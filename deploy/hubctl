@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# hubctl — start/stop control for a natively installed GetHome Hub on macOS.
+# (On Linux/Raspberry Pi the hub runs under Docker: use `docker compose` there.)
+#
+#   hubctl start      turn the hub on now AND at every login
+#   hubctl stop       turn it off now AND remove it from login autostart
+#   hubctl restart    restart hubd (deps untouched)
+#   hubctl status     show every component + an API health check
+#   hubctl logs       tail the hub log
+#   hubctl uninstall  remove launch agents and stop services (keeps data)
+#
+# "start"/"stop" flip the whole stack — hubd, Zigbee2MQTT (if installed),
+# Mosquitto, Postgres — so a stopped hub holds no ports and survives nothing:
+# one switch, exactly what it looks like. brew services carry the same
+# now+autostart semantics for the dependencies.
+
+set -euo pipefail
+
+if [[ "$(uname)" != "Darwin" ]]; then
+  echo "hubctl manages the native macOS install. On Linux use: docker compose ..." >&2
+  exit 1
+fi
+
+HUBD_LABEL="com.gethome.hubd"
+Z2M_LABEL="com.gethome.zigbee2mqtt"
+AGENTS_DIR="$HOME/Library/LaunchAgents"
+LOG_DIR="$HOME/Library/Logs/GetHome"
+UID_NUM="$(id -u)"
+
+BREW=""
+for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+  [[ -x "$candidate" ]] && BREW="$candidate" && break
+done
+if [[ -z "$BREW" ]]; then
+  echo "Homebrew not found — was the hub installed with deploy/install-macos.sh?" >&2
+  exit 1
+fi
+
+have_agent() { [[ -f "$AGENTS_DIR/$1.plist" ]]; }
+agent_running() { launchctl print "gui/$UID_NUM/$1" >/dev/null 2>&1; }
+
+start_agent() {
+  local label="$1"
+  have_agent "$label" || return 0
+  launchctl enable "gui/$UID_NUM/$label" 2>/dev/null || true
+  if agent_running "$label"; then
+    launchctl kickstart "gui/$UID_NUM/$label" 2>/dev/null || true
+  else
+    launchctl bootstrap "gui/$UID_NUM" "$AGENTS_DIR/$label.plist"
+  fi
+}
+
+stop_agent() {
+  local label="$1"
+  # Disable first so it stays off across logins, then unload if loaded.
+  launchctl disable "gui/$UID_NUM/$label" 2>/dev/null || true
+  if agent_running "$label"; then
+    launchctl bootout "gui/$UID_NUM/$label"
+  fi
+}
+
+health() {
+  curl -fsS --max-time 3 http://localhost:8420/api/v1/hub 2>/dev/null || true
+}
+
+case "${1:-status}" in
+  start)
+    echo "==> Starting Postgres and Mosquitto (brew services)…"
+    "$BREW" services start postgresql@17 >/dev/null
+    "$BREW" services start mosquitto >/dev/null
+    echo "==> Starting hubd…"
+    start_agent "$HUBD_LABEL"
+    if have_agent "$Z2M_LABEL"; then
+      echo "==> Starting Zigbee2MQTT…"
+      start_agent "$Z2M_LABEL"
+    fi
+    for _ in $(seq 1 30); do
+      [[ -n "$(health)" ]] && break
+      sleep 1
+    done
+    INFO="$(health)"
+    if [[ -n "$INFO" ]]; then
+      echo "GetHome Hub is up: $INFO"
+      echo "It will start again automatically at login."
+    else
+      echo "hubd started but is not answering yet — check: hubctl logs" >&2
+      exit 1
+    fi
+    ;;
+
+  stop)
+    echo "==> Stopping hubd…"
+    stop_agent "$HUBD_LABEL"
+    if have_agent "$Z2M_LABEL"; then
+      echo "==> Stopping Zigbee2MQTT…"
+      stop_agent "$Z2M_LABEL"
+    fi
+    echo "==> Stopping Mosquitto and Postgres (brew services)…"
+    "$BREW" services stop mosquitto >/dev/null 2>&1 || true
+    "$BREW" services stop postgresql@17 >/dev/null 2>&1 || true
+    echo "The hub is off: no ports held, nothing starts at login until 'hubctl start'."
+    ;;
+
+  restart)
+    stop_agent "$HUBD_LABEL"
+    start_agent "$HUBD_LABEL"
+    echo "hubd restarted."
+    ;;
+
+  status)
+    if agent_running "$HUBD_LABEL"; then echo "hubd:        running"; else echo "hubd:        stopped"; fi
+    if have_agent "$Z2M_LABEL"; then
+      if agent_running "$Z2M_LABEL"; then echo "zigbee2mqtt: running"; else echo "zigbee2mqtt: stopped"; fi
+    else
+      echo "zigbee2mqtt: not installed"
+    fi
+    "$BREW" services list 2>/dev/null | awk 'NR==1 || /postgresql@17|mosquitto/'
+    INFO="$(health)"
+    if [[ -n "$INFO" ]]; then
+      echo "api:         healthy — $INFO"
+    else
+      echo "api:         not answering on localhost:8420"
+    fi
+    ;;
+
+  logs)
+    exec tail -n 100 -f "$LOG_DIR/hubd.log"
+    ;;
+
+  uninstall)
+    stop_agent "$HUBD_LABEL"
+    stop_agent "$Z2M_LABEL"
+    rm -f "$AGENTS_DIR/$HUBD_LABEL.plist" "$AGENTS_DIR/$Z2M_LABEL.plist"
+    "$BREW" services stop mosquitto >/dev/null 2>&1 || true
+    "$BREW" services stop postgresql@17 >/dev/null 2>&1 || true
+    echo "Launch agents removed; services stopped."
+    echo "Kept (remove manually if you want a clean slate):"
+    echo "  data:      ~/Library/Application Support/GetHome"
+    echo "  logs:      ~/Library/Logs/GetHome"
+    echo "  packages:  brew uninstall node@22 postgresql@17 mosquitto pnpm"
+    ;;
+
+  *)
+    echo "Usage: hubctl start|stop|restart|status|logs|uninstall" >&2
+    exit 1
+    ;;
+esac

@@ -36,15 +36,11 @@ LAN-only by design.
 
 ## Quick start
 
-On the machine that will be the hub (Raspberry Pi OS, Debian, Ubuntu):
+**Raspberry Pi / Linux** (Docker-based):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/gethome-inc/gethome-hub/main/deploy/install.sh | bash
-```
-
-With a Zigbee USB stick:
-
-```sh
+# with a Zigbee USB stick:
 curl -fsSL https://raw.githubusercontent.com/gethome-inc/gethome-hub/main/deploy/install.sh | bash -s -- --zigbee /dev/ttyACM0
 ```
 
@@ -52,8 +48,22 @@ The installer sets up Docker if needed, starts the stack
 (hub + Postgres + Mosquitto, optionally Zigbee2MQTT), and prints the
 **pairing code** — enter it in the GetHome app to become the owner.
 
+**macOS** (native — no Docker, so mDNS discovery, the Matter controller, and
+Zigbee USB sticks actually work; see [docs/macos.md](docs/macos.md)):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/gethome-inc/gethome-hub/main/deploy/install-macos.sh | bash
+# with a Zigbee USB stick (auto-detects /dev/tty.usb*):
+curl -fsSL https://raw.githubusercontent.com/gethome-inc/gethome-hub/main/deploy/install-macos.sh | bash -s -- --zigbee auto
+```
+
+Requires [Homebrew](https://brew.sh); everything installs per-user (no sudo)
+and runs as launchd agents that start at login. One switch controls it all:
+`deploy/hubctl start|stop|status` — `stop` frees every port and disables
+autostart until the next `start`.
+
 The **GetHome Studio** macOS app automates all of this with a guided setup
-(finds machines on your network, installs over SSH, checks health).
+(finds machines on your network, installs locally or over SSH, checks health).
 
 ### Manual (docker compose)
 
@@ -66,9 +76,8 @@ docker compose exec hubd cat /data/pairing-code   # your pairing code
 
 The API answers at `http://<hub>:8420/api/v1/hub`.
 
-Note for macOS hosts: hubd uses host networking (mDNS + Matter). Enable host
-networking in Docker Desktop ≥ 4.34; mDNS from containers is unreliable on
-macOS, so connect by address if discovery doesn't find the hub.
+Docker on macOS is not recommended for running the hub (no USB passthrough,
+unreliable mDNS from the VM) — use the native install above instead.
 
 ### Development
 

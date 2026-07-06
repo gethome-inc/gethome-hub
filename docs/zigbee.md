@@ -9,10 +9,13 @@ available.
 
 1. Plug a supported coordinator (SONOFF ZBDongle-E/P, ConBee, SkyConnect, …)
    into the hub machine.
-2. Start the stack with the zigbee profile:
-   `COMPOSE_PROFILES=zigbee ZIGBEE_ADAPTER=/dev/ttyACM0 docker compose up -d`
-   (or `install.sh --zigbee /dev/ttyACM0`). Tip: `/dev/serial/by-id/...`
-   paths survive reboots.
+2. Start Zigbee2MQTT:
+   - **Linux/Pi (Docker):** `COMPOSE_PROFILES=zigbee ZIGBEE_ADAPTER=/dev/ttyACM0
+     docker compose up -d` (or `install.sh --zigbee /dev/ttyACM0`). Tip:
+     `/dev/serial/by-id/...` paths survive reboots.
+   - **macOS (native):** `install-macos.sh --zigbee auto` (or an explicit
+     `/dev/tty.usb*` path) — Docker on macOS cannot pass USB through, which
+     is one reason the macOS install is native (see [macos.md](macos.md)).
 3. Open the network from the GetHome app (or
    `POST /api/v1/zigbee/permit-join {"seconds":120}`) and put the device in
    pairing mode.
