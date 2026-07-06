@@ -1,0 +1,77 @@
+# GetHome Hub — one-command local deployment.
+#
+#   docker compose up -d                      # hub + Postgres + MQTT broker
+#   COMPOSE_PROFILES=zigbee docker compose up -d   # …plus Zigbee2MQTT (USB stick required)
+#
+# hubd runs with host networking: mDNS discovery (_gethome._tcp) and the
+# Matter controller (UDP 5540 + mDNS 5353) need the host's network stack.
+# On macOS, enable host networking in Docker Desktop ≥ 4.34 — and note that
+# mDNS from containers is unreliable there; the apps can always connect by
+# address (http://<host>:8420).
+
+services:
+  hubd:
+    build: .
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      PORT: 8420
+      DATABASE_URL: postgres://gethome:${POSTGRES_PASSWORD:-gethome}@127.0.0.1:5432/gethome
+      MQTT_URL: mqtt://127.0.0.1:1883
+      Z2M_BASE_TOPIC: zigbee2mqtt
+      DATA_DIR: /data
+      HUB_NAME: ${HUB_NAME:-GetHome Hub}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - hub-data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gethome
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gethome}
+      POSTGRES_DB: gethome
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gethome"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:1883:1883"
+    volumes:
+      - ./deploy/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto-data:/mosquitto/data
+
+  zigbee2mqtt:
+    image: koenkk/zigbee2mqtt
+    restart: unless-stopped
+    profiles: ["zigbee"]
+    network_mode: host
+    environment:
+      ZIGBEE2MQTT_CONFIG_MQTT_SERVER: mqtt://127.0.0.1:1883
+      ZIGBEE2MQTT_CONFIG_SERIAL_PORT: ${ZIGBEE_ADAPTER:-/dev/ttyACM0}
+      ZIGBEE2MQTT_CONFIG_FRONTEND_ENABLED: "false"
+    devices:
+      - "${ZIGBEE_ADAPTER:-/dev/ttyACM0}:${ZIGBEE_ADAPTER:-/dev/ttyACM0}"
+    volumes:
+      - z2m-data:/app/data
+
+volumes:
+  hub-data:
+  pg-data:
+  mosquitto-data:
+  z2m-data:

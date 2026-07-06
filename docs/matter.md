@@ -1,0 +1,62 @@
+# Matter support
+
+The hub is a **Matter controller** with its own fabric, built on
+[matter.js](https://github.com/matter-js/matter.js) (pure TypeScript, no
+native SDK). Devices commissioned onto the hub belong to the *hub*, not to a
+phone — that's what makes hub homes shareable.
+
+## Commissioning (v1: over IP)
+
+`POST /api/v1/matter/commission {"pairingCode":"749701123365521327694"}`
+accepts a **manual pairing code** or a **QR payload** (`MT:…`) and runs
+commissioning as an async job (`202 {jobId}`; progress via the WebSocket
+`commissioning` frames and `GET /matter/commission/:jobId`).
+
+The device must already be reachable over IP:
+
+- Ethernet or Wi-Fi devices already on your network (e.g. shared from another
+  admin via Matter multi-admin, or Wi-Fi-provisioned during a phone-side
+  setup),
+- Thread devices behind a border router on the LAN.
+
+**BLE-assisted commissioning** (taking a factory-new device through Wi-Fi
+provisioning directly) needs host Bluetooth (`@matter/nodejs-ble` + BlueZ) and
+is a planned follow-up — on a Raspberry Pi the built-in radio makes this a
+natural fit. Until then, the simplest path for factory-new Wi-Fi devices is:
+commission with the GetHome iOS app first, then share to the hub via
+multi-admin (open a commissioning window) — or use Ethernet/Thread devices.
+
+## Runtime requirements
+
+- **Host networking.** Matter uses site-local UDP (port 5540) and mDNS
+  (5353); `docker-compose.yml` runs hubd with `network_mode: host` for this
+  reason. IPv6 link-local must be available (it is on standard Raspberry Pi
+  OS / Debian; some containers/VMs disable IPv6 — the adapter will fail to
+  start and the hub continues without Matter).
+- Fabric storage lives in `<data>/matter/`; keep the `/data` volume to keep
+  your fabric.
+
+## How devices map
+
+- Endpoint device types (Descriptor cluster `DeviceTypeList`) are looked up in
+  the catalog (`src/schema/catalog.ts`) → `deviceKind` + capabilities;
+  infrastructure endpoints (root node, bridge plumbing, OTA) are filtered.
+- All attributes and events are subscribed; reports run through
+  `src/adapters/matter/reducer.ts` — a 1:1 port of the GetHome app's own
+  Matter state reducer (same cluster/attribute IDs, same unit transforms:
+  illuminance log-scale, battery half-percents, thermostat 0x8000 null
+  filtering, 0.1 W power quantization). Hub-attached and phone-attached
+  Matter devices therefore behave identically.
+- The 17 canonical intents translate to cluster commands / attribute writes
+  in `src/adapters/matter/commands.ts` (OnOff, LevelControl
+  `moveToLevelWithOnOff`, ColorControl, Thermostat setpoint/mode writes,
+  DoorLock, WindowCovering `goToLiftPercentage`, FanControl writes,
+  MediaPlayback, ModeSelect).
+
+## Version pinning
+
+matter.js's API is still evolving; the dependency is pinned to a minor
+(`~0.17.x`) and everything matter.js-specific is confined to
+`src/adapters/matter/`. If the adapter cannot start (missing IPv6, port
+conflicts), the hub logs it, records an activity entry, and keeps serving
+Zigbee/MQTT devices.

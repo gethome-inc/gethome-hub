@@ -1,0 +1,25 @@
+# Example Zigbee2MQTT configuration for a GetHome Hub.
+# The docker-compose zigbee profile configures the same values via
+# ZIGBEE2MQTT_CONFIG_* environment variables — this file documents them for
+# manual installations.
+
+mqtt:
+  server: mqtt://127.0.0.1:1883
+  base_topic: zigbee2mqtt
+
+serial:
+  # Your Zigbee USB adapter. Common paths: /dev/ttyACM0, /dev/ttyUSB0,
+  # /dev/serial/by-id/usb-... (the by-id path survives reboots).
+  port: /dev/ttyACM0
+
+frontend:
+  enabled: false
+
+advanced:
+  # The hub reads device definitions from zigbee2mqtt/bridge/devices and
+  # state from per-device topics; no Home Assistant discovery needed.
+  legacy_api: false
+  legacy_availability_payload: false
+
+availability:
+  enabled: true
