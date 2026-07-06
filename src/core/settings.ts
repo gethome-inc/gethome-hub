@@ -44,7 +44,13 @@ export class SettingsService {
 
   async setAiSettings(provider: AiProvider, model: string | null, apiKey: string): Promise<void> {
     await this.set('ai_provider', provider);
-    await this.set('ai_model', model);
+    // A JS null would become SQL NULL and violate the jsonb NOT NULL — absence
+    // of the row already means "use the provider default".
+    if (model === null) {
+      await this.db.delete(settings).where(eq(settings.key, 'ai_model'));
+    } else {
+      await this.set('ai_model', model);
+    }
     await this.set('ai_key_encrypted', encryptSecret(apiKey, this.aesKey));
   }
 
