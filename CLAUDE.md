@@ -15,7 +15,9 @@ The `docs/` files are canonical for their domains; read the relevant one before
 touching that code: `architecture.md` (module boundaries, data flow),
 `device-schema.md` (**the** capability/unit/wire contract), `api.md`,
 `zigbee.md`, `matter.md`, `mqtt-integrations.md` (public integrator
-convention), `ai-adaptation.md`, `ecosystem.md`.
+convention), `ai-adaptation.md`, `ecosystem.md`, `macos.md` (native macOS
+deployment — launchd + `deploy/hubctl`; Docker is Linux/Pi-only because
+macOS Docker breaks mDNS/Matter and cannot pass through Zigbee USB).
 
 ## Build, test, run
 
