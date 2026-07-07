@@ -18,7 +18,14 @@
 #   Zigbee:    optional Zigbee2MQTT checkout + launchd agent
 #
 # Everything is controlled afterwards with deploy/hubctl (start/stop/status).
-# The GetHome Studio app runs this same script and streams its output.
+#
+# The GetHome Studio app runs this same script and follows its progress
+# through structured markers on stdout:
+#   @@STEP:<id>@@     a phase begins (ids: packages, checkout, services,
+#                     build, zigbee, start)
+#   @@ERROR:<text>@@  a human-readable failure reason (last one wins)
+#   @@DONE@@          the install finished successfully
+# Keep these stable — Studio's install screen is driven by them.
 #
 # This is the macOS sibling of deploy/install.sh (Linux/Raspberry Pi, Docker).
 
@@ -43,7 +50,20 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
+# ── Output helpers ─────────────────────────────────────────────────────────
+say() {
+  if [[ -t 1 ]]; then printf '\n\033[1m==> %s\033[0m\n' "$*"; else printf '\n==> %s\n' "$*"; fi
+}
+step() { printf '@@STEP:%s@@\n' "$1"; say "$2"; }
+fail() { printf '@@ERROR:%s@@\n' "$1"; echo "ERROR: $1" >&2; exit 1; }
+# If any unguarded command dies under `set -e`, at least say which one.
+trap 'code=$?; printf "@@ERROR:Command failed (exit %s) at line %s: %s@@\n" "$code" "$LINENO" "$BASH_COMMAND"; echo "ERROR (exit $code) at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+# Fewer moving parts, less noise, no surprise brew self-updates mid-install.
+export HOMEBREW_NO_AUTO_UPDATE=1
+export HOMEBREW_NO_INSTALL_CLEANUP=1
+export HOMEBREW_NO_ENV_HINTS=1
+export NONINTERACTIVE=1
 
 APP_SUPPORT="$HOME/Library/Application Support/GetHome"
 DATA_DIR="$APP_SUPPORT/hub-data"
@@ -53,83 +73,76 @@ Z2M_APP_DIR="$APP_SUPPORT/zigbee2mqtt"
 Z2M_DATA_DIR="$APP_SUPPORT/zigbee2mqtt-data"
 HUBD_LABEL="com.gethome.hubd"
 Z2M_LABEL="com.gethome.zigbee2mqtt"
-UID_NUM="$(id -u)"
 
 mkdir -p "$APP_SUPPORT" "$DATA_DIR" "$LOG_DIR" "$AGENTS_DIR"
 
-# ── Homebrew ───────────────────────────────────────────────────────────────
+# ── Homebrew packages ──────────────────────────────────────────────────────
+step packages "Checking Homebrew packages…"
+
 # Studio launches this script with a minimal PATH, so find brew explicitly.
 BREW=""
 for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
   [[ -x "$candidate" ]] && BREW="$candidate" && break
 done
-if [[ -z "$BREW" ]]; then
-  echo "Homebrew is required (https://brew.sh). Install it, then re-run:" >&2
-  echo '  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"' >&2
-  exit 1
-fi
+[[ -n "$BREW" ]] || fail "Homebrew is required — install it from https://brew.sh and try again."
 BREW_PREFIX="$("$BREW" --prefix)"
 export PATH="$BREW_PREFIX/bin:$BREW_PREFIX/sbin:$PATH"
 
+# brew occasionally exits non-zero on cleanup/caveat hiccups even though the
+# formula installed fine — so trust `brew list`, not the exit code.
 brew_ensure() {
   if "$BREW" list --formula "$1" >/dev/null 2>&1; then
     say "$1 is already installed."
-  else
-    say "Installing $1…"
-    "$BREW" install "$1"
+    return 0
   fi
+  say "Installing $1…"
+  "$BREW" install "$1" || true
+  "$BREW" list --formula "$1" >/dev/null 2>&1 \
+    || fail "Homebrew could not install $1 — scroll the log above for brew's own error."
 }
 
-say "Checking Homebrew packages…"
 brew_ensure node@22
 brew_ensure postgresql@17
 brew_ensure mosquitto
 
 NODE_BIN="$BREW_PREFIX/opt/node@22/bin"
-if [[ ! -x "$NODE_BIN/node" ]]; then
-  echo "node@22 did not land in $NODE_BIN — is Homebrew healthy?" >&2
-  exit 1
-fi
+[[ -x "$NODE_BIN/node" ]] || fail "node@22 installed but $NODE_BIN/node is missing — try 'brew reinstall node@22'."
 export PATH="$NODE_BIN:$PATH"
 
 # ── Hub checkout ───────────────────────────────────────────────────────────
 if [[ -z "$HUB_DIR" ]]; then
+  step checkout "Fetching gethome-hub…"
   HUB_DIR="$APP_SUPPORT/gethome-hub"
   if [[ -d "$HUB_DIR/.git" ]]; then
-    say "Updating gethome-hub checkout…"
-    git -C "$HUB_DIR" fetch origin "$BRANCH"
+    git -C "$HUB_DIR" fetch origin "$BRANCH" || fail "Could not reach $REPO_URL — check your network."
     git -C "$HUB_DIR" checkout "$BRANCH"
     git -C "$HUB_DIR" pull --ff-only origin "$BRANCH"
   else
-    say "Cloning $REPO_URL…"
-    git clone --branch "$BRANCH" "$REPO_URL" "$HUB_DIR"
+    git clone --branch "$BRANCH" "$REPO_URL" "$HUB_DIR" \
+      || fail "Could not clone $REPO_URL — check your network."
   fi
 elif [[ ! -f "$HUB_DIR/package.json" ]]; then
-  echo "--dir $HUB_DIR does not look like a gethome-hub checkout." >&2
-  exit 1
+  fail "--dir $HUB_DIR does not look like a gethome-hub checkout."
 fi
 say "Installing from: $HUB_DIR"
 
-# ── Postgres ───────────────────────────────────────────────────────────────
-say "Starting Postgres (brew service)…"
+# ── Postgres + Mosquitto ───────────────────────────────────────────────────
+step services "Starting the database and the MQTT broker…"
+
 "$BREW" services start postgresql@17 >/dev/null
 PG_BIN="$BREW_PREFIX/opt/postgresql@17/bin"
 for _ in $(seq 1 30); do
   "$PG_BIN/pg_isready" -q -h 127.0.0.1 && break
   sleep 1
 done
-if ! "$PG_BIN/pg_isready" -q -h 127.0.0.1; then
-  echo "Postgres did not come up on 127.0.0.1:5432. If another Postgres owns" >&2
-  echo "that port, stop it or point DATABASE_URL at it manually (docs/macos.md)." >&2
-  exit 1
-fi
+"$PG_BIN/pg_isready" -q -h 127.0.0.1 \
+  || fail "Postgres did not come up on 127.0.0.1:5432. If another Postgres owns that port, stop it first (docs/macos.md)."
 if ! "$PG_BIN/psql" -h 127.0.0.1 -d gethome -c 'select 1' >/dev/null 2>&1; then
   say "Creating the gethome database…"
   "$PG_BIN/createdb" -h 127.0.0.1 gethome
 fi
 DATABASE_URL="postgres://$(whoami)@127.0.0.1:5432/gethome"
 
-# ── Mosquitto ──────────────────────────────────────────────────────────────
 MOSQ_CONF="$BREW_PREFIX/etc/mosquitto/mosquitto.conf"
 if ! grep -q "GetHome Hub" "$MOSQ_CONF" 2>/dev/null; then
   say "Writing the GetHome Mosquitto config…"
@@ -145,28 +158,24 @@ persistence true
 persistence_location $BREW_PREFIX/var/mosquitto/
 CONF
 fi
-say "Starting Mosquitto (brew service)…"
 "$BREW" services restart mosquitto >/dev/null
 
 # ── Build hubd ─────────────────────────────────────────────────────────────
-say "Building the hub (npm ci + build)…"
+step build "Building the hub (npm ci + build)…"
 cd "$HUB_DIR"
-"$NODE_BIN/npm" ci --no-fund --no-audit
-"$NODE_BIN/npm" run build
+"$NODE_BIN/npm" ci --no-fund --no-audit || fail "npm ci failed — see npm's error above."
+"$NODE_BIN/npm" run build || fail "The hub build failed — see the compiler output above."
 
 # ── Zigbee2MQTT (optional) ────────────────────────────────────────────────
 if [[ -n "$ZIGBEE_PORT" ]]; then
+  step zigbee "Setting up Zigbee2MQTT…"
   if [[ "$ZIGBEE_PORT" == "auto" ]]; then
     ZIGBEE_PORT="$(ls /dev/tty.usbserial-* /dev/tty.usbmodem* 2>/dev/null | head -1 || true)"
-    if [[ -z "$ZIGBEE_PORT" ]]; then
-      echo "No /dev/tty.usb* serial adapter found — plug in the Zigbee stick" >&2
-      echo "or pass --zigbee /dev/tty.<your-adapter> explicitly." >&2
-      exit 1
-    fi
+    [[ -n "$ZIGBEE_PORT" ]] \
+      || fail "No /dev/tty.usb* serial adapter found — plug in the Zigbee stick or pass --zigbee /dev/tty.<adapter>."
     say "Zigbee adapter detected: $ZIGBEE_PORT"
   elif [[ ! -e "$ZIGBEE_PORT" ]]; then
-    echo "Zigbee adapter $ZIGBEE_PORT does not exist (check ls /dev/tty.usb*)." >&2
-    exit 1
+    fail "Zigbee adapter $ZIGBEE_PORT does not exist (check: ls /dev/tty.usb*)."
   fi
 
   brew_ensure pnpm
@@ -175,10 +184,12 @@ if [[ -n "$ZIGBEE_PORT" ]]; then
     git -C "$Z2M_APP_DIR" pull --ff-only
   else
     say "Cloning Zigbee2MQTT…"
-    git clone --depth 1 https://github.com/Koenkk/zigbee2mqtt.git "$Z2M_APP_DIR"
+    git clone --depth 1 https://github.com/Koenkk/zigbee2mqtt.git "$Z2M_APP_DIR" \
+      || fail "Could not clone Zigbee2MQTT — check your network."
   fi
   say "Installing Zigbee2MQTT dependencies (this can take a few minutes)…"
-  (cd "$Z2M_APP_DIR" && "$BREW_PREFIX/bin/pnpm" install --frozen-lockfile)
+  (cd "$Z2M_APP_DIR" && "$BREW_PREFIX/bin/pnpm" install --frozen-lockfile) \
+    || fail "Zigbee2MQTT dependency install failed — see pnpm's error above."
 
   mkdir -p "$Z2M_DATA_DIR"
   if [[ ! -f "$Z2M_DATA_DIR/configuration.yaml" ]]; then
@@ -221,8 +232,8 @@ CONF
 PLIST
 fi
 
-# ── hubd launchd agent ─────────────────────────────────────────────────────
-say "Writing the hubd launch agent…"
+# ── Launch agent + start ───────────────────────────────────────────────────
+step start "Registering the launch agent and starting the hub…"
 cat > "$AGENTS_DIR/$HUBD_LABEL.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -252,22 +263,19 @@ cat > "$AGENTS_DIR/$HUBD_LABEL.plist" <<PLIST
 </plist>
 PLIST
 
-# ── Start everything through hubctl ───────────────────────────────────────
-say "Starting the hub…"
 chmod +x "$HUB_DIR/deploy/hubctl"
 "$HUB_DIR/deploy/hubctl" start
 
 say "Waiting for the hub to come up…"
+HEALTHY=""
 for _ in $(seq 1 60); do
-  curl -fsS http://localhost:8420/api/v1/hub >/dev/null 2>&1 && break
+  if curl -fsS http://localhost:8420/api/v1/hub >/dev/null 2>&1; then HEALTHY=1; break; fi
   sleep 2
 done
-if ! curl -fsS http://localhost:8420/api/v1/hub >/dev/null 2>&1; then
-  echo "The hub did not become healthy — check $LOG_DIR/hubd.log" >&2
-  exit 1
-fi
+[[ -n "$HEALTHY" ]] || fail "The hub did not become healthy — check $LOG_DIR/hubd.log"
 
 INFO="$(curl -fsS http://localhost:8420/api/v1/hub)"
+printf '@@DONE@@\n'
 say "GetHome Hub is running: $INFO"
 echo "Control it with: \"$HUB_DIR/deploy/hubctl\" start|stop|status|logs"
 echo "It starts automatically when you log in. For a headless Mac mini,"

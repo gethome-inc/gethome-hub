@@ -10,6 +10,13 @@
 #
 # The script is idempotent: re-running updates the checkout and restarts the
 # stack. It is also what the GetHome Studio app streams over SSH.
+#
+# Studio follows progress through structured markers on stdout (keep them
+# stable — the install screen is driven by them):
+#   @@STEP:<id>@@       a phase begins (ids: docker, checkout, start, health)
+#   @@ERROR:<text>@@    a human-readable failure reason (last one wins)
+#   @@PAIRING:<code>@@  the pairing code, when the hub is unclaimed
+#   @@DONE@@            the install finished successfully
 
 set -euo pipefail
 
@@ -27,41 +34,51 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
+# ── Output helpers ─────────────────────────────────────────────────────────
+say()  { if [[ -t 1 ]]; then printf '\n\033[1m==> %s\033[0m\n' "$*"; else printf '\n==> %s\n' "$*"; fi; }
+step() { printf '@@STEP:%s@@\n' "$1"; say "$2"; }
+fail() { printf '@@ERROR:%s@@\n' "$1"; echo "ERROR: $1" >&2; exit 1; }
+trap 'code=$?; printf "@@ERROR:Command failed (exit %s) at line %s: %s@@\n" "$code" "$LINENO" "$BASH_COMMAND"; echo "ERROR (exit $code) at line $LINENO: $BASH_COMMAND" >&2' ERR
 
+# ── Privilege check ────────────────────────────────────────────────────────
 SUDO=""
 if [[ $(id -u) -ne 0 ]]; then
-  if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; else
-    echo "Please run as root or install sudo." >&2; exit 1
+  command -v sudo >/dev/null 2>&1 || fail "This installer needs root. Run it as root, or install sudo first."
+  SUDO="sudo"
+  # A non-interactive SSH session can't answer a sudo password prompt.
+  if ! sudo -n true 2>/dev/null; then
+    fail "This user needs passwordless sudo to install unattended. On Raspberry Pi OS the default user already has it; otherwise add a sudoers rule, or run the install as root."
   fi
 fi
 
-# ── Docker ────────────────────────────────────────────────────────────────
+# ── Docker ─────────────────────────────────────────────────────────────────
+step docker "Checking Docker…"
 if ! command -v docker >/dev/null 2>&1; then
   say "Installing Docker (get.docker.com)…"
-  curl -fsSL https://get.docker.com | $SUDO sh
+  curl -fsSL https://get.docker.com | $SUDO sh \
+    || fail "Docker installation failed. See the output above, or install Docker manually and re-run."
 fi
 if ! docker compose version >/dev/null 2>&1 && ! $SUDO docker compose version >/dev/null 2>&1; then
-  echo "Docker Compose v2 is required (comes with current Docker). Please update Docker." >&2
-  exit 1
+  fail "Docker Compose v2 is required (it ships with current Docker). Please update Docker and re-run."
 fi
-
 DOCKER="docker"
 if ! docker info >/dev/null 2>&1; then DOCKER="$SUDO docker"; fi
+$DOCKER info >/dev/null 2>&1 || fail "Docker is installed but not running. Start the Docker service (sudo systemctl start docker) and re-run."
 
-# ── Checkout ─────────────────────────────────────────────────────────────
-say "Installing GetHome Hub into ${INSTALL_DIR}…"
+# ── Checkout ───────────────────────────────────────────────────────────────
+step checkout "Fetching GetHome Hub into ${INSTALL_DIR}…"
 $SUDO mkdir -p "$INSTALL_DIR"
 if [[ -d "$INSTALL_DIR/gethome-hub/.git" ]]; then
-  $SUDO git -C "$INSTALL_DIR/gethome-hub" fetch origin "$BRANCH"
+  $SUDO git -C "$INSTALL_DIR/gethome-hub" fetch origin "$BRANCH" \
+    || fail "Could not reach $REPO_URL — check the network and try again."
   $SUDO git -C "$INSTALL_DIR/gethome-hub" checkout "$BRANCH"
   $SUDO git -C "$INSTALL_DIR/gethome-hub" pull --ff-only origin "$BRANCH"
 else
-  $SUDO git clone --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR/gethome-hub"
+  $SUDO git clone --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR/gethome-hub" \
+    || fail "Could not clone $REPO_URL — check the network and try again."
 fi
 cd "$INSTALL_DIR/gethome-hub"
 
-# ── Environment ──────────────────────────────────────────────────────────
 if [[ ! -f .env ]]; then
   say "Generating .env…"
   {
@@ -71,6 +88,7 @@ if [[ ! -f .env ]]; then
 fi
 if [[ -n "$ZIGBEE_ADAPTER" ]]; then
   say "Enabling Zigbee (adapter: ${ZIGBEE_ADAPTER})…"
+  [[ -e "$ZIGBEE_ADAPTER" ]] || fail "Zigbee adapter $ZIGBEE_ADAPTER not found on this machine (check: ls /dev/tty*)."
   $SUDO sed -i '/^ZIGBEE_ADAPTER=/d;/^COMPOSE_PROFILES=/d' .env
   {
     echo "ZIGBEE_ADAPTER=${ZIGBEE_ADAPTER}"
@@ -78,27 +96,29 @@ if [[ -n "$ZIGBEE_ADAPTER" ]]; then
   } | $SUDO tee -a .env >/dev/null
 fi
 
-# ── Build & start ────────────────────────────────────────────────────────
-say "Building and starting the stack (first build takes a few minutes)…"
-$DOCKER compose up -d --build
+# ── Build & start ──────────────────────────────────────────────────────────
+step start "Building and starting the stack (the first build takes a few minutes)…"
+$DOCKER compose up -d --build \
+  || fail "docker compose failed to build or start the stack. See the output above, or run: $DOCKER compose logs"
 
-say "Waiting for the hub to come up…"
+# ── Health ─────────────────────────────────────────────────────────────────
+step health "Waiting for the hub to answer on port 8420…"
+HEALTHY=""
 for _ in $(seq 1 60); do
-  if curl -fsS http://localhost:8420/api/v1/hub >/dev/null 2>&1; then break; fi
+  if curl -fsS http://localhost:8420/api/v1/hub >/dev/null 2>&1; then HEALTHY=1; break; fi
   sleep 2
 done
-if ! curl -fsS http://localhost:8420/api/v1/hub >/dev/null 2>&1; then
-  echo "The hub did not become healthy — check: $DOCKER compose logs hubd" >&2
-  exit 1
-fi
+[[ -n "$HEALTHY" ]] || fail "The hub started but did not become healthy. Check: $DOCKER compose logs hubd"
 
 INFO=$(curl -fsS http://localhost:8420/api/v1/hub)
-say "GetHome Hub is running: ${INFO}"
-
 if echo "$INFO" | grep -q '"claimed":false'; then
   CODE=$($DOCKER compose exec -T hubd cat /data/pairing-code 2>/dev/null | tr -d '[:space:]' || true)
   if [[ -n "$CODE" ]]; then
+    printf '@@PAIRING:%s@@\n' "$CODE"
     say "Pairing code: ${CODE}"
     echo "Enter this code in the GetHome app to become the owner of this hub."
   fi
 fi
+
+printf '@@DONE@@\n'
+say "GetHome Hub is running: ${INFO}"
