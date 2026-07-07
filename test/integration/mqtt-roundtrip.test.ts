@@ -40,7 +40,9 @@ const waitFor = async (predicate: () => boolean, timeoutMs = 8000): Promise<void
 };
 
 describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention device)', () => {
-  const db = handle!.db;
+  // Skipped suites still have their body collected, so never deref a null
+  // handle here; `db` is only read once the suite actually runs.
+  const db = handle?.db!;
   let app: FastifyInstance;
   let registry: DeviceRegistry;
   let fake: mqtt.MqttClient;
