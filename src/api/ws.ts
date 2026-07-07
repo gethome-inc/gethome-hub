@@ -2,6 +2,14 @@ import type { WebSocket } from 'ws';
 import type { ApiDeps } from './server.js';
 import { deviceWire } from './dto.js';
 
+/** Controls a subscribed-but-not-yet-authorized WebSocket. */
+export interface WebSocketHandle {
+  /** Send the hello frame plus any events buffered during auth, then go live. */
+  authorize(): void;
+  /** Drop all listeners without ever sending a frame (auth failed). */
+  close(): void;
+}
+
 /**
  * WebSocket event stream. Frames (JSON, one per message):
  *
@@ -12,13 +20,23 @@ import { deviceWire } from './dto.js';
  *   {"type":"activity","entry":{id,at,kind,message,deviceId?,memberId?}}
  *   {"type":"permitJoin","active","remainingSeconds"}
  *   {"type":"commissioning","jobId","status","detail"?}
+ *
+ * Listeners attach synchronously (before the caller's async token check) so an
+ * event fired the instant the socket opens can't slip through the gap between
+ * "connected" and "authorized". Frames are buffered until `authorize()`; a
+ * failed auth calls `close()` and nothing is ever sent.
  */
-export function attachWebSocket(socket: WebSocket, deps: ApiDeps): void {
+export function attachWebSocket(socket: WebSocket, deps: ApiDeps): WebSocketHandle {
+  let authorized = false;
+  const backlog: string[] = [];
   const send = (frame: Record<string, unknown>) => {
-    if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(frame));
+    const data = JSON.stringify(frame);
+    if (!authorized) {
+      backlog.push(data);
+      return;
+    }
+    if (socket.readyState === socket.OPEN) socket.send(data);
   };
-
-  send({ type: 'hello', hubId: deps.hubId, name: deps.hubName, apiVersion: 1 });
 
   const onState = (deviceId: string, endpointId: number, state: unknown) =>
     send({ type: 'state', deviceId, endpointId, state });
@@ -40,12 +58,28 @@ export function attachWebSocket(socket: WebSocket, deps: ApiDeps): void {
   deps.events.on('permitJoin', onPermitJoin);
   deps.events.on('commissioningProgress', onCommissioning);
 
-  socket.on('close', () => {
+  const detach = () => {
     deps.events.off('stateChanged', onState);
     deps.events.off('deviceUpserted', onUpserted);
     deps.events.off('deviceRemoved', onRemoved);
     deps.events.off('activity', onActivity);
     deps.events.off('permitJoin', onPermitJoin);
     deps.events.off('commissioningProgress', onCommissioning);
-  });
+  };
+  socket.on('close', detach);
+
+  return {
+    authorize() {
+      if (authorized) return;
+      authorized = true;
+      if (socket.readyState !== socket.OPEN) return;
+      socket.send(JSON.stringify({ type: 'hello', hubId: deps.hubId, name: deps.hubName, apiVersion: 1 }));
+      for (const data of backlog) socket.send(data);
+      backlog.length = 0;
+    },
+    close() {
+      backlog.length = 0;
+      detach();
+    },
+  };
 }
