@@ -256,7 +256,9 @@ const soilDescriptor: MappingDescriptor = {
 };
 
 describe.skipIf(!handle)('AiDeviceMapper', () => {
-  const db = handle!.db;
+  // Skipped suites still have their body collected, so never deref a null
+  // handle here; `db` is only read once the suite actually runs.
+  const db = handle?.db!;
   let mapper: AiDeviceMapper;
   let generate: ReturnType<typeof vi.fn>;
 

@@ -23,7 +23,7 @@ jobs:
           --health-timeout 3s
           --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # Mosquitto needs our config file, so it starts after checkout
       # (service containers can't mount workspace paths).
       - name: Start Mosquitto
@@ -31,7 +31,7 @@ jobs:
           docker run -d --name mosquitto -p 1883:1883 \
             -v "$PWD/deploy/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro" \
             eclipse-mosquitto:2
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm

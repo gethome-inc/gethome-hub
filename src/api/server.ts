@@ -310,14 +310,19 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   // ── WebSocket event stream ───────────────────────────────────────────────
 
   app.get('/api/v1/ws', { websocket: true }, (socket, request) => {
+    // Subscribe synchronously, before the async token check, so an event
+    // fired the moment the socket opens is buffered instead of lost in the
+    // gap between "connected" and "authorized".
+    const handle = attachWebSocket(socket, deps);
     void (async () => {
       const token = extractToken(request);
       const member = token ? await deps.pairing.verifyToken(token) : null;
       if (!member) {
+        handle.close();
         socket.close(4001, 'unauthorized');
         return;
       }
-      attachWebSocket(socket, deps);
+      handle.authorize();
     })();
   });
 

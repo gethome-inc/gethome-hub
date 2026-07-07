@@ -45,7 +45,9 @@ const lampDescriptor = {
 };
 
 describe.skipIf(!handle)('DeviceRegistry', () => {
-  const db = handle!.db;
+  // Skipped suites still have their body collected, so never deref a null
+  // handle here; `db` is only read once the suite actually runs.
+  const db = handle?.db!;
   let events: HubEventBus;
   let registry: DeviceRegistry;
   let adapter: FakeAdapter;
