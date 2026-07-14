@@ -27,8 +27,8 @@ hub can control them.
   (bring your own Anthropic or OpenAI API key; stored encrypted on the hub,
   used only for this). No key → devices still appear, flagged "needs
   review". ([docs/ai-adaptation.md](docs/ai-adaptation.md))
-- **One schema for everything** — 25 capabilities (including button/remote
-  events), 16 device kinds, exact unit
+- **One schema for everything** — 26 capabilities (including button/remote
+  events and learn-and-replay IR blasters), 16 device kinds, exact unit
   conventions shared with the GetHome apps ([docs/device-schema.md](docs/device-schema.md)).
 - **Sharing built in** — pairing-code claim makes you the owner; short-lived
   invite codes add family members. Only hub homes are shareable in GetHome.

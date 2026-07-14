@@ -120,6 +120,26 @@ export function buildSetPayload(
       return { [property]: ladder[index] };
     }
 
+    case 'irLearn': {
+      const ir = features.irRemote;
+      if (!ir) throw new UnsupportedCommandError(command.type, 'not an IR remote');
+      return { [ir.learnProperty]: command.on ? ir.onValue : ir.offValue };
+    }
+
+    case 'irSendRaw': {
+      const ir = features.irRemote;
+      if (!ir) throw new UnsupportedCommandError(command.type, 'not an IR remote');
+      return { [ir.sendProperty]: command.code };
+    }
+
+    case 'irSaveLearned':
+    case 'irSend':
+    case 'irDeleteCommand':
+    case 'irRenameCommand':
+      // Library management is resolved by the registry against endpoint state;
+      // it never reaches the adapter (send arrives pre-resolved as irSendRaw).
+      throw new UnsupportedCommandError(command.type, 'handled by the registry');
+
     case 'playPause':
     case 'setMode':
       throw new UnsupportedCommandError(command.type, 'not supported for Zigbee devices');

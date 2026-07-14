@@ -108,6 +108,13 @@ export interface Z2mCommandFeatures {
   systemModeProperty?: string;
   fanModes?: string[];
   fanModeProperty?: string;
+  /** IR blaster / universal remote (learn + replay), when present. */
+  irRemote?: {
+    learnProperty: string;
+    sendProperty: string;
+    onValue: unknown;
+    offValue: unknown;
+  };
 }
 
 /**
@@ -190,6 +197,9 @@ const thermostatDefaults = {
 const SYSTEM_MODE_TO_CODE: Record<string, number> = { off: 0, auto: 1, cool: 3, heat: 4 };
 const FAN_MODE_ORDER = ['off', 'low', 'medium', 'high', 'on', 'auto'];
 
+/** The three standard IR-blaster properties (Zosung/Tuya universal remotes). */
+const IR_PROPERTIES = new Set(['learn_ir_code', 'learned_ir_code', 'ir_code_to_send']);
+
 type StateRule = (value: unknown, patch: PatchBuilder) => void;
 
 /** Mutable draft the rules write into; finalized into a state patch. */
@@ -207,6 +217,8 @@ class PatchBuilder {
   battery?: { percent: number };
   power?: { activeMilliwatts?: number; importedEnergyMilliwattHours?: number };
   event?: NonNullable<EndpointState['event']>;
+  /** Partial IR patch — merged onto the seeded library base by mergeState. */
+  irRemote?: { learning: boolean; pendingCode: string };
 
   ensureThermostat() {
     this.thermostat ??= { ...thermostatDefaults, systemMode: 0 };
@@ -240,6 +252,9 @@ class PatchBuilder {
     if (this.battery) patch.battery = this.battery;
     if (this.power) patch.power = this.power;
     if (this.event) patch.event = this.event;
+    // A partial IR patch (learning + pendingCode); mergeState folds it onto
+    // the seeded base carrying the commands library.
+    if (this.irRemote) (patch as Record<string, unknown>).irRemote = this.irRemote;
     return patch;
   }
 }
@@ -342,6 +357,36 @@ export function mapExposes(device: Z2mDevice): Z2mProfile {
       const parsed = asNumber(value);
       if (parsed !== undefined) apply(parsed, patch);
     });
+  };
+
+  const handleIrRemote = (draft: EndpointDraft, expose: Z2mExpose) => {
+    // IR blaster / universal remote: three standard Zosung/Tuya properties —
+    // learn_ir_code (SET, enter learn mode), learned_ir_code (STATE, the
+    // captured blob), ir_code_to_send (SET, transmit a blob). The learned-code
+    // library is owned by the registry; here we only declare the capability,
+    // capture the command property names, and reflect a fresh capture into
+    // pendingCode.
+    const property = expose.property ?? expose.name;
+    draft.capabilities.add('irRemote');
+    draft.features.irRemote ??= {
+      learnProperty: 'learn_ir_code',
+      sendProperty: 'ir_code_to_send',
+      onValue: 'ON',
+      offValue: 'OFF',
+    };
+    if (property === 'learn_ir_code') {
+      draft.features.irRemote.learnProperty = property;
+      if (expose.value_on !== undefined) draft.features.irRemote.onValue = expose.value_on;
+      if (expose.value_off !== undefined) draft.features.irRemote.offValue = expose.value_off;
+    } else if (property === 'ir_code_to_send') {
+      draft.features.irRemote.sendProperty = property;
+    } else if (property === 'learned_ir_code') {
+      addRule(draft, property, (value, patch) => {
+        if (typeof value === 'string' && value.trim() !== '') {
+          patch.irRemote = { learning: false, pendingCode: value };
+        }
+      });
+    }
   };
 
   const handleAction = (expose: Z2mExpose, property: string) => {
@@ -715,6 +760,10 @@ export function mapExposes(device: Z2mDevice): Z2mProfile {
           handleAction(expose, property);
           break;
         }
+        if (IR_PROPERTIES.has(property)) {
+          handleIrRemote(draftFor(expose.endpoint), expose);
+          break;
+        }
         if (handleSimple(draftFor(expose.endpoint), expose)) break;
         if (!IGNORED_PROPERTIES.has(property)) unmapped.push(property);
         break;
@@ -742,7 +791,9 @@ export function mapExposes(device: Z2mDevice): Z2mProfile {
         else if (!metered && !description.includes('plug')) kind = 'wallSwitch';
       }
       if (draft.sawClimate) kind = 'climate';
-      if (!kind) kind = draft.capabilities.has('event') ? 'remote' : 'sensor';
+      if (!kind) {
+        kind = draft.capabilities.has('event') || draft.capabilities.has('irRemote') ? 'remote' : 'sensor';
+      }
 
       const capabilities = [...draft.capabilities];
       return {
@@ -757,6 +808,14 @@ export function mapExposes(device: Z2mDevice): Z2mProfile {
     });
 
   const knownProperties = new Set<string>([...rules.keys(), ...IGNORED_PROPERTIES]);
+  // IR command properties are SET-only (never published), but list them as
+  // known so they never look like a new runtime parameter.
+  for (const endpoint of endpoints) {
+    if (endpoint.features.irRemote) {
+      knownProperties.add(endpoint.features.irRemote.learnProperty);
+      knownProperties.add(endpoint.features.irRemote.sendProperty);
+    }
+  }
   const uniqueUnmapped = [...new Set(unmapped)];
 
   return {
@@ -791,6 +850,7 @@ const PRIMARY_PRIORITY: CapabilityKind[] = [
   'windowCovering',
   'onOff',
   'fan',
+  'irRemote',
   'event',
   'temperature',
   'humidity',

@@ -915,6 +915,49 @@
   }
  },
  {
+  "ieee_address": "0x00158d000aaaaab7",
+  "friendly_name": "Living room IR",
+  "type": "Router",
+  "supported": true,
+  "interview_completed": true,
+  "definition": {
+   "vendor": "Aubess",
+   "model": "ZXZIR-02",
+   "description": "Universal smart IR remote control",
+   "exposes": [
+    {
+     "type": "binary",
+     "name": "learn_ir_code",
+     "property": "learn_ir_code",
+     "access": 2,
+     "value_on": "ON",
+     "value_off": "OFF",
+     "description": "Turn on to learn new IR code"
+    },
+    {
+     "type": "text",
+     "name": "learned_ir_code",
+     "property": "learned_ir_code",
+     "access": 1,
+     "description": "The IR code learned by device"
+    },
+    {
+     "type": "text",
+     "name": "ir_code_to_send",
+     "property": "ir_code_to_send",
+     "access": 2,
+     "description": "The IR code to send by device"
+    },
+    {
+     "type": "numeric",
+     "name": "linkquality",
+     "property": "linkquality",
+     "access": 1
+    }
+   ]
+  }
+ },
+ {
   "ieee_address": "0x0000000000000001",
   "friendly_name": "Coordinator",
   "type": "Coordinator",

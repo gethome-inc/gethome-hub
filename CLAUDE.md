@@ -47,10 +47,10 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
 ```
 
 - **`src/schema/` is dependency-free** (zod only) and is the single source of
-  truth: 25 capability kinds (incl. `event` for buttons/remotes), 16 device
-  kinds, typed `EndpointState`, 17 `HubCommand` intents, unit converters,
-  Matter device-type catalog, zod wire schemas. Everything else derives from
-  it.
+  truth: 26 capability kinds (incl. `event` for buttons/remotes and `irRemote`
+  for IR blasters), 16 device kinds, typed `EndpointState`, `HubCommand`
+  intents (incl. `ir*` learn/replay), unit converters, Matter device-type
+  catalog, zod wire schemas. Everything else derives from it.
 - **Adapters only see the `AdapterBus`** (`src/adapters/adapter.ts`). They
   never import `src/api` or `src/db`. Adding a protocol = new directory under
   `src/adapters/` + registration in `src/index.ts`.

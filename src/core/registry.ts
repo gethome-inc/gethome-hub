@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import { devices, endpoints } from '../db/schema.js';
@@ -39,6 +40,26 @@ export interface RegistryEndpoint {
   capabilities: CapabilityKind[];
   primary: CapabilityKind;
   state: EndpointState;
+}
+
+/** Commands the registry resolves against stored IR state (not the adapter). */
+function isIrLibraryCommand(
+  command: HubCommand,
+): command is Extract<HubCommand, { type: 'irLearn' | 'irSaveLearned' | 'irSend' | 'irDeleteCommand' | 'irRenameCommand' }> {
+  return (
+    command.type === 'irLearn' ||
+    command.type === 'irSaveLearned' ||
+    command.type === 'irSend' ||
+    command.type === 'irDeleteCommand' ||
+    command.type === 'irRenameCommand'
+  );
+}
+
+/** A blank endpoint state, plus the IR library base when the endpoint has one. */
+function freshEndpointState(capabilities: CapabilityKind[]): EndpointState {
+  const state = emptyState();
+  if (capabilities.includes('irRemote')) state.irRemote = { learning: false, commands: [] };
+  return state;
 }
 
 /**
@@ -206,9 +227,110 @@ export class DeviceRegistry implements AdapterBus {
   async execute(deviceId: string, endpointId: number, command: HubCommand): Promise<void> {
     const device = this.getDevice(deviceId);
     if (!device) throw new Error(`Unknown device ${deviceId}`);
+    // IR-library commands resolve against stored endpoint state, which the
+    // registry owns; only learn + the resolved raw send reach the adapter.
+    if (isIrLibraryCommand(command)) {
+      await this.executeIr(device, endpointId, command);
+      return;
+    }
     const adapter = this.adapters.get(device.adapter);
     if (!adapter) throw new Error(`Adapter "${device.adapter}" is not running`);
     await adapter.execute(device.externalId, endpointId, command);
+  }
+
+  /**
+   * IR blaster / universal remote command handling. The learned-code library
+   * lives in `endpoint.state.irRemote` (persisted jsonb, hub-authoritative):
+   * save/delete/rename mutate it here; send resolves the opaque blob and hands
+   * it to the adapter as `irSendRaw`; learn is forwarded and optimistically
+   * reflected. Every mutation runs on the per-device write queue.
+   */
+  private async executeIr(
+    device: RegistryDevice,
+    endpointId: number,
+    command: Extract<HubCommand, { type: `ir${string}` }>,
+  ): Promise<void> {
+    const endpoint = device.endpoints.find((candidate) => candidate.endpointId === endpointId);
+    if (!endpoint || !endpoint.capabilities.includes('irRemote')) {
+      throw new Error('device has no IR remote on this endpoint');
+    }
+    const adapter = this.adapters.get(device.adapter);
+    const key = this.key(device.adapter, device.externalId);
+
+    switch (command.type) {
+      case 'irLearn': {
+        if (adapter) await adapter.execute(device.externalId, endpointId, command);
+        this.mutateIr(device, endpointId, (ir) => {
+          ir.learning = command.on;
+          if (command.on) delete ir.pendingCode; // a fresh learn discards the unsaved one
+        });
+        await this.flush(key);
+        return;
+      }
+      case 'irSend': {
+        const library = endpoint.state.irRemote?.commands ?? [];
+        const found = library.find((entry) => entry.id === command.commandId);
+        if (!found) throw new Error('unknown IR command');
+        if (adapter) {
+          await adapter.execute(device.externalId, endpointId, { type: 'irSendRaw', code: found.code });
+        }
+        return;
+      }
+      case 'irSaveLearned': {
+        const code = endpoint.state.irRemote?.pendingCode;
+        if (!code) throw new Error('no learned IR code to save');
+        this.mutateIr(device, endpointId, (ir) => {
+          ir.commands = [...ir.commands, { id: randomUUID(), name: command.name, code }];
+          ir.learning = false;
+          delete ir.pendingCode;
+        });
+        await this.flush(key);
+        return;
+      }
+      case 'irDeleteCommand': {
+        this.mutateIr(device, endpointId, (ir) => {
+          ir.commands = ir.commands.filter((entry) => entry.id !== command.commandId);
+        });
+        await this.flush(key);
+        return;
+      }
+      case 'irRenameCommand': {
+        this.mutateIr(device, endpointId, (ir) => {
+          ir.commands = ir.commands.map((entry) =>
+            entry.id === command.commandId ? { ...entry, name: command.name } : entry,
+          );
+        });
+        await this.flush(key);
+        return;
+      }
+    }
+  }
+
+  /** Serialized read-modify-write of one endpoint's IR library. */
+  private mutateIr(
+    device: RegistryDevice,
+    endpointId: number,
+    mutate: (ir: NonNullable<EndpointState['irRemote']>) => void,
+  ): void {
+    const key = this.key(device.adapter, device.externalId);
+    this.enqueue(key, async () => {
+      const cached = this.cache.get(key);
+      const endpoint = cached?.endpoints.find((candidate) => candidate.endpointId === endpointId);
+      if (!cached || !endpoint) return;
+      const current = endpoint.state.irRemote;
+      const next: NonNullable<EndpointState['irRemote']> = {
+        learning: current?.learning ?? false,
+        commands: current?.commands ? [...current.commands] : [],
+        ...(current?.pendingCode !== undefined ? { pendingCode: current.pendingCode } : {}),
+      };
+      mutate(next);
+      endpoint.state = { ...endpoint.state, irRemote: next };
+      await this.db
+        .update(endpoints)
+        .set({ state: endpoint.state, updatedAt: new Date() })
+        .where(and(eq(endpoints.deviceId, cached.id), eq(endpoints.endpointId, endpointId)));
+      this.events.emit('stateChanged', cached.id, endpointId, endpoint.state);
+    });
   }
 
   async updateDevice(
@@ -302,7 +424,7 @@ export class DeviceRegistry implements AdapterBus {
       endpoints: [],
     };
     for (const endpoint of descriptor.endpoints) {
-      const state = emptyState();
+      const state = freshEndpointState(endpoint.capabilities);
       await this.db.insert(endpoints).values({
         deviceId: row.id,
         endpointId: endpoint.endpointId,
@@ -348,7 +470,7 @@ export class DeviceRegistry implements AdapterBus {
     for (const incoming of descriptor.endpoints) {
       const existing = device.endpoints.find((candidate) => candidate.endpointId === incoming.endpointId);
       if (!existing) {
-        const state = emptyState();
+        const state = freshEndpointState(incoming.capabilities);
         await this.db.insert(endpoints).values({
           deviceId: device.id,
           endpointId: incoming.endpointId,

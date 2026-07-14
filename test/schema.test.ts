@@ -23,13 +23,13 @@ import {
 } from '../src/schema/index.js';
 
 describe('canonical vocabulary', () => {
-  it('has exactly the 25 capability kinds of the app schema, in order', () => {
+  it('has exactly the 26 capability kinds of the app schema, in order', () => {
     expect(CAPABILITY_KINDS).toEqual([
       'onOff', 'level', 'colorTemperature', 'color', 'thermostat', 'fan',
       'doorLock', 'windowCovering', 'temperature', 'humidity', 'occupancy',
       'contact', 'illuminance', 'pressure', 'flow', 'airQuality', 'pm25',
       'co2', 'smokeCOAlarm', 'battery', 'electricalPower', 'mode', 'rvcRun',
-      'mediaPlayback', 'event',
+      'mediaPlayback', 'event', 'irRemote',
     ]);
   });
 

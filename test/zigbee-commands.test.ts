@@ -87,6 +87,18 @@ describe('canonical commands → Z2M /set payloads', () => {
     expect(buildSetPayload({ type: 'toggle' }, channel2)).toEqual({ state_l2: 'TOGGLE' });
   });
 
+  it('translates IR learn and resolved raw-send to the device properties', () => {
+    const ir = featuresOf('Living room IR');
+    expect(buildSetPayload({ type: 'irLearn', on: true }, ir)).toEqual({ learn_ir_code: 'ON' });
+    expect(buildSetPayload({ type: 'irLearn', on: false }, ir)).toEqual({ learn_ir_code: 'OFF' });
+    expect(buildSetPayload({ type: 'irSendRaw', code: 'BASE64BLOB==' }, ir)).toEqual({
+      ir_code_to_send: 'BASE64BLOB==',
+    });
+    // Library-management intents never reach the adapter.
+    expect(() => buildSetPayload({ type: 'irSend', commandId: 'x' }, ir)).toThrow(UnsupportedCommandError);
+    expect(() => buildSetPayload({ type: 'irSaveLearned', name: 'TV' }, ir)).toThrow(UnsupportedCommandError);
+  });
+
   it('rejects intents the device cannot honor', () => {
     const sensor = featuresOf('Bedroom climate sensor');
     expect(() => buildSetPayload({ type: 'power', on: true }, sensor)).toThrow(UnsupportedCommandError);

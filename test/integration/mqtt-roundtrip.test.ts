@@ -255,6 +255,59 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
     await fake.publishAsync('gethome/discovery/doorbell/config', '', { retain: true }).catch(() => {});
   });
 
+  it('runs the IR blaster flow: learn → capture → save → send', async () => {
+    const current = () => registry.listDevices().find((device) => device.name === 'Living room IR');
+    const irState = () => current()?.endpoints.find((endpoint) => endpoint.endpointId === 1)?.state.irRemote;
+
+    await waitFor(() => current() !== undefined);
+    const device = current()!;
+    expect(device.endpoints[0]!.capabilities).toContain('irRemote');
+    // The library base is seeded even before anything is learned.
+    expect(irState()).toEqual({ learning: false, commands: [] });
+
+    const command = (payload: unknown) =>
+      app.inject({
+        method: 'POST',
+        url: `/api/v1/devices/${device.id}/endpoints/1/commands`,
+        headers: auth(),
+        payload,
+      });
+    const lastSet = () =>
+      observed.filter((message) => message.topic === 'zigbee2mqtt/Living room IR/set').at(-1);
+
+    // Enter learn mode → publishes learn_ir_code, reflects the flag.
+    observed.length = 0;
+    await command({ type: 'irLearn', on: true });
+    await waitFor(() => lastSet() !== undefined);
+    expect(JSON.parse(lastSet()!.payload)).toEqual({ learn_ir_code: 'ON' });
+    await waitFor(() => irState()?.learning === true);
+
+    // The device captures a code off a physical remote.
+    await fake.publishAsync('zigbee2mqtt/Living room IR', JSON.stringify({ learned_ir_code: 'RAW_TV_POWER==' }));
+    await waitFor(() => irState()?.pendingCode === 'RAW_TV_POWER==');
+    expect(irState()?.learning).toBe(false);
+
+    // Name and save it.
+    await command({ type: 'irSaveLearned', name: 'TV Power' });
+    await waitFor(() => (irState()?.commands.length ?? 0) === 1);
+    const saved = irState()!.commands[0]!;
+    expect(saved.name).toBe('TV Power');
+    expect(saved.code).toBe('RAW_TV_POWER==');
+    expect(irState()?.pendingCode).toBeUndefined();
+
+    // Send it → the opaque blob goes out on ir_code_to_send.
+    observed.length = 0;
+    await command({ type: 'irSend', commandId: saved.id });
+    await waitFor(() => lastSet() !== undefined);
+    expect(JSON.parse(lastSet()!.payload)).toEqual({ ir_code_to_send: 'RAW_TV_POWER==' });
+
+    // Rename, then delete — the library reflects both.
+    await command({ type: 'irRenameCommand', commandId: saved.id, name: 'Telly' });
+    await waitFor(() => irState()?.commands[0]?.name === 'Telly');
+    await command({ type: 'irDeleteCommand', commandId: saved.id });
+    await waitFor(() => (irState()?.commands.length ?? 0) === 0);
+  });
+
   it('serves a remote with its button inventory and relays presses as events', async () => {
     // The inventory is seeded at adoption, before any press.
     await waitFor(() => {

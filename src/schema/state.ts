@@ -129,6 +129,19 @@ export interface EndpointState {
     at?: number;
   };
 
+  /**
+   * IR blaster / universal remote (learn + replay). The library of learned
+   * commands lives here (persisted, hub-authoritative); each command's `code`
+   * is an opaque protocol blob the apps never interpret — they render
+   * `{id, name}` and issue `irSend {commandId}`. `pendingCode` holds the last
+   * freshly-learned blob awaiting a name (`irSaveLearned {name}`).
+   */
+  irRemote?: {
+    learning: boolean;
+    commands: Array<{ id: string; name: string; code: string }>;
+    pendingCode?: string;
+  };
+
   /** Current mode for ModeSelect / RVC run-mode style capabilities. */
   currentMode?: number;
   /**
@@ -199,5 +212,6 @@ export function presentCapabilities(state: EndpointState): CapabilityKind[] {
   if (state.rvcOperationalState !== undefined) kinds.push('rvcRun');
   if (state.playbackPlaying !== undefined) kinds.push('mediaPlayback');
   if (state.event !== undefined) kinds.push('event');
+  if (state.irRemote !== undefined) kinds.push('irRemote');
   return kinds;
 }

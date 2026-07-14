@@ -210,6 +210,35 @@ describe('Aqara buttons, remotes and gestures → event capability', () => {
   });
 });
 
+describe('IR blaster / universal remote → irRemote capability', () => {
+  it('maps the standard three IR properties to irRemote with no leftovers', () => {
+    const profile = profileOf('Living room IR');
+    const main = mainOf('Living room IR');
+    expect(main.kind).toBe('remote');
+    expect(main.capabilities).toEqual(['irRemote']);
+    expect(main.primary).toBe('irRemote');
+    expect(profile.unmapped).toEqual([]);
+    expect(main.features.irRemote).toEqual({
+      learnProperty: 'learn_ir_code',
+      sendProperty: 'ir_code_to_send',
+      onValue: 'ON',
+      offValue: 'OFF',
+    });
+  });
+
+  it('reflects a freshly learned code into pendingCode (learning ends)', () => {
+    const patch = extractMain('Living room IR', { learned_ir_code: 'BASE64BLOB==', linkquality: 70 });
+    expect(patch.irRemote).toEqual({ learning: false, pendingCode: 'BASE64BLOB==' });
+  });
+
+  it('treats the SET-only IR command properties as known (never a new parameter)', () => {
+    const profile = profileOf('Living room IR');
+    expect(profile.knownProperties.has('learn_ir_code')).toBe(true);
+    expect(profile.knownProperties.has('ir_code_to_send')).toBe(true);
+    expect(profile.knownProperties.has('learned_ir_code')).toBe(true);
+  });
+});
+
 describe('multi-endpoint devices map statically', () => {
   it('maps a two-channel relay to two endpoints with shared metering on endpoint 1', () => {
     const profile = profileOf('Hallway relay');

@@ -16,11 +16,11 @@ units — a 2-relay module has two). Each endpoint has:
 - `deviceKind` — what it is, for display: `light, camera, sensor, climate,
   lock, outlet, airPurifier, shade, speaker, wallSwitch, fan, vacuum,
   appliance, energy, tv, remote`
-- `capabilities` — what it can do (subset of the 25 below)
+- `capabilities` — what it can do (subset of the 26 below)
 - `primaryCapability` — the headline capability
 - `state` — the typed state object below
 
-## The 25 capabilities and their units
+## The 26 capabilities and their units
 
 | Capability | State location | Unit / range |
 |---|---|---|
@@ -49,6 +49,7 @@ units — a 2-relay module has two). Each endpoint has:
 | `rvcRun` | `rvcOperationalState` | 0 stopped, 1 running, 2 paused, 3 error, 0x40 seeking, 0x41 charging, 0x42 docked |
 | `mediaPlayback` | `playbackPlaying` | boolean |
 | `event` | `event.*` (below) | stateless input events — buttons, remotes, cubes |
+| `irRemote` | `irRemote.*` (below) | IR blaster / universal remote — learn + replay a library of codes |
 
 Plus `reachable: boolean` on every state.
 
@@ -82,6 +83,32 @@ hold state — they *emit*. `event` carries two things:
 
 Remotes take no commands; a `deviceKind` of `remote` marks pure senders.
 
+### The `irRemote` capability
+
+IR blasters / universal remotes (Zosung/Tuya `learn_ir_code` family, e.g.
+Aubess ZXZIR-02) *learn* codes off a physical remote and *replay* them. They
+don't fit the state+intent model, so they carry a small library:
+
+```json
+{
+  "irRemote": {
+    "learning": false,
+    "commands": [{ "id": "…uuid", "name": "TV Power", "code": "<opaque blob>" }],
+    "pendingCode": "<opaque blob>"
+  }
+}
+```
+
+- `commands` — the saved library. Each `code` is an **opaque protocol blob**
+  the apps never interpret; clients render `{id, name}` and replay by id.
+- `pendingCode` — present when a fresh code was just captured and is awaiting a
+  name (the apps prompt "Save this button?").
+- `learning` — the device is in learn mode.
+
+The library is **hub-authoritative**: it lives in endpoint state (persisted),
+and the hub — not the adapter — owns its mutations. Driven by five intents
+(below). A `deviceKind` of `remote` covers these too.
+
 ### Example endpoint state
 
 ```json
@@ -97,7 +124,7 @@ Remotes take no commands; a `deviceKind` of `remote` marks pure senders.
 `sensors` is always present (possibly empty). Absent sub-objects mean the
 capability has not reported yet.
 
-## The 17 command intents
+## The command intents
 
 Commands are JSON objects discriminated on `type`
 (`POST /api/v1/devices/:id/endpoints/:endpointId/commands`):
@@ -115,6 +142,16 @@ Commands are JSON objects discriminated on `type`
 {"type":"setFanPercent","percent":60}                 {"type":"setFanMode","mode":5}
 {"type":"playPause","play":true}
 {"type":"setMode","mode":2}
+```
+
+IR blaster / universal remote (the `irRemote` capability):
+
+```
+{"type":"irLearn","on":true}                          // enter/exit learn mode
+{"type":"irSaveLearned","name":"TV Power"}            // name + save the pending captured code
+{"type":"irSend","commandId":"…uuid"}                 // replay a saved code
+{"type":"irDeleteCommand","commandId":"…uuid"}
+{"type":"irRenameCommand","commandId":"…uuid","name":"Telly"}
 ```
 
 A device that cannot honor an intent answers `409` with an error message.

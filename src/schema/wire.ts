@@ -113,6 +113,25 @@ export const endpointStateSchema = z
       })
       .strict()
       .optional(),
+    irRemote: z
+      .object({
+        learning: z.boolean(),
+        commands: z
+          .array(
+            z
+              .object({
+                id: z.string().min(1).max(60),
+                name: z.string().min(1).max(80),
+                /** Opaque protocol blob; the apps never interpret it. */
+                code: z.string().max(4096),
+              })
+              .strict(),
+          )
+          .max(128),
+        pendingCode: z.string().max(4096).optional(),
+      })
+      .strict()
+      .optional(),
     currentMode: uint8.optional(),
     rvcOperationalState: uint8.optional(),
   })
@@ -158,6 +177,19 @@ export const commandSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('setFanMode'), mode: z.number().int().min(0).max(5) }).strict(),
   z.object({ type: z.literal('playPause'), play: z.boolean() }).strict(),
   z.object({ type: z.literal('setMode'), mode: uint8 }).strict(),
+  // IR blaster / universal remote. `irSendRaw` is deliberately absent: clients
+  // send `irSend {commandId}`; the registry resolves it to the opaque blob.
+  z.object({ type: z.literal('irLearn'), on: z.boolean() }).strict(),
+  z.object({ type: z.literal('irSaveLearned'), name: z.string().min(1).max(80) }).strict(),
+  z.object({ type: z.literal('irSend'), commandId: z.string().min(1).max(60) }).strict(),
+  z.object({ type: z.literal('irDeleteCommand'), commandId: z.string().min(1).max(60) }).strict(),
+  z
+    .object({
+      type: z.literal('irRenameCommand'),
+      commandId: z.string().min(1).max(60),
+      name: z.string().min(1).max(80),
+    })
+    .strict(),
 ]);
 
 /** Endpoint descriptor as declared by MQTT integrations and served by the API. */

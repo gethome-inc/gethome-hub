@@ -1,7 +1,7 @@
 /**
  * The canonical capability vocabulary of the GetHome ecosystem.
  *
- * These 25 identifiers (and their exact string values) are a compatibility
+ * These 26 identifiers (and their exact string values) are a compatibility
  * contract with the GetHome apps: every protocol adapter — Matter, Zigbee,
  * MQTT — translates its devices into these capabilities. Do not rename or
  * reorder without versioning the wire format. Adding a kind is additive-safe:
@@ -33,6 +33,7 @@ export const CAPABILITY_KINDS = [
   'rvcRun',
   'mediaPlayback',
   'event',
+  'irRemote',
 ] as const;
 
 export type CapabilityKind = (typeof CAPABILITY_KINDS)[number];

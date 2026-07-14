@@ -76,6 +76,9 @@ Highlights (full unit table in [device-schema.md](device-schema.md)):
   by `src/adapters/zigbee/actions.ts` into a button inventory
   (`event.buttons`, seeded as state at adoption) plus per-press
   `event.{action,button,gesture,at}` patches. Pure senders get kind `remote`.
+- **IR blasters → the `irRemote` capability**: the three standard Zosung/Tuya
+  properties (`learn_ir_code`, `learned_ir_code`, `ir_code_to_send`) map to a
+  learn-and-replay library. See below.
 - diagnostics and device settings (linkquality, radio voltage, child locks,
   sensitivities, indicator LEDs, cube side telemetry…) are deliberately
   *known but ignored* — they never trigger the AI
@@ -86,6 +89,26 @@ Every Z2M endpoint label (`l1`/`l2`, `left`/`right`) becomes a canonical
 endpoint, numbered 1..N in exposes order; unlabeled ("whole device") exposes —
 battery, power, actions — attach to endpoint 1. Commands address channels by
 their suffixed property (`{"state_l2": "ON"}` to `<friendly_name>/set`).
+
+### IR blasters (learn + replay)
+
+Universal IR remotes (Aubess ZXZIR-02, Tuya ZS06 and the wider Zosung family)
+expose exactly three properties: `learn_ir_code` (SET, enter learn mode),
+`learned_ir_code` (STATE, the captured blob), and `ir_code_to_send` (SET,
+transmit a blob). They map to the `irRemote` capability
+([device-schema.md](device-schema.md)):
+
+- The **static mapper** declares `irRemote` (kind `remote`) and turns an
+  incoming `learned_ir_code` into `irRemote.pendingCode`. The two SET-only
+  properties are recorded as command targets, never as unmapped parameters.
+- The **learned-code library is owned by the registry**, not the adapter,
+  because it lives in endpoint state (persisted): `irSaveLearned`,
+  `irDeleteCommand`, `irRenameCommand` mutate it; `irSend {commandId}` resolves
+  the opaque blob and hands it to the adapter as the internal `irSendRaw`,
+  which the adapter publishes as `{"ir_code_to_send": "<blob>"}`; `irLearn`
+  publishes `{"learn_ir_code": "ON"|"OFF"}`.
+- Because the whole flow maps statically, IR blasters need **no AI key** and no
+  `needsReview`.
 
 ### When static mapping isn't enough
 
