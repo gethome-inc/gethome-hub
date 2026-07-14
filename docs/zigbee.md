@@ -43,7 +43,9 @@ Published topics:
 
 Devices are keyed by IEEE address, so Z2M friendly-name changes don't
 duplicate devices. The hub keeps its own device names — it never renames
-devices inside Z2M.
+devices inside Z2M. A device whose exposes definition changes (firmware or
+Z2M update) is re-adopted automatically — the adapter fingerprints the
+definition on every `bridge/devices` sync.
 
 ## Exposes → canonical schema
 

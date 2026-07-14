@@ -34,7 +34,7 @@ devices, favorites, view everything.
 | `PATCH /devices/:id` | favorite: any; name/roomId: owner | `{name?, roomId?, favorite?}` |
 | `DELETE /devices/:id` | owner | also unpairs at the protocol level |
 | `POST /devices/:id/endpoints/:endpointId/commands` | any | body = canonical command; `202` |
-| `POST /devices/:id/remap` | owner | re-run AI mapping (Zigbee devices) |
+| `POST /devices/:id/remap` | owner | force-regenerate the AI mapping (Zigbee devices); the hub also remaps automatically when a device publishes unknown parameters — see [ai-adaptation.md](ai-adaptation.md) |
 | `POST /matter/commission` | owner | `{pairingCode}` → `202 {jobId}` (async) |
 | `GET /matter/commission/:jobId` | any | `{status: running\|done\|failed, nodeId?, error?}` |
 | `POST /zigbee/permit-join` | owner | `{seconds}` (0 = close the network) |

@@ -73,6 +73,31 @@ That's the whole protocol. A sensor-only device just omits `commandRules`-ish
 behavior: declare `capabilities: ["temperature","humidity"]` and publish
 `{"sensors":{"temperatureCenti":2156,"humidityCenti":4820}}`.
 
+## Buttons and remotes (the `event` capability)
+
+Input devices — doorbell buttons, DIY remotes, anything that *emits* rather
+than holds state — declare the `event` capability (device kind `remote` for
+pure senders). Publish the button inventory once (retained), then one small
+patch per press:
+
+```
+gethome/discovery/workshop-button/config →
+  {"name":"Workshop button",
+   "endpoints":[{"endpointId":1,"deviceKind":"remote","capabilities":["event","battery"],"primary":"event"}]}
+
+gethome/device/workshop-button/state (retained) →
+  {"event":{"buttons":[{"id":"main","label":"Button","gestures":["single","double","hold"]}]}}
+
+gethome/device/workshop-button/state (per press) →
+  {"event":{"action":"double","button":"main","gesture":"double"}}
+```
+
+The hub stamps `event.at` (epoch ms) on arrival when the press doesn't carry
+one, so every press — including identical repeats — reaches the apps as a
+state change. Gesture ids follow [device-schema.md](device-schema.md)
+(`single`, `double`, `triple`, `hold`, `release`, …); free-form gestures are
+allowed and shown as-is.
+
 ## Rules & tips
 
 - **Units are canonical**, not native: centi-°C, mireds, percent-100ths with

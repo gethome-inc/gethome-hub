@@ -72,8 +72,10 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   versioning the API (`apiVersion` in `GET /hub`).
 - Zigbee2MQTT conversions to watch: cover position is **inverted** (Z2M
   100 = open), temperatures ×100, power W → mW, energy kWh → mWh, hue/sat
-  degrees/percent → 0–254 cluster units. Tests in `test/zigbee-*.test.ts`
-  pin all of these.
+  degrees/percent → 0–254 cluster units. `action` enums parse through
+  `adapters/zigbee/actions.ts` into `event` state; multi-endpoint devices
+  address channels via suffixed properties (`state_l1`). Tests in
+  `test/zigbee-*.test.ts` pin all of these.
 - The Matter reducer (`src/adapters/matter/reducer.ts`) is a 1:1 port of the
   iOS `MatterStateReducer` — keep them in lockstep if either changes.
 - Secrets: tokens are stored sha256-only; AI keys AES-256-GCM-encrypted with

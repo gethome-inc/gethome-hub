@@ -230,6 +230,31 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
     expect(JSON.parse(set.payload)).toEqual({ state_l2: 'ON' });
   });
 
+  it('stamps event.at on MQTT convention presses that arrive without one', async () => {
+    await fake.publishAsync(
+      'gethome/discovery/doorbell/config',
+      JSON.stringify({
+        name: 'Doorbell button',
+        endpoints: [{ endpointId: 1, deviceKind: 'remote', capabilities: ['event', 'battery'], primary: 'event' }],
+      }),
+      { retain: true },
+    );
+    await waitFor(() => registry.listDevices().some((device) => device.name === 'Doorbell button'));
+
+    await fake.publishAsync(
+      'gethome/device/doorbell/state',
+      JSON.stringify({ event: { action: 'double', button: 'main', gesture: 'double' } }),
+    );
+    await waitFor(() => {
+      const doorbell = registry.listDevices().find((device) => device.name === 'Doorbell button');
+      return doorbell?.endpoints[0]?.state.event?.gesture === 'double';
+    });
+    const doorbell = registry.listDevices().find((device) => device.name === 'Doorbell button')!;
+    expect(typeof doorbell.endpoints[0]!.state.event?.at).toBe('number');
+
+    await fake.publishAsync('gethome/discovery/doorbell/config', '', { retain: true }).catch(() => {});
+  });
+
   it('serves a remote with its button inventory and relays presses as events', async () => {
     // The inventory is seeded at adoption, before any press.
     await waitFor(() => {
