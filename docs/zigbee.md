@@ -49,29 +49,53 @@ devices inside Z2M.
 
 `src/adapters/zigbee/exposes-mapper.ts` statically maps Z2M's
 [exposes](https://www.zigbee2mqtt.io/guide/usage/exposes.html) into canonical
-capabilities. Highlights (full unit table in
-[device-schema.md](device-schema.md)):
+capabilities. Aqara devices are the tuning baseline — their sensors, buttons,
+remotes, cubes, relays and curtain drivers map fully with no AI round-trip.
+Highlights (full unit table in [device-schema.md](device-schema.md)):
 
 - `light`: state → `onOff`; brightness (0–254) → `level` (clamped to 1);
   color_temp (already mireds, expose min/max honored) → `colorTemperature`;
   color_hs/xy → `color` (hue° → 0–254, sat% → 0–254)
-- `switch` → `onOff` (kind `outlet`, or `wallSwitch` for bare relays)
+- `switch` → `onOff` (kind `outlet` for metering/plug singles, `wallSwitch`
+  for bare relays and every multi-gang module)
 - `cover`: position **0–100 where 100 = open** → canonical percent-100ths
-  where **0 = open**: `percent100ths = (100 − position) × 100`
+  where **0 = open**: `percent100ths = (100 − position) × 100`; a
+  `running`/`moving` flag folds into `covering.isMoving` (only alongside a
+  position — a moving flag alone isn't wire-valid)
 - `lock`: `lock_state` locked/unlocked/not_fully_locked → 1/2/0
 - `climate`: `local_temperature`/setpoints °C → centi-°C; expose min/max →
   setpoint limits; `system_mode` off/auto/cool/heat → 0/1/3/4
 - sensors: temperature ×100, humidity ×100, pressure (hPa), battery (direct),
-  power W → mW, energy kWh → mWh, occupancy, contact (true = closed),
-  water_leak → contact (inverted), smoke/carbon_monoxide → alarm 0/2, pm25, co2
-- diagnostics (linkquality, radio voltage, actions, child locks…) are ignored
+  power W → mW, energy kWh → mWh, occupancy, **presence → occupancy** (Aqara
+  FP1/FP2), contact (true = closed), water_leak → contact (inverted),
+  smoke/carbon_monoxide → alarm 0/2, pm25, co2
+- **`action`/`click` enums → the `event` capability**: the flat action
+  vocabulary ("single", "double_left", "button_3_hold", "flip90") is parsed
+  by `src/adapters/zigbee/actions.ts` into a button inventory
+  (`event.buttons`, seeded as state at adoption) plus per-press
+  `event.{action,button,gesture,at}` patches. Pure senders get kind `remote`.
+- diagnostics and device settings (linkquality, radio voltage, child locks,
+  sensitivities, indicator LEDs, cube side telemetry…) are deliberately
+  *known but ignored* — they never trigger the AI
 
-Anything left over — and any device Z2M itself doesn't support — goes to the
+### Multi-endpoint devices
+
+Every Z2M endpoint label (`l1`/`l2`, `left`/`right`) becomes a canonical
+endpoint, numbered 1..N in exposes order; unlabeled ("whole device") exposes —
+battery, power, actions — attach to endpoint 1. Commands address channels by
+their suffixed property (`{"state_l2": "ON"}` to `<friendly_name>/set`).
+
+### When static mapping isn't enough
+
+Anything left over — plus any device Z2M itself doesn't support — goes to the
 **AI mapper** ([ai-adaptation.md](ai-adaptation.md)); until a mapping exists
 the device is stored with whatever mapped statically and `needsReview: true`.
 
-Multi-endpoint devices (`state_l1`/`state_l2` relays) are not mapped
-statically in v1; the AI mapper produces multi-endpoint descriptors for them.
+The adapter also watches **runtime payloads**: it keeps the last 3 state
+payloads per device, and a payload key that neither the exposes nor an
+existing AI mapping declares triggers a one-time, debounced AI remap grounded
+in those samples ("we can't interpret this parameter yet" → generate a
+mapping for it). Each unknown key is asked about at most once per run.
 
 ## Runtime external converters
 

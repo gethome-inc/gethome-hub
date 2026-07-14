@@ -41,16 +41,24 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
     private readonly log: Logger,
   ) {}
 
-  async requestMapping(device: Z2mDevice, staticProfile: Z2mProfile): Promise<AppliedAiMapping | null> {
+  async requestMapping(
+    device: Z2mDevice,
+    staticProfile: Z2mProfile,
+    options?: { samples?: Record<string, unknown>[]; force?: boolean },
+  ): Promise<AppliedAiMapping | null> {
     const hash = exposesHash(device);
 
-    const cached = await this.db.query.aiMappings.findFirst({
-      where: and(eq(aiMappings.adapter, 'zigbee'), eq(aiMappings.exposesHash, hash)),
-    });
-    if (cached) {
-      if (cached.status === 'rejected') return null;
-      const parsed = mappingDescriptorSchema.safeParse(cached.descriptor);
-      return parsed.success ? interpret(parsed.data) : null;
+    if (options?.force) {
+      await this.invalidate(device);
+    } else {
+      const cached = await this.db.query.aiMappings.findFirst({
+        where: and(eq(aiMappings.adapter, 'zigbee'), eq(aiMappings.exposesHash, hash)),
+      });
+      if (cached) {
+        if (cached.status === 'rejected') return null;
+        const parsed = mappingDescriptorSchema.safeParse(cached.descriptor);
+        return parsed.success ? interpret(parsed.data) : null;
+      }
     }
 
     const provider = await this.resolveProvider();
@@ -61,7 +69,7 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
     try {
       const candidate = await provider.generate(
         MAPPING_SYSTEM_PROMPT,
-        buildMappingUserPrompt(device, staticProfile, []),
+        buildMappingUserPrompt(device, staticProfile, options?.samples ?? []),
       );
       const parsed = mappingDescriptorSchema.safeParse(candidate);
       if (!parsed.success) {
@@ -140,6 +148,13 @@ export function exposesHash(device: Z2mDevice): string {
 }
 
 function interpret(descriptor: MappingDescriptor): AppliedAiMapping {
+  // Top-level payload keys the rules read (dotted rules read their root key).
+  const properties = new Set<string>();
+  for (const endpoint of descriptor.endpoints) {
+    for (const rule of endpoint.stateRules) {
+      properties.add(rule.property.split('.')[0]!);
+    }
+  }
   return {
     endpoints: descriptor.endpoints.map((endpoint) => ({
       endpointId: endpoint.endpointId,
@@ -147,6 +162,7 @@ function interpret(descriptor: MappingDescriptor): AppliedAiMapping {
       capabilities: endpoint.capabilities,
       primary: endpoint.primary,
     })),
+    properties,
     extractState: (payload) => applyStateRules(descriptor, payload),
     buildCommandPayload: (endpointId, command) => buildCommandPayload(descriptor, endpointId, command),
   };

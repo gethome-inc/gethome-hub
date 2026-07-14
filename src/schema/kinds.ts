@@ -18,6 +18,7 @@ export const DEVICE_KINDS = [
   'appliance',
   'energy',
   'tv',
+  'remote',
 ] as const;
 
 export type DeviceKind = (typeof DEVICE_KINDS)[number];

@@ -8,12 +8,19 @@ import {
   type DeviceKind,
   type EndpointState,
 } from '../../schema/index.js';
+import { buttonInventory, parseAction, type ButtonDescriptor } from './actions.js';
 
 /**
  * Static mapping from Zigbee2MQTT "exposes" definitions into the canonical
- * GetHome schema. This is the first line of device support; anything it can't
- * place lands in `unmapped` and becomes an AI-mapping trigger
- * (see src/ai/mapper.ts).
+ * GetHome schema. This is the first line of device support — tuned so that
+ * common devices (Aqara sensors, buttons and relays are the baseline) map
+ * fully with no AI round-trip. Anything it can't place lands in `unmapped`
+ * and becomes an AI-mapping trigger (see src/ai/mapper.ts).
+ *
+ * Multi-endpoint devices (`state_l1`/`state_l2` relays, `left`/`right`
+ * rockers) map statically: every Z2M endpoint label becomes a canonical
+ * endpoint, and unlabeled ("whole device") exposes — battery, power, actions —
+ * attach to endpoint 1.
  *
  * Z2M exposes reference: https://www.zigbee2mqtt.io/guide/usage/exposes.html
  */
@@ -50,45 +57,82 @@ export interface Z2mDevice {
   } | null;
 }
 
-export interface Z2mProfile {
+export interface Z2mEndpointProfile {
+  /** Canonical endpoint id, 1-based and stable across restarts. */
+  endpointId: number;
+  /** The Z2M endpoint label ("l1", "left") — absent for the whole device. */
+  label?: string;
   kind: DeviceKind;
   capabilities: CapabilityKind[];
   primary: CapabilityKind;
+  /** Command-translation metadata gathered from this endpoint's exposes. */
+  features: Z2mCommandFeatures;
+  /** Button inventory when the endpoint has the `event` capability. */
+  buttons?: ButtonDescriptor[];
+}
+
+export interface Z2mProfile {
+  /** Always at least one endpoint; endpoint 1 carries whole-device exposes. */
+  endpoints: Z2mEndpointProfile[];
   /** Exposed properties the static mapper could not place (AI trigger). */
   unmapped: string[];
-  /** Command-translation metadata gathered from the exposes. */
-  features: Z2mCommandFeatures;
-  /** Convert one Z2M state payload into a canonical state patch. */
-  extractState(payload: Record<string, unknown>): Partial<EndpointState>;
+  /** Every payload key the profile reads or deliberately ignores. */
+  knownProperties: Set<string>;
+  /** Convert one Z2M state payload into per-endpoint canonical patches. */
+  extractState(payload: Record<string, unknown>): Map<number, Partial<EndpointState>>;
 }
 
 export interface Z2mCommandFeatures {
-  /** value_on/value_off of the main switch feature (usually "ON"/"OFF"). */
+  /** value_on/value_off of the switch/lock state feature. */
   onValue: unknown;
   offValue: unknown;
   hasOnOff: boolean;
+  /** Payload key of the on/off state ("state", "state_l1", "state_left"). */
+  stateProperty?: string;
   hasBrightness: boolean;
+  brightnessProperty?: string;
   colorTempRange?: { min: number; max: number };
+  colorTempProperty?: string;
   hasColorHS: boolean;
+  colorProperty?: string;
   hasPosition: boolean;
+  positionProperty?: string;
   isCover: boolean;
+  /** The OPEN/CLOSE/STOP command property for covers (usually "state"). */
+  coverStateProperty?: string;
   isLock: boolean;
   /** The heating-setpoint property name (varies per TRV). */
   heatingSetpointProperty?: string;
   coolingSetpointProperty?: string;
   systemModes?: string[];
+  systemModeProperty?: string;
   fanModes?: string[];
   fanModeProperty?: string;
 }
 
-/** Payload keys that are telemetry/plumbing, never device capabilities. */
-const IGNORED_PROPERTIES = new Set([
+/**
+ * Payload keys that are telemetry, diagnostics, or device settings — never
+ * capabilities. They are deliberately *known* (so they don't look like new
+ * parameters at runtime) but produce no state.
+ */
+export const IGNORED_PROPERTIES = new Set([
   'linkquality',
   'voltage',
   'current',
-  'action',
   'action_group',
   'action_rate',
+  'action_step_size',
+  'action_transition_time',
+  'action_side',
+  'action_from_side',
+  'action_to_side',
+  'action_angle',
+  'side',
+  'angle',
+  'angle_x',
+  'angle_y',
+  'angle_z',
+  'strength',
   'transition',
   'power_on_behavior',
   'effect',
@@ -110,7 +154,30 @@ const IGNORED_PROPERTIES = new Set([
   'auto_off',
   'sensitivity',
   'motor_speed',
+  'motor_direction',
   'options',
+  'operation_mode',
+  'click_mode',
+  'switch_type',
+  'flip_indicator_light',
+  'led_disabled_night',
+  'led_indication',
+  'calibration',
+  'calibrate',
+  'calibrated',
+  'reverse_direction',
+  'hand_open',
+  'detection_interval',
+  'occupancy_timeout',
+  'local_temperature_calibration',
+  'tamper',
+  'battery_low',
+  'vibration', // the paired `action` enum carries vibration/tilt/drop events
+  'trigger_count',
+  'schedule',
+  'schedule_settings',
+  'away_mode',
+  'interlock',
 ]);
 
 const thermostatDefaults = {
@@ -133,11 +200,13 @@ class PatchBuilder {
   colorHS?: { hue: number; saturation: number; colorModeIsHueSaturation: boolean };
   thermostat?: NonNullable<EndpointState['thermostat']>;
   lock?: 0 | 1 | 2;
-  covering?: { currentPositionLiftPercent100ths: number; isMoving: boolean };
+  coveringPosition?: number;
+  coveringMoving?: boolean;
   fan?: { mode: number; percentCurrent: number };
   sensors: NonNullable<EndpointState['sensors']> = {};
   battery?: { percent: number };
   power?: { activeMilliwatts?: number; importedEnergyMilliwattHours?: number };
+  event?: NonNullable<EndpointState['event']>;
 
   ensureThermostat() {
     this.thermostat ??= { ...thermostatDefaults, systemMode: 0 };
@@ -157,11 +226,20 @@ class PatchBuilder {
     if (this.colorHS) patch.colorHS = this.colorHS;
     if (this.thermostat) patch.thermostat = this.thermostat;
     if (this.lock !== undefined) patch.lock = this.lock;
-    if (this.covering) patch.covering = this.covering;
+    // A moving flag alone can't ship: the wire contract requires a position,
+    // and the clients decode `covering` strictly. Z2M covers publish both in
+    // motion reports, so this loses nothing in practice.
+    if (this.coveringPosition !== undefined) {
+      patch.covering = {
+        currentPositionLiftPercent100ths: this.coveringPosition,
+        isMoving: this.coveringMoving ?? false,
+      };
+    }
     if (this.fan) patch.fan = this.fan;
     if (Object.keys(this.sensors).length > 0) patch.sensors = this.sensors;
     if (this.battery) patch.battery = this.battery;
     if (this.power) patch.power = this.power;
+    if (this.event) patch.event = this.event;
     return patch;
   }
 }
@@ -179,18 +257,10 @@ function asBool(value: unknown): boolean | undefined {
   return undefined;
 }
 
-/**
- * Build the profile for one Z2M device. Multi-endpoint exposes (those with an
- * `endpoint` label, e.g. `state_l1`/`state_l2` relays) are not mapped
- * statically in v1 — they land in `unmapped` so the AI mapper can produce a
- * multi-endpoint descriptor.
- */
-export function mapExposes(device: Z2mDevice): Z2mProfile {
-  const exposes = device.definition?.exposes ?? [];
-  const capabilities = new Set<CapabilityKind>();
-  const rules = new Map<string, StateRule>();
-  const unmapped: string[] = [];
-  const features: Z2mCommandFeatures = {
+/** Working state for one endpoint while the exposes are walked. */
+class EndpointDraft {
+  capabilities = new Set<CapabilityKind>();
+  features: Z2mCommandFeatures = {
     onValue: 'ON',
     offValue: 'OFF',
     hasOnOff: false,
@@ -200,47 +270,117 @@ export function mapExposes(device: Z2mDevice): Z2mProfile {
     isCover: false,
     isLock: false,
   };
-  let kind: DeviceKind | undefined;
-  let sawClimate = false;
+  controlKind?: DeviceKind;
+  sensorKind?: DeviceKind;
+  sawClimate = false;
+  buttons?: ButtonDescriptor[];
 
-  const setKind = (candidate: DeviceKind) => {
-    kind ??= candidate;
+  constructor(
+    readonly endpointId: number,
+    readonly label?: string,
+  ) {}
+
+  setControlKind(kind: DeviceKind) {
+    this.controlKind ??= kind;
+  }
+
+  setSensorKind(kind: DeviceKind) {
+    this.sensorKind ??= kind;
+  }
+}
+
+/**
+ * Build the profile for one Z2M device: walk the exposes, route each to its
+ * endpoint draft (labeled exposes to their own endpoints, unlabeled to
+ * endpoint 1), and compile the per-property extraction rules.
+ */
+export function mapExposes(device: Z2mDevice): Z2mProfile {
+  const exposes = device.definition?.exposes ?? [];
+  const unmapped: string[] = [];
+  const rules = new Map<string, { endpointId: number; rule: StateRule }>();
+
+  const drafts = new Map<number, EndpointDraft>();
+  const endpointIdByLabel = new Map<string, number>();
+  const globalDraft = () => draftFor(undefined);
+
+  function draftFor(label: string | undefined): EndpointDraft {
+    if (label === undefined) {
+      const existing = drafts.get(1);
+      if (existing) return existing;
+      const draft = new EndpointDraft(1);
+      drafts.set(1, draft);
+      return draft;
+    }
+    let id = endpointIdByLabel.get(label);
+    if (id === undefined) {
+      // First label claims endpoint 1 (shared with whole-device exposes),
+      // later labels get the next free ids — stable, exposes-order based.
+      id = endpointIdByLabel.size + 1;
+      endpointIdByLabel.set(label, id);
+    }
+    const existing = drafts.get(id);
+    if (existing) {
+      return existing;
+    }
+    const draft = new EndpointDraft(id, label);
+    drafts.set(id, draft);
+    return draft;
+  }
+
+  const addRule = (draft: EndpointDraft, property: string, rule: StateRule) => {
+    rules.set(property, { endpointId: draft.endpointId, rule });
   };
 
   const mapSensorNumeric = (
+    draft: EndpointDraft,
     property: string,
     apply: (value: number, patch: PatchBuilder) => void,
     capability: CapabilityKind,
   ) => {
-    capabilities.add(capability);
-    rules.set(property, (value, patch) => {
+    draft.capabilities.add(capability);
+    addRule(draft, property, (value, patch) => {
       const parsed = asNumber(value);
       if (parsed !== undefined) apply(parsed, patch);
     });
   };
 
-  const handleSimple = (expose: Z2mExpose): boolean => {
+  const handleAction = (expose: Z2mExpose, property: string) => {
+    // Buttons/remotes/cubes: the flat `action` enum becomes the canonical
+    // event capability, always on the whole-device endpoint.
+    const draft = globalDraft();
+    draft.capabilities.add('event');
+    const inventory = buttonInventory(expose.values ?? []);
+    if (inventory.length > 0) draft.buttons = inventory;
+    addRule(draft, property, (value, patch) => {
+      if (typeof value !== 'string' || value.trim() === '') return;
+      const { button, gesture } = parseAction(value);
+      patch.event = { action: value, button, gesture, at: Date.now() };
+    });
+  };
+
+  const handleSimple = (draft: EndpointDraft, expose: Z2mExpose): boolean => {
     const property = expose.property ?? expose.name;
     if (!property) return true;
     switch (property) {
       case 'temperature':
-        mapSensorNumeric(property, (v, p) => (p.sensors.temperatureCenti = centiFromCelsius(v)), 'temperature');
+        mapSensorNumeric(draft, property, (v, p) => (p.sensors.temperatureCenti = centiFromCelsius(v)), 'temperature');
         return true;
       case 'humidity':
-        mapSensorNumeric(property, (v, p) => (p.sensors.humidityCenti = Math.round(v * 100)), 'humidity');
+        mapSensorNumeric(draft, property, (v, p) => (p.sensors.humidityCenti = Math.round(v * 100)), 'humidity');
         return true;
       case 'illuminance':
       case 'illuminance_lux':
-        mapSensorNumeric(property, (v, p) => (p.sensors.illuminanceLux = v), 'illuminance');
+        mapSensorNumeric(draft, property, (v, p) => (p.sensors.illuminanceLux = v), 'illuminance');
         return true;
       case 'pressure':
-        mapSensorNumeric(property, (v, p) => (p.sensors.pressureHPa = v), 'pressure');
+        mapSensorNumeric(draft, property, (v, p) => (p.sensors.pressureHPa = v), 'pressure');
         return true;
       case 'battery':
-        mapSensorNumeric(property, (v, p) => (p.battery = { percent: clamp(Math.round(v), 0, 100) }), 'battery');
+        mapSensorNumeric(draft, property, (v, p) => (p.battery = { percent: clamp(Math.round(v), 0, 100) }), 'battery');
         return true;
       case 'power':
         mapSensorNumeric(
+          draft,
           property,
           (v, p) => (p.ensurePower().activeMilliwatts = Math.round(v * 1000)),
           'electricalPower',
@@ -248,56 +388,68 @@ export function mapExposes(device: Z2mDevice): Z2mProfile {
         return true;
       case 'energy':
         mapSensorNumeric(
+          draft,
           property,
           (v, p) => (p.ensurePower().importedEnergyMilliwattHours = Math.round(v * 1_000_000)),
           'electricalPower',
         );
         return true;
       case 'pm25':
-        mapSensorNumeric(property, (v, p) => (p.sensors.pm25 = v), 'pm25');
+        mapSensorNumeric(draft, property, (v, p) => (p.sensors.pm25 = v), 'pm25');
         return true;
       case 'co2':
-        mapSensorNumeric(property, (v, p) => (p.sensors.co2ppm = v), 'co2');
+        mapSensorNumeric(draft, property, (v, p) => (p.sensors.co2ppm = v), 'co2');
         return true;
       case 'occupancy':
-        capabilities.add('occupancy');
-        rules.set(property, (value, patch) => {
+      case 'presence': // Aqara FP1/FP2 mmWave presence
+        draft.capabilities.add('occupancy');
+        addRule(draft, property, (value, patch) => {
           const parsed = asBool(value);
           if (parsed !== undefined) patch.sensors.occupied = parsed;
         });
-        setKind('sensor');
+        draft.setSensorKind('sensor');
         return true;
       case 'contact':
-        capabilities.add('contact');
-        rules.set(property, (value, patch) => {
+        draft.capabilities.add('contact');
+        addRule(draft, property, (value, patch) => {
           const parsed = asBool(value);
           if (parsed !== undefined) patch.sensors.contactClosed = parsed;
         });
-        setKind('sensor');
+        draft.setSensorKind('sensor');
         return true;
       case 'water_leak':
-        capabilities.add('contact');
-        rules.set(property, (value, patch) => {
+        draft.capabilities.add('contact');
+        addRule(draft, property, (value, patch) => {
           const parsed = asBool(value);
           if (parsed !== undefined) patch.sensors.contactClosed = !parsed;
         });
-        setKind('sensor');
+        draft.setSensorKind('sensor');
         return true;
       case 'smoke':
-        capabilities.add('smokeCOAlarm');
-        rules.set(property, (value, patch) => {
+        draft.capabilities.add('smokeCOAlarm');
+        addRule(draft, property, (value, patch) => {
           const parsed = asBool(value);
           if (parsed !== undefined) patch.sensors.smokeAlarm = parsed ? 2 : 0;
         });
-        setKind('sensor');
+        draft.setSensorKind('sensor');
         return true;
       case 'carbon_monoxide':
-        capabilities.add('smokeCOAlarm');
-        rules.set(property, (value, patch) => {
+        draft.capabilities.add('smokeCOAlarm');
+        addRule(draft, property, (value, patch) => {
           const parsed = asBool(value);
           if (parsed !== undefined) patch.sensors.coAlarm = parsed ? 2 : 0;
         });
-        setKind('sensor');
+        draft.setSensorKind('sensor');
+        return true;
+      case 'running':
+      case 'moving':
+        // Movement flag published next to a cover (Aqara curtain drivers).
+        // It only ships inside a covering patch that also carries a position,
+        // so it is harmless on devices where it means something else.
+        addRule(draft, property, (value, patch) => {
+          const parsed = asBool(value);
+          if (parsed !== undefined) patch.coveringMoving = parsed;
+        });
         return true;
       default:
         return false;
@@ -305,30 +457,29 @@ export function mapExposes(device: Z2mDevice): Z2mProfile {
   };
 
   const handleLightOrSwitch = (expose: Z2mExpose, asLight: boolean) => {
-    setKind(asLight ? 'light' : 'outlet');
+    const draft = draftFor(expose.endpoint);
+    draft.setControlKind(asLight ? 'light' : 'outlet');
     for (const feature of expose.features ?? []) {
       const property = feature.property ?? feature.name;
       if (!property) continue;
-      if (feature.endpoint) {
-        unmapped.push(property);
-        continue;
-      }
       switch (feature.name ?? property) {
         case 'state': {
-          capabilities.add('onOff');
-          features.hasOnOff = true;
-          features.onValue = feature.value_on ?? 'ON';
-          features.offValue = feature.value_off ?? 'OFF';
-          const onValue = features.onValue;
-          rules.set(property, (value, patch) => {
+          draft.capabilities.add('onOff');
+          draft.features.hasOnOff = true;
+          draft.features.stateProperty = property;
+          draft.features.onValue = feature.value_on ?? 'ON';
+          draft.features.offValue = feature.value_off ?? 'OFF';
+          const onValue = draft.features.onValue;
+          addRule(draft, property, (value, patch) => {
             patch.onOff = value === onValue;
           });
           break;
         }
         case 'brightness': {
-          capabilities.add('level');
-          features.hasBrightness = true;
-          rules.set(property, (value, patch) => {
+          draft.capabilities.add('level');
+          draft.features.hasBrightness = true;
+          draft.features.brightnessProperty = property;
+          addRule(draft, property, (value, patch) => {
             const parsed = asNumber(value);
             if (parsed !== undefined) {
               patch.level = { current: clamp(Math.round(parsed), 1, 254), min: 1, max: 254 };
@@ -337,11 +488,12 @@ export function mapExposes(device: Z2mDevice): Z2mProfile {
           break;
         }
         case 'color_temp': {
-          capabilities.add('colorTemperature');
+          draft.capabilities.add('colorTemperature');
           const min = feature.value_min ?? 153;
           const max = feature.value_max ?? 500;
-          features.colorTempRange = { min, max };
-          rules.set(property, (value, patch) => {
+          draft.features.colorTempRange = { min, max };
+          draft.features.colorTempProperty = property;
+          addRule(draft, property, (value, patch) => {
             const parsed = asNumber(value);
             if (parsed !== undefined) {
               patch.colorTemperature = { mireds: Math.round(parsed), minMireds: min, maxMireds: max };
@@ -351,9 +503,10 @@ export function mapExposes(device: Z2mDevice): Z2mProfile {
         }
         case 'color_hs':
         case 'color_xy': {
-          capabilities.add('color');
-          features.hasColorHS = true;
-          rules.set(property, (value, patch) => {
+          draft.capabilities.add('color');
+          draft.features.hasColorHS = true;
+          draft.features.colorProperty = property;
+          addRule(draft, property, (value, patch) => {
             if (value === null || typeof value !== 'object') return;
             const color = value as { hue?: unknown; saturation?: unknown };
             const hue = asNumber(color.hue);
@@ -375,25 +528,35 @@ export function mapExposes(device: Z2mDevice): Z2mProfile {
   };
 
   const handleCover = (expose: Z2mExpose) => {
-    setKind('shade');
-    features.isCover = true;
-    capabilities.add('windowCovering');
+    const draft = draftFor(expose.endpoint);
+    draft.setControlKind('shade');
+    draft.features.isCover = true;
+    draft.capabilities.add('windowCovering');
     for (const feature of expose.features ?? []) {
       const property = feature.property ?? feature.name;
       if (!property) continue;
       switch (feature.name ?? property) {
         case 'state':
           // OPEN/CLOSE/STOP — command-only; position carries the state.
+          draft.features.coverStateProperty = property;
           break;
         case 'position':
-          features.hasPosition = true;
-          rules.set(property, (value, patch) => {
+          draft.features.hasPosition = true;
+          draft.features.positionProperty = property;
+          addRule(draft, property, (value, patch) => {
             const parsed = asNumber(value);
             if (parsed !== undefined) {
-              patch.covering = {
-                currentPositionLiftPercent100ths: percent100thsFromZ2mPosition(parsed),
-                isMoving: false,
-              };
+              patch.coveringPosition = percent100thsFromZ2mPosition(parsed);
+            }
+          });
+          break;
+        case 'running':
+        case 'moving':
+          addRule(draft, property, (value, patch) => {
+            const parsed = asBool(value);
+            if (parsed !== undefined) patch.coveringMoving = parsed;
+            else if (typeof value === 'string') {
+              patch.coveringMoving = value !== 'stopped' && value !== 'STOP';
             }
           });
           break;
@@ -406,17 +569,19 @@ export function mapExposes(device: Z2mDevice): Z2mProfile {
   };
 
   const handleLock = (expose: Z2mExpose) => {
-    setKind('lock');
-    features.isLock = true;
-    capabilities.add('doorLock');
+    const draft = draftFor(expose.endpoint);
+    draft.setControlKind('lock');
+    draft.features.isLock = true;
+    draft.capabilities.add('doorLock');
     for (const feature of expose.features ?? []) {
       const property = feature.property ?? feature.name;
       if (!property) continue;
       if ((feature.name ?? property) === 'state') {
-        features.onValue = feature.value_on ?? 'LOCK';
-        features.offValue = feature.value_off ?? 'UNLOCK';
+        draft.features.stateProperty = property;
+        draft.features.onValue = feature.value_on ?? 'LOCK';
+        draft.features.offValue = feature.value_off ?? 'UNLOCK';
       } else if ((feature.name ?? property) === 'lock_state') {
-        rules.set(property, (value, patch) => {
+        addRule(draft, property, (value, patch) => {
           if (value === 'locked') patch.lock = 1;
           else if (value === 'unlocked') patch.lock = 2;
           else if (typeof value === 'string') patch.lock = 0;
@@ -428,25 +593,26 @@ export function mapExposes(device: Z2mDevice): Z2mProfile {
   };
 
   const handleClimate = (expose: Z2mExpose) => {
-    setKind('climate');
-    sawClimate = true;
-    capabilities.add('thermostat');
+    const draft = draftFor(expose.endpoint);
+    draft.setControlKind('climate');
+    draft.sawClimate = true;
+    draft.capabilities.add('thermostat');
     for (const feature of expose.features ?? []) {
       const property = feature.property ?? feature.name;
       if (!property) continue;
       switch (feature.name ?? property) {
         case 'local_temperature':
-          rules.set(property, (value, patch) => {
+          addRule(draft, property, (value, patch) => {
             const parsed = asNumber(value);
             if (parsed !== undefined) patch.ensureThermostat().localTemperatureCenti = centiFromCelsius(parsed);
           });
           break;
         case 'current_heating_setpoint':
         case 'occupied_heating_setpoint': {
-          features.heatingSetpointProperty = property;
+          draft.features.heatingSetpointProperty = property;
           const minCenti = feature.value_min !== undefined ? centiFromCelsius(feature.value_min) : 700;
           const maxCenti = feature.value_max !== undefined ? centiFromCelsius(feature.value_max) : 3000;
-          rules.set(property, (value, patch) => {
+          addRule(draft, property, (value, patch) => {
             const parsed = asNumber(value);
             if (parsed !== undefined) {
               const thermostat = patch.ensureThermostat();
@@ -458,8 +624,8 @@ export function mapExposes(device: Z2mDevice): Z2mProfile {
           break;
         }
         case 'occupied_cooling_setpoint': {
-          features.coolingSetpointProperty = property;
-          rules.set(property, (value, patch) => {
+          draft.features.coolingSetpointProperty = property;
+          addRule(draft, property, (value, patch) => {
             const parsed = asNumber(value);
             if (parsed !== undefined) {
               patch.ensureThermostat().occupiedCoolingSetpointCenti = centiFromCelsius(parsed);
@@ -468,8 +634,9 @@ export function mapExposes(device: Z2mDevice): Z2mProfile {
           break;
         }
         case 'system_mode': {
-          features.systemModes = feature.values ?? [];
-          rules.set(property, (value, patch) => {
+          draft.features.systemModes = feature.values ?? [];
+          draft.features.systemModeProperty = property;
+          addRule(draft, property, (value, patch) => {
             if (typeof value === 'string' && value in SYSTEM_MODE_TO_CODE) {
               patch.ensureThermostat().systemMode = SYSTEM_MODE_TO_CODE[value]!;
             }
@@ -485,27 +652,29 @@ export function mapExposes(device: Z2mDevice): Z2mProfile {
   };
 
   const handleFan = (expose: Z2mExpose) => {
-    setKind('fan');
-    capabilities.add('fan');
+    const draft = draftFor(expose.endpoint);
+    draft.setControlKind('fan');
+    draft.capabilities.add('fan');
     for (const feature of expose.features ?? []) {
       const property = feature.property ?? feature.name;
       if (!property) continue;
       if ((feature.name ?? property) === 'mode' || property === 'fan_mode') {
-        features.fanModes = feature.values ?? FAN_MODE_ORDER;
-        features.fanModeProperty = property;
-        rules.set(property, (value, patch) => {
+        draft.features.fanModes = feature.values ?? FAN_MODE_ORDER;
+        draft.features.fanModeProperty = property;
+        addRule(draft, property, (value, patch) => {
           if (typeof value === 'string') {
             const index = FAN_MODE_ORDER.indexOf(value);
             if (index >= 0) patch.fan = { mode: index, percentCurrent: 0 };
           }
         });
       } else if ((feature.name ?? property) === 'state' || property === 'fan_state') {
-        capabilities.add('onOff');
-        features.hasOnOff = true;
+        draft.capabilities.add('onOff');
+        draft.features.hasOnOff = true;
+        draft.features.stateProperty = property;
         const onValue = feature.value_on ?? 'ON';
-        features.onValue = onValue;
-        features.offValue = feature.value_off ?? 'OFF';
-        rules.set(property, (value, patch) => {
+        draft.features.onValue = onValue;
+        draft.features.offValue = feature.value_off ?? 'OFF';
+        addRule(draft, property, (value, patch) => {
           patch.onOff = value === onValue;
         });
       } else if (!IGNORED_PROPERTIES.has(property)) {
@@ -515,12 +684,6 @@ export function mapExposes(device: Z2mDevice): Z2mProfile {
   };
 
   for (const expose of exposes) {
-    if (expose.endpoint) {
-      // Multi-endpoint devices (state_l1/l2 relays…) are an AI-mapper job.
-      const property = expose.property ?? expose.name;
-      if (property) unmapped.push(property);
-      continue;
-    }
     switch (expose.type) {
       case 'light':
         handleLightOrSwitch(expose, true);
@@ -548,7 +711,11 @@ export function mapExposes(device: Z2mDevice): Z2mProfile {
       case 'list': {
         const property = expose.property ?? expose.name;
         if (!property) break;
-        if (handleSimple(expose)) break;
+        if ((property === 'action' || property === 'click') && expose.type === 'enum') {
+          handleAction(expose, property);
+          break;
+        }
+        if (handleSimple(draftFor(expose.endpoint), expose)) break;
         if (!IGNORED_PROPERTIES.has(property)) unmapped.push(property);
         break;
       }
@@ -557,29 +724,63 @@ export function mapExposes(device: Z2mDevice): Z2mProfile {
     }
   }
 
-  // A "switch" that also meters power is an outlet either way; a bare relay
-  // controlling something unknown is closer to a wall switch.
-  if (kind === 'outlet' && !capabilities.has('electricalPower') && !device.definition?.description?.toLowerCase().includes('plug')) {
-    kind = 'wallSwitch';
-  }
-  if (!kind) kind = 'sensor';
-  if (sawClimate) kind = 'climate';
+  // Ensure endpoint 1 exists even for definition-less devices.
+  globalDraft();
 
-  const capabilityList = [...capabilities];
-  const primary = pickPrimary(capabilityList, kind);
+  const multiEndpoint = endpointIdByLabel.size > 0;
+  const description = device.definition?.description?.toLowerCase() ?? '';
+
+  const endpoints: Z2mEndpointProfile[] = [...drafts.values()]
+    .sort((a, b) => a.endpointId - b.endpointId)
+    .map((draft) => {
+      let kind = draft.controlKind ?? draft.sensorKind;
+      // A metering single switch is an outlet; a bare relay is closer to a
+      // wall switch, and multi-gang modules are wall switches outright.
+      if (kind === 'outlet') {
+        const metered = draft.capabilities.has('electricalPower');
+        if (multiEndpoint) kind = 'wallSwitch';
+        else if (!metered && !description.includes('plug')) kind = 'wallSwitch';
+      }
+      if (draft.sawClimate) kind = 'climate';
+      if (!kind) kind = draft.capabilities.has('event') ? 'remote' : 'sensor';
+
+      const capabilities = [...draft.capabilities];
+      return {
+        endpointId: draft.endpointId,
+        ...(draft.label !== undefined ? { label: draft.label } : {}),
+        kind,
+        capabilities,
+        primary: pickPrimary(capabilities, kind),
+        features: draft.features,
+        ...(draft.buttons ? { buttons: draft.buttons } : {}),
+      };
+    });
+
+  const knownProperties = new Set<string>([...rules.keys(), ...IGNORED_PROPERTIES]);
+  const uniqueUnmapped = [...new Set(unmapped)];
 
   return {
-    kind,
-    capabilities: capabilityList,
-    primary,
-    unmapped,
-    features,
+    endpoints,
+    unmapped: uniqueUnmapped,
+    knownProperties,
     extractState(payload) {
-      const patch = new PatchBuilder();
+      const builders = new Map<number, PatchBuilder>();
       for (const [property, value] of Object.entries(payload)) {
-        rules.get(property)?.(value, patch);
+        const entry = rules.get(property);
+        if (!entry) continue;
+        let builder = builders.get(entry.endpointId);
+        if (!builder) {
+          builder = new PatchBuilder();
+          builders.set(entry.endpointId, builder);
+        }
+        entry.rule(value, builder);
       }
-      return patch.build();
+      const patches = new Map<number, Partial<EndpointState>>();
+      for (const [endpointId, builder] of builders) {
+        const patch = builder.build();
+        if (Object.keys(patch).length > 0) patches.set(endpointId, patch);
+      }
+      return patches;
     },
   };
 }
@@ -590,6 +791,7 @@ const PRIMARY_PRIORITY: CapabilityKind[] = [
   'windowCovering',
   'onOff',
   'fan',
+  'event',
   'temperature',
   'humidity',
   'occupancy',

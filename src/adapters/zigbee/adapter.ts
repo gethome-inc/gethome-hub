@@ -1,6 +1,6 @@
 import mqtt from 'mqtt';
 import type { AdapterBus, ProtocolAdapter } from '../adapter.js';
-import type { EndpointState, HubCommand } from '../../schema/index.js';
+import type { CapabilityKind, DeviceKind, EndpointState, HubCommand } from '../../schema/index.js';
 import { UnsupportedCommandError } from '../../schema/index.js';
 import { mapExposes, type Z2mDevice, type Z2mProfile } from './exposes-mapper.js';
 import { buildSetPayload } from './commands.js';
@@ -8,21 +8,33 @@ import type { Logger } from '../../logging.js';
 
 /**
  * Hook the AI mapper implements (src/ai/mapper.ts). When the static exposes
- * mapping is empty or partial, the adapter asks for an AI-generated mapping;
- * a returned mapping overrides state extraction and command translation for
- * the endpoints it declares.
+ * mapping leaves properties unmapped — at adoption or when a device starts
+ * publishing parameters nobody declared — the adapter asks for an
+ * AI-generated mapping; a returned mapping overlays the static rules for the
+ * endpoints and properties it declares.
  */
 export interface ZigbeeAiAssist {
-  requestMapping(device: Z2mDevice, staticProfile: Z2mProfile): Promise<AppliedAiMapping | null>;
+  requestMapping(
+    device: Z2mDevice,
+    staticProfile: Z2mProfile,
+    options?: {
+      /** Recent state payloads, newest last, to ground the mapping. */
+      samples?: Record<string, unknown>[];
+      /** Drop any cached mapping and regenerate. */
+      force?: boolean;
+    },
+  ): Promise<AppliedAiMapping | null>;
 }
 
 export interface AppliedAiMapping {
   endpoints: Array<{
     endpointId: number;
-    deviceKind: Z2mProfile['kind'];
-    capabilities: Z2mProfile['capabilities'];
-    primary: Z2mProfile['primary'];
+    deviceKind: DeviceKind;
+    capabilities: CapabilityKind[];
+    primary: CapabilityKind;
   }>;
+  /** Payload properties the mapping's state rules read. */
+  properties: Set<string>;
   extractState(payload: Record<string, unknown>): Map<number, Partial<EndpointState>>;
   buildCommandPayload(endpointId: number, command: HubCommand): Record<string, unknown> | null;
 }
@@ -31,7 +43,14 @@ interface TrackedDevice {
   ieee: string;
   friendlyName: string;
   profile: Z2mProfile;
+  /** JSON of the exposes definition, to detect schema changes on re-sync. */
+  fingerprint: string;
   aiMapping?: AppliedAiMapping;
+  /** Rolling buffer of recent state payloads (newest last, max 3). */
+  samples: Record<string, unknown>[];
+  /** Unknown payload keys we already asked the AI mapper about. */
+  aiAskedKeys: Set<string>;
+  remapTimer?: NodeJS.Timeout | undefined;
 }
 
 export interface ZigbeeAdapterOptions {
@@ -39,12 +58,18 @@ export interface ZigbeeAdapterOptions {
   baseTopic: string;
   log: Logger;
   aiAssist?: ZigbeeAiAssist;
+  /** Debounce before a parameter-triggered AI remap (test seam). */
+  parameterRemapDelayMs?: number;
 }
+
+const SAMPLE_BUFFER_SIZE = 3;
 
 /**
  * Zigbee support via Zigbee2MQTT: consumes the retained
  * `<base>/bridge/devices` registry (definitions + exposes), maps devices into
- * the canonical schema, relays state topics, and publishes `/set` commands.
+ * the canonical schema (multi-endpoint aware), relays state topics, and
+ * publishes `/set` commands. Payload keys that neither the static profile nor
+ * the AI mapping understands trigger a one-time, sample-grounded AI remap.
  */
 export class ZigbeeAdapter implements ProtocolAdapter {
   readonly id = 'zigbee' as const;
@@ -78,6 +103,9 @@ export class ZigbeeAdapter implements ProtocolAdapter {
   }
 
   async stop(): Promise<void> {
+    for (const device of this.byIeee.values()) {
+      if (device.remapTimer) clearTimeout(device.remapTimer);
+    }
     await this.client?.endAsync();
     this.client = null;
   }
@@ -90,8 +118,11 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     if (device.aiMapping) {
       payload = device.aiMapping.buildCommandPayload(endpointId, command);
     }
-    payload ??= buildSetPayload(command, device.profile.features);
-    if (!payload) throw new UnsupportedCommandError(command.type);
+    if (!payload) {
+      const endpoint = device.profile.endpoints.find((candidate) => candidate.endpointId === endpointId);
+      if (!endpoint) throw new UnsupportedCommandError(command.type, `no endpoint ${endpointId}`);
+      payload = buildSetPayload(command, endpoint.features);
+    }
     await this.publish(`${this.base}/${device.friendlyName}/set`, JSON.stringify(payload));
   }
 
@@ -112,11 +143,11 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     );
   }
 
-  /** Re-run mapping (including the AI path) for one device. */
+  /** Re-run mapping (invalidating any cached AI descriptor) for one device. */
   async remap(externalId: string): Promise<boolean> {
     const raw = this.rawDefinitions.get(externalId);
     if (!raw) return false;
-    await this.adoptDevice(raw, false);
+    await this.adoptDevice(raw, false, true);
     return true;
   }
 
@@ -154,18 +185,59 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     const device = this.byFriendlyName.get(suffix);
     if (!device || !payload.startsWith('{')) return;
     const parsed = JSON.parse(payload) as Record<string, unknown>;
+
+    device.samples.push(parsed);
+    if (device.samples.length > SAMPLE_BUFFER_SIZE) device.samples.shift();
+
+    // Static rules first, then the AI mapping overlays the endpoints and
+    // properties it declares (it wins on conflicts).
+    const patches = device.profile.extractState(parsed);
     if (device.aiMapping) {
-      for (const [endpointId, patch] of device.aiMapping.extractState(parsed)) {
-        if (Object.keys(patch).length > 0) {
-          this.bus?.stateChanged('zigbee', device.ieee, endpointId, patch);
-        }
+      for (const [endpointId, aiPatch] of device.aiMapping.extractState(parsed)) {
+        if (Object.keys(aiPatch).length === 0) continue;
+        const existing = patches.get(endpointId);
+        patches.set(endpointId, existing ? mergePatches(existing, aiPatch) : aiPatch);
       }
-      return;
     }
-    const patch = device.profile.extractState(parsed);
-    if (Object.keys(patch).length > 0) {
-      this.bus?.stateChanged('zigbee', device.ieee, 1, patch);
+    for (const [endpointId, patch] of patches) {
+      if (Object.keys(patch).length > 0) {
+        this.bus?.stateChanged('zigbee', device.ieee, endpointId, patch);
+      }
     }
+
+    this.detectUnknownParameters(device, parsed);
+  }
+
+  /**
+   * A payload key nobody declared (not in the exposes, not AI-mapped) is a
+   * new parameter — the "we can't interpret this yet" case. Ask the AI
+   * mapper once per key, debounced so a burst of reports produces one
+   * request grounded in fresh samples.
+   */
+  private detectUnknownParameters(device: TrackedDevice, payload: Record<string, unknown>): void {
+    if (!this.options.aiAssist) return;
+    const newKeys = Object.keys(payload).filter(
+      (key) =>
+        !device.profile.knownProperties.has(key) &&
+        !(device.aiMapping?.properties.has(key) ?? false) &&
+        !device.aiAskedKeys.has(key),
+    );
+    if (newKeys.length === 0) return;
+    for (const key of newKeys) device.aiAskedKeys.add(key);
+    this.options.log.info(
+      `${device.friendlyName} published unknown parameter(s) ${newKeys.join(', ')} — scheduling an AI remap.`,
+    );
+    if (device.remapTimer) return;
+    const timer = setTimeout(() => {
+      device.remapTimer = undefined;
+      const raw = this.rawDefinitions.get(device.ieee);
+      if (!raw) return;
+      void this.adoptDevice(raw, false, true).catch((error) => {
+        this.options.log.warn({ err: error }, `Parameter remap failed for ${device.friendlyName}`);
+      });
+    }, this.options.parameterRemapDelayMs ?? 5000);
+    timer.unref?.();
+    device.remapTimer = timer;
   }
 
   private async syncDevices(devices: Z2mDevice[]): Promise<void> {
@@ -176,13 +248,15 @@ export class ZigbeeAdapter implements ProtocolAdapter {
       seen.add(device.ieee_address);
       this.rawDefinitions.set(device.ieee_address, device);
       const known = this.byIeee.get(device.ieee_address);
-      if (!known || known.friendlyName !== device.friendly_name) {
+      const fingerprint = JSON.stringify(device.definition?.exposes ?? []);
+      if (!known || known.friendlyName !== device.friendly_name || known.fingerprint !== fingerprint) {
         await this.adoptDevice(device, !known);
       }
     }
     // Devices no longer in the bridge registry were removed from the network.
     for (const [ieee, tracked] of this.byIeee) {
       if (!seen.has(ieee)) {
+        if (tracked.remapTimer) clearTimeout(tracked.remapTimer);
         this.byIeee.delete(ieee);
         this.byFriendlyName.delete(tracked.friendlyName);
         this.rawDefinitions.delete(ieee);
@@ -191,22 +265,31 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     }
   }
 
-  private async adoptDevice(device: Z2mDevice, announce: boolean): Promise<void> {
+  private async adoptDevice(device: Z2mDevice, announce: boolean, forceAiRemap = false): Promise<void> {
     const raw = this.rawDefinitions.get(device.ieee_address) ?? device;
     const profile = mapExposes(raw);
+    const previous = this.byIeee.get(raw.ieee_address);
     const tracked: TrackedDevice = {
       ieee: raw.ieee_address,
       friendlyName: raw.friendly_name,
       profile,
+      fingerprint: JSON.stringify(raw.definition?.exposes ?? []),
+      samples: previous?.samples ?? [],
+      aiAskedKeys: previous?.aiAskedKeys ?? new Set(),
     };
+    if (previous?.remapTimer) clearTimeout(previous.remapTimer);
 
     // Ask the AI mapper when static mapping found nothing, when meaningful
     // exposes were left over, or when Z2M itself doesn't know the device.
+    const staticallyEmpty = profile.endpoints.every((endpoint) => endpoint.capabilities.length === 0);
     const needsHelp =
-      raw.supported === false || profile.capabilities.length === 0 || profile.unmapped.length > 0;
+      forceAiRemap || raw.supported === false || staticallyEmpty || profile.unmapped.length > 0;
     if (needsHelp && this.options.aiAssist) {
       try {
-        const mapping = await this.options.aiAssist.requestMapping(raw, profile);
+        const mapping = await this.options.aiAssist.requestMapping(raw, profile, {
+          samples: tracked.samples,
+          ...(forceAiRemap ? { force: true } : {}),
+        });
         if (mapping) tracked.aiMapping = mapping;
       } catch (error) {
         this.options.log.warn({ err: error }, `AI mapping failed for ${raw.friendly_name}`);
@@ -214,29 +297,30 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     }
 
     // Replace under both keys (friendly name may have changed).
-    const previous = this.byIeee.get(raw.ieee_address);
     if (previous) this.byFriendlyName.delete(previous.friendlyName);
     this.byIeee.set(raw.ieee_address, tracked);
     this.byFriendlyName.set(raw.friendly_name, tracked);
 
-    const endpoints = tracked.aiMapping?.endpoints ?? [
-      {
-        endpointId: 1,
-        deviceKind: profile.kind,
-        capabilities: profile.capabilities,
-        primary: profile.primary,
-      },
-    ];
-    const stillUnmapped = !tracked.aiMapping && (profile.unmapped.length > 0 || profile.capabilities.length === 0);
     this.bus?.deviceUpserted({
       adapter: 'zigbee',
       externalId: raw.ieee_address,
       ...(raw.definition?.vendor ? { vendor: raw.definition.vendor } : {}),
       ...(raw.definition?.model ? { model: raw.definition.model } : {}),
       suggestedName: raw.friendly_name,
-      endpoints: endpoints.filter((endpoint) => endpoint.capabilities.length > 0),
-      needsReview: stillUnmapped,
+      endpoints: mergedEndpoints(tracked),
+      needsReview: needsReview(tracked),
     });
+
+    // Seed the button inventory so the apps can render remotes before (and
+    // regardless of) the first press.
+    for (const endpoint of profile.endpoints) {
+      if (endpoint.buttons && endpoint.buttons.length > 0) {
+        this.bus?.stateChanged('zigbee', raw.ieee_address, endpoint.endpointId, {
+          event: { buttons: endpoint.buttons },
+        });
+      }
+    }
+
     if (announce) {
       this.bus?.activity({
         kind: 'zigbee.joined',
@@ -244,13 +328,19 @@ export class ZigbeeAdapter implements ProtocolAdapter {
         adapter: 'zigbee',
         externalId: raw.ieee_address,
       });
-    }
-
-    // Ask the device for a fresh state snapshot where supported.
-    if (announce && profile.features.hasOnOff) {
-      await this.publish(`${this.base}/${raw.friendly_name}/get`, JSON.stringify({ state: '' })).catch(
-        () => {},
-      );
+      // Ask the device for a fresh snapshot of its readable controls.
+      const get: Record<string, string> = {};
+      for (const endpoint of profile.endpoints) {
+        if (endpoint.features.hasOnOff && endpoint.features.stateProperty) {
+          get[endpoint.features.stateProperty] = '';
+        }
+        if (endpoint.features.hasPosition && endpoint.features.positionProperty) {
+          get[endpoint.features.positionProperty] = '';
+        }
+      }
+      if (Object.keys(get).length > 0) {
+        await this.publish(`${this.base}/${raw.friendly_name}/get`, JSON.stringify(get)).catch(() => {});
+      }
     }
   }
 
@@ -258,4 +348,78 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     if (!this.client) throw new Error('Zigbee adapter is not connected');
     await this.client.publishAsync(topic, payload);
   }
+}
+
+/**
+ * The endpoints announced to the registry: static endpoints with the AI
+ * mapping's endpoints overlaid — the AI's kind/primary win where both exist,
+ * capabilities are the union, and AI-only endpoints are appended.
+ */
+function mergedEndpoints(tracked: TrackedDevice): Array<{
+  endpointId: number;
+  deviceKind: DeviceKind;
+  capabilities: CapabilityKind[];
+  primary: CapabilityKind;
+}> {
+  const merged = new Map<
+    number,
+    { endpointId: number; deviceKind: DeviceKind; capabilities: CapabilityKind[]; primary: CapabilityKind }
+  >();
+  for (const endpoint of tracked.profile.endpoints) {
+    merged.set(endpoint.endpointId, {
+      endpointId: endpoint.endpointId,
+      deviceKind: endpoint.kind,
+      capabilities: [...endpoint.capabilities],
+      primary: endpoint.primary,
+    });
+  }
+  for (const endpoint of tracked.aiMapping?.endpoints ?? []) {
+    const existing = merged.get(endpoint.endpointId);
+    if (!existing) {
+      merged.set(endpoint.endpointId, { ...endpoint, capabilities: [...endpoint.capabilities] });
+      continue;
+    }
+    existing.deviceKind = endpoint.deviceKind;
+    existing.primary = endpoint.primary;
+    for (const capability of endpoint.capabilities) {
+      if (!existing.capabilities.includes(capability)) existing.capabilities.push(capability);
+    }
+  }
+  return [...merged.values()]
+    .sort((a, b) => a.endpointId - b.endpointId)
+    .filter((endpoint) => endpoint.capabilities.length > 0);
+}
+
+/**
+ * Merge two patches for the same endpoint, sub-object by sub-object, so an
+ * AI patch writing `sensors.humidityCenti` doesn't clobber the static rule's
+ * `sensors.temperatureCenti` from the same payload. The overlay wins on
+ * conflicting scalars.
+ */
+function mergePatches(base: Partial<EndpointState>, overlay: Partial<EndpointState>): Partial<EndpointState> {
+  const out = { ...base } as Record<string, unknown>;
+  for (const [key, value] of Object.entries(overlay)) {
+    const existing = out[key];
+    if (
+      value !== null &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      existing !== null &&
+      typeof existing === 'object' &&
+      !Array.isArray(existing)
+    ) {
+      out[key] = { ...existing, ...value };
+    } else {
+      out[key] = value;
+    }
+  }
+  return out as Partial<EndpointState>;
+}
+
+/** Review is needed while any exposed property remains unmapped. */
+function needsReview(tracked: TrackedDevice): boolean {
+  const aiProperties = tracked.aiMapping?.properties;
+  const leftover = tracked.profile.unmapped.filter((property) => !(aiProperties?.has(property) ?? false));
+  if (leftover.length > 0) return true;
+  return mergedEndpoints(tracked).length === 0;
 }

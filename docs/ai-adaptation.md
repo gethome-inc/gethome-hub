@@ -8,10 +8,14 @@ device" into a one-time, self-healing event.
 ## When it triggers
 
 1. A Zigbee device's static exposes mapping yields **no capabilities**, or
-   leaves meaningful exposed properties unmapped (multi-endpoint relays,
-   vendor-specific enums, unusual units), or Zigbee2MQTT itself doesn't know
-   the device.
-2. The owner explicitly requests `POST /api/v1/devices/:id/remap`.
+   leaves meaningful exposed properties unmapped (vendor-specific enums,
+   unusual units), or Zigbee2MQTT itself doesn't know the device.
+2. **At runtime**, a device publishes a payload key that neither the static
+   profile nor an existing AI mapping declares — a new, uninterpretable
+   parameter. The adapter debounces (~5 s), then requests a fresh mapping
+   grounded in the device's recent payloads. Each unknown key is asked about
+   at most once per run.
+3. The owner explicitly requests `POST /api/v1/devices/:id/remap`.
 
 **Without a configured API key nothing is sent anywhere** — the device simply
 appears with whatever mapped statically, flagged `needsReview: true`.
@@ -26,9 +30,10 @@ provider. Defaults: `claude-fable-5` (Anthropic) / `gpt-5.1` (OpenAI);
 override with `model`.
 
 **Privacy note:** when a mapping is generated, the device's *published
-schema* — its Zigbee2MQTT exposes definition, vendor/model strings, and
-(potentially) sample state payloads — is sent to your chosen provider. No
-home names, member names, tokens, or other hub data ever leave the machine.
+schema* — its Zigbee2MQTT exposes definition, vendor/model strings, and up to
+the last 3 raw state payloads of that device — is sent to your chosen
+provider. No home names, member names, tokens, or other hub data ever leave
+the machine.
 
 ## What the model produces: MappingDescriptor
 
@@ -62,13 +67,21 @@ interpreted, never executed):
 ```
 
 - **stateRules** run device → canonical: payload property (dotted paths
-  supported) → one of the ~30 whitelisted canonical state paths, through a
+  supported) → one of the whitelisted canonical state paths, through a
   transform (`identity`, `multiply`, `scale`, `celsiusToCenti`,
-  `invertPercentTo100ths`, `boolMap`, `enumMap`).
+  `invertPercentTo100ths`, `boolMap`, `enumMap`). The string-typed
+  `event.action`/`event.button`/`event.gesture` paths adapt vendor event
+  enums into the event capability; writing any of them auto-stamps
+  `event.at`.
 - **commandRules** run canonical → device: intent value → payload key
   (+ optional `constPayload`), with `enumMap` reversed automatically.
 - Multi-endpoint devices declare several endpoints (`state_l1` → endpoint 1,
   `state_l2` → endpoint 2, …).
+
+The descriptor **overlays** the static exposes mapping: the hub keeps running
+its built-in rules and applies the descriptor's rules on top (the descriptor
+wins on conflicts, endpoint structures are merged). The model is therefore
+asked to map only what the static mapper left over.
 
 Validation is layered: JSON-schema-constrained generation → zod parse →
 sanity checks (unique endpoints, primary ∈ capabilities, every rule's target
@@ -84,7 +97,6 @@ re-pairings. `POST /devices/:id/remap` invalidates and regenerates.
 
 ## Future work
 
-- Feeding captured state payload samples into the prompt automatically.
 - Generating Zigbee2MQTT **external converters** for devices Z2M itself
   doesn't support and loading them at runtime
   (`zigbee2mqtt/bridge/request/converter/save`).

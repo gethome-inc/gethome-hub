@@ -1,221 +1,925 @@
 [
-  {
-    "ieee_address": "0x000d6ffffe111111",
-    "friendly_name": "Desk lamp",
-    "type": "Router",
-    "supported": true,
-    "interview_completed": true,
-    "definition": {
-      "vendor": "IKEA",
-      "model": "LED2003G10",
-      "description": "TRADFRI bulb E27 WW globe 806lm",
-      "exposes": [
-        {
-          "type": "light",
-          "features": [
-            { "type": "binary", "name": "state", "property": "state", "access": 7, "value_on": "ON", "value_off": "OFF" },
-            { "type": "numeric", "name": "brightness", "property": "brightness", "access": 7, "value_min": 0, "value_max": 254 },
-            { "type": "numeric", "name": "color_temp", "property": "color_temp", "access": 7, "value_min": 250, "value_max": 454, "unit": "mired" },
-            { "type": "numeric", "name": "color_temp_startup", "property": "color_temp_startup", "access": 7 }
-          ]
-        },
-        { "type": "enum", "name": "effect", "property": "effect", "access": 2, "values": ["blink", "breathe", "okay"] },
-        { "type": "numeric", "name": "linkquality", "property": "linkquality", "access": 1, "unit": "lqi" }
-      ]
+ {
+  "ieee_address": "0x000d6ffffe111111",
+  "friendly_name": "Desk lamp",
+  "type": "Router",
+  "supported": true,
+  "interview_completed": true,
+  "definition": {
+   "vendor": "IKEA",
+   "model": "LED2003G10",
+   "description": "TRADFRI bulb E27 WW globe 806lm",
+   "exposes": [
+    {
+     "type": "light",
+     "features": [
+      {
+       "type": "binary",
+       "name": "state",
+       "property": "state",
+       "access": 7,
+       "value_on": "ON",
+       "value_off": "OFF"
+      },
+      {
+       "type": "numeric",
+       "name": "brightness",
+       "property": "brightness",
+       "access": 7,
+       "value_min": 0,
+       "value_max": 254
+      },
+      {
+       "type": "numeric",
+       "name": "color_temp",
+       "property": "color_temp",
+       "access": 7,
+       "value_min": 250,
+       "value_max": 454,
+       "unit": "mired"
+      },
+      {
+       "type": "numeric",
+       "name": "color_temp_startup",
+       "property": "color_temp_startup",
+       "access": 7
+      }
+     ]
+    },
+    {
+     "type": "enum",
+     "name": "effect",
+     "property": "effect",
+     "access": 2,
+     "values": [
+      "blink",
+      "breathe",
+      "okay"
+     ]
+    },
+    {
+     "type": "numeric",
+     "name": "linkquality",
+     "property": "linkquality",
+     "access": 1,
+     "unit": "lqi"
     }
-  },
-  {
-    "ieee_address": "0x0017880102222222",
-    "friendly_name": "Living room strip",
-    "type": "Router",
-    "supported": true,
-    "interview_completed": true,
-    "definition": {
-      "vendor": "Philips",
-      "model": "9290022166",
-      "description": "Hue white and color ambiance",
-      "exposes": [
-        {
-          "type": "light",
-          "features": [
-            { "type": "binary", "name": "state", "property": "state", "access": 7, "value_on": "ON", "value_off": "OFF" },
-            { "type": "numeric", "name": "brightness", "property": "brightness", "access": 7, "value_min": 0, "value_max": 254 },
-            { "type": "numeric", "name": "color_temp", "property": "color_temp", "access": 7, "value_min": 153, "value_max": 500, "unit": "mired" },
-            {
-              "type": "composite",
-              "name": "color_hs",
-              "property": "color",
-              "features": [
-                { "type": "numeric", "name": "hue", "property": "hue" },
-                { "type": "numeric", "name": "saturation", "property": "saturation" }
-              ]
-            }
-          ]
-        },
-        { "type": "numeric", "name": "linkquality", "property": "linkquality", "access": 1 }
-      ]
-    }
-  },
-  {
-    "ieee_address": "0x00124b0033333333",
-    "friendly_name": "Washer plug",
-    "type": "Router",
-    "supported": true,
-    "interview_completed": true,
-    "definition": {
-      "vendor": "SONOFF",
-      "model": "S31ZB",
-      "description": "Zigbee smart plug (US version)",
-      "exposes": [
-        {
-          "type": "switch",
-          "features": [
-            { "type": "binary", "name": "state", "property": "state", "access": 7, "value_on": "ON", "value_off": "OFF" }
-          ]
-        },
-        { "type": "numeric", "name": "power", "property": "power", "access": 5, "unit": "W" },
-        { "type": "numeric", "name": "energy", "property": "energy", "access": 5, "unit": "kWh" },
-        { "type": "numeric", "name": "voltage", "property": "voltage", "access": 5, "unit": "V" },
-        { "type": "numeric", "name": "current", "property": "current", "access": 5, "unit": "A" },
-        { "type": "numeric", "name": "linkquality", "property": "linkquality", "access": 1 }
-      ]
-    }
-  },
-  {
-    "ieee_address": "0x00158d0004444444",
-    "friendly_name": "Bedroom climate sensor",
-    "type": "EndDevice",
-    "supported": true,
-    "interview_completed": true,
-    "definition": {
-      "vendor": "Aqara",
-      "model": "WSDCGQ11LM",
-      "description": "Temperature and humidity sensor",
-      "exposes": [
-        { "type": "numeric", "name": "temperature", "property": "temperature", "access": 1, "unit": "°C" },
-        { "type": "numeric", "name": "humidity", "property": "humidity", "access": 1, "unit": "%" },
-        { "type": "numeric", "name": "pressure", "property": "pressure", "access": 1, "unit": "hPa" },
-        { "type": "numeric", "name": "battery", "property": "battery", "access": 1, "unit": "%" },
-        { "type": "numeric", "name": "voltage", "property": "voltage", "access": 1, "unit": "mV" },
-        { "type": "numeric", "name": "linkquality", "property": "linkquality", "access": 1 }
-      ]
-    }
-  },
-  {
-    "ieee_address": "0x00158d0005555555",
-    "friendly_name": "Front door sensor",
-    "type": "EndDevice",
-    "supported": true,
-    "interview_completed": true,
-    "definition": {
-      "vendor": "Aqara",
-      "model": "MCCGQ11LM",
-      "description": "Door and window sensor",
-      "exposes": [
-        { "type": "binary", "name": "contact", "property": "contact", "access": 1, "value_on": false, "value_off": true },
-        { "type": "numeric", "name": "battery", "property": "battery", "access": 1, "unit": "%" },
-        { "type": "numeric", "name": "linkquality", "property": "linkquality", "access": 1 }
-      ]
-    }
-  },
-  {
-    "ieee_address": "0x847127fffe666666",
-    "friendly_name": "Radiator valve",
-    "type": "EndDevice",
-    "supported": true,
-    "interview_completed": true,
-    "definition": {
-      "vendor": "Tuya",
-      "model": "TS0601_thermostat",
-      "description": "Radiator valve with thermostat",
-      "exposes": [
-        {
-          "type": "climate",
-          "features": [
-            { "type": "numeric", "name": "local_temperature", "property": "local_temperature", "access": 5, "unit": "°C" },
-            { "type": "numeric", "name": "current_heating_setpoint", "property": "current_heating_setpoint", "access": 7, "value_min": 5, "value_max": 30, "value_step": 0.5, "unit": "°C" },
-            { "type": "enum", "name": "system_mode", "property": "system_mode", "access": 7, "values": ["off", "auto", "heat"] },
-            { "type": "enum", "name": "running_state", "property": "running_state", "access": 5, "values": ["idle", "heat"] },
-            { "type": "enum", "name": "preset", "property": "preset", "access": 7, "values": ["schedule", "manual", "boost", "complex", "comfort", "eco"] }
-          ]
-        },
-        { "type": "binary", "name": "child_lock", "property": "child_lock", "access": 7, "value_on": "LOCK", "value_off": "UNLOCK" },
-        { "type": "numeric", "name": "battery", "property": "battery", "access": 1, "unit": "%" },
-        { "type": "numeric", "name": "linkquality", "property": "linkquality", "access": 1 }
-      ]
-    }
-  },
-  {
-    "ieee_address": "0x54ef4410007777777",
-    "friendly_name": "Studio shade",
-    "type": "Router",
-    "supported": true,
-    "interview_completed": true,
-    "definition": {
-      "vendor": "Aqara",
-      "model": "ZNCLDJ12LM",
-      "description": "Roller shade driver E1",
-      "exposes": [
-        {
-          "type": "cover",
-          "features": [
-            { "type": "enum", "name": "state", "property": "state", "access": 3, "values": ["OPEN", "CLOSE", "STOP"] },
-            { "type": "numeric", "name": "position", "property": "position", "access": 7, "value_min": 0, "value_max": 100 }
-          ]
-        },
-        { "type": "numeric", "name": "battery", "property": "battery", "access": 1, "unit": "%" },
-        { "type": "enum", "name": "motor_speed", "property": "motor_speed", "access": 7, "values": ["low", "medium", "high"] },
-        { "type": "numeric", "name": "linkquality", "property": "linkquality", "access": 1 }
-      ]
-    }
-  },
-  {
-    "ieee_address": "0x04cf8cdf88888888",
-    "friendly_name": "Front door lock",
-    "type": "EndDevice",
-    "supported": true,
-    "interview_completed": true,
-    "definition": {
-      "vendor": "Danalock",
-      "model": "V3-BTZB",
-      "description": "BT/ZB smartlock",
-      "exposes": [
-        {
-          "type": "lock",
-          "features": [
-            { "type": "binary", "name": "state", "property": "state", "access": 3, "value_on": "LOCK", "value_off": "UNLOCK" },
-            { "type": "enum", "name": "lock_state", "property": "lock_state", "access": 1, "values": ["not_fully_locked", "locked", "unlocked"] }
-          ]
-        },
-        { "type": "numeric", "name": "battery", "property": "battery", "access": 1, "unit": "%" },
-        { "type": "numeric", "name": "linkquality", "property": "linkquality", "access": 1 }
-      ]
-    }
-  },
-  {
-    "ieee_address": "0xa4c138999999999",
-    "friendly_name": "Mystery soil probe",
-    "type": "EndDevice",
-    "supported": true,
-    "interview_completed": true,
-    "definition": {
-      "vendor": "Tuya",
-      "model": "TS0601_soil",
-      "description": "Soil moisture sensor",
-      "exposes": [
-        { "type": "numeric", "name": "soil_moisture", "property": "soil_moisture", "access": 1, "unit": "%" },
-        { "type": "numeric", "name": "temperature", "property": "temperature", "access": 1, "unit": "°C" },
-        { "type": "numeric", "name": "battery", "property": "battery", "access": 1, "unit": "%" },
-        { "type": "numeric", "name": "linkquality", "property": "linkquality", "access": 1 }
-      ]
-    }
-  },
-  {
-    "ieee_address": "0x0000000000000001",
-    "friendly_name": "Coordinator",
-    "type": "Coordinator",
-    "supported": true,
-    "interview_completed": true,
-    "definition": null
+   ]
   }
+ },
+ {
+  "ieee_address": "0x0017880102222222",
+  "friendly_name": "Living room strip",
+  "type": "Router",
+  "supported": true,
+  "interview_completed": true,
+  "definition": {
+   "vendor": "Philips",
+   "model": "9290022166",
+   "description": "Hue white and color ambiance",
+   "exposes": [
+    {
+     "type": "light",
+     "features": [
+      {
+       "type": "binary",
+       "name": "state",
+       "property": "state",
+       "access": 7,
+       "value_on": "ON",
+       "value_off": "OFF"
+      },
+      {
+       "type": "numeric",
+       "name": "brightness",
+       "property": "brightness",
+       "access": 7,
+       "value_min": 0,
+       "value_max": 254
+      },
+      {
+       "type": "numeric",
+       "name": "color_temp",
+       "property": "color_temp",
+       "access": 7,
+       "value_min": 153,
+       "value_max": 500,
+       "unit": "mired"
+      },
+      {
+       "type": "composite",
+       "name": "color_hs",
+       "property": "color",
+       "features": [
+        {
+         "type": "numeric",
+         "name": "hue",
+         "property": "hue"
+        },
+        {
+         "type": "numeric",
+         "name": "saturation",
+         "property": "saturation"
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "type": "numeric",
+     "name": "linkquality",
+     "property": "linkquality",
+     "access": 1
+    }
+   ]
+  }
+ },
+ {
+  "ieee_address": "0x00124b0033333333",
+  "friendly_name": "Washer plug",
+  "type": "Router",
+  "supported": true,
+  "interview_completed": true,
+  "definition": {
+   "vendor": "SONOFF",
+   "model": "S31ZB",
+   "description": "Zigbee smart plug (US version)",
+   "exposes": [
+    {
+     "type": "switch",
+     "features": [
+      {
+       "type": "binary",
+       "name": "state",
+       "property": "state",
+       "access": 7,
+       "value_on": "ON",
+       "value_off": "OFF"
+      }
+     ]
+    },
+    {
+     "type": "numeric",
+     "name": "power",
+     "property": "power",
+     "access": 5,
+     "unit": "W"
+    },
+    {
+     "type": "numeric",
+     "name": "energy",
+     "property": "energy",
+     "access": 5,
+     "unit": "kWh"
+    },
+    {
+     "type": "numeric",
+     "name": "voltage",
+     "property": "voltage",
+     "access": 5,
+     "unit": "V"
+    },
+    {
+     "type": "numeric",
+     "name": "current",
+     "property": "current",
+     "access": 5,
+     "unit": "A"
+    },
+    {
+     "type": "numeric",
+     "name": "linkquality",
+     "property": "linkquality",
+     "access": 1
+    }
+   ]
+  }
+ },
+ {
+  "ieee_address": "0x00158d0004444444",
+  "friendly_name": "Bedroom climate sensor",
+  "type": "EndDevice",
+  "supported": true,
+  "interview_completed": true,
+  "definition": {
+   "vendor": "Aqara",
+   "model": "WSDCGQ11LM",
+   "description": "Temperature and humidity sensor",
+   "exposes": [
+    {
+     "type": "numeric",
+     "name": "temperature",
+     "property": "temperature",
+     "access": 1,
+     "unit": "°C"
+    },
+    {
+     "type": "numeric",
+     "name": "humidity",
+     "property": "humidity",
+     "access": 1,
+     "unit": "%"
+    },
+    {
+     "type": "numeric",
+     "name": "pressure",
+     "property": "pressure",
+     "access": 1,
+     "unit": "hPa"
+    },
+    {
+     "type": "numeric",
+     "name": "battery",
+     "property": "battery",
+     "access": 1,
+     "unit": "%"
+    },
+    {
+     "type": "numeric",
+     "name": "voltage",
+     "property": "voltage",
+     "access": 1,
+     "unit": "mV"
+    },
+    {
+     "type": "numeric",
+     "name": "linkquality",
+     "property": "linkquality",
+     "access": 1
+    }
+   ]
+  }
+ },
+ {
+  "ieee_address": "0x00158d0005555555",
+  "friendly_name": "Front door sensor",
+  "type": "EndDevice",
+  "supported": true,
+  "interview_completed": true,
+  "definition": {
+   "vendor": "Aqara",
+   "model": "MCCGQ11LM",
+   "description": "Door and window sensor",
+   "exposes": [
+    {
+     "type": "binary",
+     "name": "contact",
+     "property": "contact",
+     "access": 1,
+     "value_on": false,
+     "value_off": true
+    },
+    {
+     "type": "numeric",
+     "name": "battery",
+     "property": "battery",
+     "access": 1,
+     "unit": "%"
+    },
+    {
+     "type": "numeric",
+     "name": "linkquality",
+     "property": "linkquality",
+     "access": 1
+    }
+   ]
+  }
+ },
+ {
+  "ieee_address": "0x847127fffe666666",
+  "friendly_name": "Radiator valve",
+  "type": "EndDevice",
+  "supported": true,
+  "interview_completed": true,
+  "definition": {
+   "vendor": "Tuya",
+   "model": "TS0601_thermostat",
+   "description": "Radiator valve with thermostat",
+   "exposes": [
+    {
+     "type": "climate",
+     "features": [
+      {
+       "type": "numeric",
+       "name": "local_temperature",
+       "property": "local_temperature",
+       "access": 5,
+       "unit": "°C"
+      },
+      {
+       "type": "numeric",
+       "name": "current_heating_setpoint",
+       "property": "current_heating_setpoint",
+       "access": 7,
+       "value_min": 5,
+       "value_max": 30,
+       "value_step": 0.5,
+       "unit": "°C"
+      },
+      {
+       "type": "enum",
+       "name": "system_mode",
+       "property": "system_mode",
+       "access": 7,
+       "values": [
+        "off",
+        "auto",
+        "heat"
+       ]
+      },
+      {
+       "type": "enum",
+       "name": "running_state",
+       "property": "running_state",
+       "access": 5,
+       "values": [
+        "idle",
+        "heat"
+       ]
+      },
+      {
+       "type": "enum",
+       "name": "preset",
+       "property": "preset",
+       "access": 7,
+       "values": [
+        "schedule",
+        "manual",
+        "boost",
+        "complex",
+        "comfort",
+        "eco"
+       ]
+      }
+     ]
+    },
+    {
+     "type": "binary",
+     "name": "child_lock",
+     "property": "child_lock",
+     "access": 7,
+     "value_on": "LOCK",
+     "value_off": "UNLOCK"
+    },
+    {
+     "type": "numeric",
+     "name": "battery",
+     "property": "battery",
+     "access": 1,
+     "unit": "%"
+    },
+    {
+     "type": "numeric",
+     "name": "linkquality",
+     "property": "linkquality",
+     "access": 1
+    }
+   ]
+  }
+ },
+ {
+  "ieee_address": "0x54ef4410007777777",
+  "friendly_name": "Studio shade",
+  "type": "Router",
+  "supported": true,
+  "interview_completed": true,
+  "definition": {
+   "vendor": "Aqara",
+   "model": "ZNCLDJ12LM",
+   "description": "Roller shade driver E1",
+   "exposes": [
+    {
+     "type": "cover",
+     "features": [
+      {
+       "type": "enum",
+       "name": "state",
+       "property": "state",
+       "access": 3,
+       "values": [
+        "OPEN",
+        "CLOSE",
+        "STOP"
+       ]
+      },
+      {
+       "type": "numeric",
+       "name": "position",
+       "property": "position",
+       "access": 7,
+       "value_min": 0,
+       "value_max": 100
+      }
+     ]
+    },
+    {
+     "type": "numeric",
+     "name": "battery",
+     "property": "battery",
+     "access": 1,
+     "unit": "%"
+    },
+    {
+     "type": "enum",
+     "name": "motor_speed",
+     "property": "motor_speed",
+     "access": 7,
+     "values": [
+      "low",
+      "medium",
+      "high"
+     ]
+    },
+    {
+     "type": "numeric",
+     "name": "linkquality",
+     "property": "linkquality",
+     "access": 1
+    }
+   ]
+  }
+ },
+ {
+  "ieee_address": "0x04cf8cdf88888888",
+  "friendly_name": "Front door lock",
+  "type": "EndDevice",
+  "supported": true,
+  "interview_completed": true,
+  "definition": {
+   "vendor": "Danalock",
+   "model": "V3-BTZB",
+   "description": "BT/ZB smartlock",
+   "exposes": [
+    {
+     "type": "lock",
+     "features": [
+      {
+       "type": "binary",
+       "name": "state",
+       "property": "state",
+       "access": 3,
+       "value_on": "LOCK",
+       "value_off": "UNLOCK"
+      },
+      {
+       "type": "enum",
+       "name": "lock_state",
+       "property": "lock_state",
+       "access": 1,
+       "values": [
+        "not_fully_locked",
+        "locked",
+        "unlocked"
+       ]
+      }
+     ]
+    },
+    {
+     "type": "numeric",
+     "name": "battery",
+     "property": "battery",
+     "access": 1,
+     "unit": "%"
+    },
+    {
+     "type": "numeric",
+     "name": "linkquality",
+     "property": "linkquality",
+     "access": 1
+    }
+   ]
+  }
+ },
+ {
+  "ieee_address": "0xa4c138999999999",
+  "friendly_name": "Mystery soil probe",
+  "type": "EndDevice",
+  "supported": true,
+  "interview_completed": true,
+  "definition": {
+   "vendor": "Tuya",
+   "model": "TS0601_soil",
+   "description": "Soil moisture sensor",
+   "exposes": [
+    {
+     "type": "numeric",
+     "name": "soil_moisture",
+     "property": "soil_moisture",
+     "access": 1,
+     "unit": "%"
+    },
+    {
+     "type": "numeric",
+     "name": "temperature",
+     "property": "temperature",
+     "access": 1,
+     "unit": "°C"
+    },
+    {
+     "type": "numeric",
+     "name": "battery",
+     "property": "battery",
+     "access": 1,
+     "unit": "%"
+    },
+    {
+     "type": "numeric",
+     "name": "linkquality",
+     "property": "linkquality",
+     "access": 1
+    }
+   ]
+  }
+ },
+ {
+  "ieee_address": "0x00158d000aaaaaa1",
+  "friendly_name": "Bedroom button",
+  "type": "EndDevice",
+  "supported": true,
+  "interview_completed": true,
+  "definition": {
+   "vendor": "Aqara",
+   "model": "WXKG11LM",
+   "description": "Wireless mini switch",
+   "exposes": [
+    {
+     "type": "enum",
+     "name": "action",
+     "property": "action",
+     "access": 1,
+     "values": [
+      "single",
+      "double",
+      "triple",
+      "quadruple",
+      "hold",
+      "release"
+     ]
+    },
+    {
+     "type": "numeric",
+     "name": "battery",
+     "property": "battery",
+     "access": 1,
+     "unit": "%"
+    },
+    {
+     "type": "numeric",
+     "name": "voltage",
+     "property": "voltage",
+     "access": 1,
+     "unit": "mV"
+    },
+    {
+     "type": "numeric",
+     "name": "device_temperature",
+     "property": "device_temperature",
+     "access": 1,
+     "unit": "°C"
+    },
+    {
+     "type": "numeric",
+     "name": "power_outage_count",
+     "property": "power_outage_count",
+     "access": 1
+    },
+    {
+     "type": "numeric",
+     "name": "linkquality",
+     "property": "linkquality",
+     "access": 1
+    }
+   ]
+  }
+ },
+ {
+  "ieee_address": "0x00158d000aaaaaa2",
+  "friendly_name": "Bedside remote",
+  "type": "EndDevice",
+  "supported": true,
+  "interview_completed": true,
+  "definition": {
+   "vendor": "Aqara",
+   "model": "WRS-R02",
+   "description": "Wireless remote switch H1 (double rocker)",
+   "exposes": [
+    {
+     "type": "enum",
+     "name": "action",
+     "property": "action",
+     "access": 1,
+     "values": [
+      "single_left",
+      "double_left",
+      "hold_left",
+      "single_right",
+      "double_right",
+      "hold_right",
+      "single_both",
+      "double_both",
+      "hold_both"
+     ]
+    },
+    {
+     "type": "enum",
+     "name": "operation_mode",
+     "property": "operation_mode",
+     "access": 7,
+     "values": [
+      "command",
+      "event"
+     ]
+    },
+    {
+     "type": "numeric",
+     "name": "battery",
+     "property": "battery",
+     "access": 1,
+     "unit": "%"
+    },
+    {
+     "type": "numeric",
+     "name": "voltage",
+     "property": "voltage",
+     "access": 1,
+     "unit": "mV"
+    },
+    {
+     "type": "numeric",
+     "name": "linkquality",
+     "property": "linkquality",
+     "access": 1
+    }
+   ]
+  }
+ },
+ {
+  "ieee_address": "0x00158d000aaaaaa3",
+  "friendly_name": "Magic cube",
+  "type": "EndDevice",
+  "supported": true,
+  "interview_completed": true,
+  "definition": {
+   "vendor": "Aqara",
+   "model": "MFKZQ01LM",
+   "description": "Cube",
+   "exposes": [
+    {
+     "type": "enum",
+     "name": "action",
+     "property": "action",
+     "access": 1,
+     "values": [
+      "shake",
+      "wakeup",
+      "fall",
+      "tap",
+      "slide",
+      "flip90",
+      "flip180",
+      "rotate_left",
+      "rotate_right"
+     ]
+    },
+    {
+     "type": "numeric",
+     "name": "side",
+     "property": "side",
+     "access": 1
+    },
+    {
+     "type": "numeric",
+     "name": "action_angle",
+     "property": "action_angle",
+     "access": 1
+    },
+    {
+     "type": "numeric",
+     "name": "battery",
+     "property": "battery",
+     "access": 1,
+     "unit": "%"
+    },
+    {
+     "type": "numeric",
+     "name": "voltage",
+     "property": "voltage",
+     "access": 1,
+     "unit": "mV"
+    },
+    {
+     "type": "numeric",
+     "name": "linkquality",
+     "property": "linkquality",
+     "access": 1
+    }
+   ]
+  }
+ },
+ {
+  "ieee_address": "0x00158d000aaaaaa4",
+  "friendly_name": "Hallway relay",
+  "type": "Router",
+  "supported": true,
+  "interview_completed": true,
+  "definition": {
+   "vendor": "Aqara",
+   "model": "LLKZMK11LM",
+   "description": "Wireless relay controller (2 channels)",
+   "exposes": [
+    {
+     "type": "switch",
+     "endpoint": "l1",
+     "features": [
+      {
+       "type": "binary",
+       "name": "state",
+       "property": "state_l1",
+       "access": 7,
+       "value_on": "ON",
+       "value_off": "OFF",
+       "value_toggle": "TOGGLE",
+       "endpoint": "l1"
+      }
+     ]
+    },
+    {
+     "type": "switch",
+     "endpoint": "l2",
+     "features": [
+      {
+       "type": "binary",
+       "name": "state",
+       "property": "state_l2",
+       "access": 7,
+       "value_on": "ON",
+       "value_off": "OFF",
+       "value_toggle": "TOGGLE",
+       "endpoint": "l2"
+      }
+     ]
+    },
+    {
+     "type": "numeric",
+     "name": "power",
+     "property": "power",
+     "access": 1,
+     "unit": "W"
+    },
+    {
+     "type": "numeric",
+     "name": "energy",
+     "property": "energy",
+     "access": 1,
+     "unit": "kWh"
+    },
+    {
+     "type": "binary",
+     "name": "interlock",
+     "property": "interlock",
+     "access": 7,
+     "value_on": true,
+     "value_off": false
+    },
+    {
+     "type": "numeric",
+     "name": "device_temperature",
+     "property": "device_temperature",
+     "access": 1,
+     "unit": "°C"
+    },
+    {
+     "type": "numeric",
+     "name": "linkquality",
+     "property": "linkquality",
+     "access": 1
+    }
+   ]
+  }
+ },
+ {
+  "ieee_address": "0x00158d000aaaaaa5",
+  "friendly_name": "Office presence",
+  "type": "Router",
+  "supported": true,
+  "interview_completed": true,
+  "definition": {
+   "vendor": "Aqara",
+   "model": "RTCZCGQ11LM",
+   "description": "Presence sensor FP1",
+   "exposes": [
+    {
+     "type": "binary",
+     "name": "presence",
+     "property": "presence",
+     "access": 1,
+     "value_on": true,
+     "value_off": false
+    },
+    {
+     "type": "enum",
+     "name": "presence_event",
+     "property": "presence_event",
+     "access": 1,
+     "values": [
+      "enter",
+      "leave",
+      "left_enter",
+      "right_leave",
+      "right_enter",
+      "left_leave",
+      "approach",
+      "away"
+     ]
+    },
+    {
+     "type": "numeric",
+     "name": "device_temperature",
+     "property": "device_temperature",
+     "access": 1,
+     "unit": "°C"
+    },
+    {
+     "type": "numeric",
+     "name": "linkquality",
+     "property": "linkquality",
+     "access": 1
+    }
+   ]
+  }
+ },
+ {
+  "ieee_address": "0x00158d000aaaaaa6",
+  "friendly_name": "Bedroom curtain",
+  "type": "Router",
+  "supported": true,
+  "interview_completed": true,
+  "definition": {
+   "vendor": "Aqara",
+   "model": "ZNCLBL01LM",
+   "description": "Curtain driver E1",
+   "exposes": [
+    {
+     "type": "cover",
+     "features": [
+      {
+       "type": "enum",
+       "name": "state",
+       "property": "state",
+       "access": 3,
+       "values": [
+        "OPEN",
+        "CLOSE",
+        "STOP"
+       ]
+      },
+      {
+       "type": "numeric",
+       "name": "position",
+       "property": "position",
+       "access": 7,
+       "value_min": 0,
+       "value_max": 100
+      }
+     ]
+    },
+    {
+     "type": "binary",
+     "name": "running",
+     "property": "running",
+     "access": 1,
+     "value_on": true,
+     "value_off": false
+    },
+    {
+     "type": "numeric",
+     "name": "battery",
+     "property": "battery",
+     "access": 1,
+     "unit": "%"
+    },
+    {
+     "type": "numeric",
+     "name": "device_temperature",
+     "property": "device_temperature",
+     "access": 1,
+     "unit": "°C"
+    },
+    {
+     "type": "numeric",
+     "name": "linkquality",
+     "property": "linkquality",
+     "access": 1
+    }
+   ]
+  }
+ },
+ {
+  "ieee_address": "0x0000000000000001",
+  "friendly_name": "Coordinator",
+  "type": "Coordinator",
+  "supported": true,
+  "interview_completed": true,
+  "definition": null
+ }
 ]

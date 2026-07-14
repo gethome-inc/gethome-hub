@@ -112,6 +112,23 @@ export interface EndpointState {
 
   playbackPlaying?: boolean;
 
+  /**
+   * Stateless input events — buttons, remotes, cubes. `buttons` is the
+   * endpoint's input inventory (what the apps render); the remaining fields
+   * describe the most recent event. `at` (epoch ms) makes every press a state
+   * change even when the same action repeats, so clients always hear it.
+   */
+  event?: {
+    buttons?: Array<{ id: string; label: string; gestures: string[] }>;
+    /** Raw protocol action string (e.g. Z2M "single_left"), for debugging. */
+    action?: string;
+    /** Parsed button id ("main", "left", "1") — matches a `buttons[].id`. */
+    button?: string;
+    /** Parsed gesture: single, double, triple, hold, release, shake… */
+    gesture?: string;
+    at?: number;
+  };
+
   /** Current mode for ModeSelect / RVC run-mode style capabilities. */
   currentMode?: number;
   /**
@@ -181,5 +198,6 @@ export function presentCapabilities(state: EndpointState): CapabilityKind[] {
   if (state.currentMode !== undefined) kinds.push('mode');
   if (state.rvcOperationalState !== undefined) kinds.push('rvcRun');
   if (state.playbackPlaying !== undefined) kinds.push('mediaPlayback');
+  if (state.event !== undefined) kinds.push('event');
   return kinds;
 }

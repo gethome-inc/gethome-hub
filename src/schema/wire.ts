@@ -91,6 +91,28 @@ export const endpointStateSchema = z
       })
       .optional(),
     playbackPlaying: z.boolean().optional(),
+    event: z
+      .object({
+        buttons: z
+          .array(
+            z
+              .object({
+                id: z.string().min(1).max(60),
+                label: z.string().min(1).max(60),
+                gestures: z.array(z.string().min(1).max(60)).max(24),
+              })
+              .strict(),
+          )
+          .max(32)
+          .optional(),
+        action: z.string().max(120).optional(),
+        button: z.string().max(60).optional(),
+        gesture: z.string().max(60).optional(),
+        /** Epoch milliseconds. */
+        at: z.number().optional(),
+      })
+      .strict()
+      .optional(),
     currentMode: uint8.optional(),
     rvcOperationalState: uint8.optional(),
   })

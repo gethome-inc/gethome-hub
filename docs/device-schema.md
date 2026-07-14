@@ -15,12 +15,12 @@ units — a 2-relay module has two). Each endpoint has:
 
 - `deviceKind` — what it is, for display: `light, camera, sensor, climate,
   lock, outlet, airPurifier, shade, speaker, wallSwitch, fan, vacuum,
-  appliance, energy, tv`
-- `capabilities` — what it can do (subset of the 24 below)
+  appliance, energy, tv, remote`
+- `capabilities` — what it can do (subset of the 25 below)
 - `primaryCapability` — the headline capability
 - `state` — the typed state object below
 
-## The 24 capabilities and their units
+## The 25 capabilities and their units
 
 | Capability | State location | Unit / range |
 |---|---|---|
@@ -48,8 +48,39 @@ units — a 2-relay module has two). Each endpoint has:
 | `mode` | `currentMode` | device-defined uint8 |
 | `rvcRun` | `rvcOperationalState` | 0 stopped, 1 running, 2 paused, 3 error, 0x40 seeking, 0x41 charging, 0x42 docked |
 | `mediaPlayback` | `playbackPlaying` | boolean |
+| `event` | `event.*` (below) | stateless input events — buttons, remotes, cubes |
 
 Plus `reachable: boolean` on every state.
+
+### The `event` capability
+
+Input devices (Aqara buttons/remotes/cubes, Matter Generic Switches) don't
+hold state — they *emit*. `event` carries two things:
+
+```json
+{
+  "event": {
+    "buttons": [{ "id": "left", "label": "Left", "gestures": ["single", "double", "hold"] }],
+    "action": "double_left",
+    "button": "left",
+    "gesture": "double",
+    "at": 1752000000000
+  }
+}
+```
+
+- `buttons` — the endpoint's input inventory, seeded by the adapter at
+  adoption (parsed from Z2M's `action` enum values, or the Matter Switch
+  cluster's feature map) so clients can render the remote's layout before any
+  press.
+- `action` (raw protocol string) + parsed `button`/`gesture` ids — the most
+  recent event. Gesture vocabulary: `single, double, triple, quadruple, many,
+  hold, release, press, click, tap, press_release, hold_release` plus
+  free-form gestures (`shake, flip90, flip180, rotate_left, …`).
+- `at` — epoch milliseconds, stamped on every event so identical consecutive
+  presses still produce a state change (and a WebSocket frame).
+
+Remotes take no commands; a `deviceKind` of `remote` marks pure senders.
 
 ### Example endpoint state
 

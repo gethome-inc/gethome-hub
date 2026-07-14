@@ -44,9 +44,19 @@ multi-admin (open a commissioning window) — or use Ethernet/Thread devices.
 - All attributes and events are subscribed; reports run through
   `src/adapters/matter/reducer.ts` — a 1:1 port of the GetHome app's own
   Matter state reducer (same cluster/attribute IDs, same unit transforms:
-  illuminance log-scale, battery half-percents, thermostat 0x8000 null
-  filtering, 0.1 W power quantization). Hub-attached and phone-attached
-  Matter devices therefore behave identically.
+  illuminance log-scale, battery half-percents (truncated, like the app),
+  thermostat 0x8000 null filtering, 0.1 W power quantization). Hub-attached
+  and phone-attached Matter devices therefore behave identically.
+- On announce, the adapter **seeds initial state** from matter.js's cached
+  attribute values (every cluster client's `getLocal()`), so devices show
+  real state right after a hub restart instead of an empty card until their
+  first report.
+- **Generic Switches (0x000F) are buttons**: the Switch cluster's feature map
+  becomes an `event.buttons` inventory, and Switch-cluster events
+  (`MultiPressComplete` → single/double/triple…, `LongPress` → hold,
+  `LongRelease` → release, `ShortRelease` → single on non-multi-press
+  switches, `SwitchLatched` → single) are mapped into the canonical `event`
+  capability — the same shape Zigbee remotes use.
 - The 17 canonical intents translate to cluster commands / attribute writes
   in `src/adapters/matter/commands.ts` (OnOff, LevelControl
   `moveToLevelWithOnOff`, ColorControl, Thermostat setpoint/mode writes,

@@ -32,9 +32,11 @@ npm run build && node dist/index.js       # production build (copies SQL migrati
 npm run db:generate                       # drizzle-kit: generate a migration after editing src/db/schema.ts
 ```
 
-Green `typecheck` + `test` is the bar for every change. The e2e suite
-(`test/integration/mqtt-roundtrip.test.ts`) is the proof the whole pipeline
-works — run it for any adapter/registry/API change.
+Green `typecheck` + `test` is the bar for every change. The e2e suites
+(`test/integration/mqtt-roundtrip.test.ts` for the whole pipeline,
+`test/integration/zigbee-adapter.test.ts` for the Zigbee runtime AI
+adaptation) are the proof it all works — run them for any
+adapter/registry/API change.
 
 ## Architecture: the boundaries that matter
 
@@ -45,9 +47,10 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
 ```
 
 - **`src/schema/` is dependency-free** (zod only) and is the single source of
-  truth: 24 capability kinds, 15 device kinds, typed `EndpointState`, 17
-  `HubCommand` intents, unit converters, Matter device-type catalog, zod wire
-  schemas. Everything else derives from it.
+  truth: 25 capability kinds (incl. `event` for buttons/remotes), 16 device
+  kinds, typed `EndpointState`, 17 `HubCommand` intents, unit converters,
+  Matter device-type catalog, zod wire schemas. Everything else derives from
+  it.
 - **Adapters only see the `AdapterBus`** (`src/adapters/adapter.ts`). They
   never import `src/api` or `src/db`. Adding a protocol = new directory under
   `src/adapters/` + registration in `src/index.ts`.

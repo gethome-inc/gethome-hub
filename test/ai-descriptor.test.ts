@@ -189,6 +189,36 @@ describe('MappingDescriptor interpreter', () => {
     expect(patches.get(2)!.onOff).toBe(false);
   });
 
+  it('maps string enums onto event paths and stamps the occurrence time', () => {
+    const remote: MappingDescriptor = {
+      version: 1,
+      endpoints: [
+        {
+          endpointId: 1,
+          deviceKind: 'remote',
+          capabilities: ['event'],
+          primary: 'event',
+          stateRules: [
+            { property: 'presence_event', to: 'event.action' },
+            {
+              property: 'presence_event',
+              to: 'event.gesture',
+              transform: { kind: 'enumMap', map: { enter: 'single', leave: 'release' } },
+            },
+          ],
+          commandRules: [],
+        },
+      ],
+    };
+    expect(sanityCheckDescriptor(remote)).toEqual([]);
+    const patch = applyStateRules(remote, { presence_event: 'enter' }).get(1)!;
+    expect(patch.event?.action).toBe('enter');
+    expect(patch.event?.gesture).toBe('single');
+    expect(typeof patch.event?.at).toBe('number');
+    // No event in the payload → no stamped patch.
+    expect(applyStateRules(remote, { other: 1 }).get(1)).toEqual({});
+  });
+
   it('builds command payloads with reversed transforms', () => {
     expect(buildCommandPayload(dimmerDescriptor, 1, { type: 'power', on: true })).toEqual({ state: 'ON' });
     expect(buildCommandPayload(dimmerDescriptor, 1, { type: 'setLevel', level: 254 })).toEqual({
@@ -280,11 +310,27 @@ describe.skipIf(!handle)('AiDeviceMapper', () => {
     const patch = applied!.extractState({ soil_moisture: 42, temperature: 19.5 }).get(1)!;
     expect(patch.sensors?.humidityCenti).toBe(4200);
     expect(patch.sensors?.temperatureCenti).toBe(1950);
+    // The adapter uses this to tell known payload keys from new parameters.
+    expect(applied!.properties).toEqual(new Set(['soil_moisture', 'temperature']));
 
     // Second sighting of the same model hits the cache, not the provider.
     const again = await mapper.requestMapping(soilProbe, mapExposes(soilProbe));
     expect(again).not.toBeNull();
     expect(generate).toHaveBeenCalledTimes(1);
+  });
+
+  it('force-regenerates past the cache and feeds samples into the prompt', async () => {
+    await mapper.requestMapping(soilProbe, mapExposes(soilProbe));
+    expect(generate).toHaveBeenCalledTimes(1);
+    const samples = [{ soil_moisture: 42, mystery_field: 7 }];
+    const applied = await mapper.requestMapping(soilProbe, mapExposes(soilProbe), {
+      samples,
+      force: true,
+    });
+    expect(applied).not.toBeNull();
+    expect(generate).toHaveBeenCalledTimes(2);
+    const prompt = generate.mock.calls[1]![1] as string;
+    expect(prompt).toContain('mystery_field');
   });
 
   it('rejects invalid model output and caches the rejection', async () => {

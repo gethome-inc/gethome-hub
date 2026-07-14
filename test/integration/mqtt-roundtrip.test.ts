@@ -204,4 +204,49 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
       return lamp?.online === true;
     });
   });
+
+  it('splits a two-channel relay into endpoints and addresses each channel', async () => {
+    const relay = (await devices()).find((device) => device.name === 'Hallway relay')!;
+    expect(relay.endpoints.map((endpoint) => endpoint.endpointId)).toEqual([1, 2]);
+
+    await fake.publishAsync('zigbee2mqtt/Hallway relay', JSON.stringify({ state_l1: 'ON', state_l2: 'OFF', power: 3.5 }));
+    await waitFor(() => {
+      const current = registry.listDevices().find((device) => device.name === 'Hallway relay');
+      return current?.endpoints.find((endpoint) => endpoint.endpointId === 2)?.state.onOff === false;
+    });
+    const current = registry.listDevices().find((device) => device.name === 'Hallway relay')!;
+    expect(current.endpoints.find((endpoint) => endpoint.endpointId === 1)?.state.onOff).toBe(true);
+    expect(current.endpoints.find((endpoint) => endpoint.endpointId === 1)?.state.power?.activeMilliwatts).toBe(3500);
+
+    observed.length = 0;
+    await app.inject({
+      method: 'POST',
+      url: `/api/v1/devices/${relay.id}/endpoints/2/commands`,
+      headers: auth(),
+      payload: { type: 'power', on: true },
+    });
+    await waitFor(() => observed.some((message) => message.topic === 'zigbee2mqtt/Hallway relay/set'));
+    const set = observed.find((message) => message.topic === 'zigbee2mqtt/Hallway relay/set')!;
+    expect(JSON.parse(set.payload)).toEqual({ state_l2: 'ON' });
+  });
+
+  it('serves a remote with its button inventory and relays presses as events', async () => {
+    // The inventory is seeded at adoption, before any press.
+    await waitFor(() => {
+      const remote = registry.listDevices().find((device) => device.name === 'Bedside remote');
+      return (remote?.endpoints[0]?.state.event?.buttons?.length ?? 0) === 3;
+    });
+
+    await fake.publishAsync('zigbee2mqtt/Bedside remote', JSON.stringify({ action: 'double_left', battery: 97 }));
+    await waitFor(() => {
+      const remote = registry.listDevices().find((device) => device.name === 'Bedside remote');
+      return remote?.endpoints[0]?.state.event?.gesture === 'double';
+    });
+    const remote = (await devices()).find((device) => device.name === 'Bedside remote')!;
+    expect(remote.endpoints[0]!.capabilities).toContain('event');
+    expect(remote.endpoints[0]!.state).toMatchObject({
+      event: { action: 'double_left', button: 'left', gesture: 'double' },
+      battery: { percent: 97 },
+    });
+  });
 });

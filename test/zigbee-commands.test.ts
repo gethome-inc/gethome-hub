@@ -9,10 +9,12 @@ const devices = JSON.parse(
   readFileSync(path.join(import.meta.dirname, 'fixtures/z2m/devices.json'), 'utf8'),
 ) as Z2mDevice[];
 
-const featuresOf = (name: string) => {
+const featuresOf = (name: string, endpointId = 1) => {
   const device = devices.find((candidate) => candidate.friendly_name === name);
   if (!device) throw new Error(`fixture ${name} missing`);
-  return mapExposes(device).features;
+  const endpoint = mapExposes(device).endpoints.find((candidate) => candidate.endpointId === endpointId);
+  if (!endpoint) throw new Error(`fixture ${name} has no endpoint ${endpointId}`);
+  return endpoint.features;
 };
 
 describe('canonical commands → Z2M /set payloads', () => {
@@ -77,10 +79,22 @@ describe('canonical commands → Z2M /set payloads', () => {
     expect(buildSetPayload({ type: 'lock', engage: false }, lock)).toEqual({ state: 'UNLOCK' });
   });
 
+  it('addresses multi-endpoint relays through their suffixed properties', () => {
+    const channel1 = featuresOf('Hallway relay', 1);
+    const channel2 = featuresOf('Hallway relay', 2);
+    expect(buildSetPayload({ type: 'power', on: true }, channel1)).toEqual({ state_l1: 'ON' });
+    expect(buildSetPayload({ type: 'power', on: false }, channel2)).toEqual({ state_l2: 'OFF' });
+    expect(buildSetPayload({ type: 'toggle' }, channel2)).toEqual({ state_l2: 'TOGGLE' });
+  });
+
   it('rejects intents the device cannot honor', () => {
     const sensor = featuresOf('Bedroom climate sensor');
     expect(() => buildSetPayload({ type: 'power', on: true }, sensor)).toThrow(UnsupportedCommandError);
     expect(() => buildSetPayload({ type: 'playPause', play: true }, featuresOf('Desk lamp'))).toThrow(
+      UnsupportedCommandError,
+    );
+    // Remotes send events; they take no commands.
+    expect(() => buildSetPayload({ type: 'power', on: true }, featuresOf('Bedroom button'))).toThrow(
       UnsupportedCommandError,
     );
   });

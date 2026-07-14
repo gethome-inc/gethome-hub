@@ -53,7 +53,7 @@ export const transformSchema = z.discriminatedUnion('kind', [
 
 export type Transform = z.infer<typeof transformSchema>;
 
-/** Canonical state paths a rule may write, with integer-rounding flags. */
+/** Canonical state paths a rule may write, with type-coercion flags. */
 export const STATE_PATHS = {
   onOff: { boolean: true },
   'level.current': { integer: true },
@@ -85,6 +85,11 @@ export const STATE_PATHS = {
   playbackPlaying: { boolean: true },
   currentMode: { integer: true },
   rvcOperationalState: { integer: true },
+  // Stateless input events (buttons/remotes). Writing any of these also
+  // stamps `event.at` so every occurrence registers as a state change.
+  'event.action': { string: true },
+  'event.button': { string: true },
+  'event.gesture': { string: true },
 } as const;
 
 export type StatePath = keyof typeof STATE_PATHS;
@@ -187,6 +192,9 @@ const PATH_CAPABILITY: Record<StatePath, CapabilityKind> = {
   playbackPlaying: 'mediaPlayback',
   currentMode: 'mode',
   rvcOperationalState: 'rvcRun',
+  'event.action': 'event',
+  'event.button': 'event',
+  'event.gesture': 'event',
 };
 
 /** Returns problems (empty = sane). Run after zod validation. */
@@ -254,9 +262,12 @@ function readPath(payload: Record<string, unknown>, property: string): unknown {
 }
 
 function writeStatePath(patch: Record<string, unknown>, path: StatePath, value: unknown): void {
-  const spec = STATE_PATHS[path] as { integer?: boolean; boolean?: boolean };
+  const spec = STATE_PATHS[path] as { integer?: boolean; boolean?: boolean; string?: boolean };
   let coerced = value;
-  if (spec.boolean) {
+  if (spec.string) {
+    if (typeof coerced === 'number' || typeof coerced === 'boolean') coerced = String(coerced);
+    if (typeof coerced !== 'string' || coerced === '') return;
+  } else if (spec.boolean) {
     if (typeof coerced === 'number') coerced = coerced !== 0;
     if (typeof coerced !== 'boolean') return;
   } else {
@@ -278,6 +289,8 @@ function writeStatePath(patch: Record<string, unknown>, path: StatePath, value: 
 /** Structural defaults so partially-written sub-objects stay wire-valid. */
 function defaultContainer(head: string): Record<string, unknown> {
   switch (head) {
+    case 'event':
+      return {};
     case 'level':
       return { current: 1, min: 1, max: 254 };
     case 'colorTemperature':
@@ -317,6 +330,11 @@ export function applyStateRules(
       const transformed = applyTransform(rule.transform, raw);
       if (transformed === undefined) continue;
       writeStatePath(patch, rule.to, transformed);
+    }
+    // A written event is a fresh occurrence — stamp it so repeats register.
+    const event = patch.event as Record<string, unknown> | undefined;
+    if (event && Object.keys(event).length > 0) {
+      event.at = Date.now();
     }
     result.set(endpoint.endpointId, patch as Partial<EndpointState>);
   }
