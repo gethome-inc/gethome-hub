@@ -15,12 +15,12 @@ units — a 2-relay module has two). Each endpoint has:
 
 - `deviceKind` — what it is, for display: `light, camera, sensor, climate,
   lock, outlet, airPurifier, shade, speaker, wallSwitch, fan, vacuum,
-  appliance, energy, tv`
-- `capabilities` — what it can do (subset of the 24 below)
+  appliance, energy, tv, remote`
+- `capabilities` — what it can do (subset of the 27 below)
 - `primaryCapability` — the headline capability
 - `state` — the typed state object below
 
-## The 24 capabilities and their units
+## The 27 capabilities and their units
 
 | Capability | State location | Unit / range |
 |---|---|---|
@@ -48,8 +48,105 @@ units — a 2-relay module has two). Each endpoint has:
 | `mode` | `currentMode` | device-defined uint8 |
 | `rvcRun` | `rvcOperationalState` | 0 stopped, 1 running, 2 paused, 3 error, 0x40 seeking, 0x41 charging, 0x42 docked |
 | `mediaPlayback` | `playbackPlaying` | boolean |
+| `event` | `event.*` (below) | stateless input events — buttons, remotes, cubes |
+| `irRemote` | `irRemote.*` (below) | IR blaster / universal remote — learn + replay a library of codes |
+| `custom` | `custom.*` (below) | the universal fallback — declared generic controls for any parameter that fits no capability above |
 
 Plus `reachable: boolean` on every state.
+
+### The `event` capability
+
+Input devices (Aqara buttons/remotes/cubes, Matter Generic Switches) don't
+hold state — they *emit*. `event` carries two things:
+
+```json
+{
+  "event": {
+    "buttons": [{ "id": "left", "label": "Left", "gestures": ["single", "double", "hold"] }],
+    "action": "double_left",
+    "button": "left",
+    "gesture": "double",
+    "at": 1752000000000
+  }
+}
+```
+
+- `buttons` — the endpoint's input inventory, seeded by the adapter at
+  adoption (parsed from Z2M's `action` enum values, or the Matter Switch
+  cluster's feature map) so clients can render the remote's layout before any
+  press.
+- `action` (raw protocol string) + parsed `button`/`gesture` ids — the most
+  recent event. Gesture vocabulary: `single, double, triple, quadruple, many,
+  hold, release, press, click, tap, press_release, hold_release` plus
+  free-form gestures (`shake, flip90, flip180, rotate_left, …`).
+- `at` — epoch milliseconds, stamped on every event so identical consecutive
+  presses still produce a state change (and a WebSocket frame).
+
+Remotes take no commands; a `deviceKind` of `remote` marks pure senders.
+
+### The `irRemote` capability
+
+IR blasters / universal remotes (Zosung/Tuya `learn_ir_code` family, e.g.
+Aubess ZXZIR-02) *learn* codes off a physical remote and *replay* them. They
+don't fit the state+intent model, so they carry a small library:
+
+```json
+{
+  "irRemote": {
+    "learning": false,
+    "commands": [{ "id": "…uuid", "name": "TV Power", "code": "<opaque blob>" }],
+    "pendingCode": "<opaque blob>"
+  }
+}
+```
+
+- `commands` — the saved library. Each `code` is an **opaque protocol blob**
+  the apps never interpret; clients render `{id, name}` and replay by id.
+- `pendingCode` — present when a fresh code was just captured and is awaiting a
+  name (the apps prompt "Save this button?").
+- `learning` — the device is in learn mode.
+
+The library is **hub-authoritative**: it lives in endpoint state (persisted),
+and the hub — not the adapter — owns its mutations. Driven by five intents
+(below). A `deviceKind` of `remote` covers these too.
+
+### The `custom` capability — the universal fallback
+
+No fixed table can name every device parameter. The `custom` capability is the
+escape hatch: **any** parameter with no dedicated capability becomes a declared
+generic control the apps render with a universal component set, so a device is
+never "unsupported" just because we lack a specific type for one of its knobs.
+
+```json
+{
+  "custom": {
+    "fields": [
+      { "id": "sensitivity", "label": "Sensitivity", "control": "select",
+        "options": [{ "value": "low", "label": "Low" }, { "value": "high", "label": "High" }], "settable": true },
+      { "id": "occupancy_timeout", "label": "Occupancy timeout", "control": "slider",
+        "unit": "s", "min": 0, "max": 3600, "step": 10, "settable": true },
+      { "id": "child_lock", "label": "Child lock", "control": "toggle", "settable": true },
+      { "id": "soil_moisture", "label": "Soil moisture", "control": "value", "unit": "%", "settable": false }
+    ],
+    "values": { "sensitivity": "high", "occupancy_timeout": 60, "child_lock": true, "soil_moisture": 42 }
+  }
+}
+```
+
+- `fields` — the declared inventory. `control` is one of `toggle` / `slider` /
+  `select` / `value` (read-only readout); `settable` says whether the app may
+  write it; `unit`/`min`/`max`/`step` shape a slider; `options` list a select.
+  The **field `id` is the device's own payload property.**
+- `values` — current values keyed by field id (booleans for toggles, the
+  option value for selects, numbers/strings otherwise).
+
+Writes use one intent — `setCustomField {fieldId, value}` — so the apps drive
+every generic control the same way. Where do fields come from? For Zigbee, the
+adapter generates them from Z2M's own `exposes` metadata (every leftover
+setting/sensor). For anything the metadata can't describe, the **AI mapper**
+declares them ([ai-adaptation.md](ai-adaptation.md)). A device only stays in
+`needsReview` when a property has *no* representation at all — not even a
+generic field.
 
 ### Example endpoint state
 
@@ -66,7 +163,7 @@ Plus `reachable: boolean` on every state.
 `sensors` is always present (possibly empty). Absent sub-objects mean the
 capability has not reported yet.
 
-## The 17 command intents
+## The command intents
 
 Commands are JSON objects discriminated on `type`
 (`POST /api/v1/devices/:id/endpoints/:endpointId/commands`):
@@ -84,6 +181,24 @@ Commands are JSON objects discriminated on `type`
 {"type":"setFanPercent","percent":60}                 {"type":"setFanMode","mode":5}
 {"type":"playPause","play":true}
 {"type":"setMode","mode":2}
+```
+
+IR blaster / universal remote (the `irRemote` capability):
+
+```
+{"type":"irLearn","on":true}                          // enter/exit learn mode
+{"type":"irSaveLearned","name":"TV Power"}            // name + save the pending captured code
+{"type":"irSend","commandId":"…uuid"}                 // replay a saved code
+{"type":"irDeleteCommand","commandId":"…uuid"}
+{"type":"irRenameCommand","commandId":"…uuid","name":"Telly"}
+```
+
+Generic controls (the `custom` capability) — one intent for every field:
+
+```
+{"type":"setCustomField","fieldId":"sensitivity","value":"high"}   // select
+{"type":"setCustomField","fieldId":"child_lock","value":true}      // toggle
+{"type":"setCustomField","fieldId":"occupancy_timeout","value":90} // slider
 ```
 
 A device that cannot honor an intent answers `409` with an error message.

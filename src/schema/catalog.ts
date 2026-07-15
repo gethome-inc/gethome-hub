@@ -45,7 +45,8 @@ export const DEVICE_TYPE_CATALOG: readonly DeviceTypeDescriptor[] = [
   d(0x0303, 'Pump', 'appliance', ['onOff']),
 
   // Switches & controls
-  d(0x000f, 'Generic Switch', 'wallSwitch', ['battery']),
+  // Generic Switch endpoints emit Switch-cluster events (buttons), not On/Off.
+  d(0x000f, 'Generic Switch', 'remote', ['event', 'battery'], 'event'),
   d(0x0103, 'On/Off Light Switch', 'wallSwitch', ['onOff']),
   d(0x0104, 'Dimmer Switch', 'wallSwitch', ['onOff', 'level']),
   d(0x0105, 'Color Dimmer Switch', 'wallSwitch', ['onOff', 'level', 'color']),

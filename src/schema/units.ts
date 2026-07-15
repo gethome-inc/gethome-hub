@@ -43,9 +43,13 @@ export function measuredIlluminanceFromLux(lux: number): number {
   return Math.round(10_000 * Math.log10(lux) + 1);
 }
 
-/** Power Source cluster reports battery in half-percents (0–200). */
+/**
+ * Power Source cluster reports battery in half-percents (0–200). Truncates
+ * rather than rounds — the app's reducer does `Int(raw) / 2` and both ends
+ * must agree byte-for-byte.
+ */
 export function percentFromHalfPercent(halfPercent: number): number {
-  return Math.max(0, Math.min(100, Math.round(halfPercent / 2)));
+  return Math.max(0, Math.min(100, Math.trunc(halfPercent / 2)));
 }
 
 export function clamp(value: number, min: number, max: number): number {

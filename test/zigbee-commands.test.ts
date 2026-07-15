@@ -9,10 +9,12 @@ const devices = JSON.parse(
   readFileSync(path.join(import.meta.dirname, 'fixtures/z2m/devices.json'), 'utf8'),
 ) as Z2mDevice[];
 
-const featuresOf = (name: string) => {
+const featuresOf = (name: string, endpointId = 1) => {
   const device = devices.find((candidate) => candidate.friendly_name === name);
   if (!device) throw new Error(`fixture ${name} missing`);
-  return mapExposes(device).features;
+  const endpoint = mapExposes(device).endpoints.find((candidate) => candidate.endpointId === endpointId);
+  if (!endpoint) throw new Error(`fixture ${name} has no endpoint ${endpointId}`);
+  return endpoint.features;
 };
 
 describe('canonical commands → Z2M /set payloads', () => {
@@ -77,10 +79,59 @@ describe('canonical commands → Z2M /set payloads', () => {
     expect(buildSetPayload({ type: 'lock', engage: false }, lock)).toEqual({ state: 'UNLOCK' });
   });
 
+  it('addresses multi-endpoint relays through their suffixed properties', () => {
+    const channel1 = featuresOf('Hallway relay', 1);
+    const channel2 = featuresOf('Hallway relay', 2);
+    expect(buildSetPayload({ type: 'power', on: true }, channel1)).toEqual({ state_l1: 'ON' });
+    expect(buildSetPayload({ type: 'power', on: false }, channel2)).toEqual({ state_l2: 'OFF' });
+    expect(buildSetPayload({ type: 'toggle' }, channel2)).toEqual({ state_l2: 'TOGGLE' });
+  });
+
+  it('translates IR learn and resolved raw-send to the device properties', () => {
+    const ir = featuresOf('Living room IR');
+    expect(buildSetPayload({ type: 'irLearn', on: true }, ir)).toEqual({ learn_ir_code: 'ON' });
+    expect(buildSetPayload({ type: 'irLearn', on: false }, ir)).toEqual({ learn_ir_code: 'OFF' });
+    expect(buildSetPayload({ type: 'irSendRaw', code: 'BASE64BLOB==' }, ir)).toEqual({
+      ir_code_to_send: 'BASE64BLOB==',
+    });
+    // Library-management intents never reach the adapter.
+    expect(() => buildSetPayload({ type: 'irSend', commandId: 'x' }, ir)).toThrow(UnsupportedCommandError);
+    expect(() => buildSetPayload({ type: 'irSaveLearned', name: 'TV' }, ir)).toThrow(UnsupportedCommandError);
+  });
+
+  it('writes generic custom fields through their own property', () => {
+    const lamp = featuresOf('Desk lamp'); // effect: settable select
+    expect(buildSetPayload({ type: 'setCustomField', fieldId: 'effect', value: 'blink' }, lamp)).toEqual({
+      effect: 'blink',
+    });
+    // child_lock is a toggle whose device values are LOCK/UNLOCK — the
+    // boolean is translated to the device's own on/off vocabulary.
+    const trv = featuresOf('Radiator valve');
+    expect(buildSetPayload({ type: 'setCustomField', fieldId: 'child_lock', value: true }, trv)).toEqual({
+      child_lock: 'LOCK',
+    });
+    expect(buildSetPayload({ type: 'setCustomField', fieldId: 'child_lock', value: false }, trv)).toEqual({
+      child_lock: 'UNLOCK',
+    });
+    // Read-only field → rejected.
+    const probe = featuresOf('Mystery soil probe');
+    expect(() => buildSetPayload({ type: 'setCustomField', fieldId: 'soil_moisture', value: 1 }, probe)).toThrow(
+      UnsupportedCommandError,
+    );
+    // Unknown field → rejected.
+    expect(() => buildSetPayload({ type: 'setCustomField', fieldId: 'nope', value: 1 }, lamp)).toThrow(
+      UnsupportedCommandError,
+    );
+  });
+
   it('rejects intents the device cannot honor', () => {
     const sensor = featuresOf('Bedroom climate sensor');
     expect(() => buildSetPayload({ type: 'power', on: true }, sensor)).toThrow(UnsupportedCommandError);
     expect(() => buildSetPayload({ type: 'playPause', play: true }, featuresOf('Desk lamp'))).toThrow(
+      UnsupportedCommandError,
+    );
+    // Remotes send events; they take no commands.
+    expect(() => buildSetPayload({ type: 'power', on: true }, featuresOf('Bedroom button'))).toThrow(
       UnsupportedCommandError,
     );
   });

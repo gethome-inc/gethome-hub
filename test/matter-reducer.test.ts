@@ -74,7 +74,8 @@ describe('Matter attribute reducer (port of the app reducer)', () => {
       report(Cluster.humidityMeasurement, 0x0000, 4820),
     ]);
     expect(next.sensors.illuminanceLux).toBeCloseTo(10_000, 0);
-    expect(next.battery?.percent).toBe(74);
+    // 147 half-percents → 73 (truncated like the app's `Int(raw) / 2`).
+    expect(next.battery?.percent).toBe(73);
     expect(next.sensors.flowCubicMetersPerHour).toBeCloseTo(12.5);
     expect(next.sensors.temperatureCenti).toBe(2156);
     expect(next.sensors.humidityCenti).toBe(4820);

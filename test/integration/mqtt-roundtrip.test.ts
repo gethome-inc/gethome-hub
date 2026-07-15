@@ -204,4 +204,161 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
       return lamp?.online === true;
     });
   });
+
+  it('splits a two-channel relay into endpoints and addresses each channel', async () => {
+    const relay = (await devices()).find((device) => device.name === 'Hallway relay')!;
+    expect(relay.endpoints.map((endpoint) => endpoint.endpointId)).toEqual([1, 2]);
+
+    await fake.publishAsync('zigbee2mqtt/Hallway relay', JSON.stringify({ state_l1: 'ON', state_l2: 'OFF', power: 3.5 }));
+    await waitFor(() => {
+      const current = registry.listDevices().find((device) => device.name === 'Hallway relay');
+      return current?.endpoints.find((endpoint) => endpoint.endpointId === 2)?.state.onOff === false;
+    });
+    const current = registry.listDevices().find((device) => device.name === 'Hallway relay')!;
+    expect(current.endpoints.find((endpoint) => endpoint.endpointId === 1)?.state.onOff).toBe(true);
+    expect(current.endpoints.find((endpoint) => endpoint.endpointId === 1)?.state.power?.activeMilliwatts).toBe(3500);
+
+    observed.length = 0;
+    await app.inject({
+      method: 'POST',
+      url: `/api/v1/devices/${relay.id}/endpoints/2/commands`,
+      headers: auth(),
+      payload: { type: 'power', on: true },
+    });
+    await waitFor(() => observed.some((message) => message.topic === 'zigbee2mqtt/Hallway relay/set'));
+    const set = observed.find((message) => message.topic === 'zigbee2mqtt/Hallway relay/set')!;
+    expect(JSON.parse(set.payload)).toEqual({ state_l2: 'ON' });
+  });
+
+  it('stamps event.at on MQTT convention presses that arrive without one', async () => {
+    await fake.publishAsync(
+      'gethome/discovery/doorbell/config',
+      JSON.stringify({
+        name: 'Doorbell button',
+        endpoints: [{ endpointId: 1, deviceKind: 'remote', capabilities: ['event', 'battery'], primary: 'event' }],
+      }),
+      { retain: true },
+    );
+    await waitFor(() => registry.listDevices().some((device) => device.name === 'Doorbell button'));
+
+    await fake.publishAsync(
+      'gethome/device/doorbell/state',
+      JSON.stringify({ event: { action: 'double', button: 'main', gesture: 'double' } }),
+    );
+    await waitFor(() => {
+      const doorbell = registry.listDevices().find((device) => device.name === 'Doorbell button');
+      return doorbell?.endpoints[0]?.state.event?.gesture === 'double';
+    });
+    const doorbell = registry.listDevices().find((device) => device.name === 'Doorbell button')!;
+    expect(typeof doorbell.endpoints[0]!.state.event?.at).toBe('number');
+
+    await fake.publishAsync('gethome/discovery/doorbell/config', '', { retain: true }).catch(() => {});
+  });
+
+  it('exposes device settings as generic custom fields and writes them back', async () => {
+    // The TRV's child_lock (a settable binary) and preset (a settable enum)
+    // have no typed capability — they surface as generic custom fields.
+    const trv = (await devices()).find((device) => device.name === 'Radiator valve')!;
+    const endpoint = trv.endpoints[0]!;
+    expect(endpoint.capabilities).toContain('custom');
+    const custom = endpoint.state.custom as {
+      fields?: Array<{ id: string; control: string; settable: boolean }>;
+      values?: Record<string, unknown>;
+    };
+    const fieldIds = (custom.fields ?? []).map((field) => field.id);
+    expect(fieldIds).toContain('child_lock');
+    expect(fieldIds).toContain('preset');
+
+    // A state report populates the field values.
+    await fake.publishAsync('zigbee2mqtt/Radiator valve', JSON.stringify({ child_lock: 'LOCK', preset: 'eco' }));
+    await waitFor(() => {
+      const current = registry.listDevices().find((device) => device.name === 'Radiator valve');
+      return (current?.endpoints[0]?.state.custom?.values as Record<string, unknown>)?.preset === 'eco';
+    });
+
+    // Writing a field goes out on its own property, translating the toggle.
+    observed.length = 0;
+    await app.inject({
+      method: 'POST',
+      url: `/api/v1/devices/${trv.id}/endpoints/1/commands`,
+      headers: auth(),
+      payload: { type: 'setCustomField', fieldId: 'child_lock', value: false },
+    });
+    await waitFor(() => observed.some((message) => message.topic === 'zigbee2mqtt/Radiator valve/set'));
+    const set = observed.find((message) => message.topic === 'zigbee2mqtt/Radiator valve/set')!;
+    expect(JSON.parse(set.payload)).toEqual({ child_lock: 'UNLOCK' });
+  });
+
+  it('runs the IR blaster flow: learn → capture → save → send', async () => {
+    const current = () => registry.listDevices().find((device) => device.name === 'Living room IR');
+    const irState = () => current()?.endpoints.find((endpoint) => endpoint.endpointId === 1)?.state.irRemote;
+
+    await waitFor(() => current() !== undefined);
+    const device = current()!;
+    expect(device.endpoints[0]!.capabilities).toContain('irRemote');
+    // The library base is seeded even before anything is learned.
+    expect(irState()).toEqual({ learning: false, commands: [] });
+
+    const command = (payload: unknown) =>
+      app.inject({
+        method: 'POST',
+        url: `/api/v1/devices/${device.id}/endpoints/1/commands`,
+        headers: auth(),
+        payload,
+      });
+    const lastSet = () =>
+      observed.filter((message) => message.topic === 'zigbee2mqtt/Living room IR/set').at(-1);
+
+    // Enter learn mode → publishes learn_ir_code, reflects the flag.
+    observed.length = 0;
+    await command({ type: 'irLearn', on: true });
+    await waitFor(() => lastSet() !== undefined);
+    expect(JSON.parse(lastSet()!.payload)).toEqual({ learn_ir_code: 'ON' });
+    await waitFor(() => irState()?.learning === true);
+
+    // The device captures a code off a physical remote.
+    await fake.publishAsync('zigbee2mqtt/Living room IR', JSON.stringify({ learned_ir_code: 'RAW_TV_POWER==' }));
+    await waitFor(() => irState()?.pendingCode === 'RAW_TV_POWER==');
+    expect(irState()?.learning).toBe(false);
+
+    // Name and save it.
+    await command({ type: 'irSaveLearned', name: 'TV Power' });
+    await waitFor(() => (irState()?.commands.length ?? 0) === 1);
+    const saved = irState()!.commands[0]!;
+    expect(saved.name).toBe('TV Power');
+    expect(saved.code).toBe('RAW_TV_POWER==');
+    expect(irState()?.pendingCode).toBeUndefined();
+
+    // Send it → the opaque blob goes out on ir_code_to_send.
+    observed.length = 0;
+    await command({ type: 'irSend', commandId: saved.id });
+    await waitFor(() => lastSet() !== undefined);
+    expect(JSON.parse(lastSet()!.payload)).toEqual({ ir_code_to_send: 'RAW_TV_POWER==' });
+
+    // Rename, then delete — the library reflects both.
+    await command({ type: 'irRenameCommand', commandId: saved.id, name: 'Telly' });
+    await waitFor(() => irState()?.commands[0]?.name === 'Telly');
+    await command({ type: 'irDeleteCommand', commandId: saved.id });
+    await waitFor(() => (irState()?.commands.length ?? 0) === 0);
+  });
+
+  it('serves a remote with its button inventory and relays presses as events', async () => {
+    // The inventory is seeded at adoption, before any press.
+    await waitFor(() => {
+      const remote = registry.listDevices().find((device) => device.name === 'Bedside remote');
+      return (remote?.endpoints[0]?.state.event?.buttons?.length ?? 0) === 3;
+    });
+
+    await fake.publishAsync('zigbee2mqtt/Bedside remote', JSON.stringify({ action: 'double_left', battery: 97 }));
+    await waitFor(() => {
+      const remote = registry.listDevices().find((device) => device.name === 'Bedside remote');
+      return remote?.endpoints[0]?.state.event?.gesture === 'double';
+    });
+    const remote = (await devices()).find((device) => device.name === 'Bedside remote')!;
+    expect(remote.endpoints[0]!.capabilities).toContain('event');
+    expect(remote.endpoints[0]!.state).toMatchObject({
+      event: { action: 'double_left', button: 'left', gesture: 'double' },
+      battery: { percent: 97 },
+    });
+  });
 });

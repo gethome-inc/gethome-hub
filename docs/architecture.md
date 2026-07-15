@@ -21,7 +21,7 @@ exactly **one home**; sharing a home means granting members access to the hub.
 
 | Module | Responsibility |
 |---|---|
-| `src/schema/` | The canonical device schema: 24 capability kinds, 15 device kinds, typed endpoint state, 17 command intents, unit conversions, Matter device-type catalog, zod wire schemas. Dependency-free (zod only) — everything else derives from it. |
+| `src/schema/` | The canonical device schema: 27 capability kinds (incl. a universal `custom` fallback), 16 device kinds, typed endpoint state, command intents (incl. IR learn/replay + `setCustomField`), unit conversions, Matter device-type catalog, zod wire schemas. Dependency-free (zod only) — everything else derives from it. |
 | `src/adapters/` | Protocol drivers. Each implements `ProtocolAdapter` and talks to the rest of the hub only through the narrow `AdapterBus` (announce devices, report state, execute commands). Adapters never touch the database or the API. |
 | `src/core/registry.ts` | `DeviceRegistry` — implements the `AdapterBus`: persists devices/endpoints, merges state patches (per-device write queue + write-through cache), fans events out, routes commands back to the owning adapter. An adapter that fails to start is isolated; the hub keeps running. |
 | `src/core/pairing.ts` | Claim flow: boot pairing code → first claim = owner; owner-minted invite codes (15 min TTL) → members. Opaque bearer tokens, sha256-hashed at rest. |
@@ -46,6 +46,17 @@ exactly **one home**; sharing a home means granting members access to the hub.
    device, no MQTT client — the API and claim flow still work.
 5. **Fail soft.** Adapter crashes are logged + surfaced as activity, never
    fatal.
+6. **Nothing is unsupported by default.** Devices are made usable in three
+   layers, tried in order: (1) **typed capabilities** for anything that fits
+   the canonical schema; (2) **generic custom fields** (the `custom`
+   capability) for every other exposed parameter, generated statically from
+   the protocol's own metadata; (3) **AI adaptation** for the genuine gaps
+   layer 2 can't hold, and to upgrade generic fields to typed capabilities.
+   Layers 1–2 are static (no key, no cost). A leftover parameter must never be
+   silently dropped — settings and vendor knobs become fields, only pure
+   telemetry is hidden. See [zigbee.md](zigbee.md) ("The three layers of
+   device support") and [device-schema.md](device-schema.md) (the `custom`
+   capability).
 
 ## Data flow
 

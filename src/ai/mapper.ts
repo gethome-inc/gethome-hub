@@ -9,11 +9,13 @@ import type {
   ZigbeeAiAssist,
 } from '../adapters/zigbee/adapter.js';
 import type { Z2mDevice, Z2mProfile } from '../adapters/zigbee/exposes-mapper.js';
+import type { CustomFieldSpec } from '../adapters/zigbee/exposes-mapper.js';
 import {
   applyStateRules,
   buildCommandPayload,
   mappingDescriptorSchema,
   sanityCheckDescriptor,
+  type DescriptorCustomField,
   type MappingDescriptor,
 } from './descriptor.js';
 import { createProvider, type MappingProvider } from './providers.js';
@@ -41,16 +43,24 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
     private readonly log: Logger,
   ) {}
 
-  async requestMapping(device: Z2mDevice, staticProfile: Z2mProfile): Promise<AppliedAiMapping | null> {
+  async requestMapping(
+    device: Z2mDevice,
+    staticProfile: Z2mProfile,
+    options?: { samples?: Record<string, unknown>[]; force?: boolean },
+  ): Promise<AppliedAiMapping | null> {
     const hash = exposesHash(device);
 
-    const cached = await this.db.query.aiMappings.findFirst({
-      where: and(eq(aiMappings.adapter, 'zigbee'), eq(aiMappings.exposesHash, hash)),
-    });
-    if (cached) {
-      if (cached.status === 'rejected') return null;
-      const parsed = mappingDescriptorSchema.safeParse(cached.descriptor);
-      return parsed.success ? interpret(parsed.data) : null;
+    if (options?.force) {
+      await this.invalidate(device);
+    } else {
+      const cached = await this.db.query.aiMappings.findFirst({
+        where: and(eq(aiMappings.adapter, 'zigbee'), eq(aiMappings.exposesHash, hash)),
+      });
+      if (cached) {
+        if (cached.status === 'rejected') return null;
+        const parsed = mappingDescriptorSchema.safeParse(cached.descriptor);
+        return parsed.success ? interpret(parsed.data) : null;
+      }
     }
 
     const provider = await this.resolveProvider();
@@ -61,7 +71,7 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
     try {
       const candidate = await provider.generate(
         MAPPING_SYSTEM_PROMPT,
-        buildMappingUserPrompt(device, staticProfile, []),
+        buildMappingUserPrompt(device, staticProfile, options?.samples ?? []),
       );
       const parsed = mappingDescriptorSchema.safeParse(candidate);
       if (!parsed.success) {
@@ -140,14 +150,47 @@ export function exposesHash(device: Z2mDevice): string {
 }
 
 function interpret(descriptor: MappingDescriptor): AppliedAiMapping {
+  // Typed properties = keys mapped onto real capabilities (they supersede any
+  // static custom field); `properties` also includes generic field ids.
+  const typedProperties = new Set<string>();
+  const properties = new Set<string>();
+  for (const endpoint of descriptor.endpoints) {
+    for (const rule of endpoint.stateRules) {
+      const key = rule.property.split('.')[0]!;
+      typedProperties.add(key);
+      properties.add(key);
+    }
+    for (const field of endpoint.customFields) properties.add(field.id);
+  }
   return {
     endpoints: descriptor.endpoints.map((endpoint) => ({
       endpointId: endpoint.endpointId,
       deviceKind: endpoint.deviceKind,
       capabilities: endpoint.capabilities,
       primary: endpoint.primary,
+      ...(endpoint.customFields.length > 0
+        ? { customFields: endpoint.customFields.map(toCustomFieldSpec) }
+        : {}),
     })),
+    properties,
+    typedProperties,
     extractState: (payload) => applyStateRules(descriptor, payload),
     buildCommandPayload: (endpointId, command) => buildCommandPayload(descriptor, endpointId, command),
+  };
+}
+
+/** Drop the hub-side write metadata (onValue/offValue) — the apps see only
+ *  the display inventory. Conditional spreads satisfy exactOptionalPropertyTypes. */
+function toCustomFieldSpec(field: DescriptorCustomField): CustomFieldSpec {
+  return {
+    id: field.id,
+    label: field.label,
+    control: field.control,
+    ...(field.unit !== undefined ? { unit: field.unit } : {}),
+    ...(field.min !== undefined ? { min: field.min } : {}),
+    ...(field.max !== undefined ? { max: field.max } : {}),
+    ...(field.step !== undefined ? { step: field.step } : {}),
+    ...(field.options !== undefined ? { options: field.options } : {}),
+    settable: field.settable,
   };
 }

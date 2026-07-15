@@ -108,13 +108,19 @@ export class MqttAdapter implements ProtocolAdapter {
           this.options.log.warn({ deviceId: parsed.deviceId }, 'Rejected invalid MQTT state payload');
           return;
         }
+        // An event without a timestamp gets one on arrival, like the Zigbee
+        // and AI paths — integrators shouldn't need a clock to report a press.
+        const patch = result.data;
+        if (patch.event && (patch.event.action ?? patch.event.gesture ?? patch.event.button) !== undefined) {
+          patch.event.at ??= Date.now();
+        }
         this.bus?.stateChanged(
           'mqtt',
           parsed.deviceId,
           parsed.endpointId,
           // zod's deep-partial output is structurally a state patch; the cast
           // bridges exactOptionalPropertyTypes.
-          result.data as Partial<import('../../schema/index.js').EndpointState>,
+          patch as Partial<import('../../schema/index.js').EndpointState>,
         );
         return;
       }

@@ -13,27 +13,31 @@ const FAN_MODE_ORDER = ['off', 'low', 'medium', 'high', 'on', 'auto'];
 
 /**
  * Translate a canonical command intent into the JSON payload published to
- * `zigbee2mqtt/<friendly_name>/set`.
+ * `zigbee2mqtt/<friendly_name>/set`, using the endpoint's own property names
+ * (multi-endpoint devices address channels as `state_l1`, `state_l2`, …).
  */
 export function buildSetPayload(
   command: HubCommand,
   features: Z2mCommandFeatures,
 ): Record<string, unknown> {
   switch (command.type) {
-    case 'power':
+    case 'power': {
       if (features.isLock) {
-        return { state: command.on ? features.onValue : features.offValue };
+        return { [features.stateProperty ?? 'state']: command.on ? features.onValue : features.offValue };
       }
       if (!features.hasOnOff) throw new UnsupportedCommandError(command.type, 'device has no switch');
-      return { state: command.on ? features.onValue : features.offValue };
+      return { [features.stateProperty ?? 'state']: command.on ? features.onValue : features.offValue };
+    }
 
     case 'toggle':
       if (!features.hasOnOff) throw new UnsupportedCommandError(command.type, 'device has no switch');
-      return { state: 'TOGGLE' };
+      return { [features.stateProperty ?? 'state']: 'TOGGLE' };
 
     case 'setLevel': {
       if (!features.hasBrightness) throw new UnsupportedCommandError(command.type, 'device has no brightness');
-      const payload: Record<string, unknown> = { brightness: clamp(Math.round(command.level), 1, 254) };
+      const payload: Record<string, unknown> = {
+        [features.brightnessProperty ?? 'brightness']: clamp(Math.round(command.level), 1, 254),
+      };
       if (command.transitionDs !== undefined) payload.transition = command.transitionDs / 10;
       return payload;
     }
@@ -41,13 +45,13 @@ export function buildSetPayload(
     case 'setColorTemperature': {
       const range = features.colorTempRange;
       if (!range) throw new UnsupportedCommandError(command.type, 'device has no color temperature');
-      return { color_temp: clamp(Math.round(command.mireds), range.min, range.max) };
+      return { [features.colorTempProperty ?? 'color_temp']: clamp(Math.round(command.mireds), range.min, range.max) };
     }
 
     case 'setHueSaturation':
       if (!features.hasColorHS) throw new UnsupportedCommandError(command.type, 'device has no color');
       return {
-        color: {
+        [features.colorProperty ?? 'color']: {
           hue: Math.round(degreesFromHue(command.hue)),
           saturation: Math.round(percentFromSaturation(command.saturation)),
         },
@@ -70,28 +74,28 @@ export function buildSetPayload(
       if (!mode || !features.systemModes?.includes(mode)) {
         throw new UnsupportedCommandError(command.type, `mode ${command.mode} not supported`);
       }
-      return { system_mode: mode };
+      return { [features.systemModeProperty ?? 'system_mode']: mode };
     }
 
     case 'lock':
       if (!features.isLock) throw new UnsupportedCommandError(command.type, 'not a lock');
-      return { state: command.engage ? features.onValue : features.offValue };
+      return { [features.stateProperty ?? 'state']: command.engage ? features.onValue : features.offValue };
 
     case 'setCoveringPercent':
       if (!features.hasPosition) throw new UnsupportedCommandError(command.type, 'cover has no position');
-      return { position: z2mPositionFromPercent100ths(command.percent100ths) };
+      return { [features.positionProperty ?? 'position']: z2mPositionFromPercent100ths(command.percent100ths) };
 
     case 'openCovering':
       if (!features.isCover) throw new UnsupportedCommandError(command.type, 'not a cover');
-      return { state: 'OPEN' };
+      return { [features.coverStateProperty ?? 'state']: 'OPEN' };
 
     case 'closeCovering':
       if (!features.isCover) throw new UnsupportedCommandError(command.type, 'not a cover');
-      return { state: 'CLOSE' };
+      return { [features.coverStateProperty ?? 'state']: 'CLOSE' };
 
     case 'stopCovering':
       if (!features.isCover) throw new UnsupportedCommandError(command.type, 'not a cover');
-      return { state: 'STOP' };
+      return { [features.coverStateProperty ?? 'state']: 'STOP' };
 
     case 'setFanMode': {
       const property = features.fanModeProperty;
@@ -115,6 +119,39 @@ export function buildSetPayload(
       const index = Math.round((clamp(command.percent, 0, 100) / 100) * (ladder.length - 1));
       return { [property]: ladder[index] };
     }
+
+    case 'irLearn': {
+      const ir = features.irRemote;
+      if (!ir) throw new UnsupportedCommandError(command.type, 'not an IR remote');
+      return { [ir.learnProperty]: command.on ? ir.onValue : ir.offValue };
+    }
+
+    case 'irSendRaw': {
+      const ir = features.irRemote;
+      if (!ir) throw new UnsupportedCommandError(command.type, 'not an IR remote');
+      return { [ir.sendProperty]: command.code };
+    }
+
+    case 'setCustomField': {
+      const spec = features.customWrites?.[command.fieldId];
+      if (!spec) throw new UnsupportedCommandError(command.type, `no field "${command.fieldId}"`);
+      if (!spec.settable) throw new UnsupportedCommandError(command.type, `"${command.fieldId}" is read-only`);
+      if (spec.control === 'toggle') {
+        if (typeof command.value !== 'boolean') {
+          throw new UnsupportedCommandError(command.type, 'toggle fields take a boolean');
+        }
+        return { [command.fieldId]: command.value ? spec.onValue : spec.offValue };
+      }
+      return { [command.fieldId]: command.value };
+    }
+
+    case 'irSaveLearned':
+    case 'irSend':
+    case 'irDeleteCommand':
+    case 'irRenameCommand':
+      // Library management is resolved by the registry against endpoint state;
+      // it never reaches the adapter (send arrives pre-resolved as irSendRaw).
+      throw new UnsupportedCommandError(command.type, 'handled by the registry');
 
     case 'playPause':
     case 'setMode':

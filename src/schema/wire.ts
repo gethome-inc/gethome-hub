@@ -91,6 +91,83 @@ export const endpointStateSchema = z
       })
       .optional(),
     playbackPlaying: z.boolean().optional(),
+    event: z
+      .object({
+        buttons: z
+          .array(
+            z
+              .object({
+                id: z.string().min(1).max(60),
+                label: z.string().min(1).max(60),
+                gestures: z.array(z.string().min(1).max(60)).max(24),
+              })
+              .strict(),
+          )
+          .max(32)
+          .optional(),
+        action: z.string().max(120).optional(),
+        button: z.string().max(60).optional(),
+        gesture: z.string().max(60).optional(),
+        /** Epoch milliseconds. */
+        at: z.number().optional(),
+      })
+      .strict()
+      .optional(),
+    irRemote: z
+      .object({
+        learning: z.boolean(),
+        commands: z
+          .array(
+            z
+              .object({
+                id: z.string().min(1).max(60),
+                name: z.string().min(1).max(80),
+                /** Opaque protocol blob; the apps never interpret it. */
+                code: z.string().max(4096),
+              })
+              .strict(),
+          )
+          .max(128),
+        pendingCode: z.string().max(4096).optional(),
+      })
+      .strict()
+      .optional(),
+    custom: z
+      .object({
+        fields: z
+          .array(
+            z
+              .object({
+                id: z.string().min(1).max(80),
+                label: z.string().min(1).max(80),
+                control: z.enum(['toggle', 'slider', 'select', 'value']),
+                unit: z.string().max(24).optional(),
+                min: z.number().optional(),
+                max: z.number().optional(),
+                step: z.number().optional(),
+                options: z
+                  .array(
+                    z
+                      .object({
+                        value: z.union([z.string().max(120), z.number()]),
+                        label: z.string().min(1).max(80),
+                      })
+                      .strict(),
+                  )
+                  .max(32)
+                  .optional(),
+                settable: z.boolean(),
+              })
+              .strict(),
+          )
+          .max(32)
+          .optional(),
+        values: z
+          .record(z.string().max(80), z.union([z.string().max(400), z.number(), z.boolean()]))
+          .optional(),
+      })
+      .strict()
+      .optional(),
     currentMode: uint8.optional(),
     rvcOperationalState: uint8.optional(),
   })
@@ -136,6 +213,27 @@ export const commandSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('setFanMode'), mode: z.number().int().min(0).max(5) }).strict(),
   z.object({ type: z.literal('playPause'), play: z.boolean() }).strict(),
   z.object({ type: z.literal('setMode'), mode: uint8 }).strict(),
+  // IR blaster / universal remote. `irSendRaw` is deliberately absent: clients
+  // send `irSend {commandId}`; the registry resolves it to the opaque blob.
+  z.object({ type: z.literal('irLearn'), on: z.boolean() }).strict(),
+  z.object({ type: z.literal('irSaveLearned'), name: z.string().min(1).max(80) }).strict(),
+  z.object({ type: z.literal('irSend'), commandId: z.string().min(1).max(60) }).strict(),
+  z.object({ type: z.literal('irDeleteCommand'), commandId: z.string().min(1).max(60) }).strict(),
+  z
+    .object({
+      type: z.literal('irRenameCommand'),
+      commandId: z.string().min(1).max(60),
+      name: z.string().min(1).max(80),
+    })
+    .strict(),
+  // The universal generic-control write (the `custom` capability).
+  z
+    .object({
+      type: z.literal('setCustomField'),
+      fieldId: z.string().min(1).max(80),
+      value: z.union([z.string().max(400), z.number(), z.boolean()]),
+    })
+    .strict(),
 ]);
 
 /** Endpoint descriptor as declared by MQTT integrations and served by the API. */

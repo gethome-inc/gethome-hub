@@ -112,6 +112,61 @@ export interface EndpointState {
 
   playbackPlaying?: boolean;
 
+  /**
+   * Stateless input events — buttons, remotes, cubes. `buttons` is the
+   * endpoint's input inventory (what the apps render); the remaining fields
+   * describe the most recent event. `at` (epoch ms) makes every press a state
+   * change even when the same action repeats, so clients always hear it.
+   */
+  event?: {
+    buttons?: Array<{ id: string; label: string; gestures: string[] }>;
+    /** Raw protocol action string (e.g. Z2M "single_left"), for debugging. */
+    action?: string;
+    /** Parsed button id ("main", "left", "1") — matches a `buttons[].id`. */
+    button?: string;
+    /** Parsed gesture: single, double, triple, hold, release, shake… */
+    gesture?: string;
+    at?: number;
+  };
+
+  /**
+   * IR blaster / universal remote (learn + replay). The library of learned
+   * commands lives here (persisted, hub-authoritative); each command's `code`
+   * is an opaque protocol blob the apps never interpret — they render
+   * `{id, name}` and issue `irSend {commandId}`. `pendingCode` holds the last
+   * freshly-learned blob awaiting a name (`irSaveLearned {name}`).
+   */
+  irRemote?: {
+    learning: boolean;
+    commands: Array<{ id: string; name: string; code: string }>;
+    pendingCode?: string;
+  };
+
+  /**
+   * The universal fallback: typed generic controls for device parameters that
+   * fit no dedicated capability. `fields` is the declared inventory (from the
+   * protocol's own metadata — Z2M exposes — or an AI mapping): each field says
+   * how to render (`toggle`/`slider`/`select`/`value`) and whether it can be
+   * written; `values` holds current values keyed by field id. Writes go
+   * through the single `setCustomField {fieldId, value}` intent, so the apps
+   * can control ANY parameter with one set of universal components.
+   */
+  custom?: {
+    fields?: Array<{
+      /** Field id — the device's own property name. */
+      id: string;
+      label: string;
+      control: 'toggle' | 'slider' | 'select' | 'value';
+      unit?: string;
+      min?: number;
+      max?: number;
+      step?: number;
+      options?: Array<{ value: string | number; label: string }>;
+      settable: boolean;
+    }>;
+    values?: Record<string, string | number | boolean>;
+  };
+
   /** Current mode for ModeSelect / RVC run-mode style capabilities. */
   currentMode?: number;
   /**
@@ -127,23 +182,38 @@ export function emptyState(): EndpointState {
 }
 
 /**
- * Deep-merge a state patch into an existing state. Sub-objects are merged
- * key-by-key so a report that only carries `level.current` doesn't clobber
- * the known min/max; scalars overwrite. Returns a new object.
+ * Deep-merge a state patch into an existing state. Plain sub-objects are
+ * merged recursively, key-by-key, so a report that only carries
+ * `level.current` doesn't clobber the known min/max and a patch touching one
+ * `custom.values` key doesn't drop its siblings; scalars and arrays
+ * (`event.buttons`, `irRemote.commands`, `custom.fields`) overwrite.
+ * Returns a new object.
  */
 export function mergeState(base: EndpointState, patch: Partial<EndpointState>): EndpointState {
-  const next: EndpointState = { ...base, sensors: { ...base.sensors } };
-  const record = next as unknown as Record<string, unknown>;
+  const next = mergeRecords(
+    base as unknown as Record<string, unknown>,
+    patch as unknown as Record<string, unknown>,
+  ) as unknown as EndpointState;
+  next.sensors ??= {};
+  return next;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function mergeRecords(
+  base: Record<string, unknown>,
+  patch: Record<string, unknown>,
+): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...base };
   for (const [key, value] of Object.entries(patch)) {
     if (value === undefined) continue;
-    if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
-      const existing = record[key];
-      record[key] =
-        existing !== null && typeof existing === 'object'
-          ? { ...(existing as object), ...(value as object) }
-          : { ...(value as object) };
+    const existing = next[key];
+    if (isPlainObject(value)) {
+      next[key] = isPlainObject(existing) ? mergeRecords(existing, value) : { ...value };
     } else {
-      record[key] = value;
+      next[key] = value;
     }
   }
   return next;
@@ -181,5 +251,8 @@ export function presentCapabilities(state: EndpointState): CapabilityKind[] {
   if (state.currentMode !== undefined) kinds.push('mode');
   if (state.rvcOperationalState !== undefined) kinds.push('rvcRun');
   if (state.playbackPlaying !== undefined) kinds.push('mediaPlayback');
+  if (state.event !== undefined) kinds.push('event');
+  if (state.irRemote !== undefined) kinds.push('irRemote');
+  if (state.custom !== undefined) kinds.push('custom');
   return kinds;
 }

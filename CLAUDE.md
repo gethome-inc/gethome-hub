@@ -32,9 +32,11 @@ npm run build && node dist/index.js       # production build (copies SQL migrati
 npm run db:generate                       # drizzle-kit: generate a migration after editing src/db/schema.ts
 ```
 
-Green `typecheck` + `test` is the bar for every change. The e2e suite
-(`test/integration/mqtt-roundtrip.test.ts`) is the proof the whole pipeline
-works — run it for any adapter/registry/API change.
+Green `typecheck` + `test` is the bar for every change. The e2e suites
+(`test/integration/mqtt-roundtrip.test.ts` for the whole pipeline,
+`test/integration/zigbee-adapter.test.ts` for the Zigbee runtime AI
+adaptation) are the proof it all works — run them for any
+adapter/registry/API change.
 
 ## Architecture: the boundaries that matter
 
@@ -45,9 +47,12 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
 ```
 
 - **`src/schema/` is dependency-free** (zod only) and is the single source of
-  truth: 24 capability kinds, 15 device kinds, typed `EndpointState`, 17
-  `HubCommand` intents, unit converters, Matter device-type catalog, zod wire
-  schemas. Everything else derives from it.
+  truth: 27 capability kinds (incl. `event` for buttons/remotes, `irRemote`
+  for IR blasters, and `custom` — the universal generic-control fallback so
+  any parameter is usable), 16 device kinds, typed `EndpointState`,
+  `HubCommand` intents (incl. `ir*` learn/replay and `setCustomField`), unit
+  converters, Matter device-type catalog, zod wire schemas. Everything else
+  derives from it.
 - **Adapters only see the `AdapterBus`** (`src/adapters/adapter.ts`). They
   never import `src/api` or `src/db`. Adding a protocol = new directory under
   `src/adapters/` + registration in `src/index.ts`.
@@ -61,6 +66,16 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
 
 ## Conventions that bite if missed
 
+- **Nothing is unsupported by default — three layers, in order.** Devices are
+  made usable by (1) **typed capabilities** (canonical schema), then (2)
+  **generic custom fields** (`custom`) for every leftover parameter, generated
+  statically from the protocol's own metadata, then (3) **AI** for the genuine
+  gaps and to upgrade fields to typed capabilities. Layers 1–2 are static (no
+  key). A leftover expose must never be silently dropped: settings/vendor knobs
+  become fields, only pure telemetry is hidden; `needsReview` means still
+  `uncovered` after layers 1–2. This is design rule #6 — full model in
+  `docs/zigbee.md` ("The three layers of device support") and
+  `docs/architecture.md`. Keep it when editing the mapper.
 - **Units are load-bearing** and mirror the GetHome app's Matter schema
   byte-for-byte: level 1–254, mireds, centi-°C, humidity centi-%, covering
   percent-100ths with **0 = open**, battery 0–100, milliwatts, lock 0/1/2,
@@ -69,7 +84,11 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   versioning the API (`apiVersion` in `GET /hub`).
 - Zigbee2MQTT conversions to watch: cover position is **inverted** (Z2M
   100 = open), temperatures ×100, power W → mW, energy kWh → mWh, hue/sat
-  degrees/percent → 0–254 cluster units. Tests in `test/zigbee-*.test.ts`
+  degrees/percent → 0–254 cluster units. `action` enums parse through
+  `adapters/zigbee/actions.ts` into `event` state; multi-endpoint devices
+  address channels via suffixed properties (`state_l1`); every other leftover
+  expose (settings, vendor knobs) becomes a generic `custom` field from its
+  own metadata, so no parameter is unsupported. Tests in `test/zigbee-*.test.ts`
   pin all of these.
 - The Matter reducer (`src/adapters/matter/reducer.ts`) is a 1:1 port of the
   iOS `MatterStateReducer` — keep them in lockstep if either changes.

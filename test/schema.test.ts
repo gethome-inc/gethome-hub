@@ -23,20 +23,21 @@ import {
 } from '../src/schema/index.js';
 
 describe('canonical vocabulary', () => {
-  it('has exactly the 24 capability kinds of the app schema, in order', () => {
+  it('has exactly the 27 capability kinds of the app schema, in order', () => {
     expect(CAPABILITY_KINDS).toEqual([
       'onOff', 'level', 'colorTemperature', 'color', 'thermostat', 'fan',
       'doorLock', 'windowCovering', 'temperature', 'humidity', 'occupancy',
       'contact', 'illuminance', 'pressure', 'flow', 'airQuality', 'pm25',
       'co2', 'smokeCOAlarm', 'battery', 'electricalPower', 'mode', 'rvcRun',
-      'mediaPlayback',
+      'mediaPlayback', 'event', 'irRemote', 'custom',
     ]);
   });
 
-  it('has exactly the 15 device kinds of the app schema', () => {
-    expect(DEVICE_KINDS).toHaveLength(15);
+  it('has exactly the 16 device kinds of the app schema', () => {
+    expect(DEVICE_KINDS).toHaveLength(16);
     expect(DEVICE_KINDS).toContain('wallSwitch');
     expect(DEVICE_KINDS).toContain('airPurifier');
+    expect(DEVICE_KINDS).toContain('remote');
   });
 });
 
@@ -65,9 +66,11 @@ describe('units', () => {
     expect(luxFromMeasuredIlluminance(0)).toBe(0);
   });
 
-  it('normalizes half-percent battery readings', () => {
+  it('normalizes half-percent battery readings by truncating like the app', () => {
     expect(percentFromHalfPercent(200)).toBe(100);
-    expect(percentFromHalfPercent(147)).toBe(74);
+    // The app does `Int(raw) / 2` — 147 → 73, not 74.
+    expect(percentFromHalfPercent(147)).toBe(73);
+    expect(percentFromHalfPercent(199)).toBe(99);
     expect(percentFromHalfPercent(0)).toBe(0);
   });
 
@@ -130,6 +133,21 @@ describe('endpoint state', () => {
     expect(parsed.thermostat?.systemMode).toBe(4);
   });
 
+  it('round-trips events (buttons inventory + last event) and derives the capability', () => {
+    const state = mergeState(emptyState(), {
+      event: { buttons: [{ id: 'left', label: 'Left', gestures: ['single', 'double'] }] },
+    });
+    const pressed = mergeState(state, {
+      event: { action: 'single_left', button: 'left', gesture: 'single', at: 1_752_000_000_000 },
+    });
+    // The inventory survives event merges.
+    expect(pressed.event?.buttons).toHaveLength(1);
+    expect(pressed.event?.gesture).toBe('single');
+    const parsed = endpointStateSchema.parse(JSON.parse(JSON.stringify(pressed)));
+    expect(parsed.event?.button).toBe('left');
+    expect(presentCapabilities(pressed)).toContain('event');
+  });
+
   it('rejects out-of-range values', () => {
     expect(() => endpointStateSchema.parse({ reachable: true, sensors: {}, level: { current: 0 } })).toThrow();
     expect(() =>
@@ -178,6 +196,9 @@ describe('device-type catalog', () => {
     expect(descriptorFor([0x000a]).kind).toBe('lock');
     expect(descriptorFor([0x0301]).primary).toBe('thermostat');
     expect(descriptorFor([0x0074]).kind).toBe('vacuum');
+    // Generic Switch = buttons (Switch-cluster events), not a relay.
+    expect(descriptorFor([0x000f]).kind).toBe('remote');
+    expect(descriptorFor([0x000f]).primary).toBe('event');
   });
 
   it('prefers the richest non-infrastructure descriptor', () => {

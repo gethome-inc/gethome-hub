@@ -16,15 +16,20 @@ hub can control them.
   (matter.js) and controls them over IP.
 - **Zigbee** — pairs any Zigbee device through [Zigbee2MQTT](https://www.zigbee2mqtt.io)
   and a USB coordinator stick; device definitions ("exposes") are translated
-  into the canonical schema automatically.
+  into the canonical schema automatically — including buttons/remotes/cubes
+  (as structured button events) and multi-channel relays (as separate
+  endpoints). ([docs/zigbee.md](docs/zigbee.md))
 - **MQTT integrations** — a simple public convention for wiring DIY hardware,
   wired controllers, and third-party bridges into the hub
   ([docs/mqtt-integrations.md](docs/mqtt-integrations.md)).
-- **AI device adaptation** — unknown Zigbee/MQTT devices are mapped into the
-  schema by an LLM (bring your own Anthropic or OpenAI API key; stored
-  encrypted on the hub, used only for this). No key → devices still appear,
-  flagged "needs review". ([docs/ai-adaptation.md](docs/ai-adaptation.md))
-- **One schema for everything** — 24 capabilities, 15 device kinds, exact unit
+- **AI device adaptation** — unknown devices, and unknown parameters a
+  device starts publishing later, are mapped into the schema by an LLM
+  (bring your own Anthropic or OpenAI API key; stored encrypted on the hub,
+  used only for this). No key → devices still appear, flagged "needs
+  review". ([docs/ai-adaptation.md](docs/ai-adaptation.md))
+- **One schema for everything** — 27 capabilities (including button/remote
+  events, learn-and-replay IR blasters, and a universal generic-control
+  fallback so *any* device parameter is usable), 16 device kinds, exact unit
   conventions shared with the GetHome apps ([docs/device-schema.md](docs/device-schema.md)).
 - **Sharing built in** — pairing-code claim makes you the owner; short-lived
   invite codes add family members. Only hub homes are shareable in GetHome.
