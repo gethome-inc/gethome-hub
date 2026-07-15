@@ -1,12 +1,13 @@
 # AI device adaptation
 
-Zigbee is an open ecosystem with tens of thousands of device models; no static
-mapping table covers them all. Two things make the hub support *any* device:
-the static mapper turns every leftover parameter into a generic **custom
-field** (so nothing is unusable by default — see
-[device-schema.md](device-schema.md)), and, for the genuine gaps, an LLM
-generates a mapping — turning "unsupported device" into a one-time,
-self-healing event, and upgrading generic fields to typed capabilities.
+This is **layer 3** of the "nothing is unsupported by default" model
+([zigbee.md](zigbee.md) → "The three layers of device support"; design rule #6
+in [architecture.md](architecture.md)). Layers 1–2 are static: typed
+capabilities, then a generic **custom field** for every leftover parameter (so
+nothing is unusable without a key — see [device-schema.md](device-schema.md)).
+Layer 3 fills what remains: for the genuine gaps an LLM generates a mapping —
+turning "unsupported device" into a one-time, self-healing event, and
+upgrading generic fields to typed capabilities.
 
 ## When it triggers
 

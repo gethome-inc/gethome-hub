@@ -46,6 +46,17 @@ exactly **one home**; sharing a home means granting members access to the hub.
    device, no MQTT client — the API and claim flow still work.
 5. **Fail soft.** Adapter crashes are logged + surfaced as activity, never
    fatal.
+6. **Nothing is unsupported by default.** Devices are made usable in three
+   layers, tried in order: (1) **typed capabilities** for anything that fits
+   the canonical schema; (2) **generic custom fields** (the `custom`
+   capability) for every other exposed parameter, generated statically from
+   the protocol's own metadata; (3) **AI adaptation** for the genuine gaps
+   layer 2 can't hold, and to upgrade generic fields to typed capabilities.
+   Layers 1–2 are static (no key, no cost). A leftover parameter must never be
+   silently dropped — settings and vendor knobs become fields, only pure
+   telemetry is hidden. See [zigbee.md](zigbee.md) ("The three layers of
+   device support") and [device-schema.md](device-schema.md) (the `custom`
+   capability).
 
 ## Data flow
 

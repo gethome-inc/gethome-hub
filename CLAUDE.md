@@ -66,6 +66,16 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
 
 ## Conventions that bite if missed
 
+- **Nothing is unsupported by default — three layers, in order.** Devices are
+  made usable by (1) **typed capabilities** (canonical schema), then (2)
+  **generic custom fields** (`custom`) for every leftover parameter, generated
+  statically from the protocol's own metadata, then (3) **AI** for the genuine
+  gaps and to upgrade fields to typed capabilities. Layers 1–2 are static (no
+  key). A leftover expose must never be silently dropped: settings/vendor knobs
+  become fields, only pure telemetry is hidden; `needsReview` means still
+  `uncovered` after layers 1–2. This is design rule #6 — full model in
+  `docs/zigbee.md` ("The three layers of device support") and
+  `docs/architecture.md`. Keep it when editing the mapper.
 - **Units are load-bearing** and mirror the GetHome app's Matter schema
   byte-for-byte: level 1–254, mireds, centi-°C, humidity centi-%, covering
   percent-100ths with **0 = open**, battery 0–100, milliwatts, lock 0/1/2,
