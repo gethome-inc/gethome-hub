@@ -16,11 +16,11 @@ units — a 2-relay module has two). Each endpoint has:
 - `deviceKind` — what it is, for display: `light, camera, sensor, climate,
   lock, outlet, airPurifier, shade, speaker, wallSwitch, fan, vacuum,
   appliance, energy, tv, remote`
-- `capabilities` — what it can do (subset of the 26 below)
+- `capabilities` — what it can do (subset of the 27 below)
 - `primaryCapability` — the headline capability
 - `state` — the typed state object below
 
-## The 26 capabilities and their units
+## The 27 capabilities and their units
 
 | Capability | State location | Unit / range |
 |---|---|---|
@@ -50,6 +50,7 @@ units — a 2-relay module has two). Each endpoint has:
 | `mediaPlayback` | `playbackPlaying` | boolean |
 | `event` | `event.*` (below) | stateless input events — buttons, remotes, cubes |
 | `irRemote` | `irRemote.*` (below) | IR blaster / universal remote — learn + replay a library of codes |
+| `custom` | `custom.*` (below) | the universal fallback — declared generic controls for any parameter that fits no capability above |
 
 Plus `reachable: boolean` on every state.
 
@@ -109,6 +110,44 @@ The library is **hub-authoritative**: it lives in endpoint state (persisted),
 and the hub — not the adapter — owns its mutations. Driven by five intents
 (below). A `deviceKind` of `remote` covers these too.
 
+### The `custom` capability — the universal fallback
+
+No fixed table can name every device parameter. The `custom` capability is the
+escape hatch: **any** parameter with no dedicated capability becomes a declared
+generic control the apps render with a universal component set, so a device is
+never "unsupported" just because we lack a specific type for one of its knobs.
+
+```json
+{
+  "custom": {
+    "fields": [
+      { "id": "sensitivity", "label": "Sensitivity", "control": "select",
+        "options": [{ "value": "low", "label": "Low" }, { "value": "high", "label": "High" }], "settable": true },
+      { "id": "occupancy_timeout", "label": "Occupancy timeout", "control": "slider",
+        "unit": "s", "min": 0, "max": 3600, "step": 10, "settable": true },
+      { "id": "child_lock", "label": "Child lock", "control": "toggle", "settable": true },
+      { "id": "soil_moisture", "label": "Soil moisture", "control": "value", "unit": "%", "settable": false }
+    ],
+    "values": { "sensitivity": "high", "occupancy_timeout": 60, "child_lock": true, "soil_moisture": 42 }
+  }
+}
+```
+
+- `fields` — the declared inventory. `control` is one of `toggle` / `slider` /
+  `select` / `value` (read-only readout); `settable` says whether the app may
+  write it; `unit`/`min`/`max`/`step` shape a slider; `options` list a select.
+  The **field `id` is the device's own payload property.**
+- `values` — current values keyed by field id (booleans for toggles, the
+  option value for selects, numbers/strings otherwise).
+
+Writes use one intent — `setCustomField {fieldId, value}` — so the apps drive
+every generic control the same way. Where do fields come from? For Zigbee, the
+adapter generates them from Z2M's own `exposes` metadata (every leftover
+setting/sensor). For anything the metadata can't describe, the **AI mapper**
+declares them ([ai-adaptation.md](ai-adaptation.md)). A device only stays in
+`needsReview` when a property has *no* representation at all — not even a
+generic field.
+
 ### Example endpoint state
 
 ```json
@@ -152,6 +191,14 @@ IR blaster / universal remote (the `irRemote` capability):
 {"type":"irSend","commandId":"…uuid"}                 // replay a saved code
 {"type":"irDeleteCommand","commandId":"…uuid"}
 {"type":"irRenameCommand","commandId":"…uuid","name":"Telly"}
+```
+
+Generic controls (the `custom` capability) — one intent for every field:
+
+```
+{"type":"setCustomField","fieldId":"sensitivity","value":"high"}   // select
+{"type":"setCustomField","fieldId":"child_lock","value":true}      // toggle
+{"type":"setCustomField","fieldId":"occupancy_timeout","value":90} // slider
 ```
 
 A device that cannot honor an intent answers `409` with an error message.

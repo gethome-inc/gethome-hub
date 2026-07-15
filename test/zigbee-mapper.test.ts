@@ -30,7 +30,8 @@ describe('Z2M exposes → canonical mapping', () => {
     const profile = profileOf('Desk lamp');
     const main = mainOf('Desk lamp');
     expect(main.kind).toBe('light');
-    expect(main.capabilities).toEqual(['onOff', 'level', 'colorTemperature']);
+    // `effect` (a settable enum) becomes a generic custom control.
+    expect(main.capabilities).toEqual(['onOff', 'level', 'colorTemperature', 'custom']);
     expect(main.primary).toBe('onOff');
     expect(profile.unmapped).toEqual([]);
     expect(main.features.colorTempRange).toEqual({ min: 250, max: 454 });
@@ -210,6 +211,47 @@ describe('Aqara buttons, remotes and gestures → event capability', () => {
   });
 });
 
+describe('universal fallback: any leftover parameter → generic custom field', () => {
+  it('turns a settable enum into a select control with options', () => {
+    const main = mainOf('Desk lamp');
+    const effect = main.customFields?.find((field) => field.id === 'effect');
+    expect(effect).toMatchObject({ id: 'effect', control: 'select', settable: true });
+    expect(effect?.options).toEqual([
+      { value: 'blink', label: 'Blink' },
+      { value: 'breathe', label: 'Breathe' },
+      { value: 'okay', label: 'Okay' },
+    ]);
+    // The value reads straight from the payload property.
+    const patch = extractMain('Desk lamp', { effect: 'breathe' });
+    expect(patch.custom?.values).toEqual({ effect: 'breathe' });
+  });
+
+  it('turns a settable binary into a toggle', () => {
+    const main = mainOf('Radiator valve');
+    const lock = main.customFields?.find((field) => field.id === 'child_lock');
+    expect(lock).toMatchObject({ control: 'toggle', settable: true });
+    // The device reports LOCK/UNLOCK; state folds it to a boolean for the UI.
+    expect(extractMain('Radiator valve', { child_lock: 'LOCK' }).custom?.values).toEqual({ child_lock: true });
+    expect(extractMain('Radiator valve', { child_lock: 'UNLOCK' }).custom?.values).toEqual({ child_lock: false });
+  });
+
+  it('turns a read-only numeric with no range into a value readout', () => {
+    const main = mainOf('Mystery soil probe');
+    const moisture = main.customFields?.find((field) => field.id === 'soil_moisture');
+    expect(moisture).toMatchObject({ control: 'value', settable: false });
+    // Covered as a field → not uncovered, so no needs-review from it.
+    expect(profileOf('Mystery soil probe').uncovered).toEqual([]);
+    expect(extractMain('Mystery soil probe', { soil_moisture: 42 }).custom?.values).toEqual({ soil_moisture: 42 });
+  });
+
+  it('ignores pure telemetry (no field, no value)', () => {
+    // linkquality/voltage never become fields.
+    const main = mainOf('Bedroom climate sensor');
+    expect(main.customFields ?? []).toEqual([]);
+    expect(extractMain('Bedroom climate sensor', { linkquality: 80, voltage: 3000 })).toEqual({});
+  });
+});
+
 describe('IR blaster / universal remote → irRemote capability', () => {
   it('maps the standard three IR properties to irRemote with no leftovers', () => {
     const profile = profileOf('Living room IR');
@@ -277,8 +319,10 @@ describe('presence and covers with movement', () => {
     const profile = profileOf('Office presence');
     const main = mainOf('Office presence');
     expect(main.kind).toBe('sensor');
-    expect(main.capabilities).toEqual(['occupancy']);
+    // presence → occupancy; presence_event has no typed home → generic field.
+    expect(main.capabilities).toEqual(['occupancy', 'custom']);
     expect(profile.unmapped).toEqual(['presence_event']);
+    expect(profile.uncovered).toEqual([]); // covered as a custom field
 
     expect(extractMain('Office presence', { presence: true }).sensors?.occupied).toBe(true);
     expect(extractMain('Office presence', { presence: false }).sensors?.occupied).toBe(false);

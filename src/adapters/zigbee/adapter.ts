@@ -2,7 +2,7 @@ import mqtt from 'mqtt';
 import type { AdapterBus, ProtocolAdapter } from '../adapter.js';
 import type { CapabilityKind, DeviceKind, EndpointState, HubCommand } from '../../schema/index.js';
 import { UnsupportedCommandError } from '../../schema/index.js';
-import { mapExposes, type Z2mDevice, type Z2mProfile } from './exposes-mapper.js';
+import { mapExposes, type CustomFieldSpec, type Z2mDevice, type Z2mProfile } from './exposes-mapper.js';
 import { buildSetPayload } from './commands.js';
 import type { Logger } from '../../logging.js';
 
@@ -32,9 +32,13 @@ export interface AppliedAiMapping {
     deviceKind: DeviceKind;
     capabilities: CapabilityKind[];
     primary: CapabilityKind;
+    /** Generic controls the AI declared for this endpoint. */
+    customFields?: CustomFieldSpec[];
   }>;
-  /** Payload properties the mapping's state rules read. */
+  /** Every payload property the mapping reads (typed rules + custom fields). */
   properties: Set<string>;
+  /** Properties mapped onto *typed* capabilities (supersede static fields). */
+  typedProperties: Set<string>;
   extractState(payload: Record<string, unknown>): Map<number, Partial<EndpointState>>;
   buildCommandPayload(endpointId: number, command: HubCommand): Record<string, unknown> | null;
 }
@@ -279,11 +283,14 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     };
     if (previous?.remapTimer) clearTimeout(previous.remapTimer);
 
-    // Ask the AI mapper when static mapping found nothing, when meaningful
-    // exposes were left over, or when Z2M itself doesn't know the device.
+    // Ask the AI mapper when a property has NO representation at all
+    // (uncovered — composites, or a device Z2M barely supports), when nothing
+    // mapped, or on an explicit remap. Properties that got a generic custom
+    // field are already controllable, so they don't auto-trigger the AI; a
+    // remap can still upgrade them to typed capabilities.
     const staticallyEmpty = profile.endpoints.every((endpoint) => endpoint.capabilities.length === 0);
     const needsHelp =
-      forceAiRemap || raw.supported === false || staticallyEmpty || profile.unmapped.length > 0;
+      forceAiRemap || raw.supported === false || staticallyEmpty || profile.uncovered.length > 0;
     if (needsHelp && this.options.aiAssist) {
       try {
         const mapping = await this.options.aiAssist.requestMapping(raw, profile, {
@@ -319,6 +326,14 @@ export class ZigbeeAdapter implements ProtocolAdapter {
           event: { buttons: endpoint.buttons },
         });
       }
+    }
+
+    // Seed the custom-field inventory: the static fields (minus any the AI
+    // superseded with typed mappings or its own fields) plus the AI's fields.
+    for (const [endpointId, fields] of mergedCustomFields(tracked)) {
+      this.bus?.stateChanged('zigbee', raw.ieee_address, endpointId, {
+        custom: { fields },
+      });
     }
 
     if (announce) {
@@ -376,7 +391,12 @@ function mergedEndpoints(tracked: TrackedDevice): Array<{
   for (const endpoint of tracked.aiMapping?.endpoints ?? []) {
     const existing = merged.get(endpoint.endpointId);
     if (!existing) {
-      merged.set(endpoint.endpointId, { ...endpoint, capabilities: [...endpoint.capabilities] });
+      merged.set(endpoint.endpointId, {
+        endpointId: endpoint.endpointId,
+        deviceKind: endpoint.deviceKind,
+        capabilities: [...endpoint.capabilities],
+        primary: endpoint.primary,
+      });
       continue;
     }
     existing.deviceKind = endpoint.deviceKind;
@@ -416,10 +436,38 @@ function mergePatches(base: Partial<EndpointState>, overlay: Partial<EndpointSta
   return out as Partial<EndpointState>;
 }
 
-/** Review is needed while any exposed property remains unmapped. */
+/**
+ * The custom-field inventories to seed, per endpoint: static fields whose
+ * property the AI didn't claim (typed mapping or its own field wins), plus
+ * the AI's declared fields.
+ */
+function mergedCustomFields(tracked: TrackedDevice): Map<number, CustomFieldSpec[]> {
+  const result = new Map<number, CustomFieldSpec[]>();
+  const aiClaimed = new Set<string>();
+  for (const endpoint of tracked.aiMapping?.endpoints ?? []) {
+    for (const field of endpoint.customFields ?? []) aiClaimed.add(field.id);
+  }
+  for (const property of tracked.aiMapping?.typedProperties ?? []) aiClaimed.add(property);
+
+  for (const endpoint of tracked.profile.endpoints) {
+    const statics = (endpoint.customFields ?? []).filter((field) => !aiClaimed.has(field.id));
+    if (statics.length > 0) result.set(endpoint.endpointId, statics);
+  }
+  for (const endpoint of tracked.aiMapping?.endpoints ?? []) {
+    if (!endpoint.customFields || endpoint.customFields.length === 0) continue;
+    const existing = result.get(endpoint.endpointId) ?? [];
+    result.set(endpoint.endpointId, [...existing, ...endpoint.customFields].slice(0, 32));
+  }
+  return result;
+}
+
+/**
+ * Review is needed only while some property has NO representation at all —
+ * no typed mapping, no custom field, not AI-covered.
+ */
 function needsReview(tracked: TrackedDevice): boolean {
   const aiProperties = tracked.aiMapping?.properties;
-  const leftover = tracked.profile.unmapped.filter((property) => !(aiProperties?.has(property) ?? false));
+  const leftover = tracked.profile.uncovered.filter((property) => !(aiProperties?.has(property) ?? false));
   if (leftover.length > 0) return true;
   return mergedEndpoints(tracked).length === 0;
 }

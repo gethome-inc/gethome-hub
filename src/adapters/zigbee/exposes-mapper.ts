@@ -37,8 +37,22 @@ export interface Z2mExpose {
   value_off?: unknown;
   value_min?: number;
   value_max?: number;
+  value_step?: number;
   values?: string[];
   features?: Z2mExpose[];
+}
+
+/** One declared generic control — mirrors `EndpointState['custom']`. */
+export interface CustomFieldSpec {
+  id: string;
+  label: string;
+  control: 'toggle' | 'slider' | 'select' | 'value';
+  unit?: string;
+  min?: number;
+  max?: number;
+  step?: number;
+  options?: Array<{ value: string | number; label: string }>;
+  settable: boolean;
 }
 
 /** A device entry from `zigbee2mqtt/bridge/devices`. */
@@ -69,13 +83,23 @@ export interface Z2mEndpointProfile {
   features: Z2mCommandFeatures;
   /** Button inventory when the endpoint has the `event` capability. */
   buttons?: ButtonDescriptor[];
+  /** Declared generic controls when the endpoint has the `custom` capability. */
+  customFields?: CustomFieldSpec[];
 }
 
 export interface Z2mProfile {
   /** Always at least one endpoint; endpoint 1 carries whole-device exposes. */
   endpoints: Z2mEndpointProfile[];
-  /** Exposed properties the static mapper could not place (AI trigger). */
+  /**
+   * Properties without a *typed* capability mapping — the AI-upgrade
+   * candidates. Many of these still work today as generic custom fields.
+   */
   unmapped: string[];
+  /**
+   * Properties with NO representation at all (no typed mapping, no custom
+   * field) — the only thing that keeps a device in needs-review.
+   */
+  uncovered: string[];
   /** Every payload key the profile reads or deliberately ignores. */
   knownProperties: Set<string>;
   /** Convert one Z2M state payload into per-endpoint canonical patches. */
@@ -115,12 +139,17 @@ export interface Z2mCommandFeatures {
     onValue: unknown;
     offValue: unknown;
   };
+  /** Write metadata for declared custom fields, keyed by field id. */
+  customWrites?: Record<
+    string,
+    { control: CustomFieldSpec['control']; settable: boolean; onValue?: unknown; offValue?: unknown }
+  >;
 }
 
 /**
- * Payload keys that are telemetry, diagnostics, or device settings — never
- * capabilities. They are deliberately *known* (so they don't look like new
- * parameters at runtime) but produce no state.
+ * Payload keys that are pure telemetry/diagnostics — noise, never shown.
+ * They are deliberately *known* (so they don't look like new parameters at
+ * runtime) but produce no state and no controls.
  */
 export const IGNORED_PROPERTIES = new Set([
   'linkquality',
@@ -141,15 +170,10 @@ export const IGNORED_PROPERTIES = new Set([
   'angle_z',
   'strength',
   'transition',
-  'power_on_behavior',
-  'effect',
   'identify',
   'update',
   'update_available',
   'device_temperature',
-  'indicator_mode',
-  'backlight_mode',
-  'child_lock',
   'running_state',
   'position_left', // multi-motor covers: v1 maps the primary motor only
   'color_mode',
@@ -157,12 +181,32 @@ export const IGNORED_PROPERTIES = new Set([
   'gradient',
   'gradient_scene',
   'power_outage_count',
-  'power_outage_memory',
-  'auto_off',
+  'options',
+  'tamper',
+  'battery_low',
+  'vibration', // the paired `action` enum carries vibration/tilt/drop events
+  'trigger_count',
+  'schedule',
+  'schedule_settings',
+  'calibrated',
+]);
+
+/**
+ * Device settings — real, user-adjustable parameters (child locks, presets,
+ * sensitivities, indicator LEDs…). They become generic custom fields
+ * (toggle/slider/select per their expose metadata) so the apps can adjust
+ * them, but they never trigger the AI: a field already represents them
+ * perfectly, there is no typed capability to upgrade to.
+ */
+export const SETTINGS_PROPERTIES = new Set([
+  'power_on_behavior',
+  'effect',
+  'indicator_mode',
+  'backlight_mode',
+  'child_lock',
   'sensitivity',
   'motor_speed',
   'motor_direction',
-  'options',
   'operation_mode',
   'click_mode',
   'switch_type',
@@ -171,20 +215,17 @@ export const IGNORED_PROPERTIES = new Set([
   'led_indication',
   'calibration',
   'calibrate',
-  'calibrated',
   'reverse_direction',
   'hand_open',
   'detection_interval',
   'occupancy_timeout',
   'local_temperature_calibration',
-  'tamper',
-  'battery_low',
-  'vibration', // the paired `action` enum carries vibration/tilt/drop events
-  'trigger_count',
-  'schedule',
-  'schedule_settings',
-  'away_mode',
+  'auto_off',
   'interlock',
+  'away_mode',
+  'power_outage_memory',
+  'keypad_lockout',
+  'boost_time',
 ]);
 
 const thermostatDefaults = {
@@ -219,6 +260,11 @@ class PatchBuilder {
   event?: NonNullable<EndpointState['event']>;
   /** Partial IR patch — merged onto the seeded library base by mergeState. */
   irRemote?: { learning: boolean; pendingCode: string };
+  customValues?: Record<string, string | number | boolean>;
+
+  setCustomValue(id: string, value: string | number | boolean) {
+    (this.customValues ??= {})[id] = value;
+  }
 
   ensureThermostat() {
     this.thermostat ??= { ...thermostatDefaults, systemMode: 0 };
@@ -255,6 +301,9 @@ class PatchBuilder {
     // A partial IR patch (learning + pendingCode); mergeState folds it onto
     // the seeded base carrying the commands library.
     if (this.irRemote) (patch as Record<string, unknown>).irRemote = this.irRemote;
+    // Partial custom values; mergeState folds them per key onto the seeded
+    // inventory base.
+    if (this.customValues) patch.custom = { values: this.customValues };
     return patch;
   }
 }
@@ -284,11 +333,13 @@ class EndpointDraft {
     hasPosition: false,
     isCover: false,
     isLock: false,
+    customWrites: {},
   };
   controlKind?: DeviceKind;
   sensorKind?: DeviceKind;
   sawClimate = false;
   buttons?: ButtonDescriptor[];
+  customFields: CustomFieldSpec[] = [];
 
   constructor(
     readonly endpointId: number,
@@ -312,6 +363,7 @@ class EndpointDraft {
 export function mapExposes(device: Z2mDevice): Z2mProfile {
   const exposes = device.definition?.exposes ?? [];
   const unmapped: string[] = [];
+  const uncovered: string[] = [];
   const rules = new Map<string, { endpointId: number; rule: StateRule }>();
 
   const drafts = new Map<number, EndpointDraft>();
@@ -357,6 +409,103 @@ export function mapExposes(device: Z2mDevice): Z2mProfile {
       const parsed = asNumber(value);
       if (parsed !== undefined) apply(parsed, patch);
     });
+  };
+
+  /**
+   * The universal fallback: turn a simple leftover expose into a declared
+   * custom field, using the expose's own metadata — type → control, access
+   * bit 2 → settable, value_min/max/step/unit → slider shape, values → select
+   * options. Returns false for shapes a generic field can't represent
+   * (composite/list), which are the AI's job.
+   */
+  const makeCustomField = (draft: EndpointDraft, expose: Z2mExpose): boolean => {
+    const property = expose.property ?? expose.name;
+    if (!property || draft.customFields.length >= 32) return false;
+    if (draft.customFields.some((field) => field.id === property)) return true;
+    const settable = ((expose.access ?? 0) & 0b010) !== 0;
+    const label = fieldLabel(expose.name ?? property);
+
+    let spec: CustomFieldSpec;
+    switch (expose.type) {
+      case 'binary': {
+        const onValue = expose.value_on ?? true;
+        const offValue = expose.value_off ?? false;
+        spec = { id: property, label, control: 'toggle', settable };
+        draft.features.customWrites![property] = { control: 'toggle', settable, onValue, offValue };
+        addRule(draft, property, (value, patch) => {
+          const flag = value === onValue ? true : value === offValue ? false : asBool(value);
+          if (flag !== undefined) patch.setCustomValue(property, flag);
+        });
+        break;
+      }
+      case 'numeric': {
+        const hasRange = expose.value_min !== undefined && expose.value_max !== undefined;
+        const asSlider = settable && hasRange;
+        spec = {
+          id: property,
+          label,
+          control: asSlider ? 'slider' : 'value',
+          ...(expose.unit ? { unit: expose.unit } : {}),
+          ...(expose.value_min !== undefined ? { min: expose.value_min } : {}),
+          ...(expose.value_max !== undefined ? { max: expose.value_max } : {}),
+          ...(expose.value_step !== undefined ? { step: expose.value_step } : {}),
+          settable: asSlider,
+        };
+        draft.features.customWrites![property] = { control: spec.control, settable: spec.settable };
+        addRule(draft, property, (value, patch) => {
+          const parsed = asNumber(value);
+          if (parsed !== undefined) patch.setCustomValue(property, parsed);
+        });
+        break;
+      }
+      case 'enum': {
+        const values = (expose.values ?? []).filter((value) => typeof value === 'string' && value !== '');
+        if (values.length === 0) return false;
+        spec = {
+          id: property,
+          label,
+          control: settable ? 'select' : 'value',
+          options: values.slice(0, 32).map((value) => ({ value, label: fieldLabel(value) })),
+          settable,
+        };
+        draft.features.customWrites![property] = { control: spec.control, settable };
+        addRule(draft, property, (value, patch) => {
+          if (typeof value === 'string' || typeof value === 'number') {
+            patch.setCustomValue(property, value);
+          }
+        });
+        break;
+      }
+      case 'text': {
+        spec = { id: property, label, control: 'value', settable: false };
+        draft.features.customWrites![property] = { control: 'value', settable: false };
+        addRule(draft, property, (value, patch) => {
+          if (typeof value === 'string') patch.setCustomValue(property, value);
+        });
+        break;
+      }
+      default:
+        return false;
+    }
+    draft.customFields.push(spec);
+    draft.capabilities.add('custom');
+    return true;
+  };
+
+  /**
+   * Route one leftover expose (nothing typed matched): diagnostics vanish,
+   * everything else becomes a custom field where representable. Settings are
+   * served perfectly by their field and stay silent; genuine unknowns remain
+   * AI-upgrade candidates, and shapes with no field at all are `uncovered`
+   * (the only thing that flags needs-review).
+   */
+  const handleLeftover = (draft: EndpointDraft, expose: Z2mExpose) => {
+    const property = expose.property ?? expose.name;
+    if (!property || IGNORED_PROPERTIES.has(property)) return;
+    const fielded = makeCustomField(draft, expose);
+    if (SETTINGS_PROPERTIES.has(property)) return;
+    unmapped.push(property);
+    if (!fielded) uncovered.push(property);
   };
 
   const handleIrRemote = (draft: EndpointDraft, expose: Z2mExpose) => {
@@ -567,7 +716,7 @@ export function mapExposes(device: Z2mDevice): Z2mProfile {
           break;
         }
         default:
-          if (!IGNORED_PROPERTIES.has(property)) unmapped.push(property);
+          handleLeftover(draft, feature);
       }
     }
   };
@@ -608,7 +757,7 @@ export function mapExposes(device: Z2mDevice): Z2mProfile {
         case 'tilt':
           break; // v1: lift only
         default:
-          if (!IGNORED_PROPERTIES.has(property)) unmapped.push(property);
+          handleLeftover(draft, feature);
       }
     }
   };
@@ -631,8 +780,8 @@ export function mapExposes(device: Z2mDevice): Z2mProfile {
           else if (value === 'unlocked') patch.lock = 2;
           else if (typeof value === 'string') patch.lock = 0;
         });
-      } else if (!IGNORED_PROPERTIES.has(property)) {
-        unmapped.push(property);
+      } else {
+        handleLeftover(draft, feature);
       }
     }
   };
@@ -691,7 +840,7 @@ export function mapExposes(device: Z2mDevice): Z2mProfile {
         case 'running_state':
           break;
         default:
-          if (!IGNORED_PROPERTIES.has(property)) unmapped.push(property);
+          handleLeftover(draft, feature);
       }
     }
   };
@@ -722,8 +871,8 @@ export function mapExposes(device: Z2mDevice): Z2mProfile {
         addRule(draft, property, (value, patch) => {
           patch.onOff = value === onValue;
         });
-      } else if (!IGNORED_PROPERTIES.has(property)) {
-        unmapped.push(property);
+      } else {
+        handleLeftover(draft, feature);
       }
     }
   };
@@ -765,7 +914,7 @@ export function mapExposes(device: Z2mDevice): Z2mProfile {
           break;
         }
         if (handleSimple(draftFor(expose.endpoint), expose)) break;
-        if (!IGNORED_PROPERTIES.has(property)) unmapped.push(property);
+        handleLeftover(draftFor(expose.endpoint), expose);
         break;
       }
       default:
@@ -804,6 +953,7 @@ export function mapExposes(device: Z2mDevice): Z2mProfile {
         primary: pickPrimary(capabilities, kind),
         features: draft.features,
         ...(draft.buttons ? { buttons: draft.buttons } : {}),
+        ...(draft.customFields.length > 0 ? { customFields: draft.customFields } : {}),
       };
     });
 
@@ -817,10 +967,12 @@ export function mapExposes(device: Z2mDevice): Z2mProfile {
     }
   }
   const uniqueUnmapped = [...new Set(unmapped)];
+  const uniqueUncovered = [...new Set(uncovered)];
 
   return {
     endpoints,
     unmapped: uniqueUnmapped,
+    uncovered: uniqueUncovered,
     knownProperties,
     extractState(payload) {
       const builders = new Map<number, PatchBuilder>();
@@ -865,6 +1017,7 @@ const PRIMARY_PRIORITY: CapabilityKind[] = [
   'pressure',
   'flow',
   'battery',
+  'custom',
 ];
 
 function pickPrimary(capabilities: CapabilityKind[], kind: DeviceKind): CapabilityKind {
@@ -873,4 +1026,10 @@ function pickPrimary(capabilities: CapabilityKind[], kind: DeviceKind): Capabili
     if (capabilities.includes(candidate)) return candidate;
   }
   return capabilities[0] ?? 'onOff';
+}
+
+/** "child_lock" → "Child lock", "eco" → "Eco". */
+function fieldLabel(id: string): string {
+  const words = id.split('_').join(' ');
+  return words.charAt(0).toUpperCase() + words.slice(1);
 }

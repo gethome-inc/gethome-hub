@@ -90,6 +90,9 @@ export const STATE_PATHS = {
   'event.action': { string: true },
   'event.button': { string: true },
   'event.gesture': { string: true },
+  // IR blasters: the freshly-captured code. Writing it also clears
+  // `irRemote.learning`; the saved-code library itself is hub-owned.
+  'irRemote.pendingCode': { string: true },
 } as const;
 
 export type StatePath = keyof typeof STATE_PATHS;
@@ -122,6 +125,11 @@ const commandIntentSchema = z.enum([
   'setFanMode',
   'playPause',
   'setMode',
+  // IR blasters with non-standard property names: irLearn carries a boolean
+  // (use boolMap for the device's ON/OFF); irSendRaw carries the opaque code
+  // string (identity → the send property).
+  'irLearn',
+  'irSendRaw',
 ]);
 
 export const commandRuleSchema = z
@@ -138,6 +146,42 @@ export const commandRuleSchema = z
     message: 'a command rule needs a property, a constPayload, or both',
   });
 
+/**
+ * A declared generic control — the universal fallback for parameters that fit
+ * no typed capability. The hub renders these with the apps' generic
+ * components and writes them through `setCustomField`. The field id IS the
+ * device's payload property; values pass through directly (toggles translate
+ * through onValue/offValue).
+ */
+export const customFieldSchema = z
+  .object({
+    id: z.string().min(1).max(80),
+    label: z.string().min(1).max(80),
+    control: z.enum(['toggle', 'slider', 'select', 'value']),
+    unit: z.string().max(24).optional(),
+    min: z.number().optional(),
+    max: z.number().optional(),
+    step: z.number().optional(),
+    options: z
+      .array(
+        z
+          .object({
+            value: z.union([z.string().max(120), z.number()]),
+            label: z.string().min(1).max(80),
+          })
+          .strict(),
+      )
+      .max(32)
+      .optional(),
+    settable: z.boolean(),
+    /** Wire values a toggle translates to/from (default true/false). */
+    onValue: z.union([z.string().max(120), z.number(), z.boolean()]).optional(),
+    offValue: z.union([z.string().max(120), z.number(), z.boolean()]).optional(),
+  })
+  .strict();
+
+export type DescriptorCustomField = z.infer<typeof customFieldSchema>;
+
 export const endpointMappingSchema = z
   .object({
     endpointId: z.number().int().min(0),
@@ -146,6 +190,7 @@ export const endpointMappingSchema = z
     primary: z.enum(CAPABILITY_KINDS),
     stateRules: z.array(stateRuleSchema),
     commandRules: z.array(commandRuleSchema).default([]),
+    customFields: z.array(customFieldSchema).max(32).default([]),
   })
   .strict();
 
@@ -195,6 +240,7 @@ const PATH_CAPABILITY: Record<StatePath, CapabilityKind> = {
   'event.action': 'event',
   'event.button': 'event',
   'event.gesture': 'event',
+  'irRemote.pendingCode': 'irRemote',
 };
 
 /** Returns problems (empty = sane). Run after zod validation. */
@@ -216,6 +262,15 @@ export function sanityCheckDescriptor(descriptor: MappingDescriptor): string[] {
           `endpoint ${endpoint.endpointId}: state rule for "${rule.to}" but capability "${capability}" not declared`,
         );
       }
+    }
+    const customFields = endpoint.customFields ?? [];
+    if (customFields.length > 0 && !endpoint.capabilities.includes('custom')) {
+      problems.push(`endpoint ${endpoint.endpointId}: customFields declared but "custom" capability missing`);
+    }
+    const fieldIds = new Set<string>();
+    for (const field of customFields) {
+      if (fieldIds.has(field.id)) problems.push(`endpoint ${endpoint.endpointId}: duplicate custom field "${field.id}"`);
+      fieldIds.add(field.id);
     }
   }
   return problems;
@@ -336,9 +391,38 @@ export function applyStateRules(
     if (event && Object.keys(event).length > 0) {
       event.at = Date.now();
     }
+    // A written IR pending code means a capture just finished.
+    const irRemote = patch.irRemote as Record<string, unknown> | undefined;
+    if (irRemote && typeof irRemote.pendingCode === 'string') {
+      irRemote.learning = false;
+    }
+    // Generic fields read their value straight from the payload property (the
+    // field id) — no per-field rule needed. Toggles fold onValue/offValue.
+    const values: Record<string, string | number | boolean> = {};
+    for (const field of endpoint.customFields ?? []) {
+      const raw = payload[field.id];
+      if (raw === undefined || raw === null) continue;
+      const value = coerceCustomValue(field, raw);
+      if (value !== undefined) values[field.id] = value;
+    }
+    if (Object.keys(values).length > 0) {
+      patch.custom = { ...(patch.custom as object | undefined), values };
+    }
     result.set(endpoint.endpointId, patch as Partial<EndpointState>);
   }
   return result;
+}
+
+/** Read a payload value into a custom field's value type. */
+function coerceCustomValue(field: DescriptorCustomField, raw: unknown): string | number | boolean | undefined {
+  if (field.control === 'toggle') {
+    if (field.onValue !== undefined && raw === field.onValue) return true;
+    if (field.offValue !== undefined && raw === field.offValue) return false;
+    if (typeof raw === 'boolean') return raw;
+    return undefined;
+  }
+  if (typeof raw === 'string' || typeof raw === 'number' || typeof raw === 'boolean') return raw;
+  return undefined;
 }
 
 /** The scalar an intent carries, fed through the command rule's transform. */
@@ -365,6 +449,10 @@ function intentValue(command: HubCommand): unknown {
       return command.percent;
     case 'playPause':
       return command.play;
+    case 'irLearn':
+      return command.on;
+    case 'irSendRaw':
+      return command.code;
     default:
       return undefined; // toggle, open/close/stopCovering: constPayload-only
   }
@@ -383,7 +471,20 @@ export function buildCommandPayload(
   command: HubCommand,
 ): Record<string, unknown> | null {
   const endpoint = descriptor.endpoints.find((candidate) => candidate.endpointId === endpointId);
-  const rule = endpoint?.commandRules.find((candidate) => candidate.intent === command.type);
+  if (!endpoint) return null;
+
+  // Writing a declared generic field: the field id is the payload property.
+  if (command.type === 'setCustomField') {
+    const field = endpoint.customFields.find((candidate) => candidate.id === command.fieldId);
+    if (!field || !field.settable) return null;
+    if (field.control === 'toggle') {
+      if (typeof command.value !== 'boolean') return null;
+      return { [field.id]: command.value ? (field.onValue ?? true) : (field.offValue ?? false) };
+    }
+    return { [field.id]: command.value };
+  }
+
+  const rule = endpoint.commandRules.find((candidate) => candidate.intent === command.type);
   if (!rule) return null;
 
   const payload: Record<string, unknown> = { ...(rule.constPayload ?? {}) };

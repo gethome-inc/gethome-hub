@@ -132,6 +132,19 @@ export function buildSetPayload(
       return { [ir.sendProperty]: command.code };
     }
 
+    case 'setCustomField': {
+      const spec = features.customWrites?.[command.fieldId];
+      if (!spec) throw new UnsupportedCommandError(command.type, `no field "${command.fieldId}"`);
+      if (!spec.settable) throw new UnsupportedCommandError(command.type, `"${command.fieldId}" is read-only`);
+      if (spec.control === 'toggle') {
+        if (typeof command.value !== 'boolean') {
+          throw new UnsupportedCommandError(command.type, 'toggle fields take a boolean');
+        }
+        return { [command.fieldId]: command.value ? spec.onValue : spec.offValue };
+      }
+      return { [command.fieldId]: command.value };
+    }
+
     case 'irSaveLearned':
     case 'irSend':
     case 'irDeleteCommand':

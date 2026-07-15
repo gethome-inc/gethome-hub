@@ -255,6 +255,40 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
     await fake.publishAsync('gethome/discovery/doorbell/config', '', { retain: true }).catch(() => {});
   });
 
+  it('exposes device settings as generic custom fields and writes them back', async () => {
+    // The TRV's child_lock (a settable binary) and preset (a settable enum)
+    // have no typed capability — they surface as generic custom fields.
+    const trv = (await devices()).find((device) => device.name === 'Radiator valve')!;
+    const endpoint = trv.endpoints[0]!;
+    expect(endpoint.capabilities).toContain('custom');
+    const custom = endpoint.state.custom as {
+      fields?: Array<{ id: string; control: string; settable: boolean }>;
+      values?: Record<string, unknown>;
+    };
+    const fieldIds = (custom.fields ?? []).map((field) => field.id);
+    expect(fieldIds).toContain('child_lock');
+    expect(fieldIds).toContain('preset');
+
+    // A state report populates the field values.
+    await fake.publishAsync('zigbee2mqtt/Radiator valve', JSON.stringify({ child_lock: 'LOCK', preset: 'eco' }));
+    await waitFor(() => {
+      const current = registry.listDevices().find((device) => device.name === 'Radiator valve');
+      return (current?.endpoints[0]?.state.custom?.values as Record<string, unknown>)?.preset === 'eco';
+    });
+
+    // Writing a field goes out on its own property, translating the toggle.
+    observed.length = 0;
+    await app.inject({
+      method: 'POST',
+      url: `/api/v1/devices/${trv.id}/endpoints/1/commands`,
+      headers: auth(),
+      payload: { type: 'setCustomField', fieldId: 'child_lock', value: false },
+    });
+    await waitFor(() => observed.some((message) => message.topic === 'zigbee2mqtt/Radiator valve/set'));
+    const set = observed.find((message) => message.topic === 'zigbee2mqtt/Radiator valve/set')!;
+    expect(JSON.parse(set.payload)).toEqual({ child_lock: 'UNLOCK' });
+  });
+
   it('runs the IR blaster flow: learn → capture → save → send', async () => {
     const current = () => registry.listDevices().find((device) => device.name === 'Living room IR');
     const irState = () => current()?.endpoints.find((endpoint) => endpoint.endpointId === 1)?.state.irRemote;

@@ -9,11 +9,13 @@ import type {
   ZigbeeAiAssist,
 } from '../adapters/zigbee/adapter.js';
 import type { Z2mDevice, Z2mProfile } from '../adapters/zigbee/exposes-mapper.js';
+import type { CustomFieldSpec } from '../adapters/zigbee/exposes-mapper.js';
 import {
   applyStateRules,
   buildCommandPayload,
   mappingDescriptorSchema,
   sanityCheckDescriptor,
+  type DescriptorCustomField,
   type MappingDescriptor,
 } from './descriptor.js';
 import { createProvider, type MappingProvider } from './providers.js';
@@ -148,12 +150,17 @@ export function exposesHash(device: Z2mDevice): string {
 }
 
 function interpret(descriptor: MappingDescriptor): AppliedAiMapping {
-  // Top-level payload keys the rules read (dotted rules read their root key).
+  // Typed properties = keys mapped onto real capabilities (they supersede any
+  // static custom field); `properties` also includes generic field ids.
+  const typedProperties = new Set<string>();
   const properties = new Set<string>();
   for (const endpoint of descriptor.endpoints) {
     for (const rule of endpoint.stateRules) {
-      properties.add(rule.property.split('.')[0]!);
+      const key = rule.property.split('.')[0]!;
+      typedProperties.add(key);
+      properties.add(key);
     }
+    for (const field of endpoint.customFields) properties.add(field.id);
   }
   return {
     endpoints: descriptor.endpoints.map((endpoint) => ({
@@ -161,9 +168,29 @@ function interpret(descriptor: MappingDescriptor): AppliedAiMapping {
       deviceKind: endpoint.deviceKind,
       capabilities: endpoint.capabilities,
       primary: endpoint.primary,
+      ...(endpoint.customFields.length > 0
+        ? { customFields: endpoint.customFields.map(toCustomFieldSpec) }
+        : {}),
     })),
     properties,
+    typedProperties,
     extractState: (payload) => applyStateRules(descriptor, payload),
     buildCommandPayload: (endpointId, command) => buildCommandPayload(descriptor, endpointId, command),
+  };
+}
+
+/** Drop the hub-side write metadata (onValue/offValue) — the apps see only
+ *  the display inventory. Conditional spreads satisfy exactOptionalPropertyTypes. */
+function toCustomFieldSpec(field: DescriptorCustomField): CustomFieldSpec {
+  return {
+    id: field.id,
+    label: field.label,
+    control: field.control,
+    ...(field.unit !== undefined ? { unit: field.unit } : {}),
+    ...(field.min !== undefined ? { min: field.min } : {}),
+    ...(field.max !== undefined ? { max: field.max } : {}),
+    ...(field.step !== undefined ? { step: field.step } : {}),
+    ...(field.options !== undefined ? { options: field.options } : {}),
+    settable: field.settable,
   };
 }

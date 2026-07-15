@@ -21,7 +21,7 @@ exactly **one home**; sharing a home means granting members access to the hub.
 
 | Module | Responsibility |
 |---|---|
-| `src/schema/` | The canonical device schema: 26 capability kinds, 16 device kinds, typed endpoint state, command intents (incl. IR learn/replay), unit conversions, Matter device-type catalog, zod wire schemas. Dependency-free (zod only) — everything else derives from it. |
+| `src/schema/` | The canonical device schema: 27 capability kinds (incl. a universal `custom` fallback), 16 device kinds, typed endpoint state, command intents (incl. IR learn/replay + `setCustomField`), unit conversions, Matter device-type catalog, zod wire schemas. Dependency-free (zod only) — everything else derives from it. |
 | `src/adapters/` | Protocol drivers. Each implements `ProtocolAdapter` and talks to the rest of the hub only through the narrow `AdapterBus` (announce devices, report state, execute commands). Adapters never touch the database or the API. |
 | `src/core/registry.ts` | `DeviceRegistry` — implements the `AdapterBus`: persists devices/endpoints, merges state patches (per-device write queue + write-through cache), fans events out, routes commands back to the owning adapter. An adapter that fails to start is isolated; the hub keeps running. |
 | `src/core/pairing.ts` | Claim flow: boot pairing code → first claim = owner; owner-minted invite codes (15 min TTL) → members. Opaque bearer tokens, sha256-hashed at rest. |

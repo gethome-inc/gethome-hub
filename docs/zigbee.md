@@ -79,9 +79,16 @@ Highlights (full unit table in [device-schema.md](device-schema.md)):
 - **IR blasters → the `irRemote` capability**: the three standard Zosung/Tuya
   properties (`learn_ir_code`, `learned_ir_code`, `ir_code_to_send`) map to a
   learn-and-replay library. See below.
-- diagnostics and device settings (linkquality, radio voltage, child locks,
-  sensitivities, indicator LEDs, cube side telemetry…) are deliberately
-  *known but ignored* — they never trigger the AI
+- **device settings and any other leftover parameter → the `custom`
+  capability**: every exposed property with no dedicated capability (child
+  locks, presets, sensitivities, indicator LEDs, power-on behaviour, vendor
+  sensors…) is turned into a declared generic control using the expose's own
+  metadata — `binary`→toggle, `enum`→select, ranged `numeric`→slider, else a
+  read-only value. So a device's *every* adjustable parameter is controllable
+  by default, with no AI. See [device-schema.md](device-schema.md).
+- pure diagnostics (linkquality, radio voltage, `action_*` sidecar fields,
+  cube side telemetry…) are deliberately *known but ignored* — noise, never
+  shown, and they never trigger the AI
 
 ### Multi-endpoint devices
 
@@ -112,15 +119,21 @@ transmit a blob). They map to the `irRemote` capability
 
 ### When static mapping isn't enough
 
-Anything left over — plus any device Z2M itself doesn't support — goes to the
-**AI mapper** ([ai-adaptation.md](ai-adaptation.md)); until a mapping exists
-the device is stored with whatever mapped statically and `needsReview: true`.
+Because leftovers become generic custom fields, most devices are fully usable
+with **no AI at all**. The AI mapper ([ai-adaptation.md](ai-adaptation.md)) is
+reserved for genuine gaps:
+
+- a property with **no representation at all** (`uncovered` — composites, or a
+  device Z2M barely supports), or a device Z2M doesn't support → auto-trigger;
+- an explicit `POST /devices/:id/remap` to **upgrade** generic fields to typed
+  capabilities (e.g. a value field → a real `humidity` sensor).
+
+A device only carries `needsReview: true` while something is `uncovered`.
 
 The adapter also watches **runtime payloads**: it keeps the last 3 state
 payloads per device, and a payload key that neither the exposes nor an
 existing AI mapping declares triggers a one-time, debounced AI remap grounded
-in those samples ("we can't interpret this parameter yet" → generate a
-mapping for it). Each unknown key is asked about at most once per run.
+in those samples. Each unknown key is asked about at most once per run.
 
 ## Runtime external converters
 

@@ -47,10 +47,12 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
 ```
 
 - **`src/schema/` is dependency-free** (zod only) and is the single source of
-  truth: 26 capability kinds (incl. `event` for buttons/remotes and `irRemote`
-  for IR blasters), 16 device kinds, typed `EndpointState`, `HubCommand`
-  intents (incl. `ir*` learn/replay), unit converters, Matter device-type
-  catalog, zod wire schemas. Everything else derives from it.
+  truth: 27 capability kinds (incl. `event` for buttons/remotes, `irRemote`
+  for IR blasters, and `custom` — the universal generic-control fallback so
+  any parameter is usable), 16 device kinds, typed `EndpointState`,
+  `HubCommand` intents (incl. `ir*` learn/replay and `setCustomField`), unit
+  converters, Matter device-type catalog, zod wire schemas. Everything else
+  derives from it.
 - **Adapters only see the `AdapterBus`** (`src/adapters/adapter.ts`). They
   never import `src/api` or `src/db`. Adding a protocol = new directory under
   `src/adapters/` + registration in `src/index.ts`.
@@ -74,8 +76,10 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   100 = open), temperatures ×100, power W → mW, energy kWh → mWh, hue/sat
   degrees/percent → 0–254 cluster units. `action` enums parse through
   `adapters/zigbee/actions.ts` into `event` state; multi-endpoint devices
-  address channels via suffixed properties (`state_l1`). Tests in
-  `test/zigbee-*.test.ts` pin all of these.
+  address channels via suffixed properties (`state_l1`); every other leftover
+  expose (settings, vendor knobs) becomes a generic `custom` field from its
+  own metadata, so no parameter is unsupported. Tests in `test/zigbee-*.test.ts`
+  pin all of these.
 - The Matter reducer (`src/adapters/matter/reducer.ts`) is a 1:1 port of the
   iOS `MatterStateReducer` — keep them in lockstep if either changes.
 - Secrets: tokens are stored sha256-only; AI keys AES-256-GCM-encrypted with

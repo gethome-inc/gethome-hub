@@ -39,6 +39,18 @@ The canonical schema's capabilities and their state paths (with exact units):
 - mode → "currentMode" · rvcRun → "rvcOperationalState" · mediaPlayback → "playbackPlaying" (boolean)
 - event → "event.action" (raw string), "event.button" (button id), "event.gesture" (single/double/hold/…) — \
 stateless input events from buttons, remotes and gesture devices; use enumMap or identity on string enums
+- irRemote → "irRemote.pendingCode" (string) for a non-standard IR blaster: map the "learned code" property here \
+and declare commandRules {intent:"irLearn", property:<learn prop>, transform:{boolMap ON/OFF}} and \
+{intent:"irSendRaw", property:<send prop>} (the send code passes through as the value)
+
+For ANY genuine parameter that fits none of the typed capabilities above — device settings, vendor-specific \
+knobs, unusual sensors — declare a **customField** instead of forcing a wrong mapping. Add "custom" to \
+capabilities and one entry per parameter in "customFields": {id (the exact payload property), label, control \
+("toggle"|"slider"|"select"|"value"), settable, and — per control — unit/min/max/step (slider), \
+options:[{value,label}] (select), onValue/offValue (toggle, if the device uses non-boolean on/off). The hub reads \
+the value straight from the payload property and writes it back via the property; you do NOT write stateRules for \
+custom fields. Prefer a typed capability when one truly fits; use customField for everything else so the parameter \
+is still controllable.
 
 Transforms (stateRules run device→canonical; commandRules run canonical→device):
 - {"kind":"identity"} — value passes through
@@ -67,6 +79,12 @@ Example 1 — a dimmable device exposing "state" ("ON"/"OFF") and "dim_level" (0
 Example 2 — a two-relay module exposing "state_l1"/"state_l2" becomes two endpoints (1 and 2), each with an onOff \
 capability, its own stateRules on the suffixed property, and power commandRules.
 
+Example 2b — a plug exposing a settable "power_mode" enum ("green"/"performance") and a read-only "temperature_probe" \
+number (°C, unmapped by the hub) → declare "custom" and:
+"customFields":[
+ {"id":"power_mode","label":"Power mode","control":"select","settable":true,"options":[{"value":"green","label":"Green"},{"value":"performance","label":"Performance"}]},
+ {"id":"temperature_probe","label":"Probe","control":"value","unit":"°C","settable":false}]
+
 Example 3 — a presence sensor publishing an unhandled "presence_event" enum ("enter"/"leave"/"approach"):
 {"version":1,"endpoints":[{"endpointId":1,"deviceKind":"sensor","capabilities":["event"],"primary":"event",
 "stateRules":[
@@ -88,6 +106,7 @@ export function buildMappingUserPrompt(
       (endpoint) =>
         `endpoint ${endpoint.endpointId}${endpoint.label ? ` (${endpoint.label})` : ''}: ${endpoint.capabilities.join(', ')}`,
     );
+  const fielded = staticProfile.unmapped.filter((property) => !staticProfile.uncovered.includes(property));
   const lines = [
     `Device: vendor=${device.definition?.vendor ?? 'unknown'} model=${device.definition?.model ?? 'unknown'}`,
     `description: ${device.definition?.description ?? 'n/a'}`,
@@ -97,10 +116,13 @@ export function buildMappingUserPrompt(
     JSON.stringify(device.definition?.exposes ?? [], null, 1),
     '',
     `Already handled statically (do NOT re-map, the hub keeps these): ${
-      staticSummary.length > 0 ? staticSummary.join(' · ') : 'nothing'
+      staticSummary.length > 0 ? staticSummary.join(', ') : 'nothing'
     }`,
-    `Properties needing mapping: ${
-      staticProfile.unmapped.length > 0 ? staticProfile.unmapped.join(', ') : 'all of them'
+    `Already generic custom fields (controllable; upgrade to a typed capability ONLY if one truly fits): ${
+      fielded.length > 0 ? fielded.join(', ') : 'none'
+    }`,
+    `Uncovered — no representation yet, please handle these (typed capability or customField): ${
+      staticProfile.uncovered.length > 0 ? staticProfile.uncovered.join(', ') : 'none'
     }`,
   ];
   if (samplePayloads.length > 0) {

@@ -98,6 +98,31 @@ state change. Gesture ids follow [device-schema.md](device-schema.md)
 (`single`, `double`, `triple`, `hold`, `release`, …); free-form gestures are
 allowed and shown as-is.
 
+## Generic controls for anything else (the `custom` capability)
+
+For a parameter that fits no dedicated capability, declare the `custom`
+capability and publish its field inventory + values — the apps render
+universal toggle/slider/select/value controls, and writes arrive as
+`{"type":"setCustomField","fieldId":…,"value":…}`:
+
+```
+gethome/discovery/pump/config →
+  {"name":"Pool pump","endpoints":[{"endpointId":1,"deviceKind":"appliance",
+    "capabilities":["onOff","custom"],"primary":"onOff"}]}
+
+gethome/device/pump/state →
+  {"onOff":true,
+   "custom":{
+     "fields":[{"id":"schedule_mode","label":"Schedule","control":"select",
+                "options":[{"value":"eco","label":"Eco"},{"value":"turbo","label":"Turbo"}],"settable":true}],
+     "values":{"schedule_mode":"eco"}}}
+
+gethome/device/pump/set ← {"type":"setCustomField","fieldId":"schedule_mode","value":"turbo"}
+```
+
+Your device receives the intent and applies it. This lets a DIY device expose
+*any* knob without a new capability.
+
 ## Rules & tips
 
 - **Units are canonical**, not native: centi-°C, mireds, percent-100ths with

@@ -99,6 +99,31 @@ describe('canonical commands → Z2M /set payloads', () => {
     expect(() => buildSetPayload({ type: 'irSaveLearned', name: 'TV' }, ir)).toThrow(UnsupportedCommandError);
   });
 
+  it('writes generic custom fields through their own property', () => {
+    const lamp = featuresOf('Desk lamp'); // effect: settable select
+    expect(buildSetPayload({ type: 'setCustomField', fieldId: 'effect', value: 'blink' }, lamp)).toEqual({
+      effect: 'blink',
+    });
+    // child_lock is a toggle whose device values are LOCK/UNLOCK — the
+    // boolean is translated to the device's own on/off vocabulary.
+    const trv = featuresOf('Radiator valve');
+    expect(buildSetPayload({ type: 'setCustomField', fieldId: 'child_lock', value: true }, trv)).toEqual({
+      child_lock: 'LOCK',
+    });
+    expect(buildSetPayload({ type: 'setCustomField', fieldId: 'child_lock', value: false }, trv)).toEqual({
+      child_lock: 'UNLOCK',
+    });
+    // Read-only field → rejected.
+    const probe = featuresOf('Mystery soil probe');
+    expect(() => buildSetPayload({ type: 'setCustomField', fieldId: 'soil_moisture', value: 1 }, probe)).toThrow(
+      UnsupportedCommandError,
+    );
+    // Unknown field → rejected.
+    expect(() => buildSetPayload({ type: 'setCustomField', fieldId: 'nope', value: 1 }, lamp)).toThrow(
+      UnsupportedCommandError,
+    );
+  });
+
   it('rejects intents the device cannot honor', () => {
     const sensor = featuresOf('Bedroom climate sensor');
     expect(() => buildSetPayload({ type: 'power', on: true }, sensor)).toThrow(UnsupportedCommandError);

@@ -132,6 +132,42 @@ export const endpointStateSchema = z
       })
       .strict()
       .optional(),
+    custom: z
+      .object({
+        fields: z
+          .array(
+            z
+              .object({
+                id: z.string().min(1).max(80),
+                label: z.string().min(1).max(80),
+                control: z.enum(['toggle', 'slider', 'select', 'value']),
+                unit: z.string().max(24).optional(),
+                min: z.number().optional(),
+                max: z.number().optional(),
+                step: z.number().optional(),
+                options: z
+                  .array(
+                    z
+                      .object({
+                        value: z.union([z.string().max(120), z.number()]),
+                        label: z.string().min(1).max(80),
+                      })
+                      .strict(),
+                  )
+                  .max(32)
+                  .optional(),
+                settable: z.boolean(),
+              })
+              .strict(),
+          )
+          .max(32)
+          .optional(),
+        values: z
+          .record(z.string().max(80), z.union([z.string().max(400), z.number(), z.boolean()]))
+          .optional(),
+      })
+      .strict()
+      .optional(),
     currentMode: uint8.optional(),
     rvcOperationalState: uint8.optional(),
   })
@@ -188,6 +224,14 @@ export const commandSchema = z.discriminatedUnion('type', [
       type: z.literal('irRenameCommand'),
       commandId: z.string().min(1).max(60),
       name: z.string().min(1).max(80),
+    })
+    .strict(),
+  // The universal generic-control write (the `custom` capability).
+  z
+    .object({
+      type: z.literal('setCustomField'),
+      fieldId: z.string().min(1).max(80),
+      value: z.union([z.string().max(400), z.number(), z.boolean()]),
     })
     .strict(),
 ]);

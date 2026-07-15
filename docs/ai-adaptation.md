@@ -1,24 +1,33 @@
 # AI device adaptation
 
 Zigbee is an open ecosystem with tens of thousands of device models; no static
-mapping table covers them all. When the hub meets a device it can't fully
-place, it can ask an LLM to generate the mapping — turning "unsupported
-device" into a one-time, self-healing event.
+mapping table covers them all. Two things make the hub support *any* device:
+the static mapper turns every leftover parameter into a generic **custom
+field** (so nothing is unusable by default — see
+[device-schema.md](device-schema.md)), and, for the genuine gaps, an LLM
+generates a mapping — turning "unsupported device" into a one-time,
+self-healing event, and upgrading generic fields to typed capabilities.
 
 ## When it triggers
 
-1. A Zigbee device's static exposes mapping yields **no capabilities**, or
-   leaves meaningful exposed properties unmapped (vendor-specific enums,
-   unusual units), or Zigbee2MQTT itself doesn't know the device.
+1. A property has **no representation at all** (`uncovered`) — a shape even a
+   generic field can't hold (composites/lists), or a device Z2M barely
+   supports — or the static mapping yields **no capabilities**.
 2. **At runtime**, a device publishes a payload key that neither the static
    profile nor an existing AI mapping declares — a new, uninterpretable
    parameter. The adapter debounces (~5 s), then requests a fresh mapping
    grounded in the device's recent payloads. Each unknown key is asked about
    at most once per run.
-3. The owner explicitly requests `POST /api/v1/devices/:id/remap`.
+3. The owner explicitly requests `POST /api/v1/devices/:id/remap` — including
+   to **upgrade** working generic fields into richer typed capabilities.
+
+Parameters that already became generic custom fields do **not** auto-trigger
+the AI: they are controllable as-is, so a device with only fielded leftovers
+uses no API calls.
 
 **Without a configured API key nothing is sent anywhere** — the device simply
-appears with whatever mapped statically, flagged `needsReview: true`.
+appears with whatever mapped statically (typed capabilities + generic fields),
+flagged `needsReview: true` only if something is still `uncovered`.
 
 ## Bring your own key
 
@@ -75,13 +84,22 @@ interpreted, never executed):
   `event.at`.
 - **commandRules** run canonical → device: intent value → payload key
   (+ optional `constPayload`), with `enumMap` reversed automatically.
+- **customFields** are the universal fallback: for a parameter that fits no
+  typed capability, the model declares a generic control
+  (`{id, label, control: toggle|slider|select|value, settable, …}`) instead of
+  forcing a wrong mapping. The `id` is the payload property; the hub reads the
+  value straight from it and writes it back through `setCustomField` — no
+  stateRules needed. This is what lets the AI make *any* device controllable,
+  not only devices that happen to fit the typed schema.
 - Multi-endpoint devices declare several endpoints (`state_l1` → endpoint 1,
   `state_l2` → endpoint 2, …).
 
 The descriptor **overlays** the static exposes mapping: the hub keeps running
 its built-in rules and applies the descriptor's rules on top (the descriptor
-wins on conflicts, endpoint structures are merged). The model is therefore
-asked to map only what the static mapper left over.
+wins on conflicts, endpoint structures are merged, and a typed mapping
+supersedes the static generic field for that property). The model is asked to
+map what the static mapper left generic — upgrading fields to typed
+capabilities where one fits, and covering anything still `uncovered`.
 
 Validation is layered: JSON-schema-constrained generation → zod parse →
 sanity checks (unique endpoints, primary ∈ capabilities, every rule's target

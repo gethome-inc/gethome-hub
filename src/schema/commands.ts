@@ -36,6 +36,11 @@ export type HubCommand =
   | { type: 'irSend'; commandId: string }
   | { type: 'irDeleteCommand'; commandId: string }
   | { type: 'irRenameCommand'; commandId: string; name: string }
+  /**
+   * Write one declared custom field (the `custom` capability) — the universal
+   * intent behind every generic toggle/slider/select the apps render.
+   */
+  | { type: 'setCustomField'; fieldId: string; value: string | number | boolean }
   /** Internal (registry → adapter): send an already-resolved opaque blob. */
   | { type: 'irSendRaw'; code: string };
 
@@ -64,6 +69,7 @@ export const COMMAND_TYPES: readonly HubCommandType[] = [
   'irSend',
   'irDeleteCommand',
   'irRenameCommand',
+  'setCustomField',
 ] as const;
 
 /** Thrown by adapters when a device has no way to honor an intent. */
