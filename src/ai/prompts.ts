@@ -1,12 +1,14 @@
 import type { Z2mDevice, Z2mProfile } from '../adapters/zigbee/exposes-mapper.js';
 
 /**
- * Prompt construction for AI device adaptation. The model sees the device's
- * published schema (Z2M exposes) plus recent state payloads and must emit a
- * MappingDescriptor (structured output constrained by its JSON schema).
+ * Prompt construction for AI device adaptation. The mapping agent sees the
+ * device's published schema (Z2M exposes) plus recent state payloads — in the
+ * prompt and as files in its working directory — may research the device on
+ * the web, and must finish by calling the `submit_mapping` tool with a
+ * MappingDescriptor (validated in the tool; errors come back for a retry).
  *
  * The descriptor OVERLAYS the static exposes mapping: the hub keeps running
- * its built-in rules and applies the descriptor's rules on top, so the model
+ * its built-in rules and applies the descriptor's rules on top, so the agent
  * is asked to map only what the static mapper left over.
  */
 
@@ -93,7 +95,20 @@ Example 3 — a presence sensor publishing an unhandled "presence_event" enum ("
 
 Rules of thumb: declare a capability only if you map at least one state rule for it; keep endpoint ids consistent \
 with the hub's static endpoints when extending them (the whole device is endpoint 1); pick deviceKind from what the \
-device physically is; be conservative — an unmapped extra is better than a wrong mapping.`;
+device physically is; be conservative — an unmapped extra is better than a wrong mapping.
+
+How you work (you are an autonomous agent):
+- Your working directory contains the full research material: device.json (vendor/model/description + complete \
+exposes tree), samples.json (recent raw payloads), static-mapping.json (what the hub already mapped, its generic \
+fields, and the uncovered/unmapped lists), and schema-reference.md (the exact JSON schema your submission must \
+satisfy plus the whitelisted state paths). Read them instead of guessing.
+- When the exposes and samples are NOT enough to map a property confidently — ambiguous units, undocumented enums, \
+vendor-specific behavior — research it: WebSearch for "<vendor> <model> zigbee2mqtt" (the Zigbee2MQTT device page \
+and the zigbee-herdsman-converters source are the best references) and WebFetch the relevant pages. Keep searches \
+to the device's vendor/model/property names — never include anything else from this hub in a query.
+- You MUST finish by calling the submit_mapping tool with the complete MappingDescriptor. Do not answer in prose. \
+If submit_mapping returns validation errors, fix the descriptor and call it again. A successful submission is the \
+end of your task.`;
 
 export function buildMappingUserPrompt(
   device: Z2mDevice,
@@ -133,8 +148,8 @@ export function buildMappingUserPrompt(
   }
   lines.push(
     '',
-    'Emit the MappingDescriptor covering the unmapped properties (your rules run on top of the static mapping ' +
-      'and win on conflicts).',
+    'Produce the MappingDescriptor covering the unmapped properties (your rules run on top of the static ' +
+      'mapping and win on conflicts) and submit it with the submit_mapping tool.',
   );
   return lines.join('\n');
 }

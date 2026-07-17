@@ -62,7 +62,11 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   keep running (and must boot with no devices/radios at all).
 - **AI mappings are data, not code**: `MappingDescriptor`
   (`src/ai/descriptor.ts`) is zod-validated and interpreted. Never execute
-  model output.
+  model output. The mapping is produced by an autonomous agent
+  (`src/ai/agent.ts`, Claude Agent SDK — research-only tools, `submit_mapping`
+  MCP tool, backoff on account failures; `docs/ai-adaptation.md` is
+  canonical), authenticated with the owner's Anthropic API key or Claude
+  subscription token.
 
 ## Conventions that bite if missed
 
@@ -92,9 +96,10 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   pin all of these.
 - The Matter reducer (`src/adapters/matter/reducer.ts`) is a 1:1 port of the
   iOS `MatterStateReducer` — keep them in lockstep if either changes.
-- Secrets: tokens are stored sha256-only; AI keys AES-256-GCM-encrypted with
-  the hub secret (`<data>/hub-secret.json`, 0600); the API never returns key
-  material. Keep it that way.
+- Secrets: tokens are stored sha256-only; the AI credential (API key or
+  subscription token) AES-256-GCM-encrypted with the hub secret
+  (`<data>/hub-secret.json`, 0600); the API never returns key material. Keep
+  it that way.
 - matter.js is pinned to a minor (`~0.17.x`) because its API churns; keep all
   matter.js-specific code inside `src/adapters/matter/`.
 - `tsconfig` uses `exactOptionalPropertyTypes` — build optional-field objects

@@ -57,7 +57,7 @@ async function main(): Promise<void> {
       mqttUrl: config.MQTT_URL,
       baseTopic: config.Z2M_BASE_TOPIC,
       log: log.child({ module: 'zigbee' }),
-      aiAssist: new AiDeviceMapper(db, settings, log.child({ module: 'ai' })),
+      aiAssist: new AiDeviceMapper(db, settings, log.child({ module: 'ai' }), { dataDir: config.DATA_DIR }),
     });
     registry.registerAdapter(zigbee);
   }

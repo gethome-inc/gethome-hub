@@ -18,29 +18,53 @@ import {
   type DescriptorCustomField,
   type MappingDescriptor,
 } from './descriptor.js';
-import { createProvider, type MappingProvider } from './providers.js';
+import {
+  DEFAULT_MODEL,
+  createMappingAgent,
+  type AgentRunStats,
+  type MappingProvider,
+} from './agent.js';
+import { AiUnavailableError } from './errors.js';
 import { MAPPING_SYSTEM_PROMPT, buildMappingUserPrompt } from './prompts.js';
 
 /**
  * AI device adaptation. When the static exposes mapper can't fully place a
- * device, this module asks the configured model (Anthropic or OpenAI, with
- * the owner's own key) for a MappingDescriptor, validates and sanity-checks
- * it, caches it per device model in Postgres, and hands the adapter an
+ * device, this module runs the mapping agent (agent.ts — Claude Agent SDK,
+ * with the owner's own API key or Claude subscription token) to research the
+ * device and produce a MappingDescriptor, validates and sanity-checks it,
+ * caches it per device model in Postgres, and hands the adapter an
  * interpreted mapping.
  *
- * Without a configured key this module does nothing — devices simply keep
- * their partial static mapping and a needs-review flag. Nothing but the
- * device's published schema (exposes + sample payloads) is ever sent to the
- * provider. See docs/ai-adaptation.md.
+ * Without a configured credential this module does nothing — devices simply
+ * keep their partial static mapping and a needs-review flag. Nothing but the
+ * device's published schema (exposes + sample payloads, plus web searches
+ * derived from its vendor/model strings) ever leaves the machine. See
+ * docs/ai-adaptation.md.
+ *
+ * Operational guarantees added around the agent:
+ *  - one agent run at a time (each run is a subprocess and costs real money);
+ *  - concurrent requests for the same device model share one run;
+ *  - transient account failures (rate limit, exhausted subscription window,
+ *    bad credentials…) trip a backoff gate — no run is even attempted until
+ *    it expires — and are surfaced on GET /settings/ai as `status.lastError`.
  */
 export class AiDeviceMapper implements ZigbeeAiAssist {
-  /** Test seam: overrides the provider constructed from settings. */
+  /** Test seam: overrides the agent constructed from settings. */
   providerOverride: MappingProvider | null = null;
+
+  /** In-flight run per exposes hash — concurrent same-model requests join it. */
+  private readonly inFlight = new Map<string, Promise<AppliedAiMapping | null>>();
+  /** Serializes agent runs hub-wide. */
+  private queue: Promise<unknown> = Promise.resolve();
+  /** Backoff gate: no runs until this timestamp. */
+  private unavailableUntil = 0;
+  private failureCount = 0;
 
   constructor(
     private readonly db: Db,
     private readonly settings: SettingsService,
     private readonly log: Logger,
+    private readonly options: { dataDir: string },
   ) {}
 
   async requestMapping(
@@ -63,39 +87,18 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
       }
     }
 
-    const provider = await this.resolveProvider();
-    if (!provider) return null;
+    const existing = this.inFlight.get(hash);
+    if (existing) return existing;
 
-    this.log.info(`Asking the AI mapper about ${device.definition?.model ?? device.friendly_name}…`);
-    let descriptor: MappingDescriptor;
-    try {
-      const candidate = await provider.generate(
-        MAPPING_SYSTEM_PROMPT,
-        buildMappingUserPrompt(device, staticProfile, options?.samples ?? []),
-      );
-      const parsed = mappingDescriptorSchema.safeParse(candidate);
-      if (!parsed.success) {
-        this.log.warn({ issues: parsed.error.issues }, 'AI mapping failed validation');
-        await this.store(device, hash, candidate, 'rejected');
-        return null;
-      }
-      const problems = sanityCheckDescriptor(parsed.data);
-      if (problems.length > 0) {
-        this.log.warn({ problems }, 'AI mapping failed sanity checks');
-        await this.store(device, hash, parsed.data, 'rejected');
-        return null;
-      }
-      descriptor = parsed.data;
-    } catch (error) {
-      this.log.warn({ err: error }, 'AI mapping request failed');
-      return null;
-    }
-
-    await this.store(device, hash, descriptor, 'generated');
-    this.log.info(
-      `AI mapping stored for ${device.definition?.model ?? device.friendly_name} (${descriptor.endpoints.length} endpoint(s)).`,
+    const run = this.serialize(() =>
+      this.generateMapping(device, staticProfile, hash, options?.samples ?? []),
     );
-    return interpret(descriptor);
+    this.inFlight.set(hash, run);
+    try {
+      return await run;
+    } finally {
+      this.inFlight.delete(hash);
+    }
   }
 
   /** Drop a cached mapping so the next announcement regenerates it. */
@@ -105,13 +108,128 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
       .where(and(eq(aiMappings.adapter, 'zigbee'), eq(aiMappings.exposesHash, exposesHash(device))));
   }
 
+  /** Chain onto the run queue: at most one agent subprocess at a time. */
+  private serialize<T>(task: () => Promise<T>): Promise<T> {
+    const next = this.queue.then(task);
+    this.queue = next.catch(() => undefined);
+    return next;
+  }
+
+  private async generateMapping(
+    device: Z2mDevice,
+    staticProfile: Z2mProfile,
+    hash: string,
+    samples: Record<string, unknown>[],
+  ): Promise<AppliedAiMapping | null> {
+    if (Date.now() < this.unavailableUntil) {
+      this.log.debug(
+        `AI backoff active until ${new Date(this.unavailableUntil).toISOString()} — skipping mapping request.`,
+      );
+      return null;
+    }
+
+    const provider = await this.resolveProvider();
+    if (!provider) return null;
+
+    this.log.info(`Asking the mapping agent about ${device.definition?.model ?? device.friendly_name}…`);
+    let stats: AgentRunStats | null = null;
+    let descriptor: MappingDescriptor;
+    try {
+      const candidate = await provider.generate(
+        MAPPING_SYSTEM_PROMPT,
+        buildMappingUserPrompt(device, staticProfile, samples),
+        {
+          device,
+          staticProfile,
+          samples,
+          exposesHash: hash,
+          onStats: (s) => {
+            stats = s;
+          },
+        },
+      );
+      const parsed = mappingDescriptorSchema.safeParse(candidate);
+      if (!parsed.success) {
+        this.log.warn({ issues: parsed.error.issues }, 'AI mapping failed validation');
+        await this.store(device, hash, candidate, 'rejected');
+        await this.recordRun(false, stats);
+        return null;
+      }
+      const problems = sanityCheckDescriptor(parsed.data);
+      if (problems.length > 0) {
+        this.log.warn({ problems }, 'AI mapping failed sanity checks');
+        await this.store(device, hash, parsed.data, 'rejected');
+        await this.recordRun(false, stats);
+        return null;
+      }
+      descriptor = parsed.data;
+    } catch (error) {
+      if (error instanceof AiUnavailableError) {
+        await this.recordUnavailable(error);
+        return null;
+      }
+      // The run failed on its own merits (gave up, never submitted…). The
+      // account works, so nothing is cached and no backoff is armed — the
+      // next natural trigger simply tries again.
+      this.log.warn({ err: error }, 'AI mapping request failed');
+      await this.recordRun(false, stats);
+      return null;
+    }
+
+    await this.store(device, hash, descriptor, 'generated');
+    await this.recordRun(true, stats);
+    this.log.info(
+      `AI mapping stored for ${device.definition?.model ?? device.friendly_name} (${descriptor.endpoints.length} endpoint(s)).`,
+    );
+    return interpret(descriptor);
+  }
+
   private async resolveProvider(): Promise<MappingProvider | null> {
     if (this.providerOverride) return this.providerOverride;
-    const { provider, model } = await this.settings.getAiSettings();
+    const { provider, authType, model } = await this.settings.getAiSettings();
     if (!provider) return null;
-    const apiKey = await this.settings.aiKey();
-    if (!apiKey) return null;
-    return createProvider(provider, apiKey, model);
+    const secret = await this.settings.aiKey();
+    if (!secret) return null;
+    return createMappingAgent({ authType, secret }, model, this.options.dataDir, this.log);
+  }
+
+  /** Transient account/service failure: arm the backoff gate and surface it. */
+  private async recordUnavailable(error: AiUnavailableError): Promise<void> {
+    this.failureCount += 1;
+    const ladder = [60_000, 300_000, 1_800_000, 7_200_000] as const;
+    const backoffMs = ladder[Math.min(this.failureCount, ladder.length) - 1]!;
+    this.unavailableUntil = error.resetAt
+      ? Math.max(error.resetAt.getTime(), Date.now() + 30_000)
+      : Date.now() + backoffMs;
+    this.log.warn(
+      { kind: error.kind, retryAt: new Date(this.unavailableUntil).toISOString() },
+      `AI unavailable (${error.kind}): ${error.message.slice(0, 200)}`,
+    );
+    const current = await this.settings.getAiStatus();
+    await this.settings.setAiStatus({
+      ...(current.lastRun !== undefined ? { lastRun: current.lastRun } : {}),
+      lastError: {
+        kind: error.kind,
+        message: error.message.slice(0, 200),
+        at: new Date().toISOString(),
+        ...(error.resetAt !== undefined ? { resetAt: error.resetAt.toISOString() } : {}),
+      },
+    });
+  }
+
+  /** A run completed (well or badly) — the account works, so clear the gate. */
+  private async recordRun(ok: boolean, stats: AgentRunStats | null): Promise<void> {
+    this.failureCount = 0;
+    this.unavailableUntil = 0;
+    const { model } = await this.settings.getAiSettings();
+    await this.settings.setAiStatus({
+      lastRun: {
+        at: new Date().toISOString(),
+        ok,
+        ...(stats !== null ? { costUsd: stats.costUsd } : {}),
+        model: model ?? DEFAULT_MODEL,
+      },
+    });
   }
 
   private async store(

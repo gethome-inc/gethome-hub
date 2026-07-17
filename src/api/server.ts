@@ -288,18 +288,31 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
 
   // ── AI settings ──────────────────────────────────────────────────────────
 
-  app.get('/api/v1/settings/ai', ownerOnly, async () => deps.settings.getAiSettings());
+  const aiSettingsResponse = async () => {
+    const [ai, status] = await Promise.all([deps.settings.getAiSettings(), deps.settings.getAiStatus()]);
+    return { ...ai, status };
+  };
+
+  app.get('/api/v1/settings/ai', ownerOnly, aiSettingsResponse);
 
   app.put('/api/v1/settings/ai', ownerOnly, async (request) => {
     const body = z
       .object({
-        provider: z.enum(['anthropic', 'openai']),
+        // Anthropic is the only provider — tolerated for older clients.
+        provider: z.literal('anthropic').optional(),
+        authType: z.enum(['api_key', 'oauth_token']).default('api_key'),
         model: z.string().min(1).max(120).nullable().optional(),
-        apiKey: z.string().min(8).max(400),
+        // An Anthropic API key or a Claude subscription OAuth token
+        // (`claude setup-token`) — write-only, stored encrypted.
+        apiKey: z.string().min(8).max(4000),
       })
       .parse(request.body);
-    await deps.settings.setAiSettings(body.provider, body.model ?? null, body.apiKey);
-    return deps.settings.getAiSettings();
+    await deps.settings.setAiSettings({
+      authType: body.authType,
+      model: body.model ?? null,
+      apiKey: body.apiKey,
+    });
+    return aiSettingsResponse();
   });
 
   app.delete('/api/v1/settings/ai', ownerOnly, async (_request, reply) => {
