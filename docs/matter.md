@@ -22,9 +22,10 @@ The device must already be reachable over IP:
 **BLE-assisted commissioning** (taking a factory-new device through Wi-Fi
 provisioning directly) needs host Bluetooth (`@matter/nodejs-ble` + BlueZ) and
 is a planned follow-up — on a Raspberry Pi the built-in radio makes this a
-natural fit. Until then, the simplest path for factory-new Wi-Fi devices is:
-commission with the GetHome iOS app first, then share to the hub via
-multi-admin (open a commissioning window) — or use Ethernet/Thread devices.
+natural fit. Until then, the simplest path for factory-new Wi-Fi devices is to
+pair them into another Matter ecosystem first (Apple Home, Google Home, Alexa,
+or `chip-tool`), then share to the hub via multi-admin (open a commissioning
+window) — or use Ethernet/Thread devices.
 
 ## Runtime requirements
 
@@ -45,8 +46,8 @@ multi-admin (open a commissioning window) — or use Ethernet/Thread devices.
   `src/adapters/matter/reducer.ts` — a 1:1 port of the GetHome app's own
   Matter state reducer (same cluster/attribute IDs, same unit transforms:
   illuminance log-scale, battery half-percents (truncated, like the app),
-  thermostat 0x8000 null filtering, 0.1 W power quantization). Hub-attached
-  and phone-attached Matter devices therefore behave identically.
+  thermostat 0x8000 null filtering, 0.1 W power quantization). Hub devices
+  therefore produce exactly the typed state the GetHome app renders.
 - On announce, the adapter **seeds initial state** from matter.js's cached
   attribute values (every cluster client's `getLocal()`), so devices show
   real state right after a hub restart instead of an empty card until their
