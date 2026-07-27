@@ -13,7 +13,8 @@
 #
 # Studio follows progress through structured markers on stdout (keep them
 # stable — the install screen is driven by them):
-#   @@STEP:<id>@@       a phase begins (ids: docker, checkout, start, health)
+#   @@STEP:<id>@@       a phase begins
+#                       (ids: docker, checkout, start, autostart, health)
 #   @@ERROR:<text>@@    a human-readable failure reason (last one wins)
 #   @@PAIRING:<code>@@  the pairing code, when the hub is unclaimed
 #   @@DONE@@            the install finished successfully
@@ -100,6 +101,24 @@ fi
 step start "Building and starting the stack (the first build takes a few minutes)…"
 $DOCKER compose up -d --build \
   || fail "docker compose failed to build or start the stack. See the output above, or run: $DOCKER compose logs"
+
+# ── Autostart ──────────────────────────────────────────────────────────────
+# Every compose service carries `restart: unless-stopped`, so the hub comes
+# back by itself after a power cut — but only if the Docker daemon starts at
+# boot. Distribution packages usually enable it; make it explicit so a Pi that
+# is simply unplugged always comes back up on its own.
+step autostart "Setting the hub to start automatically on power-up…"
+if command -v systemctl >/dev/null 2>&1; then
+  $SUDO systemctl enable docker.service >/dev/null 2>&1 || true
+  $SUDO systemctl enable containerd.service >/dev/null 2>&1 || true
+  if systemctl is-enabled docker.service >/dev/null 2>&1; then
+    say "Docker starts at boot; the hub will restart with it."
+  else
+    say "WARNING: could not enable Docker at boot. After a reboot, start the hub with: cd $INSTALL_DIR/gethome-hub && $DOCKER compose up -d"
+  fi
+else
+  say "No systemd here — make sure Docker starts at boot so the hub comes back after a power cut."
+fi
 
 # ── Health ─────────────────────────────────────────────────────────────────
 step health "Waiting for the hub to answer on port 8420…"

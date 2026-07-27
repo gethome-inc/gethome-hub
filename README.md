@@ -54,7 +54,10 @@ curl -fsSL https://raw.githubusercontent.com/gethome-inc/gethome-hub/main/deploy
 
 The installer sets up Docker if needed, starts the stack
 (hub + Postgres + Mosquitto, optionally Zigbee2MQTT), and prints the
-**pairing code** — enter it in the GetHome app to become the owner.
+**pairing code** — enter it in the GetHome app to become the owner. It also
+enables Docker at boot; together with `restart: unless-stopped` on every
+service, that means the hub comes back on its own after a power cut — plug the
+Pi in and it runs, with nothing to start by hand.
 
 **macOS** (native — no Docker, so mDNS discovery, the Matter controller, and
 Zigbee USB sticks actually work; see [docs/macos.md](docs/macos.md)):
