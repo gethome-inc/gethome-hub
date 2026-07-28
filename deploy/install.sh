@@ -14,8 +14,12 @@
 # Studio follows progress through structured markers on stdout (keep them
 # stable — the install screen is driven by them):
 #   @@STEP:<id>@@       a phase begins
-#                       (ids: docker, checkout, start, autostart, health)
+#                       (ids: docker, checkout, zigbee, start, autostart, health)
 #   @@ERROR:<text>@@    a human-readable failure reason (last one wins)
+#   @@WARN:<text>@@     something worth telling the user; the install continues
+#   @@ZIGBEE_FOUND:<device>@@  the coordinator that will be used
+#   @@ZIGBEE_MAYBE:<device>@@  a USB serial device that might be a coordinator
+#                              but doesn't identify itself as one
 #   @@PAIRING:<code>@@  the pairing code, when the hub is unclaimed
 #   @@DONE@@            the install finished successfully
 
@@ -39,6 +43,9 @@ done
 say()  { if [[ -t 1 ]]; then printf '\n\033[1m==> %s\033[0m\n' "$*"; else printf '\n==> %s\n' "$*"; fi; }
 step() { printf '@@STEP:%s@@\n' "$1"; say "$2"; }
 fail() { printf '@@ERROR:%s@@\n' "$1"; echo "ERROR: $1" >&2; exit 1; }
+# Something the user should know about, but not a reason to stop: the hub is
+# useful without Zigbee, so a coordinator that won't start is a warning.
+warn() { printf '@@WARN:%s@@\n' "$1"; say "WARNING: $1"; }
 trap 'code=$?; printf "@@ERROR:Command failed (exit %s) at line %s: %s@@\n" "$code" "$LINENO" "$BASH_COMMAND"; echo "ERROR (exit $code) at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 # ── Privilege check ────────────────────────────────────────────────────────
@@ -87,20 +94,79 @@ if [[ ! -f .env ]]; then
     echo "HUB_NAME=GetHome Hub"
   } | $SUDO tee .env >/dev/null
 fi
+# ── Zigbee ─────────────────────────────────────────────────────────────────
+# Zigbee is optional: Matter and Wi-Fi devices work without it. So nothing here
+# is ever fatal unless the user named an adapter explicitly and got it wrong.
+step zigbee "Looking for a Zigbee coordinator…"
+
+# Whatever happens now, make plugging a stick in *later* just work: udev wakes
+# a oneshot unit that re-runs the detector and brings Zigbee2MQTT up. Without
+# this, a user who buys a stick next month would have to re-run the installer.
+$SUDO install -m 0755 deploy/zigbee-detect.sh /usr/local/lib/gethome-zigbee-detect.sh
+$SUDO tee /etc/systemd/system/gethome-zigbee.service >/dev/null <<UNIT
+[Unit]
+Description=Configure Zigbee for the GetHome Hub when a coordinator is attached
+After=docker.service
+
+[Service]
+Type=oneshot
+Environment=GETHOME_DIR=${INSTALL_DIR}/gethome-hub
+ExecStart=/usr/local/lib/gethome-zigbee-detect.sh
+UNIT
+# Trigger on any USB serial device: the script is the authority on whether a
+# given device is really a coordinator, udev only needs to wake it.
+$SUDO tee /etc/udev/rules.d/99-gethome-zigbee.rules >/dev/null <<'RULE'
+SUBSYSTEM=="tty", ACTION=="add", ENV{ID_BUS}=="usb", TAG+="systemd", ENV{SYSTEMD_WANTS}="gethome-zigbee.service"
+RULE
+if command -v systemctl >/dev/null 2>&1; then
+  $SUDO systemctl daemon-reload >/dev/null 2>&1 || true
+  $SUDO udevadm control --reload-rules >/dev/null 2>&1 || true
+fi
+
 if [[ -n "$ZIGBEE_ADAPTER" ]]; then
+  # Explicitly named by the user (or by GetHome Studio, which detected it) —
+  # a wrong path here is worth stopping for.
   say "Enabling Zigbee (adapter: ${ZIGBEE_ADAPTER})…"
-  [[ -e "$ZIGBEE_ADAPTER" ]] || fail "Zigbee adapter $ZIGBEE_ADAPTER not found on this machine (check: ls /dev/tty*)."
+  [[ -e "$ZIGBEE_ADAPTER" ]] || fail "Zigbee adapter $ZIGBEE_ADAPTER not found on this machine (check: ls /dev/serial/by-id/)."
   $SUDO sed -i '/^ZIGBEE_ADAPTER=/d;/^COMPOSE_PROFILES=/d' .env
   {
     echo "ZIGBEE_ADAPTER=${ZIGBEE_ADAPTER}"
     echo "COMPOSE_PROFILES=zigbee"
   } | $SUDO tee -a .env >/dev/null
+else
+  $SUDO env GETHOME_DIR="$INSTALL_DIR/gethome-hub" \
+    bash deploy/zigbee-detect.sh --no-start || \
+    say "Continuing without Zigbee. Plug a coordinator in whenever you like — the hub picks it up on its own."
 fi
 
 # ── Build & start ──────────────────────────────────────────────────────────
 step start "Building and starting the stack (the first build takes a few minutes)…"
 $DOCKER compose up -d --build \
   || fail "docker compose failed to build or start the stack. See the output above, or run: $DOCKER compose logs"
+
+# Did the coordinator actually answer? A device node only proves something is
+# plugged in — Zigbee2MQTT talking to the radio is the real test, and it is the
+# difference between "Zigbee works" and "Zigbee looks configured but is dead".
+if grep -q '^COMPOSE_PROFILES=.*zigbee' .env 2>/dev/null; then
+  say "Waiting for Zigbee2MQTT to reach the coordinator…"
+  ZIGBEE_OK=""
+  for _ in $(seq 1 45); do
+    if $DOCKER compose logs zigbee2mqtt 2>/dev/null | grep -q "Zigbee2MQTT started successfully"; then
+      ZIGBEE_OK=1; break
+    fi
+    case "$($DOCKER compose ps --format '{{.State}}' zigbee2mqtt 2>/dev/null | head -n1)" in
+      exited|restarting|dead) break ;;
+    esac
+    sleep 2
+  done
+  if [[ -n "$ZIGBEE_OK" ]]; then
+    say "Zigbee2MQTT is running and talking to the coordinator."
+  else
+    ZIGBEE_REASON=$($DOCKER compose logs --tail 30 zigbee2mqtt 2>/dev/null \
+      | grep -iE 'error|failed|denied|cannot|no such' | tail -n1 | cut -c1-200)
+    warn "The hub is running, but the Zigbee coordinator didn't come up. Everything else works — Matter and Wi-Fi devices are unaffected. Try reseating the USB stick (a powered extension cable helps; the Pi's own ports are noisy), then restart Zigbee with: cd $INSTALL_DIR/gethome-hub && $DOCKER compose restart zigbee2mqtt${ZIGBEE_REASON:+ — last error: $ZIGBEE_REASON}"
+  fi
+fi
 
 # ── Autostart ──────────────────────────────────────────────────────────────
 # Every compose service carries `restart: unless-stopped`, so the hub comes
