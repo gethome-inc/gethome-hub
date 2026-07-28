@@ -45,7 +45,6 @@ CERTAIN_IDS=(
   "1cf1:0030" # dresden elektronik ConBee II
   "1cf1:0032" # dresden elektronik ConBee III
   "0451:16a8" # Texas Instruments CC2531
-  "0451:bef3" # Texas Instruments CC2652 / LAUNCHXL
 )
 
 # Generic USB-serial bridges. Sonoff and friends use these, but so does half
@@ -56,6 +55,8 @@ MAYBE_IDS=(
   "1a86:7523" # QinHeng CH340
   "0403:6001" # FTDI FT232
   "0403:6015" # FTDI FT-X
+  "0451:bef3" # TI XDS110 debug probe — a CC2652 LaunchPad, or any other
+              # LaunchPad, so it is offered rather than assumed
 )
 
 usb_ids() {
