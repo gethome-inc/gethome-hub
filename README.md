@@ -23,10 +23,13 @@ hub can control them.
   wired controllers, and third-party bridges into the hub
   ([docs/mqtt-integrations.md](docs/mqtt-integrations.md)).
 - **AI device adaptation** — unknown devices, and unknown parameters a
-  device starts publishing later, are mapped into the schema by an LLM
-  (bring your own Anthropic or OpenAI API key; stored encrypted on the hub,
-  used only for this). No key → devices still appear, flagged "needs
-  review". ([docs/ai-adaptation.md](docs/ai-adaptation.md))
+  device starts publishing later, are mapped into the schema by an
+  autonomous mapping agent built on the Claude Agent SDK: it reads the
+  device's published schema, researches it on the web, and submits a
+  validated mapping (bring your own Anthropic API key or Claude
+  subscription token; stored encrypted on the hub, used only for this).
+  No credential → devices still appear, flagged "needs review".
+  ([docs/ai-adaptation.md](docs/ai-adaptation.md))
 - **One schema for everything** — 27 capabilities (including button/remote
   events, learn-and-replay IR blasters, and a universal generic-control
   fallback so *any* device parameter is usable), 16 device kinds, exact unit

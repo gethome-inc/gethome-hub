@@ -254,6 +254,7 @@ describe.skipIf(!handle)('hub API', () => {
   });
 
   it('stores AI settings without ever returning the key', async () => {
+    // Legacy body (no authType) keeps working and defaults to an API key.
     const put = await app.inject({
       method: 'PUT',
       url: '/api/v1/settings/ai',
@@ -262,11 +263,44 @@ describe.skipIf(!handle)('hub API', () => {
     });
     expect(put.statusCode).toBe(200);
     const body = put.json() as Record<string, unknown>;
-    expect(body).toEqual({ provider: 'anthropic', model: null, hasKey: true });
+    expect(body).toEqual({ provider: 'anthropic', authType: 'api_key', model: null, hasKey: true, status: {} });
     expect(JSON.stringify(body)).not.toContain('sk-ant');
 
     const denied = await app.inject({ method: 'GET', url: '/api/v1/settings/ai', headers: auth(memberToken) });
     expect(denied.statusCode).toBe(403);
+  });
+
+  it('stores a Claude subscription token without ever returning it', async () => {
+    const put = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/settings/ai',
+      headers: auth(ownerToken),
+      payload: { authType: 'oauth_token', apiKey: 'sk-ant-oat01-subscription-token-000000' },
+    });
+    expect(put.statusCode).toBe(200);
+    const body = put.json() as Record<string, unknown>;
+    expect(body).toEqual({
+      provider: 'anthropic',
+      authType: 'oauth_token',
+      model: null,
+      hasKey: true,
+      status: {},
+    });
+    expect(JSON.stringify(body)).not.toContain('oat01');
+
+    const got = await app.inject({ method: 'GET', url: '/api/v1/settings/ai', headers: auth(ownerToken) });
+    expect((got.json() as Record<string, unknown>).authType).toBe('oauth_token');
+    expect(got.body).not.toContain('oat01');
+  });
+
+  it('rejects the removed openai provider', async () => {
+    const put = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/settings/ai',
+      headers: auth(ownerToken),
+      payload: { provider: 'openai', apiKey: 'sk-test-1234567890' },
+    });
+    expect(put.statusCode).toBe(400);
   });
 
   it('streams events over the WebSocket', async () => {

@@ -1,3 +1,6 @@
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { pino } from 'pino';
 import {
@@ -8,6 +11,7 @@ import {
   type MappingDescriptor,
 } from '../src/ai/descriptor.js';
 import { AiDeviceMapper, exposesHash } from '../src/ai/mapper.js';
+import { AiUnavailableError } from '../src/ai/errors.js';
 import { SettingsService } from '../src/core/settings.js';
 import type { Z2mDevice } from '../src/adapters/zigbee/exposes-mapper.js';
 import { mapExposes } from '../src/adapters/zigbee/exposes-mapper.js';
@@ -360,12 +364,15 @@ describe.skipIf(!handle)('AiDeviceMapper', () => {
   // Skipped suites still have their body collected, so never deref a null
   // handle here; `db` is only read once the suite actually runs.
   const db = handle?.db!;
+  const dataDir = mkdtempSync(path.join(tmpdir(), 'gethome-ai-test-'));
   let mapper: AiDeviceMapper;
+  let settingsService: SettingsService;
   let generate: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     await resetDb(db);
-    mapper = new AiDeviceMapper(db, new SettingsService(db, Buffer.alloc(32).toString('base64')), pino({ level: 'silent' }));
+    settingsService = new SettingsService(db, Buffer.alloc(32).toString('base64'));
+    mapper = new AiDeviceMapper(db, settingsService, pino({ level: 'silent' }), { dataDir });
     generate = vi.fn().mockResolvedValue(soilDescriptor);
     mapper.providerOverride = { generate };
   });
@@ -450,5 +457,73 @@ describe.skipIf(!handle)('AiDeviceMapper', () => {
       definition: { ...soilProbe.definition!, exposes: [] },
     };
     expect(exposesHash(differentSchema)).not.toBe(exposesHash(soilProbe));
+  });
+
+  it('shares one in-flight run per device model', async () => {
+    generate.mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return soilDescriptor;
+    });
+    const [first, second] = await Promise.all([
+      mapper.requestMapping(soilProbe, mapExposes(soilProbe)),
+      mapper.requestMapping(soilProbe, mapExposes(soilProbe)),
+    ]);
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    expect(generate).toHaveBeenCalledTimes(1);
+  });
+
+  it('backs off after a transient availability failure and recovers', async () => {
+    const realNow = Date.now();
+    const nowSpy = vi.spyOn(Date, 'now');
+    try {
+      generate.mockRejectedValue(new AiUnavailableError('rate_limited', '429 rate limit'));
+      expect(await mapper.requestMapping(soilProbe, mapExposes(soilProbe))).toBeNull();
+      expect(generate).toHaveBeenCalledTimes(1);
+
+      // The failure is NOT cached — it is the backoff gate that suppresses
+      // the retry, so the account isn't hammered while it is down.
+      expect(await mapper.requestMapping(soilProbe, mapExposes(soilProbe))).toBeNull();
+      expect(generate).toHaveBeenCalledTimes(1);
+      const during = await settingsService.getAiStatus();
+      expect(during.lastError?.kind).toBe('rate_limited');
+
+      // Past the first backoff step the mapper tries again; success clears
+      // the gate and the surfaced error.
+      nowSpy.mockReturnValue(realNow + 61_000);
+      generate.mockResolvedValue(soilDescriptor);
+      expect(await mapper.requestMapping(soilProbe, mapExposes(soilProbe))).not.toBeNull();
+      const after = await settingsService.getAiStatus();
+      expect(after.lastError).toBeUndefined();
+      expect(after.lastRun?.ok).toBe(true);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('honours a provider-supplied reset time over the backoff ladder', async () => {
+    const realNow = Date.now();
+    const nowSpy = vi.spyOn(Date, 'now');
+    try {
+      generate.mockRejectedValue(
+        new AiUnavailableError('usage_limit', 'weekly limit reached', new Date(realNow + 3_600_000)),
+      );
+      expect(await mapper.requestMapping(soilProbe, mapExposes(soilProbe))).toBeNull();
+      const status = await settingsService.getAiStatus();
+      expect(status.lastError?.kind).toBe('usage_limit');
+      expect(status.lastError?.resetAt).toBeDefined();
+
+      // Ten minutes later (past the 60s ladder step) it is still gated,
+      // because the provider said the window resets in an hour.
+      nowSpy.mockReturnValue(realNow + 600_000);
+      expect(await mapper.requestMapping(soilProbe, mapExposes(soilProbe))).toBeNull();
+      expect(generate).toHaveBeenCalledTimes(1);
+
+      nowSpy.mockReturnValue(realNow + 3_600_001);
+      generate.mockResolvedValue(soilDescriptor);
+      expect(await mapper.requestMapping(soilProbe, mapExposes(soilProbe))).not.toBeNull();
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 });

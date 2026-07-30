@@ -26,7 +26,7 @@ exactly **one home**; sharing a home means granting members access to the hub.
 | `src/core/registry.ts` | `DeviceRegistry` — implements the `AdapterBus`: persists devices/endpoints, merges state patches (per-device write queue + write-through cache), fans events out, routes commands back to the owning adapter. An adapter that fails to start is isolated; the hub keeps running. |
 | `src/core/pairing.ts` | Claim flow: boot pairing code → first claim = owner; owner-minted invite codes (15 min TTL) → members. Opaque bearer tokens, sha256-hashed at rest. |
 | `src/core/crypto.ts` | Hub identity + AES-256-GCM key in `<data>/hub-secret.json` (survives database resets), token generation/hashing, secret encryption. |
-| `src/ai/` | AI device adaptation — see [ai-adaptation.md](ai-adaptation.md). |
+| `src/ai/` | AI device adaptation — the mapping agent (Claude Agent SDK) plus descriptor DSL, failure taxonomy, and backoff — see [ai-adaptation.md](ai-adaptation.md). |
 | `src/api/` | Fastify REST + WebSocket — see [api.md](api.md). |
 | `src/mdns/` | `_gethome._tcp` advertisement (@homebridge/ciao) with `id`/`ver`/`api`/`claimed` TXT records. |
 | `src/db/` | Drizzle ORM schema + committed SQL migrations, run automatically at boot. |
@@ -78,5 +78,6 @@ applies the change optimistically; the device's real report reconciles it.
 - AuthN: opaque bearer tokens issued at claim time, sha256-hashed at rest.
 - AuthZ: `owner` (structure: rename, rooms, members, commissioning, AI
   settings, removal) vs `member` (control devices, favorites, view activity).
-- Secrets: AI provider keys AES-256-GCM-encrypted with the hub secret;
-  the key file is 0600 and never leaves the machine.
+- Secrets: the AI credential (Anthropic API key or Claude subscription
+  token) AES-256-GCM-encrypted with the hub secret; the key file is 0600 and
+  never leaves the machine.
