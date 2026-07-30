@@ -22,6 +22,16 @@
 #                              but doesn't identify itself as one
 #   @@PAIRING:<code>@@  the pairing code, when the hub is unclaimed
 #   @@DONE@@            the install finished successfully
+#
+# The same vocabulary is reused by GetHome Studio's SD-card path, whose
+# first-boot script logs its own two steps before handing over to this
+# installer, and reads the whole log back over SSH:
+#   network    waiting for the Pi to get online
+#   installer  downloading this script
+# They are separate on purpose — a Pi that never joined the Wi-Fi and one that
+# joined and was refused the download are different failures with different
+# fixes. Both are step ids in that stream, so don't reuse either here for
+# something else.
 
 set -euo pipefail
 
