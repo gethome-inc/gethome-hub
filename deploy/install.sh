@@ -22,6 +22,12 @@
 #                              but doesn't identify itself as one
 #   @@PAIRING:<code>@@  the pairing code, when the hub is unclaimed
 #   @@DONE@@            the install finished successfully
+#
+# The same vocabulary is reused by GetHome Studio's SD-card path, whose
+# first-boot script logs `@@STEP:network@@` (waiting for the Pi to get online)
+# before handing over to this installer, and reads the whole log back over SSH.
+# So `network` is a step id in that stream too — don't reuse it here for
+# something else.
 
 set -euo pipefail
 
