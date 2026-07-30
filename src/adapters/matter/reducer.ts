@@ -7,10 +7,9 @@ import {
 
 /**
  * Folds raw Matter attribute reports into canonical endpoint state — a 1:1
- * port of the GetHome app's `MatterStateReducer`, so hub-attached and
- * phone-attached Matter devices behave byte-identically. Operates on plain
- * (clusterId, attributeId, value) tuples, which keeps it testable without a
- * radio.
+ * port of the GetHome app's `MatterStateReducer`, so hub devices produce
+ * byte-identical canonical state. Operates on plain (clusterId, attributeId,
+ * value) tuples, which keeps it testable without a radio.
  */
 
 export interface AttributeReport {

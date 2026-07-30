@@ -8,17 +8,51 @@ available.
 ## Setup
 
 1. Plug a supported coordinator (SONOFF ZBDongle-E/P, ConBee, SkyConnect, …)
-   into the hub machine.
+   into the hub machine. **Order doesn't matter** — before or after installing
+   the hub, see [Finding the coordinator](#finding-the-coordinator).
 2. Start Zigbee2MQTT:
-   - **Linux/Pi (Docker):** `COMPOSE_PROFILES=zigbee ZIGBEE_ADAPTER=/dev/ttyACM0
-     docker compose up -d` (or `install.sh --zigbee /dev/ttyACM0`). Tip:
-     `/dev/serial/by-id/...` paths survive reboots.
+   - **Linux/Pi (Docker):** nothing to do — `install.sh` detects the
+     coordinator and enables the `zigbee` profile. To pin a specific device,
+     `install.sh --zigbee /dev/serial/by-id/usb-...`, or by hand:
+     `COMPOSE_PROFILES=zigbee ZIGBEE_ADAPTER=/dev/serial/by-id/usb-...
+     docker compose up -d`. Prefer `by-id` paths: `/dev/ttyACM0` moves the
+     moment another USB device appears.
    - **macOS (native):** `install-macos.sh --zigbee auto` (or an explicit
      `/dev/tty.usb*` path) — Docker on macOS cannot pass USB through, which
      is one reason the macOS install is native (see [macos.md](macos.md)).
 3. Open the network from the GetHome app (or
    `POST /api/v1/zigbee/permit-join {"seconds":120}`) and put the device in
    pairing mode.
+
+### Finding the coordinator
+
+`deploy/zigbee-detect.sh` is the single authority on which USB device is a
+Zigbee coordinator. `install.sh` runs it once, and installs it as
+`gethome-zigbee.service` behind a udev rule that fires on any USB serial
+device — so a stick bought two months later is configured the moment it is
+plugged in, with nothing for the user to re-run.
+
+It classifies a device three ways, and the middle one is the point:
+
+| Verdict | Signal | What happens |
+|---|---|---|
+| `certain` | the USB product string names a coordinator (`zigbee`, `zbdongle`, `conbee`, `slzb`, `cc2652`, `efr32`, …), or the `vendor:product` id is a coordinator and nothing else (ConBee, CC2531) | `.env` gets `ZIGBEE_ADAPTER` + `COMPOSE_PROFILES=zigbee`, the stack comes up |
+| `maybe` | a generic USB-serial bridge (CP210x, CH340/CH9102, FTDI) — what a Sonoff uses, and also a 3D printer, a UPS, a GPS puck, an Arduino | reported as `@@ZIGBEE_MAYBE:<device>@@`, **never** configured automatically; GetHome Studio offers it for the user to pick |
+| `no` | not USB serial, or unknown ids | ignored |
+
+Auto-enabling on `maybe` would hand someone's 3D printer to Zigbee2MQTT, so
+it deliberately does nothing instead.
+
+Presence of a device node only proves something is plugged in, so after
+starting the stack `install.sh` waits for Z2M to report
+`Zigbee2MQTT started successfully` and otherwise emits `@@WARN:…@@` — the hub
+stays up (Matter and Wi-Fi are unaffected) and the user is told the radio
+didn't answer, with the last error from the container log.
+
+**The identification tables are duplicated** in Studio's
+`Models/ZigbeeModels.swift` (`ZigbeeCatalog`), which classifies devices during
+the SSH preflight — before this script exists on the machine. Change both
+together, or the two will disagree about the same hardware.
 
 ## How the hub uses Zigbee2MQTT
 
@@ -172,8 +206,10 @@ to upgrade them to. Only `IGNORED_PROPERTIES` (pure telemetry) produce nothing.
 
 ## Layer 3: AI adaptation (the genuine gaps)
 
-Because layers 1–2 make almost everything usable, the AI mapper
-([ai-adaptation.md](ai-adaptation.md)) is reserved for real gaps:
+Because layers 1–2 make almost everything usable, the mapping agent
+([ai-adaptation.md](ai-adaptation.md) — an autonomous researcher built on the
+Claude Agent SDK, run with the owner's own Anthropic API key or Claude
+subscription token) is reserved for real gaps:
 
 - a property with **no representation at all** (`uncovered` — composites/lists,
   or a device Z2M barely supports), or nothing mapped → auto-trigger;
@@ -188,6 +224,12 @@ The adapter also watches **runtime payloads**: it keeps the last 3 state
 payloads per device, and a payload key that neither the exposes nor an
 existing AI mapping declares triggers a one-time, debounced AI remap grounded
 in those samples. Each unknown key is asked about at most once per run.
+
+When the owner's account is temporarily unusable (rate limit, exhausted
+subscription window, bad credentials…) the mapper backs off instead of
+retrying — devices keep their static mapping and the reason is surfaced on
+`GET /settings/ai` as `status.lastError` (see
+[ai-adaptation.md](ai-adaptation.md) → taxonomy & backoff).
 
 ## Runtime external converters
 

@@ -14,8 +14,8 @@ import { UnsupportedCommandError, type HubCommand } from '../../schema/index.js'
 
 /**
  * Translate the 17 canonical intents into Matter cluster commands and
- * attribute writes — the same cluster/command mapping the GetHome app uses
- * for phone-attached devices (docs/matter.md).
+ * attribute writes — the same cluster/command mapping the GetHome app's Matter
+ * schema defines (docs/matter.md).
  */
 export async function executeMatterCommand(endpoint: Endpoint, command: HubCommand): Promise<void> {
   switch (command.type) {

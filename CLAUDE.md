@@ -62,7 +62,11 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   keep running (and must boot with no devices/radios at all).
 - **AI mappings are data, not code**: `MappingDescriptor`
   (`src/ai/descriptor.ts`) is zod-validated and interpreted. Never execute
-  model output.
+  model output. The mapping is produced by an autonomous agent
+  (`src/ai/agent.ts`, Claude Agent SDK — research-only tools, `submit_mapping`
+  MCP tool, backoff on account failures; `docs/ai-adaptation.md` is
+  canonical), authenticated with the owner's Anthropic API key or Claude
+  subscription token.
 
 ## Conventions that bite if missed
 
@@ -92,14 +96,35 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   pin all of these.
 - The Matter reducer (`src/adapters/matter/reducer.ts`) is a 1:1 port of the
   iOS `MatterStateReducer` — keep them in lockstep if either changes.
-- Secrets: tokens are stored sha256-only; AI keys AES-256-GCM-encrypted with
-  the hub secret (`<data>/hub-secret.json`, 0600); the API never returns key
-  material. Keep it that way.
+- Secrets: tokens are stored sha256-only; the AI credential (API key or
+  subscription token) AES-256-GCM-encrypted with the hub secret
+  (`<data>/hub-secret.json`, 0600); the API never returns key material. Keep
+  it that way.
 - matter.js is pinned to a minor (`~0.17.x`) because its API churns; keep all
   matter.js-specific code inside `src/adapters/matter/`.
 - `tsconfig` uses `exactOptionalPropertyTypes` — build optional-field objects
   with conditional spreads (`...(x !== undefined ? { x } : {})`), not
   `x: maybeUndefined`.
+
+## `deploy/` is a contract, not just scripts
+
+- **`install.sh`'s `@@…@@` markers are a wire protocol.** GetHome Studio drives
+  its whole install UI off them (`@@STEP@@`, `@@ERROR@@`, `@@WARN@@`,
+  `@@PAIRING@@`, `@@ZIGBEE_FOUND@@`, `@@ZIGBEE_MAYBE@@`). Adding a marker or a
+  step id is safe — unknown ones are ignored — but renaming or removing one
+  breaks the app silently. The header comment lists them; keep it accurate.
+- **Every install path must leave the hub starting on power-up.** Compose
+  services carry `restart: unless-stopped` and `install.sh` enables
+  `docker.service` at boot. Don't add a path that needs a human to start the
+  hub by hand.
+- **`deploy/zigbee-detect.sh` decides what a Zigbee coordinator is**, for both
+  the install and for hot-plug (it is installed as `gethome-zigbee.service`
+  behind a udev rule). It only acts on hardware it is *sure* about: the same
+  CP210x/CH340 bridges are used by 3D printers and UPSes, so an unidentifiable
+  device is reported and never configured. **Its tables are duplicated in
+  GetHome Studio** (`Models/ZigbeeModels.swift`), which classifies devices
+  during its SSH preflight — before this script exists on the machine. Change
+  both together; `docs/zigbee.md` documents the contract.
 
 ## Keep the docs in sync
 
@@ -108,4 +133,6 @@ schema/units/wire → `docs/device-schema.md` (+ the iOS repo needs a matching
 change — flag it); routes/auth → `docs/api.md`; adapter behavior/topics →
 `docs/zigbee.md` / `docs/matter.md` / `docs/mqtt-integrations.md`; AI
 trigger/DSL → `docs/ai-adaptation.md`; module boundaries → this file +
-`docs/architecture.md`; anything README restates → `README.md`.
+`docs/architecture.md`; installer markers, autostart or Zigbee detection →
+`docs/zigbee.md` + the marker list in `deploy/install.sh` (and flag the Studio
+repo); anything README restates → `README.md`.
