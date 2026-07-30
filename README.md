@@ -48,13 +48,21 @@ LAN-only by design.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/gethome-inc/gethome-hub/main/deploy/install.sh | bash
-# with a Zigbee USB stick:
-curl -fsSL https://raw.githubusercontent.com/gethome-inc/gethome-hub/main/deploy/install.sh | bash -s -- --zigbee /dev/ttyACM0
+# to pin a specific Zigbee coordinator instead of letting it be detected:
+curl -fsSL https://raw.githubusercontent.com/gethome-inc/gethome-hub/main/deploy/install.sh | bash -s -- --zigbee /dev/serial/by-id/usb-...
 ```
+
+**Zigbee needs no flags.** The installer identifies an attached coordinator by
+itself, and installs a udev rule so one plugged in *later* is set up
+automatically too — see
+[docs/zigbee.md](docs/zigbee.md#finding-the-coordinator).
 
 The installer sets up Docker if needed, starts the stack
 (hub + Postgres + Mosquitto, optionally Zigbee2MQTT), and prints the
-**pairing code** — enter it in the GetHome app to become the owner.
+**pairing code** — enter it in the GetHome app to become the owner. It also
+enables Docker at boot; together with `restart: unless-stopped` on every
+service, that means the hub comes back on its own after a power cut — plug the
+Pi in and it runs, with nothing to start by hand.
 
 **macOS** (native — no Docker, so mDNS discovery, the Matter controller, and
 Zigbee USB sticks actually work; see [docs/macos.md](docs/macos.md)):

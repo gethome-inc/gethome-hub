@@ -106,6 +106,26 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   with conditional spreads (`...(x !== undefined ? { x } : {})`), not
   `x: maybeUndefined`.
 
+## `deploy/` is a contract, not just scripts
+
+- **`install.sh`'s `@@…@@` markers are a wire protocol.** GetHome Studio drives
+  its whole install UI off them (`@@STEP@@`, `@@ERROR@@`, `@@WARN@@`,
+  `@@PAIRING@@`, `@@ZIGBEE_FOUND@@`, `@@ZIGBEE_MAYBE@@`). Adding a marker or a
+  step id is safe — unknown ones are ignored — but renaming or removing one
+  breaks the app silently. The header comment lists them; keep it accurate.
+- **Every install path must leave the hub starting on power-up.** Compose
+  services carry `restart: unless-stopped` and `install.sh` enables
+  `docker.service` at boot. Don't add a path that needs a human to start the
+  hub by hand.
+- **`deploy/zigbee-detect.sh` decides what a Zigbee coordinator is**, for both
+  the install and for hot-plug (it is installed as `gethome-zigbee.service`
+  behind a udev rule). It only acts on hardware it is *sure* about: the same
+  CP210x/CH340 bridges are used by 3D printers and UPSes, so an unidentifiable
+  device is reported and never configured. **Its tables are duplicated in
+  GetHome Studio** (`Models/ZigbeeModels.swift`), which classifies devices
+  during its SSH preflight — before this script exists on the machine. Change
+  both together; `docs/zigbee.md` documents the contract.
+
 ## Keep the docs in sync
 
 After landing a change, update the docs it invalidates in the same change:
@@ -113,4 +133,6 @@ schema/units/wire → `docs/device-schema.md` (+ the iOS repo needs a matching
 change — flag it); routes/auth → `docs/api.md`; adapter behavior/topics →
 `docs/zigbee.md` / `docs/matter.md` / `docs/mqtt-integrations.md`; AI
 trigger/DSL → `docs/ai-adaptation.md`; module boundaries → this file +
-`docs/architecture.md`; anything README restates → `README.md`.
+`docs/architecture.md`; installer markers, autostart or Zigbee detection →
+`docs/zigbee.md` + the marker list in `deploy/install.sh` (and flag the Studio
+repo); anything README restates → `README.md`.
