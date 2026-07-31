@@ -149,10 +149,56 @@ else
     say "Continuing without Zigbee. Plug a coordinator in whenever you like — the hub picks it up on its own."
 fi
 
-# ── Build & start ──────────────────────────────────────────────────────────
-step start "Building and starting the stack (the first build takes a few minutes)…"
-$DOCKER compose up -d --build \
-  || fail "docker compose failed to build or start the stack. See the output above, or run: $DOCKER compose logs"
+# ── Download & start ───────────────────────────────────────────────────────
+step start "Downloading and starting the stack…"
+
+# Pull the published image rather than compile the hub here. On a Raspberry Pi
+# that is the difference between two minutes and forty: building meant `npm ci`
+# fetching a thousand packages onto an SD card and `tsc` compiling them, with
+# every minute another chance for the connection to drop and lose the lot.
+#
+# The fallback matters as much as the fast path, though. A pull can fail for
+# reasons that have nothing to do with this machine — an architecture we don't
+# publish, a registry that's down, a package that isn't public — and none of
+# them should be the end of the install, because the source is right here and
+# still builds. So: try the image, and if it won't come, build it and say so.
+COMPOSE_FILES=(-f docker-compose.yml)
+COMPOSE_UP_FLAGS=()
+PULL_LOG=$(mktemp)
+if ! $DOCKER compose pull hubd 2>&1 | tee "$PULL_LOG"; then
+  PULL_REASON="the image couldn't be downloaded"
+  if grep -qiE 'no matching manifest|not found|manifest unknown' "$PULL_LOG"; then
+    PULL_REASON="there's no prebuilt image for this machine's processor ($(uname -m))"
+  elif grep -qiE 'denied|unauthorized|authentication required' "$PULL_LOG"; then
+    PULL_REASON="the image registry refused the download"
+  fi
+  warn "Building the hub from source because ${PULL_REASON}. Everything still works — it just takes about twenty minutes on a Raspberry Pi instead of two, and the log below goes quiet for most of it."
+  COMPOSE_FILES+=(-f docker-compose.build.yml)
+  COMPOSE_UP_FLAGS=(--build)
+fi
+rm -f "$PULL_LOG"
+
+# The output is kept as well as shown, so a failure can be *named*. Compose
+# reports "failed to build or start the stack" for everything from a dropped
+# download to a full disk, and on a Pi those are the failures that actually
+# happen — each with a different thing for the user to do about it. The
+# reason is buried a hundred lines up in a build log by then, which for
+# anyone driving this from GetHome Studio may as well be nowhere.
+BUILD_LOG=$(mktemp)
+if $DOCKER compose "${COMPOSE_FILES[@]}" up -d "${COMPOSE_UP_FLAGS[@]}" 2>&1 | tee "$BUILD_LOG"; then
+  rm -f "$BUILD_LOG"
+else
+  REASON="docker compose failed to build or start the stack. See the output above, or run: $DOCKER compose logs"
+  if grep -qE 'ECONNRESET|ETIMEDOUT|EAI_AGAIN|npm error network|Client\.Timeout|TLS handshake timeout' "$BUILD_LOG"; then
+    REASON="The download of the hub's dependencies was cut off partway (the network dropped, or timed out). Nothing is wrong with the Pi or the card — this is a slow or flaky connection, and it is worth simply running the install again: Docker keeps what it already downloaded, so the retry starts where this one got to. A network cable instead of Wi-Fi makes it much more likely to finish first time."
+  elif grep -qE 'no space left on device|ENOSPC' "$BUILD_LOG"; then
+    REASON="The Pi ran out of disk space while building the hub. Building needs a few gigabytes free on the card. Free some space (or use a larger card) and run the install again."
+  elif grep -qE 'signal: killed|Killed|out of memory|Cannot allocate memory' "$BUILD_LOG"; then
+    REASON="The Pi ran out of memory while building the hub. That happens on boards with 1 GB of RAM or less. Adding swap usually gets it through: sudo dphys-swapfile swapoff && sudo sed -i 's/^CONF_SWAPSIZE=.*/CONF_SWAPSIZE=2048/' /etc/dphys-swapfile && sudo dphys-swapfile setup && sudo dphys-swapfile swapon — then run the install again."
+  fi
+  rm -f "$BUILD_LOG"
+  fail "$REASON"
+fi
 
 # Did the coordinator actually answer? A device node only proves something is
 # plugged in — Zigbee2MQTT talking to the radio is the real test, and it is the
@@ -198,12 +244,20 @@ fi
 
 # ── Health ─────────────────────────────────────────────────────────────────
 step health "Waiting for the hub to answer on port 8420…"
+# Four minutes, not two. What happens in this window is Postgres initialising
+# its data directory and the hub running its migrations — on a Raspberry Pi
+# writing to an SD card, both of which are slow enough that the old budget
+# could expire on a hub that was about to come up perfectly. Costs nothing
+# when it is healthy: the loop breaks on the first success.
 HEALTHY=""
-for _ in $(seq 1 60); do
+for attempt in $(seq 1 120); do
   if curl -fsS http://localhost:8420/api/v1/hub >/dev/null 2>&1; then HEALTHY=1; break; fi
+  # Nothing else prints during this wait, and GetHome Studio shows the log as
+  # it grows — so mark the time rather than let it look stalled.
+  if [[ $((attempt % 15)) -eq 0 ]]; then say "Still waiting for the hub… ($((attempt * 2))s)"; fi
   sleep 2
 done
-[[ -n "$HEALTHY" ]] || fail "The hub started but did not become healthy. Check: $DOCKER compose logs hubd"
+[[ -n "$HEALTHY" ]] || fail "The hub built and started, but didn't answer on port 8420 within four minutes. Check: $DOCKER compose logs hubd"
 
 INFO=$(curl -fsS http://localhost:8420/api/v1/hub)
 if echo "$INFO" | grep -q '"claimed":false'; then

@@ -92,6 +92,33 @@ docker compose exec hubd cat /data/pairing-code   # your pairing code
 
 The API answers at `http://<hub>:8420/api/v1/hub`.
 
+### The hub image
+
+`hubd` runs from `ghcr.io/gethome-inc/gethome-hub:latest`, built for
+`linux/amd64`, `linux/arm64` and `linux/arm/v7` by
+`.github/workflows/publish.yml` on every push to `main`. That is deliberate and
+load-bearing: compiling the hub *on* a Raspberry Pi means `npm ci` pulling a
+thousand packages onto an SD card and `tsc` compiling them — twenty to forty
+minutes, every minute of it another chance for a dropped connection to throw
+the whole build away. Downloading it takes about two.
+
+Build it yourself when you've changed the source, or when you're on an
+architecture that isn't published:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+```
+
+`deploy/install.sh` does that on its own if the pull fails, and says why — so
+an unanticipated machine still gets a working hub, just slowly.
+
+> **The package has to be public.** GHCR creates it private on the first push,
+> and a private package fails every user's pull with `denied` — sending all of
+> them down the twenty-minute build path with no obvious cause. After the first
+> successful publish, set the package to public under the repository's
+> *Packages* settings, and check it with `docker pull` from a machine that
+> isn't logged in.
+
 Docker on macOS is not recommended for running the hub (no USB passthrough,
 unreliable mDNS from the VM) — use the native install above instead.
 
