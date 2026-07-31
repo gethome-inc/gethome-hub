@@ -117,6 +117,23 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   services carry `restart: unless-stopped` and `install.sh` enables
   `docker.service` at boot. Don't add a path that needs a human to start the
   hub by hand.
+- **The Pi downloads the hub; it does not compile it.** `hubd` runs from
+  `ghcr.io/gethome-inc/gethome-hub:latest` (amd64 + arm64 + armhf, published by
+  `.github/workflows/publish.yml`). Building on a Pi is `npm ci` fetching a
+  thousand packages onto an SD card plus `tsc` — twenty to forty minutes, and
+  every minute of it another chance for a dropped connection to lose the lot,
+  which is a real failure people hit. Keep the fallback working too:
+  `install.sh` pulls first and drops to `docker-compose.build.yml` with a
+  `@@WARN@@` when it can't, so an architecture nobody anticipated still ends up
+  with a hub. **A private GHCR package fails every pull with `denied`** and
+  silently sends everyone down the slow path — after the first publish, make
+  the package public and verify with a logged-out `docker pull`.
+- **Name a build failure, don't just relay it.** Compose says "failed to build
+  or start the stack" for a dropped download, a full card and an OOM kill
+  alike, and on a Pi all three happen and want different fixes. `install.sh`
+  keeps the output and matches those three, because by then the actual reason
+  is a hundred lines up a build log — which, for someone driving this from
+  Studio, may as well be nowhere.
 - **`deploy/zigbee-detect.sh` decides what a Zigbee coordinator is**, for both
   the install and for hot-plug (it is installed as `gethome-zigbee.service`
   behind a udev rule). It only acts on hardware it is *sure* about: the same

@@ -149,8 +149,34 @@ else
     say "Continuing without Zigbee. Plug a coordinator in whenever you like — the hub picks it up on its own."
 fi
 
-# ── Build & start ──────────────────────────────────────────────────────────
-step start "Building and starting the stack (on a Raspberry Pi this takes about twenty minutes)…"
+# ── Download & start ───────────────────────────────────────────────────────
+step start "Downloading and starting the stack…"
+
+# Pull the published image rather than compile the hub here. On a Raspberry Pi
+# that is the difference between two minutes and forty: building meant `npm ci`
+# fetching a thousand packages onto an SD card and `tsc` compiling them, with
+# every minute another chance for the connection to drop and lose the lot.
+#
+# The fallback matters as much as the fast path, though. A pull can fail for
+# reasons that have nothing to do with this machine — an architecture we don't
+# publish, a registry that's down, a package that isn't public — and none of
+# them should be the end of the install, because the source is right here and
+# still builds. So: try the image, and if it won't come, build it and say so.
+COMPOSE_FILES=(-f docker-compose.yml)
+COMPOSE_UP_FLAGS=()
+PULL_LOG=$(mktemp)
+if ! $DOCKER compose pull hubd 2>&1 | tee "$PULL_LOG"; then
+  PULL_REASON="the image couldn't be downloaded"
+  if grep -qiE 'no matching manifest|not found|manifest unknown' "$PULL_LOG"; then
+    PULL_REASON="there's no prebuilt image for this machine's processor ($(uname -m))"
+  elif grep -qiE 'denied|unauthorized|authentication required' "$PULL_LOG"; then
+    PULL_REASON="the image registry refused the download"
+  fi
+  warn "Building the hub from source because ${PULL_REASON}. Everything still works — it just takes about twenty minutes on a Raspberry Pi instead of two, and the log below goes quiet for most of it."
+  COMPOSE_FILES+=(-f docker-compose.build.yml)
+  COMPOSE_UP_FLAGS=(--build)
+fi
+rm -f "$PULL_LOG"
 
 # The output is kept as well as shown, so a failure can be *named*. Compose
 # reports "failed to build or start the stack" for everything from a dropped
@@ -159,7 +185,7 @@ step start "Building and starting the stack (on a Raspberry Pi this takes about 
 # reason is buried a hundred lines up in a build log by then, which for
 # anyone driving this from GetHome Studio may as well be nowhere.
 BUILD_LOG=$(mktemp)
-if $DOCKER compose up -d --build 2>&1 | tee "$BUILD_LOG"; then
+if $DOCKER compose "${COMPOSE_FILES[@]}" up -d "${COMPOSE_UP_FLAGS[@]}" 2>&1 | tee "$BUILD_LOG"; then
   rm -f "$BUILD_LOG"
 else
   REASON="docker compose failed to build or start the stack. See the output above, or run: $DOCKER compose logs"

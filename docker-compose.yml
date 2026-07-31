@@ -3,6 +3,13 @@
 #   docker compose up -d                      # hub + Postgres + MQTT broker
 #   COMPOSE_PROFILES=zigbee docker compose up -d   # …plus Zigbee2MQTT (USB stick required)
 #
+# hubd runs from the published multi-architecture image, so a Raspberry Pi
+# downloads it in a couple of minutes instead of compiling it for half an hour.
+# To build it yourself instead — a change to the source, or an architecture
+# that isn't published — add the override:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+#
 # hubd runs with host networking: mDNS discovery (_gethome._tcp) and the
 # Matter controller (UDP 5540 + mDNS 5353) need the host's network stack.
 # On macOS, enable host networking in Docker Desktop ≥ 4.34 — and note that
@@ -11,7 +18,7 @@
 
 services:
   hubd:
-    build: .
+    image: ${GETHOME_IMAGE:-ghcr.io/gethome-inc/gethome-hub:latest}
     restart: unless-stopped
     network_mode: host
     environment:
