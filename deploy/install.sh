@@ -204,15 +204,22 @@ fi
 # plugged in — Zigbee2MQTT talking to the radio is the real test, and it is the
 # difference between "Zigbee works" and "Zigbee looks configured but is dead".
 if grep -q '^COMPOSE_PROFILES=.*zigbee' .env 2>/dev/null; then
-  say "Waiting for Zigbee2MQTT to reach the coordinator…"
+  say "Waiting for Zigbee2MQTT to reach the coordinator (up to 90 seconds)…"
   ZIGBEE_OK=""
-  for _ in $(seq 1 45); do
-    if $DOCKER compose logs zigbee2mqtt 2>/dev/null | grep -q "Zigbee2MQTT started successfully"; then
+  for attempt in $(seq 1 45); do
+    # `--tail` is what keeps this a ninety-second wait. Without it each poll
+    # re-reads the *entire* Zigbee2MQTT log — a log that is growing while we
+    # watch it — so on a Pi the checking costs more than the waiting, and a
+    # bounded check turns into several minutes of apparent silence.
+    if $DOCKER compose logs --tail 500 zigbee2mqtt 2>/dev/null | grep -q "Zigbee2MQTT started successfully"; then
       ZIGBEE_OK=1; break
     fi
     case "$($DOCKER compose ps --format '{{.State}}' zigbee2mqtt 2>/dev/null | head -n1)" in
       exited|restarting|dead) break ;;
     esac
+    if [[ $((attempt % 15)) -eq 0 ]]; then
+      say "Still waiting for the Zigbee coordinator… ($((attempt * 2))s of 90)"
+    fi
     sleep 2
   done
   if [[ -n "$ZIGBEE_OK" ]]; then
