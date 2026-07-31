@@ -198,12 +198,20 @@ fi
 
 # ── Health ─────────────────────────────────────────────────────────────────
 step health "Waiting for the hub to answer on port 8420…"
+# Four minutes, not two. What happens in this window is Postgres initialising
+# its data directory and the hub running its migrations — on a Raspberry Pi
+# writing to an SD card, both of which are slow enough that the old budget
+# could expire on a hub that was about to come up perfectly. Costs nothing
+# when it is healthy: the loop breaks on the first success.
 HEALTHY=""
-for _ in $(seq 1 60); do
+for attempt in $(seq 1 120); do
   if curl -fsS http://localhost:8420/api/v1/hub >/dev/null 2>&1; then HEALTHY=1; break; fi
+  # Nothing else prints during this wait, and GetHome Studio shows the log as
+  # it grows — so mark the time rather than let it look stalled.
+  if [[ $((attempt % 15)) -eq 0 ]]; then say "Still waiting for the hub… ($((attempt * 2))s)"; fi
   sleep 2
 done
-[[ -n "$HEALTHY" ]] || fail "The hub started but did not become healthy. Check: $DOCKER compose logs hubd"
+[[ -n "$HEALTHY" ]] || fail "The hub built and started, but didn't answer on port 8420 within four minutes. Check: $DOCKER compose logs hubd"
 
 INFO=$(curl -fsS http://localhost:8420/api/v1/hub)
 if echo "$INFO" | grep -q '"claimed":false'; then
