@@ -150,9 +150,29 @@ else
 fi
 
 # ── Build & start ──────────────────────────────────────────────────────────
-step start "Building and starting the stack (the first build takes a few minutes)…"
-$DOCKER compose up -d --build \
-  || fail "docker compose failed to build or start the stack. See the output above, or run: $DOCKER compose logs"
+step start "Building and starting the stack (on a Raspberry Pi this takes about twenty minutes)…"
+
+# The output is kept as well as shown, so a failure can be *named*. Compose
+# reports "failed to build or start the stack" for everything from a dropped
+# download to a full disk, and on a Pi those are the failures that actually
+# happen — each with a different thing for the user to do about it. The
+# reason is buried a hundred lines up in a build log by then, which for
+# anyone driving this from GetHome Studio may as well be nowhere.
+BUILD_LOG=$(mktemp)
+if $DOCKER compose up -d --build 2>&1 | tee "$BUILD_LOG"; then
+  rm -f "$BUILD_LOG"
+else
+  REASON="docker compose failed to build or start the stack. See the output above, or run: $DOCKER compose logs"
+  if grep -qE 'ECONNRESET|ETIMEDOUT|EAI_AGAIN|npm error network|Client\.Timeout|TLS handshake timeout' "$BUILD_LOG"; then
+    REASON="The download of the hub's dependencies was cut off partway (the network dropped, or timed out). Nothing is wrong with the Pi or the card — this is a slow or flaky connection, and it is worth simply running the install again: Docker keeps what it already downloaded, so the retry starts where this one got to. A network cable instead of Wi-Fi makes it much more likely to finish first time."
+  elif grep -qE 'no space left on device|ENOSPC' "$BUILD_LOG"; then
+    REASON="The Pi ran out of disk space while building the hub. Building needs a few gigabytes free on the card. Free some space (or use a larger card) and run the install again."
+  elif grep -qE 'signal: killed|Killed|out of memory|Cannot allocate memory' "$BUILD_LOG"; then
+    REASON="The Pi ran out of memory while building the hub. That happens on boards with 1 GB of RAM or less. Adding swap usually gets it through: sudo dphys-swapfile swapoff && sudo sed -i 's/^CONF_SWAPSIZE=.*/CONF_SWAPSIZE=2048/' /etc/dphys-swapfile && sudo dphys-swapfile setup && sudo dphys-swapfile swapon — then run the install again."
+  fi
+  rm -f "$BUILD_LOG"
+  fail "$REASON"
+fi
 
 # Did the coordinator actually answer? A device node only proves something is
 # plugged in — Zigbee2MQTT talking to the radio is the real test, and it is the
