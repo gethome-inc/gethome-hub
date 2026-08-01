@@ -200,30 +200,6 @@ else
   fail "$REASON"
 fi
 
-# Did the coordinator actually answer? A device node only proves something is
-# plugged in — Zigbee2MQTT talking to the radio is the real test, and it is the
-# difference between "Zigbee works" and "Zigbee looks configured but is dead".
-if grep -q '^COMPOSE_PROFILES=.*zigbee' .env 2>/dev/null; then
-  say "Waiting for Zigbee2MQTT to reach the coordinator…"
-  ZIGBEE_OK=""
-  for _ in $(seq 1 45); do
-    if $DOCKER compose logs zigbee2mqtt 2>/dev/null | grep -q "Zigbee2MQTT started successfully"; then
-      ZIGBEE_OK=1; break
-    fi
-    case "$($DOCKER compose ps --format '{{.State}}' zigbee2mqtt 2>/dev/null | head -n1)" in
-      exited|restarting|dead) break ;;
-    esac
-    sleep 2
-  done
-  if [[ -n "$ZIGBEE_OK" ]]; then
-    say "Zigbee2MQTT is running and talking to the coordinator."
-  else
-    ZIGBEE_REASON=$($DOCKER compose logs --tail 30 zigbee2mqtt 2>/dev/null \
-      | grep -iE 'error|failed|denied|cannot|no such' | tail -n1 | cut -c1-200)
-    warn "The hub is running, but the Zigbee coordinator didn't come up. Everything else works — Matter and Wi-Fi devices are unaffected. Try reseating the USB stick (a powered extension cable helps; the Pi's own ports are noisy), then restart Zigbee with: cd $INSTALL_DIR/gethome-hub && $DOCKER compose restart zigbee2mqtt${ZIGBEE_REASON:+ — last error: $ZIGBEE_REASON}"
-  fi
-fi
-
 # ── Autostart ──────────────────────────────────────────────────────────────
 # Every compose service carries `restart: unless-stopped`, so the hub comes
 # back by itself after a power cut — but only if the Docker daemon starts at
@@ -266,6 +242,48 @@ if echo "$INFO" | grep -q '"claimed":false'; then
     printf '@@PAIRING:%s@@\n' "$CODE"
     say "Pairing code: ${CODE}"
     echo "Enter this code in the GetHome app to become the owner of this hub."
+  fi
+fi
+
+# Did the coordinator actually answer? A device node only proves something is
+# plugged in — Zigbee2MQTT talking to the radio is the real test, and it is the
+# difference between "Zigbee works" and "Zigbee looks configured but is dead".
+#
+# It runs *here*, after the hub is healthy and the pairing code is out, because
+# it is a confirmation rather than a dependency. It used to sit between
+# starting the stack and the health check, which meant a working hub — already
+# up, already answering — was held back from its owner by a question about an
+# accessory it doesn't need.
+if grep -q '^COMPOSE_PROFILES=.*zigbee' .env 2>/dev/null; then
+  say "Checking that Zigbee2MQTT reached the coordinator (up to 90 seconds)…"
+  ZIGBEE_OK=""
+  # A wall-clock deadline, not a count of attempts. Each poll shells out to
+  # Docker, and on a busy Pi that can take tens of seconds — so "45 tries, two
+  # seconds apart" was ninety seconds in theory and a quarter of an hour in
+  # practice. This bound holds however slow the polling gets.
+  ZIGBEE_DEADLINE=$((SECONDS + 90))
+  ZIGBEE_SPOKE=0
+  while [[ $SECONDS -lt $ZIGBEE_DEADLINE ]]; do
+    # `--tail` matters for the same reason: without it every poll re-reads the
+    # entire Zigbee2MQTT log, which is growing while we watch it.
+    if $DOCKER compose logs --tail 500 zigbee2mqtt 2>/dev/null | grep -q "Zigbee2MQTT started successfully"; then
+      ZIGBEE_OK=1; break
+    fi
+    case "$($DOCKER compose ps --format '{{.State}}' zigbee2mqtt 2>/dev/null | head -n1)" in
+      exited|restarting|dead) break ;;
+    esac
+    if [[ $((SECONDS - ZIGBEE_DEADLINE + 90)) -ge $((ZIGBEE_SPOKE + 30)) ]]; then
+      ZIGBEE_SPOKE=$((ZIGBEE_SPOKE + 30))
+      say "Still checking the Zigbee coordinator… (${ZIGBEE_SPOKE}s of 90)"
+    fi
+    sleep 2
+  done
+  if [[ -n "$ZIGBEE_OK" ]]; then
+    say "Zigbee2MQTT is running and talking to the coordinator."
+  else
+    ZIGBEE_REASON=$($DOCKER compose logs --tail 30 zigbee2mqtt 2>/dev/null \
+      | grep -iE 'error|failed|denied|cannot|no such' | tail -n1 | cut -c1-200)
+    warn "The hub is running, but the Zigbee coordinator didn't come up. Everything else works — Matter and Wi-Fi devices are unaffected. Try reseating the USB stick (a powered extension cable helps; the Pi's own ports are noisy), then restart Zigbee with: cd $INSTALL_DIR/gethome-hub && $DOCKER compose restart zigbee2mqtt${ZIGBEE_REASON:+ — last error: $ZIGBEE_REASON}"
   fi
 fi
 

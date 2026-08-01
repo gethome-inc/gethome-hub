@@ -10,8 +10,14 @@ Base URL: `http://<hub>:8420/api/v1`. JSON everywhere. Discover hubs via mDNS
 
 Tokens come from the claim flow:
 
-1. An unclaimed hub prints an 8-digit **pairing code** at boot (also in
-   `<data>/pairing-code`).
+1. An unclaimed hub prints an 8-digit **pairing code** at boot, and writes it
+   to `<data>/pairing-code` (0600). A **fresh code is generated on every boot**
+   while the hub is unclaimed, so a code captured once — from a log line, or
+   from `install.sh`'s `@@PAIRING@@` marker — is stale as soon as the container
+   restarts. Read the file when you need the code, not when you first see it:
+   that path is what GetHome Studio reads over SSH so the person who installed
+   the hub is never asked for a code they were never shown. Moving or dropping
+   it breaks claiming for them.
 2. `POST /pair {"code","memberName","deviceName"?}` — the first successful
    claim creates the **owner** and returns `{token, member}`. The boot code
    dies with the claim.

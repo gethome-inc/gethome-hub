@@ -100,6 +100,14 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   subscription token) AES-256-GCM-encrypted with the hub secret
   (`<data>/hub-secret.json`, 0600); the API never returns key material. Keep
   it that way.
+- **`<data>/pairing-code` is a contract, and it is rewritten every boot.** An
+  unclaimed hub mints a *new* code on each start, so anything that captured one
+  earlier is holding a stale number — which is why Studio reads the file over
+  SSH at the moment it claims rather than trusting `install.sh`'s `@@PAIRING@@`
+  marker. That is also what keeps the code away from the user entirely: they
+  installed the hub, so they have already proved the physical access the code
+  exists to prove. Don't move the file or change when it's written without
+  fixing Studio's claim path with it.
 - matter.js is pinned to a minor (`~0.17.x`) because its API churns; keep all
   matter.js-specific code inside `src/adapters/matter/`.
 - `tsconfig` uses `exactOptionalPropertyTypes` — build optional-field objects
