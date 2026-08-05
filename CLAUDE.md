@@ -108,6 +108,12 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   installed the hub, so they have already proved the physical access the code
   exists to prove. Don't move the file or change when it's written without
   fixing Studio's claim path with it.
+  **The startup line is part of that contract too.** The file is `0600` inside
+  the container and the account driving Docker may not have passwordless sudo,
+  so Studio falls back to the volume's path on the host and then to grepping
+  `Pairing code: <digits>` out of the hub's own log — the exact wording
+  `PairingService.boot()` logs. Rephrasing that message breaks the last way
+  Studio has of handing a user the code it promised they'd never have to find.
 - matter.js is pinned to a minor (`~0.17.x`) because its API churns; keep all
   matter.js-specific code inside `src/adapters/matter/`.
 - `tsconfig` uses `exactOptionalPropertyTypes` — build optional-field objects
