@@ -23,7 +23,12 @@ services:
     network_mode: host
     environment:
       PORT: 8420
+      # A bounded heap and a small database pool keep the complete stack
+      # reliable on a Raspberry Pi Zero 2 W (512 MB) without changing the API.
+      # Users with larger hubs can override either value in .env.
+      NODE_OPTIONS: ${GETHOME_NODE_OPTIONS:---max-old-space-size=256}
       DATABASE_URL: postgres://gethome:${POSTGRES_PASSWORD:-gethome}@127.0.0.1:5432/gethome
+      DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-4}
       MQTT_URL: mqtt://127.0.0.1:1883
       Z2M_BASE_TOPIC: zigbee2mqtt
       DATA_DIR: /data
@@ -44,6 +49,19 @@ services:
       POSTGRES_USER: gethome
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gethome}
       POSTGRES_DB: gethome
+    # PostgreSQL defaults are designed for a general-purpose server. A home
+    # hub has one process and a small local client set, so the lower limits
+    # avoid memory pressure without reducing normal hub functionality.
+    command:
+      - postgres
+      - -c
+      - max_connections=${POSTGRES_MAX_CONNECTIONS:-16}
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-32MB}
+      - -c
+      - work_mem=${POSTGRES_WORK_MEM:-1MB}
+      - -c
+      - maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-16MB}
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
@@ -58,7 +76,9 @@ services:
     image: eclipse-mosquitto:2
     restart: unless-stopped
     ports:
-      - "127.0.0.1:1883:1883"
+      # MQTT integrations run on other devices on the home LAN. The firewall
+      # boundary is the router, not Docker's loopback-only binding.
+      - "1883:1883"
     volumes:
       - ./deploy/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - mosquitto-data:/mosquitto/data
