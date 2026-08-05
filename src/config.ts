@@ -10,6 +10,10 @@ const configSchema = z.object({
   DATABASE_URL: z
     .string()
     .default('postgres://gethome:gethome@127.0.0.1:5432/gethome'),
+  // A home hub has a handful of local clients, not hundreds of concurrent web
+  // requests. Keeping Postgres's pool small saves a meaningful amount of RAM
+  // on 512 MB boards such as Raspberry Pi Zero 2 W.
+  DATABASE_POOL_SIZE: z.coerce.number().int().min(1).max(20).default(4),
   MQTT_URL: z.string().default('mqtt://127.0.0.1:1883'),
   Z2M_BASE_TOPIC: z.string().default('zigbee2mqtt'),
   DATA_DIR: z.string().default('./data'),

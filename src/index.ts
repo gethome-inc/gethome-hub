@@ -34,7 +34,7 @@ async function main(): Promise<void> {
   log.info(`GetHome Hub ${version} starting…`);
 
   const secret = ensureHubSecret(config.DATA_DIR);
-  const { db, pool } = createDb(config.DATABASE_URL);
+  const { db, pool } = createDb(config.DATABASE_URL, config.DATABASE_POOL_SIZE);
   await runMigrations(db);
   if (!(await db.query.home.findFirst())) {
     await db.insert(home).values({ name: 'My Home' });

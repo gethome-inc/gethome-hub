@@ -35,6 +35,20 @@ const INVITE_TTL_MS = 15 * 60 * 1000;
  */
 export class PairingService {
   private bootCode: string | null = null;
+  /**
+   * Claims change the database and invalidate the boot code. Serializing them
+   * prevents two overlapping HTTP requests from both becoming the owner while
+   * the first insert is waiting on Postgres.
+   */
+  private claimQueue: Promise<void> = Promise.resolve();
+  /**
+   * URLSession can time out after the Pi has already committed the owner and
+   * before its response reaches Studio. Retaining the response briefly turns a
+   * retry with the same opaque claim id into a safe resume instead of an
+   * alarming `invalid_code` dead end. The token remains memory-only, exactly as
+   * it is during the original response.
+   */
+  private readonly recentClaims = new Map<string, { result: ClaimResult; expiresAt: number }>();
 
   constructor(
     private readonly db: Db,
@@ -60,7 +74,31 @@ export class PairingService {
     return this.bootCode === null;
   }
 
-  async claim(code: string, memberName: string, deviceName?: string): Promise<ClaimResult | null> {
+  async claim(
+    code: string,
+    memberName: string,
+    deviceName?: string,
+    claimId?: string,
+  ): Promise<ClaimResult | null> {
+    const work = this.claimQueue.then(() => this.claimUnlocked(code, memberName, deviceName, claimId));
+    this.claimQueue = work.then(
+      () => undefined,
+      () => undefined,
+    );
+    return work;
+  }
+
+  private async claimUnlocked(
+    code: string,
+    memberName: string,
+    deviceName?: string,
+    claimId?: string,
+  ): Promise<ClaimResult | null> {
+    this.dropExpiredClaims();
+    if (claimId) {
+      const previous = this.recentClaims.get(claimId);
+      if (previous) return previous.result;
+    }
     const normalized = code.replace(/\D/g, '');
 
     if (this.bootCode !== null) {
@@ -72,7 +110,7 @@ export class PairingService {
       if (!owner) return null;
       this.clearBootCode();
       this.log.info(`Hub claimed by owner "${memberName}".`);
-      return this.issueToken(owner.id, owner.name, 'owner', deviceName);
+      return this.rememberClaim(claimId, await this.issueToken(owner.id, owner.name, 'owner', deviceName));
     }
 
     // Claimed hub: the code must match a live, unused invite.
@@ -86,7 +124,7 @@ export class PairingService {
     if (!member) return null;
     await this.db.update(invites).set({ usedBy: member.id }).where(eq(invites.id, invite.id));
     this.log.info(`Member "${memberName}" joined via invite.`);
-    return this.issueToken(member.id, member.name, role, deviceName);
+    return this.rememberClaim(claimId, await this.issueToken(member.id, member.name, role, deviceName));
   }
 
   async createInvite(createdBy: string, role: MemberRole = 'member'): Promise<{ code: string; expiresAt: Date }> {
@@ -133,5 +171,19 @@ export class PairingService {
   private clearBootCode(): void {
     this.bootCode = null;
     rmSync(path.join(this.dataDir, 'pairing-code'), { force: true });
+  }
+
+  private rememberClaim(claimId: string | undefined, result: ClaimResult): ClaimResult {
+    if (claimId) {
+      this.recentClaims.set(claimId, { result, expiresAt: Date.now() + 5 * 60 * 1000 });
+    }
+    return result;
+  }
+
+  private dropExpiredClaims(): void {
+    const now = Date.now();
+    for (const [id, claim] of this.recentClaims) {
+      if (claim.expiresAt <= now) this.recentClaims.delete(id);
+    }
   }
 }
