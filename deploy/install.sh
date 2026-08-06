@@ -307,7 +307,7 @@ if [[ -z "$INSTALLED" ]]; then
   # doesn't have it, starting the build means forty minutes of thrashing an SD
   # card and then an OOM kill — so say what is wrong now instead.
   if [[ -n "$SMALL_BOARD" && -z "$FORCE_BUILD" ]]; then
-    fail "There is no prebuilt hub for this machine (${NODE_ARCH}, branch ${BRANCH}) yet, and this board has ${RAM_MB} MB of memory — not enough to build one here. If you have just pushed a change, the build that publishes it may still be running; try again in a few minutes. Otherwise install from a branch that has been published."
+    fail "There is no prebuilt hub for this machine (${NODE_ARCH}) on branch ${BRANCH}, and this board has ${RAM_MB} MB of memory — not enough to build one here. The build that publishes it is the 'Publish bundle' workflow, and it puts the result in the '${BUNDLE_TAG}' release. If you have just pushed, it may still be running: check https://github.com/${REPO_SLUG}/actions and try again when it is green. To install what is on main instead, re-run with --branch main."
   fi
   say "Building the hub from source (this takes a while)…"
   command -v git >/dev/null 2>&1 || $SUDO apt-get install -y -qq git >/dev/null 2>&1
