@@ -55,6 +55,9 @@ function isIrLibraryCommand(
   );
 }
 
+/** How long endpoint-state writes coalesce before they reach the database. */
+const STATE_FLUSH_MS = 2_000;
+
 /** A blank endpoint state, plus the IR library base when the endpoint has one. */
 function freshEndpointState(capabilities: CapabilityKind[]): EndpointState {
   const state = emptyState();
@@ -72,7 +75,21 @@ export class DeviceRegistry implements AdapterBus {
   private readonly adapters = new Map<AdapterId, ProtocolAdapter>();
   /** Write-through cache: `${adapter}:${externalId}` → device row + state. */
   private readonly cache = new Map<string, RegistryDevice>();
+  /** Same objects as `cache`, keyed by device id — `getDevice` is on every command. */
+  private readonly byId = new Map<string, RegistryDevice>();
   private readonly queue = new Map<string, Promise<void>>();
+
+  /**
+   * Endpoint states whose row is behind the cache, keyed `deviceId:endpointId`.
+   *
+   * Persisting on every report meant one whole-row JSON rewrite per sensor
+   * message, forever, onto an SD card — a power meter alone is a write every
+   * few seconds. The cache is already authoritative while the hub runs; the row
+   * only has to be right when it restarts. So writes coalesce into one flush a
+   * couple of seconds later, and `stop()` flushes before the process leaves.
+   */
+  private readonly dirtyState = new Map<string, { deviceId: string; endpointId: number }>();
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly db: Db,
@@ -91,12 +108,19 @@ export class DeviceRegistry implements AdapterBus {
 
   /** Load persisted devices into the cache, then start every adapter. */
   async start(): Promise<void> {
+    // Two queries, not one per device. The old shape issued an `endpoints`
+    // query inside the device loop, so boot time grew with the size of the
+    // home on exactly the machines least able to afford it.
     const rows = await this.db.query.devices.findMany();
+    const endpointRows = await this.db.query.endpoints.findMany();
+    const byDevice = new Map<string, typeof endpointRows>();
+    for (const endpoint of endpointRows) {
+      const list = byDevice.get(endpoint.deviceId);
+      if (list) list.push(endpoint);
+      else byDevice.set(endpoint.deviceId, [endpoint]);
+    }
     for (const row of rows) {
-      const endpointRows = await this.db.query.endpoints.findMany({
-        where: eq(endpoints.deviceId, row.id),
-      });
-      this.cache.set(this.key(row.adapter as AdapterId, row.externalId), {
+      const device: RegistryDevice = {
         id: row.id,
         adapter: row.adapter as AdapterId,
         externalId: row.externalId,
@@ -107,14 +131,16 @@ export class DeviceRegistry implements AdapterBus {
         favorite: row.favorite,
         online: row.online,
         needsReview: row.needsReview,
-        endpoints: endpointRows.map((endpoint) => ({
+        endpoints: (byDevice.get(row.id) ?? []).map((endpoint) => ({
           endpointId: endpoint.endpointId,
           deviceKind: endpoint.deviceKind as DeviceKind,
           capabilities: endpoint.capabilities as CapabilityKind[],
           primary: endpoint.primaryCapability as CapabilityKind,
           state: endpoint.state as EndpointState,
         })),
-      });
+      };
+      this.cache.set(this.key(device.adapter, device.externalId), device);
+      this.byId.set(device.id, device);
     }
     this.log.info(`Device registry loaded ${this.cache.size} device(s).`);
 
@@ -137,6 +163,43 @@ export class DeviceRegistry implements AdapterBus {
     for (const adapter of this.adapters.values()) {
       await adapter.stop().catch(() => {});
     }
+    await this.flush();
+  }
+
+  /** Write every endpoint state the cache is holding ahead of its row. */
+  private async flushState(): Promise<void> {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    if (this.dirtyState.size === 0) return;
+    const pending = [...this.dirtyState.values()];
+    this.dirtyState.clear();
+    const now = new Date();
+    for (const { deviceId, endpointId } of pending) {
+      const device = this.byId.get(deviceId);
+      const endpoint = device?.endpoints.find((candidate) => candidate.endpointId === endpointId);
+      if (!endpoint) continue;
+      try {
+        await this.db
+          .update(endpoints)
+          .set({ state: endpoint.state, updatedAt: now })
+          .where(and(eq(endpoints.deviceId, deviceId), eq(endpoints.endpointId, endpointId)));
+      } catch (error) {
+        this.log.error({ err: error }, 'Persisting endpoint state failed');
+      }
+    }
+  }
+
+  private markStateDirty(deviceId: string, endpointId: number): void {
+    this.dirtyState.set(`${deviceId}:${endpointId}`, { deviceId, endpointId });
+    if (this.flushTimer) return;
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null;
+      void this.flushState();
+    }, STATE_FLUSH_MS);
+    // A pending flush must never be the reason a process stays alive.
+    this.flushTimer.unref?.();
   }
 
   // ── AdapterBus ────────────────────────────────────────────────────────────
@@ -157,6 +220,12 @@ export class DeviceRegistry implements AdapterBus {
       const cached = this.cache.get(this.key(adapter, externalId));
       if (!cached) return;
       this.cache.delete(this.key(adapter, externalId));
+      this.byId.delete(cached.id);
+      // Drop queued state writes for a device that no longer exists, so a
+      // flush can't try to update rows the cascade has already taken away.
+      for (const [key, entry] of this.dirtyState) {
+        if (entry.deviceId === cached.id) this.dirtyState.delete(key);
+      }
       await this.db.delete(devices).where(eq(devices.id, cached.id));
       this.events.emit('deviceRemoved', cached.id);
       await this.activityLog.record({
@@ -178,10 +247,7 @@ export class DeviceRegistry implements AdapterBus {
       const endpoint = cached.endpoints.find((candidate) => candidate.endpointId === endpointId);
       if (!endpoint) return;
       endpoint.state = mergeState(endpoint.state, patch);
-      await this.db
-        .update(endpoints)
-        .set({ state: endpoint.state, updatedAt: new Date() })
-        .where(and(eq(endpoints.deviceId, cached.id), eq(endpoints.endpointId, endpointId)));
+      this.markStateDirty(cached.id, endpointId);
       this.events.emit('stateChanged', cached.id, endpointId, endpoint.state);
     });
   }
@@ -218,10 +284,7 @@ export class DeviceRegistry implements AdapterBus {
   }
 
   getDevice(deviceId: string): RegistryDevice | undefined {
-    for (const device of this.cache.values()) {
-      if (device.id === deviceId) return device;
-    }
-    return undefined;
+    return this.byId.get(deviceId);
   }
 
   async execute(deviceId: string, endpointId: number, command: HubCommand): Promise<void> {
@@ -368,13 +431,19 @@ export class DeviceRegistry implements AdapterBus {
     return true;
   }
 
-  /** Await all pending writes for a device — used by tests and shutdown. */
+  /**
+   * Await all pending writes — used by tests and shutdown. Draining the
+   * per-device queues is only half of it: endpoint state is deliberately
+   * written behind a debounce, so "everything is on disk" also means flushing
+   * that.
+   */
   async flush(key?: string): Promise<void> {
     if (key) {
       await this.queue.get(key);
-      return;
+    } else {
+      await Promise.all([...this.queue.values()]);
     }
-    await Promise.all([...this.queue.values()]);
+    await this.flushState();
   }
 
   // ── Internals ─────────────────────────────────────────────────────────────
@@ -442,6 +511,7 @@ export class DeviceRegistry implements AdapterBus {
       });
     }
     this.cache.set(this.key(descriptor.adapter, descriptor.externalId), device);
+    this.byId.set(device.id, device);
     this.events.emit('deviceUpserted', device.id);
     await this.activityLog.record({
       kind: 'device.added',
@@ -501,6 +571,7 @@ export class DeviceRegistry implements AdapterBus {
     const incomingIds = new Set(descriptor.endpoints.map((endpoint) => endpoint.endpointId));
     const removed = device.endpoints.filter((endpoint) => !incomingIds.has(endpoint.endpointId));
     for (const endpoint of removed) {
+      this.dirtyState.delete(`${device.id}:${endpoint.endpointId}`);
       await this.db
         .delete(endpoints)
         .where(and(eq(endpoints.deviceId, device.id), eq(endpoints.endpointId, endpoint.endpointId)));

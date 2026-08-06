@@ -84,6 +84,42 @@ describe.skipIf(!handle)('PairingService', () => {
     expect(await pairing.claim(stale.code, 'Boris')).toBeNull();
   });
 
+  it('keeps the same pairing code across restarts while unclaimed', async () => {
+    const code = readFileSync(path.join(dataDir, 'pairing-code'), 'utf8').trim();
+
+    // The hub restarts — an update, a power cut, the OOM killer. A code that
+    // Studio or the installer read a minute ago has to still be the code, or a
+    // finished install ends at "invalid_code" with no way forward.
+    const rebooted = new PairingService(db, dataDir, log);
+    await rebooted.boot();
+
+    expect(readFileSync(path.join(dataDir, 'pairing-code'), 'utf8').trim()).toBe(code);
+    const result = await rebooted.claim(code, 'Georgy');
+    expect(result?.member.role).toBe('owner');
+  });
+
+  it('replays a claim whose response was lost, instead of calling it a bad code', async () => {
+    const code = readFileSync(path.join(dataDir, 'pairing-code'), 'utf8').trim();
+    const claimId = '9a7a72e7-90e6-4b1e-859a-902abf7e7c4a';
+
+    const first = await pairing.claim(code, 'Georgy', 'Studio Mac', claimId);
+    const resumed = await pairing.claim(code, 'Georgy', 'Studio Mac', claimId);
+
+    expect(first).not.toBeNull();
+    expect(resumed).toEqual(first);
+    // A retry without the id still sees a spent code, as it should.
+    expect(await pairing.claim(code, 'Mallory')).toBeNull();
+  });
+
+  it('lets only one of two simultaneous claims become the owner', async () => {
+    const code = readFileSync(path.join(dataDir, 'pairing-code'), 'utf8').trim();
+    const [a, b] = await Promise.all([
+      pairing.claim(code, 'Georgy'),
+      pairing.claim(code, 'Mallory'),
+    ]);
+    expect([a, b].filter(Boolean)).toHaveLength(1);
+  });
+
   it('does not re-issue a boot code once claimed', async () => {
     const code = readFileSync(path.join(dataDir, 'pairing-code'), 'utf8').trim();
     await pairing.claim(code, 'Georgy');

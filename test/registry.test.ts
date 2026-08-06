@@ -93,7 +93,7 @@ describe.skipIf(!handle)('DeviceRegistry', () => {
     expect(seen).toHaveBeenCalledTimes(2);
   });
 
-  it('survives a restart from Postgres alone', async () => {
+  it('survives a restart from the database alone', async () => {
     adapter.bus!.deviceUpserted(lampDescriptor);
     await registry.flush();
     adapter.bus!.stateChanged('mqtt', 'lamp-1', 1, { onOff: true });
@@ -105,6 +105,29 @@ describe.skipIf(!handle)('DeviceRegistry', () => {
     const device = reloaded.listDevices()[0]!;
     expect(device.name).toBe('Desk lamp');
     expect(device.endpoints[0]!.state.onOff).toBe(true);
+  });
+
+  it('serves state from the cache before it has been persisted, and persists it on stop', async () => {
+    adapter.bus!.deviceUpserted(lampDescriptor);
+    await registry.flush();
+
+    // A burst, as a power meter or a motion sensor produces. Reads are answered
+    // from the cache immediately; the row is deliberately still behind.
+    for (let level = 10; level <= 200; level += 10) {
+      adapter.bus!.stateChanged('mqtt', 'lamp-1', 1, { level: { current: level, min: 1, max: 254 } });
+    }
+    await Promise.all([...(registry as unknown as { queue: Map<string, Promise<void>> }).queue.values()]);
+    expect(registry.listDevices()[0]!.endpoints[0]!.state.level?.current).toBe(200);
+
+    const beforeFlush = new DeviceRegistry(db, events, new ActivityService(db, events), log);
+    await beforeFlush.start();
+    expect(beforeFlush.listDevices()[0]!.endpoints[0]!.state.level?.current).toBeUndefined();
+
+    await registry.stop();
+
+    const afterFlush = new DeviceRegistry(db, events, new ActivityService(db, events), log);
+    await afterFlush.start();
+    expect(afterFlush.listDevices()[0]!.endpoints[0]!.state.level?.current).toBe(200);
   });
 
   it('keeps the user-chosen name across re-announcements', async () => {
