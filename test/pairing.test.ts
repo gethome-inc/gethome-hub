@@ -49,17 +49,6 @@ describe.skipIf(!handle)('PairingService', () => {
     expect(await pairing.claim(code, 'Mallory')).toBeNull();
   });
 
-  it('returns the original owner result when a timed-out claim is retried', async () => {
-    const code = readFileSync(path.join(dataDir, 'pairing-code'), 'utf8').trim();
-    const claimId = '9a7a72e7-90e6-4b1e-859a-902abf7e7c4a';
-
-    const first = await pairing.claim(code, 'Georgy', 'Studio Mac', claimId);
-    const resumed = await pairing.claim(code, 'Georgy', 'Studio Mac', claimId);
-
-    expect(first).not.toBeNull();
-    expect(resumed).toEqual(first);
-  });
-
   it('stores only the token hash', async () => {
     const code = readFileSync(path.join(dataDir, 'pairing-code'), 'utf8').trim();
     const result = await pairing.claim(code, 'Georgy');

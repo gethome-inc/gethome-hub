@@ -18,12 +18,9 @@ Tokens come from the claim flow:
    that path is what GetHome Studio reads over SSH so the person who installed
    the hub is never asked for a code they were never shown. Moving or dropping
    it breaks claiming for them.
-2. `POST /pair {"code","memberName","deviceName"?,"claimId"?}` — the first
-   successful claim creates the **owner** and returns `{token, member}`. The
-   boot code dies with the claim. A client should generate one UUID `claimId`
-   for an attempted claim and reuse it when retrying after a timeout; the hub
-   can then return the original result rather than treating the successful
-   first attempt as a bad code.
+2. `POST /pair {"code","memberName","deviceName"?}` — the first successful
+   claim creates the **owner** and returns `{token, member}`. The boot code
+   dies with the claim.
 3. Owners mint **invite codes** (`POST /invites`, 15-minute TTL, single use);
    claiming one through the same `/pair` endpoint creates a **member**.
 
@@ -36,7 +33,7 @@ devices, favorites, view everything.
 | Method & path | Role | Notes |
 |---|---|---|
 | `GET /hub` | — | `{hubId, name, version, apiVersion, claimed}` |
-| `POST /pair` | — | claim / join, returns `{token, member}`; reuse optional `claimId` when retrying; 401 on bad code |
+| `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code |
 | `GET /home` · `PATCH /home` | any · owner | home name |
 | `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | any · owner | |
 | `GET /devices` | any | full device list (wire shape below) |
