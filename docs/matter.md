@@ -30,7 +30,7 @@ window) — or use Ethernet/Thread devices.
 ## Runtime requirements
 
 - **Host networking.** Matter uses site-local UDP (port 5540) and mDNS
-  (5353); `docker-compose.yml` runs hubd with `network_mode: host` for this
+  (5353); hubd runs directly on the host network for this
   reason. IPv6 link-local must be available (it is on standard Raspberry Pi
   OS / Debian; some containers/VMs disable IPv6 — the adapter will fail to
   start and the hub continues without Matter).

@@ -35,5 +35,5 @@ integrations, which phones can't do at all.
 ## Installing without the Studio app
 
 Everything the Studio app does is scriptable — this repo is self-sufficient:
-`deploy/install.sh` (or plain `docker compose up -d`) brings up a hub, and the
+`deploy/install.sh` brings up a hub, and the
 pairing code lands in `<data>/pairing-code`. See the [README](../README.md).

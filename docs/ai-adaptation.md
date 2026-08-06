@@ -109,7 +109,7 @@ GET /api/v1/settings/ai
 ```
 
 The secret is encrypted with the hub's local AES-256-GCM secret, stored in
-Postgres, never returned by any API, and used only to run the mapping agent.
+the hub's database, never returned by any API, and used only to run the mapping agent.
 Default model: **`claude-opus-4-8`**; override with `model`. A typical
 adaptation run costs cents (bounded by the per-run budget cap).
 
@@ -242,7 +242,7 @@ Everything lives in `src/ai/`; the module never imports the API or adapters
 | `context.ts` | The per-run research workspace (device/samples/static-mapping/schema-reference files) and the `CLAUDE_CONFIG_DIR` home under `DATA_DIR`. |
 | `errors.ts` | The failure taxonomy: `AiUnavailableError` kinds, error-text classification, reset-time parsing. |
 | `prompts.ts` | The system prompt (canonical capabilities/paths/units/transforms + worked examples + agent working rules) and the per-device task prompt. |
-| `mapper.ts` | Orchestration: cache lookups, one-run-at-a-time serialization, per-model in-flight dedupe, the backoff gate, validation, Postgres storage, and interpretation into an `AppliedAiMapping` for the adapter. |
+| `mapper.ts` | Orchestration: cache lookups, one-run-at-a-time serialization, per-model in-flight dedupe, the backoff gate, validation, storage, and interpretation into an `AppliedAiMapping` for the adapter. |
 
 Related pieces elsewhere: credential + status storage in
 `src/core/settings.ts` (AES-256-GCM via `src/core/crypto.ts`), the owner-only
@@ -252,7 +252,7 @@ explicit remap).
 
 Tests: `test/ai-agent.test.ts` (failure classification, submit-tool
 validation loop, research workspace), `test/ai-descriptor.test.ts` (DSL +
-mapper behavior incl. backoff and dedupe, against Postgres), and
+mapper behavior incl. backoff and dedupe, against a temporary SQLite file), and
 `test/integration/zigbee-adapter.test.ts` (runtime adaptation end-to-end over
 a real broker).
 

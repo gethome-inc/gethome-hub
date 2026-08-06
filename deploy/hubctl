@@ -10,7 +10,7 @@
 #   hubctl uninstall  remove launch agents and stop services (keeps data)
 #
 # "start"/"stop" flip the whole stack — hubd, Zigbee2MQTT (if installed),
-# Mosquitto, Postgres — so a stopped hub holds no ports and survives nothing:
+# Mosquitto — so a stopped hub holds no ports and survives nothing:
 # one switch, exactly what it looks like. brew services carry the same
 # now+autostart semantics for the dependencies.
 
@@ -65,8 +65,7 @@ health() {
 
 case "${1:-status}" in
   start)
-    echo "==> Starting Postgres and Mosquitto (brew services)…"
-    "$BREW" services start postgresql@17 >/dev/null
+    echo "==> Starting Mosquitto (brew services)…"
     "$BREW" services start mosquitto >/dev/null
     echo "==> Starting hubd…"
     start_agent "$HUBD_LABEL"
@@ -95,9 +94,8 @@ case "${1:-status}" in
       echo "==> Stopping Zigbee2MQTT…"
       stop_agent "$Z2M_LABEL"
     fi
-    echo "==> Stopping Mosquitto and Postgres (brew services)…"
+    echo "==> Stopping Mosquitto (brew services)…"
     "$BREW" services stop mosquitto >/dev/null 2>&1 || true
-    "$BREW" services stop postgresql@17 >/dev/null 2>&1 || true
     echo "The hub is off: no ports held, nothing starts at login until 'hubctl start'."
     ;;
 
@@ -114,7 +112,7 @@ case "${1:-status}" in
     else
       echo "zigbee2mqtt: not installed"
     fi
-    "$BREW" services list 2>/dev/null | awk 'NR==1 || /postgresql@17|mosquitto/'
+    "$BREW" services list 2>/dev/null | awk 'NR==1 || /mosquitto/'
     INFO="$(health)"
     if [[ -n "$INFO" ]]; then
       echo "api:         healthy — $INFO"
@@ -132,12 +130,11 @@ case "${1:-status}" in
     stop_agent "$Z2M_LABEL"
     rm -f "$AGENTS_DIR/$HUBD_LABEL.plist" "$AGENTS_DIR/$Z2M_LABEL.plist"
     "$BREW" services stop mosquitto >/dev/null 2>&1 || true
-    "$BREW" services stop postgresql@17 >/dev/null 2>&1 || true
     echo "Launch agents removed; services stopped."
     echo "Kept (remove manually if you want a clean slate):"
     echo "  data:      ~/Library/Application Support/GetHome"
     echo "  logs:      ~/Library/Logs/GetHome"
-    echo "  packages:  brew uninstall node@22 postgresql@17 mosquitto pnpm"
+    echo "  packages:  brew uninstall node@22 mosquitto pnpm"
     ;;
 
   *)
