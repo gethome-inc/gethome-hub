@@ -90,16 +90,7 @@ COMPOSE_PROFILES=zigbee docker compose up -d      # …plus Zigbee2MQTT
 docker compose exec hubd cat /data/pairing-code   # your pairing code
 ```
 
-The API answers at `http://<hub>:8420/api/v1/hub`. The MQTT broker answers on
-`mqtt://<hub>:1883` for devices on the same local network.
-
-### Small Raspberry Pi boards
-
-Raspberry Pi Zero 2 W can run the hub, but its 512 MB of RAM leaves little
-room for an operating-system update, Docker and a large Matter device list at
-the same time. The default stack therefore uses a capped Node heap and a
-low-memory Postgres configuration. A Pi 4/5 with 2 GB+ remains the better
-choice for a busy home or for many Matter devices.
+The API answers at `http://<hub>:8420/api/v1/hub`.
 
 ### The hub image
 

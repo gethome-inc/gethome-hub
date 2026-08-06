@@ -82,13 +82,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         code: z.string().min(4).max(16),
         memberName: z.string().min(1).max(80),
         deviceName: z.string().max(120).optional(),
-        // The client keeps this random value while retrying a claim. It makes
-        // a response lost to a slow Pi/network recoverable without weakening
-        // the pairing-code check for a new claim.
-        claimId: z.uuid().optional(),
       })
       .parse(request.body);
-    const result = await deps.pairing.claim(body.code, body.memberName, body.deviceName, body.claimId);
+    const result = await deps.pairing.claim(body.code, body.memberName, body.deviceName);
     if (!result) return reply.code(401).send({ error: 'invalid_code' });
     await deps.activity.record({
       kind: 'member.joined',
