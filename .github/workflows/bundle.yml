@@ -1,0 +1,137 @@
+# Publishes the hub as a per-architecture tarball, so a Raspberry Pi downloads
+# it instead of building it.
+#
+# Building on the Pi meant `npm ci` fetching a thousand-odd packages and then
+# `tsc` compiling them, on an SD card, for twenty to forty minutes — with every
+# minute of it another chance for a flaky connection to reset and throw the
+# whole thing away, and, on a 512 MB board, an OOM kill at the end of it
+# regardless. Here it happens once, on machines built for it.
+#
+# A tarball rather than a container image: the hub runs as a systemd unit now,
+# not in Docker, and a Pi Zero cannot spare the ~130 MB the Docker daemon costs.
+#
+# Each bundle carries `node_modules` **built for its own architecture**, which
+# is the part that matters: better-sqlite3 ships prebuilt binaries for
+# linux-arm64 and linux-x64 inside its npm tarball, but *not* for 32-bit ARM.
+# Building armv7 here — slowly, under QEMU — is what keeps `npm rebuild` off
+# the Pi, where it would need a compiler toolchain and several hundred
+# megabytes of memory it doesn't have.
+
+name: Publish bundle
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    name: Bundle ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: linux-x64
+            runner: ubuntu-latest
+            platform: linux/amd64
+          - arch: linux-arm64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+          # Raspberry Pi OS and Ubuntu still ship 32-bit images, and a Pi
+          # running one of those is exactly the machine this exists for.
+          - arch: linux-armv7l
+            runner: ubuntu-latest
+            platform: linux/arm/v7
+    steps:
+      - uses: actions/checkout@v5
+
+      # Only where the runner can't execute the target architecture itself.
+      - uses: docker/setup-qemu-action@v3
+        if: matrix.arch == 'linux-armv7l'
+
+      # One container per architecture, so `npm ci` resolves the same optional
+      # and platform-specific packages the Pi would — and compiles any native
+      # module against the right ABI. `node:22-bookworm` matches what
+      # install.sh puts on the machine: Node 22, glibc, Debian.
+      - name: Build the bundle
+        run: |
+          set -euo pipefail
+          docker run --rm --platform ${{ matrix.platform }} \
+            -v "$PWD:/src" -w /src \
+            node:22-bookworm bash -euo pipefail -c '
+              apt-get update -qq
+              apt-get install -y -qq --no-install-recommends python3 make g++ >/dev/null
+              npm ci --no-audit --no-fund
+              npm run build
+              npm ci --omit=dev --no-audit --no-fund
+              mkdir -p /src/out
+              tar -czf "/src/out/gethome-hub-${{ matrix.arch }}.tar.gz" \
+                dist node_modules package.json deploy
+            '
+
+      - name: Check the bundle actually runs
+        if: matrix.arch != 'linux-armv7l'
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/verify && tar -xzf "out/gethome-hub-${{ matrix.arch }}.tar.gz" -C /tmp/verify
+          # Boots, migrates a fresh SQLite file, answers, and shuts down. This
+          # is the check that would have caught a bundle missing its native
+          # SQLite binding — the failure mode a cross-built tarball has and a
+          # container image does not.
+          DATA_DIR=/tmp/verify-data MDNS=0 ADAPTER_ZIGBEE=0 ADAPTER_MQTT=0 ADAPTER_MATTER=0 \
+            node /tmp/verify/dist/index.js &
+          hub=$!
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8420/api/v1/hub && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8420/api/v1/hub | tee /dev/stderr | grep -q '"apiVersion":1'
+          kill "$hub"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.arch }}
+          path: out/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish
+    runs-on: ubuntu-latest
+    needs: [bundle]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          pattern: bundle-*
+          merge-multiple: true
+
+      # A rolling release per branch, which is what makes testing a branch on
+      # real hardware possible: install.sh derives the tag from `--branch`, so
+      # a card written from a feature branch installs that branch's build. The
+      # tag has slashes flattened because a release tag is a git ref.
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME}"
+            title="${GITHUB_REF_NAME}"
+            flags=""
+          else
+            tag="bundle-$(printf '%s' "${GITHUB_REF_NAME}" | tr '/' '-')"
+            title="Build of ${GITHUB_REF_NAME}"
+            flags="--prerelease"
+          fi
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --title "$title" --notes "Automatic build of \`${GITHUB_REF_NAME}\` (${GITHUB_SHA})." $flags
+          fi
+          gh release upload "$tag" out/*.tar.gz --clobber

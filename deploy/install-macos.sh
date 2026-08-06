@@ -57,6 +57,7 @@ say() {
 step() { printf '@@STEP:%s@@\n' "$1"; say "$2"; }
 fail() { printf '@@ERROR:%s@@\n' "$1"; echo "ERROR: $1" >&2; exit 1; }
 # If any unguarded command dies under `set -e`, at least say which one.
+# shellcheck disable=SC2154  # `code` is assigned inside the trap body itself.
 trap 'code=$?; printf "@@ERROR:Command failed (exit %s) at line %s: %s@@\n" "$code" "$LINENO" "$BASH_COMMAND"; echo "ERROR (exit $code) at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 # Fewer moving parts, less noise, no surprise brew self-updates mid-install.
