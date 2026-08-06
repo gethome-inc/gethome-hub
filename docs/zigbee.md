@@ -11,15 +11,20 @@ available.
    into the hub machine. **Order doesn't matter** — before or after installing
    the hub, see [Finding the coordinator](#finding-the-coordinator).
 2. Start Zigbee2MQTT:
-   - **Linux/Pi (Docker):** nothing to do — `install.sh` detects the
-     coordinator and enables the `zigbee` profile. To pin a specific device,
-     `install.sh --zigbee /dev/serial/by-id/usb-...`, or by hand:
-     `COMPOSE_PROFILES=zigbee ZIGBEE_ADAPTER=/dev/serial/by-id/usb-...
-     docker compose up -d`. Prefer `by-id` paths: `/dev/ttyACM0` moves the
-     moment another USB device appears.
+   - **Linux/Pi:** nothing to do. `install.sh` installs Zigbee2MQTT and the
+     detector; the detector starts the `gethome-zigbee2mqtt` service when a
+     coordinator is there and stops it when there isn't — at every boot and on
+     every plug or unplug. To pin a specific device (a generic USB-serial
+     bridge the detector will never adopt on its own),
+     `install.sh --zigbee /dev/serial/by-id/usb-...`. Prefer `by-id` paths:
+     `/dev/ttyACM0` moves the moment another USB device appears.
    - **macOS (native):** `install-macos.sh --zigbee auto` (or an explicit
-     `/dev/tty.usb*` path) — Docker on macOS cannot pass USB through, which
-     is one reason the macOS install is native (see [macos.md](macos.md)).
+     `/dev/tty.usb*` path).
+
+   **The service is installed but not enabled**, and that is the point.
+   Zigbee2MQTT is a second full Node.js process — around 150 MB — and on a
+   512 MB board, holding that open to wait for hardware nobody has bought is
+   memory the hub needs. The detector owns whether it runs.
 3. Open the network from the GetHome app (or
    `POST /api/v1/zigbee/permit-join {"seconds":120}`) and put the device in
    pairing mode.
@@ -27,27 +32,40 @@ available.
 ### Finding the coordinator
 
 `deploy/zigbee-detect.sh` is the single authority on which USB device is a
-Zigbee coordinator. `install.sh` runs it once, and installs it as
-`gethome-zigbee.service` behind a udev rule that fires on any USB serial
-device — so a stick bought two months later is configured the moment it is
-plugged in, with nothing for the user to re-run.
+Zigbee coordinator, **and on whether Zigbee2MQTT runs at all**. `install.sh`
+installs it as `gethome-zigbee-detect.service`, which runs at every boot and
+from a udev rule that fires on any USB serial device appearing *or*
+disappearing — so a stick bought two months later starts working the moment it
+is plugged in, with nothing for the user to re-run and no reboot.
 
 It classifies a device three ways, and the middle one is the point:
 
 | Verdict | Signal | What happens |
 |---|---|---|
-| `certain` | the USB product string names a coordinator (`zigbee`, `zbdongle`, `conbee`, `slzb`, `cc2652`, `efr32`, …), or the `vendor:product` id is a coordinator and nothing else (ConBee, CC2531) | `.env` gets `ZIGBEE_ADAPTER` + `COMPOSE_PROFILES=zigbee`, the stack comes up |
+| `certain` | the USB product string names a coordinator (`zigbee`, `zbdongle`, `conbee`, `slzb`, `cc2652`, `efr32`, …), or the `vendor:product` id is a coordinator and nothing else (ConBee, CC2531) | `/etc/gethome/zigbee.env` gets the device path and `gethome-zigbee2mqtt.service` is started |
 | `maybe` | a generic USB-serial bridge (CP210x, CH340/CH9102, FTDI) — what a Sonoff uses, and also a 3D printer, a UPS, a GPS puck, an Arduino | reported as `@@ZIGBEE_MAYBE:<device>@@`, **never** configured automatically; GetHome Studio offers it for the user to pick |
 | `no` | not USB serial, or unknown ids | ignored |
 
 Auto-enabling on `maybe` would hand someone's 3D printer to Zigbee2MQTT, so
 it deliberately does nothing instead.
 
-Presence of a device node only proves something is plugged in, so after
-starting the stack `install.sh` waits for Z2M to report
-`Zigbee2MQTT started successfully` and otherwise emits `@@WARN:…@@` — the hub
-stays up (Matter and Wi-Fi are unaffected) and the user is told the radio
-didn't answer, with the last error from the container log.
+Nothing found means the service is **stopped**, not left waiting. Zigbee2MQTT
+is a second full Node.js process; leaving it up against a device node that has
+gone is a restart loop, and leaving it up on a board with 512 MB is memory the
+hub needs.
+
+The device path is written as a `ZIGBEE2MQTT_CONFIG_SERIAL_PORT` override, never
+into Zigbee2MQTT's own `configuration.yaml` — that file holds the network key
+and the paired-device list, and rewriting it on a replug would lose the user's
+whole Zigbee network.
+
+Presence of a device node only proves something is plugged in, so `install.sh`
+reports what it found and the hub's `GET /api/v1/hub` carries
+`zigbee: {enabled, connected}` — `connected` being the Z2M bridge actually
+saying it is online, not merely that the broker is up. A coordinator wired to
+the Pi's GPIO serial port is the one case that genuinely needs a reboot
+(`enable_uart=1` plus the Bluetooth swap in `config.txt`), and the detector says
+so with `@@WARN:…@@` rather than leaving the user to wonder.
 
 **The identification tables are duplicated** in Studio's
 `Models/ZigbeeModels.swift` (`ZigbeeCatalog`), which classifies devices during

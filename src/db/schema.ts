@@ -1,36 +1,55 @@
-import {
-  bigserial,
-  boolean,
-  integer,
-  jsonb,
-  pgTable,
-  text,
-  timestamp,
-  uniqueIndex,
-  uuid,
-} from 'drizzle-orm/pg-core';
+import { randomUUID } from 'node:crypto';
+import { integer, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
+
+/**
+ * The hub's store is a single SQLite file (`<data>/hub.db`).
+ *
+ * It used to be Postgres, which cost a second daemon, a TCP connection pool
+ * and — with stock `shared_buffers` — more memory than the hub itself on a
+ * 512 MB Raspberry Pi. Nothing here needed a server: one process writes, the
+ * reads are small and local, and there is not a transaction in the codebase.
+ *
+ * Three conventions carry over from the Postgres schema and must stay, because
+ * the column names are the wire contract with the GetHome apps:
+ *  - ids are uuid *text*, generated in JS (`randomUUID`) rather than by
+ *    `gen_random_uuid()`;
+ *  - JSON columns are text in `json` mode — drizzle serialises on the way in
+ *    and parses on the way out, so callers see the same objects as before;
+ *  - timestamps are integer milliseconds in `timestamp_ms` mode, which still
+ *    hands JavaScript a `Date`, so `JSON.stringify` still emits ISO-8601.
+ */
+
+const uuidPk = () =>
+  text('id')
+    .primaryKey()
+    .$defaultFn(() => randomUUID());
+
+const createdAt = (column = 'created_at') =>
+  integer(column, { mode: 'timestamp_ms' })
+    .notNull()
+    .$defaultFn(() => new Date());
 
 /**
  * One hub hosts exactly one home — sharing means granting members access to
  * this hub. The single `home` row is created at first boot.
  */
-export const home = pgTable('home', {
-  id: uuid('id').primaryKey().defaultRandom(),
+export const home = sqliteTable('home', {
+  id: uuidPk(),
   name: text('name').notNull(),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  createdAt: createdAt(),
 });
 
-export const rooms = pgTable('rooms', {
-  id: uuid('id').primaryKey().defaultRandom(),
+export const rooms = sqliteTable('rooms', {
+  id: uuidPk(),
   name: text('name').notNull(),
   sortOrder: integer('sort_order').notNull().default(0),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  createdAt: createdAt(),
 });
 
-export const devices = pgTable(
+export const devices = sqliteTable(
   'devices',
   {
-    id: uuid('id').primaryKey().defaultRandom(),
+    id: uuidPk(),
     /** Owning protocol adapter: zigbee | mqtt | matter. */
     adapter: text('adapter').notNull(),
     /** Adapter-scoped stable id: IEEE address, MQTT device id, Matter node id. */
@@ -38,91 +57,91 @@ export const devices = pgTable(
     vendor: text('vendor'),
     model: text('model'),
     name: text('name').notNull(),
-    roomId: uuid('room_id').references(() => rooms.id, { onDelete: 'set null' }),
-    favorite: boolean('favorite').notNull().default(false),
-    online: boolean('online').notNull().default(true),
+    roomId: text('room_id').references(() => rooms.id, { onDelete: 'set null' }),
+    favorite: integer('favorite', { mode: 'boolean' }).notNull().default(false),
+    online: integer('online', { mode: 'boolean' }).notNull().default(true),
     /** Set when automatic (static or AI) mapping was incomplete. */
-    needsReview: boolean('needs_review').notNull().default(false),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    needsReview: integer('needs_review', { mode: 'boolean' }).notNull().default(false),
+    createdAt: createdAt(),
   },
   (table) => [uniqueIndex('devices_adapter_external_id').on(table.adapter, table.externalId)],
 );
 
-export const endpoints = pgTable(
+export const endpoints = sqliteTable(
   'endpoints',
   {
-    id: uuid('id').primaryKey().defaultRandom(),
-    deviceId: uuid('device_id')
+    id: uuidPk(),
+    deviceId: text('device_id')
       .notNull()
       .references(() => devices.id, { onDelete: 'cascade' }),
     endpointId: integer('endpoint_id').notNull(),
     deviceKind: text('device_kind').notNull(),
     /** CapabilityKind[] as JSON. */
-    capabilities: jsonb('capabilities').notNull(),
+    capabilities: text('capabilities', { mode: 'json' }).notNull(),
     primaryCapability: text('primary_capability').notNull(),
     /** Latest canonical EndpointState as JSON — survives restarts. */
-    state: jsonb('state').notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    state: text('state', { mode: 'json' }).notNull(),
+    updatedAt: createdAt('updated_at'),
   },
   (table) => [uniqueIndex('endpoints_device_endpoint').on(table.deviceId, table.endpointId)],
 );
 
-export const members = pgTable('members', {
-  id: uuid('id').primaryKey().defaultRandom(),
+export const members = sqliteTable('members', {
+  id: uuidPk(),
   name: text('name').notNull(),
   /** owner | member */
   role: text('role').notNull(),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  createdAt: createdAt(),
 });
 
-export const tokens = pgTable('tokens', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  memberId: uuid('member_id')
+export const tokens = sqliteTable('tokens', {
+  id: uuidPk(),
+  memberId: text('member_id')
     .notNull()
     .references(() => members.id, { onDelete: 'cascade' }),
   /** sha256 hex of the opaque bearer token; the plaintext is never stored. */
   tokenHash: text('token_hash').notNull().unique(),
   deviceName: text('device_name'),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+  createdAt: createdAt(),
+  lastUsedAt: integer('last_used_at', { mode: 'timestamp_ms' }),
 });
 
-export const invites = pgTable('invites', {
-  id: uuid('id').primaryKey().defaultRandom(),
+export const invites = sqliteTable('invites', {
+  id: uuidPk(),
   /** sha256 hex of the 8-digit invite code. */
   codeHash: text('code_hash').notNull(),
   role: text('role').notNull().default('member'),
-  createdBy: uuid('created_by').references(() => members.id, { onDelete: 'set null' }),
-  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
-  usedBy: uuid('used_by').references(() => members.id, { onDelete: 'set null' }),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  createdBy: text('created_by').references(() => members.id, { onDelete: 'set null' }),
+  expiresAt: integer('expires_at', { mode: 'timestamp_ms' }).notNull(),
+  usedBy: text('used_by').references(() => members.id, { onDelete: 'set null' }),
+  createdAt: createdAt(),
 });
 
-export const activity = pgTable('activity', {
-  id: bigserial('id', { mode: 'number' }).primaryKey(),
-  at: timestamp('at', { withTimezone: true }).notNull().defaultNow(),
-  memberId: uuid('member_id').references(() => members.id, { onDelete: 'set null' }),
-  deviceId: uuid('device_id').references(() => devices.id, { onDelete: 'set null' }),
+export const activity = sqliteTable('activity', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  at: createdAt('at'),
+  memberId: text('member_id').references(() => members.id, { onDelete: 'set null' }),
+  deviceId: text('device_id').references(() => devices.id, { onDelete: 'set null' }),
   kind: text('kind').notNull(),
   message: text('message').notNull(),
-  data: jsonb('data'),
+  data: text('data', { mode: 'json' }),
 });
 
-export const aiMappings = pgTable(
+export const aiMappings = sqliteTable(
   'ai_mappings',
   {
-    id: uuid('id').primaryKey().defaultRandom(),
+    id: uuidPk(),
     adapter: text('adapter').notNull(),
     vendor: text('vendor'),
     model: text('model'),
     /** sha256 of the canonicalized exposes/definition JSON — the cache key. */
     exposesHash: text('exposes_hash').notNull(),
     /** MappingDescriptor as JSON. */
-    descriptor: jsonb('descriptor').notNull(),
+    descriptor: text('descriptor', { mode: 'json' }).notNull(),
     /** generated | verified | rejected */
     status: text('status').notNull().default('generated'),
     provider: text('provider'),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: createdAt(),
   },
   (table) => [uniqueIndex('ai_mappings_adapter_hash').on(table.adapter, table.exposesHash)],
 );
@@ -131,7 +150,7 @@ export const aiMappings = pgTable(
  * Key-value settings. AI provider keys are stored here encrypted with the
  * hub secret (AES-256-GCM) — never in plaintext, never returned by the API.
  */
-export const settings = pgTable('settings', {
+export const settings = sqliteTable('settings', {
   key: text('key').primaryKey(),
-  value: jsonb('value').notNull(),
+  value: text('value', { mode: 'json' }).notNull(),
 });

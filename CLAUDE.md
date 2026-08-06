@@ -16,21 +16,30 @@ touching that code: `architecture.md` (module boundaries, data flow),
 `device-schema.md` (**the** capability/unit/wire contract), `api.md`,
 `zigbee.md`, `matter.md`, `mqtt-integrations.md` (public integrator
 convention), `ai-adaptation.md`, `ecosystem.md`, `macos.md` (native macOS
-deployment — launchd + `deploy/hubctl`; Docker is Linux/Pi-only because
-macOS Docker breaks mDNS/Matter and cannot pass through Zigbee USB).
+deployment — launchd + `deploy/hubctl`).
+
+**There is no Docker and no database server anywhere any more.** Linux runs
+systemd units (`deploy/install.sh`, `deploy/gethome-hubctl`), macOS runs launchd
+agents, and the store is a SQLite file. That was a memory decision: on a
+Raspberry Pi Zero 2 W — 512 MB, the smallest supported board — the Docker daemon
+took ~130 MB and a stock Postgres another ~130 MB before the hub had started,
+and the OOM killer was taking the hub down between the end of the install and
+the user claiming it.
 
 ## Build, test, run
 
 ```sh
-docker compose up -d postgres mosquitto   # test/dev dependencies
 npm install
 npm run typecheck                         # tsc --noEmit (strict, exactOptionalPropertyTypes)
-npm test                                  # vitest; Postgres-backed suites skip cleanly if the DB is down
-HUB_TEST_MQTT=1 npm test                  # + end-to-end broker round-trip (needs mosquitto)
+npm test                                  # vitest — the database is a temp file, so nothing to start
+HUB_TEST_MQTT=1 npm test                  # + end-to-end broker round-trip (needs a local mosquitto)
 npm run dev                               # tsx watch, reads .env
 npm run build && node dist/index.js       # production build (copies SQL migrations into dist)
 npm run db:generate                       # drizzle-kit: generate a migration after editing src/db/schema.ts
 ```
+
+`deploy/` has no type checker behind it, so CI runs `shellcheck -S warning` over
+every script there. Keep it clean.
 
 Green `typecheck` + `test` is the bar for every change. The e2e suites
 (`test/integration/mqtt-roundtrip.test.ts` for the whole pipeline,
@@ -41,7 +50,7 @@ adapter/registry/API change.
 ## Architecture: the boundaries that matter
 
 ```
-adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ──▶ Postgres
+adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ──▶ SQLite
         ▲ execute()                                   │ events
         └──────────── command routing ◀── REST/WS API ┘
 ```
@@ -57,9 +66,22 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   never import `src/api` or `src/db`. Adding a protocol = new directory under
   `src/adapters/` + registration in `src/index.ts`.
 - **`DeviceRegistry`** (`src/core/registry.ts`) implements the bus: per-device
-  serialized write queue, write-through cache, jsonb state persistence, event
+  serialized write queue, write-through cache, JSON state persistence, event
   fan-out, command routing. Adapter start failures are isolated — the hub must
   keep running (and must boot with no devices/radios at all).
+  **Endpoint state is written behind a debounce** (`STATE_FLUSH_MS`), because
+  persisting on every report meant one whole-row JSON rewrite per sensor
+  message, forever, onto an SD card — a power meter alone is a write every few
+  seconds. The cache is authoritative while the process runs; the row only has
+  to be right when it restarts, so `flush()`/`stop()` are what make that true
+  and tests must call one of them before reading rows back.
+- **The API listens before the adapters start** (`src/index.ts`). Starting them
+  first meant a broker that wasn't up yet, or matter.js opening its storage on a
+  slow card, held port 8420 closed — and with it the installer's health check
+  and the claim. The three adapters and the AI mapper are also **dynamic
+  imports**: `@matter/main` and `@anthropic-ai/claude-agent-sdk` are the two
+  largest things in the graph, and a static import loaded them whether or not
+  the adapter was enabled.
 - **AI mappings are data, not code**: `MappingDescriptor`
   (`src/ai/descriptor.ts`) is zod-validated and interpreted. Never execute
   model output. The mapping is produced by an autonomous agent
@@ -100,20 +122,29 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   subscription token) AES-256-GCM-encrypted with the hub secret
   (`<data>/hub-secret.json`, 0600); the API never returns key material. Keep
   it that way.
-- **`<data>/pairing-code` is a contract, and it is rewritten every boot.** An
-  unclaimed hub mints a *new* code on each start, so anything that captured one
-  earlier is holding a stale number — which is why Studio reads the file over
-  SSH at the moment it claims rather than trusting `install.sh`'s `@@PAIRING@@`
-  marker. That is also what keeps the code away from the user entirely: they
-  installed the hub, so they have already proved the physical access the code
-  exists to prove. Don't move the file or change when it's written without
-  fixing Studio's claim path with it.
-  **The startup line is part of that contract too.** The file is `0600` inside
-  the container and the account driving Docker may not have passwordless sudo,
-  so Studio falls back to the volume's path on the host and then to grepping
-  `Pairing code: <digits>` out of the hub's own log — the exact wording
-  `PairingService.boot()` logs. Rephrasing that message breaks the last way
-  Studio has of handing a user the code it promised they'd never have to find.
+- **`<data>/pairing-code` is a contract, and it now *survives* restarts.** It
+  used to be re-minted on every boot, and that was the bug: any code that had
+  been read — `install.sh`'s `@@PAIRING@@` marker, or a value Studio fetched a
+  minute earlier — was a different number by the time somebody pressed Claim, so
+  a finished install ended at `invalid_code` with nothing the user could do.
+  Rotation bought nothing: the code only ever proves physical access to the
+  machine, and reading the file *is* that access. The file is the source of
+  truth; it is deleted the moment the hub is claimed. Don't reintroduce
+  rotation.
+  **The startup line is part of that contract too.** The file is `0600` and
+  owned by the service account, so Studio falls back to grepping
+  `Pairing code: <digits>` out of the journal — the exact wording
+  `PairingService.boot()` logs. Rephrasing it breaks the last way Studio has of
+  handing a user the code it promised they'd never have to find.
+- **The code is the *fallback*, not the route.** `gethome-hubctl claim` reads
+  the code and claims in one step on the hub's own machine, printing
+  `@@HUBID:@@`/`@@TOKEN:@@`; Studio drives it over SSH with the key the card
+  planted, so the person who installs a hub never sees a code. Anyone who can
+  run it already holds root on the machine the code exists to prove access to.
+  `POST /pair` also takes a `claimId` — one UUID per attempt, replayed for five
+  minutes — because a hub can commit a claim and lose the response, and without
+  it the retry is told the code is wrong. Both halves are load-bearing; neither
+  replaces the typed code for a hub Studio has no key on.
 - matter.js is pinned to a minor (`~0.17.x`) because its API churns; keep all
   matter.js-specific code inside `src/adapters/matter/`.
 - `tsconfig` uses `exactOptionalPropertyTypes` — build optional-field objects
@@ -124,38 +155,62 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
 
 - **`install.sh`'s `@@…@@` markers are a wire protocol.** GetHome Studio drives
   its whole install UI off them (`@@STEP@@`, `@@ERROR@@`, `@@WARN@@`,
-  `@@PAIRING@@`, `@@ZIGBEE_FOUND@@`, `@@ZIGBEE_MAYBE@@`). Adding a marker or a
-  step id is safe — unknown ones are ignored — but renaming or removing one
-  breaks the app silently. The header comment lists them; keep it accurate.
-- **Every install path must leave the hub starting on power-up.** Compose
-  services carry `restart: unless-stopped` and `install.sh` enables
-  `docker.service` at boot. Don't add a path that needs a human to start the
-  hub by hand.
-- **The Pi downloads the hub; it does not compile it.** `hubd` runs from
-  `ghcr.io/gethome-inc/gethome-hub:latest` (amd64 + arm64 + armhf, published by
-  `.github/workflows/publish.yml`). Building on a Pi is `npm ci` fetching a
-  thousand packages onto an SD card plus `tsc` — twenty to forty minutes, and
-  every minute of it another chance for a dropped connection to lose the lot,
-  which is a real failure people hit. Keep the fallback working too:
-  `install.sh` pulls first and drops to `docker-compose.build.yml` with a
-  `@@WARN@@` when it can't, so an architecture nobody anticipated still ends up
-  with a hub. **A private GHCR package fails every pull with `denied`** and
-  silently sends everyone down the slow path — after the first publish, make
-  the package public and verify with a logged-out `docker pull`.
-- **Name a build failure, don't just relay it.** Compose says "failed to build
-  or start the stack" for a dropped download, a full card and an OOM kill
-  alike, and on a Pi all three happen and want different fixes. `install.sh`
-  keeps the output and matches those three, because by then the actual reason
-  is a hundred lines up a build log — which, for someone driving this from
-  Studio, may as well be nowhere.
-- **`deploy/zigbee-detect.sh` decides what a Zigbee coordinator is**, for both
-  the install and for hot-plug (it is installed as `gethome-zigbee.service`
-  behind a udev rule). It only acts on hardware it is *sure* about: the same
-  CP210x/CH340 bridges are used by 3D printers and UPSes, so an unidentifiable
-  device is reported and never configured. **Its tables are duplicated in
-  GetHome Studio** (`Models/ZigbeeModels.swift`), which classifies devices
-  during its SSH preflight — before this script exists on the machine. Change
-  both together; `docs/zigbee.md` documents the contract.
+  `@@BOARD@@`, `@@PAIRING@@`, `@@ZIGBEE_FOUND@@`, `@@ZIGBEE_MAYBE@@`). Adding a
+  marker is safe — unknown ones are ignored — but renaming or removing one, or
+  changing a **step id**, breaks the app silently: the step ids (`system`,
+  `runtime`, `download`, `zigbee`, `start`, `autostart`, `health`) are mirrored
+  in Studio's `FirstBootMonitor.installSteps` and `PiInstallView.steps()`.
+  Change both repos together. The header comment lists them; keep it accurate.
+- **Every install path must leave the hub starting on power-up.** Every unit is
+  `systemctl enable`d with `Restart=always`. Don't add a path that needs a human
+  to start the hub by hand.
+- **The Pi downloads the hub; it does not compile it.** `install.sh` fetches a
+  per-architecture tarball (`dist/` + production `node_modules`, native modules
+  already built) published by `.github/workflows/bundle.yml` to a rolling
+  per-branch release — which is also what makes `--branch` testable on real
+  hardware. Building on a Pi is `npm ci` fetching a thousand packages onto an SD
+  card plus `tsc`: twenty to forty minutes, several hundred megabytes of memory,
+  and on a 512 MB board an OOM kill at the end regardless. So the fallback is
+  **refused below 1 GB of RAM** and says why. Starting a build that cannot
+  finish is worse than failing in ten seconds.
+- **Name a failure, don't just relay it.** A dropped download, a full card and
+  an OOM kill all happen on a Pi and all want different fixes; `install.sh`
+  keeps the output and matches them, because by then the actual reason is a
+  hundred lines up a log — which, for someone driving this from Studio, may as
+  well be nowhere. The same applies to hardware: an ARMv6 board (original Pi
+  Zero / Zero W / Pi 1) is refused **by name**, with what to buy instead,
+  because Node.js has published no ARMv6 build since Node 12.
+- **`deploy/zigbee-detect.sh` decides what a Zigbee coordinator is *and whether
+  Zigbee2MQTT runs at all*.** It is installed as `gethome-zigbee-detect.service`
+  and fires at boot and from a udev rule on `add` **and** `remove` — so a stick
+  bought next month starts Zigbee within seconds, with no reboot and no restart
+  of the hub, and unplugging one stops the service instead of leaving it
+  restart-looping against a device node that is gone. `gethome-zigbee2mqtt`
+  is installed but deliberately **not enabled**: it is a second ~150 MB Node
+  process, and holding that open for hardware nobody has bought is memory the
+  hub needs. It only acts on hardware it is *sure* about: the same CP210x/CH340
+  bridges are used by 3D printers and UPSes, so an unidentifiable device is
+  reported and never configured. The device path is written as a
+  `ZIGBEE2MQTT_CONFIG_*` override and **never** into Zigbee2MQTT's own
+  `configuration.yaml`, which holds the network key and the paired-device list.
+  **Its tables are duplicated in GetHome Studio** (`Models/ZigbeeModels.swift`),
+  which classifies devices during its SSH preflight — before this script exists
+  on the machine. Change both together; `docs/zigbee.md` documents the contract.
+- **One mDNS responder per host.** `MdnsAdvertiser` publishes `_gethome._tcp`
+  through **avahi** (a static file in `/etc/avahi/services`) wherever avahi
+  exists, and only falls back to in-process `ciao` where it doesn't. Running
+  both is not redundancy: ciao publishes an A record for `os.hostname()` — the
+  same `<host>.local` avahi owns — mDNS calls that a conflict, and the loser
+  renames itself. That is why a Pi answered to `raspberrypi.local` right after
+  an install and stopped answering after a power cut while keeping its IP.
+  `install.sh` also denies `docker0` in `avahi-daemon.conf`, so a Docker
+  installed later for something else can't get an unreachable `172.17.0.1`
+  published for the Pi's name.
+- **Mosquitto listens on the LAN, not loopback.** That is what
+  `deploy/mosquitto`'s config always claimed and what the compose port mapping
+  quietly contradicted — the reason port 1883 was invisible from the user's Mac.
+  MQTT integrations run on other machines; the firewall boundary for a home hub
+  is the router.
 
 ## Keep the docs in sync
 

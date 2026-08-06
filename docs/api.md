@@ -8,21 +8,40 @@ Base URL: `http://<hub>:8420/api/v1`. JSON everywhere. Discover hubs via mDNS
 `GET /hub` is public (discovery/health). Everything else requires
 `Authorization: Bearer <token>` (or `?token=` for the WebSocket).
 
-Tokens come from the claim flow:
+### Claiming
 
-1. An unclaimed hub prints an 8-digit **pairing code** at boot, and writes it
-   to `<data>/pairing-code` (0600). A **fresh code is generated on every boot**
-   while the hub is unclaimed, so a code captured once — from a log line, or
-   from `install.sh`'s `@@PAIRING@@` marker — is stale as soon as the container
-   restarts. Read the file when you need the code, not when you first see it:
-   that path is what GetHome Studio reads over SSH so the person who installed
-   the hub is never asked for a code they were never shown. Moving or dropping
-   it breaks claiming for them.
-2. `POST /pair {"code","memberName","deviceName"?}` — the first successful
-   claim creates the **owner** and returns `{token, member}`. The boot code
-   dies with the claim.
+Tokens come from the claim flow, and **a token never expires** — a device
+connects once and is never asked again. That is the point of the whole design:
+the code is a one-time proof of physical access, not a password.
+
+1. An unclaimed hub writes an 8-digit **pairing code** to `<data>/pairing-code`
+   (0600) and logs it, and **keeps it** until somebody claims the hub. It used
+   to be re-minted on every boot, which meant any code that had been read — the
+   `@@PAIRING@@` marker from the install, or a value fetched a minute ago — was
+   a different number by the time it was used. On a small board where the hub
+   restarts (an update, a power cut, the OOM killer) that turned a finished
+   install into `invalid_code` with nothing the user could do. Rotation bought
+   nothing either: the code only ever proves access to the machine, and reading
+   the file *is* that access. Moving the file, or the `Pairing code: <digits>`
+   log line, breaks GetHome Studio's fallback path.
+2. `POST /pair {"code","memberName","deviceName"?,"claimId"?}` — the first
+   successful claim creates the **owner** and returns `{token, member}`. The
+   code dies with the claim. `claimId` is the client's own UUID for *this
+   attempt*, kept across retries: a hub can commit a claim and lose the
+   response on the way back, and without an id the retry finds a code that is
+   already spent and is told it is wrong. With one, the hub replays the
+   original answer for five minutes. Failed attempts are rate-limited per
+   address.
 3. Owners mint **invite codes** (`POST /invites`, 15-minute TTL, single use);
-   claiming one through the same `/pair` endpoint creates a **member**.
+   claiming one through the same `/pair` endpoint creates a **member**. This is
+   how a phone or a second Mac joins.
+
+**On the hub's own machine there is a shorter route.** `gethome-hubctl claim
+--name "…" --device "…"` reads the code and claims in one step, printing
+`@@HUBID:…@@` and `@@TOKEN:…@@`. Anyone who can run that already holds root on
+the machine the code exists to prove access to, so requiring them to recite the
+number adds a step that can only fail. GetHome Studio uses it over SSH, which
+is why the person who installs a hub is never shown a code at all.
 
 Roles: **owner** = structure (rename home/devices, rooms, members, invites,
 commissioning, permit-join, AI settings, device removal). **member** = control
@@ -32,8 +51,8 @@ devices, favorites, view everything.
 
 | Method & path | Role | Notes |
 |---|---|---|
-| `GET /hub` | — | `{hubId, name, version, apiVersion, claimed}` |
-| `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code |
+| `GET /hub` | — | `{hubId, name, version, apiVersion, claimed, zigbee: {enabled, connected}}` — `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section |
+| `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
 | `GET /home` · `PATCH /home` | any · owner | home name |
 | `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | any · owner | |
 | `GET /devices` | any | full device list (wire shape below) |

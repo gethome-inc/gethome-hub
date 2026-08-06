@@ -44,7 +44,7 @@ LAN-only by design.
 
 ## Quick start
 
-**Raspberry Pi / Linux** (Docker-based):
+**Raspberry Pi / Linux**:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/gethome-inc/gethome-hub/main/deploy/install.sh | bash
@@ -53,19 +53,21 @@ curl -fsSL https://raw.githubusercontent.com/gethome-inc/gethome-hub/main/deploy
 ```
 
 **Zigbee needs no flags.** The installer identifies an attached coordinator by
-itself, and installs a udev rule so one plugged in *later* is set up
+itself, and installs a udev rule so one plugged in *later* starts working
 automatically too — see
 [docs/zigbee.md](docs/zigbee.md#finding-the-coordinator).
 
-The installer sets up Docker if needed, starts the stack
-(hub + Postgres + Mosquitto, optionally Zigbee2MQTT), and prints the
-**pairing code** — enter it in the GetHome app to become the owner. It also
-enables Docker at boot; together with `restart: unless-stopped` on every
-service, that means the hub comes back on its own after a power cut — plug the
-Pi in and it runs, with nothing to start by hand.
+The installer downloads a prebuilt hub for this machine's processor, installs
+Node.js 22 and Mosquitto, registers everything as systemd units, and prints the
+**pairing code**. Every unit is enabled at boot with `Restart=always`, so the
+hub comes back on its own after a power cut — plug the Pi in and it runs, with
+nothing to start by hand.
 
-**macOS** (native — no Docker, so mDNS discovery, the Matter controller, and
-Zigbee USB sticks actually work; see [docs/macos.md](docs/macos.md)):
+**GetHome Studio claims the hub for you**, so the pairing code is for your
+*other* devices — a phone, a second Mac — rather than something you have to
+find. See [docs/api.md](docs/api.md#claiming).
+
+**macOS** (also native; see [docs/macos.md](docs/macos.md)):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/gethome-inc/gethome-hub/main/deploy/install-macos.sh | bash
@@ -81,56 +83,61 @@ autostart until the next `start`.
 The **GetHome Studio** macOS app automates all of this with a guided setup
 (finds machines on your network, installs locally or over SSH, checks health).
 
-### Manual (docker compose)
+### One switch, on Linux
 
 ```sh
-git clone https://github.com/gethome-inc/gethome-hub.git && cd gethome-hub
-docker compose up -d                              # hub + Postgres + MQTT
-COMPOSE_PROFILES=zigbee docker compose up -d      # …plus Zigbee2MQTT
-docker compose exec hubd cat /data/pairing-code   # your pairing code
+sudo gethome-hubctl status          # every service, and what the API says
+sudo gethome-hubctl logs 100
+sudo gethome-hubctl zigbee          # the coordinator, and re-check what's attached
+sudo gethome-hubctl pairing-code    # for another device
 ```
 
-The API answers at `http://<hub>:8420/api/v1/hub`.
+The API answers at `http://<hub>:8420/api/v1/hub`, and the MQTT broker at
+`mqtt://<hub>:1883` for devices on the same network. The broker is anonymous
+and unencrypted, which is right for a home LAN and wrong for the internet —
+don't forward 1883 through your router.
 
-### The hub image
+### There is no Docker, and no database server
 
-`hubd` runs from `ghcr.io/gethome-inc/gethome-hub:latest`, built for
-`linux/amd64`, `linux/arm64` and `linux/arm/v7` by
-`.github/workflows/publish.yml` on every push to `main`. That is deliberate and
-load-bearing: compiling the hub *on* a Raspberry Pi means `npm ci` pulling a
-thousand packages onto an SD card and `tsc` compiling them — twenty to forty
-minutes, every minute of it another chance for a dropped connection to throw
-the whole build away. Downloading it takes about two.
+Both were removed, and the reason is one machine: a Raspberry Pi Zero 2 W has
+512 MB of memory. The Docker daemon wanted ~130 MB of it and Postgres at stock
+settings another ~130 MB — before the hub had started — for a workload that is
+one writer, small local reads, and not a single transaction. The board ran out
+of memory, and the hub was being killed somewhere between the install finishing
+and its owner claiming it.
 
-Build it yourself when you've changed the source, or when you're on an
-architecture that isn't published:
+So: systemd units against a SQLite file at `<data>/hub.db`. systemd also gives
+what compose could not — `MemoryMax` per service, so a runaway Zigbee2MQTT
+costs itself a restart instead of taking the hub down with it.
 
-```sh
-docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
-```
+### The prebuilt bundle
 
-`deploy/install.sh` does that on its own if the pull fails, and says why — so
-an unanticipated machine still gets a working hub, just slowly.
+The Pi downloads the hub; it does not compile it. `.github/workflows/bundle.yml`
+publishes one tarball per architecture (`linux-x64`, `linux-arm64`,
+`linux-armv7l`) — `dist/` plus production `node_modules` with native modules
+already built for that platform — to a rolling per-branch release. Compiling
+*on* a Pi means `npm ci` pulling a thousand packages onto an SD card and then
+`tsc`: twenty to forty minutes, several hundred megabytes of memory, and on a
+512 MB board an out-of-memory kill at the end of it regardless.
 
-> **The package has to be public.** GHCR creates it private on the first push,
-> and a private package fails every user's pull with `denied` — sending all of
-> them down the twenty-minute build path with no obvious cause. After the first
-> successful publish, set the package to public under the repository's
-> *Packages* settings, and check it with `docker pull` from a machine that
-> isn't logged in.
+`install.sh` falls back to building from source when there is no bundle — but
+only on a machine with more than 1 GB of memory. Below that it stops and says
+why, because starting a build that cannot finish is worse than an error.
 
-Docker on macOS is not recommended for running the hub (no USB passthrough,
-unreliable mDNS from the VM) — use the native install above instead.
+Supported boards: **Raspberry Pi Zero 2 W, 3, 4, 5** and any other 64-bit ARM
+or x86-64 Linux machine; 32-bit ARMv7 works too. The original **Pi Zero / Zero
+W / Pi 1 cannot run the hub** — they are ARMv6, and Node.js has published no
+ARMv6 build since Node 12. Both the installer and Studio say so by name rather
+than failing halfway through.
 
 ### Development
 
 ```sh
-docker compose up -d postgres mosquitto   # just the dependencies
 cp .env.example .env
 npm install
 npm run dev                               # tsx watch
-npm test                                  # vitest (some suites need Postgres)
-HUB_TEST_MQTT=1 npm test                  # + end-to-end broker round-trip
+npm test                                  # vitest — no services needed
+HUB_TEST_MQTT=1 npm test                  # + end-to-end broker round-trip (needs mosquitto)
 ```
 
 Node.js ≥ 22 required. There is no cloud: everything runs from this repo.
@@ -142,7 +149,7 @@ Zigbee2MQTT ─┐                       ┌─ REST /api/v1 ── GetHome apps
 MQTT devices ─┼─ protocol adapters ──┤
 Matter fabric┘        │              └─ WebSocket events
                 DeviceRegistry
-             (canonical schema, Postgres)
+            (canonical schema, SQLite)
 ```
 
 Adapters translate protocols into one canonical schema; the registry persists

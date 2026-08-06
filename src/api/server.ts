@@ -41,6 +41,10 @@ interface CommissionJob {
   error?: string;
 }
 
+const COMMISSION_JOB_TTL_MS = 10 * 60 * 1000;
+const PAIR_MAX_FAILURES = 10;
+const PAIR_WINDOW_MS = 5 * 60 * 1000;
+
 /**
  * The hub's local API: REST under /api/v1 plus a WebSocket event stream.
  * Auth is a bearer token issued by the pairing claim flow; `GET /api/v1/hub`
@@ -48,14 +52,57 @@ interface CommissionJob {
  */
 export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   // pino v10 instance vs fastify's bundled pino types — structurally identical.
+  // Fastify logs two `info` lines per request. The apps poll, so on a hub
+  // that is simply working that is thousands of lines a day of "200 OK" —
+  // write amplification on an SD card, and noise in the log somebody reads
+  // when something is actually wrong. Lifting this one child logger to `warn`
+  // drops them while leaving the error handler's `request.log.error` intact,
+  // and leaving every other module at the configured level. An operator who
+  // asked for `debug` or `trace` clearly wants the requests, so they keep them.
+  const verbose = deps.log.level === 'trace' || deps.log.level === 'debug';
   const app = Fastify({
-    loggerInstance: deps.log.child({ module: 'api' }) as unknown as FastifyBaseLogger,
+    loggerInstance: deps.log.child(
+      { module: 'api' },
+      verbose ? {} : { level: 'warn' },
+    ) as unknown as FastifyBaseLogger,
   });
   await app.register(websocket);
 
   const authed = { preHandler: [requireMember(deps.pairing)] };
   const ownerOnly = { preHandler: [requireMember(deps.pairing), requireOwner] };
   const commissionJobs = new Map<string, CommissionJob>();
+
+  /** Forget finished commissioning jobs; the map used to grow for the uptime. */
+  const forgetJobLater = (jobId: string) => {
+    setTimeout(() => commissionJobs.delete(jobId), COMMISSION_JOB_TTL_MS).unref?.();
+  };
+
+  /**
+   * `POST /pair` is unauthenticated and checks an 8-digit code, so without a
+   * lid it is a hundred million guesses at LAN speed. This is deliberately
+   * crude — a home hub has a handful of clients — and it counts *failures*, so
+   * a person retyping a code they misread is never locked out by their own
+   * successful attempt.
+   */
+  const pairFailures = new Map<string, { count: number; until: number }>();
+  const pairAttemptAllowed = (address: string): boolean => {
+    const record = pairFailures.get(address);
+    if (!record) return true;
+    if (Date.now() > record.until) {
+      pairFailures.delete(address);
+      return true;
+    }
+    return record.count < PAIR_MAX_FAILURES;
+  };
+  const recordPairFailure = (address: string): void => {
+    const now = Date.now();
+    const record = pairFailures.get(address);
+    if (!record || now > record.until) {
+      pairFailures.set(address, { count: 1, until: now + PAIR_WINDOW_MS });
+      return;
+    }
+    record.count += 1;
+  };
 
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof z.ZodError) {
@@ -74,6 +121,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     version: deps.version,
     apiVersion: 1,
     claimed: deps.pairing.claimed,
+    // Additive: an app that doesn't know about this field ignores it, and one
+    // that does can say "plug a coordinator in" instead of showing an empty
+    // Zigbee section with no explanation.
+    zigbee: {
+      enabled: deps.zigbee !== undefined,
+      connected: deps.zigbee?.connected ?? false,
+    },
   }));
 
   app.post('/api/v1/pair', async (request, reply) => {
@@ -82,10 +136,25 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         code: z.string().min(4).max(16),
         memberName: z.string().min(1).max(80),
         deviceName: z.string().max(120).optional(),
+        // A client keeps this random value while retrying. It makes a response
+        // lost to a slow Pi or a dropped connection recoverable, instead of
+        // presenting a claim that already succeeded as a wrong code.
+        claimId: z.uuid().optional(),
       })
       .parse(request.body);
-    const result = await deps.pairing.claim(body.code, body.memberName, body.deviceName);
-    if (!result) return reply.code(401).send({ error: 'invalid_code' });
+    if (!pairAttemptAllowed(request.ip)) {
+      return reply.code(429).send({ error: 'too_many_attempts' });
+    }
+    const result = await deps.pairing.claim(
+      body.code,
+      body.memberName,
+      body.deviceName,
+      body.claimId,
+    );
+    if (!result) {
+      recordPairFailure(request.ip);
+      return reply.code(401).send({ error: 'invalid_code' });
+    }
     await deps.activity.record({
       kind: 'member.joined',
       message: `${result.member.name} joined the home.`,
@@ -223,7 +292,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         job.status = 'failed';
         job.error = error.message;
         deps.events.emit('commissioningProgress', job.id, 'failed', error.message);
-      });
+      })
+      .finally(() => forgetJobLater(job.id));
     return reply.code(202).send({ jobId: job.id });
   });
 

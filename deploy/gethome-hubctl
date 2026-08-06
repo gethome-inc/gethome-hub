@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+# gethome-hubctl — control the GetHome Hub on a Linux machine.
+#
+#   gethome-hubctl start|stop|restart|status|logs|zigbee|pairing-code|uninstall
+#   gethome-hubctl claim --name "Georgy" [--device "Georgy's Mac"]
+#
+# The Linux sibling of `deploy/hubctl` (macOS/launchd). Everything here is
+# systemd underneath; the point of the wrapper is that a person — or GetHome
+# Studio over SSH — should not have to know the names of four units.
+#
+# ── Why `claim` exists ─────────────────────────────────────────────────────
+# The pairing code proves physical access to the machine the hub runs on.
+# Somebody signed in over SSH with a key, holding root, *has* that access —
+# more of it than the code represents. Making them find an 8-digit number
+# stored in a file they can already read adds a step and a way to fail, and
+# that failure is what people actually hit: the hub restarts, the code they
+# were shown is stale, and a finished install ends at "invalid code".
+#
+# So this reads the code and claims the hub in one round trip, and prints the
+# token. Studio stores it and never shows a code. Phones and other Macs still
+# use codes, because they have no way in: the owner mints an invite for them.
+
+set -uo pipefail
+
+DATA_DIR="${GETHOME_DATA_DIR:-/var/lib/gethome/data}"
+CONF_DIR="${GETHOME_CONF:-/etc/gethome}"
+INSTALL_DIR="${GETHOME_DIR:-/opt/gethome}"
+HUB_UNIT="gethome-hubd.service"
+Z2M_UNIT="gethome-zigbee2mqtt.service"
+DETECT_UNIT="gethome-zigbee-detect.service"
+PORT="$(sed -n 's/^PORT=//p' "$CONF_DIR/hub.env" 2>/dev/null | head -n1)"
+PORT="${PORT:-8420}"
+API="http://127.0.0.1:${PORT}/api/v1"
+
+SUDO=""
+if [[ $(id -u) -ne 0 ]]; then SUDO="sudo"; fi
+
+die() { echo "gethome-hubctl: $*" >&2; exit 1; }
+
+hub_info() { curl -fsS --max-time 5 "${API}/hub" 2>/dev/null; }
+
+cmd_start() {
+  $SUDO systemctl start mosquitto "$HUB_UNIT"
+  # Bring Zigbee up only if there is something to bring it up for; the
+  # detector is the authority.
+  $SUDO systemctl start "$DETECT_UNIT" >/dev/null 2>&1 || true
+  cmd_status
+}
+
+cmd_stop() {
+  $SUDO systemctl stop "$HUB_UNIT" "$Z2M_UNIT" >/dev/null 2>&1 || true
+  echo "Stopped. The MQTT broker is left running; it is a system service."
+}
+
+cmd_restart() {
+  $SUDO systemctl restart "$HUB_UNIT"
+  cmd_status
+}
+
+cmd_status() {
+  for unit in mosquitto.service avahi-daemon.service "$HUB_UNIT" "$Z2M_UNIT"; do
+    printf '%-32s %s\n' "$unit" "$(systemctl is-active "$unit" 2>/dev/null || echo unknown)"
+  done
+  local info
+  info="$(hub_info)"
+  if [[ -n "$info" ]]; then
+    echo "API: ${info}"
+  else
+    echo "API: not answering on port ${PORT}"
+  fi
+}
+
+cmd_logs() {
+  $SUDO journalctl -u "$HUB_UNIT" -n "${1:-100}" --no-pager
+}
+
+cmd_zigbee() {
+  local adapter
+  adapter="$(sed -n 's/^ZIGBEE_ADAPTER=//p' "$CONF_DIR/zigbee.env" 2>/dev/null | head -n1)"
+  if [[ -n "$adapter" ]]; then
+    echo "coordinator=${adapter}"
+  else
+    echo "coordinator=none"
+  fi
+  echo "service=$(systemctl is-active "$Z2M_UNIT" 2>/dev/null || echo unknown)"
+  echo
+  echo "Re-checking what is plugged in…"
+  $SUDO systemctl start "$DETECT_UNIT" >/dev/null 2>&1 || true
+  $SUDO journalctl -u "$DETECT_UNIT" -n 20 --no-pager 2>/dev/null || true
+}
+
+cmd_pairing_code() {
+  local code
+  code="$($SUDO cat "$DATA_DIR/pairing-code" 2>/dev/null | tr -d '[:space:]')"
+  if [[ -n "$code" ]]; then
+    printf '@@PAIRING:%s@@\n' "$code"
+    echo "$code"
+    return 0
+  fi
+  # No file: either the hub is claimed already, or it isn't running yet. Those
+  # want different things from the user, so don't collapse them into one
+  # "couldn't read it".
+  local info
+  info="$(hub_info)"
+  if [[ -z "$info" ]]; then
+    echo "The hub isn't answering on port ${PORT}, so there is no pairing code yet." >&2
+    echo "Check it with: gethome-hubctl status" >&2
+    return 1
+  fi
+  if grep -q '"claimed":true' <<<"$info"; then
+    echo "This hub is already claimed, so it has no pairing code." >&2
+    echo "To add another device, have the owner create an invite in the app." >&2
+    return 2
+  fi
+  echo "The hub is unclaimed but the pairing code file is missing from ${DATA_DIR}." >&2
+  return 1
+}
+
+cmd_claim() {
+  local name="" device=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name) name="${2:-}"; shift 2 ;;
+      --device) device="${2:-}"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  [[ -n "$name" ]] || die "claim needs --name \"Your name\""
+
+  local info
+  info="$(hub_info)" || true
+  [[ -n "$info" ]] || die "the hub isn't answering on port ${PORT} yet. Try: gethome-hubctl status"
+
+  local hub_id
+  hub_id="$(sed -n 's/.*"hubId":"\([^"]*\)".*/\1/p' <<<"$info")"
+
+  if grep -q '"claimed":true' <<<"$info"; then
+    printf '@@HUBID:%s@@\n' "$hub_id"
+    echo "already_claimed" >&2
+    exit 3
+  fi
+
+  local code
+  code="$($SUDO cat "$DATA_DIR/pairing-code" 2>/dev/null | tr -d '[:space:]')"
+  [[ -n "$code" ]] || die "the hub is unclaimed but its pairing code is missing from ${DATA_DIR}."
+
+  # A stable id for this attempt, so a reply lost to a slow network can be
+  # retried without the hub treating the second try as a wrong code.
+  local claim_id
+  claim_id="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo '')"
+
+  local payload
+  payload=$(printf '{"code":"%s","memberName":%s,"deviceName":%s%s}' \
+    "$code" "$(json_string "$name")" "$(json_string "${device:-$(hostname)}")" \
+    "${claim_id:+,\"claimId\":\"$claim_id\"}")
+
+  local response
+  response="$(curl -fsS --max-time 20 -X POST "${API}/pair" \
+    -H 'Content-Type: application/json' -d "$payload" 2>/dev/null)" \
+    || die "the hub refused the claim. Its log may say why: gethome-hubctl logs"
+
+  local token
+  token="$(sed -n 's/.*"token":"\([^"]*\)".*/\1/p' <<<"$response")"
+  [[ -n "$token" ]] || die "the hub answered, but without a token: ${response}"
+
+  printf '@@HUBID:%s@@\n' "$hub_id"
+  printf '@@TOKEN:%s@@\n' "$token"
+}
+
+# Minimal JSON string escaping — names come from a person and can contain
+# quotes, backslashes and non-ASCII.
+json_string() {
+  printf '%s' "$1" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null \
+    || printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+}
+
+cmd_uninstall() {
+  echo "This removes the GetHome Hub, its services, and everything it stored."
+  read -r -p "Type 'remove' to confirm: " answer
+  [[ "$answer" == "remove" ]] || { echo "Left alone."; return 1; }
+  $SUDO systemctl disable --now "$HUB_UNIT" "$Z2M_UNIT" "$DETECT_UNIT" gethome-zram.service >/dev/null 2>&1 || true
+  $SUDO rm -f /etc/systemd/system/gethome-*.service
+  $SUDO rm -f /etc/udev/rules.d/99-gethome-zigbee.rules
+  $SUDO rm -f /etc/mosquitto/conf.d/gethome.conf
+  $SUDO rm -f /etc/avahi/services/gethome-hub.service
+  $SUDO rm -f /etc/sysctl.d/60-gethome.conf
+  $SUDO rm -f /usr/local/lib/gethome-zigbee-detect.sh /usr/local/lib/gethome-zram.sh
+  $SUDO rm -rf "$INSTALL_DIR" /var/lib/gethome "$CONF_DIR"
+  $SUDO systemctl daemon-reload
+  $SUDO systemctl restart mosquitto avahi-daemon >/dev/null 2>&1 || true
+  echo "Removed. The MQTT broker and avahi are still installed; remove them with apt if you want them gone."
+}
+
+case "${1:-}" in
+  start) shift; cmd_start "$@" ;;
+  stop) shift; cmd_stop "$@" ;;
+  restart) shift; cmd_restart "$@" ;;
+  status) shift; cmd_status "$@" ;;
+  logs) shift; cmd_logs "$@" ;;
+  zigbee) shift; cmd_zigbee "$@" ;;
+  pairing-code) shift; cmd_pairing_code "$@" ;;
+  claim) shift; cmd_claim "$@" ;;
+  uninstall) shift; cmd_uninstall "$@" ;;
+  *)
+    cat >&2 <<USAGE
+gethome-hubctl — control the GetHome Hub
+
+  start | stop | restart      the hub (Zigbee follows what is plugged in)
+  status                      every service, plus what the API says
+  logs [lines]                the hub's log
+  zigbee                      the coordinator, and re-check what is attached
+  pairing-code                print the code for another device
+  claim --name "Your name" [--device "This Mac"]
+                              become the owner and print a token
+  uninstall                   remove everything
+USAGE
+    exit 1
+    ;;
+esac

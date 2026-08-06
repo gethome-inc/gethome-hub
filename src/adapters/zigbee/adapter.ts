@@ -83,9 +83,20 @@ export class ZigbeeAdapter implements ProtocolAdapter {
   private readonly byIeee = new Map<string, TrackedDevice>();
   private readonly byFriendlyName = new Map<string, TrackedDevice>();
   private readonly base: string;
+  private bridgeOnline = false;
 
   constructor(private readonly options: ZigbeeAdapterOptions) {
     this.base = options.baseTopic.replace(/\/+$/, '');
+  }
+
+  /**
+   * Whether Zigbee2MQTT is actually there, as opposed to the broker being up.
+   * The two differ for most of a hub's life: Z2M only runs when a coordinator
+   * is plugged in, so "no Zigbee" is the normal state, not a fault, and the
+   * apps need to be able to tell that from a broken one.
+   */
+  get connected(): boolean {
+    return this.bridgeOnline;
   }
 
   async start(bus: AdapterBus): Promise<void> {
@@ -112,6 +123,7 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     }
     await this.client?.endAsync();
     this.client = null;
+    this.bridgeOnline = false;
   }
 
   async execute(externalId: string, endpointId: number, command: HubCommand): Promise<void> {
@@ -171,6 +183,7 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     }
     if (suffix === 'bridge/state') {
       const state = payload.startsWith('{') ? (JSON.parse(payload) as { state?: string }).state : payload;
+      this.bridgeOnline = state === 'online';
       this.options.log.info(`Zigbee2MQTT is ${state}.`);
       return;
     }

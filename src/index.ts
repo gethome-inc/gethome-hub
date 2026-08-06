@@ -12,12 +12,12 @@ import { ActivityService } from './core/activity.js';
 import { PairingService } from './core/pairing.js';
 import { SettingsService } from './core/settings.js';
 import { DeviceRegistry } from './core/registry.js';
-import { ZigbeeAdapter } from './adapters/zigbee/adapter.js';
-import { MqttAdapter } from './adapters/mqtt/adapter.js';
-import { MatterAdapter } from './adapters/matter/adapter.js';
-import { AiDeviceMapper } from './ai/mapper.js';
 import { buildServer } from './api/server.js';
 import { MdnsAdvertiser } from './mdns/advertiser.js';
+import { lazyAiAssist } from './ai/lazy.js';
+import type { ZigbeeAdapter } from './adapters/zigbee/adapter.js';
+import type { MqttAdapter } from './adapters/mqtt/adapter.js';
+import type { MatterAdapter } from './adapters/matter/adapter.js';
 
 const version = (() => {
   try {
@@ -34,8 +34,8 @@ async function main(): Promise<void> {
   log.info(`GetHome Hub ${version} starting…`);
 
   const secret = ensureHubSecret(config.DATA_DIR);
-  const { db, pool } = createDb(config.DATABASE_URL);
-  await runMigrations(db);
+  const { db, close } = createDb(config.DATABASE_FILE);
+  runMigrations(db);
   if (!(await db.query.home.findFirst())) {
     await db.insert(home).values({ name: 'My Home' });
   }
@@ -48,29 +48,36 @@ async function main(): Promise<void> {
 
   const registry = new DeviceRegistry(db, events, activity, log.child({ module: 'registry' }));
 
+  // Adapters are *constructed* here and *started* after the API is listening.
+  // The modules are imported dynamically for one reason that matters on a small
+  // board: matter.js and the Claude Agent SDK are the two largest things in the
+  // dependency graph, and a static import loads them into memory whether or not
+  // the adapter is enabled — so `ADAPTER_MATTER=0` used to save the work but
+  // not the megabytes.
   let zigbee: ZigbeeAdapter | undefined;
   let mqttAdapter: MqttAdapter | undefined;
   let matter: MatterAdapter | undefined;
 
   if (config.ADAPTER_ZIGBEE) {
+    const { ZigbeeAdapter } = await import('./adapters/zigbee/adapter.js');
     zigbee = new ZigbeeAdapter({
       mqttUrl: config.MQTT_URL,
       baseTopic: config.Z2M_BASE_TOPIC,
       log: log.child({ module: 'zigbee' }),
-      aiAssist: new AiDeviceMapper(db, settings, log.child({ module: 'ai' }), { dataDir: config.DATA_DIR }),
+      aiAssist: lazyAiAssist({ db, settings, log: log.child({ module: 'ai' }), dataDir: config.DATA_DIR }),
     });
     registry.registerAdapter(zigbee);
   }
   if (config.ADAPTER_MQTT) {
+    const { MqttAdapter } = await import('./adapters/mqtt/adapter.js');
     mqttAdapter = new MqttAdapter({ mqttUrl: config.MQTT_URL, log: log.child({ module: 'mqtt' }) });
     registry.registerAdapter(mqttAdapter);
   }
   if (config.ADAPTER_MATTER) {
+    const { MatterAdapter } = await import('./adapters/matter/adapter.js');
     matter = new MatterAdapter({ dataDir: config.DATA_DIR, log: log.child({ module: 'matter' }) });
     registry.registerAdapter(matter);
   }
-
-  await registry.start();
 
   const app = await buildServer({
     db,
@@ -86,6 +93,12 @@ async function main(): Promise<void> {
     ...(matter ? { matter } : {}),
     ...(zigbee ? { zigbee } : {}),
   });
+
+  // Listen *before* the adapters start. Starting them first meant a broker that
+  // wasn't up yet, or matter.js opening its storage on a slow SD card, held the
+  // API closed — and with it the installer's health check and the claim. The
+  // hub has always been designed to run with no devices and no radios; this
+  // makes the boot match that.
   await app.listen({ port: config.PORT, host: '0.0.0.0' });
   log.info(`API listening on :${config.PORT} (hub ${secret.hubId}).`);
 
@@ -96,6 +109,8 @@ async function main(): Promise<void> {
       hubName: config.HUB_NAME,
       port: config.PORT,
       version,
+      backend: config.MDNS_BACKEND,
+      servicesDir: config.AVAHI_SERVICES_DIR,
       log: log.child({ module: 'mdns' }),
     });
     try {
@@ -103,14 +118,28 @@ async function main(): Promise<void> {
     } catch (error) {
       log.warn({ err: error }, 'mDNS advertisement failed — discovery by address still works.');
     }
+    // The TXT record used to say `claimed=0` until the next restart, which is
+    // how a claimed hub kept advertising itself as available to claim.
+    pairing.onClaimed = () => mdns?.updateClaimed(true);
   }
 
+  void registry.start().catch((error) => {
+    log.error({ err: error }, 'Device registry failed to start.');
+  });
+
+  const stopping = { value: false };
   const shutdown = async (signal: string) => {
+    if (stopping.value) return;
+    stopping.value = true;
     log.info(`${signal} received, shutting down…`);
     await mdns?.stop().catch(() => {});
     await app.close().catch(() => {});
     await registry.stop().catch(() => {});
-    await pool.end().catch(() => {});
+    try {
+      close();
+    } catch {
+      // Already closed, or never opened.
+    }
     process.exit(0);
   };
   process.on('SIGINT', () => void shutdown('SIGINT'));

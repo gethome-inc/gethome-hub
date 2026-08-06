@@ -1,7 +1,16 @@
 # Example Zigbee2MQTT configuration for a GetHome Hub.
-# The docker-compose zigbee profile configures the same values via
-# ZIGBEE2MQTT_CONFIG_* environment variables — this file documents them for
-# manual installations.
+#
+# You do not normally write this file. `deploy/install.sh` installs Zigbee2MQTT
+# from npm and lets it create its own configuration.yaml in
+# /var/lib/gethome/zigbee2mqtt on first run; the coordinator's device path
+# arrives as a `ZIGBEE2MQTT_CONFIG_SERIAL_PORT` override from
+# `deploy/zigbee-detect.sh`.
+#
+# That separation is deliberate: the file Zigbee2MQTT owns also holds the Zigbee
+# network key and the list of paired devices. Anything that rewrote it whenever
+# a stick was replugged would lose the user's whole network.
+#
+# This copy documents the same settings for a manual installation.
 
 mqtt:
   server: mqtt://127.0.0.1:1883

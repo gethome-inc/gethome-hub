@@ -9,8 +9,9 @@ On macOS the hub runs **natively — no Docker**. This is deliberate:
 - A hub should idle quietly 24/7 on a Mac mini; a permanent Linux VM is the
   opposite of that.
 
-Docker remains the deployment story for Linux/Raspberry Pi
-(`deploy/install.sh`), where host networking and USB passthrough are real.
+Linux and Raspberry Pi run natively too (`deploy/install.sh`, systemd units) —
+for the same reasons plus one more: on a 512 MB board the Docker daemon is a
+third of the machine.
 
 ## Install
 
@@ -28,10 +29,10 @@ Requires [Homebrew](https://brew.sh). Everything is **per-user, no sudo**:
 
 | Piece | How it runs |
 |---|---|
-| Node 22, Postgres 17, Mosquitto | Homebrew packages; Postgres + Mosquitto as `brew services` |
+| Node 22, Mosquitto | Homebrew packages; Mosquitto as a `brew service` |
 | hubd | `npm ci && npm run build`, launchd agent `com.gethome.hubd` |
 | Zigbee2MQTT (optional) | checkout in `~/Library/Application Support/GetHome/zigbee2mqtt`, launchd agent `com.gethome.zigbee2mqtt` |
-| Hub data (identity, Matter fabric, pairing code) | `~/Library/Application Support/GetHome/hub-data` |
+| Hub data (SQLite database, identity, Matter fabric, pairing code) | `~/Library/Application Support/GetHome/hub-data` |
 | Logs | `~/Library/Logs/GetHome/hubd.log`, `zigbee2mqtt.log` |
 
 The GetHome Studio app runs this same script with a guided UI and shows every
@@ -44,9 +45,9 @@ line it executes.
 ```
 
 `start` and `stop` flip the **whole stack at once** — hubd, Zigbee2MQTT,
-Mosquitto, Postgres — in both dimensions:
+Mosquitto — in both dimensions:
 
-- `stop`: everything shuts down **now**, ports 8420/1883/5432 are freed, and
+- `stop`: everything shuts down **now**, ports 8420/1883 are freed, and
   nothing comes back at login until you start it again.
 - `start`: everything comes up **now** and re-enters login autostart
   (launchd agents + `brew services` share the same now-and-at-login
@@ -72,10 +73,11 @@ edit `serial.port` there and `hubctl restart` if the adapter path changes.
 
 ## Port conflicts
 
-The installer expects to own 5432 (Postgres), 1883 (Mosquitto), and 8420
-(hubd). If another Postgres already runs on 5432, either stop it or create a
-`gethome` database on it and adjust `DATABASE_URL` inside
-`~/Library/LaunchAgents/com.gethome.hubd.plist`, then `hubctl restart`.
+The installer expects to own 1883 (Mosquitto) and 8420 (hubd). There is no
+database port to fight over — the store is a SQLite file inside the hub's data
+directory. If something else already owns 1883, stop it, or point `MQTT_URL` at
+your own broker inside `~/Library/LaunchAgents/com.gethome.hubd.plist` and
+`hubctl restart`.
 
 ## Updating
 

@@ -11,8 +11,7 @@
 #   --branch <name>        git branch to install (default main)
 #
 # What it does — all per-user, no sudo:
-#   Homebrew packages: node@22, postgresql@17, mosquitto (+ pnpm for Zigbee)
-#   Postgres:  brew service + a `gethome` database
+#   Homebrew packages: node@22, mosquitto (+ pnpm for Zigbee)
 #   Mosquitto: brew service with the GetHome LAN config
 #   hubd:      npm ci + build, launchd agent com.gethome.hubd (starts at login)
 #   Zigbee:    optional Zigbee2MQTT checkout + launchd agent
@@ -57,6 +56,7 @@ say() {
 step() { printf '@@STEP:%s@@\n' "$1"; say "$2"; }
 fail() { printf '@@ERROR:%s@@\n' "$1"; echo "ERROR: $1" >&2; exit 1; }
 # If any unguarded command dies under `set -e`, at least say which one.
+# shellcheck disable=SC2154  # `code` is assigned inside the trap body itself.
 trap 'code=$?; printf "@@ERROR:Command failed (exit %s) at line %s: %s@@\n" "$code" "$LINENO" "$BASH_COMMAND"; echo "ERROR (exit $code) at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 # Fewer moving parts, less noise, no surprise brew self-updates mid-install.
@@ -102,7 +102,6 @@ brew_ensure() {
 }
 
 brew_ensure node@22
-brew_ensure postgresql@17
 brew_ensure mosquitto
 
 NODE_BIN="$BREW_PREFIX/opt/node@22/bin"
@@ -126,22 +125,12 @@ elif [[ ! -f "$HUB_DIR/package.json" ]]; then
 fi
 say "Installing from: $HUB_DIR"
 
-# ── Postgres + Mosquitto ───────────────────────────────────────────────────
-step services "Starting the database and the MQTT broker…"
-
-"$BREW" services start postgresql@17 >/dev/null
-PG_BIN="$BREW_PREFIX/opt/postgresql@17/bin"
-for _ in $(seq 1 30); do
-  "$PG_BIN/pg_isready" -q -h 127.0.0.1 && break
-  sleep 1
-done
-"$PG_BIN/pg_isready" -q -h 127.0.0.1 \
-  || fail "Postgres did not come up on 127.0.0.1:5432. If another Postgres owns that port, stop it first (docs/macos.md)."
-if ! "$PG_BIN/psql" -h 127.0.0.1 -d gethome -c 'select 1' >/dev/null 2>&1; then
-  say "Creating the gethome database…"
-  "$PG_BIN/createdb" -h 127.0.0.1 gethome
-fi
-DATABASE_URL="postgres://$(whoami)@127.0.0.1:5432/gethome"
+# ── Mosquitto ──────────────────────────────────────────────────────────────
+# There is no database service to start any more: the hub's store is a SQLite
+# file inside DATA_DIR. That removes a Homebrew formula, a launchd service, a
+# port to fight over, and the whole "another Postgres already owns 5432" class
+# of failure.
+step services "Starting the MQTT broker…"
 
 MOSQ_CONF="$BREW_PREFIX/etc/mosquitto/mosquitto.conf"
 if ! grep -q "GetHome Hub" "$MOSQ_CONF" 2>/dev/null; then
@@ -251,7 +240,6 @@ cat > "$AGENTS_DIR/$HUBD_LABEL.plist" <<PLIST
 		<key>NODE_ENV</key><string>production</string>
 		<key>PORT</key><string>8420</string>
 		<key>DATA_DIR</key><string>$DATA_DIR</string>
-		<key>DATABASE_URL</key><string>$DATABASE_URL</string>
 		<key>MQTT_URL</key><string>mqtt://127.0.0.1:1883</string>
 		<key>Z2M_BASE_TOPIC</key><string>zigbee2mqtt</string>
 	</dict>
