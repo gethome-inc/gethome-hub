@@ -42,17 +42,8 @@ jobs:
           - arch: linux-arm64
             runner: ubuntu-24.04-arm
             platform: linux/arm64
-          # Raspberry Pi OS and Ubuntu still ship 32-bit images, and a Pi
-          # running one of those is exactly the machine this exists for.
-          - arch: linux-armv7l
-            runner: ubuntu-latest
-            platform: linux/arm/v7
     steps:
       - uses: actions/checkout@v5
-
-      # Only where the runner can't execute the target architecture itself.
-      - uses: docker/setup-qemu-action@v3
-        if: matrix.arch == 'linux-armv7l'
 
       # One container per architecture, so `npm ci` resolves the same optional
       # and platform-specific packages the Pi would — and compiles any native
@@ -75,7 +66,6 @@ jobs:
             '
 
       - name: Check the bundle actually runs
-        if: matrix.arch != 'linux-armv7l'
         run: |
           set -euo pipefail
           mkdir -p /tmp/verify && tar -xzf "out/gethome-hub-${{ matrix.arch }}.tar.gz" -C /tmp/verify
