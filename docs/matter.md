@@ -1,11 +1,20 @@
 # Matter support
 
-> **Memory note.** `install.sh` sets `ADAPTER_MATTER=0` on boards with 512 MB or
-> less (a Raspberry Pi Zero 2 W). Loading matter.js costs about 60 MB on top of
-> the hub's ~120 MB, and Zigbee2MQTT another ~150 MB, which does not fit
-> alongside the operating system. Turn it on with `ADAPTER_MATTER=1` in
-> `/etc/gethome/hub.env` and `sudo gethome-hubctl restart` — or use a Pi 4 or 5,
-> which runs Matter and Zigbee together comfortably.
+> **Memory note.** Matter is installed and enabled everywhere, including on a
+> Raspberry Pi Zero 2 W. What a 512 MB board cannot do is run it *and*
+> Zigbee2MQTT at once — matter.js costs about 60 MB on top of the hub's
+> ~120 MB, Zigbee2MQTT is another ~150 MB in its own process, and the operating
+> system wants ~70 MB. So `install.sh` records that board as affording **one
+> radio** (`GETHOME_RADIO=one`) and `gethome-zigbee-detect` hands it to
+> whichever radio is actually in use: Zigbee when a coordinator is plugged in,
+> Matter when one isn't. The owner can override that from the GetHome app.
+> See [Zigbee or Matter on a small board](zigbee.md#zigbee-or-matter-on-a-small-board).
+> A Pi 4 or 5 runs both together and never makes the choice.
+
+`ADAPTER_MATTER` in `/etc/gethome/hub.env` is the live switch, but on a
+one-radio board it is **managed** — the detector rewrites it on every plug and
+unplug, so editing it by hand there does not survive. Use `PUT
+/api/v1/settings/radio` (the app's radio switch) instead.
 
 The hub is a **Matter controller** with its own fabric, built on
 [matter.js](https://github.com/matter-js/matter.js) (pure TypeScript, no

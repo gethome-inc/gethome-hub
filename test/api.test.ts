@@ -67,6 +67,10 @@ describe.skipIf(!handle)('hub API', () => {
       hubId: 'hub-test-1234',
       hubName: 'Test Hub',
       version: '0.1.0-test',
+      dataDir,
+      // The interesting case: a board that affords one radio, so the switch is
+      // offered and the hub has a real choice to record.
+      radioBudget: 'one',
     });
     await app.ready();
   });
@@ -321,6 +325,57 @@ describe.skipIf(!handle)('hub API', () => {
       payload: { provider: 'openai', apiKey: 'sk-test-1234567890' },
     });
     expect(put.statusCode).toBe(400);
+  });
+
+  it('says what this hub can talk to, since it is not the same on every board', async () => {
+    const info = await app.inject({ method: 'GET', url: '/api/v1/hub' });
+    expect((info.json() as { radio: unknown }).radio).toEqual({
+      budget: 'one',
+      mode: 'auto',
+      // Live, not requested — this hub was built without a Matter adapter.
+      matter: false,
+      canRunBoth: false,
+    });
+  });
+
+  it("records the owner's radio choice without applying it itself", async () => {
+    const put = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/settings/radio',
+      headers: auth(ownerToken),
+      payload: { mode: 'matter' },
+    });
+    expect(put.statusCode).toBe(200);
+    expect(put.json()).toMatchObject({ mode: 'matter', budget: 'one', applying: true });
+
+    // The file is the entire mechanism. A path unit notices it and
+    // gethome-zigbee-detect does the work — editing root-owned config,
+    // stopping Zigbee2MQTT, restarting the hub — so the hub itself never needs
+    // sudo for any of it.
+    expect(readFileSync(path.join(dataDir, 'radio-mode'), 'utf8').trim()).toBe('matter');
+
+    const info = await app.inject({ method: 'GET', url: '/api/v1/hub' });
+    expect((info.json() as { radio: { mode: string } }).radio.mode).toBe('matter');
+  });
+
+  it('refuses a radio it has never heard of, and anyone who is not the owner', async () => {
+    const nonsense = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/settings/radio',
+      headers: auth(ownerToken),
+      payload: { mode: 'bluetooth' },
+    });
+    expect(nonsense.statusCode).toBe(400);
+
+    const denied = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/settings/radio',
+      headers: auth(memberToken),
+      payload: { mode: 'auto' },
+    });
+    expect(denied.statusCode).toBe(403);
+    // The refused request must not have moved anything.
+    expect(readFileSync(path.join(dataDir, 'radio-mode'), 'utf8').trim()).toBe('matter');
   });
 
   it('streams events over the WebSocket', async () => {

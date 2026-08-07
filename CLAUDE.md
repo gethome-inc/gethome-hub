@@ -196,7 +196,8 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
 
 - **`install.sh`'s `@@…@@` markers are a wire protocol.** GetHome Studio drives
   its whole install UI off them (`@@STEP@@`, `@@ERROR@@`, `@@WARN@@`,
-  `@@BOARD@@`, `@@PAIRING@@`, `@@ZIGBEE_FOUND@@`, `@@ZIGBEE_MAYBE@@`). Adding a
+  `@@BOARD@@`, `@@PAIRING@@`, `@@ZIGBEE_FOUND@@`, `@@ZIGBEE_MAYBE@@`,
+  `@@CAPABILITIES@@`). Adding a
   marker is safe — unknown ones are ignored — but renaming or removing one, or
   changing a **step id**, breaks the app silently: the step ids (`system`,
   `runtime`, `download`, `zigbee`, `start`, `autostart`, `health`) are mirrored
@@ -222,13 +223,33 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   choice. Claiming support for hardware nobody has tried is the misleading half
   of that choice; refusing a Pi 3 that has twice a Zero 2 W's memory is the
   other.
-- **The limit worth stating out loud is the *combination*.** No coordinator
-  means no Zigbee; a 512 MB board means no Matter. Either alone is a footnote,
-  and together they leave a hub that can only talk to MQTT integrations — which
-  is not what somebody setting up a smart home expects. `install.sh` warns on
-  exactly that pair after the Zigbee step, README's *Required hardware* says a
-  Zero 2 W effectively requires a stick, and `docs/zigbee.md` lists the ones
-  known to work.
+- **A small board runs one radio; which one is decided by what is plugged in,
+  not at install time.** 512 MB fits the OS, the hub, and *either* Matter
+  (~60 MB in-process) *or* Zigbee2MQTT (~150 MB, its own process). `install.sh`
+  writes that as a **budget** (`GETHOME_RADIO=one|both`, measured from RAM);
+  the owner's **mode** (`auto|zigbee|matter`) lives in `<data>/radio-mode` and
+  reaches it through `PUT /settings/radio`. `gethome-zigbee-detect` is where the
+  two meet, because it is the only thing that knows whether a coordinator is
+  actually there. **Matter gives way only to Zigbee that is genuinely going to
+  run** — the installer used to switch it off on every small board, so a
+  stickless Zero 2 W held 150 MB for a process that never started *and* went
+  without Matter, leaving a hub that could talk to almost nothing. That trap is
+  the reason for the rule, so don't reintroduce it by simplifying the matrix.
+  `docs/zigbee.md` ("Zigbee or Matter on a small board") is canonical; the
+  install ends with an additive `@@CAPABILITIES:<list>@@` marker naming what the
+  hub actually ended up able to talk to, and Studio shows the same list on the
+  hub page.
+- **The hub records the radio choice; it never applies it.** Applying means
+  rewriting `/etc/gethome/hub.env`, stopping or starting a unit and restarting
+  the hub — all root, none of it something the service user should be able to
+  do. So `src/core/radio.ts` writes one word into the hub's own data directory,
+  `gethome-radio.path` (`PathModified`) notices, and the detector applies it. No
+  sudo rule, nothing new to lock down. The consequence for callers is that
+  `PUT /settings/radio` returns `applying: true` and a *stale* `matter` — what
+  is live comes from `ADAPTER_MATTER` and the adapters, never from the file.
+  `apply_matter()` restarts the hub only when the value really changed, because
+  this script runs on every USB event and a hub that restarted whenever somebody
+  plugged in a phone charger would be worse than the problem being solved.
 - **64-bit only, and the two 32-bit cases are different problems.** Bundles are
   built for `linux-arm64` and `linux-x64` and nothing else. `armv6l` (Pi 1 /
   Zero / Zero W) is unfixable — no Node.js build exists — and the answer is
@@ -276,9 +297,14 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   resident with Matter off, ~178 MB with it on. So `hubd` gets `MemoryHigh`
   only — a hard `MemoryMax` near the working set turns a busy minute into a
   restart, which is what a 260 MB cap was doing. Zigbee2MQTT keeps a hard cap
-  because it is the optional process and should die before the hub does. On
-  boards ≤ 512 MB `install.sh` also writes `ADAPTER_MATTER=0` and says why:
-  70 (OS) + 178 + 150 (Z2M) does not fit in 512 MB, while 70 + 119 + 150 does.
+  because it is the optional process and should die before the hub does. The
+  same arithmetic is what makes a small board a one-radio board: 70 (OS) + 178
+  (hub with Matter) + 150 (Z2M) does not fit in 512 MB, while either 70 + 178 or
+  70 + 119 + 150 does — see the radio note above for who chooses between them.
+  A small board also gets `--optimize-for-size --max-semi-space-size=1` in
+  `ExecStart`, measured at 176 → 139 MB resident with Matter loaded for about
+  half a second of startup. They have to be **argv**: `NODE_OPTIONS` refuses
+  `--optimize-for-size` outright.
 - **Name a failure, don't just relay it.** A dropped download, a full card and
   an OOM kill all happen on a Pi and all want different fixes; `install.sh`
   keeps the output and matches them, because by then the actual reason is a

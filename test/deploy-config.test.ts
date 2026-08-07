@@ -112,7 +112,7 @@ describe('deploy/install.sh', () => {
    * doing during the install. Throttling with `MemoryHigh` slows the cgroup
    * down instead and lets the garbage collector catch up.
    */
-  it('sizes a 512 MB board to throttle rather than kill, and leaves Matter off', () => {
+  it('sizes a 512 MB board to throttle rather than kill, and budgets it one radio', () => {
     const small = installer.slice(
       installer.indexOf('if [[ "$RAM_MB" -gt 0 && "$RAM_MB" -le 1024 ]]'),
       installer.indexOf('# ── System packages'),
@@ -123,7 +123,22 @@ describe('deploy/install.sh', () => {
     // Zigbee2MQTT keeps a hard cap: it is the optional process and should die
     // on its own rather than take the hub down with it.
     expect(small).toContain('Z2M_MEM_MAX="MemoryMax=');
-    expect(small).toContain('MATTER_DEFAULT=0');
+
+    // One radio, not none. The installer used to switch Matter off here
+    // outright, which was wrong whenever no coordinator was plugged in — the
+    // board then ran neither radio. It now records the *budget* and lets
+    // gethome-zigbee-detect spend it, since that is the only thing that knows
+    // whether the stick is actually there.
+    expect(small).toContain('RADIO_BUDGET=one');
+    expect(small, 'the radio decision moved to the detector').not.toContain('MATTER_DEFAULT=');
+
+    // --optimize-for-size is rejected by NODE_OPTIONS, so it can only reach
+    // the hub through the unit's own command line.
+    expect(small).toContain('--optimize-for-size');
+    expect(
+      installer.slice(installer.indexOf('ExecStart=${NODE_BIN}')),
+      'the V8 flags have to be argv, not NODE_OPTIONS',
+    ).toMatch(/ExecStart=\$\{NODE_BIN\} \$\{HUB_V8_FLAGS\}/);
 
     // And the unit must not carry a MemoryMax for hubd from anywhere else.
     const hubUnit = installer.slice(

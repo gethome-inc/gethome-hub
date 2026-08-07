@@ -17,6 +17,18 @@ const configSchema = z.object({
   ADAPTER_ZIGBEE: boolFlag,
   ADAPTER_MQTT: boolFlag,
   ADAPTER_MATTER: boolFlag,
+  /**
+   * How many radios this board can afford at once, written by `install.sh`
+   * from the machine's memory. `one` means Matter and Zigbee2MQTT do not fit
+   * together — a 512 MB board — and something has to choose between them.
+   *
+   * This is a *budget*, not a preference: which radio wins is the owner's
+   * call, is stored in `<DATA_DIR>/radio-mode`, and is applied by
+   * `gethome-zigbee-detect` (the only thing that knows whether a coordinator
+   * is actually plugged in). The hub only reads both to say what it can talk
+   * to and to record what the owner picked.
+   */
+  GETHOME_RADIO: z.enum(['both', 'one']).default('both'),
   MDNS: boolFlag,
   /**
    * Who answers mDNS for this machine. `avahi` writes a static service file and

@@ -51,7 +51,7 @@ devices, favorites, view everything.
 
 | Method & path | Role | Notes |
 |---|---|---|
-| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}}`. `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section |
+| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section. `radio` is [below](#radio-get-hub-and-put-settingsradio) |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
 | `GET /home` · `PATCH /home` | any · owner | home name |
 | `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | any · owner | |
@@ -67,6 +67,40 @@ devices, favorites, view everything.
 | `GET /invites` · `POST /invites` | owner | `POST` → `201 {code, expiresAt}` |
 | `GET /activity?limit=&before=` | any | reverse-chronological, cursor = `before` id |
 | `GET /settings/ai` · `PUT /settings/ai` · `DELETE /settings/ai` | owner | PUT `{apiKey, model?}` (an Anthropic API key, write-only; a `sk-ant-oat…` subscription token and a model outside the supported list are both refused with 400, an `authType` from an older app is ignored); GET/PUT respond `{provider: "anthropic", model, hasKey, legacySubscriptionToken, status}` where `status` carries `lastError`/`lastRun` health — see [ai-adaptation.md](ai-adaptation.md) |
+| `PUT /settings/radio` | owner | `{mode: "auto"\|"zigbee"\|"matter"}` → `{budget, mode, matter, canRunBoth, applying: true}`. Records a *request*; see below |
+
+### Radio (`GET /hub` and `PUT /settings/radio`)
+
+A 512 MB board has memory for one radio at a time, so what a hub can talk to is
+not the same on every machine and an app that assumes otherwise shows sections
+that can never fill. The `radio` block on `GET /hub` says which situation this
+hub is in:
+
+| Field | Meaning |
+|---|---|
+| `budget` | `"both"` or `"one"` — the *board's*, measured at install time. Not a preference and not settable |
+| `mode` | `"auto"` (default), `"zigbee"` or `"matter"` — the owner's choice, when one has been made |
+| `matter` | whether the Matter adapter is **live right now** |
+| `canRunBoth` | `budget === "both"`, restated so an app can hide the switch without parsing the enum |
+
+`auto` follows the hardware: a coordinator takes the board when one is plugged
+in, Matter takes it when one isn't. The full matrix, and why Matter never gives
+way to a coordinator that isn't there, is in
+[zigbee.md](zigbee.md#zigbee-or-matter-on-a-small-board).
+
+**`PUT` records a request and returns immediately — its response is not state.**
+Applying a mode is root work (rewriting `/etc/gethome/hub.env`, stopping or
+starting Zigbee2MQTT, restarting the hub), and the hub deliberately cannot do
+any of it: it writes one word to a file it owns, a `.path` unit wakes
+`gethome-zigbee-detect`, and that applies it. So `matter` in the PUT response is
+still the *old* live value, `applying: true` says the switch is in flight, and
+the hub will be briefly unreachable while it restarts. Re-read `GET /hub` a few
+seconds later rather than trusting the response; a `mode` that is already in
+force restarts nothing at all.
+
+The switch is cheap to change your mind about: the coordinator's device path and
+Zigbee2MQTT's paired-device list both survive, so devices on the radio that lost
+the board come back when it is handed back. They read as offline meanwhile.
 
 ### Device wire shape (`GET /devices` item)
 

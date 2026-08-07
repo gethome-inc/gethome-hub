@@ -110,6 +110,8 @@ async function main(): Promise<void> {
     hubId: secret.hubId,
     hubName: config.HUB_NAME,
     version,
+    dataDir: config.DATA_DIR,
+    radioBudget: config.GETHOME_RADIO,
     ...(build ? { build } : {}),
     ...(matter ? { matter } : {}),
     ...(zigbee ? { zigbee } : {}),

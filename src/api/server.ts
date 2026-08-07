@@ -17,6 +17,7 @@ import type { ZigbeeAdapter } from '../adapters/zigbee/adapter.js';
 // Dependency-free model catalog (a price table and an allowlist) — importing
 // it here does not pull the AI stack into the API layer.
 import { isSupportedModel, supportedModelIds } from '../ai/models.js';
+import { RADIO_MODES, readRadioMode, writeRadioMode, type RadioBudget, type RadioMode } from '../core/radio.js';
 import { deviceWire } from './dto.js';
 import { extractToken, requireMember, requireOwner } from './auth.js';
 import { attachWebSocket } from './ws.js';
@@ -37,6 +38,9 @@ export interface ApiDeps {
   /** Present when the corresponding adapter is enabled and running. */
   matter?: MatterAdapter;
   zigbee?: ZigbeeAdapter;
+  /** Where the owner's radio choice is stored, and how many radios fit. */
+  dataDir: string;
+  radioBudget: RadioBudget;
 }
 
 interface CommissionJob {
@@ -135,6 +139,19 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     zigbee: {
       enabled: deps.zigbee !== undefined,
       connected: deps.zigbee?.connected ?? false,
+    },
+    // Also additive. What this hub can actually talk to is not the same on
+    // every machine: a 512 MB board affords one radio, so an app that shows
+    // "Matter" unconditionally would be lying on half the hardware.
+    radio: {
+      /** 'one' when Matter and Zigbee2MQTT don't fit together on this board. */
+      budget: deps.radioBudget,
+      /** What the owner asked for; 'auto' means "follow the hardware". */
+      mode: readRadioMode(deps.dataDir),
+      /** Live, not requested — a switch takes a moment to apply. */
+      matter: deps.matter !== undefined,
+      /** True only when the board could run both at once. */
+      canRunBoth: deps.radioBudget === 'both',
     },
   }));
 
@@ -413,6 +430,37 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   app.delete('/api/v1/settings/ai', ownerOnly, async (_request, reply) => {
     await deps.settings.clearAiSettings();
     return reply.code(204).send();
+  });
+
+  /**
+   * Pick the radio on a board that can only afford one.
+   *
+   * The hub records the choice and returns; it does not apply it. Applying it
+   * edits root-owned config, stops or starts Zigbee2MQTT and restarts this
+   * process — so `gethome-zigbee-detect` does it, woken by a path unit
+   * watching the file written here. That keeps the hub free of any need for
+   * sudo, and puts the decision in the one place that knows whether a
+   * coordinator is plugged in.
+   *
+   * Expect this process to be restarted a moment after a mode change that
+   * actually moves Matter. The response is sent first.
+   */
+  app.put('/api/v1/settings/radio', ownerOnly, async (request) => {
+    // Built from the exported list rather than re-typed, so a mode added to
+    // `core/radio.ts` cannot be one the API silently rejects.
+    const modes = RADIO_MODES as readonly [RadioMode, ...RadioMode[]];
+    const body = z.object({ mode: z.enum(modes) }).parse(request.body);
+    writeRadioMode(deps.dataDir, body.mode);
+    deps.log.info({ mode: body.mode }, 'Radio mode requested');
+    await deps.activity.record({ kind: 'hub.radio', message: `Radio set to ${body.mode}` });
+    return {
+      budget: deps.radioBudget,
+      mode: body.mode,
+      matter: deps.matter !== undefined,
+      canRunBoth: deps.radioBudget === 'both',
+      /** The switch is applied out of process; poll GET /hub for the result. */
+      applying: true,
+    };
   });
 
   // ── WebSocket event stream ───────────────────────────────────────────────

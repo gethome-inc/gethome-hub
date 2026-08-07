@@ -33,6 +33,7 @@ before the hub had started.
 | `src/core/registry.ts` | `DeviceRegistry` — implements the `AdapterBus`: persists devices/endpoints, merges state patches (per-device write queue + write-through cache), fans events out, routes commands back to the owning adapter. An adapter that fails to start is isolated; the hub keeps running. |
 | `src/core/pairing.ts` | Claim flow: boot pairing code → first claim = owner; owner-minted invite codes (15 min TTL) → members. Opaque bearer tokens, sha256-hashed at rest. |
 | `src/core/crypto.ts` | Hub identity + AES-256-GCM key in `<data>/hub-secret.json` (survives database resets), token generation/hashing, secret encryption. |
+| `src/core/radio.ts` | The owner's Matter-or-Zigbee choice on a board that affords one radio, as a word in `<data>/radio-mode`. Records only — applying it is root work, so a `.path` unit hands it to `gethome-zigbee-detect`. See [zigbee.md](zigbee.md#zigbee-or-matter-on-a-small-board). |
 | `src/db/` | drizzle over `better-sqlite3`, one file at `<data>/hub.db` (WAL, `synchronous = NORMAL`, foreign keys on). No pool, no socket, no second process. |
 | `src/ai/` | AI device adaptation — the mapping agent (a tool-use loop on the Anthropic Messages API) plus descriptor DSL, model allowlist, failure taxonomy, and backoff — see [ai-adaptation.md](ai-adaptation.md). |
 | `src/api/` | Fastify REST + WebSocket — see [api.md](api.md). |
