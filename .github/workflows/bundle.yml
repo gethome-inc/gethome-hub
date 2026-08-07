@@ -24,9 +24,22 @@
 
 name: Publish bundle
 
+# Automatic builds are for `main` and for version tags only.
+#
+# This used to fire on every branch, which meant a release per branch and a
+# tags page that grew forever. In practice a hub installs `bundle-main` —
+# install.sh, `gethome-hubctl update` and Studio's `hubBranch` all default to
+# it — so building for every branch was paying on every push for something
+# nobody fetched.
+#
+# Testing a branch on real hardware is still possible and still the reason
+# `--branch` exists: run this workflow from the Actions page with that branch
+# selected, and it publishes `bundle-<branch>` exactly as before. On demand
+# rather than automatically, which is the difference between an escape hatch
+# and a mess.
 on:
   push:
-    branches: ["**"]
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -120,14 +133,15 @@ jobs:
           pattern: bundle-*
           merge-multiple: true
 
-      # A rolling release per branch, which is what makes testing a branch on
-      # real hardware possible: install.sh derives the tag from `--branch`, so
-      # a card written from a feature branch installs that branch's build. The
-      # tag has slashes flattened because a release tag is a git ref.
+      # `bundle-main` on a push to main, `bundle-<branch>` when this workflow is
+      # dispatched against a branch — which is what makes testing a branch on
+      # real hardware possible, since install.sh derives the tag from
+      # `--branch`. The tag has slashes flattened because a release tag is a
+      # git ref.
       #
-      # These are disposable — `bundle-cleanup.yml` deletes each one when its
-      # branch goes away, so they don't pile up. A `v*` tag takes the other
-      # branch below and publishes an immutable release, which nothing deletes.
+      # Branch builds are disposable — `bundle-cleanup.yml` deletes each one
+      # when its branch goes away. A `v*` tag takes the other branch below and
+      # publishes an immutable release, which nothing deletes.
       - name: Upload
         env:
           GH_TOKEN: ${{ github.token }}

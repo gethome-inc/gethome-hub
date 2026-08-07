@@ -182,12 +182,15 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   wrong and expensive. Studio blocks the same two cases earlier still —
   `SDCardInspector.is64Bit` reads the card before anything is written, and is
   three-valued so an image it can't place is never blocked.
-- **Branch bundles are disposable; `v*` releases are not.** Every push publishes
-  a rolling `bundle-<branch>` prerelease — assets and tag both move — which is
-  what makes `--branch` testable on hardware. `bundle-cleanup.yml` removes each
-  one when its branch is deleted (plus a weekly sweep as a backstop), because
-  otherwise the tag list grows by one per branch forever. Its guardrails matter:
-  only `bundle-` tags, only prereleases, never the default branch's, and an
+- **Bundles build from `main` and from `v*` tags — branches are on demand.**
+  A push to main refreshes the rolling `bundle-main` (assets and tag both move);
+  a `v*` tag publishes an immutable release. To test a branch on hardware,
+  dispatch the workflow against it and it writes `bundle-<branch>` for
+  `--branch` to fetch. It used to fire on `["**"]`, which meant a release per
+  branch forever for artifacts nobody downloaded — everything that installs a
+  hub defaults to `main`. `bundle-cleanup.yml` removes each branch build when
+  its branch is deleted (plus a weekly sweep as a backstop). Its guardrails
+  matter: only `bundle-` tags, only prereleases, never the default branch's, and an
   empty branch listing aborts rather than deleting everything. The sweep matches
   by building the set of tags the *existing* branches would produce, because
   flattening slashes into the tag name is lossy and cannot be inverted.

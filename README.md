@@ -126,16 +126,21 @@ out-of-memory kill at the end of it regardless.
 only on a machine with more than 1 GB of memory. Below that it stops and says
 why, because starting a build that cannot finish is worse than an error.
 
-**Two kinds of release, and only one of them lasts.** Pushing any branch
-publishes a *rolling prerelease* named `bundle-<branch>`; its assets and its tag
-move on every push, and `bundle-cleanup.yml` deletes the whole thing once the
-branch is gone, so they don't accumulate. Pushing a `v*` tag publishes an
-immutable release under that tag, which nothing ever deletes.
+**Two kinds of release, and only one of them lasts.** A push to `main`
+refreshes `bundle-main`, a *rolling* prerelease whose assets and tag move every
+time. A `v*` tag publishes an immutable release under that tag, which nothing
+ever deletes.
 
-That is what makes a branch testable on real hardware: `install.sh --branch X`
-looks for `bundle-X`, and GetHome Studio passes `StudioFeature.hubBranch`
-through to it. Everything defaults to `main`, so a hub installs `bundle-main`
-unless someone says otherwise.
+Everything defaults to `main` — `install.sh`, `gethome-hubctl update`, and
+Studio's `StudioFeature.hubBranch` — so a hub installs `bundle-main` unless
+someone says otherwise.
+
+**To test a branch on real hardware**, run the *Publish bundle* workflow against
+it from the Actions page. That writes `bundle-<branch>`, which
+`install.sh --branch <branch>` (and Studio's `hubBranch`) will then fetch. It is
+deliberately on demand: building for every branch automatically meant a release
+per branch and a tags page that grew forever, for artifacts nobody downloaded.
+`bundle-cleanup.yml` removes any branch build once its branch is gone.
 
 ### Supported hardware
 
