@@ -107,22 +107,35 @@ of memory, and the hub was being killed somewhere between the install finishing
 and its owner claiming it.
 
 So: systemd units against a SQLite file at `<data>/hub.db`. systemd also gives
-what compose could not — `MemoryMax` per service, so a runaway Zigbee2MQTT
-costs itself a restart instead of taking the hub down with it.
+what compose could not — per-service memory limits, so a runaway Zigbee2MQTT
+costs itself a restart instead of taking the hub down with it. The hub itself is
+*throttled* rather than capped (`MemoryHigh`, no `MemoryMax`): a hard ceiling
+near the real working set turns a busy minute into a kill.
 
 ### The prebuilt bundle
 
 The Pi downloads the hub; it does not compile it. `.github/workflows/bundle.yml`
-publishes one tarball per architecture (`linux-x64`, `linux-arm64`,
-`linux-armv7l`) — `dist/` plus production `node_modules` with native modules
-already built for that platform — to a rolling per-branch release. Compiling
-*on* a Pi means `npm ci` pulling a thousand packages onto an SD card and then
-`tsc`: twenty to forty minutes, several hundred megabytes of memory, and on a
-512 MB board an out-of-memory kill at the end of it regardless.
+publishes one tarball per architecture (`linux-arm64`, `linux-x64`) — `dist/`
+plus production `node_modules` with native modules already built for that
+platform — and stamps each with a build id. Compiling *on* a Pi means `npm ci`
+pulling a thousand packages onto an SD card and then `tsc`: twenty to forty
+minutes, several hundred megabytes of memory, and on a 512 MB board an
+out-of-memory kill at the end of it regardless.
 
 `install.sh` falls back to building from source when there is no bundle — but
 only on a machine with more than 1 GB of memory. Below that it stops and says
 why, because starting a build that cannot finish is worse than an error.
+
+**Two kinds of release, and only one of them lasts.** Pushing any branch
+publishes a *rolling prerelease* named `bundle-<branch>`; its assets and its tag
+move on every push, and `bundle-cleanup.yml` deletes the whole thing once the
+branch is gone, so they don't accumulate. Pushing a `v*` tag publishes an
+immutable release under that tag, which nothing ever deletes.
+
+That is what makes a branch testable on real hardware: `install.sh --branch X`
+looks for `bundle-X`, and GetHome Studio passes `StudioFeature.hubBranch`
+through to it. Everything defaults to `main`, so a hub installs `bundle-main`
+unless someone says otherwise.
 
 ### Supported hardware
 

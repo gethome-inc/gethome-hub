@@ -124,6 +124,10 @@ jobs:
       # real hardware possible: install.sh derives the tag from `--branch`, so
       # a card written from a feature branch installs that branch's build. The
       # tag has slashes flattened because a release tag is a git ref.
+      #
+      # These are disposable — `bundle-cleanup.yml` deletes each one when its
+      # branch goes away, so they don't pile up. A `v*` tag takes the other
+      # branch below and publishes an immutable release, which nothing deletes.
       - name: Upload
         env:
           GH_TOKEN: ${{ github.token }}
