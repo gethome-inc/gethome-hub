@@ -102,6 +102,40 @@ describe('deploy/install.sh', () => {
     expect(workflow).not.toContain('linux-armv7l');
   });
 
+  /**
+   * The Zero 2 W path, which cannot be reproduced on a build machine: these are
+   * the values that decide whether the hub survives on 512 MB.
+   *
+   * `MemoryMax` on hubd is the one that has to stay gone. Measured, the hub is
+   * 119 MB resident with Matter off and 178 MB with it on, and a hard cap near
+   * that turns a busy minute into a kill — which is what a 260 MB ceiling was
+   * doing during the install. Throttling with `MemoryHigh` slows the cgroup
+   * down instead and lets the garbage collector catch up.
+   */
+  it('sizes a 512 MB board to throttle rather than kill, and leaves Matter off', () => {
+    const small = installer.slice(
+      installer.indexOf('if [[ "$RAM_MB" -gt 0 && "$RAM_MB" -le 1024 ]]'),
+      installer.indexOf('# ── System packages'),
+    );
+    expect(small).not.toBe('');
+    expect(small).toContain('HUB_MEM_HIGH="MemoryHigh=');
+    expect(small, 'a hard cap on hubd is what caused the restarts').not.toMatch(/HUB_MEM_MAX=/);
+    // Zigbee2MQTT keeps a hard cap: it is the optional process and should die
+    // on its own rather than take the hub down with it.
+    expect(small).toContain('Z2M_MEM_MAX="MemoryMax=');
+    expect(small).toContain('MATTER_DEFAULT=0');
+
+    // And the unit must not carry a MemoryMax for hubd from anywhere else.
+    const hubUnit = installer.slice(
+      installer.indexOf('gethome-hubd.service >/dev/null <<UNIT'),
+      installer.indexOf('gethome-zigbee2mqtt.service >/dev/null <<UNIT'),
+    );
+    expect(hubUnit).toContain('${HUB_MEM_HIGH}');
+    // A directive, not the word — the comment above it explains why there
+    // isn't one, and matching prose would make this test unfixable.
+    expect(hubUnit).not.toMatch(/^\s*MemoryMax=/m);
+  });
+
   it('keeps the installer step ids Studio mirrors', () => {
     // Renaming one of these silently breaks the app's install checklist —
     // `FirstBootMonitor.installSteps` and `PiInstallView.steps()` hard-code them.

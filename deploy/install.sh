@@ -574,6 +574,7 @@ UNIT
 # the authority on whether a given device is really a coordinator, udev only
 # needs to wake it. Removal matters as much as arrival — without it, unplugging
 # a stick leaves a service restart-looping against a device node that is gone.
+$SUDO mkdir -p /etc/udev/rules.d
 $SUDO tee /etc/udev/rules.d/99-gethome-zigbee.rules >/dev/null <<'RULE'
 SUBSYSTEM=="tty", ACTION=="add", ENV{ID_BUS}=="usb", TAG+="systemd", ENV{SYSTEMD_WANTS}="gethome-zigbee-detect.service"
 SUBSYSTEM=="tty", ACTION=="remove", ENV{ID_BUS}=="usb", TAG+="systemd", ENV{SYSTEMD_WANTS}="gethome-zigbee-detect.service"
