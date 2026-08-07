@@ -5,11 +5,30 @@ and a USB coordinator stick. The hub never speaks Zigbee itself — it consumes
 Z2M's MQTT interface, which keeps the enormous Z2M device library and tooling
 available.
 
+## Which coordinator
+
+Known-good sticks, all of which `zigbee-detect.sh` recognises without help:
+
+- **SONOFF ZBDongle-E** (EFR32MG21) or **ZBDongle-P** (CC2652P)
+- **dresden elektronik ConBee II / ConBee III**
+- **Home Assistant SkyConnect / Connect ZBT-1**
+
+Others usually work — anything Zigbee2MQTT supports does — but a stick built on
+a bare USB-serial bridge (CP210x, CH340, FTDI) cannot be told apart from a 3D
+printer or a UPS, so it is offered to you rather than adopted automatically.
+See [Finding the coordinator](#finding-the-coordinator).
+
+**Without a coordinator the hub runs Matter and MQTT devices only.** On a
+Raspberry Pi Zero 2 W that is a sharper limit than it sounds: 512 MB cannot hold
+Matter and Zigbee2MQTT at once, so the installer switches Matter off there — and
+a Zero 2 W with no stick can therefore talk to almost nothing. On that board a
+coordinator is effectively required. A Pi 4 or 5 runs both together.
+
 ## Setup
 
-1. Plug a supported coordinator (SONOFF ZBDongle-E/P, ConBee, SkyConnect, …)
-   into the hub machine. **Order doesn't matter** — before or after installing
-   the hub, see [Finding the coordinator](#finding-the-coordinator).
+1. Plug the coordinator into the hub machine. **Order doesn't matter** — before
+   or after installing the hub, see
+   [Finding the coordinator](#finding-the-coordinator).
 2. Start Zigbee2MQTT:
    - **Linux/Pi:** nothing to do. `install.sh` installs Zigbee2MQTT and the
      detector; the detector starts the `gethome-zigbee2mqtt` service when a

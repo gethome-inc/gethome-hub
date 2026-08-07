@@ -173,6 +173,21 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   and on a 512 MB board an OOM kill at the end regardless. So the fallback is
   **refused below 1 GB of RAM** and says why. Starting a build that cannot
   finish is worse than failing in ten seconds.
+- **Say what is tested, not just what runs.** README's *Required hardware* is
+  the contract: Pi 5 / Pi 4 / Zero 2 W are tested; other 64-bit boards (Pi 3,
+  400/500, CMs, x86-64) run but aren't routinely tried, and `install.sh` says so
+  with a `@@WARN@@` for Raspberry Pis it doesn't recognise — silently for
+  anything that isn't a Pi, where running a home hub is already a deliberate
+  choice. Claiming support for hardware nobody has tried is the misleading half
+  of that choice; refusing a Pi 3 that has twice a Zero 2 W's memory is the
+  other.
+- **The limit worth stating out loud is the *combination*.** No coordinator
+  means no Zigbee; a 512 MB board means no Matter. Either alone is a footnote,
+  and together they leave a hub that can only talk to MQTT integrations — which
+  is not what somebody setting up a smart home expects. `install.sh` warns on
+  exactly that pair after the Zigbee step, README's *Required hardware* says a
+  Zero 2 W effectively requires a stick, and `docs/zigbee.md` lists the ones
+  known to work.
 - **64-bit only, and the two 32-bit cases are different problems.** Bundles are
   built for `linux-arm64` and `linux-x64` and nothing else. `armv6l` (Pi 1 /
   Zero / Zero W) is unfixable — no Node.js build exists — and the answer is

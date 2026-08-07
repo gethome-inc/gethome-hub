@@ -1,5 +1,12 @@
 # Matter support
 
+> **Memory note.** `install.sh` sets `ADAPTER_MATTER=0` on boards with 512 MB or
+> less (a Raspberry Pi Zero 2 W). Loading matter.js costs about 60 MB on top of
+> the hub's ~120 MB, and Zigbee2MQTT another ~150 MB, which does not fit
+> alongside the operating system. Turn it on with `ADAPTER_MATTER=1` in
+> `/etc/gethome/hub.env` and `sudo gethome-hubctl restart` — or use a Pi 4 or 5,
+> which runs Matter and Zigbee together comfortably.
+
 The hub is a **Matter controller** with its own fabric, built on
 [matter.js](https://github.com/matter-js/matter.js) (pure TypeScript, no
 native SDK). Devices commissioned onto the hub belong to the *hub*, not to a

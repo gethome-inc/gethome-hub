@@ -42,6 +42,60 @@ hub can control them.
 Remote access (control away from home through a relay) is planned; v1 is
 LAN-only by design.
 
+## Required hardware
+
+### The computer
+
+A **64-bit** system is required, and the board's memory decides what the hub can
+run on it.
+
+| | Board | What you get |
+|---|---|---|
+| **Recommended** | Raspberry Pi 5, Pi 4 (2 GB or more) | Everything: Matter, Zigbee, MQTT, room to spare |
+| **Tested, with one limit** | Raspberry Pi Zero 2 W (512 MB) | Zigbee and MQTT. **Matter is switched off** — see below |
+| **Should work, not routinely tested** | Pi 3 / 3B+, 400, 500, CM4, CM5, and any other 64-bit ARM or x86-64 Linux machine | Everything, on 1 GB or more |
+| **Cannot work** | Pi 1, Pi Zero, Pi Zero W | Nothing — these are ARMv6, and Node.js has published no ARMv6 build since Node 12 |
+
+The tested operating system is **Raspberry Pi OS Lite (64-bit)**. Debian and
+Ubuntu on arm64 work too; they are simply not what we test against.
+
+**A 32-bit system is refused, even on a 64-bit board.** Writing the 32-bit image
+to a perfectly good Zero 2 W or Pi 4 is an easy mistake and an expensive one —
+the Pi boots, the install runs for minutes, and only then finds there is nothing
+published for it. Both the installer and GetHome Studio stop first and say that
+the *card* needs rewriting, not that the Pi is wrong. Studio checks the card
+before it writes anything at all.
+
+### The Zigbee coordinator
+
+A USB Zigbee coordinator is what lets the hub pair Zigbee devices — bulbs,
+sensors, buttons, the great majority of affordable smart-home hardware. Known-good
+sticks:
+
+- **SONOFF ZBDongle-E** or **ZBDongle-P**
+- **dresden elektronik ConBee II / ConBee III**
+- **Home Assistant SkyConnect / Connect ZBT-1**
+
+Plug it in at any time — before or after installing. The hub notices within
+seconds and starts Zigbee by itself, with no reboot
+([docs/zigbee.md](docs/zigbee.md#finding-the-coordinator)).
+
+**Without a coordinator you get Matter and MQTT devices only** — no Zigbee. That
+is a real limitation rather than a temporary one, so it is worth deciding before
+you buy a board:
+
+> **On a Raspberry Pi Zero 2 W, a Zigbee coordinator is effectively required.**
+> 512 MB is not enough to run Matter and Zigbee at once — measured, the hub is
+> ~120 MB, Matter adds ~60 MB, and Zigbee2MQTT another ~150 MB on top of the
+> operating system's ~70 MB. The installer switches Matter off on that board and
+> says so. So a Zero 2 W *with* a stick is a capable Zigbee hub, and a Zero 2 W
+> *without* one can talk to almost nothing. A Pi 4 or Pi 5 runs both together
+> comfortably.
+
+Matter can be turned back on at any time — `ADAPTER_MATTER=1` in
+`/etc/gethome/hub.env`, then `sudo gethome-hubctl restart` — with the memory
+consequences above.
+
 ## Quick start
 
 **Raspberry Pi / Linux**:
@@ -136,23 +190,6 @@ That is what makes a branch testable on real hardware: `install.sh --branch X`
 looks for `bundle-X`, and GetHome Studio passes `StudioFeature.hubBranch`
 through to it. Everything defaults to `main`, so a hub installs `bundle-main`
 unless someone says otherwise.
-
-### Supported hardware
-
-**A 64-bit system is required.** Raspberry Pi **Zero 2 W, 3, 4, 5** (and 400,
-500, CM4, CM5), plus any other 64-bit ARM or x86-64 Linux machine. The tested
-and recommended system is **Raspberry Pi OS Lite (64-bit)**; Debian and Ubuntu
-on arm64 also work.
-
-Two cases are refused up front rather than halfway through an install:
-
-- The original **Pi Zero / Zero W / Pi 1** are ARMv6, and Node.js has published
-  no ARMv6 build since Node 12. Nothing can be installed on them.
-- A **32-bit system on a 64-bit board** — the 32-bit image written to a
-  perfectly good Zero 2 W or Pi 4. The Pi is fine; the card needs rewriting with
-  the 64-bit image, and both the installer and Studio say exactly that. Studio
-  checks the card before it writes anything, so this costs one sentence instead
-  of twenty minutes.
 
 ### Updating
 

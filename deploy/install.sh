@@ -173,6 +173,23 @@ if [[ "$RAM_MB" -gt 0 && "$RAM_MB" -lt 400 ]]; then
   fail "This machine has ${RAM_MB} MB of memory, which is below what the hub needs. A Raspberry Pi Zero 2 W (512 MB) is the smallest board that works."
 fi
 
+# Which Raspberry Pis we actually test on. Everything 64-bit runs, and a board
+# outside this list is far more likely to be fine than not — a Pi 3 has twice
+# the memory of a Zero 2 W. So this is a note, not a gate: saying "supported"
+# about hardware nobody has tried would be the misleading half of the choice.
+# Deliberately silent for machines that aren't Raspberry Pis at all, where
+# running a home hub is an informed decision rather than a purchase.
+# ("Raspberry Pi 5" also covers the 500, and "Pi 4" the 400 — they are
+# substrings. The Compute Modules need their own patterns, because their model
+# strings read "Raspberry Pi Compute Module 4".)
+case "$BOARD" in
+  *"Raspberry Pi 5"*|*"Raspberry Pi 4"*|*"Raspberry Pi Zero 2"*|\
+  *"Compute Module 4"*|*"Compute Module 5"*) ;;
+  *"Raspberry Pi"*)
+    warn "${BOARD} isn't one of the boards this hub is regularly tested on (Raspberry Pi 5, Pi 4, and Zero 2 W). It should work — anything 64-bit with 512 MB or more does — but if something behaves oddly, that is worth knowing."
+    ;;
+esac
+
 # Everything sized from here, so a Pi 5 isn't held to a Pi Zero's budget.
 #
 # Measured, not guessed: hubd is ~119 MB resident with Matter off and ~178 MB
@@ -781,8 +798,22 @@ fi
 # coordinator to bring up. It runs *here* because it is a confirmation rather
 # than a dependency: a working hub should not be held back from its owner by a
 # question about an accessory it doesn't need.
+ZIGBEE_READY=""
 if [[ -x /usr/local/lib/gethome-zigbee-detect.sh ]]; then
-  $SUDO env GETHOME_CONF="$CONF_DIR" /usr/local/lib/gethome-zigbee-detect.sh || true
+  if $SUDO env GETHOME_CONF="$CONF_DIR" /usr/local/lib/gethome-zigbee-detect.sh; then
+    ZIGBEE_READY=1
+  fi
+fi
+
+# The one combination worth spelling out, because on its own each half sounds
+# minor and together they mean the hub can barely talk to anything: a 512 MB
+# board runs no Matter, and with no coordinator it runs no Zigbee either. That
+# leaves MQTT integrations, which is not what somebody setting up a smart home
+# is expecting. Better said now than discovered when the first bulb won't pair.
+if [[ -z "$ZIGBEE_READY" && "$MATTER_DEFAULT" == "0" ]]; then
+  warn "This hub has no Zigbee coordinator plugged in, and Matter is off because ${RAM_MB} MB isn't enough for both. As it stands it can only talk to MQTT devices. Plugging in a Zigbee stick (SONOFF ZBDongle-E/P, ConBee, SkyConnect) starts Zigbee within seconds, with no reboot — that is the usual answer on this board. A Raspberry Pi 4 or 5 runs Matter and Zigbee together instead."
+elif [[ -z "$ZIGBEE_READY" ]]; then
+  say "No Zigbee coordinator is plugged in, so this hub starts with Matter and MQTT devices. Plug one in whenever you like — Zigbee starts by itself, with no reboot."
 fi
 
 printf '@@DONE@@\n'
