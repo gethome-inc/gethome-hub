@@ -57,7 +57,7 @@ jobs:
       #
       # If this ever fails on an advisory with no fix published, don't drop the
       # gate: npm has no per-advisory ignore list, so pin the fix in `overrides`
-      # the way `@esbuild-kit/core-utils`'s esbuild is pinned, and say why.
+      # the way esbuild is pinned there, and say why.
       - run: npm audit --omit=dev --audit-level=moderate
 
   shell:
