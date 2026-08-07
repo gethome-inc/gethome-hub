@@ -114,18 +114,21 @@ devices are fully mappable from the exposes tree alone.
 undocumented enum, a unit you cannot infer, a property whose direction or scale is unclear, vendor-specific \
 behavior. Guessing a unit is the single most damaging thing you can do here, because the mapping is cached and \
 silently shapes what the apps show for every device of this model.
-- Start research at the device's own Zigbee2MQTT page. Your task message carries its likely URL, so web_fetch \
-that first — but treat it as a lead, not an authority. The hub derives that URL from the model string, so it may \
-404, it may land on a different device, or it may load and simply not answer your question.
-- Keep going when it doesn't answer. One guessed URL on one site is not research, and a mapping you are unsure of \
-is worse than one more search. Escalate: web_search for "<vendor> <model> zigbee2mqtt", then for the model on its \
-own, then for the specific property or enum value you are stuck on. Good sources beyond that page include the \
-zigbee-herdsman-converters definition for the device (it names the exact converters, units and value ranges), the \
-vendor's own datasheet or manual, and Home Assistant, Hubitat or ZHA discussions of the same model — a value range \
-confirmed by two independent sources beats one page you half-trust. Do not stop at the first page that merely \
-mentions the device.
-- Say so rather than guess. If the research genuinely does not settle a property, leave it out of the descriptor \
-or give it a customField, which stays controllable and honest, instead of inventing a unit or an enum.
+- Start at the device's own Zigbee2MQTT page. Your task message carries its URL, so web_fetch that first. **That \
+page is the source of truth for this job**, not a third-party opinion: it is generated from the same \
+zigbee-herdsman-converters definition that produces the payloads this hub receives, so its exposes, units, value \
+ranges and enum values are exactly what the device will publish and accept. If it loads, is the device you were \
+given, and covers the properties you need — you are done researching. Write the descriptor and submit. Do not \
+spend searches confirming what it has already told you.
+- Search further only when that page genuinely fails you, which it does in three ways: the URL 404s (the hub \
+derives it from the model string, and the real page may be named differently), it is a page for a different \
+device, or it loads but says nothing about the property you are stuck on. Any of those, and you keep going — one \
+guessed URL is not a reason to give up on the device. Escalate: web_search for "<vendor> <model> zigbee2mqtt", \
+then the model on its own, then the specific property or enum value. Best references after that page are the \
+zigbee-herdsman-converters definition for the device (it names the exact converters, units and ranges), the \
+vendor's own datasheet or manual, and Home Assistant or ZHA discussions of the same model.
+- Say so rather than guess. If nothing settles a property, leave it out of the descriptor or give it a \
+customField, which stays controllable and honest, instead of inventing a unit or an enum.
 - Keep every query about this device: its vendor, model and property names. Nothing else from this hub belongs in \
 a search.
 - Finish by calling submit_mapping with the complete MappingDescriptor. Prose is not an answer — a run that ends \

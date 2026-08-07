@@ -56,15 +56,20 @@ process — no subprocess, no second runtime.
      well the model guesses it.
 2. The model researches with the **server-side** `web_search_20260209` and
    `web_fetch_20260209` tools. They execute on Anthropic's infrastructure, so
-   the hub itself needs no egress beyond `api.anthropic.com`. The prompt
-   points at the device's Zigbee2MQTT page first and treats it as a lead, not
-   an authority: the URL is derived from a model string and may 404, land on
-   the wrong device, or simply not answer the question. It is told to
-   escalate — search the vendor and model, then the specific property or enum
-   it is stuck on, and corroborate a value range across the
-   zigbee-herdsman-converters definition, the vendor's own documentation, or
-   Home Assistant / ZHA discussions of the same model — and to leave a
-   property out (or give it a `customField`) rather than invent a unit.
+   the hub itself needs no egress beyond `api.anthropic.com`. The prompt sends
+   it to the device's Zigbee2MQTT page first and treats that page as **the
+   source of truth when it works**: those pages are generated from the same
+   zigbee-herdsman-converters definition that produces the payloads this hub
+   receives, so a page that loads, is the right device, and covers the
+   properties in question settles them — the agent is told to stop there and
+   submit rather than spend searches corroborating it. Searching further is
+   for the three ways that page can fail: a 404 (the URL is derived from a
+   model string, and the real page may be named differently), the wrong
+   device, or a page that says nothing about the property in hand. Then it
+   searches the vendor and model, then the property or enum itself, falling
+   back to the converters source, the vendor's documentation, and Home
+   Assistant / ZHA discussions. Either way it is told to leave a property out
+   (or give it a `customField`) rather than invent a unit.
 3. The **only client-side tool, and the only way to answer**, is
    `submit_mapping`. Its `input_schema` is generated from the live descriptor
    zod schema, so it cannot drift from what the mapper accepts — and because
