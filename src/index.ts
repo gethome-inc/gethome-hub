@@ -19,19 +19,40 @@ import type { ZigbeeAdapter } from './adapters/zigbee/adapter.js';
 import type { MqttAdapter } from './adapters/mqtt/adapter.js';
 import type { MatterAdapter } from './adapters/matter/adapter.js';
 
+const installRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+
 const version = (() => {
   try {
-    const packageJson = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'package.json');
+    const packageJson = path.join(installRoot, 'package.json');
     return (JSON.parse(readFileSync(packageJson, 'utf8')) as { version: string }).version;
   } catch {
     return '0.0.0';
   }
 })();
 
+/**
+ * Which build this is, stamped by CI into the bundle.
+ *
+ * `version` alone is the package version, which barely moves and is the same
+ * on every build of a branch — so "0.1.0" was the only answer the app could
+ * give to "what is running on my Pi", including after an update. This is
+ * `<version>-<short sha>-<branch>`, it names the release directory the
+ * installer unpacked into, and it is absent only for a hub built from source
+ * on the machine itself.
+ */
+const build = (() => {
+  try {
+    const stamped = readFileSync(path.join(installRoot, 'VERSION'), 'utf8').trim();
+    return stamped.length > 0 ? stamped : undefined;
+  } catch {
+    return undefined;
+  }
+})();
+
 async function main(): Promise<void> {
   const config = loadConfig();
   const log = createLogger(config.LOG_LEVEL);
-  log.info(`GetHome Hub ${version} starting…`);
+  log.info(`GetHome Hub ${version} starting…${build ? ` (build ${build})` : ''}`);
 
   const secret = ensureHubSecret(config.DATA_DIR);
   const { db, close } = createDb(config.DATABASE_FILE);
@@ -90,6 +111,7 @@ async function main(): Promise<void> {
     hubId: secret.hubId,
     hubName: config.HUB_NAME,
     version,
+    ...(build ? { build } : {}),
     ...(matter ? { matter } : {}),
     ...(zigbee ? { zigbee } : {}),
   });

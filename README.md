@@ -124,11 +124,37 @@ already built for that platform — to a rolling per-branch release. Compiling
 only on a machine with more than 1 GB of memory. Below that it stops and says
 why, because starting a build that cannot finish is worse than an error.
 
-Supported boards: **Raspberry Pi Zero 2 W, 3, 4, 5** and any other 64-bit ARM
-or x86-64 Linux machine; 32-bit ARMv7 works too. The original **Pi Zero / Zero
-W / Pi 1 cannot run the hub** — they are ARMv6, and Node.js has published no
-ARMv6 build since Node 12. Both the installer and Studio say so by name rather
-than failing halfway through.
+### Supported hardware
+
+**A 64-bit system is required.** Raspberry Pi **Zero 2 W, 3, 4, 5** (and 400,
+500, CM4, CM5), plus any other 64-bit ARM or x86-64 Linux machine. The tested
+and recommended system is **Raspberry Pi OS Lite (64-bit)**; Debian and Ubuntu
+on arm64 also work.
+
+Two cases are refused up front rather than halfway through an install:
+
+- The original **Pi Zero / Zero W / Pi 1** are ARMv6, and Node.js has published
+  no ARMv6 build since Node 12. Nothing can be installed on them.
+- A **32-bit system on a 64-bit board** — the 32-bit image written to a
+  perfectly good Zero 2 W or Pi 4. The Pi is fine; the card needs rewriting with
+  the 64-bit image, and both the installer and Studio say exactly that. Studio
+  checks the card before it writes anything, so this costs one sentence instead
+  of twenty minutes.
+
+### Updating
+
+```sh
+sudo gethome-hubctl version          # which build is running
+sudo gethome-hubctl update           # install the latest build of main
+sudo gethome-hubctl rollback         # go back to the previous one
+```
+
+Each build lives in its own directory under `/opt/gethome/releases/` and
+`current` is a symlink to the one that runs, so an update is an atomic flip —
+**and if the new build doesn't answer, the installer flips it back by itself**
+and tells you why. That is deliberately not a container: on a 512 MB board the
+Docker daemon alone is a third of the machine, and a `docker pull` into the same
+tag has nothing to roll back to.
 
 ### Development
 

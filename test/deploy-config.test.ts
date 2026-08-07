@@ -1,0 +1,113 @@
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { afterAll, describe, expect, it } from 'vitest';
+
+const repoRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+const installer = readFileSync(path.join(repoRoot, 'deploy', 'install.sh'), 'utf8');
+
+const mosquittoBinary = ['/usr/sbin/mosquitto', '/usr/local/sbin/mosquitto', '/opt/homebrew/sbin/mosquitto']
+  .find((candidate) => existsSync(candidate));
+
+/**
+ * `deploy/` has no type checker behind it, and the configuration it writes is
+ * only exercised on a Raspberry Pi. These are the checks that can be made here.
+ */
+describe('deploy/install.sh', () => {
+  const dirs: string[] = [];
+  afterAll(() => {
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** Pull a heredoc body out of the installer by its delimiter. */
+  function heredoc(delimiter: string): string {
+    const pattern = new RegExp(`<<'${delimiter}'\\n([\\s\\S]*?)\\n${delimiter}\\n`);
+    const found = installer.match(pattern);
+    expect(found, `heredoc ${delimiter} not found in install.sh`).not.toBeNull();
+    return found![1]!;
+  }
+
+  /**
+   * **The regression that cost a whole install round.**
+   *
+   * Our drop-in is included *after* the distribution's own mosquitto.conf,
+   * which already sets `persistence` and `persistence_location`. Repeating a
+   * string option there is not an override — mosquitto treats it as a fatal
+   * config error and refuses to start, so the broker was down, port 1883 was
+   * closed, and Zigbee could not work at all on a hub that had otherwise
+   * installed perfectly.
+   *
+   * The failure was invisible because the installer discarded the reason. This
+   * test is the cheap half of the fix: it parses our drop-in together with a
+   * copy of Debian's config, exactly as mosquitto will on the Pi.
+   */
+  it('writes a mosquitto drop-in that loads alongside the distribution config', () => {
+    const dropIn = heredoc('MOSQ');
+    expect(dropIn).toContain('listener 1883');
+    expect(dropIn).toContain('allow_anonymous true');
+
+    // Whatever else it grows, it must not repeat what Debian already sets.
+    for (const duplicated of ['persistence_location', 'log_dest', 'pid_file']) {
+      expect(dropIn, `${duplicated} is already set by the distribution config`)
+        .not.toMatch(new RegExp(`^\\s*${duplicated}\\b`, 'm'));
+    }
+
+    if (!mosquittoBinary) return; // Proven above; the live parse needs the broker.
+
+    const dir = mkdtempSync(path.join(tmpdir(), 'gethome-mosq-'));
+    dirs.push(dir);
+    mkdirSync(path.join(dir, 'conf.d'));
+    writeFileSync(path.join(dir, 'conf.d', 'gethome.conf'), dropIn + '\n');
+    // Debian / Raspberry Pi OS ship exactly this.
+    writeFileSync(
+      path.join(dir, 'mosquitto.conf'),
+      [
+        'persistence true',
+        `persistence_location ${dir}/`,
+        `log_dest file ${dir}/mosquitto.log`,
+        `include_dir ${dir}/conf.d`,
+        '',
+      ].join('\n'),
+    );
+
+    let output = '';
+    try {
+      // Parses the config and exits; `-h` never opens a socket, so this is safe
+      // to run in CI next to whatever else is using 1883.
+      output = execFileSync(mosquittoBinary, ['-c', path.join(dir, 'mosquitto.conf'), '-h'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (error) {
+      const failure = error as { stdout?: string; stderr?: string };
+      output = `${failure.stdout ?? ''}${failure.stderr ?? ''}`;
+    }
+    expect(output).not.toMatch(/Duplicate .* value in configuration/i);
+    expect(output).not.toMatch(/^\s*Error:/im);
+  });
+
+  it('refuses 32-bit systems by name, and only builds 64-bit bundles', () => {
+    // Every supported board (Zero 2 W, 3, 4, 5) is 64-bit, and 32-bit has no
+    // prebuilt SQLite binding. The installer and CI have to agree on that, or
+    // a Pi is told to download something nobody publishes.
+    expect(installer).toMatch(/armv7l\|armv8l\)/);
+    expect(installer).toMatch(/64-bit operating system|64-bit system/);
+    expect(installer).not.toMatch(/NODE_ARCH="linux-armv7l"/);
+
+    const workflow = readFileSync(path.join(repoRoot, '.github/workflows/bundle.yml'), 'utf8');
+    expect(workflow).toContain('linux-arm64');
+    expect(workflow).toContain('linux-x64');
+    expect(workflow).not.toContain('linux-armv7l');
+  });
+
+  it('keeps the installer step ids Studio mirrors', () => {
+    // Renaming one of these silently breaks the app's install checklist —
+    // `FirstBootMonitor.installSteps` and `PiInstallView.steps()` hard-code them.
+    for (const step of ['system', 'runtime', 'download', 'zigbee', 'start', 'autostart', 'health']) {
+      expect(installer, `@@STEP:${step}@@ is a cross-repo contract`)
+        .toMatch(new RegExp(`\\bstep ${step}\\b`));
+    }
+  });
+});

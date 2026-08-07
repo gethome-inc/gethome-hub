@@ -29,6 +29,8 @@ export interface ApiDeps {
   hubId: string;
   hubName: string;
   version: string;
+  /** CI's build stamp, when this install came from a published bundle. */
+  build?: string;
   /** Present when the corresponding adapter is enabled and running. */
   matter?: MatterAdapter;
   zigbee?: ZigbeeAdapter;
@@ -119,6 +121,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     hubId: deps.hubId,
     name: deps.hubName,
     version: deps.version,
+    // Additive. `version` moves once per release; this identifies the exact
+    // build, which is what someone asking "did my update land?" needs.
+    ...(deps.build ? { build: deps.build } : {}),
     apiVersion: 1,
     claimed: deps.pairing.claimed,
     // Additive: an app that doesn't know about this field ignores it, and one
