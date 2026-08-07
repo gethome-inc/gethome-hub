@@ -1,0 +1,49 @@
+# Keeps dependencies moving on their own, so a published advisory turns into a
+# pull request instead of a number on the Security tab that nobody is looking at.
+#
+# This file enables *version* updates. Dependabot *security* updates — the ones
+# that open a PR the moment an advisory lands — are a repository setting, not
+# something this file can turn on: Settings → Advanced Security → Dependabot
+# security updates. Both halves are wanted. Version updates keep the tree close
+# to current so a security bump is a small diff; security updates are what
+# reacts to an advisory the same day.
+#
+# The CI `audit` job is the backstop for both: it fails a pull request whose
+# lockfile ships a known-vulnerable production dependency, so a missed alert
+# cannot be merged silently.
+
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    # One PR for the routine churn instead of fifteen. Majors stay separate,
+    # because those are the ones that need a human to read a changelog.
+    groups:
+      npm-minor-and-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      # matter.js is pinned to a minor on purpose — its API churns between
+      # them, and all matter.js-specific code lives in src/adapters/matter/ so
+      # that the churn stays in one place. A bot walking the pin forward is
+      # exactly what the pin exists to prevent; moving it is a deliberate,
+      # test-it-on-hardware change. On a 0.x package a minor bump is the
+      # breaking one, so both types have to be ignored.
+      - dependency-name: "@matter/main"
+        update-types:
+          ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "@project-chip/matter.js"
+        update-types:
+          ["version-update:semver-major", "version-update:semver-minor"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]

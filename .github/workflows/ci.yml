@@ -32,6 +32,34 @@ jobs:
           HUB_TEST_MQTT: "1"
       - run: npm run build
 
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      # No `npm ci`: audit resolves the tree from package-lock.json alone, so
+      # this job is a checkout and one registry call rather than a full install.
+      #
+      # `--omit=dev` scopes it to what actually reaches a user's hub. The bundle
+      # `bundle.yml` publishes is `dist/` plus *production* `node_modules`, so a
+      # vitest or tsx advisory is a CI-machine problem, not a Pi problem — and
+      # gating on it would block unrelated pull requests on something that never
+      # ships. Dependabot still opens PRs for those; this only refuses to merge
+      # a vulnerable dependency into the hub itself.
+      #
+      # `moderate` rather than `high` because the four alerts that prompted this
+      # job included a moderate one, and both packages were production deps
+      # reached transitively (mqtt → socks → ip-address, claude-agent-sdk →
+      # mcp-sdk → hono) — nothing a glance at package.json would have shown.
+      #
+      # If this ever fails on an advisory with no fix published, don't drop the
+      # gate: npm has no per-advisory ignore list, so pin the fix in `overrides`
+      # the way `@esbuild-kit/core-utils`'s esbuild is pinned, and say why.
+      - run: npm audit --omit=dev --audit-level=moderate
+
   shell:
     name: Shell scripts
     runs-on: ubuntu-latest

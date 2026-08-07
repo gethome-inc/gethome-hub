@@ -36,10 +36,25 @@ HUB_TEST_MQTT=1 npm test                  # + end-to-end broker round-trip (need
 npm run dev                               # tsx watch, reads .env
 npm run build && node dist/index.js       # production build (copies SQL migrations into dist)
 npm run db:generate                       # drizzle-kit: generate a migration after editing src/db/schema.ts
+npm audit --omit=dev --audit-level=moderate  # what CI gates on; reads the lockfile, no install needed
 ```
 
 `deploy/` has no type checker behind it, so CI runs `shellcheck -S warning` over
 every script there. Keep it clean.
+
+**Dependencies are gated, not just watched.** Every vulnerable package this repo
+has shipped arrived transitively — `mqtt → socks → ip-address`,
+`@anthropic-ai/claude-agent-sdk → @modelcontextprotocol/sdk → hono` — so
+`package.json` is not where you would notice. CI's `audit` job fails a pull
+request whose lockfile carries a known-vulnerable **production** dependency
+(dev-only advisories don't gate: the bundle ships `dist/` + production
+`node_modules`, so vitest never reaches a Pi). `.github/dependabot.yml` keeps
+the tree moving so those bumps stay small; it deliberately holds matter.js at
+its pinned minor. Fix a finding by updating the lockfile — `npm audit fix` is
+usually enough, because the vulnerable version is normally pinned there while
+the parent's own range already permits the patched one. Reach for `overrides`
+only when a parent range genuinely blocks the fix, which is why the lone
+existing override exists (`@esbuild-kit/core-utils` pins `esbuild@~0.18.20`).
 
 Green `typecheck` + `test` is the bar for every change. The e2e suites
 (`test/integration/mqtt-roundtrip.test.ts` for the whole pipeline,
