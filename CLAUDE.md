@@ -53,8 +53,24 @@ the tree moving so those bumps stay small; it deliberately holds matter.js at
 its pinned minor. Fix a finding by updating the lockfile — `npm audit fix` is
 usually enough, because the vulnerable version is normally pinned there while
 the parent's own range already permits the patched one. Reach for `overrides`
-only when a parent range genuinely blocks the fix, which is why the lone
-existing override exists (`@esbuild-kit/core-utils` pins `esbuild@~0.18.20`).
+only when a parent range genuinely blocks the fix, or when duplicate copies of
+one package are themselves the problem — which is what the lone existing
+override is now for.
+
+**That override keeps exactly one `esbuild` in the tree, and the second reason
+is the load-bearing one.** Four things want it at three different ranges
+(`drizzle-kit@^0.25.4` takes the hoisted slot, `tsx@~0.28.0` and `vitest` nest
+their own 0.28.x beside it, `@esbuild-kit/core-utils` pins `~0.18.20`), and
+esbuild carries 26 per-platform optional packages, so each duplicate is a
+27-entry subtree. Dependabot regenerates the whole lockfile on every bump and
+**drops one of those subtrees when it does** — it wrote `tsx`'s and lost
+`vitest`'s, and `npm ci` then failed every PR with `EUSAGE … Missing:
+esbuild@0.28.1 from lock file`, whatever the PR was actually bumping. Pinning
+one version collapses all of it: one copy, 26 entries, nothing left to drop.
+Removing the override does not simplify this — it restores a *fourth* copy at
+the vulnerable `0.18.20`. The cost is that `drizzle-kit` runs above its declared
+range, which CI does not cover because nothing there runs `db:generate`; if you
+touch these versions, run it by hand and check it still reads the schema.
 
 Green `typecheck` + `test` is the bar for every change. The e2e suites
 (`test/integration/mqtt-roundtrip.test.ts` for the whole pipeline,
