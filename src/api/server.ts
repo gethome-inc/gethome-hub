@@ -14,6 +14,9 @@ import type { Logger } from '../logging.js';
 import { commandSchema } from '../schema/index.js';
 import type { MatterAdapter } from '../adapters/matter/adapter.js';
 import type { ZigbeeAdapter } from '../adapters/zigbee/adapter.js';
+// Dependency-free model catalog (a price table and an allowlist) — importing
+// it here does not pull the AI stack into the API layer.
+import { isSupportedModel, supportedModelIds } from '../ai/models.js';
 import { deviceWire } from './dto.js';
 import { extractToken, requireMember, requireOwner } from './auth.js';
 import { attachWebSocket } from './ws.js';
@@ -375,15 +378,32 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       .object({
         // Anthropic is the only provider — tolerated for older clients.
         provider: z.literal('anthropic').optional(),
-        authType: z.enum(['api_key', 'oauth_token']).default('api_key'),
-        model: z.string().min(1).max(120).nullable().optional(),
-        // An Anthropic API key or a Claude subscription OAuth token
-        // (`claude setup-token`) — write-only, stored encrypted.
-        apiKey: z.string().min(8).max(4000),
+        // Older apps sent authType: "api_key" | "oauth_token". Subscription
+        // tokens can no longer authenticate the Messages API, so the field is
+        // accepted and ignored rather than 400-ing an app that hasn't shipped
+        // an update yet — the key check below is what actually catches one.
+        authType: z.string().optional(),
+        model: z
+          .string()
+          .min(1)
+          .max(120)
+          .refine(isSupportedModel, {
+            message: `unsupported model — the mapping agent runs on: ${supportedModelIds().join(', ')}`,
+          })
+          .nullable()
+          .optional(),
+        // An Anthropic API key — write-only, stored encrypted.
+        apiKey: z
+          .string()
+          .min(8)
+          .max(4000)
+          .refine((key) => !key.trim().startsWith('sk-ant-oat'), {
+            message:
+              'that is a Claude subscription token; the hub needs an Anthropic API key (sk-ant-api…) from platform.claude.com',
+          }),
       })
       .parse(request.body);
     await deps.settings.setAiSettings({
-      authType: body.authType,
       model: body.model ?? null,
       apiKey: body.apiKey,
     });

@@ -66,7 +66,7 @@ devices, favorites, view everything.
 | `GET /members` · `DELETE /members/:id` | any · owner | the owner cannot be removed |
 | `GET /invites` · `POST /invites` | owner | `POST` → `201 {code, expiresAt}` |
 | `GET /activity?limit=&before=` | any | reverse-chronological, cursor = `before` id |
-| `GET /settings/ai` · `PUT /settings/ai` · `DELETE /settings/ai` | owner | PUT `{authType: "api_key"\|"oauth_token", apiKey, model?}` (the secret — an Anthropic API key or a Claude subscription token — is write-only); GET/PUT respond `{provider: "anthropic", authType, model, hasKey, status}` where `status` carries `lastError`/`lastRun` health — see [ai-adaptation.md](ai-adaptation.md) |
+| `GET /settings/ai` · `PUT /settings/ai` · `DELETE /settings/ai` | owner | PUT `{apiKey, model?}` (an Anthropic API key, write-only; a `sk-ant-oat…` subscription token and a model outside the supported list are both refused with 400, an `authType` from an older app is ignored); GET/PUT respond `{provider: "anthropic", model, hasKey, legacySubscriptionToken, status}` where `status` carries `lastError`/`lastRun` health — see [ai-adaptation.md](ai-adaptation.md) |
 
 ### Device wire shape (`GET /devices` item)
 

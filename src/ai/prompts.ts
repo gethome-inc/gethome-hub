@@ -2,10 +2,19 @@ import type { Z2mDevice, Z2mProfile } from '../adapters/zigbee/exposes-mapper.js
 
 /**
  * Prompt construction for AI device adaptation. The mapping agent sees the
- * device's published schema (Z2M exposes) plus recent state payloads — in the
- * prompt and as files in its working directory — may research the device on
- * the web, and must finish by calling the `submit_mapping` tool with a
- * MappingDescriptor (validated in the tool; errors come back for a retry).
+ * device's published schema (Z2M exposes), recent state payloads, and what
+ * the static mapper already produced — all of it in the task message — may
+ * research the device on the web, and finishes by calling the
+ * `submit_mapping` tool with a MappingDescriptor (validated in the tool;
+ * errors come back for a retry).
+ *
+ * This message *is* the research material. The agent used to receive it as
+ * files in a throwaway working directory it read with Read/Glob/Grep; with
+ * the Messages API there are no file tools, so the same content is inlined
+ * here. Nothing was dropped in the move except `schema-reference.md`, which
+ * became redundant: the descriptor schema is now the `submit_mapping` tool's
+ * own `input_schema`, and the whitelisted state paths are a zod enum inside
+ * it, so the API hands the model both.
  *
  * The descriptor OVERLAYS the static exposes mapping: the hub keeps running
  * its built-in rules and applies the descriptor's rules on top, so the agent
@@ -97,59 +106,130 @@ Rules of thumb: declare a capability only if you map at least one state rule for
 with the hub's static endpoints when extending them (the whole device is endpoint 1); pick deviceKind from what the \
 device physically is; be conservative — an unmapped extra is better than a wrong mapping.
 
-How you work (you are an autonomous agent):
-- Your working directory contains the full research material: device.json (vendor/model/description + complete \
-exposes tree), samples.json (recent raw payloads), static-mapping.json (what the hub already mapped, its generic \
-fields, and the uncovered/unmapped lists), and schema-reference.md (the exact JSON schema your submission must \
-satisfy plus the whitelisted state paths). Read them instead of guessing.
-- When the exposes and samples are NOT enough to map a property confidently — ambiguous units, undocumented enums, \
-vendor-specific behavior — research it: WebSearch for "<vendor> <model> zigbee2mqtt" (the Zigbee2MQTT device page \
-and the zigbee-herdsman-converters source are the best references) and WebFetch the relevant pages. Keep searches \
-to the device's vendor/model/property names — never include anything else from this hub in a query.
-- You MUST finish by calling the submit_mapping tool with the complete MappingDescriptor. Do not answer in prose. \
-If submit_mapping returns validation errors, fix the descriptor and call it again. A successful submission is the \
-end of your task.`;
+How you work:
+- Everything the hub knows about this device is in your task message: vendor/model/description, the complete \
+exposes tree, recent raw payloads, and exactly what the hub's static mapper already produced. Start there — most \
+devices are fully mappable from the exposes tree alone.
+- Research the device when, and only when, the exposes and payloads leave something genuinely ambiguous: an \
+undocumented enum, a unit you cannot infer, a property whose direction or scale is unclear, vendor-specific \
+behavior. Guessing a unit is the single most damaging thing you can do here, because the mapping is cached and \
+silently shapes what the apps show for every device of this model.
+- Start research at the device's own Zigbee2MQTT page. Your task message carries its likely URL, so web_fetch \
+that first — but treat it as a lead, not an authority. The hub derives that URL from the model string, so it may \
+404, it may land on a different device, or it may load and simply not answer your question.
+- Keep going when it doesn't answer. One guessed URL on one site is not research, and a mapping you are unsure of \
+is worse than one more search. Escalate: web_search for "<vendor> <model> zigbee2mqtt", then for the model on its \
+own, then for the specific property or enum value you are stuck on. Good sources beyond that page include the \
+zigbee-herdsman-converters definition for the device (it names the exact converters, units and value ranges), the \
+vendor's own datasheet or manual, and Home Assistant, Hubitat or ZHA discussions of the same model — a value range \
+confirmed by two independent sources beats one page you half-trust. Do not stop at the first page that merely \
+mentions the device.
+- Say so rather than guess. If the research genuinely does not settle a property, leave it out of the descriptor \
+or give it a customField, which stays controllable and honest, instead of inventing a unit or an enum.
+- Keep every query about this device: its vendor, model and property names. Nothing else from this hub belongs in \
+a search.
+- Finish by calling submit_mapping with the complete MappingDescriptor. Prose is not an answer — a run that ends \
+without a submission produced nothing. If submit_mapping returns errors, fix the descriptor and call it again; a \
+successful submission ends your task.
+- Map this device, and stop there. Don't propose changes to the hub, to the canonical schema, or to how other \
+devices are handled.`;
+
+/**
+ * The device's page on zigbee2mqtt.io, if we can name it.
+ *
+ * Those pages are generated per device with the **model** string as the
+ * filename (docgen writes `docs/devices/<model>.md`), so the hub can point
+ * straight at the page instead of spending a search on finding it. Two
+ * reasons that is worth doing: the server-side `web_fetch` tool will only
+ * fetch URLs that already appear in the conversation, so an unmentioned page
+ * is unreachable however well the agent guesses; and a fetch that hits is a
+ * search request not spent.
+ *
+ * It is a *candidate*: model strings with slashes or spaces don't always
+ * survive into the filename, so the prompt tells the agent to fall back to a
+ * search when it 404s.
+ */
+export function zigbee2mqttDevicePage(model: string | null | undefined): string | null {
+  if (!model) return null;
+  const trimmed = model.trim();
+  if (trimmed.length === 0) return null;
+  return `https://www.zigbee2mqtt.io/devices/${encodeURIComponent(trimmed)}.html`;
+}
+
+/** How many recent payloads to include. Enough to show a property changing
+ *  and to catch values the exposes tree understates; bounded because every
+ *  one of them is input tokens on every turn of the run. */
+const MAX_SAMPLES = 5;
 
 export function buildMappingUserPrompt(
   device: Z2mDevice,
   staticProfile: Z2mProfile,
   samplePayloads: Record<string, unknown>[],
 ): string {
-  const staticSummary = staticProfile.endpoints
-    .filter((endpoint) => endpoint.capabilities.length > 0)
-    .map(
-      (endpoint) =>
-        `endpoint ${endpoint.endpointId}${endpoint.label ? ` (${endpoint.label})` : ''}: ${endpoint.capabilities.join(', ')}`,
-    );
+  const vendor = device.definition?.vendor ?? 'unknown';
+  const model = device.definition?.model ?? 'unknown';
   const fielded = staticProfile.unmapped.filter((property) => !staticProfile.uncovered.includes(property));
+  const devicePage = zigbee2mqttDevicePage(device.definition?.model);
+
   const lines = [
-    `Device: vendor=${device.definition?.vendor ?? 'unknown'} model=${device.definition?.model ?? 'unknown'}`,
+    '# Device',
+    `vendor: ${vendor}`,
+    `model: ${model}`,
     `description: ${device.definition?.description ?? 'n/a'}`,
-    `Zigbee2MQTT supported: ${device.supported !== false}`,
+    `supported by Zigbee2MQTT: ${device.supported !== false}`,
+  ];
+  if (devicePage) {
+    lines.push(
+      `Zigbee2MQTT page (likely — derived from the model string, may 404): ${devicePage}`,
+      'zigbee-herdsman-converters source (the definitions those pages are generated from): ' +
+        'https://github.com/Koenkk/zigbee-herdsman-converters',
+    );
+  }
+
+  lines.push(
     '',
-    'Exposes definition:',
+    '# Exposes definition (the device\'s full published schema)',
     JSON.stringify(device.definition?.exposes ?? [], null, 1),
     '',
-    `Already handled statically (do NOT re-map, the hub keeps these): ${
-      staticSummary.length > 0 ? staticSummary.join(', ') : 'nothing'
-    }`,
-    `Already generic custom fields (controllable; upgrade to a typed capability ONLY if one truly fits): ${
-      fielded.length > 0 ? fielded.join(', ') : 'none'
-    }`,
-    `Uncovered — no representation yet, please handle these (typed capability or customField): ${
-      staticProfile.uncovered.length > 0 ? staticProfile.uncovered.join(', ') : 'none'
-    }`,
-  ];
+    '# What the hub already mapped statically',
+    'Your rules overlay this: the hub keeps running these and applies yours on top, so map only what is left.',
+    JSON.stringify(
+      {
+        endpoints: staticProfile.endpoints.map((endpoint) => ({
+          endpointId: endpoint.endpointId,
+          ...(endpoint.label !== undefined ? { label: endpoint.label } : {}),
+          kind: endpoint.kind,
+          capabilities: endpoint.capabilities,
+          primary: endpoint.primary,
+          ...(endpoint.customFields !== undefined ? { customFields: endpoint.customFields } : {}),
+        })),
+        genericCustomFields: fielded,
+        uncovered: staticProfile.uncovered,
+        unmapped: staticProfile.unmapped,
+      },
+      null,
+      1,
+    ),
+    '',
+    '- `genericCustomFields` are already controllable as generic fields. Upgrade one to a typed capability only ' +
+      'when a capability genuinely fits it; leaving it as a field is not a failure.',
+    '- `uncovered` properties have no representation at all. These are the ones that need you: give each a typed ' +
+      'capability, or a customField when none fits.',
+  );
+
   if (samplePayloads.length > 0) {
-    lines.push('', 'Recent state payloads (newest last):');
-    for (const sample of samplePayloads.slice(-3)) {
+    lines.push('', '# Recent state payloads (newest last)');
+    for (const sample of samplePayloads.slice(-MAX_SAMPLES)) {
       lines.push(JSON.stringify(sample));
     }
   }
+
   lines.push(
     '',
-    'Produce the MappingDescriptor covering the unmapped properties (your rules run on top of the static ' +
-      'mapping and win on conflicts) and submit it with the submit_mapping tool.',
+    '# Your task',
+    `Produce the MappingDescriptor for ${vendor} ${model}, covering the properties above that the hub does not ` +
+      'already handle, and submit it with the submit_mapping tool. Where the exposes tree and the payloads do not ' +
+      'settle a unit, an enum or a direction, look the device up before deciding.',
   );
   return lines.join('\n');
 }

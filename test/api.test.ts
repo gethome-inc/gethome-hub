@@ -254,7 +254,6 @@ describe.skipIf(!handle)('hub API', () => {
   });
 
   it('stores AI settings without ever returning the key', async () => {
-    // Legacy body (no authType) keeps working and defaults to an API key.
     const put = await app.inject({
       method: 'PUT',
       url: '/api/v1/settings/ai',
@@ -263,34 +262,55 @@ describe.skipIf(!handle)('hub API', () => {
     });
     expect(put.statusCode).toBe(200);
     const body = put.json() as Record<string, unknown>;
-    expect(body).toEqual({ provider: 'anthropic', authType: 'api_key', model: null, hasKey: true, status: {} });
+    expect(body).toEqual({
+      provider: 'anthropic',
+      model: null,
+      hasKey: true,
+      legacySubscriptionToken: false,
+      status: {},
+    });
     expect(JSON.stringify(body)).not.toContain('sk-ant');
 
     const denied = await app.inject({ method: 'GET', url: '/api/v1/settings/ai', headers: auth(memberToken) });
     expect(denied.statusCode).toBe(403);
   });
 
-  it('stores a Claude subscription token without ever returning it', async () => {
+  it('still accepts an authType field from an app that has not been updated', async () => {
+    // The field is gone from the contract but older Studio builds still send
+    // it; ignoring it beats 400-ing an app mid-rollout.
     const put = await app.inject({
       method: 'PUT',
       url: '/api/v1/settings/ai',
       headers: auth(ownerToken),
-      payload: { authType: 'oauth_token', apiKey: 'sk-ant-oat01-subscription-token-000000' },
+      payload: { authType: 'api_key', apiKey: 'sk-ant-api03-1234567890' },
     });
     expect(put.statusCode).toBe(200);
-    const body = put.json() as Record<string, unknown>;
-    expect(body).toEqual({
-      provider: 'anthropic',
-      authType: 'oauth_token',
-      model: null,
-      hasKey: true,
-      status: {},
-    });
-    expect(JSON.stringify(body)).not.toContain('oat01');
+    expect(put.json()).not.toHaveProperty('authType');
+  });
 
-    const got = await app.inject({ method: 'GET', url: '/api/v1/settings/ai', headers: auth(ownerToken) });
-    expect((got.json() as Record<string, unknown>).authType).toBe('oauth_token');
-    expect(got.body).not.toContain('oat01');
+  it('refuses a Claude subscription token and says what to paste instead', async () => {
+    // The Messages API cannot authenticate an sk-ant-oat token, and finding
+    // that out on the next device announcement is a 401 the owner can't read.
+    const put = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/settings/ai',
+      headers: auth(ownerToken),
+      payload: { apiKey: 'sk-ant-oat01-subscription-token-000000' },
+    });
+    expect(put.statusCode).toBe(400);
+    expect(put.body).toContain('Anthropic API key');
+    expect(put.body).not.toContain('oat01-subscription');
+  });
+
+  it('refuses a model the mapping agent cannot run on', async () => {
+    const put = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/settings/ai',
+      headers: auth(ownerToken),
+      payload: { apiKey: 'sk-ant-api03-1234567890', model: 'claude-haiku-4-5' },
+    });
+    expect(put.statusCode).toBe(400);
+    expect(put.body).toContain('claude-opus-5');
   });
 
   it('rejects the removed openai provider', async () => {

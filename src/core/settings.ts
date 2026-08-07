@@ -4,16 +4,27 @@ import { settings } from '../db/schema.js';
 import { decryptSecret, encryptSecret, type EncryptedValue } from './crypto.js';
 
 export type AiProvider = 'anthropic';
-/** How the stored secret authenticates: an Anthropic API key, or a Claude
- *  subscription OAuth token minted by the owner with `claude setup-token`. */
-export type AiAuthType = 'api_key' | 'oauth_token';
+
+/**
+ * Legacy value of the removed `ai_auth_type` setting. Hubs configured before
+ * the mapping agent moved to the Messages API may still hold a Claude
+ * subscription token, which that API cannot authenticate with — it is read
+ * only so the hub can say so instead of failing with a bare 401.
+ */
+const LEGACY_OAUTH_AUTH_TYPE = 'oauth_token';
 
 export interface AiSettings {
   provider: AiProvider | null;
-  authType: AiAuthType;
   model: string | null;
-  /** Whether a key/token is configured — the secret itself is never exposed. */
+  /** Whether a key is configured — the secret itself is never exposed. */
   hasKey: boolean;
+  /**
+   * The stored secret is a Claude subscription token from before the move to
+   * the Messages API and can no longer be used. The owner has to save an
+   * Anthropic API key; until they do, mapping runs are skipped and
+   * `status.lastError` says why.
+   */
+  legacySubscriptionToken: boolean;
 }
 
 /** Observable AI health, safe to return over the API (never contains secrets). */
@@ -61,15 +72,22 @@ export class SettingsService {
 
   async getAiSettings(): Promise<AiSettings> {
     const provider = await this.get<AiProvider>('ai_provider');
-    const authType = (await this.get<AiAuthType>('ai_auth_type')) ?? 'api_key';
+    const authType = await this.get<string>('ai_auth_type');
     const model = await this.get<string>('ai_model');
     const encrypted = await this.get<EncryptedValue>('ai_key_encrypted');
-    return { provider, authType, model, hasKey: encrypted !== null };
+    return {
+      provider,
+      model,
+      hasKey: encrypted !== null,
+      legacySubscriptionToken: encrypted !== null && authType === LEGACY_OAUTH_AUTH_TYPE,
+    };
   }
 
-  async setAiSettings(input: { authType: AiAuthType; model: string | null; apiKey: string }): Promise<void> {
+  async setAiSettings(input: { model: string | null; apiKey: string }): Promise<void> {
     await this.set('ai_provider', 'anthropic' satisfies AiProvider);
-    await this.set('ai_auth_type', input.authType);
+    // Saving a key clears the legacy marker: whatever is stored now is an
+    // API key, so the hub must stop reporting the subscription problem.
+    await this.unset('ai_auth_type');
     // A JS null would become SQL NULL and violate the jsonb NOT NULL — absence
     // of the row already means "use the default model".
     if (input.model === null) {

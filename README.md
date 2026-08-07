@@ -24,11 +24,11 @@ hub can control them.
   ([docs/mqtt-integrations.md](docs/mqtt-integrations.md)).
 - **AI device adaptation** — unknown devices, and unknown parameters a
   device starts publishing later, are mapped into the schema by an
-  autonomous mapping agent built on the Claude Agent SDK: it reads the
-  device's published schema, researches it on the web, and submits a
-  validated mapping (bring your own Anthropic API key or Claude
-  subscription token; stored encrypted on the hub, used only for this).
-  No credential → devices still appear, flagged "needs review".
+  autonomous mapping agent: it reads the device's published schema,
+  researches it on the web (starting from the device's own Zigbee2MQTT
+  page), and submits a validated mapping (bring your own Anthropic API key;
+  stored encrypted on the hub, used only for this). No credential → devices
+  still appear, flagged "needs review".
   ([docs/ai-adaptation.md](docs/ai-adaptation.md))
 - **One schema for everything** — 27 capabilities (including button/remote
   events, learn-and-replay IR blasters, and a universal generic-control

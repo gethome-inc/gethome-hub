@@ -244,9 +244,9 @@ to upgrade them to. Only `IGNORED_PROPERTIES` (pure telemetry) produce nothing.
 ## Layer 3: AI adaptation (the genuine gaps)
 
 Because layers 1–2 make almost everything usable, the mapping agent
-([ai-adaptation.md](ai-adaptation.md) — an autonomous researcher built on the
-Claude Agent SDK, run with the owner's own Anthropic API key or Claude
-subscription token) is reserved for real gaps:
+([ai-adaptation.md](ai-adaptation.md) — an autonomous researcher running as a
+tool-use loop on the Anthropic Messages API, with the owner's own API key) is
+reserved for real gaps:
 
 - a property with **no representation at all** (`uncovered` — composites/lists,
   or a device Z2M barely supports), or nothing mapped → auto-trigger;
@@ -263,7 +263,7 @@ existing AI mapping declares triggers a one-time, debounced AI remap grounded
 in those samples. Each unknown key is asked about at most once per run.
 
 When the owner's account is temporarily unusable (rate limit, exhausted
-subscription window, bad credentials…) the mapper backs off instead of
+account cap, bad credentials…) the mapper backs off instead of
 retrying — devices keep their static mapping and the reason is surfaced on
 `GET /settings/ai` as `status.lastError` (see
 [ai-adaptation.md](ai-adaptation.md) → taxonomy & backoff).

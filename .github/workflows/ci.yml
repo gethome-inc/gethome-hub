@@ -52,8 +52,9 @@ jobs:
       #
       # `moderate` rather than `high` because the four alerts that prompted this
       # job included a moderate one, and both packages were production deps
-      # reached transitively (mqtt → socks → ip-address, claude-agent-sdk →
-      # mcp-sdk → hono) — nothing a glance at package.json would have shown.
+      # reached transitively (mqtt → socks → ip-address, and the since-removed
+      # claude-agent-sdk → mcp-sdk → hono) — nothing a glance at package.json
+      # would have shown.
       #
       # If this ever fails on an advisory with no fix published, don't drop the
       # gate: npm has no per-advisory ignore list, so pin the fix in `overrides`

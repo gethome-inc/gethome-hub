@@ -43,9 +43,10 @@ npm audit --omit=dev --audit-level=moderate  # what CI gates on; reads the lockf
 every script there. Keep it clean.
 
 **Dependencies are gated, not just watched.** Every vulnerable package this repo
-has shipped arrived transitively — `mqtt → socks → ip-address`,
-`@anthropic-ai/claude-agent-sdk → @modelcontextprotocol/sdk → hono` — so
-`package.json` is not where you would notice. CI's `audit` job fails a pull
+has shipped arrived transitively — `mqtt → socks → ip-address`, and
+`@anthropic-ai/claude-agent-sdk → @modelcontextprotocol/sdk → hono` before that
+whole subtree left with the Agent SDK — so `package.json` is not where you would
+notice. CI's `audit` job fails a pull
 request whose lockfile carries a known-vulnerable **production** dependency
 (dev-only advisories don't gate: the bundle ships `dist/` + production
 `node_modules`, so vitest never reaches a Pi). `.github/dependabot.yml` keeps
@@ -110,16 +111,26 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   first meant a broker that wasn't up yet, or matter.js opening its storage on a
   slow card, held port 8420 closed — and with it the installer's health check
   and the claim. The three adapters and the AI mapper are also **dynamic
-  imports**: `@matter/main` and `@anthropic-ai/claude-agent-sdk` are the two
-  largest things in the graph, and a static import loaded them whether or not
-  the adapter was enabled.
+  imports**: `@matter/main` is by far the largest thing in the graph, and a
+  static import loaded it whether or not the adapter was enabled. The AI
+  mapper keeps the seam for a second reason — the credential check runs on
+  every call, so a key added later works without a restart.
 - **AI mappings are data, not code**: `MappingDescriptor`
   (`src/ai/descriptor.ts`) is zod-validated and interpreted. Never execute
   model output. The mapping is produced by an autonomous agent
-  (`src/ai/agent.ts`, Claude Agent SDK — research-only tools, `submit_mapping`
-  MCP tool, backoff on account failures; `docs/ai-adaptation.md` is
-  canonical), authenticated with the owner's Anthropic API key or Claude
-  subscription token.
+  (`src/ai/agent.ts` — a tool-use loop on the Anthropic Messages API with the
+  server-side `web_search`/`web_fetch` research tools, `submit_mapping` as its
+  only answer channel, backoff on account failures; `docs/ai-adaptation.md` is
+  canonical), authenticated with the owner's Anthropic API key.
+  **It used to run on the Claude Agent SDK, and moving off it was a memory
+  decision like dropping Docker.** That SDK ships a 276 MB native binary — 74%
+  of the hub's whole download — and spawned a ~315 MB subprocess per run, of
+  which ~224 MB is mapped binary pages. On a Zero 2 W that thrashes against
+  the SD card instead of OOM-ing and outlives the 10-minute watchdog, so AI
+  adaptation was installed-but-unusable on the smallest supported board. The
+  bundle went 117 MB → 29 MB. The cost is that Claude subscription tokens no
+  longer authenticate; only API keys do, and `src/ai/models.ts` is an
+  allowlist because the `_20260209` research tools need Opus 4.6+/Sonnet 4.6+.
 
 ## Conventions that bite if missed
 
@@ -149,10 +160,9 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   pin all of these.
 - The Matter reducer (`src/adapters/matter/reducer.ts`) is a 1:1 port of the
   iOS `MatterStateReducer` — keep them in lockstep if either changes.
-- Secrets: tokens are stored sha256-only; the AI credential (API key or
-  subscription token) AES-256-GCM-encrypted with the hub secret
-  (`<data>/hub-secret.json`, 0600); the API never returns key material. Keep
-  it that way.
+- Secrets: tokens are stored sha256-only; the AI credential (an Anthropic API
+  key) AES-256-GCM-encrypted with the hub secret (`<data>/hub-secret.json`,
+  0600); the API never returns key material. Keep it that way.
 - **`<data>/pairing-code` is a contract, and it now *survives* restarts.** It
   used to be re-minted on every boot, and that was the bug: any code that had
   been read — `install.sh`'s `@@PAIRING@@` marker, or a value Studio fetched a

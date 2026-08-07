@@ -1,48 +1,87 @@
-import { createSdkMcpServer, query, tool } from '@anthropic-ai/claude-agent-sdk';
-import type { Options, SDKMessage, SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
+import Anthropic from '@anthropic-ai/sdk';
+import { z } from 'zod';
 import type { Logger } from '../logging.js';
-import type { Z2mDevice, Z2mProfile } from '../adapters/zigbee/exposes-mapper.js';
 import { mappingDescriptorSchema, sanityCheckDescriptor } from './descriptor.js';
-import { buildAgentContext, ensureAgentHome } from './context.js';
-import { AiUnavailableError, classifyAgentFailure } from './errors.js';
+import { AiUnavailableError, classifyApiError } from './errors.js';
+import { DEFAULT_MODEL, estimateCostUsd, isSupportedModel, supportedModelIds } from './models.js';
 
 /**
- * The mapping agent: a Claude Agent SDK (Claude Code as a library) run that
+ * The mapping agent: a tool-use loop on the Anthropic Messages API that
  * researches an unknown Zigbee device and submits a MappingDescriptor.
  *
- * Shape of a run:
- *  - the hub prepares a read-only research workspace (context.ts) and uses it
- *    as the agent's cwd;
- *  - the agent gets research tools only — Read/Glob/Grep on that workspace
- *    plus WebSearch/WebFetch — never Bash/Write/Edit, `permissionMode:
- *    'dontAsk'` (deny anything unlisted) and `settingSources: []` (no host
- *    machine settings leak in);
- *  - the only way to answer is the in-process MCP tool `submit_mapping`,
- *    whose handler validates with the descriptor's zod schema + sanity
- *    checks and hands validation errors back so the agent can fix and
- *    resubmit within the same session;
- *  - guardrails: maxTurns, maxBudgetUsd, and a wall-clock watchdog.
+ * **Why this is a plain API loop and not the Claude Agent SDK.** It used to
+ * be the latter, and the Agent SDK is a better fit for the job on paper — it
+ * brought its own agent loop, file tools and permission model. What it also
+ * brought was a 276 MB native `claude` executable: 74% of everything a hub
+ * downloads, and a ~315 MB subprocess per run, of which ~224 MB is the
+ * binary's own pages mapped in from disk. On a Raspberry Pi Zero 2 W that
+ * subprocess does not get OOM-killed — it thrashes, re-reading its own code
+ * off an SD card through a cgroup that is already at its `MemoryHigh` mark,
+ * and a run reliably outlived the 10-minute watchdog below without
+ * finishing. AI adaptation was therefore installed-but-unusable on the
+ * smallest board the hub supports. This loop makes the same requests from
+ * inside the hub process, costing a few megabytes and no subprocess at all.
+ * `docs/ai-adaptation.md` is canonical; the trade is that Claude
+ * subscription tokens no longer work, only Anthropic API keys.
  *
- * The descriptor itself remains data, not code — it is re-validated by the
- * mapper and interpreted exactly as before (docs/ai-adaptation.md).
+ * Shape of a run:
+ *  - the hub puts the whole research brief in the task message (prompts.ts):
+ *    exposes tree, recent payloads, the static mapping, and the device's
+ *    likely zigbee2mqtt.io page — `web_fetch` will only fetch URLs already
+ *    in the conversation, so naming it is what makes it reachable;
+ *  - the model researches with the server-side `web_search` / `web_fetch`
+ *    tools, which run on Anthropic's infrastructure — the hub itself needs
+ *    no egress beyond api.anthropic.com;
+ *  - the only client-side tool, and the only way to answer, is
+ *    `submit_mapping`, whose input schema *is* the descriptor's zod schema
+ *    and whose handler re-validates and hands errors back so the model can
+ *    fix and resubmit within the same run;
+ *  - guardrails: a turn cap, a cost cap computed from token usage, and a
+ *    wall-clock watchdog.
+ *
+ * The descriptor remains data, not code — it is re-validated by the mapper
+ * and interpreted exactly as before. Model output is never executed.
  */
 
-export const DEFAULT_MODEL = 'claude-opus-4-8';
+export { DEFAULT_MODEL } from './models.js';
+
+/** Agentic turns — one request/response round each. */
 export const AGENT_MAX_TURNS = 40;
+/** Hard ceiling per run, checked against the running cost estimate. */
 export const AGENT_MAX_BUDGET_USD = 2;
 export const AGENT_TIMEOUT_MS = 10 * 60 * 1000;
 
+/**
+ * Output ceiling per turn, covering thinking *and* the tool call. Generous
+ * on purpose: a truncated `submit_mapping` call is a wasted run, and a
+ * multi-endpoint descriptor plus high-effort reasoning is not small.
+ */
+const MAX_OUTPUT_TOKENS = 32_000;
+
+/**
+ * Kept at `high`, which is what the Agent SDK run used. Device adaptation is
+ * reasoning-heavy, but this migration deliberately changes one thing at a
+ * time — raising effort would quietly raise the per-run bill at the same
+ * moment the footprint dropped, and that is the owner's call to make.
+ */
+const EFFORT = 'high' as const;
+
+/** Research budget per run. High enough for a genuinely obscure device,
+ *  low enough that a confused run cannot spend the whole cost cap on search. */
+const WEB_SEARCH_MAX_USES = 8;
+const WEB_FETCH_MAX_USES = 8;
+
+/** How many times a run may be reminded that prose is not an answer. */
+const MAX_NUDGES = 2;
+
 /** Everything the runner needs beyond the prompts (absent in unit-test mocks). */
 export interface AgentRunContext {
-  device: Z2mDevice;
-  staticProfile: Z2mProfile | null;
-  samples: Record<string, unknown>[];
-  exposesHash: string;
-  /** Receives run statistics when the underlying agent reported them. */
+  /** Receives run statistics when the run produced them. */
   onStats?: (stats: AgentRunStats) => void;
 }
 
 export interface AgentRunStats {
+  /** Estimated from token usage and list prices — see models.ts. */
   costUsd: number;
   numTurns: number;
   durationMs: number;
@@ -59,205 +98,278 @@ export interface MappingProvider {
 }
 
 export interface AgentAuth {
-  authType: 'api_key' | 'oauth_token';
+  /** An Anthropic API key. Subscription tokens are not accepted — see the
+   *  note at the top of this file. */
   secret: string;
 }
 
-/** The last candidate the agent submitted, valid or not. */
+/** The last candidate the model submitted, valid or not. */
 export interface SubmitCapture {
   submitted: unknown;
 }
 
+export interface SubmissionOutcome {
+  /** True when the descriptor passed both schema and sanity checks. */
+  accepted: boolean;
+  isError: boolean;
+  text: string;
+}
+
 /**
- * The `submit_mapping` in-process MCP tool: the agent's only output channel.
- * The handler validates with the descriptor schema + sanity checks and hands
- * failures back as tool errors, so the agent can fix and resubmit within the
- * same session. An invalid *last* submission is still captured — the mapper
- * records the rejection exactly like the single-shot implementation did.
+ * The `submit_mapping` tool definition. Its `input_schema` is generated from
+ * the live descriptor schema, so it cannot drift from what the mapper will
+ * accept — and because the whitelisted canonical state paths are a zod enum
+ * inside that schema, the model receives them here rather than in a separate
+ * reference file.
+ *
+ * Deliberately not `strict`: strict tool use guarantees the *shape* of the
+ * input but cannot express the descriptor's semantic rules (a declared
+ * capability needs a state rule for it, `primary` has to be one of the
+ * capabilities), and it rejects the numeric and string constraints this
+ * schema uses. The validate-and-resubmit loop below covers both, so the
+ * model gets a real error message instead of a silently narrowed schema.
  */
-export function createSubmitMappingTool(capture: SubmitCapture) {
-  return tool(
-    'submit_mapping',
-    'Submit the final MappingDescriptor for this device. If validation fails, the errors are ' +
-      'returned — fix the descriptor and call this tool again. A successful submission ends your task.',
-    mappingDescriptorSchema.shape,
-    async (args) => {
-      const parsed = mappingDescriptorSchema.safeParse(args);
-      if (!parsed.success) {
-        capture.submitted = args;
-        const issues = parsed.error.issues
-          .map((issue) => `- ${issue.path.join('.') || '(root)'}: ${issue.message}`)
-          .join('\n');
-        return {
-          content: [{ type: 'text' as const, text: `Descriptor rejected — schema errors:\n${issues}` }],
-          isError: true,
-        };
-      }
-      const problems = sanityCheckDescriptor(parsed.data);
-      if (problems.length > 0) {
-        capture.submitted = parsed.data;
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: `Descriptor rejected — sanity checks failed:\n${problems.map((p) => `- ${p}`).join('\n')}`,
-            },
-          ],
-          isError: true,
-        };
-      }
-      capture.submitted = parsed.data;
-      return {
-        content: [{ type: 'text' as const, text: 'Mapping accepted. You are done — end your reply now.' }],
-      };
-    },
-  );
+export function submitMappingTool(): Anthropic.Tool {
+  const schema = z.toJSONSchema(mappingDescriptorSchema, { target: 'draft-7' }) as Record<string, unknown>;
+  // `$schema` is metadata about the document, not about the tool input.
+  delete schema.$schema;
+  return {
+    name: 'submit_mapping',
+    description:
+      'Submit the final MappingDescriptor for this device. Call this once you have decided how every property ' +
+      'the hub does not already handle maps onto the canonical schema — it is the only way to return an answer, ' +
+      'and a run that ends without it produced nothing. If the descriptor fails validation the errors are ' +
+      'returned to you: fix them and call this again. A successful submission ends the task.',
+    input_schema: schema as Anthropic.Tool['input_schema'],
+  };
+}
+
+/**
+ * Validate a submission and record it. An invalid *last* submission is still
+ * captured — the mapper records the rejection, which is what stops the hub
+ * re-asking about a device model whose descriptor the model cannot get right.
+ */
+export function evaluateSubmission(input: unknown, capture: SubmitCapture): SubmissionOutcome {
+  const parsed = mappingDescriptorSchema.safeParse(input);
+  if (!parsed.success) {
+    capture.submitted = input;
+    const issues = parsed.error.issues
+      .map((issue) => `- ${issue.path.join('.') || '(root)'}: ${issue.message}`)
+      .join('\n');
+    return { accepted: false, isError: true, text: `Descriptor rejected — schema errors:\n${issues}` };
+  }
+  const problems = sanityCheckDescriptor(parsed.data);
+  if (problems.length > 0) {
+    capture.submitted = parsed.data;
+    return {
+      accepted: false,
+      isError: true,
+      text: `Descriptor rejected — sanity checks failed:\n${problems.map((p) => `- ${p}`).join('\n')}`,
+    };
+  }
+  capture.submitted = parsed.data;
+  return { accepted: true, isError: false, text: 'Mapping accepted. You are done — end your reply now.' };
+}
+
+/** The research tools, plus the one client-side tool the model answers with. */
+function buildTools(): Anthropic.Messages.ToolUnion[] {
+  return [
+    { type: 'web_search_20260209', name: 'web_search', max_uses: WEB_SEARCH_MAX_USES },
+    { type: 'web_fetch_20260209', name: 'web_fetch', max_uses: WEB_FETCH_MAX_USES },
+    submitMappingTool(),
+  ];
+}
+
+/** Running total across every turn of one run. */
+class RunUsage {
+  private input = 0;
+  private output = 0;
+  private cacheRead = 0;
+  private cacheWrite = 0;
+  private webSearches = 0;
+
+  constructor(private readonly model: string) {}
+
+  add(usage: Anthropic.Usage | undefined): void {
+    if (!usage) return;
+    this.input += usage.input_tokens ?? 0;
+    this.output += usage.output_tokens ?? 0;
+    this.cacheRead += usage.cache_read_input_tokens ?? 0;
+    this.cacheWrite += usage.cache_creation_input_tokens ?? 0;
+    this.webSearches += usage.server_tool_use?.web_search_requests ?? 0;
+  }
+
+  costUsd(): number {
+    return estimateCostUsd(this.model, {
+      input_tokens: this.input,
+      output_tokens: this.output,
+      cache_read_input_tokens: this.cacheRead,
+      cache_creation_input_tokens: this.cacheWrite,
+      webSearchRequests: this.webSearches,
+    });
+  }
 }
 
 export function createMappingAgent(
   auth: AgentAuth,
   model: string | null,
-  dataDir: string,
   log: Logger,
 ): MappingProvider {
+  const modelId = model ?? DEFAULT_MODEL;
+
   return {
     async generate(systemPrompt, userPrompt, run) {
-      const context = run
-        ? buildAgentContext(dataDir, run.exposesHash, run.device, run.staticProfile, run.samples)
-        : buildAgentContext(dataDir, 'adhoc0000', { ieee_address: 'unknown', friendly_name: 'unknown' }, null, []);
+      if (!isSupportedModel(modelId)) {
+        // Defensive: PUT /settings/ai refuses these, so reaching here means
+        // a hand-edited database. Not an availability failure — no backoff.
+        throw new Error(
+          `model "${modelId}" cannot run the mapping agent (supported: ${supportedModelIds().join(', ')})`,
+        );
+      }
 
-      const capture: SubmitCapture = { submitted: null };
-      const mappingServer = createSdkMcpServer({
-        name: 'mapping',
-        version: '1.0.0',
-        tools: [createSubmitMappingTool(capture)],
-      });
-
-      // The subprocess env REPLACES process.env when provided — rebuild it,
-      // drop any host-machine Anthropic credentials, and inject exactly the
-      // one the owner configured.
-      const env: Record<string, string | undefined> = { ...process.env };
-      delete env.ANTHROPIC_API_KEY;
-      delete env.CLAUDE_CODE_OAUTH_TOKEN;
-      delete env.ANTHROPIC_AUTH_TOKEN;
-      env[auth.authType === 'oauth_token' ? 'CLAUDE_CODE_OAUTH_TOKEN' : 'ANTHROPIC_API_KEY'] = auth.secret;
-      env.CLAUDE_CONFIG_DIR = ensureAgentHome(dataDir);
-      env.CLAUDE_AGENT_SDK_CLIENT_APP = 'gethome-hub';
-      env.CLAUDE_CODE_MAX_RETRIES = env.CLAUDE_CODE_MAX_RETRIES ?? '3';
-
+      const client = new Anthropic({ apiKey: auth.secret, maxRetries: 3 });
       const controller = new AbortController();
       const watchdog = setTimeout(() => controller.abort(), AGENT_TIMEOUT_MS);
       watchdog.unref();
 
-      const options: Options = {
-        model: model ?? DEFAULT_MODEL,
-        systemPrompt,
-        cwd: context.dir,
-        env,
-        tools: ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch'],
-        allowedTools: ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'mcp__mapping__submit_mapping'],
-        disallowedTools: ['Bash', 'Write', 'Edit'],
-        permissionMode: 'dontAsk',
-        settingSources: [],
-        persistSession: false,
-        maxTurns: AGENT_MAX_TURNS,
-        maxBudgetUsd: AGENT_MAX_BUDGET_USD,
-        effort: 'high',
-        mcpServers: { mapping: mappingServer },
-        abortController: controller,
-        stderr: (data) => log.debug({ stderr: data.slice(0, 500) }, 'mapping agent stderr'),
-      };
+      const capture: SubmitCapture = { submitted: null };
+      const usage = new RunUsage(modelId);
+      const startedAt = Date.now();
+      const tools = buildTools();
+      const messages: Anthropic.MessageParam[] = [{ role: 'user', content: userPrompt }];
 
-      let result: SDKResultMessage | null = null;
-      // Structured subscription-limit signal — richer than any error text.
-      let limitRejection: { resetsAt?: number; rateLimitType?: string } | null = null;
+      let turns = 0;
+      let nudges = 0;
+      let accepted = false;
+      let ranOutOf: 'turns' | 'budget' | null = null;
 
       try {
-        for await (const message of query({ prompt: userPrompt, options })) {
-          result = observe(message, log) ?? result;
-          if (message.type === 'rate_limit_event' && message.rate_limit_info.status === 'rejected') {
-            const info = message.rate_limit_info;
-            limitRejection = {
-              ...(info.resetsAt !== undefined ? { resetsAt: info.resetsAt } : {}),
-              ...(info.rateLimitType !== undefined ? { rateLimitType: info.rateLimitType } : {}),
-            };
+        for (turns = 1; turns <= AGENT_MAX_TURNS; turns++) {
+          if (usage.costUsd() >= AGENT_MAX_BUDGET_USD) {
+            ranOutOf = 'budget';
+            break;
           }
+
+          let response: Anthropic.Message;
+          try {
+            response = await client.messages.create(
+              {
+                model: modelId,
+                max_tokens: MAX_OUTPUT_TOKENS,
+                // One cached breakpoint covers the tool definitions and the
+                // system prompt — the large, byte-identical prefix every turn
+                // of every run shares.
+                system: [
+                  { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } },
+                ],
+                messages,
+                tools,
+                thinking: { type: 'adaptive' },
+                output_config: { effort: EFFORT },
+              },
+              { signal: controller.signal },
+            );
+          } catch (error) {
+            if (controller.signal.aborted) {
+              throw new AiUnavailableError(
+                'aborted',
+                `mapping agent timed out after ${AGENT_TIMEOUT_MS / 1000}s`,
+              );
+            }
+            throw classifyApiError(error) ?? error;
+          }
+
+          usage.add(response.usage);
+          // The whole content goes back verbatim — thinking blocks included,
+          // which the API requires when continuing a thinking conversation.
+          messages.push({ role: 'assistant', content: response.content });
+
+          if (response.stop_reason === 'pause_turn') {
+            // The server-side tool loop hit its own iteration limit. Re-send
+            // as-is; the API resumes from the trailing server_tool_use block
+            // and must NOT be given an extra user turn here.
+            continue;
+          }
+          if (response.stop_reason === 'refusal') {
+            throw new Error('mapping agent run was refused by the model');
+          }
+          if (response.stop_reason === 'max_tokens') {
+            throw new Error(`mapping agent turn hit max_tokens (${MAX_OUTPUT_TOKENS}) before answering`);
+          }
+
+          const toolUses = response.content.filter(
+            (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use',
+          );
+
+          if (toolUses.length === 0) {
+            // Answered in prose. Worth one or two reminders — the run has
+            // already paid for the research — but not the whole turn budget.
+            if (nudges >= MAX_NUDGES) break;
+            nudges += 1;
+            messages.push({
+              role: 'user',
+              content:
+                'You have not called submit_mapping yet, and it is the only way to return an answer. ' +
+                'Submit the MappingDescriptor now.',
+            });
+            continue;
+          }
+
+          const results: Anthropic.ToolResultBlockParam[] = [];
+          for (const call of toolUses) {
+            if (call.name !== 'submit_mapping') {
+              results.push({
+                type: 'tool_result',
+                tool_use_id: call.id,
+                content: `Unknown tool "${call.name}".`,
+                is_error: true,
+              });
+              continue;
+            }
+            const outcome = evaluateSubmission(call.input, capture);
+            log.debug({ accepted: outcome.accepted }, 'mapping agent submitted a descriptor');
+            results.push({
+              type: 'tool_result',
+              tool_use_id: call.id,
+              content: outcome.text,
+              ...(outcome.isError ? { is_error: true } : {}),
+            });
+            if (outcome.accepted) accepted = true;
+          }
+
+          if (accepted) break;
+          messages.push({ role: 'user', content: results });
         }
-      } catch (error) {
-        if (controller.signal.aborted) {
-          throw new AiUnavailableError('aborted', `mapping agent timed out after ${AGENT_TIMEOUT_MS / 1000}s`);
-        }
-        const text = error instanceof Error ? error.message : String(error);
-        throw classifyAgentFailure(text) ?? new AiUnavailableError('network', text);
+        if (!accepted && ranOutOf === null && turns > AGENT_MAX_TURNS) ranOutOf = 'turns';
       } finally {
         clearTimeout(watchdog);
-        context.cleanup();
       }
 
-      if (result && run?.onStats) {
-        run.onStats({
-          costUsd: result.total_cost_usd,
-          numTurns: result.num_turns,
-          durationMs: result.duration_ms,
-        });
-      }
-      if (result) {
-        log.info(
-          { costUsd: result.total_cost_usd, numTurns: result.num_turns, subtype: result.subtype },
-          'Mapping agent run finished',
-        );
-      }
+      const stats: AgentRunStats = {
+        costUsd: usage.costUsd(),
+        numTurns: Math.min(turns, AGENT_MAX_TURNS),
+        durationMs: Date.now() - startedAt,
+      };
+      run?.onStats?.(stats);
+      log.info(
+        { costUsd: Number(stats.costUsd.toFixed(4)), numTurns: stats.numTurns, accepted },
+        'Mapping agent run finished',
+      );
 
       // Whatever was submitted last is the run's answer: a valid descriptor
       // is used, an invalid one flows through the mapper's validation and is
-      // cached as `rejected` — the same contract the single-shot caller had.
+      // cached as `rejected` — the same contract the Agent SDK run had.
       if (capture.submitted !== null) return capture.submitted;
 
-      // Nothing was submitted — figure out why, structured signal first.
-      if (limitRejection) {
-        const resetAt = limitRejection.resetsAt !== undefined ? epochToDate(limitRejection.resetsAt) : undefined;
-        throw new AiUnavailableError(
-          'usage_limit',
-          `subscription ${limitRejection.rateLimitType ?? 'usage'} limit reached`,
-          resetAt,
+      if (ranOutOf === 'budget') {
+        throw new Error(
+          `mapping agent hit its $${AGENT_MAX_BUDGET_USD} cost cap after ${stats.numTurns} turn(s) without submitting`,
         );
       }
-      if (!result) {
-        throw new AiUnavailableError('network', 'mapping agent ended without a result message');
+      if (ranOutOf === 'turns') {
+        throw new Error(`mapping agent used all ${AGENT_MAX_TURNS} turns without submitting`);
       }
-      if (result.subtype !== 'success') {
-        const text = result.errors.join('; ') || result.subtype;
-        const classified = classifyAgentFailure(text);
-        if (classified) throw classified;
-        if (result.subtype === 'error_during_execution') {
-          // Execution errors without a recognizable cause are still almost
-          // always environmental — back off rather than hammering the API.
-          throw new AiUnavailableError('network', text);
-        }
-        // Ran out of turns/budget: the account works, this run just failed.
-        throw new Error(`mapping agent gave up (${result.subtype}): ${text.slice(0, 300)}`);
-      }
-      throw new Error(
-        `mapping agent finished without calling submit_mapping: ${result.result.slice(0, 300)}`,
-      );
+      throw new Error('mapping agent finished without calling submit_mapping');
     },
   };
-}
-
-/** Log the interesting bits of the stream; return the result message if this is one. */
-function observe(message: SDKMessage, log: Logger): SDKResultMessage | null {
-  if (message.type === 'result') return message;
-  if (message.type === 'assistant') {
-    for (const block of message.message.content) {
-      if (block.type === 'tool_use') {
-        log.debug({ tool: block.name }, 'mapping agent tool use');
-      }
-    }
-  }
-  return null;
-}
-
-function epochToDate(epoch: number): Date | undefined {
-  const date = new Date(epoch > 1e12 ? epoch : epoch * 1000);
-  return Number.isNaN(date.getTime()) ? undefined : date;
 }

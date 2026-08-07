@@ -71,10 +71,9 @@ async function main(): Promise<void> {
 
   // Adapters are *constructed* here and *started* after the API is listening.
   // The modules are imported dynamically for one reason that matters on a small
-  // board: matter.js and the Claude Agent SDK are the two largest things in the
-  // dependency graph, and a static import loads them into memory whether or not
-  // the adapter is enabled — so `ADAPTER_MATTER=0` used to save the work but
-  // not the megabytes.
+  // board: matter.js is by far the largest thing in the dependency graph, and a
+  // static import loads it into memory whether or not the adapter is enabled —
+  // so `ADAPTER_MATTER=0` used to save the work but not the megabytes.
   let zigbee: ZigbeeAdapter | undefined;
   let mqttAdapter: MqttAdapter | undefined;
   let matter: MatterAdapter | undefined;
@@ -85,7 +84,7 @@ async function main(): Promise<void> {
       mqttUrl: config.MQTT_URL,
       baseTopic: config.Z2M_BASE_TOPIC,
       log: log.child({ module: 'zigbee' }),
-      aiAssist: lazyAiAssist({ db, settings, log: log.child({ module: 'ai' }), dataDir: config.DATA_DIR }),
+      aiAssist: lazyAiAssist({ db, settings, log: log.child({ module: 'ai' }) }),
     });
     registry.registerAdapter(zigbee);
   }

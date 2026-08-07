@@ -18,22 +18,17 @@ import {
   type DescriptorCustomField,
   type MappingDescriptor,
 } from './descriptor.js';
-import {
-  DEFAULT_MODEL,
-  createMappingAgent,
-  type AgentRunStats,
-  type MappingProvider,
-} from './agent.js';
+import { createMappingAgent, type AgentRunStats, type MappingProvider } from './agent.js';
+import { DEFAULT_MODEL } from './models.js';
 import { AiUnavailableError } from './errors.js';
 import { MAPPING_SYSTEM_PROMPT, buildMappingUserPrompt } from './prompts.js';
 
 /**
  * AI device adaptation. When the static exposes mapper can't fully place a
- * device, this module runs the mapping agent (agent.ts — Claude Agent SDK,
- * with the owner's own API key or Claude subscription token) to research the
+ * device, this module runs the mapping agent (agent.ts — a tool-use loop on
+ * the Anthropic Messages API, with the owner's own API key) to research the
  * device and produce a MappingDescriptor, validates and sanity-checks it,
- * caches it per device model in Postgres, and hands the adapter an
- * interpreted mapping.
+ * caches it per device model, and hands the adapter an interpreted mapping.
  *
  * Without a configured credential this module does nothing — devices simply
  * keep their partial static mapping and a needs-review flag. Nothing but the
@@ -42,7 +37,7 @@ import { MAPPING_SYSTEM_PROMPT, buildMappingUserPrompt } from './prompts.js';
  * docs/ai-adaptation.md.
  *
  * Operational guarantees added around the agent:
- *  - one agent run at a time (each run is a subprocess and costs real money);
+ *  - one agent run at a time (each run costs real money);
  *  - concurrent requests for the same device model share one run;
  *  - transient account failures (rate limit, exhausted subscription window,
  *    bad credentials…) trip a backoff gate — no run is even attempted until
@@ -64,7 +59,6 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
     private readonly db: Db,
     private readonly settings: SettingsService,
     private readonly log: Logger,
-    private readonly options: { dataDir: string },
   ) {}
 
   async requestMapping(
@@ -108,7 +102,7 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
       .where(and(eq(aiMappings.adapter, 'zigbee'), eq(aiMappings.exposesHash, exposesHash(device))));
   }
 
-  /** Chain onto the run queue: at most one agent subprocess at a time. */
+  /** Chain onto the run queue: at most one agent run at a time. */
   private serialize<T>(task: () => Promise<T>): Promise<T> {
     const next = this.queue.then(task);
     this.queue = next.catch(() => undefined);
@@ -139,10 +133,6 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
         MAPPING_SYSTEM_PROMPT,
         buildMappingUserPrompt(device, staticProfile, samples),
         {
-          device,
-          staticProfile,
-          samples,
-          exposesHash: hash,
           onStats: (s) => {
             stats = s;
           },
@@ -186,11 +176,24 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
 
   private async resolveProvider(): Promise<MappingProvider | null> {
     if (this.providerOverride) return this.providerOverride;
-    const { provider, authType, model } = await this.settings.getAiSettings();
+    const { provider, model, legacySubscriptionToken } = await this.settings.getAiSettings();
     if (!provider) return null;
+    if (legacySubscriptionToken) {
+      // A credential saved before the agent moved to the Messages API. It
+      // cannot authenticate, and a bare 401 on the next device announcement
+      // would tell the owner nothing — surface the actual fix instead.
+      await this.recordUnavailable(
+        new AiUnavailableError(
+          'auth_failed',
+          'The saved credential is a Claude subscription token, which the hub no longer supports. ' +
+            'Save an Anthropic API key in the hub settings to turn AI adaptation back on.',
+        ),
+      );
+      return null;
+    }
     const secret = await this.settings.aiKey();
     if (!secret) return null;
-    return createMappingAgent({ authType, secret }, model, this.options.dataDir, this.log);
+    return createMappingAgent({ secret }, model, this.log);
   }
 
   /** Transient account/service failure: arm the backoff gate and surface it. */
