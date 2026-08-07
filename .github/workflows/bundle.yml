@@ -48,7 +48,7 @@ jobs:
             runner: ubuntu-24.04-arm
             platform: linux/arm64
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # The build id: version, short SHA, and the branch it came from. It names
       # the release directory on the Pi, so `gethome-hubctl version` and the
@@ -99,7 +99,7 @@ jobs:
           curl -fsS http://127.0.0.1:8420/api/v1/hub | tee /dev/stderr | grep -q '"apiVersion":1'
           kill "$hub"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bundle-${{ matrix.arch }}
           path: out/*.tar.gz
@@ -113,8 +113,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           path: out
           pattern: bundle-*
