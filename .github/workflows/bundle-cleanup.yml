@@ -48,6 +48,12 @@ jobs:
       - name: Remove bundles whose branch is gone
         env:
           GH_TOKEN: ${{ github.token }}
+          # `gh` finds the repository from a git remote, and this job has no
+          # checkout — deliberately, since it needs the API and not the tree.
+          # `gh` does *not* read GITHUB_REPOSITORY, so without this every
+          # `gh release` call below fails to resolve a repo. That is what made
+          # this workflow a no-op: see the note on delete_bundle.
+          GH_REPO: ${{ github.repository }}
           EVENT: ${{ github.event_name }}
           DELETED_REF: ${{ github.event.ref }}
           DRY_RUN: ${{ inputs.dry_run }}
@@ -57,6 +63,35 @@ jobs:
 
           # The same transformation bundle.yml uses to name the release.
           tag_for() { printf 'bundle-%s' "$(printf '%s' "$1" | tr '/' '-')"; }
+
+          # Is there a release for this tag, and is it a prerelease?
+          #
+          # This used to be one line — `gh release view … 2>/dev/null || echo
+          # missing` — and that line is why nothing was ever deleted. Every
+          # `gh` call was failing for want of a repo (see GH_REPO above), the
+          # `||` turned that failure into "missing", and the caller reported
+          # "nothing to do" and exited 0. Both `delete` events and the weekly
+          # sweep ran green for weeks while the tag list grew.
+          #
+          # So the two cases are told apart. A release that is genuinely gone
+          # is normal and prints `missing`; anything else is a bug, says what
+          # went wrong, and fails the job — because a cleanup that cannot see
+          # the releases must not look like a cleanup that found nothing.
+          prerelease_state() {
+            local tag="$1" out
+            if out="$(gh release view "$tag" --json isPrerelease --jq .isPrerelease 2>&1)"; then
+              printf '%s' "$out"
+              return 0
+            fi
+            case "$out" in
+              *"release not found"*|*"Not Found"*|*"HTTP 404"*)
+                printf 'missing'
+                return 0
+                ;;
+            esac
+            echo "could not read release '$tag': $out" >&2
+            return 1
+          }
 
           # Guardrails live here rather than at each call site: only a
           # prerelease, only a `bundle-` tag, and never the default branch's.
@@ -72,7 +107,7 @@ jobs:
               return 0
             fi
             local prerelease
-            prerelease="$(gh release view "$tag" --json isPrerelease --jq .isPrerelease 2>/dev/null || echo missing)"
+            prerelease="$(prerelease_state "$tag")"
             if [[ "$prerelease" == "missing" ]]; then
               echo "nothing to do for $tag"
               return 0
