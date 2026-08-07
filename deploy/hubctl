@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # hubctl — start/stop control for a natively installed GetHome Hub on macOS.
-# (On Linux/Raspberry Pi the hub runs under Docker: use `docker compose` there.)
+# (On Linux/Raspberry Pi the hub runs as systemd units: use `gethome-hubctl` there.)
 #
 #   hubctl start      turn the hub on now AND at every login
 #   hubctl stop       turn it off now AND remove it from login autostart
@@ -17,7 +17,7 @@
 set -euo pipefail
 
 if [[ "$(uname)" != "Darwin" ]]; then
-  echo "hubctl manages the native macOS install. On Linux use: docker compose ..." >&2
+  echo "hubctl manages the native macOS install. On Linux use: gethome-hubctl" >&2
   exit 1
 fi
 

@@ -173,13 +173,77 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   and on a 512 MB board an OOM kill at the end regardless. So the fallback is
   **refused below 1 GB of RAM** and says why. Starting a build that cannot
   finish is worse than failing in ten seconds.
+- **Say what is tested, not just what runs.** README's *Required hardware* is
+  the contract: Pi 5 / Pi 4 / Zero 2 W are tested; other 64-bit boards (Pi 3,
+  400/500, CMs, x86-64) run but aren't routinely tried, and `install.sh` says so
+  with a `@@WARN@@` for Raspberry Pis it doesn't recognise — silently for
+  anything that isn't a Pi, where running a home hub is already a deliberate
+  choice. Claiming support for hardware nobody has tried is the misleading half
+  of that choice; refusing a Pi 3 that has twice a Zero 2 W's memory is the
+  other.
+- **The limit worth stating out loud is the *combination*.** No coordinator
+  means no Zigbee; a 512 MB board means no Matter. Either alone is a footnote,
+  and together they leave a hub that can only talk to MQTT integrations — which
+  is not what somebody setting up a smart home expects. `install.sh` warns on
+  exactly that pair after the Zigbee step, README's *Required hardware* says a
+  Zero 2 W effectively requires a stick, and `docs/zigbee.md` lists the ones
+  known to work.
+- **64-bit only, and the two 32-bit cases are different problems.** Bundles are
+  built for `linux-arm64` and `linux-x64` and nothing else. `armv6l` (Pi 1 /
+  Zero / Zero W) is unfixable — no Node.js build exists — and the answer is
+  different hardware. `armv7l` is almost always *good hardware with the 32-bit
+  image on its card*, so it is refused with "rewrite the card", not "buy a
+  different Pi"; telling someone to replace a Pi they already own would be both
+  wrong and expensive. Studio blocks the same two cases earlier still —
+  `SDCardInspector.is64Bit` reads the card before anything is written, and is
+  three-valued so an image it can't place is never blocked.
+- **Branch bundles are disposable; `v*` releases are not.** Every push publishes
+  a rolling `bundle-<branch>` prerelease — assets and tag both move — which is
+  what makes `--branch` testable on hardware. `bundle-cleanup.yml` removes each
+  one when its branch is deleted (plus a weekly sweep as a backstop), because
+  otherwise the tag list grows by one per branch forever. Its guardrails matter:
+  only `bundle-` tags, only prereleases, never the default branch's, and an
+  empty branch listing aborts rather than deleting everything. The sweep matches
+  by building the set of tags the *existing* branches would produce, because
+  flattening slashes into the tag name is lossy and cannot be inverted.
+- **Versioning is a symlink, not a container.** Each build unpacks into
+  `/opt/gethome/releases/<build-id>/` and `current` points at the one that
+  runs; CI stamps `VERSION` into the bundle, which names the directory and
+  becomes `build` in `GET /hub`. An update unpacks beside the running build and
+  flips the link, so switching is atomic — **and if the new build doesn't answer
+  the health check, `install.sh` flips it back and says so.** That is the part
+  Docker could not have given us: a `docker pull` into the same tag has nothing
+  to roll back to. `gethome-hubctl update` re-runs the installer rather than
+  reimplementing any of this; `rollback` flips to the previous release.
+- **Add nothing to a config file the distribution already writes.** The
+  mosquitto drop-in is `listener 1883` + `allow_anonymous true` and must stay
+  that way: `/etc/mosquitto/mosquitto.conf` already sets `persistence`,
+  `persistence_location` and `log_dest`, and mosquitto treats a repeated string
+  option as a **fatal** error rather than an override. Repeating
+  `persistence_location` is what kept the broker down, port 1883 closed and
+  Zigbee dead on a hub that installed perfectly otherwise.
+  `test/deploy-config.test.ts` parses the drop-in against a copy of Debian's
+  config to stop it coming back.
+- **When a unit won't start, put the reason in the log.** `service_failure()`
+  prints `systemctl status` and the last journal lines into the install output.
+  The mosquitto bug above was invisible for a whole round because the installer
+  did `systemctl restart … >/dev/null 2>&1 || warn "it didn't restart"` — the
+  broker was saying exactly what was wrong and we threw it away. Studio's user
+  is watching this log on another machine; "check systemctl status" is homework
+  they cannot do.
+- **Memory limits throttle; they don't kill.** Measured: hubd is ~119 MB
+  resident with Matter off, ~178 MB with it on. So `hubd` gets `MemoryHigh`
+  only — a hard `MemoryMax` near the working set turns a busy minute into a
+  restart, which is what a 260 MB cap was doing. Zigbee2MQTT keeps a hard cap
+  because it is the optional process and should die before the hub does. On
+  boards ≤ 512 MB `install.sh` also writes `ADAPTER_MATTER=0` and says why:
+  70 (OS) + 178 + 150 (Z2M) does not fit in 512 MB, while 70 + 119 + 150 does.
 - **Name a failure, don't just relay it.** A dropped download, a full card and
   an OOM kill all happen on a Pi and all want different fixes; `install.sh`
   keeps the output and matches them, because by then the actual reason is a
   hundred lines up a log — which, for someone driving this from Studio, may as
-  well be nowhere. The same applies to hardware: an ARMv6 board (original Pi
-  Zero / Zero W / Pi 1) is refused **by name**, with what to buy instead,
-  because Node.js has published no ARMv6 build since Node 12.
+  well be nowhere. The same applies to hardware and to services — see the
+  64-bit and `service_failure()` notes above.
 - **`deploy/zigbee-detect.sh` decides what a Zigbee coordinator is *and whether
   Zigbee2MQTT runs at all*.** It is installed as `gethome-zigbee-detect.service`
   and fires at boot and from a udev rule on `add` **and** `remove` — so a stick
@@ -211,6 +275,11 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   quietly contradicted — the reason port 1883 was invisible from the user's Mac.
   MQTT integrations run on other machines; the firewall boundary for a home hub
   is the router.
+- **Only install what is missing.** `install.sh` checks each apt package with
+  `dpkg-query` first: Raspberry Pi OS Lite already ships avahi-daemon, curl,
+  ca-certificates and xz-utils, so the step is "install mosquitto" and takes
+  seconds. An unconditional `apt-get update` plus five packages with output sent
+  to `/dev/null` was several minutes of a progress screen that looked hung.
 
 ## Keep the docs in sync
 

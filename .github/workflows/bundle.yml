@@ -11,11 +11,16 @@
 # not in Docker, and a Pi Zero cannot spare the ~130 MB the Docker daemon costs.
 #
 # Each bundle carries `node_modules` **built for its own architecture**, which
-# is the part that matters: better-sqlite3 ships prebuilt binaries for
-# linux-arm64 and linux-x64 inside its npm tarball, but *not* for 32-bit ARM.
-# Building armv7 here — slowly, under QEMU — is what keeps `npm rebuild` off
-# the Pi, where it would need a compiler toolchain and several hundred
-# megabytes of memory it doesn't have.
+# is the part that matters: better-sqlite3 ships prebuilt binaries inside its
+# npm tarball for linux-arm64 and linux-x64 — and those are the only two
+# architectures the hub supports. 32-bit ARM is deliberately not built: it has
+# no prebuilt SQLite binding, it needs a slow QEMU cross-build here, and every
+# board the hub runs on (Zero 2 W, 3, 4, 5) is 64-bit. `install.sh` refuses a
+# 32-bit system by name and says how to reinstall.
+#
+# Every bundle carries a VERSION stamp, which becomes the release directory
+# name on the Pi and the build id the API reports — so "which build is this
+# hub running" has one answer from CI all the way to the app.
 
 name: Publish bundle
 
@@ -45,6 +50,17 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # The build id: version, short SHA, and the branch it came from. It names
+      # the release directory on the Pi, so `gethome-hubctl version` and the
+      # API report something a human can trace back to a commit.
+      - name: Stamp the build
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./package.json').version")
+          ref=$(printf '%s' "${GITHUB_REF_NAME}" | tr -c '[:alnum:]._-' '-')
+          printf '%s-%s-%s\n' "$version" "${GITHUB_SHA::7}" "$ref" > VERSION
+          cat VERSION
+
       # One container per architecture, so `npm ci` resolves the same optional
       # and platform-specific packages the Pi would — and compiles any native
       # module against the right ABI. `node:22-bookworm` matches what
@@ -62,7 +78,7 @@ jobs:
               npm ci --omit=dev --no-audit --no-fund
               mkdir -p /src/out
               tar -czf "/src/out/gethome-hub-${{ matrix.arch }}.tar.gz" \
-                dist node_modules package.json deploy
+                dist node_modules package.json deploy VERSION
             '
 
       - name: Check the bundle actually runs
@@ -108,6 +124,10 @@ jobs:
       # real hardware possible: install.sh derives the tag from `--branch`, so
       # a card written from a feature branch installs that branch's build. The
       # tag has slashes flattened because a release tag is a git ref.
+      #
+      # These are disposable — `bundle-cleanup.yml` deletes each one when its
+      # branch goes away, so they don't pile up. A `v*` tag takes the other
+      # branch below and publishes an immutable release, which nothing deletes.
       - name: Upload
         env:
           GH_TOKEN: ${{ github.token }}

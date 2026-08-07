@@ -19,7 +19,7 @@ import { openTestDb, resetDb } from '../helpers/db.js';
  * End-to-end proof over a real MQTT broker: a fake Zigbee2MQTT bridge and a
  * fake GetHome-convention device on one side, the full hub core + API on the
  * other. Gated on HUB_TEST_MQTT=1 (needs mosquitto on 127.0.0.1:1883 and
- * Postgres — `docker compose up -d postgres mosquitto`).
+ * a local mosquitto).
  */
 const enabled = process.env.HUB_TEST_MQTT === '1';
 const MQTT_URL = process.env.HUB_TEST_MQTT_URL ?? 'mqtt://127.0.0.1:1883';

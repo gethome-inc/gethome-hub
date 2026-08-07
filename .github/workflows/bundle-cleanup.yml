@@ -1,0 +1,121 @@
+# Deletes the per-branch bundle prereleases that `bundle.yml` creates, once the
+# branch they were built for is gone.
+#
+# Every push to any branch publishes a `bundle-<branch>` prerelease so a card
+# can be pointed at that branch and tested on real hardware. Nothing removed
+# them, so the repository's tag list grew by one per branch forever. This is the
+# other half of that mechanism.
+#
+# Two triggers, because they cover different failures:
+#
+#   delete    — precise, and the case that actually happens: a PR is merged and
+#               its branch deleted. GitHub hands us the branch's real name, so
+#               the tag is derived exactly the way bundle.yml derived it.
+#   schedule  — the backstop, for branches deleted before this workflow existed,
+#               deleted through the API without an event, or missed because the
+#               event fired while a build was still uploading.
+#
+# The sweep cannot just invert a tag name — flattening slashes is lossy, so
+# `bundle-a-b` might have come from `a/b` or from `a-b`. It works the other way
+# round: build the set of tags the *existing* branches would produce, and delete
+# any bundle prerelease that isn't in it. A collision keeps the release, which
+# is the safe direction to be wrong in.
+
+name: Clean up bundle releases
+
+on:
+  delete:
+  schedule:
+    # Weekly, early Monday UTC. Nothing here is urgent.
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "List what would be deleted, delete nothing"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    # `on: delete` fires for tags as well as branches, and deleting a `v*`
+    # release tag must not trigger anything at all.
+    if: github.event_name != 'delete' || github.event.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remove bundles whose branch is gone
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          DELETED_REF: ${{ github.event.ref }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+
+          # The same transformation bundle.yml uses to name the release.
+          tag_for() { printf 'bundle-%s' "$(printf '%s' "$1" | tr '/' '-')"; }
+
+          # Guardrails live here rather than at each call site: only a
+          # prerelease, only a `bundle-` tag, and never the default branch's.
+          # A `v*` release can therefore never be caught by any path below.
+          delete_bundle() {
+            local tag="$1"
+            case "$tag" in
+              bundle-*) ;;
+              *) echo "refusing to touch '$tag' — not a bundle tag"; return 0 ;;
+            esac
+            if [[ "$tag" == "$(tag_for "$DEFAULT_BRANCH")" ]]; then
+              echo "keeping $tag — that is the default branch's build"
+              return 0
+            fi
+            local prerelease
+            prerelease="$(gh release view "$tag" --json isPrerelease --jq .isPrerelease 2>/dev/null || echo missing)"
+            if [[ "$prerelease" == "missing" ]]; then
+              echo "nothing to do for $tag"
+              return 0
+            fi
+            if [[ "$prerelease" != "true" ]]; then
+              echo "keeping $tag — it is a real release, not a branch build"
+              return 0
+            fi
+            if [[ "${DRY_RUN:-false}" == "true" ]]; then
+              echo "would delete $tag"
+              return 0
+            fi
+            echo "deleting $tag"
+            gh release delete "$tag" --cleanup-tag --yes
+          }
+
+          if [[ "$EVENT" == "delete" ]]; then
+            echo "Branch '${DELETED_REF}' was deleted."
+            delete_bundle "$(tag_for "$DELETED_REF")"
+            exit 0
+          fi
+
+          # ── Sweep ───────────────────────────────────────────────────────────
+          # An empty or failed branch listing would make every bundle look
+          # orphaned, so treat that as a reason to stop rather than a reason to
+          # delete everything.
+          branches="$(gh api --paginate repos/${GITHUB_REPOSITORY}/branches --jq '.[].name')"
+          if [[ -z "$branches" ]]; then
+            echo "Could not list branches — doing nothing."
+            exit 1
+          fi
+
+          keep=""
+          while IFS= read -r branch; do
+            [[ -n "$branch" ]] || continue
+            keep+="$(tag_for "$branch")"$'\n'
+          done <<< "$branches"
+
+          gh release list --limit 200 --json tagName,isPrerelease \
+            --jq '.[] | select(.isPrerelease) | .tagName' \
+          | while IFS= read -r tag; do
+              [[ -n "$tag" ]] || continue
+              case "$tag" in bundle-*) ;; *) continue ;; esac
+              if grep -qxF "$tag" <<< "$keep"; then continue; fi
+              delete_bundle "$tag"
+            done
