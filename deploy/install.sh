@@ -865,21 +865,44 @@ fi
 # concluding anything.
 if [[ -n "$ZIGBEE_READY" ]]; then
   say "Checking that Zigbee2MQTT reached the coordinator…"
-  ZIGBEE_LIVE=""
-  for _ in $(seq 1 20); do
-    if curl -fsS --max-time 5 http://localhost:8420/api/v1/hub 2>/dev/null \
-        | grep -q '"connected":true'; then
-      ZIGBEE_LIVE=1
-      break
-    fi
+
+  # Wait for the *hub* first, and don't count that time against Zigbee.
+  #
+  # The answer comes from the hub's API, and the detector a few lines up may
+  # have just restarted the hub — that is what happens on a fresh install where
+  # a coordinator takes the board from Matter, and on a Zero 2 W coming back is
+  # over a minute. Polling straight away would spend the whole window on a
+  # closed port and then blame the radio for a restart this script performed.
+  HUB_NOW=""
+  for _ in $(seq 1 40); do
+    HUB_NOW=$(curl -fsS --max-time 5 http://localhost:8420/api/v1/hub 2>/dev/null || true)
+    [[ -n "$HUB_NOW" ]] && break
     sleep 3
   done
-  if [[ -z "$ZIGBEE_LIVE" ]]; then
-    # A warning, never a failure: the hub itself is fine, and the coordinator
-    # stays configured, so this is something to fix rather than something that
-    # undoes the install.
-    warn "Zigbee2MQTT started but hasn't reached the coordinator. The hub works; Zigbee devices won't pair until it does. Check: journalctl -u gethome-zigbee2mqtt -n 50"
+
+  ZIGBEE_LIVE=""
+  if [[ -z "$HUB_NOW" ]]; then
+    # Nothing to say about the radio: the thing that would answer the question
+    # is itself not answering, and the health step above already covers a hub
+    # that won't start. Saying "Zigbee isn't working" here would be a guess.
+    warn "The hub isn't answering, so whether Zigbee reached its coordinator couldn't be checked. See: journalctl -u gethome-hubd -n 50"
     ZIGBEE_READY=""
+  else
+    # Now a full window of a *live* hub, however long the restart took. Z2M is
+    # a second Node process starting on an SD card; a minute and a half is
+    # patient without being an install that looks hung.
+    for _ in $(seq 1 30); do
+      case "$HUB_NOW" in *'"connected":true'*) ZIGBEE_LIVE=1; break ;; esac
+      sleep 3
+      HUB_NOW=$(curl -fsS --max-time 5 http://localhost:8420/api/v1/hub 2>/dev/null || printf '%s' "$HUB_NOW")
+    done
+    if [[ -z "$ZIGBEE_LIVE" ]]; then
+      # A warning, never a failure: the hub itself is fine, and the coordinator
+      # stays configured, so this is something to fix rather than something that
+      # undoes the install.
+      warn "Zigbee2MQTT started but hasn't reached the coordinator. The hub works; Zigbee devices won't pair until it does. Check: journalctl -u gethome-zigbee2mqtt -n 50"
+      ZIGBEE_READY=""
+    fi
   fi
 fi
 
