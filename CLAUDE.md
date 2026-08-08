@@ -336,6 +336,16 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   reported and never configured. The device path is written as a
   `ZIGBEE2MQTT_CONFIG_*` override and **never** into Zigbee2MQTT's own
   `configuration.yaml`, which holds the network key and the paired-device list.
+  **Two paths, one stick.** `ZIGBEE_ADAPTER` keeps the stable `by-id` name —
+  which device this is — while `ZIGBEE2MQTT_CONFIG_SERIAL_PORT` gets the node it
+  resolves to, because since 1.41 Z2M won't guess an adapter type and its
+  discovery matches the configured port against `SerialPort.list()`, which
+  reports real device nodes. A `by-id` path matches none of them and it exits
+  with `No valid USB adapter found` beside a correctly identified coordinator.
+  Setting `serial.adapter` instead would mean copying upstream's device table in
+  here *and* would still miss the options lookup, so `rtscts` would silently go
+  unapplied. The instability `by-id` avoids is covered because the detector owns
+  Z2M's lifecycle and the change check compares both paths.
   **The single exception is `onboarding`, and it is surgical.** Zigbee2MQTT 2.x
   runs a browser wizard and leaves the radio alone until somebody finishes it,
   so a hub nobody configures by hand sits "active (running)" with a correctly
