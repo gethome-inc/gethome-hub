@@ -260,8 +260,20 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `SDCardInspector.is64Bit` reads the card before anything is written, and is
   three-valued so an image it can't place is never blocked.
 - **Branch bundles are disposable; `v*` releases are not.** Every push publishes
-  a rolling `bundle-<branch>` prerelease — assets and tag both move — which is
-  what makes `--branch` testable on hardware. `bundle-cleanup.yml` removes each
+  a rolling `bundle-<branch>` prerelease — assets, tag **and notes** all move —
+  which is what makes `--branch` testable on hardware. The "and notes" is a
+  repair, not decoration: `bundle.yml` used to create the release only when it
+  was missing and then upload with `--clobber`, so the notes and the tag kept
+  naming whatever commit the branch *first* built while the tarballs beside them
+  moved on. Observed live: `bundle-main` said `47b48bf` in both while its assets
+  were two days newer and `main` was at `a86c1dc`. No download was ever wrong —
+  `install.sh` fetches `releases/download/<tag>/<asset>` and `bundle-cleanup.yml`
+  matches tag *names*, so nothing resolves a bundle through the tag's commit —
+  but the release page is where a human goes to ask which build is on their Pi,
+  and it was answering with a commit that wasn't in it. A rolling release has to
+  roll in the parts nobody downloads too. `v*` releases are re-pointed by
+  nothing, deliberately: rewriting a version tag would move history somebody may
+  already have installed. `bundle-cleanup.yml` removes each
   one when its branch is deleted (plus a weekly sweep as a backstop), because
   otherwise the tag list grows by one per branch forever. Its guardrails matter:
   only `bundle-` tags, only prereleases, never the default branch's, and an

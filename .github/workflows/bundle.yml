@@ -128,6 +128,21 @@ jobs:
       # These are disposable — `bundle-cleanup.yml` deletes each one when its
       # branch goes away, so they don't pile up. A `v*` tag takes the other
       # branch below and publishes an immutable release, which nothing deletes.
+      #
+      # **A rolling release has to actually roll, including the parts nobody
+      # downloads.** This used to create the release only when it was missing
+      # and then upload assets with `--clobber` — so the notes and the tag kept
+      # naming whatever commit the branch first built, forever, while the
+      # tarballs beside them moved. Checked on a live repo: `bundle-main`'s
+      # notes and tag both said `47b48bf` while its assets were two days newer
+      # and `main` was at `a86c1dc`.
+      #
+      # Nothing *resolves* a bundle through the tag's commit — `install.sh`
+      # fetches `releases/download/<tag>/<asset>`, which goes through the
+      # release, and `bundle-cleanup.yml` matches tag names — so this was never
+      # a broken download. It was worse in a quieter way: the release page is
+      # where a human goes to ask which build is on their Pi, and it was
+      # answering with a commit that wasn't in it.
       - name: Upload
         env:
           GH_TOKEN: ${{ github.token }}
@@ -137,12 +152,33 @@ jobs:
             tag="${GITHUB_REF_NAME}"
             title="${GITHUB_REF_NAME}"
             flags=""
+            rolling=""
           else
             tag="bundle-$(printf '%s' "${GITHUB_REF_NAME}" | tr '/' '-')"
             title="Build of ${GITHUB_REF_NAME}"
             flags="--prerelease"
+            rolling=1
           fi
+          notes="Automatic build of \`${GITHUB_REF_NAME}\` (${GITHUB_SHA})."
+
+          existed=1
           if ! gh release view "$tag" >/dev/null 2>&1; then
-            gh release create "$tag" --title "$title" --notes "Automatic build of \`${GITHUB_REF_NAME}\` (${GITHUB_SHA})." $flags
+            existed=""
+            gh release create "$tag" --title "$title" --notes "$notes" $flags
           fi
+
+          # The tarballs go up before anything is re-pointed. They are the
+          # load-bearing artifact — a Pi installing this branch downloads them
+          # and nothing else — so if the re-pointing below fails, the failure
+          # should cost a red job and a stale description, never a branch with
+          # no bundle at all. `set -e` means it fails loudly either way.
           gh release upload "$tag" out/*.tar.gz --clobber
+
+          # Then make the release describe what was just uploaded. Only for a
+          # rolling branch release, and only when it already existed — a `v*`
+          # release is immutable, and re-pointing a version tag would rewrite
+          # history somebody may already have installed.
+          if [[ -n "$rolling" && -n "$existed" ]]; then
+            git push --force origin "${GITHUB_SHA}:refs/tags/${tag}"
+            gh release edit "$tag" --title "$title" --notes "$notes"
+          fi
