@@ -69,16 +69,38 @@ before it writes anything at all.
 ### The Zigbee coordinator
 
 A USB Zigbee coordinator is what lets the hub pair Zigbee devices — bulbs,
-sensors, buttons, the great majority of affordable smart-home hardware. Known-good
-sticks:
+sensors, buttons, the great majority of affordable smart-home hardware.
 
-- **SONOFF ZBDongle-E** or **ZBDongle-P**
-- **dresden elektronik ConBee II / ConBee III**
-- **Home Assistant SkyConnect / Connect ZBT-1**
+**If you want one recommendation: the SONOFF ZBDongle-E.** It is the coordinator
+this hub is developed against — the stick in the Zero 2 W that the installer,
+the detector and the one-radio switch are exercised on — so it is the hardware
+that has had the most chances to go wrong here and be fixed.
 
-Plug it in at any time — before or after installing. The hub notices within
-seconds and starts Zigbee by itself, with no reboot
-([docs/zigbee.md](docs/zigbee.md#finding-the-coordinator)).
+Beyond that, what the hub can tell you is how *certainly* it will recognise a
+stick, and that has three honest levels:
+
+| | Coordinator | Why it's placed here |
+|---|---|---|
+| **Developed against** | **SONOFF ZBDongle-E** (V2, the CH9102 variant, `1a86:55d4`) | The one we own and install with. |
+| **Recognised by a dedicated USB id** | **dresden elektronik ConBee II / III**, **Texas Instruments CC2531 / CC2538** | Their `vendor:product` belongs to a Zigbee coordinator and nothing else, so identifying them never depends on a product string a vendor might reword. |
+| **Recognised by name** | **SONOFF** ZBDongle-P, Dongle Plus MG24, Dongle Lite MG21, Dongle Max, Dongle-PP10 · **Home Assistant** SkyConnect, Connect ZBT-1, Connect ZBT-2 · **SMLIGHT** SLZB-06 / 06p7 / 06p10 / 06m, SLZB-07 / 07p7 / 07mg24 · **ZiGate**, **TubesZB**, **ZigStar**, **Electrolama zzh**, **Nordic Zigbee NCP** | They say what they are in their USB product string, and the hub reads it. |
+
+Any of those: plug it in at any time, before or after installing. The hub
+identifies it, sets it up and starts Zigbee within seconds, with no reboot and
+nothing to re-run ([docs/zigbee.md](docs/zigbee.md#finding-the-coordinator)).
+
+**That table is about recognition, not about what works.** Anything Zigbee2MQTT
+supports works. The difference is that a stick built on a bare USB-serial bridge
+(CP210x, CH340, FTDI) with no name of its own cannot be told apart from a 3D
+printer or a UPS — so the hub offers it to you instead of adopting it, and
+GetHome Studio lets you pick it. Nothing is lost by declining: you can point the
+installer at it later with `--zigbee /dev/serial/by-id/...`.
+
+Both recognised tiers are pinned by `test/deploy-radio.test.ts`, which runs real
+device names from `zigbee-herdsman`'s own table — the library Zigbee2MQTT uses to
+talk to a coordinator — through the actual detector. That is what stops this list
+quietly falling behind as upstream's grows, and it is how the gaps it currently
+closes were found.
 
 **Without a coordinator you get Matter, Wi-Fi and MQTT devices only** — no
 Zigbee. That is a real limitation rather than a temporary one, so it is worth

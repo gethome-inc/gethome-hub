@@ -582,6 +582,48 @@ if [[ ! -x "$Z2M_DIR/node_modules/.bin/zigbee2mqtt" ]]; then
 fi
 $SUDO chown -R "$SERVICE_USER:$SERVICE_USER" "$Z2M_DATA_DIR"
 
+# ── Zigbee2MQTT must not wait for a browser ────────────────────────────────
+# Zigbee2MQTT 2.x runs an *onboarding* wizard on a web page and does not bring
+# the Zigbee stack up at all until somebody finishes it. On a hub that is
+# nobody's business to configure by hand — the serial port and the broker are
+# both supplied as environment overrides — that is a service which starts,
+# stays "active (running)", never touches the coordinator, and reports nothing
+# wrong. Observed exactly that: a correctly identified SONOFF dongle, the right
+# path in the config, `zigbee.connected: false` forever, and one line in the
+# journal offering a setup page on port 8080.
+#
+# `ZIGBEE2MQTT_CONFIG_ONBOARDING=false` is set on the unit as well, but it
+# cannot be the whole answer: upstream ignores that variable when there is no
+# configuration.yaml yet, which is precisely the fresh-install case. So the
+# file gets the setting too.
+#
+# **This is the one thing written into configuration.yaml, and it is surgical
+# on purpose.** That file holds the network key and the paired-device list;
+# rewriting it would lose somebody's whole Zigbee network. Creating it when it
+# is absent, or replacing one `onboarding:` line when it is present, does
+# neither.
+Z2M_CONFIG="$Z2M_DATA_DIR/configuration.yaml"
+Z2M_ONBOARDING_CHANGED=""
+if [[ ! -f "$Z2M_CONFIG" ]]; then
+  printf 'onboarding: false\n' | $SUDO tee "$Z2M_CONFIG" >/dev/null \
+    && $SUDO chown "$SERVICE_USER:$SERVICE_USER" "$Z2M_CONFIG" \
+    && Z2M_ONBOARDING_CHANGED=1
+elif grep -qE '^onboarding:[[:space:]]*true' "$Z2M_CONFIG" 2>/dev/null; then
+  $SUDO sed -i 's/^onboarding:[[:space:]]*true.*/onboarding: false/' "$Z2M_CONFIG" \
+    && Z2M_ONBOARDING_CHANGED=1
+elif ! grep -qE '^onboarding:' "$Z2M_CONFIG" 2>/dev/null; then
+  printf 'onboarding: false\n' | $SUDO tee -a "$Z2M_CONFIG" >/dev/null \
+    && Z2M_ONBOARDING_CHANGED=1
+fi
+# A running Z2M read the old file at startup, and the detector below only
+# restarts it when the *device path* changed — so without this an existing hub
+# would keep waiting for its browser until the next reboot.
+if [[ -n "$Z2M_ONBOARDING_CHANGED" ]] && command -v systemctl >/dev/null 2>&1 \
+   && $SUDO systemctl is-active --quiet gethome-zigbee2mqtt.service 2>/dev/null; then
+  say "Zigbee2MQTT was waiting on its setup page; turning that off and restarting it."
+  $SUDO systemctl restart gethome-zigbee2mqtt.service >/dev/null 2>&1 || true
+fi
+
 # The detector is the authority on what counts as a coordinator, and it is what
 # starts and stops Zigbee2MQTT — at boot and whenever something is plugged in
 # or unplugged. Installing it unconditionally is what makes buying a stick next
@@ -724,6 +766,11 @@ Environment=NODE_OPTIONS=--max-old-space-size=${Z2M_HEAP_MB}
 Environment=ZIGBEE2MQTT_CONFIG_MQTT_SERVER=mqtt://127.0.0.1:1883
 Environment=ZIGBEE2MQTT_CONFIG_MQTT_BASE_TOPIC=zigbee2mqtt
 Environment=ZIGBEE2MQTT_CONFIG_FRONTEND_ENABLED=false
+# No setup wizard. Zigbee2MQTT 2.x otherwise starts a web page and leaves the
+# radio alone until a human finishes it — see the note by the config above,
+# which is where this is actually enforced, because upstream ignores this
+# variable when configuration.yaml doesn't exist yet.
+Environment=ZIGBEE2MQTT_CONFIG_ONBOARDING=false
 # The coordinator's path comes from the detector, as an override rather than an
 # edit: Zigbee2MQTT's own configuration.yaml holds the network key and the
 # paired-device list, and nothing here may ever rewrite that file.
@@ -865,21 +912,44 @@ fi
 # concluding anything.
 if [[ -n "$ZIGBEE_READY" ]]; then
   say "Checking that Zigbee2MQTT reached the coordinator…"
-  ZIGBEE_LIVE=""
-  for _ in $(seq 1 20); do
-    if curl -fsS --max-time 5 http://localhost:8420/api/v1/hub 2>/dev/null \
-        | grep -q '"connected":true'; then
-      ZIGBEE_LIVE=1
-      break
-    fi
+
+  # Wait for the *hub* first, and don't count that time against Zigbee.
+  #
+  # The answer comes from the hub's API, and the detector a few lines up may
+  # have just restarted the hub — that is what happens on a fresh install where
+  # a coordinator takes the board from Matter, and on a Zero 2 W coming back is
+  # over a minute. Polling straight away would spend the whole window on a
+  # closed port and then blame the radio for a restart this script performed.
+  HUB_NOW=""
+  for _ in $(seq 1 40); do
+    HUB_NOW=$(curl -fsS --max-time 5 http://localhost:8420/api/v1/hub 2>/dev/null || true)
+    [[ -n "$HUB_NOW" ]] && break
     sleep 3
   done
-  if [[ -z "$ZIGBEE_LIVE" ]]; then
-    # A warning, never a failure: the hub itself is fine, and the coordinator
-    # stays configured, so this is something to fix rather than something that
-    # undoes the install.
-    warn "Zigbee2MQTT started but hasn't reached the coordinator. The hub works; Zigbee devices won't pair until it does. Check: journalctl -u gethome-zigbee2mqtt -n 50"
+
+  ZIGBEE_LIVE=""
+  if [[ -z "$HUB_NOW" ]]; then
+    # Nothing to say about the radio: the thing that would answer the question
+    # is itself not answering, and the health step above already covers a hub
+    # that won't start. Saying "Zigbee isn't working" here would be a guess.
+    warn "The hub isn't answering, so whether Zigbee reached its coordinator couldn't be checked. See: journalctl -u gethome-hubd -n 50"
     ZIGBEE_READY=""
+  else
+    # Now a full window of a *live* hub, however long the restart took. Z2M is
+    # a second Node process starting on an SD card; a minute and a half is
+    # patient without being an install that looks hung.
+    for _ in $(seq 1 30); do
+      case "$HUB_NOW" in *'"connected":true'*) ZIGBEE_LIVE=1; break ;; esac
+      sleep 3
+      HUB_NOW=$(curl -fsS --max-time 5 http://localhost:8420/api/v1/hub 2>/dev/null || printf '%s' "$HUB_NOW")
+    done
+    if [[ -z "$ZIGBEE_LIVE" ]]; then
+      # A warning, never a failure: the hub itself is fine, and the coordinator
+      # stays configured, so this is something to fix rather than something that
+      # undoes the install.
+      warn "Zigbee2MQTT started but hasn't reached the coordinator. The hub works; Zigbee devices won't pair until it does. Check: journalctl -u gethome-zigbee2mqtt -n 50"
+      ZIGBEE_READY=""
+    fi
   fi
 fi
 
