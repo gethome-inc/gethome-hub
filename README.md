@@ -24,11 +24,11 @@ hub can control them.
   ([docs/mqtt-integrations.md](docs/mqtt-integrations.md)).
 - **AI device adaptation** — unknown devices, and unknown parameters a
   device starts publishing later, are mapped into the schema by an
-  autonomous mapping agent built on the Claude Agent SDK: it reads the
-  device's published schema, researches it on the web, and submits a
-  validated mapping (bring your own Anthropic API key or Claude
-  subscription token; stored encrypted on the hub, used only for this).
-  No credential → devices still appear, flagged "needs review".
+  autonomous mapping agent: it reads the device's published schema,
+  researches it on the web (starting from the device's own Zigbee2MQTT
+  page), and submits a validated mapping (bring your own Anthropic API key;
+  stored encrypted on the hub, used only for this). No credential → devices
+  still appear, flagged "needs review".
   ([docs/ai-adaptation.md](docs/ai-adaptation.md))
 - **One schema for everything** — 27 capabilities (including button/remote
   events, learn-and-replay IR blasters, and a universal generic-control
@@ -52,8 +52,8 @@ run on it.
 | | Board | What you get |
 |---|---|---|
 | **Recommended** | Raspberry Pi 5, Pi 4 (2 GB or more) | Everything: Matter, Zigbee, MQTT, room to spare |
-| **Tested, with one limit** | Raspberry Pi Zero 2 W (512 MB) | Zigbee and MQTT. **Matter is switched off** — see below |
-| **Should work, not routinely tested** | Pi 3 / 3B+, 400, 500, CM4, CM5, and any other 64-bit ARM or x86-64 Linux machine | Everything, on 1 GB or more |
+| **Tested, with one limit** | Raspberry Pi Zero 2 W (512 MB) | Matter, Wi-Fi and MQTT, **or** Zigbee — one radio at a time, see below |
+| **Should work, not routinely tested** | Pi 3 / 3B+, 400, 500, CM4, CM5, and any other 64-bit ARM or x86-64 Linux machine | Everything above 1 GB; one radio at a time at 1 GB or below |
 | **Cannot work** | Pi 1, Pi Zero, Pi Zero W | Nothing — these are ARMv6, and Node.js has published no ARMv6 build since Node 12 |
 
 The tested operating system is **Raspberry Pi OS Lite (64-bit)**. Debian and
@@ -80,21 +80,19 @@ Plug it in at any time — before or after installing. The hub notices within
 seconds and starts Zigbee by itself, with no reboot
 ([docs/zigbee.md](docs/zigbee.md#finding-the-coordinator)).
 
-**Without a coordinator you get Matter and MQTT devices only** — no Zigbee. That
-is a real limitation rather than a temporary one, so it is worth deciding before
-you buy a board:
+**Without a coordinator you get Matter, Wi-Fi and MQTT devices only** — no
+Zigbee. That is a real limitation rather than a temporary one, so it is worth
+deciding before you buy a board:
 
-> **On a Raspberry Pi Zero 2 W, a Zigbee coordinator is effectively required.**
-> 512 MB is not enough to run Matter and Zigbee at once — measured, the hub is
-> ~120 MB, Matter adds ~60 MB, and Zigbee2MQTT another ~150 MB on top of the
-> operating system's ~70 MB. The installer switches Matter off on that board and
-> says so. So a Zero 2 W *with* a stick is a capable Zigbee hub, and a Zero 2 W
-> *without* one can talk to almost nothing. A Pi 4 or Pi 5 runs both together
-> comfortably.
-
-Matter can be turned back on at any time — `ADAPTER_MATTER=1` in
-`/etc/gethome/hub.env`, then `sudo gethome-hubctl restart` — with the memory
-consequences above.
+> **A Raspberry Pi Zero 2 W runs one radio at a time.** 512 MB is not enough for
+> Matter *and* Zigbee at once — measured, the hub is ~120 MB, Matter adds
+> ~60 MB, and Zigbee2MQTT another ~150 MB on top of the operating system's
+> ~70 MB. So that board gets whichever one you are actually using: plug a
+> coordinator in and it runs Zigbee, leave it out and it runs Matter. Nothing to
+> configure either way, and the installer says which one you ended up with. You
+> can switch it in the GetHome app at any time — the coordinator stays
+> configured, and Zigbee devices come back when you switch back (they show as
+> offline meanwhile). A Pi 4 or Pi 5 runs both together and never asks.
 
 ## Quick start
 

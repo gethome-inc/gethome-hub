@@ -18,11 +18,11 @@ a bare USB-serial bridge (CP210x, CH340, FTDI) cannot be told apart from a 3D
 printer or a UPS, so it is offered to you rather than adopted automatically.
 See [Finding the coordinator](#finding-the-coordinator).
 
-**Without a coordinator the hub runs Matter and MQTT devices only.** On a
-Raspberry Pi Zero 2 W that is a sharper limit than it sounds: 512 MB cannot hold
-Matter and Zigbee2MQTT at once, so the installer switches Matter off there — and
-a Zero 2 W with no stick can therefore talk to almost nothing. On that board a
-coordinator is effectively required. A Pi 4 or 5 runs both together.
+**Without a coordinator the hub runs Matter, Wi-Fi and MQTT devices only.** On a
+Raspberry Pi Zero 2 W there is a second consequence: 512 MB cannot hold Matter
+and Zigbee2MQTT at once, so that board runs *one* of them — see
+[Zigbee or Matter on a small board](#zigbee-or-matter-on-a-small-board). A Pi 4
+or 5 runs both together and never makes the choice.
 
 ## Setup
 
@@ -90,6 +90,58 @@ so with `@@WARN:…@@` rather than leaving the user to wonder.
 `Models/ZigbeeModels.swift` (`ZigbeeCatalog`), which classifies devices during
 the SSH preflight — before this script exists on the machine. Change both
 together, or the two will disagree about the same hardware.
+
+### Zigbee or Matter on a small board
+
+A 512 MB board fits the operating system (~70 MB), the hub (~119 MB), and
+**one** of Zigbee2MQTT (~150 MB, its own process) or Matter (~60 MB inside the
+hub). Not both. Two separate things decide which:
+
+| | Who sets it | Where it lives | What it means |
+|---|---|---|---|
+| **Budget** | `install.sh`, from the board's RAM | `GETHOME_RADIO` in `/etc/gethome/hub.env` | `both` (> 1 GB) or `one` (≤ 1 GB). Measured, not a preference. |
+| **Mode** | the owner, from the GetHome app | `<data>/radio-mode` | `auto` (default), `zigbee` or `matter`. |
+
+`gethome-zigbee-detect` is where the two meet, because it is the only thing
+that knows whether a coordinator is *actually plugged in* — it runs at boot, on
+every USB plug and unplug, and at the end of the install:
+
+| Budget | Mode | Coordinator | Result |
+|---|---|---|---|
+| `one` | `auto` | yes | Zigbee runs, `ADAPTER_MATTER=0` |
+| `one` | `auto` | no | Matter runs, Zigbee2MQTT stays down |
+| `one` | `zigbee` | yes | same as `auto` + coordinator |
+| `one` | `zigbee` | no | Matter runs — see below |
+| `one` | `matter` | either | Matter runs; a plugged-in coordinator is recorded but Z2M stays down |
+| `both` | `auto` | either | both run |
+| `both` | `zigbee` | yes | Zigbee runs, Matter off (the owner asked for it) |
+| `both` | `matter` | either | Matter runs, Z2M stays down |
+
+**Matter only ever gives way to Zigbee that is genuinely going to run.** That
+is the row worth reading twice: `mode=zigbee` with no stick plugged in still
+leaves Matter on. Reserving the memory for a coordinator that isn't there is
+how a hub ends up talking to nothing at all — no Zigbee because there is no
+stick, no Matter because we saved the room for one.
+
+Applying a mode is root work — editing `hub.env`, starting or stopping a unit,
+restarting the hub — and the hub deliberately cannot do any of it. It writes one
+word to `<data>/radio-mode`, a file it already owns; `gethome-radio.path`
+(`PathModified`) notices and runs the detector, which applies it. So `PUT
+/api/v1/settings/radio` records a *request* and returns immediately, the hub
+restarts a moment later, and what `GET /api/v1/hub` reports as live comes from
+`ADAPTER_MATTER` and the adapters themselves — never from the file.
+
+The hub restarts only when the value really changes. This script runs on every
+USB event, and a hub that restarted each time somebody plugged in a phone
+charger would be worse than the problem it solves.
+
+Switching costs nothing but the switch: the coordinator's device path stays in
+`/etc/gethome/zigbee.env` and Zigbee2MQTT keeps its `configuration.yaml`, so
+paired devices come back when the board is handed back to Zigbee. They show as
+offline in the app while another radio has the board.
+
+On a `both` board none of this normally fires — `auto` runs everything, and the
+mode exists there only for somebody who wants a radio off deliberately.
 
 ## How the hub uses Zigbee2MQTT
 
@@ -244,9 +296,9 @@ to upgrade them to. Only `IGNORED_PROPERTIES` (pure telemetry) produce nothing.
 ## Layer 3: AI adaptation (the genuine gaps)
 
 Because layers 1–2 make almost everything usable, the mapping agent
-([ai-adaptation.md](ai-adaptation.md) — an autonomous researcher built on the
-Claude Agent SDK, run with the owner's own Anthropic API key or Claude
-subscription token) is reserved for real gaps:
+([ai-adaptation.md](ai-adaptation.md) — an autonomous researcher running as a
+tool-use loop on the Anthropic Messages API, with the owner's own API key) is
+reserved for real gaps:
 
 - a property with **no representation at all** (`uncovered` — composites/lists,
   or a device Z2M barely supports), or nothing mapped → auto-trigger;
@@ -263,7 +315,7 @@ existing AI mapping declares triggers a one-time, debounced AI remap grounded
 in those samples. Each unknown key is asked about at most once per run.
 
 When the owner's account is temporarily unusable (rate limit, exhausted
-subscription window, bad credentials…) the mapper backs off instead of
+account cap, bad credentials…) the mapper backs off instead of
 retrying — devices keep their static mapping and the reason is surfaced on
 `GET /settings/ai` as `status.lastError` (see
 [ai-adaptation.md](ai-adaptation.md) → taxonomy & backoff).

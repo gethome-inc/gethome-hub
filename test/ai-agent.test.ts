@@ -1,28 +1,39 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
-import { createSubmitMappingTool, type SubmitCapture } from '../src/ai/agent.js';
-import { buildAgentContext, ensureAgentHome } from '../src/ai/context.js';
-import { classifyAgentFailure, parseResetHint } from '../src/ai/errors.js';
+import { describe, expect, it, vi, beforeEach } from 'vitest';
+import type { Logger } from '../src/logging.js';
 import type { MappingDescriptor } from '../src/ai/descriptor.js';
 import type { Z2mDevice } from '../src/adapters/zigbee/exposes-mapper.js';
 import { mapExposes } from '../src/adapters/zigbee/exposes-mapper.js';
+import { classifyAgentFailure, classifyApiError, parseResetHint } from '../src/ai/errors.js';
+import { buildMappingUserPrompt, zigbee2mqttDevicePage } from '../src/ai/prompts.js';
+import {
+  DEFAULT_MODEL,
+  SUPPORTED_MODELS,
+  estimateCostUsd,
+  isSupportedModel,
+} from '../src/ai/models.js';
+
+// The agent constructs its own Anthropic client, so the loop is exercised by
+// mocking the SDK rather than by threading a client through the signature.
+const { createMock } = vi.hoisted(() => ({ createMock: vi.fn() }));
+vi.mock('@anthropic-ai/sdk', () => ({
+  default: class MockAnthropic {
+    messages = { create: createMock };
+  },
+}));
+
+const { AGENT_MAX_TURNS, createMappingAgent, evaluateSubmission, submitMappingTool } = await import(
+  '../src/ai/agent.js'
+);
 
 // ── Failure classification ────────────────────────────────────────────────
 
 describe('classifyAgentFailure', () => {
-  it('recognizes subscription usage limits (with reset hints)', () => {
-    // Real-world strings the Claude Code runtime emits.
-    const session = classifyAgentFailure("You've hit your session limit · resets 11pm (UTC)");
-    expect(session?.kind).toBe('usage_limit');
-    expect(session?.resetAt).toBeInstanceOf(Date);
-
+  it('recognizes account usage caps (with reset hints)', () => {
     const epoch = classifyAgentFailure('Claude AI usage limit reached|1752710400');
     expect(epoch?.kind).toBe('usage_limit');
     expect(epoch?.resetAt?.getTime()).toBe(1752710400 * 1000);
 
-    expect(classifyAgentFailure('Weekly limit reached for Claude')?.kind).toBe('usage_limit');
+    expect(classifyAgentFailure('Monthly limit reached for this organization')?.kind).toBe('usage_limit');
   });
 
   it('recognizes API rate limits, overload, auth, and billing failures', () => {
@@ -32,7 +43,6 @@ describe('classifyAgentFailure', () => {
     expect(classifyAgentFailure('401 {"type":"authentication_error","message":"invalid x-api-key"}')?.kind).toBe(
       'auth_failed',
     );
-    expect(classifyAgentFailure('OAuth token has expired. Please run /login.')?.kind).toBe('auth_failed');
     expect(classifyAgentFailure('Your credit balance is too low to access the API')?.kind).toBe('billing');
     expect(classifyAgentFailure('fetch failed: getaddrinfo ENOTFOUND api.anthropic.com')?.kind).toBe('network');
   });
@@ -40,6 +50,50 @@ describe('classifyAgentFailure', () => {
   it('returns null for text that is not an availability problem', () => {
     expect(classifyAgentFailure('the descriptor was missing an endpoint')).toBeNull();
     expect(classifyAgentFailure('error_max_turns')).toBeNull();
+  });
+});
+
+describe('classifyApiError', () => {
+  const now = new Date('2026-07-16T10:00:00Z');
+
+  it('reads the HTTP status rather than the message text', () => {
+    // The message deliberately says nothing useful — the status is the signal.
+    expect(classifyApiError({ status: 429, message: 'request failed' }, now)?.kind).toBe('rate_limited');
+    expect(classifyApiError({ status: 401, message: 'request failed' }, now)?.kind).toBe('auth_failed');
+    expect(classifyApiError({ status: 403, message: 'request failed' }, now)?.kind).toBe('auth_failed');
+    expect(classifyApiError({ status: 402, message: 'request failed' }, now)?.kind).toBe('billing');
+    expect(classifyApiError({ status: 529, message: 'request failed' }, now)?.kind).toBe('overloaded');
+    expect(classifyApiError({ status: 503, message: 'request failed' }, now)?.kind).toBe('overloaded');
+  });
+
+  it('prefers the provider retry-after header over any heuristic', () => {
+    const fromSeconds = classifyApiError(
+      { status: 429, message: 'slow down', headers: { 'retry-after': '90' } },
+      now,
+    );
+    expect(fromSeconds?.resetAt?.toISOString()).toBe('2026-07-16T10:01:30.000Z');
+
+    // A Headers-like object works the same way.
+    const fromHeaders = classifyApiError(
+      { status: 429, message: 'slow down', headers: { get: (k: string) => (k === 'retry-after' ? '30' : null) } },
+      now,
+    );
+    expect(fromHeaders?.resetAt?.toISOString()).toBe('2026-07-16T10:00:30.000Z');
+  });
+
+  it('separates an exhausted account cap from an ordinary 429', () => {
+    expect(classifyApiError({ status: 429, message: 'monthly limit reached' }, now)?.kind).toBe('usage_limit');
+    expect(classifyApiError({ status: 429, message: 'too many requests' }, now)?.kind).toBe('rate_limited');
+  });
+
+  it('treats a 400 as our own bug unless it is really a billing problem', () => {
+    expect(classifyApiError({ status: 400, message: 'tools.0: unexpected field' }, now)).toBeNull();
+    expect(classifyApiError({ status: 400, message: 'Your credit balance is too low' }, now)?.kind).toBe('billing');
+  });
+
+  it('falls back to the text when the failure never reached HTTP', () => {
+    expect(classifyApiError({ message: 'Connection error.' }, now)?.kind).toBe('network');
+    expect(classifyApiError({ message: 'socket hang up' }, now)?.kind).toBe('network');
   });
 });
 
@@ -62,6 +116,44 @@ describe('parseResetHint', () => {
   });
 });
 
+// ── The model allowlist ───────────────────────────────────────────────────
+
+describe('supported models', () => {
+  it('only allows models that can drive the server-side research tools', () => {
+    expect(isSupportedModel(DEFAULT_MODEL)).toBe(true);
+    // The _20260209 web tools do not exist on Haiku or the 4.5 generation, so
+    // these would 400 rather than degrade.
+    expect(isSupportedModel('claude-haiku-4-5')).toBe(false);
+    expect(isSupportedModel('claude-sonnet-4-5')).toBe(false);
+    expect(isSupportedModel('gpt-4')).toBe(false);
+  });
+
+  it('does not offer Claude Fable 5', () => {
+    expect(Object.keys(SUPPORTED_MODELS).some((id) => id.includes('fable') || id.includes('mythos'))).toBe(false);
+  });
+
+  it('prices a run from its token usage', () => {
+    // 1M input + 1M output on Opus-tier list prices.
+    const cost = estimateCostUsd('claude-opus-5', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
+    expect(cost).toBeCloseTo(30, 5);
+  });
+
+  it('bills cache reads at a tenth of the input rate', () => {
+    const cached = estimateCostUsd('claude-opus-5', { cache_read_input_tokens: 1_000_000 });
+    expect(cached).toBeCloseTo(0.5, 5);
+  });
+
+  it('counts web searches, which are billed per request', () => {
+    expect(estimateCostUsd('claude-opus-5', { webSearchRequests: 100 })).toBeCloseTo(1, 5);
+  });
+
+  it('falls back to the most expensive tier for an unknown model, so the cap trips early', () => {
+    const unknown = estimateCostUsd('claude-something-new', { output_tokens: 1_000_000 });
+    const cheapest = estimateCostUsd('claude-sonnet-5', { output_tokens: 1_000_000 });
+    expect(unknown).toBeGreaterThanOrEqual(cheapest);
+  });
+});
+
 // ── The submit_mapping tool ───────────────────────────────────────────────
 
 const validDescriptor: MappingDescriptor = {
@@ -72,41 +164,53 @@ const validDescriptor: MappingDescriptor = {
       deviceKind: 'sensor',
       capabilities: ['humidity'],
       primary: 'humidity',
-      stateRules: [{ property: 'soil_moisture', to: 'sensors.humidityCenti', transform: { kind: 'multiply', factor: 100 } }],
+      stateRules: [
+        { property: 'soil_moisture', to: 'sensors.humidityCenti', transform: { kind: 'multiply', factor: 100 } },
+      ],
       commandRules: [],
     },
   ],
 };
 
-describe('submit_mapping tool', () => {
-  it('returns schema errors and captures the invalid candidate', async () => {
-    const capture: SubmitCapture = { submitted: null };
-    const toolDef = createSubmitMappingTool(capture);
-    const result = await toolDef.handler({ version: 1, endpoints: [] } as never, {});
-    expect(result.isError).toBe(true);
-    expect(JSON.stringify(result.content)).toContain('schema errors');
+describe('submitMappingTool', () => {
+  it('publishes the live descriptor schema as its input schema', () => {
+    const tool = submitMappingTool();
+    expect(tool.name).toBe('submit_mapping');
+    expect(tool.input_schema.type).toBe('object');
+    // No `$schema` — that is metadata about the document, not the tool input.
+    expect(tool.input_schema).not.toHaveProperty('$schema');
+    // The whitelisted state paths ride along inside the schema, which is why
+    // the agent no longer needs a separate reference file.
+    expect(JSON.stringify(tool.input_schema)).toContain('sensors.humidityCenti');
+  });
+});
+
+describe('evaluateSubmission', () => {
+  it('returns schema errors and captures the invalid candidate', () => {
+    const capture = { submitted: null as unknown };
+    const outcome = evaluateSubmission({ version: 1, endpoints: [] }, capture);
+    expect(outcome.accepted).toBe(false);
+    expect(outcome.isError).toBe(true);
+    expect(outcome.text).toContain('schema errors');
     expect(capture.submitted).toEqual({ version: 1, endpoints: [] });
   });
 
-  it('returns sanity problems for schema-valid but incoherent descriptors', async () => {
-    const capture: SubmitCapture = { submitted: null };
-    const toolDef = createSubmitMappingTool(capture);
+  it('returns sanity problems for schema-valid but incoherent descriptors', () => {
+    const capture = { submitted: null as unknown };
     const incoherent = {
       ...validDescriptor,
       endpoints: [{ ...validDescriptor.endpoints[0]!, primary: 'temperature' }],
     };
-    const result = await toolDef.handler(incoherent as never, {});
-    expect(result.isError).toBe(true);
-    expect(JSON.stringify(result.content)).toContain('sanity checks');
+    const outcome = evaluateSubmission(incoherent, capture);
+    expect(outcome.accepted).toBe(false);
+    expect(outcome.text).toContain('sanity checks');
   });
 
-  it('accepts a valid descriptor and captures the parsed data', async () => {
-    const capture: SubmitCapture = { submitted: null };
-    const toolDef = createSubmitMappingTool(capture);
-    const result = await toolDef.handler(validDescriptor as never, {});
-    expect(result.isError).toBeUndefined();
-    expect(JSON.stringify(result.content)).toContain('accepted');
-    // The capture holds the *parsed* descriptor — schema defaults applied.
+  it('accepts a valid descriptor and captures the parsed data', () => {
+    const capture = { submitted: null as unknown };
+    const outcome = evaluateSubmission(validDescriptor, capture);
+    expect(outcome.accepted).toBe(true);
+    expect(outcome.isError).toBe(false);
     expect(capture.submitted).toEqual({
       ...validDescriptor,
       endpoints: [{ ...validDescriptor.endpoints[0]!, customFields: [] }],
@@ -114,7 +218,7 @@ describe('submit_mapping tool', () => {
   });
 });
 
-// ── The research workspace ────────────────────────────────────────────────
+// ── The research brief ────────────────────────────────────────────────────
 
 const probe: Z2mDevice = {
   ieee_address: '0x00124b0022000001',
@@ -128,54 +232,199 @@ const probe: Z2mDevice = {
   },
 };
 
-describe('buildAgentContext', () => {
-  const dataDir = mkdtempSync(path.join(tmpdir(), 'gethome-agent-ctx-'));
-
-  afterAll(() => rmSync(dataDir, { recursive: true, force: true }));
-
-  it('writes the research files and cleans up after itself', () => {
-    const context = buildAgentContext(dataDir, 'abcdef0123456789', probe, mapExposes(probe), [
-      { soil_moisture: 41 },
-    ]);
-
-    const device = JSON.parse(readFileSync(path.join(context.dir, 'device.json'), 'utf8')) as Record<string, unknown>;
-    expect(device.vendor).toBe('Tuya');
-    expect(device.model).toBe('TS0601_soil');
-
-    const samples = JSON.parse(readFileSync(path.join(context.dir, 'samples.json'), 'utf8')) as unknown[];
-    expect(samples).toEqual([{ soil_moisture: 41 }]);
-
-    const staticMapping = JSON.parse(
-      readFileSync(path.join(context.dir, 'static-mapping.json'), 'utf8'),
-    ) as Record<string, unknown>;
-    expect(Array.isArray(staticMapping.endpoints)).toBe(true);
-
-    const reference = readFileSync(path.join(context.dir, 'schema-reference.md'), 'utf8');
-    expect(reference).toContain('MappingDescriptor');
-    expect(reference).toContain('sensors.humidityCenti');
-
-    context.cleanup();
-    expect(existsSync(context.dir)).toBe(false);
+describe('zigbee2mqttDevicePage', () => {
+  it('names the page after the model, which is how those pages are generated', () => {
+    expect(zigbee2mqttDevicePage('LLKZMK12LM')).toBe('https://www.zigbee2mqtt.io/devices/LLKZMK12LM.html');
   });
 
-  it('omits static-mapping.json when there is no static profile', () => {
-    const context = buildAgentContext(dataDir, 'ffff000011112222', probe, null, []);
-    expect(existsSync(path.join(context.dir, 'device.json'))).toBe(true);
-    expect(existsSync(path.join(context.dir, 'static-mapping.json'))).toBe(false);
-    context.cleanup();
+  it('escapes model strings that would break the path', () => {
+    expect(zigbee2mqttDevicePage('ABC/DEF')).toBe('https://www.zigbee2mqtt.io/devices/ABC%2FDEF.html');
+  });
+
+  it('has nothing to offer when the model is unknown', () => {
+    expect(zigbee2mqttDevicePage(null)).toBeNull();
+    expect(zigbee2mqttDevicePage('  ')).toBeNull();
   });
 });
 
-describe('ensureAgentHome', () => {
-  it('creates a stable claude-agent home under the data dir', () => {
-    const dataDir = mkdtempSync(path.join(tmpdir(), 'gethome-agent-home-'));
-    try {
-      const home = ensureAgentHome(dataDir);
-      expect(home).toBe(path.resolve(dataDir, 'claude-agent'));
-      expect(existsSync(home)).toBe(true);
-      expect(ensureAgentHome(dataDir)).toBe(home);
-    } finally {
-      rmSync(dataDir, { recursive: true, force: true });
-    }
+describe('buildMappingUserPrompt', () => {
+  it('carries everything the old file workspace did', () => {
+    const prompt = buildMappingUserPrompt(probe, mapExposes(probe), [{ soil_moisture: 41 }]);
+
+    // device.json
+    expect(prompt).toContain('Tuya');
+    expect(prompt).toContain('TS0601_soil');
+    expect(prompt).toContain('soil_moisture');
+    // samples.json
+    expect(prompt).toContain('{"soil_moisture":41}');
+    // static-mapping.json
+    expect(prompt).toContain('uncovered');
+    expect(prompt).toContain('genericCustomFields');
   });
+
+  it('names the device page so web_fetch can reach it at all', () => {
+    // The server-side fetch tool only fetches URLs already in the
+    // conversation, so an unmentioned page is unreachable however well the
+    // model guesses.
+    const prompt = buildMappingUserPrompt(probe, mapExposes(probe), []);
+    expect(prompt).toContain('https://www.zigbee2mqtt.io/devices/TS0601_soil.html');
+  });
+
+  it('bounds how many payloads it inlines', () => {
+    const many = Array.from({ length: 12 }, (_, i) => ({ soil_moisture: i }));
+    const prompt = buildMappingUserPrompt(probe, mapExposes(probe), many);
+    expect(prompt).toContain('{"soil_moisture":11}');
+    expect(prompt).not.toContain('{"soil_moisture":0}');
+  });
+});
+
+// ── The agent loop ────────────────────────────────────────────────────────
+
+const log = {
+  debug: () => undefined,
+  info: () => undefined,
+  warn: () => undefined,
+  error: () => undefined,
+} as unknown as Logger;
+
+interface FakeReply {
+  stop_reason: string;
+  content: unknown[];
+  usage?: Record<string, unknown>;
+}
+
+/**
+ * Replies the mocked API hands back, and a snapshot of the request body it
+ * received each time. Snapshots matter: the loop appends to one `messages`
+ * array across turns, so inspecting the live object after the run would only
+ * ever show its final state.
+ */
+const replies: FakeReply[] = [];
+const sent: Record<string, any>[] = [];
+
+function reply(partial: FakeReply): FakeReply {
+  return { usage: { input_tokens: 100, output_tokens: 100 }, ...partial };
+}
+
+function submitCall(input: unknown, id = 'toolu_1') {
+  return { type: 'tool_use', id, name: 'submit_mapping', input };
+}
+
+function queue(...next: FakeReply[]): void {
+  replies.push(...next);
+}
+
+describe('the mapping agent loop', () => {
+  beforeEach(() => {
+    createMock.mockReset();
+    replies.length = 0;
+    sent.length = 0;
+    createMock.mockImplementation(async (params: unknown) => {
+      sent.push(JSON.parse(JSON.stringify(params)) as Record<string, any>);
+      // The last queued reply repeats, so a test can either script a sequence
+      // or pin one answer and let the loop run into a guardrail.
+      return replies.length > 1 ? replies.shift()! : replies[0]!;
+    });
+  });
+
+  const agent = () => createMappingAgent({ secret: 'sk-ant-api03-test' }, null, log);
+
+  it('returns the descriptor the model submitted', async () => {
+    queue(reply({ stop_reason: 'tool_use', content: [submitCall(validDescriptor)] }));
+    const result = await agent().generate('system', 'user');
+    expect(result).toMatchObject({ version: 1 });
+    expect(sent).toHaveLength(1);
+  });
+
+  it('sends the research tools and caches the system prompt', async () => {
+    queue(reply({ stop_reason: 'tool_use', content: [submitCall(validDescriptor)] }));
+    await agent().generate('system prompt', 'user');
+
+    const toolTypes = sent[0]!.tools.map((tool: Record<string, unknown>) => tool.type ?? tool.name);
+    expect(toolTypes).toEqual(['web_search_20260209', 'web_fetch_20260209', 'submit_mapping']);
+    expect(sent[0]!.system[0].cache_control).toEqual({ type: 'ephemeral' });
+    expect(sent[0]!.model).toBe(DEFAULT_MODEL);
+  });
+
+  it('resumes a paused turn without inserting a user message', async () => {
+    queue(
+      reply({ stop_reason: 'pause_turn', content: [{ type: 'text', text: 'searching' }] }),
+      reply({ stop_reason: 'tool_use', content: [submitCall(validDescriptor)] }),
+    );
+    const result = await agent().generate('system', 'user');
+    expect(result).toMatchObject({ version: 1 });
+
+    // The resumed request must end on the assistant turn — the API picks up
+    // from the trailing server_tool_use block, and a "continue" breaks it.
+    expect(sent[1]!.messages.at(-1).role).toBe('assistant');
+  });
+
+  it('hands validation errors back so the model can resubmit', async () => {
+    queue(
+      reply({ stop_reason: 'tool_use', content: [submitCall({ version: 1, endpoints: [] })] }),
+      reply({ stop_reason: 'tool_use', content: [submitCall(validDescriptor, 'toolu_2')] }),
+    );
+    const result = await agent().generate('system', 'user');
+    expect(result).toMatchObject({ version: 1 });
+
+    const toolResult = sent[1]!.messages.at(-1).content[0];
+    expect(toolResult.type).toBe('tool_result');
+    expect(toolResult.is_error).toBe(true);
+    expect(toolResult.content).toContain('schema errors');
+  });
+
+  it('keeps the last invalid submission so the mapper can cache the rejection', async () => {
+    queue(reply({ stop_reason: 'tool_use', content: [submitCall({ version: 1, endpoints: [] })] }));
+    const result = await agent().generate('system', 'user');
+    expect(result).toEqual({ version: 1, endpoints: [] });
+  });
+
+  it('nudges a prose answer, then gives up rather than burning the turn budget', async () => {
+    queue(reply({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'I think…' }] }));
+    await expect(agent().generate('system', 'user')).rejects.toThrow(/without calling submit_mapping/);
+    // The first turn plus two reminders — not all 40.
+    expect(sent).toHaveLength(3);
+    expect(sent[1]!.messages.at(-1).content).toContain('submit_mapping');
+  });
+
+  it('stops at the turn cap', async () => {
+    queue(reply({ stop_reason: 'tool_use', content: [submitCall({ nonsense: true }, 'toolu_x')] }));
+    await agent().generate('system', 'user');
+    expect(sent).toHaveLength(AGENT_MAX_TURNS);
+  });
+
+  it('stops when the run has spent its cost cap', async () => {
+    // ~$0.55 of Opus-tier output per turn, so the $2 cap lands well before
+    // the turn cap does.
+    queue(
+      reply({
+        stop_reason: 'tool_use',
+        content: [submitCall({ nonsense: true }, 'toolu_x')],
+        usage: { input_tokens: 1000, output_tokens: 22_000 },
+      }),
+    );
+    await agent().generate('system', 'user');
+    expect(sent.length).toBeLessThan(AGENT_MAX_TURNS);
+    expect(sent.length).toBeGreaterThan(1);
+  });
+
+  it('refuses a model that cannot drive the research tools', async () => {
+    const wrong = createMappingAgent({ secret: 'sk-ant-api03-test' }, 'claude-haiku-4-5', log);
+    await expect(wrong.generate('system', 'user')).rejects.toThrow(/cannot run the mapping agent/);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('reports run statistics to the mapper', async () => {
+    queue(reply({ stop_reason: 'tool_use', content: [submitCall(validDescriptor)] }));
+    const stats: unknown[] = [];
+    await agent().generate('system', 'user', { onStats: (s) => stats.push(s) });
+    expect(stats).toHaveLength(1);
+    expect(stats[0]).toMatchObject({ numTurns: 1 });
+    expect((stats[0] as { costUsd: number }).costUsd).toBeGreaterThan(0);
+  });
+
+  // How the loop turns an API failure into an AiUnavailableError is covered by
+  // the `classifyApiError` cases above rather than here: a mocked API that
+  // rejects makes Vitest report the rejection as a test failure even when the
+  // loop catches it and throws its own error, which would mask the assertion.
 });

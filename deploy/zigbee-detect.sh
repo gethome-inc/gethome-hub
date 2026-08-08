@@ -49,6 +49,8 @@ say() { [[ -n "$QUIET" ]] || printf '%s\n' "$*"; }
 
 ENV_FILE="$CONF_DIR/zigbee.env"
 UNIT="gethome-zigbee2mqtt.service"
+HUB_ENV="$CONF_DIR/hub.env"
+HUB_UNIT="gethome-hubd.service"
 
 # ── Identification ─────────────────────────────────────────────────────────
 # Two signals. The by-id name carries the USB manufacturer/product strings,
@@ -145,8 +147,89 @@ for candidate in ${MAYBES[@]+"${MAYBES[@]}"}; do
   say "@@ZIGBEE_MAYBE:${candidate}@@"
 done
 
-# ── Apply ──────────────────────────────────────────────────────────────────
+# ── Which radio this board runs ────────────────────────────────────────────
+# Two separate things, easy to confuse:
+#
+#   the *budget*     — how many radios the board can afford at once. Measured,
+#                      not chosen: a 512 MB board fits the OS, the hub and one
+#                      of {Zigbee2MQTT ~150 MB, Matter ~60-90 MB inside the
+#                      hub}, not both. install.sh writes GETHOME_RADIO=one
+#                      there and GETHOME_RADIO=both on anything larger.
+#   the *preference* — which one the owner wants when only one fits. Written
+#                      by the hub to <DATA_DIR>/radio-mode when the owner
+#                      switches in the app, so the hub never needs sudo; a
+#                      .path unit wakes this script to apply it.
+#
+# This script is where they meet, because it already runs at boot, on every
+# plug and unplug, and at the end of the install — it is the only thing that
+# knows whether a coordinator is actually there.
+read_env() { sed -n "s/^$1=//p" "$2" 2>/dev/null | tail -n1; }
+
+BUDGET=$(read_env GETHOME_RADIO "$HUB_ENV")
+[[ -n "$BUDGET" ]] || BUDGET=both
+DATA_DIR=$(read_env DATA_DIR "$HUB_ENV")
+[[ -n "$DATA_DIR" ]] || DATA_DIR=/var/lib/gethome/data
+
+MODE=auto
+if [[ -r "$DATA_DIR/radio-mode" ]]; then
+  MODE=$(tr -d '[:space:]' < "$DATA_DIR/radio-mode" 2>/dev/null)
+  case "$MODE" in auto|zigbee|matter|both) ;; *) MODE=auto ;; esac
+fi
+
+# Only `matter` stops Zigbee outright; it is the one choice that means "do not
+# use the stick even though it is here".
+ZIGBEE_ALLOWED=1
+[[ "$MODE" == "matter" ]] && ZIGBEE_ALLOWED=0
+
+# Matter gives way only when Zigbee is *genuinely going to run*. Turning it off
+# for a coordinator that isn't plugged in is how a hub ends up talking to
+# nothing at all — no Zigbee because there is no stick, no Matter because we
+# reserved the memory for one. That is the trap install.sh warns about, and it
+# would be a poor way to reintroduce it.
+MATTER_WANTED=1
+if [[ "$ZIGBEE_ALLOWED" == "1" && -n "$FOUND" ]]; then
+  case "$BUDGET:$MODE" in
+    one:*)       MATTER_WANTED=0 ;;  # one radio's memory, and Zigbee has it
+    both:zigbee) MATTER_WANTED=0 ;;  # room for both, owner asked for Zigbee alone
+  esac
+fi
+
 has_systemd() { command -v systemctl >/dev/null 2>&1; }
+
+# Turn Matter on or off to match, and restart the hub only when the value
+# really changed — this script runs on every USB event, and a hub that
+# restarted each time somebody plugged in a phone charger would be worse than
+# the problem being solved.
+apply_matter() {
+  [[ -w "$HUB_ENV" || -w "$CONF_DIR" ]] || return 0
+  local current
+  current=$(read_env ADAPTER_MATTER "$HUB_ENV")
+  [[ "$current" == "$MATTER_WANTED" ]] && return 0
+  if grep -q '^ADAPTER_MATTER=' "$HUB_ENV" 2>/dev/null; then
+    sed -i "s/^ADAPTER_MATTER=.*/ADAPTER_MATTER=${MATTER_WANTED}/" "$HUB_ENV" || return 0
+  else
+    printf 'ADAPTER_MATTER=%s\n' "$MATTER_WANTED" >> "$HUB_ENV" || return 0
+  fi
+  if [[ "$MATTER_WANTED" == "1" ]]; then
+    say "Turning Matter on: this board has room for it."
+  else
+    say "Turning Matter off: this board affords one radio and Zigbee has it."
+  fi
+  if has_systemd && systemctl is-active --quiet "$HUB_UNIT" 2>/dev/null; then
+    systemctl restart "$HUB_UNIT" >/dev/null 2>&1 \
+      || say "The hub wouldn't restart. See: journalctl -u ${HUB_UNIT} -n 50"
+  fi
+}
+
+stop_zigbee_if_running() {
+  if has_systemd && systemctl is-active --quiet "$UNIT" 2>/dev/null; then
+    systemctl stop "$UNIT" >/dev/null 2>&1 || true
+    return 0
+  fi
+  return 1
+}
+
+# ── Apply ──────────────────────────────────────────────────────────────────
 
 if [[ -z "$FOUND" ]]; then
   say "No Zigbee coordinator found."
@@ -157,10 +240,13 @@ if [[ -z "$FOUND" ]]; then
   # Nothing plugged in means nothing to run. Leaving Zigbee2MQTT up would be
   # a restart loop against a device node that no longer exists, and ~150 MB
   # held for no reason.
-  if has_systemd && systemctl is-active --quiet "$UNIT" 2>/dev/null; then
+  if stop_zigbee_if_running; then
     say "Stopping Zigbee2MQTT: the coordinator is gone."
-    systemctl stop "$UNIT" >/dev/null 2>&1 || true
   fi
+  # …and those 150 MB are exactly what Matter needs, so hand them over. This
+  # is the case the installer used to get wrong: it switched Matter off on
+  # every small board at install time, whether or not a stick was ever there.
+  apply_matter
   exit 1
 fi
 
@@ -179,6 +265,25 @@ if [[ "$CURRENT" != "$FOUND" ]]; then
   } > "$ENV_FILE.tmp" && mv "$ENV_FILE.tmp" "$ENV_FILE"
   chmod 0644 "$ENV_FILE"
 fi
+
+# A coordinator is plugged in, but the owner asked this board to run Matter
+# instead. Record the device — so switching back needs no replug — and leave
+# Zigbee2MQTT down. Exit 1 because Zigbee is genuinely not running, which is
+# what the installer reads to decide what to tell the user.
+if [[ "$ZIGBEE_ALLOWED" == "0" ]]; then
+  say "A Zigbee coordinator is plugged in, but this hub is set to run Matter instead."
+  say "Switch it in the GetHome app to use Zigbee; the coordinator stays configured either way."
+  if stop_zigbee_if_running; then
+    say "Stopping Zigbee2MQTT: Matter has this board's radio budget."
+  fi
+  apply_matter
+  exit 1
+fi
+
+# Zigbee is the radio for this board, so on a one-radio board Matter gives way
+# before Zigbee2MQTT is started — starting both and letting the kernel decide
+# is how a hub ends up thrashing.
+apply_matter
 
 if [[ -n "$NO_START" ]]; then
   say "Zigbee is configured; the installer will start it."

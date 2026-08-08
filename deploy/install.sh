@@ -34,6 +34,10 @@
 #   @@ZIGBEE_MAYBE:<device>@@  a USB serial device that might be a coordinator
 #                              but doesn't identify itself as one
 #   @@PAIRING:<code>@@  the pairing code, when the hub is unclaimed
+#   @@CAPABILITIES:<list>@@  what this hub ended up able to talk to, e.g.
+#                            "Zigbee, Wi-Fi and MQTT" — a 512 MB board runs one
+#                            radio at a time, so this is not the same on every
+#                            machine
 #   @@DONE@@            the install finished successfully
 #
 # The same vocabulary is reused by GetHome Studio's SD-card path, whose
@@ -205,7 +209,11 @@ Z2M_HEAP_MB=512
 HUB_MEM_HIGH=""
 Z2M_MEM_HIGH=""
 Z2M_MEM_MAX=""
-MATTER_DEFAULT=1
+HUB_V8_FLAGS=""
+# How many radios this board can afford at once — measured, not chosen. The
+# owner's preference between them, when only one fits, is a separate thing and
+# lives in <DATA_DIR>/radio-mode; gethome-zigbee-detect is where the two meet.
+RADIO_BUDGET=both
 if [[ "$RAM_MB" -gt 0 && "$RAM_MB" -le 1024 ]]; then
   SMALL_BOARD=1
   HUB_HEAP_MB=160
@@ -213,12 +221,21 @@ if [[ "$RAM_MB" -gt 0 && "$RAM_MB" -le 1024 ]]; then
   HUB_MEM_HIGH="MemoryHigh=200M"
   Z2M_MEM_HIGH="MemoryHigh=170M"
   Z2M_MEM_MAX="MemoryMax=230M"
-  # Matter and Zigbee do not both fit here. Loading matter.js costs ~59 MB, and
-  # Zigbee2MQTT is another ~150: 70 (OS) + 178 + 150 is more than a Zero 2 W
-  # has, while 70 + 119 + 150 fits with room for zram. Zigbee is the one the
-  # user has hardware for on day one, so Matter is the one that waits — and the
-  # warning below says so, with the single line that turns it back on.
-  MATTER_DEFAULT=0
+  # One radio, not none. Matter and Zigbee do not both fit — 70 (OS) + 178
+  # (hub with Matter) + 150 (Zigbee2MQTT) is more than a Zero 2 W has, while
+  # 70 + 119 + 150 fits with room for zram. But this used to be written as
+  # "small board, no Matter", which was wrong in the common case: Zigbee2MQTT
+  # is only started when a coordinator is actually plugged in, so a Zero 2 W
+  # without a stick was holding 150 MB for a process that never ran *and*
+  # going without Matter. gethome-zigbee-detect now owns that call, because it
+  # is the only thing that knows whether the stick is there — at boot, on
+  # every plug and unplug, and at the end of this install.
+  RADIO_BUDGET=one
+  # Measured on this hub: with Matter loaded these two take its resident set
+  # from 176 MB to 139 MB, for about half a second of extra startup and no
+  # change in request latency. They have to be argv — NODE_OPTIONS refuses
+  # --optimize-for-size outright ("not allowed in NODE_OPTIONS").
+  HUB_V8_FLAGS="--optimize-for-size --max-semi-space-size=1"
 fi
 
 # ── System packages ────────────────────────────────────────────────────────
@@ -628,15 +645,17 @@ NODE_OPTIONS=--max-old-space-size=${HUB_HEAP_MB}
 MDNS_BACKEND=auto
 ADAPTER_ZIGBEE=1
 ADAPTER_MQTT=1
-# Matter. Loading it costs about 60 MB on top of the hub, which a board with
-# 512 MB cannot pay at the same time as Zigbee2MQTT. Set this to 1 and
-# \`systemctl restart gethome-hubd\` to turn it on.
-ADAPTER_MATTER=${MATTER_DEFAULT}
+# How many radios this board affords at once: 'both' where there is memory for
+# Matter and Zigbee2MQTT together, 'one' on a 512 MB board. Not a preference —
+# the owner's choice between them lives in <DATA_DIR>/radio-mode and is applied
+# by gethome-zigbee-detect, which is the only thing that knows whether a
+# coordinator is actually plugged in.
+GETHOME_RADIO=${RADIO_BUDGET}
+# Matter. Managed by gethome-zigbee-detect on a one-radio board — editing it by
+# hand there will be overwritten the next time something is plugged in. Switch
+# radios from the GetHome app instead.
+ADAPTER_MATTER=1
 ENV
-fi
-
-if [[ "$MATTER_DEFAULT" == "0" ]]; then
-  warn "Matter is switched off on this board. It and Zigbee together need more memory than ${RAM_MB} MB: the hub is about 120 MB on its own, Matter adds about 60, and Zigbee2MQTT another 150. Zigbee, Wi-Fi and MQTT devices all work. To turn Matter on anyway, set ADAPTER_MATTER=1 in /etc/gethome/hub.env and run 'sudo gethome-hubctl restart' — a Raspberry Pi 4 or 5 runs both comfortably."
 fi
 
 $SUDO tee /etc/systemd/system/gethome-hubd.service >/dev/null <<UNIT
@@ -653,7 +672,7 @@ Group=${SERVICE_USER}
 SupplementaryGroups=dialout
 WorkingDirectory=${HUB_DIR}
 EnvironmentFile=${CONF_DIR}/hub.env
-ExecStart=${NODE_BIN} ${HUB_DIR}/dist/index.js
+ExecStart=${NODE_BIN} ${HUB_V8_FLAGS} ${HUB_DIR}/dist/index.js
 Restart=always
 RestartSec=5
 # The hub must come back from a crash, but must not spin: five failures inside
@@ -722,9 +741,26 @@ UNIT
 
 $SUDO install -m 0755 "$HUB_DIR/deploy/gethome-hubctl" /usr/local/bin/gethome-hubctl 2>/dev/null || true
 
+# Switching radios from the app, without giving the hub root. The hub writes
+# one word to a file in its own data directory — which it already owns — and
+# this wakes the detector, which is where the decision lives anyway. No sudo
+# rule, no systemctl from the service user, nothing new to lock down.
+$SUDO tee /etc/systemd/system/gethome-radio.path >/dev/null <<UNIT
+[Unit]
+Description=Apply the radio the GetHome Hub owner picked
+
+[Path]
+PathModified=${DATA_DIR}/radio-mode
+Unit=gethome-zigbee-detect.service
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable gethome-hubd.service >/dev/null 2>&1
 $SUDO systemctl enable gethome-zigbee-detect.service >/dev/null 2>&1 || true
+$SUDO systemctl enable --now gethome-radio.path >/dev/null 2>&1 || true
 $SUDO systemctl restart gethome-hubd.service \
   || fail "The hub is installed but wouldn't start. See: journalctl -u gethome-hubd -n 50"
 
@@ -805,15 +841,33 @@ if [[ -x /usr/local/lib/gethome-zigbee-detect.sh ]]; then
   fi
 fi
 
-# The one combination worth spelling out, because on its own each half sounds
-# minor and together they mean the hub can barely talk to anything: a 512 MB
-# board runs no Matter, and with no coordinator it runs no Zigbee either. That
-# leaves MQTT integrations, which is not what somebody setting up a smart home
-# is expecting. Better said now than discovered when the first bulb won't pair.
-if [[ -z "$ZIGBEE_READY" && "$MATTER_DEFAULT" == "0" ]]; then
-  warn "This hub has no Zigbee coordinator plugged in, and Matter is off because ${RAM_MB} MB isn't enough for both. As it stands it can only talk to MQTT devices. Plugging in a Zigbee stick (SONOFF ZBDongle-E/P, ConBee, SkyConnect) starts Zigbee within seconds, with no reboot — that is the usual answer on this board. A Raspberry Pi 4 or 5 runs Matter and Zigbee together instead."
+# What this hub can actually talk to, said in as many words. The radio decision
+# was made by the detector a few lines up, so read back what it settled on
+# rather than repeating what we guessed before the hardware was known.
+MATTER_ON=$(sed -n 's/^ADAPTER_MATTER=//p' "$CONF_DIR/hub.env" 2>/dev/null | tail -n1)
+CAPS=""
+[[ -n "$ZIGBEE_READY" ]] && CAPS="Zigbee"
+if [[ "$MATTER_ON" == "1" ]]; then
+  [[ -n "$CAPS" ]] && CAPS="$CAPS, Matter" || CAPS="Matter"
+fi
+[[ -n "$CAPS" ]] && CAPS="$CAPS, Wi-Fi and MQTT" || CAPS="Wi-Fi and MQTT"
+# Additive marker: GetHome Studio shows this on the hub page. Unknown markers
+# are ignored by older builds, so adding one is safe.
+printf '@@CAPABILITIES:%s@@\n' "$CAPS"
+say "This hub can talk to: ${CAPS}."
+
+if [[ "$RADIO_BUDGET" == "one" ]]; then
+  # One radio at a time, so say which one has it and how to change that. The
+  # combination worth spelling out is the one where the hub can barely talk to
+  # anything, and it no longer happens by default — Matter takes the board when
+  # no coordinator is plugged in.
+  if [[ -n "$ZIGBEE_READY" ]]; then
+    say "This board has memory for one radio at a time, and the Zigbee coordinator you plugged in has it, so Matter is off. You can switch to Matter in the GetHome app — the coordinator stays configured, and Zigbee devices come back when you switch back."
+  else
+    say "This board has memory for one radio at a time, and with no Zigbee coordinator plugged in that radio is Matter. Plug a stick in whenever you like (SONOFF ZBDongle-E/P, ConBee, SkyConnect) and Zigbee takes over by itself, with no reboot."
+  fi
 elif [[ -z "$ZIGBEE_READY" ]]; then
-  say "No Zigbee coordinator is plugged in, so this hub starts with Matter and MQTT devices. Plug one in whenever you like — Zigbee starts by itself, with no reboot."
+  say "No Zigbee coordinator is plugged in, so this hub starts with Matter, Wi-Fi and MQTT devices. Plug one in whenever you like — Zigbee starts by itself, with no reboot."
 fi
 
 printf '@@DONE@@\n'

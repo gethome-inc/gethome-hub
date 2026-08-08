@@ -8,20 +8,19 @@ export interface LazyAiAssistOptions {
   db: Db;
   settings: SettingsService;
   log: Logger;
-  dataDir: string;
 }
 
 /**
  * A `ZigbeeAiAssist` that doesn't load the AI stack until it is actually going
  * to use it.
  *
- * `AiDeviceMapper` pulls in `@anthropic-ai/claude-agent-sdk`, which is the
- * second-largest thing in the dependency graph and does nothing at all without
- * a credential — and the hub ships with no credential, so on a 512 MB board the
- * common case was paying for it in memory forever and never running it. The
- * import happens on the first device that needs a mapping *and* only when a key
- * has been configured; the check is re-done every call, so a key added through
- * the API later still works without a restart.
+ * This mattered enormously when `AiDeviceMapper` pulled in the Claude Agent
+ * SDK — 46 MB of resident memory on import, for a stack that does nothing at
+ * all without a credential, on a board that has ~76 MB of headroom. The
+ * Anthropic SDK it now uses is small enough that the saving is modest, but the
+ * seam is worth keeping for its second property: the credential check runs on
+ * every call, so a key added through the API later starts working without a
+ * restart, and a hub with no key never constructs an API client at all.
  */
 export function lazyAiAssist(options: LazyAiAssistOptions): ZigbeeAiAssist {
   let mapper: ZigbeeAiAssist | null = null;
@@ -36,9 +35,7 @@ export function lazyAiAssist(options: LazyAiAssistOptions): ZigbeeAiAssist {
         const configured = await options.settings.getAiSettings();
         if (!configured.hasKey) return null;
         const { AiDeviceMapper } = await import('./mapper.js');
-        mapper = new AiDeviceMapper(options.db, options.settings, options.log, {
-          dataDir: options.dataDir,
-        });
+        mapper = new AiDeviceMapper(options.db, options.settings, options.log);
       }
       return mapper.requestMapping(device, staticProfile, requestOptions);
     },
