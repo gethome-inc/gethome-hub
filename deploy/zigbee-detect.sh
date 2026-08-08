@@ -63,7 +63,11 @@ CERTAIN_IDS=(
   "1cf1:0032" # dresden elektronik ConBee III
   "0451:16a8" # Texas Instruments CC2531
   "0451:16c8" # Texas Instruments CC2538
-  "303a:4001" # Nabu Casa Home Assistant Connect ZBT-2
+  # Deliberately *not* the Home Assistant Connect ZBT-2's 303a:4001. That vendor
+  # id is Espressif's and is on a great many ESP32 boards; zigbee-herdsman won't
+  # act on the pair alone either — it also requires the manufacturer string and
+  # a path regex. The name rule below matches `Nabu_Casa_ZBT-2` anyway, so the
+  # id would add nothing but a chance to adopt somebody's dev board.
 )
 
 # Generic USB-serial bridges. Sonoff and friends use these, but so does half
