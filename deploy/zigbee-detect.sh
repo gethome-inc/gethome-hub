@@ -62,6 +62,8 @@ CERTAIN_IDS=(
   "1cf1:0030" # dresden elektronik ConBee II
   "1cf1:0032" # dresden elektronik ConBee III
   "0451:16a8" # Texas Instruments CC2531
+  "0451:16c8" # Texas Instruments CC2538
+  "303a:4001" # Nabu Casa Home Assistant Connect ZBT-2
 )
 
 # Generic USB-serial bridges. Sonoff and friends use these, but so does half
@@ -98,9 +100,17 @@ classify() {
   local name ids
   name=$(basename "$device" | tr '[:upper:]' '[:lower:]')
 
+  # Checked against zigbee-herdsman's own device table by running every example
+  # by-id path it documents through this function: the five names on the second
+  # line were the gap. Without `cc2538` a Texas Instruments CC2538 was invisible
+  # here — neither its name nor its `0451:16c8` matched anything — so it could
+  # not even be offered; the other four fell through to their generic bridge id
+  # and were demoted to `maybe`, which asks the user about hardware we can in
+  # fact identify by name.
   case "$name" in
     *zigbee*|*zbdongle*|*conbee*|*raspbee*|*slzb*|*smlight*|*deconz*|*zzh*|\
-    *skyconnect*|*nabu_casa*|*sonoff*|*cc2531*|*cc2652*|*cc1352*|*efr32*|*ezsp*)
+    *skyconnect*|*nabu_casa*|*sonoff*|*cc2531*|*cc2652*|*cc1352*|*efr32*|*ezsp*|\
+    *cc2538*|*zigate*|*tubeszb*|*zigstar*|*electrolama*)
       printf 'certain'; return ;;
   esac
 

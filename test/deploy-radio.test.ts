@@ -242,3 +242,65 @@ describe('defaults', () => {
     expect(readFileSync(path.join(conf, 'hub.env'), 'utf8')).toContain('ADAPTER_MATTER=1');
   });
 });
+
+/**
+ * Which USB devices the detector is willing to adopt on its own.
+ *
+ * The names below are the example by-id paths that `zigbee-herdsman` documents
+ * in its own device table — the library Zigbee2MQTT uses to talk to a
+ * coordinator — so this asks the question that matters: of the hardware
+ * upstream supports, how much does *this hub* pick up without asking?
+ *
+ * Running that table through these rules is what found the gap they now close.
+ * A Texas Instruments CC2538 matched no name and no id, so it could not be
+ * adopted *or* offered; ZiGate, TubesZB, ZigStar and Electrolama fell through
+ * to their generic bridge id and were demoted to "unidentified", which asks the
+ * user about hardware that names itself perfectly well.
+ *
+ * The tables are duplicated in GetHome Studio (`Models/ZigbeeModels.swift`),
+ * which classifies devices during its SSH preflight — before this script is on
+ * the machine. This is the guard that stops the two drifting.
+ */
+describe('what counts as a coordinator', () => {
+  function adopts(deviceName: string): boolean {
+    const conf = tmp();
+    const data = tmp();
+    const scan = tmp();
+    writeFileSync(path.join(conf, 'hub.env'), `DATA_DIR=${data}\nGETHOME_RADIO=both\nADAPTER_MATTER=9\n`);
+    writeFileSync(path.join(scan, deviceName), '');
+    try {
+      execFileSync('bash', [SCRIPT, '--quiet', '--no-start'], {
+        env: { ...process.env, GETHOME_CONF: conf, GETHOME_ZIGBEE_SCAN_DIR: scan },
+        stdio: 'ignore',
+      });
+    } catch {
+      return false; // exit 1 — nothing was adopted
+    }
+    return readFileSync(path.join(conf, 'zigbee.env'), 'utf8').includes(deviceName);
+  }
+
+  // One per family, named exactly as upstream documents them.
+  it.each([
+    'usb-ITEAD_SONOFF_Zigbee_3.0_USB_Dongle_Plus_V2_20240122183357-if00',
+    'usb-Silicon_Labs_Sonoff_Zigbee_3.0_USB_Dongle_Plus_0001-if00-port0',
+    'usb-dresden_elektronik_ConBee_III_DE03188111-if00',
+    'usb-Nabu_Casa_SkyConnect_v1.0_3abe54797c91ed118f8e0d64a6c61111-if00-port0',
+    'usb-Nabu_Casa_ZBT-2_10B41DE58D6C-if00',
+    'usb-SMLIGHT_SMLIGHT_SLZB-06p7_82e43faf9872ed118b1c0d64a6c61111-if00-port0',
+    'usb-SONOFF_SONOFF_Dongle_Max_MG24_08965d6b0674ef11b2f4e61e313510fd-if00-port0',
+    'usb-Texas_Instruments_TI_CC2531_USB_CDC___0X00124B0018ED3DDF-if00',
+    'usb-Texas_Instruments_CC2538_USB_CDC-if00',
+    'usb-FTDI_ZiGate_ZIGATE+-if00-port0',
+    'usb-ZEPHYR_Zigbee_NCP_54ACCFAFA6DAD111-if00',
+  ])('adopts %s', (device) => {
+    expect(adopts(device)).toBe(true);
+  });
+
+  it('refuses a bare USB-serial bridge, however plausible', () => {
+    // The SMLight SLZB-07's CP2102N variant announces itself with this exact
+    // string, and so does a 3D printer. Being unable to tell them apart is the
+    // reason a `maybe` is reported to the user instead of being configured:
+    // handing somebody's printer to Zigbee2MQTT is worse than asking.
+    expect(adopts('usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_0001-if00-port0')).toBe(false);
+  });
+});

@@ -69,16 +69,33 @@ before it writes anything at all.
 ### The Zigbee coordinator
 
 A USB Zigbee coordinator is what lets the hub pair Zigbee devices — bulbs,
-sensors, buttons, the great majority of affordable smart-home hardware. Known-good
-sticks:
+sensors, buttons, the great majority of affordable smart-home hardware.
 
-- **SONOFF ZBDongle-E** or **ZBDongle-P**
-- **dresden elektronik ConBee II / ConBee III**
-- **Home Assistant SkyConnect / Connect ZBT-1**
-
-Plug it in at any time — before or after installing. The hub notices within
-seconds and starts Zigbee by itself, with no reboot
+**Buy any of these and there is nothing to configure.** Plug it in at any time,
+before or after installing: the hub identifies it by name, sets it up and starts
+Zigbee within seconds, with no reboot and nothing to re-run
 ([docs/zigbee.md](docs/zigbee.md#finding-the-coordinator)).
+
+| | |
+|---|---|
+| **SONOFF** | ZBDongle-E, ZBDongle-P, Dongle Plus MG24, Dongle Lite MG21, Dongle Max, Dongle-PP10 |
+| **dresden elektronik** | ConBee II, ConBee III |
+| **Home Assistant** | SkyConnect, Connect ZBT-1, Connect ZBT-2 |
+| **SMLIGHT** | SLZB-06 / 06p7 / 06p10 / 06m, SLZB-07, SLZB-07p7, SLZB-07mg24 |
+| **Texas Instruments** | CC2531, CC2538, CC2652 / CC1352 boards, LaunchPads |
+| **Also identified** | ZiGate, TubesZB, ZigStar, Electrolama zzh, Nordic Zigbee NCP |
+
+That list is not a promise about *these* products only — it is the hardware the
+hub can recognise **without asking you**. Anything Zigbee2MQTT supports works;
+the difference is that a stick built on a bare USB-serial bridge (CP210x, CH340,
+FTDI) with no name of its own cannot be told apart from a 3D printer or a UPS,
+so the hub offers it to you instead of adopting it, and GetHome Studio lets you
+pick it. Nothing is lost by declining — you can point the installer at it later
+with `--zigbee /dev/serial/by-id/...`.
+
+The recognised list is checked against `zigbee-herdsman`'s own device table —
+the library Zigbee2MQTT uses to talk to a coordinator — by
+`test/deploy-radio.test.ts`, so it stays honest as that table grows.
 
 **Without a coordinator you get Matter, Wi-Fi and MQTT devices only** — no
 Zigbee. That is a real limitation rather than a temporary one, so it is worth
