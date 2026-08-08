@@ -26,7 +26,8 @@
 #   @@DONE@@          the install finished successfully
 # Keep these stable — Studio's install screen is driven by them.
 #
-# This is the macOS sibling of deploy/install.sh (Linux/Raspberry Pi, Docker).
+# This is the macOS sibling of deploy/install.sh (Linux/Raspberry Pi). Neither
+# uses Docker: this one runs launchd agents, that one systemd units.
 
 set -euo pipefail
 
