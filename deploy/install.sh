@@ -8,9 +8,18 @@
 #   --dir /opt/gethome      install directory (default /opt/gethome)
 #   --branch main           branch to install from (default main)
 #   --build                 build from source even when a bundle exists
+#   --repo owner/name       take the bundle from this repository instead
+#   --token <token>         GitHub token, for a bundle in a private repository
 #
 # The script is idempotent: re-running updates the install and restarts the
 # services. It is also what the GetHome Studio app streams over SSH.
+#
+# The last two options exist for one job, and no real install ever passes them:
+# development happens in a private repository and only `main` is mirrored into
+# the public one, so installing an *unreleased* branch on real hardware means
+# fetching a bundle a public URL cannot reach. `docs/release.md` has the whole
+# model. Everything a user or Studio does defaults to the public repository and
+# needs no credential at all.
 #
 # ── There is no Docker here, on purpose ────────────────────────────────────
 # The hub used to run as four containers with Postgres underneath. On a
@@ -52,12 +61,14 @@
 
 set -euo pipefail
 
-REPO_SLUG="gethome-inc/gethome-hub"
-REPO_URL="https://github.com/${REPO_SLUG}.git"
+REPO_SLUG="${GETHOME_INSTALL_REPO:-gethome-inc/gethome-hub}"
 INSTALL_DIR="/opt/gethome"
 BRANCH="main"
 ZIGBEE_ADAPTER=""
 FORCE_BUILD=""
+# Empty for every install that isn't ours: a public bundle is a plain file on a
+# CDN and takes no credential. See the note in the header.
+INSTALL_TOKEN="${GETHOME_INSTALL_TOKEN:-}"
 
 NODE_VERSION="22.22.2"
 Z2M_VERSION="2"
@@ -73,9 +84,14 @@ while [[ $# -gt 0 ]]; do
     --dir) INSTALL_DIR="$2"; shift 2 ;;
     --branch) BRANCH="$2"; shift 2 ;;
     --build) FORCE_BUILD=1; shift ;;
+    --repo) REPO_SLUG="$2"; shift 2 ;;
+    --token) INSTALL_TOKEN="$2"; shift 2 ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
+
+# Derived after the parse, so `--repo` reaches the clone fallback too.
+REPO_URL="https://github.com/${REPO_SLUG}.git"
 
 # One directory per installed build, and a symlink saying which one runs.
 #
@@ -369,10 +385,60 @@ step download "Downloading the hub…"
 # every minute another chance for a dropped connection to lose the lot. CI
 # builds one tarball per architecture instead, native modules included.
 BUNDLE_TAG="bundle-$(printf '%s' "$BRANCH" | tr '/' '-')"
-BUNDLE_URL="https://github.com/${REPO_SLUG}/releases/download/${BUNDLE_TAG}/gethome-hub-${NODE_ARCH}.tar.gz"
+BUNDLE_ASSET="gethome-hub-${NODE_ARCH}.tar.gz"
+BUNDLE_URL="https://github.com/${REPO_SLUG}/releases/download/${BUNDLE_TAG}/${BUNDLE_ASSET}"
 BUNDLE_TGZ="/tmp/gethome-hub-bundle.tar.gz"
 INSTALLED=""
 STAGING=""
+
+# Downloading the bundle, from a public release or a private one.
+#
+# A public asset is a plain file on a CDN: one unauthenticated GET of
+# `releases/download/<tag>/<asset>`, which is what every real install does and
+# what this function is when no token is set.
+#
+# A private asset is not reachable that way *at all* — that URL 404s however
+# good the token is, which is the whole trap. It takes two API calls: one for
+# the release, to turn the asset's name into its numeric id, then one for the
+# asset with `Accept: application/octet-stream`, which is what makes the API
+# answer with bytes instead of JSON describing them.
+#
+# The token only ever travels in a header, never in a URL. That is deliberate:
+# this script's output is streamed to Studio and kept in logs, and the line
+# above prints the URL it is fetching.
+fetch_bundle() {
+  local out="$1"
+  if [[ -z "$INSTALL_TOKEN" ]]; then
+    curl -fsSL --retry 5 --retry-delay 5 --retry-connrefused "$BUNDLE_URL" -o "$out"
+    return
+  fi
+
+  local api="https://api.github.com/repos/${REPO_SLUG}/releases"
+  local release_json asset_id
+  release_json="$(mktemp)"
+  if ! curl -fsSL --retry 5 --retry-delay 5 --retry-connrefused \
+      -H "Authorization: Bearer ${INSTALL_TOKEN}" \
+      -H "Accept: application/vnd.github+json" \
+      "${api}/tags/${BUNDLE_TAG}" -o "$release_json"; then
+    rm -f "$release_json"
+    return 1
+  fi
+  # Node is already installed by the step above this one, so parsing the
+  # response needs no jq on a freshly imaged card.
+  asset_id="$("$NODE_BIN" -e '
+    const fs = require("node:fs");
+    const { assets = [] } = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    const asset = assets.find((candidate) => candidate.name === process.argv[2]);
+    process.stdout.write(asset ? String(asset.id) : "");
+  ' "$release_json" "$BUNDLE_ASSET" 2>/dev/null || true)"
+  rm -f "$release_json"
+  [[ -n "$asset_id" ]] || return 1
+
+  curl -fsSL --retry 5 --retry-delay 5 --retry-connrefused \
+    -H "Authorization: Bearer ${INSTALL_TOKEN}" \
+    -H "Accept: application/octet-stream" \
+    "${api}/assets/${asset_id}" -o "$out"
+}
 
 # What `current` points at right now, so a failed install can go back to it.
 PREVIOUS_RELEASE=""
@@ -383,8 +449,12 @@ fi
 $SUDO mkdir -p "$RELEASES_DIR"
 
 if [[ -z "$FORCE_BUILD" ]]; then
-  say "Fetching ${BUNDLE_URL}…"
-  if curl -fsSL --retry 5 --retry-delay 5 --retry-connrefused "$BUNDLE_URL" -o "$BUNDLE_TGZ" && [[ -s "$BUNDLE_TGZ" ]]; then
+  if [[ -n "$INSTALL_TOKEN" ]]; then
+    say "Fetching ${BUNDLE_ASSET} from ${REPO_SLUG} (${BUNDLE_TAG}) with a token…"
+  else
+    say "Fetching ${BUNDLE_URL}…"
+  fi
+  if fetch_bundle "$BUNDLE_TGZ" && [[ -s "$BUNDLE_TGZ" ]]; then
     STAGING="$RELEASES_DIR/.incoming.$$"
     $SUDO rm -rf "$STAGING"
     $SUDO mkdir -p "$STAGING"
@@ -413,8 +483,18 @@ if [[ -z "$INSTALLED" ]]; then
   command -v git >/dev/null 2>&1 || $SUDO apt-get install -y -qq git >/dev/null 2>&1
   STAGING="$RELEASES_DIR/.incoming.$$"
   $SUDO rm -rf "$STAGING"
-  $SUDO git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$STAGING" \
-    || fail "Could not clone ${REPO_URL} — check the network and try again."
+  if [[ -n "$INSTALL_TOKEN" ]]; then
+    # `-c` goes before the subcommand on purpose: `git clone -c …` writes the
+    # setting into the new repository's config, where the header would outlive
+    # the install. It is visible in this machine's process list for the length
+    # of the clone, which is a machine the caller already has root on.
+    $SUDO git -c "http.extraheader=Authorization: Bearer ${INSTALL_TOKEN}" \
+      clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$STAGING" \
+      || fail "Could not clone ${REPO_URL} — check the network and the token, and try again."
+  else
+    $SUDO git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$STAGING" \
+      || fail "Could not clone ${REPO_URL} — check the network and try again."
+  fi
   BUILD_LOG=$(mktemp)
   if ! ( cd "$STAGING" && $SUDO env PATH="$(dirname "$NODE_BIN"):$PATH" "$NPM_BIN" ci --no-audit --no-fund --maxsockets 5 --fetch-retries 5 \
         && $SUDO env PATH="$(dirname "$NODE_BIN"):$PATH" "$NPM_BIN" run build \

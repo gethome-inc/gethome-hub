@@ -7,16 +7,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 GetHome Hub — a local smart-home hub (TypeScript / Node.js 22, ESM) that hosts
 Matter, Zigbee (via Zigbee2MQTT), and MQTT devices behind one canonical device
 schema and serves them to the GetHome apps over a local REST + WebSocket API.
-One hub = one home; sharing = granting members access to the hub. This repo is
-**public** (PolyForm Noncommercial + commercial licensing) — never commit
-secrets, keys, or non-public ecosystem details.
+One hub = one home; sharing = granting members access to the hub.
+
+**The code is public; the development is not.** Work happens in the private
+`gethome-hub-dev`, and `mirror.yml` fast-forwards `main` into the public
+`gethome-inc/gethome-hub` (PolyForm Noncommercial + commercial licensing), which
+keeps its slug because `install.sh`, `gethome-hubctl` and Studio all hard-code
+it. So everything on this branch's `main` is published minutes after it merges —
+**never commit secrets, keys, or non-public ecosystem details**, exactly as when
+this tree was public directly. `docs/release.md` is canonical.
 
 The `docs/` files are canonical for their domains; read the relevant one before
 touching that code: `architecture.md` (module boundaries, data flow),
 `device-schema.md` (**the** capability/unit/wire contract), `api.md`,
 `zigbee.md`, `matter.md`, `mqtt-integrations.md` (public integrator
-convention), `ai-adaptation.md`, `ecosystem.md`, `macos.md` (native macOS
-deployment — launchd + `deploy/hubctl`).
+convention), `ai-adaptation.md`, `ecosystem.md`, `release.md` (the two
+repositories, the mirror, testing a branch on hardware), `macos.md` (native
+macOS deployment — launchd + `deploy/hubctl`).
 
 **There is no Docker and no database server anywhere any more.** Linux runs
 systemd units (`deploy/install.sh`, `deploy/gethome-hubctl`), macOS runs launchd
@@ -259,9 +266,16 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   wrong and expensive. Studio blocks the same two cases earlier still —
   `SDCardInspector.is64Bit` reads the card before anything is written, and is
   three-valued so an image it can't place is never blocked.
-- **Branch bundles are disposable; `v*` releases are not.** Every push publishes
-  a rolling `bundle-<branch>` prerelease — assets, tag **and notes** all move —
-  which is what makes `--branch` testable on hardware. The "and notes" is a
+- **Branch bundles are disposable; `v*` releases are not.** A push to `main` or
+  to a `hw/**` branch publishes a rolling `bundle-<branch>` prerelease — assets,
+  tag **and notes** all move — which is what makes `--branch` testable on
+  hardware. The branch list is deliberately a closed set and not `["**"]` any
+  more: a prerelease is named after its branch and carries the head SHA, so a
+  wildcard published every feature branch by name the moment it was pushed. That
+  is the privacy half of the split above, and `test/release-pipeline.test.ts`
+  pins it along with the mirror's refusal to force-push. Dev branches build in
+  the *private* repository instead, where `install.sh --repo … --token …`
+  installs them; `docs/release.md` has both paths. The "and notes" is a
   repair, not decoration: `bundle.yml` used to create the release only when it
   was missing and then upload with `--clobber`, so the notes and the tag kept
   naming whatever commit the branch *first* built while the tarballs beside them

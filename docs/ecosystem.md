@@ -4,9 +4,15 @@ GetHome Hub is one of three pieces:
 
 | Repository | What it is |
 |---|---|
-| [`gethome-hub`](https://github.com/gethome-inc/gethome-hub) (this repo, public) | The local hub server: Matter + Zigbee + MQTT devices behind one canonical schema, local REST/WS API, member sharing. Runs on a Mac mini, Raspberry Pi, or any Linux machine. |
+| [`gethome-hub`](https://github.com/gethome-inc/gethome-hub) (this project, public) | The local hub server: Matter + Zigbee + MQTT devices behind one canonical schema, local REST/WS API, member sharing. Runs on a Mac mini, Raspberry Pi, or any Linux machine. |
 | `gethome-ios` | The GetHome iOS app — the daily driver for controlling homes. Supports two home types: an Apple Home mirror (Matter accessories come in this way) and **hub homes** served by this project. |
 | `gethome-studio-macos` | GetHome Studio for macOS — the guided way to create a hub: it finds machines on your network, installs the hub on this Mac or onto a Raspberry Pi over SSH, walks through claiming, and manages hubs afterwards. |
+
+The hub's code is public; the work that produces it is not. Development happens
+in a private `gethome-hub-dev`, and `main` is mirrored into the public
+repository, which keeps the slug every installer and Studio hard-codes. That is
+the whole of the difference, and [release.md](release.md) is canonical for it —
+including how to install an unreleased branch on real hardware.
 
 ## Why a hub?
 

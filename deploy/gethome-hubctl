@@ -27,7 +27,7 @@ CONF_DIR="${GETHOME_CONF:-/etc/gethome}"
 INSTALL_DIR="${GETHOME_DIR:-/opt/gethome}"
 RELEASES_DIR="$INSTALL_DIR/releases"
 CURRENT_LINK="$INSTALL_DIR/current"
-REPO_SLUG="gethome-inc/gethome-hub"
+REPO_SLUG="${GETHOME_INSTALL_REPO:-gethome-inc/gethome-hub}"
 HUB_UNIT="gethome-hubd.service"
 Z2M_UNIT="gethome-zigbee2mqtt.service"
 DETECT_UNIT="gethome-zigbee-detect.service"
@@ -99,10 +99,17 @@ cmd_version() {
 }
 
 cmd_update() {
-  local branch="main"
+  local branch="main" repo="$REPO_SLUG" token="${GETHOME_INSTALL_TOKEN:-}"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --branch) branch="${2:-main}"; shift 2 ;;
+      # For updating a test hub that runs an unreleased branch from the private
+      # development repository; see docs/release.md. Neither is remembered
+      # between updates — the token is a credential and the hub's own env file
+      # is readable by the service user, so an update of a dev hub passes them
+      # again. A plain `update` always means the public repository.
+      --repo) repo="${2:-$REPO_SLUG}"; shift 2 ;;
+      --token) token="${2:-}"; shift 2 ;;
       *) shift ;;
     esac
   done
@@ -111,12 +118,24 @@ cmd_update() {
   # it beside the running build, flip the symlink, health-check the result and
   # roll back if it fails. A separate update path would be a second thing to
   # keep correct, and the one that gets less testing is the one that breaks.
-  echo "==> Updating from branch ${branch}…"
-  curl -fsSL "https://raw.githubusercontent.com/${REPO_SLUG}/${branch}/deploy/install.sh" \
-    -o /tmp/gethome-install.sh \
-    || die "couldn't download the installer for branch ${branch}."
+  echo "==> Updating from branch ${branch} of ${repo}…"
+  # raw.githubusercontent.com serves a private repository too, given a token in
+  # a header. The two calls are spelled out rather than built from an array so
+  # nothing can accidentally word-split a credential.
+  local raw="https://raw.githubusercontent.com/${repo}/${branch}/deploy/install.sh"
+  if [[ -n "$token" ]]; then
+    curl -fsSL -H "Authorization: Bearer ${token}" "$raw" -o /tmp/gethome-install.sh \
+      || die "couldn't download the installer for branch ${branch} — check the token."
+  else
+    curl -fsSL "$raw" -o /tmp/gethome-install.sh \
+      || die "couldn't download the installer for branch ${branch}."
+  fi
   [[ -s /tmp/gethome-install.sh ]] || die "the installer download was empty — is '${branch}' a real branch?"
-  bash /tmp/gethome-install.sh --branch "$branch"
+  if [[ -n "$token" ]]; then
+    bash /tmp/gethome-install.sh --branch "$branch" --repo "$repo" --token "$token"
+  else
+    bash /tmp/gethome-install.sh --branch "$branch" --repo "$repo"
+  fi
   local status=$?
   rm -f /tmp/gethome-install.sh
   return $status
@@ -288,8 +307,10 @@ gethome-hubctl — control the GetHome Hub
   claim --name "Your name" [--device "This Mac"]
                               become the owner and print a token
   version                     which build is running, and what else is installed
-  update [--branch main]      install the latest build; goes back by itself if
-                              the new one doesn't start
+  update [--branch main] [--repo owner/name] [--token <token>]
+                              install the latest build; goes back by itself if
+                              the new one doesn't start. --repo/--token are for
+                              a test hub on an unreleased branch only.
   rollback                    return to the previous build
   uninstall                   remove everything
 USAGE

@@ -21,12 +21,29 @@
 # Every bundle carries a VERSION stamp, which becomes the release directory
 # name on the Pi and the build id the API reports — so "which build is this
 # hub running" has one answer from CI all the way to the app.
+#
+# ── Two repositories share this file ───────────────────────────────────────
+# Development happens in a private repository and only `main` is mirrored into
+# the public one (`mirror.yml`, `docs/release.md`). This file runs in both, and
+# the branch list above is half of what keeps the split honest: it used to be
+# `["**"]`, which published a prerelease *named after the branch* on every push
+# — so a feature branch pushed to the public repository would announce itself,
+# tag and all, before anything was released. `main` and `v*` are the release
+# paths; `hw/**` is the deliberate escape hatch for a branch you want on real
+# hardware and don't mind being visible.
+#
+# The other half is the job guard below: in the private repository only `hw/**`
+# and a manual dispatch build, because a private `main` or `v*` build would be a
+# duplicate of the public release the mirror is about to trigger — paid for in
+# private Actions minutes, arm64 runner included. Dev bundles land in the
+# private repository's own releases, where `install.sh --repo … --token …`
+# fetches them.
 
 name: Publish bundle
 
 on:
   push:
-    branches: ["**"]
+    branches: [main, "hw/**"]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -36,6 +53,13 @@ permissions:
 jobs:
   bundle:
     name: Bundle ${{ matrix.arch }}
+    # In the public repository every trigger above publishes. In the private one
+    # only the opt-in hardware-test branches and a manual dispatch do — see the
+    # note at the top. `release` needs this job, so skipping it skips the upload.
+    if: >-
+      github.repository == 'gethome-inc/gethome-hub'
+      || startsWith(github.ref, 'refs/heads/hw/')
+      || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -124,6 +148,11 @@ jobs:
       # real hardware possible: install.sh derives the tag from `--branch`, so
       # a card written from a feature branch installs that branch's build. The
       # tag has slashes flattened because a release tag is a git ref.
+      #
+      # Which branches reach here is decided by the triggers and the guard
+      # above, not here: `main` and `hw/**` publicly, `hw/**` and dispatches
+      # privately. This step publishes to whichever repository it is running in,
+      # so a private build's assets are private without any special casing.
       #
       # These are disposable — `bundle-cleanup.yml` deletes each one when its
       # branch goes away, so they don't pile up. A `v*` tag takes the other

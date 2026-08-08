@@ -178,13 +178,13 @@ out-of-memory kill at the end of it regardless.
 only on a machine with more than 1 GB of memory. Below that it stops and says
 why, because starting a build that cannot finish is worse than an error.
 
-**Two kinds of release, and only one of them lasts.** Pushing any branch
-publishes a *rolling prerelease* named `bundle-<branch>`; its assets, its tag
-and its description all move on every push, so the release page always names the
-commit that is actually inside it. `bundle-cleanup.yml` deletes the whole thing
-once the branch is gone, so they don't accumulate. Pushing a `v*` tag publishes
-an immutable release under that tag, which nothing re-points and nothing ever
-deletes.
+**Two kinds of release, and only one of them lasts.** Pushing `main` — or a
+`hw/**` hardware-test branch — publishes a *rolling prerelease* named
+`bundle-<branch>`; its assets, its tag and its description all move on every
+push, so the release page always names the commit that is actually inside it.
+`bundle-cleanup.yml` deletes the whole thing once the branch is gone, so they
+don't accumulate. Pushing a `v*` tag publishes an immutable release under that
+tag, which nothing re-points and nothing ever deletes.
 
 That is what makes a branch testable on real hardware: `install.sh --branch X`
 looks for `bundle-X`, and GetHome Studio passes `StudioFeature.hubBranch`
@@ -217,6 +217,12 @@ HUB_TEST_MQTT=1 npm test                  # + end-to-end broker round-trip (need
 ```
 
 Node.js ≥ 22 required. There is no cloud: everything runs from this repo.
+
+The code is public; the development is not. Branches, pull requests and reviews
+live in a private repository, and `main` is mirrored here on every merge — so
+this repository is the code, the releases and the issue tracker, and it is not
+where the work happens. [docs/release.md](docs/release.md) covers the whole
+model, including how an unreleased branch gets onto real hardware.
 
 ## Architecture (short version)
 

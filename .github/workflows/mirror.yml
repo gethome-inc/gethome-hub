@@ -1,0 +1,99 @@
+# Publishes `main` — and only `main` — into the public repository, so the code
+# stays public while the work that produced it does not.
+#
+#   gethome-hub-dev (private)   branches, pull requests, reviews, Dependabot, CI
+#   gethome-hub     (public)    main, v* tags, and the bundles a Pi downloads
+#
+# **The public slug cannot move**, which is what shapes everything here: three
+# unauthenticated URLs hard-code `gethome-inc/gethome-hub` and are baked into
+# things already in the world — `raw.githubusercontent.com/…/main/deploy/
+# install.sh` (README, `gethome-hubctl update`, GetHome Studio's SSH install),
+# the bundle download in `install.sh`, and the clone fallback beside it. So the
+# public repository keeps its name and its releases, and development moves
+# somewhere else. `docs/release.md` is canonical.
+#
+# ── Fast-forward, never force ──────────────────────────────────────────────
+# The mirror pushes commits, it does not rewrite them, and it squashes nothing.
+# That is not tidiness: `bundle.yml` stamps `<version>-<short sha>-<ref>` into
+# VERSION, which names the release directory on the Pi and becomes `build` in
+# `GET /hub`. Squashing or rebasing on the way out would leave every hub in the
+# field reporting a commit that exists in no public repository, and would break
+# the `git clone` fallback in `install.sh`, which clones public `main` by name.
+#
+# A non-fast-forward push therefore fails the job on purpose. It means the
+# public repository has a commit the private one doesn't — a direct commit, or a
+# pull request merged over there. The fix is to fetch it into the private repo
+# and merge it, not to force the mirror.
+
+name: Mirror to public
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Two pushes racing each other would make the second fail its fast-forward
+# check for no better reason than ordering.
+concurrency:
+  group: mirror-public
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    # A no-op in the public repository: there is nothing to mirror when this
+    # *is* the mirror. Job-level `if` cannot read `env`, so the slug is spelled
+    # out — the same literal `bundle.yml` uses for the opposite test.
+    if: github.repository != 'gethome-inc/gethome-hub'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # A fast-forward push needs the history it fast-forwards over.
+          fetch-depth: 0
+          # The push below carries its own credential; leaving the checkout
+          # token in .git/config as well would just be a second way in.
+          persist-credentials: false
+
+      - name: Push to the public repository
+        env:
+          PUBLIC_REPO: gethome-inc/gethome-hub
+          MIRROR_TOKEN: ${{ secrets.PUBLIC_MIRROR_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${MIRROR_TOKEN}" ]]; then
+            echo "PUBLIC_MIRROR_TOKEN is not set, so nothing can be published." >&2
+            echo "Create a fine-grained token with Contents: read and write on" >&2
+            echo "${PUBLIC_REPO}, and add it to this repository as that secret." >&2
+            exit 1
+          fi
+
+          # Only these two refs are ever allowed out. `workflow_dispatch` can be
+          # run from any ref, and without this check dispatching it from a
+          # feature branch would publish that branch as public `main` — the one
+          # mistake this whole workflow exists to prevent.
+          if [[ "${GITHUB_REF_TYPE}" == "branch" && "${GITHUB_REF_NAME}" != "main" ]]; then
+            echo "Refusing to mirror '${GITHUB_REF_NAME}': only main and v* tags go public." >&2
+            exit 1
+          fi
+
+          # In the URL rather than a header because that is what `git push` over
+          # HTTPS takes without a credential helper. Nothing below echoes it,
+          # and `set -x` is deliberately absent.
+          remote="https://x-access-token:${MIRROR_TOKEN}@github.com/${PUBLIC_REPO}.git"
+
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            # The commit a v* tag points at was mirrored by the `main` push that
+            # preceded it. If it wasn't, this push fails — which is right: a
+            # version tag on a commit the public repository has never seen would
+            # publish an immutable release of code nobody can read.
+            echo "Mirroring tag ${GITHUB_REF_NAME} to ${PUBLIC_REPO}."
+            git push "$remote" "refs/tags/${GITHUB_REF_NAME}"
+          else
+            echo "Mirroring ${GITHUB_SHA} to ${PUBLIC_REPO} main."
+            git push "$remote" "${GITHUB_SHA}:refs/heads/main"
+          fi

@@ -1,10 +1,16 @@
 # Deletes the per-branch bundle prereleases that `bundle.yml` creates, once the
 # branch they were built for is gone.
 #
-# Every push to any branch publishes a `bundle-<branch>` prerelease so a card
-# can be pointed at that branch and tested on real hardware. Nothing removed
-# them, so the repository's tag list grew by one per branch forever. This is the
-# other half of that mechanism.
+# A push to `main` or to a `hw/**` hardware-test branch publishes a
+# `bundle-<branch>` prerelease so a card can be pointed at that branch and
+# tested on real hardware. Nothing removed them, so the repository's tag list
+# grew by one per branch forever. This is the other half of that mechanism.
+#
+# It runs in both repositories unchanged: the private one accumulates
+# `bundle-hw-*` prereleases for dev branches, the public one has `bundle-main`
+# and whatever `hw/**` branches were pushed there deliberately. The default
+# branch's build is protected by name below, so `bundle-main` is never a
+# candidate in either.
 #
 # Two triggers, because they cover different failures:
 #
