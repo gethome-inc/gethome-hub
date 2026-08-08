@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -294,6 +294,34 @@ describe('what counts as a coordinator', () => {
     'usb-ZEPHYR_Zigbee_NCP_54ACCFAFA6DAD111-if00',
   ])('adopts %s', (device) => {
     expect(adopts(device)).toBe(true);
+  });
+
+  /**
+   * Zigbee2MQTT is handed the node the by-id name resolves to, not the by-id
+   * name itself. Since 1.41 it will not guess an adapter type, and its
+   * discovery matches the configured port against `SerialPort.list()`, which
+   * reports real device nodes — so a by-id path matches nothing and it exits
+   * with `No valid USB adapter found` while the coordinator sits right there.
+   * Reproduced against zigbee-herdsman 10.8.0 with a real dongle's port data.
+   *
+   * The by-id name stays as `ZIGBEE_ADAPTER`: it is the stable identity, and
+   * what tells a different stick from the same stick renumbered.
+   */
+  it('hands Zigbee2MQTT the resolved node, and keeps by-id as the identity', () => {
+    const conf = tmp();
+    const data = tmp();
+    const scan = tmp();
+    const node = path.join(tmp(), 'ttyACM0');
+    writeFileSync(node, '');
+    symlinkSync(node, path.join(scan, CERTAIN_NAME));
+    writeFileSync(path.join(conf, 'hub.env'), `DATA_DIR=${data}\nGETHOME_RADIO=both\nADAPTER_MATTER=9\n`);
+    execFileSync('bash', [SCRIPT, '--quiet', '--no-start'], {
+      env: { ...process.env, GETHOME_CONF: conf, GETHOME_ZIGBEE_SCAN_DIR: scan },
+      stdio: 'ignore',
+    });
+    const env = readFileSync(path.join(conf, 'zigbee.env'), 'utf8');
+    expect(env, 'Zigbee2MQTT gets the node').toContain(`ZIGBEE2MQTT_CONFIG_SERIAL_PORT=${node}`);
+    expect(env, 'we keep the by-id name').toContain(`ZIGBEE_ADAPTER=${path.join(scan, CERTAIN_NAME)}`);
   });
 
   it('refuses a bare USB-serial bridge, however plausible', () => {

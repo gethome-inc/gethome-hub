@@ -281,8 +281,38 @@ say "@@ZIGBEE_FOUND:${FOUND}@@"
 say "Zigbee coordinator: ${FOUND}"
 
 mkdir -p "$CONF_DIR"
+
+# ── Two paths for the same stick, and each is used for what it is good at ──
+# `FOUND` is the stable `/dev/serial/by-id/…` name. It survives reboots and
+# replugging, so it stays our record of *which* device this is.
+#
+# Zigbee2MQTT gets the resolved node (`/dev/ttyACM0`) instead, and that is not a
+# preference — it is the difference between working and not. Since 1.41 it will
+# not guess an adapter type, and its discovery matches the configured port
+# against `SerialPort.list()`, which reports real device nodes. A by-id path
+# equals none of them, every port is skipped, and it exits with
+# `USB adapter discovery error (No valid USB adapter found)` — with a
+# coordinator sitting right there, correctly identified by this script.
+# Reproduced against zigbee-herdsman 10.8.0 with a real dongle's port data.
+#
+# Setting `serial.adapter` would also work and would keep the by-id path, but it
+# is the worse fix twice over: it means keeping a copy of upstream's device
+# table here, and with a by-id path the *options* lookup still misses, so the
+# `rtscts` some adapters need is silently not applied. Handing over the resolved
+# node lets upstream identify the stick from its own table, correctly, including
+# those options.
+#
+# The instability of `/dev/ttyACM*` is what by-id exists to avoid, and it is
+# handled rather than ignored: this script re-runs at boot and on every USB plug
+# and unplug, `gethome-zigbee2mqtt` is never enabled on its own, and the compare
+# below covers the resolved path too — so a renumbered node is rewritten and the
+# service restarted before it can matter.
+FOUND_NODE=$(readlink -f "$FOUND" 2>/dev/null || true)
+[[ -n "$FOUND_NODE" && -e "$FOUND_NODE" ]] || FOUND_NODE="$FOUND"
+
 CURRENT=$(sed -n 's/^ZIGBEE_ADAPTER=//p' "$ENV_FILE" 2>/dev/null | head -n1)
-if [[ "$CURRENT" != "$FOUND" ]]; then
+CURRENT_NODE=$(sed -n 's/^ZIGBEE2MQTT_CONFIG_SERIAL_PORT=//p' "$ENV_FILE" 2>/dev/null | head -n1)
+if [[ "$CURRENT" != "$FOUND" || "$CURRENT_NODE" != "$FOUND_NODE" ]]; then
   # The pinned line is written with `if`, not `[[ … ]] && echo`, and that is
   # not style. A group's exit status is its *last* command's, so the `&&`
   # form made the whole `{ … }` return 1 whenever nothing was pinned — which
@@ -295,8 +325,11 @@ if [[ "$CURRENT" != "$FOUND" ]]; then
   if {
     echo "# Written by gethome-zigbee-detect. Editing GETHOME_ZIGBEE_PINNED here"
     echo "# forces a particular device; everything else is detected."
+    echo "# ZIGBEE_ADAPTER is the stable by-id name — which device this is."
+    echo "# SERIAL_PORT is the node it resolves to, which is what Zigbee2MQTT's"
+    echo "# adapter discovery can actually match. See the note in the script."
     echo "ZIGBEE_ADAPTER=${FOUND}"
-    echo "ZIGBEE2MQTT_CONFIG_SERIAL_PORT=${FOUND}"
+    echo "ZIGBEE2MQTT_CONFIG_SERIAL_PORT=${FOUND_NODE}"
     if [[ -n "$PINNED" ]]; then echo "GETHOME_ZIGBEE_PINNED=${PINNED}"; fi
   } > "$ENV_FILE.tmp" && mv "$ENV_FILE.tmp" "$ENV_FILE"; then
     chmod 0644 "$ENV_FILE"
@@ -340,9 +373,12 @@ if ! has_systemd; then
 fi
 
 # A changed device path needs a restart, not a start: the running process is
-# holding the old one.
-if [[ "$CURRENT" != "$FOUND" ]] && systemctl is-active --quiet "$UNIT" 2>/dev/null; then
-  say "The coordinator moved to ${FOUND}; restarting Zigbee2MQTT."
+# holding the old one. Either path changing counts — the by-id name means a
+# different stick, the node means the same stick renumbered, and Zigbee2MQTT is
+# configured with the node.
+if [[ "$CURRENT" != "$FOUND" || "$CURRENT_NODE" != "$FOUND_NODE" ]] \
+   && systemctl is-active --quiet "$UNIT" 2>/dev/null; then
+  say "The coordinator moved to ${FOUND_NODE}; restarting Zigbee2MQTT."
   systemctl restart "$UNIT" >/dev/null 2>&1 || true
 elif ! systemctl is-active --quiet "$UNIT" 2>/dev/null; then
   say "Starting Zigbee2MQTT…"

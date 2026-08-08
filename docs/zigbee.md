@@ -78,6 +78,33 @@ into Zigbee2MQTT's own `configuration.yaml` — that file holds the network key
 and the paired-device list, and rewriting it on a replug would lose the user's
 whole Zigbee network.
 
+**Two paths for one stick, and each is used for what it is good at.**
+`ZIGBEE_ADAPTER` in `/etc/gethome/zigbee.env` is the stable `by-id` name: it is
+our record of *which* device this is, and it survives reboots and replugging.
+`ZIGBEE2MQTT_CONFIG_SERIAL_PORT` is the node that name resolves to
+(`/dev/ttyACM0`), because that is the only form Zigbee2MQTT's adapter discovery
+can match.
+
+Since 1.41 Zigbee2MQTT will not guess an adapter type. With no `serial.adapter`
+set it discovers one by comparing the configured port against
+`SerialPort.list()`, which reports real device nodes — so a `by-id` path equals
+none of them, every port is skipped, and it exits with `USB adapter discovery
+error (No valid USB adapter found)` while a correctly identified coordinator
+sits right there. Reproduced against zigbee-herdsman 10.8.0 with a real
+dongle's port data.
+
+Setting `serial.adapter` would also work and would keep the `by-id` path, and it
+is the worse fix twice over: it means keeping a copy of upstream's device table
+here, and with a `by-id` path the *options* lookup still misses, so the `rtscts`
+some adapters need is silently not applied. Handing over the resolved node lets
+upstream identify the stick from its own table, correctly, options included.
+
+The instability `by-id` exists to avoid is handled rather than ignored: the
+detector re-runs at boot and on every plug and unplug, `gethome-zigbee2mqtt` is
+never enabled on its own so it only ever starts after the detector has written
+the current node, and the change check covers both paths — a renumbered node is
+rewritten and the service restarted before it can matter.
+
 **One setting is the exception: `onboarding: false`.** Zigbee2MQTT 2.x offers a
 browser setup wizard and does not bring the Zigbee stack up until somebody
 completes it. On this hub there is nothing for that wizard to ask — the serial
