@@ -76,6 +76,14 @@ this hub is developed against — the stick in the Zero 2 W that the installer,
 the detector and the one-radio switch are exercised on — so it is the hardware
 that has had the most chances to go wrong here and be fixed.
 
+> **A new ZBDongle-E needs its firmware flashed once, and that is not our
+> quirk.** It ships running EmberZNet 6.10 (EZSP v8); Zigbee2MQTT needs EZSP 13
+> or newer (NCP 7.4.x), so out of the box it is found, identified and opened —
+> and then refuses at the last step. SONOFF's browser flasher at
+> <https://dongle.sonoff.tech> does it over the same USB port in about a minute,
+> and the hub tells you this in as many words rather than pointing you at a log.
+> Once flashed, it is done for good.
+
 Beyond that, what the hub can tell you is how *certainly* it will recognise a
 stick, and that has three honest levels:
 

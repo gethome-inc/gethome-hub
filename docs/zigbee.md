@@ -144,6 +144,34 @@ never a failure: the hub itself is fine and the coordinator stays configured.
 the SSH preflight — before this script exists on the machine. Change both
 together, or the two will disagree about the same hardware.
 
+### The coordinator's own firmware
+
+Identifying a stick and being able to talk to it are different things, and the
+gap between them has one near-universal cause.
+
+A **SONOFF ZBDongle-E ships running EmberZNet 6.10 (EZSP v8)**. Zigbee2MQTT's
+`ember` driver needs **EZSP 13 or newer — NCP firmware 7.4.x**. So a brand-new
+dongle gets all the way to a working serial link and then refuses:
+
+```
+zh:adapter:discovery: Matched adapter=ember path=/dev/ttyACM0, score=4
+zh:ember:uart:ash: ======== ASH connected ========
+zh:ember:ezsp: ======== EZSP started ========
+error: Adapter EZSP protocol version (8) is not supported by Host [13-19]
+```
+
+Everything above that last line is the hub working correctly — the stick was
+found, identified, opened and answered. Only the firmware is behind.
+
+Flashing is a one-time job and needs no hardware: SONOFF's browser flasher at
+<https://dongle.sonoff.tech> does it over the same USB port, and the NCP images
+live at <https://github.com/itead/Sonoff_Zigbee_Dongle_Firmware>. The hub keeps
+running throughout; nothing else on it is affected.
+
+`install.sh` matches this case by name rather than pointing at the journal —
+the person watching the install is usually on another machine, where "check
+`journalctl`" is homework they cannot do.
+
 ### Zigbee or Matter on a small board
 
 A 512 MB board fits the operating system (~70 MB), the hub (~119 MB), and

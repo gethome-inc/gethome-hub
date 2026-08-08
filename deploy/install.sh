@@ -947,7 +947,26 @@ if [[ -n "$ZIGBEE_READY" ]]; then
       # A warning, never a failure: the hub itself is fine, and the coordinator
       # stays configured, so this is something to fix rather than something that
       # undoes the install.
-      warn "Zigbee2MQTT started but hasn't reached the coordinator. The hub works; Zigbee devices won't pair until it does. Check: journalctl -u gethome-zigbee2mqtt -n 50"
+      #
+      # And a *named* warning where we can manage it. "Check the journal" is
+      # homework for somebody watching this from another machine, and the one
+      # cause that is near-universal deserves better: a SONOFF ZBDongle-E ships
+      # from the factory running EmberZNet 6.10 (EZSP v8), while Zigbee2MQTT's
+      # ember driver needs EZSP 13 or newer — NCP firmware 7.4.x. So the very
+      # first thing a new owner of the coordinator this project recommends sees
+      # is a radio that answers and then refuses, once, until it is flashed.
+      Z2M_TAIL=$($SUDO journalctl -u gethome-zigbee2mqtt -n 80 --no-pager 2>/dev/null || true)
+      case "$Z2M_TAIL" in
+        *"EZSP protocol version"*"is not supported by Host"*)
+          warn "The Zigbee coordinator answered, but its firmware is too old for Zigbee2MQTT: it speaks EZSP v8 (EmberZNet 6.10) and the ember driver needs EZSP 13 or newer (NCP 7.4.x). SONOFF ZBDongle-E sticks ship this way — flashing it once fixes it for good, and everything else on this hub is unaffected. SONOFF's own browser flasher is at https://dongle.sonoff.tech and the NCP images are at https://github.com/itead/Sonoff_Zigbee_Dongle_Firmware"
+          ;;
+        *"No valid USB adapter found"*)
+          warn "Zigbee2MQTT could not identify the coordinator on ${ZIGBEE_ADAPTER:-the configured port}. If this is a generic USB-serial stick, Zigbee2MQTT needs to be told what it is. See: journalctl -u gethome-zigbee2mqtt -n 50"
+          ;;
+        *)
+          warn "Zigbee2MQTT started but hasn't reached the coordinator. The hub works; Zigbee devices won't pair until it does. Check: journalctl -u gethome-zigbee2mqtt -n 50"
+          ;;
+      esac
       ZIGBEE_READY=""
     fi
   fi
