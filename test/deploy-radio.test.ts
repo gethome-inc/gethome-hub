@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -36,15 +36,39 @@ interface Outcome {
   matter: string;
   /** 0 when Zigbee is running, 1 when it is not — what install.sh reads. */
   exitCode: number;
+  /** `zigbee.env` as the script left it, or '' when it never wrote one. */
+  zigbeeEnv: string;
+  /** The device path the script settled on, from that file. */
+  serialPort: string;
+  /** Where the two env files live, so a test can look for what shouldn't. */
+  confDir: string;
 }
+
+/**
+ * A fake coordinator, staged the way a real one arrives.
+ *
+ * `GETHOME_ZIGBEE_SCAN_DIR` stands in for `/dev/serial/by-id`, and the file
+ * name is a real SONOFF's, which `classify()` calls `certain` from the name
+ * alone. Pinning would be the easier stage and is what this used to do — but
+ * pinning is exactly the path that worked while the ordinary one silently
+ * wrote nothing, so a test that pins proves the least interesting case.
+ *
+ * Passing a scan directory even when there is no coordinator is what makes
+ * the suite hermetic: without it the script reads the *host's* `/dev`, and a
+ * developer with a Zigbee stick in their laptop would see different results.
+ */
+const CERTAIN_NAME = 'usb-ITEAD_SONOFF_Zigbee_3.0_USB_Dongle_Plus_V2_20240122183357-if00';
 
 function decide(options: {
   budget: 'one' | 'both';
   mode?: 'auto' | 'zigbee' | 'matter';
   coordinator: boolean;
+  /** Stage it as an explicit `--zigbee` pin instead of a detected device. */
+  pinned?: boolean;
 }): Outcome {
   const conf = tmp();
   const data = tmp();
+  const scan = tmp();
   writeFileSync(
     path.join(conf, 'hub.env'),
     // ADAPTER_MATTER starts at a value the script can never want, so a test
@@ -53,18 +77,17 @@ function decide(options: {
   );
   if (options.mode) writeFileSync(path.join(data, 'radio-mode'), options.mode);
   if (options.coordinator) {
-    // A pinned path that exists is adopted as a coordinator, which is how a
-    // generic bridge gets used once a human has vouched for it — and the only
-    // way to stage one of these on a machine with no Zigbee hardware.
-    const fake = path.join(data, 'fake-coordinator');
-    writeFileSync(fake, '');
-    writeFileSync(path.join(conf, 'zigbee.env'), `GETHOME_ZIGBEE_PINNED=${fake}\n`);
+    const device = path.join(scan, CERTAIN_NAME);
+    writeFileSync(device, '');
+    if (options.pinned) {
+      writeFileSync(path.join(conf, 'zigbee.env'), `GETHOME_ZIGBEE_PINNED=${device}\n`);
+    }
   }
 
   let exitCode = 0;
   try {
     execFileSync('bash', [SCRIPT, '--quiet', '--no-start'], {
-      env: { ...process.env, GETHOME_CONF: conf },
+      env: { ...process.env, GETHOME_CONF: conf, GETHOME_ZIGBEE_SCAN_DIR: scan },
       stdio: 'ignore',
     });
   } catch (error) {
@@ -72,7 +95,14 @@ function decide(options: {
   }
   const env = readFileSync(path.join(conf, 'hub.env'), 'utf8');
   const matter = /^ADAPTER_MATTER=(.*)$/m.exec(env.split('\n').reverse().join('\n'))?.[1] ?? '';
-  return { matter, exitCode };
+  let zigbeeEnv = '';
+  try {
+    zigbeeEnv = readFileSync(path.join(conf, 'zigbee.env'), 'utf8');
+  } catch {
+    // Never written — which is the failure this file exists to catch.
+  }
+  const serialPort = /^ZIGBEE2MQTT_CONFIG_SERIAL_PORT=(.*)$/m.exec(zigbeeEnv)?.[1] ?? '';
+  return { matter, exitCode, zigbeeEnv, serialPort, confDir: conf };
 }
 
 describe('a board that affords one radio', () => {
@@ -80,18 +110,18 @@ describe('a board that affords one radio', () => {
     // The bug this fixes: the installer switched Matter off on every board
     // under 1 GB, so a Zero 2 W with no stick ran neither radio and reserved
     // 150 MB for a Zigbee2MQTT that was never started.
-    expect(decide({ budget: 'one', coordinator: false })).toEqual({ matter: '1', exitCode: 1 });
+    expect(decide({ budget: 'one', coordinator: false })).toMatchObject({ matter: '1', exitCode: 1 });
   });
 
   it('gives the board to Zigbee once a coordinator appears', () => {
-    expect(decide({ budget: 'one', mode: 'auto', coordinator: true })).toEqual({
+    expect(decide({ budget: 'one', mode: 'auto', coordinator: true })).toMatchObject({
       matter: '0',
       exitCode: 0,
     });
   });
 
   it('keeps Matter when the owner picked it, even with a coordinator plugged in', () => {
-    expect(decide({ budget: 'one', mode: 'matter', coordinator: true })).toEqual({
+    expect(decide({ budget: 'one', mode: 'matter', coordinator: true })).toMatchObject({
       matter: '1',
       exitCode: 1,
     });
@@ -100,7 +130,7 @@ describe('a board that affords one radio', () => {
   it('still runs Matter when the owner picked Zigbee but has not plugged a stick in', () => {
     // Otherwise the hub talks to nothing at all: no Zigbee because there is no
     // coordinator, no Matter because the memory was reserved for one.
-    expect(decide({ budget: 'one', mode: 'zigbee', coordinator: false })).toEqual({
+    expect(decide({ budget: 'one', mode: 'zigbee', coordinator: false })).toMatchObject({
       matter: '1',
       exitCode: 1,
     });
@@ -109,24 +139,71 @@ describe('a board that affords one radio', () => {
 
 describe('a board that affords both', () => {
   it('runs Matter and Zigbee together', () => {
-    expect(decide({ budget: 'both', mode: 'auto', coordinator: true })).toEqual({
+    expect(decide({ budget: 'both', mode: 'auto', coordinator: true })).toMatchObject({
       matter: '1',
       exitCode: 0,
     });
   });
 
   it('honours an owner who wants Zigbee alone', () => {
-    expect(decide({ budget: 'both', mode: 'zigbee', coordinator: true })).toEqual({
+    expect(decide({ budget: 'both', mode: 'zigbee', coordinator: true })).toMatchObject({
       matter: '0',
       exitCode: 0,
     });
   });
 
   it('honours an owner who wants Matter alone, leaving the coordinator configured', () => {
-    expect(decide({ budget: 'both', mode: 'matter', coordinator: true })).toEqual({
+    expect(decide({ budget: 'both', mode: 'matter', coordinator: true })).toMatchObject({
       matter: '1',
       exitCode: 1,
     });
+  });
+});
+
+describe('recording the coordinator', () => {
+  /**
+   * The regression this file was extended for.
+   *
+   * The write was `{ … [[ -n "$PINNED" ]] && echo … } > tmp && mv tmp real`.
+   * A group's exit status is its last command's, so with nothing pinned the
+   * group returned 1, the `mv` never ran, and `zigbee.env` was never created —
+   * leaving a perfect config in `zigbee.env.tmp` and one line of evidence,
+   * `chmod: cannot access …`. Zigbee2MQTT's EnvironmentFile is optional by
+   * design, so it started, found no serial port, and never reached the stick:
+   * a hub whose coordinator was correctly identified sat at
+   * `zigbee.connected: false` forever.
+   *
+   * Nothing pinned is the *ordinary* install — every one that doesn't pass
+   * `--zigbee`.
+   */
+  it('writes the serial port for a detected coordinator with nothing pinned', () => {
+    const outcome = decide({ budget: 'both', coordinator: true });
+    expect(outcome.serialPort, 'zigbee.env must name the device').toContain(CERTAIN_NAME);
+    expect(outcome.zigbeeEnv).toContain('ZIGBEE_ADAPTER=');
+    expect(outcome.exitCode, 'Zigbee is running').toBe(0);
+  });
+
+  it('writes it for a pinned coordinator too', () => {
+    const outcome = decide({ budget: 'both', coordinator: true, pinned: true });
+    expect(outcome.serialPort).toContain(CERTAIN_NAME);
+    expect(outcome.zigbeeEnv).toContain('GETHOME_ZIGBEE_PINNED=');
+  });
+
+  it('records the device even when Matter is the radio this board runs', () => {
+    // Switching back must not need a replug, so the path is written before
+    // Zigbee2MQTT is refused the board.
+    const outcome = decide({ budget: 'one', mode: 'matter', coordinator: true });
+    expect(outcome.serialPort).toContain(CERTAIN_NAME);
+    expect(outcome.matter, 'Matter keeps the board').toBe('1');
+    expect(outcome.exitCode, 'Zigbee is genuinely not running').toBe(1);
+  });
+
+  it('leaves no temp file behind', () => {
+    // The failure mode wrote zigbee.env.tmp and stopped there, so a stray temp
+    // file beside the real one is the fingerprint of it coming back.
+    const outcome = decide({ budget: 'both', coordinator: true });
+    expect(outcome.serialPort).not.toBe('');
+    expect(existsSync(path.join(outcome.confDir, 'zigbee.env.tmp'))).toBe(false);
   });
 });
 
@@ -138,7 +215,7 @@ describe('defaults', () => {
     let exitCode = 0;
     try {
       execFileSync('bash', [SCRIPT, '--quiet', '--no-start'], {
-        env: { ...process.env, GETHOME_CONF: conf },
+        env: { ...process.env, GETHOME_CONF: conf, GETHOME_ZIGBEE_SCAN_DIR: tmp() },
         stdio: 'ignore',
       });
     } catch (error) {
@@ -155,7 +232,7 @@ describe('defaults', () => {
     writeFileSync(path.join(data, 'radio-mode'), 'nonsense');
     try {
       execFileSync('bash', [SCRIPT, '--quiet', '--no-start'], {
-        env: { ...process.env, GETHOME_CONF: conf },
+        env: { ...process.env, GETHOME_CONF: conf, GETHOME_ZIGBEE_SCAN_DIR: tmp() },
         stdio: 'ignore',
       });
     } catch {

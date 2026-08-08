@@ -116,11 +116,24 @@ classify() {
 # unlike /dev/ttyACM0, which moves the moment a second device appears. Only
 # fall back to the raw nodes when by-id isn't populated, so one physical stick
 # can't be reported twice under two names.
+#
+# The scan root is overridable, and that is not a convenience. Staging a
+# coordinator in a test used to be possible only by *pinning* one — and pinning
+# is the single case the file-writing path below got right, so the bug that
+# left `zigbee.env` unwritten on every ordinary install was invisible to a
+# suite that otherwise drives this whole script. A directory of fake by-id
+# names makes detection testable the way it actually happens.
+SCAN_DIR="${GETHOME_ZIGBEE_SCAN_DIR:-/dev/serial/by-id}"
+
 CANDIDATES=()
-for candidate in /dev/serial/by-id/*; do
+for candidate in "$SCAN_DIR"/*; do
   [[ -e "$candidate" ]] && CANDIDATES+=("$candidate")
 done
-if [[ ${#CANDIDATES[@]} -eq 0 ]]; then
+# Raw device nodes are the fallback for systems where by-id isn't populated —
+# but only for the real one. An overridden scan root means "look here", and
+# reaching past it to the machine's own /dev would make a test depend on
+# whatever is plugged into the machine running it.
+if [[ ${#CANDIDATES[@]} -eq 0 && "$SCAN_DIR" == "/dev/serial/by-id" ]]; then
   for candidate in /dev/ttyUSB* /dev/ttyACM*; do
     [[ -e "$candidate" ]] && CANDIDATES+=("$candidate")
   done
@@ -256,14 +269,31 @@ say "Zigbee coordinator: ${FOUND}"
 mkdir -p "$CONF_DIR"
 CURRENT=$(sed -n 's/^ZIGBEE_ADAPTER=//p' "$ENV_FILE" 2>/dev/null | head -n1)
 if [[ "$CURRENT" != "$FOUND" ]]; then
-  {
+  # The pinned line is written with `if`, not `[[ … ]] && echo`, and that is
+  # not style. A group's exit status is its *last* command's, so the `&&`
+  # form made the whole `{ … }` return 1 whenever nothing was pinned — which
+  # is every install that doesn't pass --zigbee, i.e. the normal one. The
+  # `mv` then never ran: the temp file held a perfect config, `zigbee.env`
+  # was never created, and the only trace was `chmod: cannot access …`.
+  # Zigbee2MQTT starts anyway (its EnvironmentFile is optional by design),
+  # finds no serial port, and never reaches the stick — so a hub with a
+  # correctly identified coordinator sat at `zigbee.connected: false`.
+  if {
     echo "# Written by gethome-zigbee-detect. Editing GETHOME_ZIGBEE_PINNED here"
     echo "# forces a particular device; everything else is detected."
     echo "ZIGBEE_ADAPTER=${FOUND}"
     echo "ZIGBEE2MQTT_CONFIG_SERIAL_PORT=${FOUND}"
-    [[ -n "$PINNED" ]] && echo "GETHOME_ZIGBEE_PINNED=${PINNED}"
-  } > "$ENV_FILE.tmp" && mv "$ENV_FILE.tmp" "$ENV_FILE"
-  chmod 0644 "$ENV_FILE"
+    if [[ -n "$PINNED" ]]; then echo "GETHOME_ZIGBEE_PINNED=${PINNED}"; fi
+  } > "$ENV_FILE.tmp" && mv "$ENV_FILE.tmp" "$ENV_FILE"; then
+    chmod 0644 "$ENV_FILE"
+  else
+    # Say it rather than leaving it to be inferred from a chmod error. Without
+    # this file Zigbee2MQTT has no coordinator, so claiming Zigbee works would
+    # be the same silent lie as before.
+    rm -f "$ENV_FILE.tmp"
+    say "Could not write ${ENV_FILE} — Zigbee2MQTT will not know where the coordinator is."
+    exit 1
+  fi
 fi
 
 # A coordinator is plugged in, but the owner asked this board to run Matter
