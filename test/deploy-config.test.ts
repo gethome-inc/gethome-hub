@@ -151,6 +151,41 @@ describe('deploy/install.sh', () => {
     expect(hubUnit).not.toMatch(/^\s*MemoryMax=/m);
   });
 
+  /**
+   * `StartLimitIntervalSec=` and `StartLimitBurst=` are [Unit] options —
+   * systemd moved them there in v230 and answers the old [Service] placement
+   * with "Unknown key 'StartLimitIntervalSec' in section [Service], ignoring".
+   *
+   * The cost is quiet twice over: a warning on every unit load, so the hub's
+   * journal carried eight of them per install, and a restart rate limit that
+   * silently does not exist — the thing meant to stop a broken hub from
+   * hammering itself into an unreadable log was never in force.
+   */
+  it('puts the systemd restart limits in the section systemd reads', () => {
+    const units = [
+      installer.slice(
+        installer.indexOf('gethome-hubd.service >/dev/null <<UNIT'),
+        installer.indexOf('gethome-zigbee2mqtt.service >/dev/null <<UNIT'),
+      ),
+      installer.slice(
+        installer.indexOf('gethome-zigbee2mqtt.service >/dev/null <<UNIT'),
+        installer.indexOf('gethome-hubctl'),
+      ),
+    ];
+    for (const unit of units) {
+      expect(unit).not.toBe('');
+      // Split on the section *header*, not the first mention of it: the
+      // comment above these keys names `[Service]` while explaining why they
+      // are not in it, and a bare indexOf finds the prose first.
+      const service = unit.slice(unit.indexOf('\n[Service]\n'));
+      for (const key of ['StartLimitIntervalSec', 'StartLimitBurst']) {
+        expect(unit, `${key} must be set at all`).toMatch(new RegExp(`^${key}=`, 'm'));
+        expect(service, `${key} in [Service] is ignored by systemd`)
+          .not.toMatch(new RegExp(`^${key}=`, 'm'));
+      }
+    }
+  });
+
   it('keeps the installer step ids Studio mirrors', () => {
     // Renaming one of these silently breaks the app's install checklist —
     // `FirstBootMonitor.installSteps` and `PiInstallView.steps()` hard-code them.

@@ -43,8 +43,10 @@ export interface MatterAdapterOptions {
  * by a phone, Ethernet, or shared via multi-admin). BLE-assisted
  * commissioning is a documented follow-up (docs/matter.md).
  *
- * Requires host networking in Docker: Matter uses site-local UDP (port 5540)
- * and mDNS (5353).
+ * Needs the host's own network: Matter is site-local UDP (port 5540) plus
+ * mDNS (5353), neither of which survives being NAT-ed. The hub runs directly
+ * on the host — a systemd unit on Linux, a launchd agent on macOS — so this
+ * costs nothing to arrange and is one of the reasons it isn't containerised.
  */
 export class MatterAdapter implements ProtocolAdapter {
   readonly id = 'matter' as const;

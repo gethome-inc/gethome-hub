@@ -260,8 +260,20 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `SDCardInspector.is64Bit` reads the card before anything is written, and is
   three-valued so an image it can't place is never blocked.
 - **Branch bundles are disposable; `v*` releases are not.** Every push publishes
-  a rolling `bundle-<branch>` prerelease — assets and tag both move — which is
-  what makes `--branch` testable on hardware. `bundle-cleanup.yml` removes each
+  a rolling `bundle-<branch>` prerelease — assets, tag **and notes** all move —
+  which is what makes `--branch` testable on hardware. The "and notes" is a
+  repair, not decoration: `bundle.yml` used to create the release only when it
+  was missing and then upload with `--clobber`, so the notes and the tag kept
+  naming whatever commit the branch *first* built while the tarballs beside them
+  moved on. Observed live: `bundle-main` said `47b48bf` in both while its assets
+  were two days newer and `main` was at `a86c1dc`. No download was ever wrong —
+  `install.sh` fetches `releases/download/<tag>/<asset>` and `bundle-cleanup.yml`
+  matches tag *names*, so nothing resolves a bundle through the tag's commit —
+  but the release page is where a human goes to ask which build is on their Pi,
+  and it was answering with a commit that wasn't in it. A rolling release has to
+  roll in the parts nobody downloads too. `v*` releases are re-pointed by
+  nothing, deliberately: rewriting a version tag would move history somebody may
+  already have installed. `bundle-cleanup.yml` removes each
   one when its branch is deleted (plus a weekly sweep as a backstop), because
   otherwise the tag list grows by one per branch forever. Its guardrails matter:
   only `bundle-` tags, only prereleases, never the default branch's, and an
@@ -324,6 +336,29 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   reported and never configured. The device path is written as a
   `ZIGBEE2MQTT_CONFIG_*` override and **never** into Zigbee2MQTT's own
   `configuration.yaml`, which holds the network key and the paired-device list.
+  **Writing that override is load-bearing and used to fail silently.** The
+  write was `{ … [[ -n "$PINNED" ]] && echo … } > tmp && mv tmp real`; a
+  group's exit status is its last command's, so with nothing pinned — every
+  install that doesn't pass `--zigbee` — the group returned 1, the `mv` never
+  ran, and the only evidence was `chmod: cannot access …`. Z2M's
+  `EnvironmentFile=-` is optional by design, so it started, found no serial
+  port, and a hub whose coordinator was correctly identified sat at
+  `zigbee.connected: false` forever. Two rules came out of it: a failed write
+  says so and exits non-zero, and `GETHOME_ZIGBEE_SCAN_DIR` exists so a test
+  can stage a coordinator the way one actually arrives — pinning was the only
+  stage available, and pinning is the one path that worked.
+- **A started service is not a working radio.** `install.sh` polls the hub's
+  own `zigbee.connected` for a minute after starting Z2M and warns if it stays
+  false, dropping Zigbee from `@@CAPABILITIES@@`. Without it the install ends
+  claiming Zigbee works on a hub that pairs nothing — which is exactly what the
+  override bug produced. The installer keeps the two facts apart:
+  `ZIGBEE_CONFIGURED` (the board went to the coordinator) drives what it says
+  about the *board*, `ZIGBEE_READY` (Z2M is actually talking) drives what it
+  claims the hub can talk to.
+- **systemd's restart limits live in `[Unit]`, not `[Service]`.** They moved in
+  v230; the old placement earns "Unknown key 'StartLimitIntervalSec' in section
+  [Service], ignoring" on every unit load and a rate limit that silently is not
+  in force. `test/deploy-config.test.ts` pins the section.
   **Its tables are duplicated in GetHome Studio** (`Models/ZigbeeModels.swift`),
   which classifies devices during its SSH preflight — before this script exists
   on the machine. Change both together; `docs/zigbee.md` documents the contract.

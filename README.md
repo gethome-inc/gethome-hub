@@ -179,10 +179,12 @@ only on a machine with more than 1 GB of memory. Below that it stops and says
 why, because starting a build that cannot finish is worse than an error.
 
 **Two kinds of release, and only one of them lasts.** Pushing any branch
-publishes a *rolling prerelease* named `bundle-<branch>`; its assets and its tag
-move on every push, and `bundle-cleanup.yml` deletes the whole thing once the
-branch is gone, so they don't accumulate. Pushing a `v*` tag publishes an
-immutable release under that tag, which nothing ever deletes.
+publishes a *rolling prerelease* named `bundle-<branch>`; its assets, its tag
+and its description all move on every push, so the release page always names the
+commit that is actually inside it. `bundle-cleanup.yml` deletes the whole thing
+once the branch is gone, so they don't accumulate. Pushing a `v*` tag publishes
+an immutable release under that tag, which nothing re-points and nothing ever
+deletes.
 
 That is what makes a branch testable on real hardware: `install.sh --branch X`
 looks for `bundle-X`, and GetHome Studio passes `StudioFeature.hubBranch`

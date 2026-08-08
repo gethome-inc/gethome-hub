@@ -664,6 +664,14 @@ Description=GetHome Hub
 Documentation=https://github.com/${REPO_SLUG}
 After=network-online.target mosquitto.service
 Wants=network-online.target
+# The hub must come back from a crash, but must not spin: five failures inside
+# a minute means something is genuinely wrong and hammering it makes the log
+# unreadable. These live in [Unit], not [Service] — systemd moved them in v230
+# and answers the old placement with "Unknown key 'StartLimitIntervalSec' in
+# section [Service], ignoring", which is a warning per unit load and a rate
+# limit that silently does not exist.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -675,11 +683,6 @@ EnvironmentFile=${CONF_DIR}/hub.env
 ExecStart=${NODE_BIN} ${HUB_V8_FLAGS} ${HUB_DIR}/dist/index.js
 Restart=always
 RestartSec=5
-# The hub must come back from a crash, but must not spin: five failures inside
-# a minute means something is genuinely wrong and hammering it makes the log
-# unreadable.
-StartLimitIntervalSec=60
-StartLimitBurst=5
 # avahi's service directory, so the hub can publish _gethome._tcp through the
 # system responder instead of running one of its own.
 ReadWritePaths=${DATA_DIR} /etc/avahi/services
@@ -706,6 +709,9 @@ Wants=mosquitto.service
 # stopped by gethome-zigbee-detect, which knows whether a coordinator is
 # actually plugged in. Enabling it unconditionally would mean ~150 MB held by a
 # process waiting for hardware that may never arrive.
+# [Unit], not [Service] — see the hub unit above.
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -725,8 +731,6 @@ EnvironmentFile=-${CONF_DIR}/zigbee.env
 ExecStart=${NODE_BIN} ${Z2M_DIR}/node_modules/zigbee2mqtt/index.js
 Restart=always
 RestartSec=10
-StartLimitIntervalSec=120
-StartLimitBurst=5
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full
@@ -834,10 +838,48 @@ fi
 # coordinator to bring up. It runs *here* because it is a confirmation rather
 # than a dependency: a working hub should not be held back from its owner by a
 # question about an accessory it doesn't need.
+# Two different facts, and conflating them is what let a dead radio be
+# announced as a working one: ZIGBEE_CONFIGURED means the detector found a
+# coordinator and gave the board to it, ZIGBEE_READY means Zigbee2MQTT is
+# actually talking to it. The first decides what to say about the *board*, the
+# second decides what to claim the hub can talk to.
+ZIGBEE_CONFIGURED=""
 ZIGBEE_READY=""
 if [[ -x /usr/local/lib/gethome-zigbee-detect.sh ]]; then
   if $SUDO env GETHOME_CONF="$CONF_DIR" /usr/local/lib/gethome-zigbee-detect.sh; then
+    ZIGBEE_CONFIGURED=1
     ZIGBEE_READY=1
+  fi
+fi
+
+# A started service is not a working radio. The detector's success means "a
+# device node is there and I started the unit"; whether Zigbee2MQTT actually
+# reached the stick is a different question, and the hub already answers it —
+# `zigbee.connected` is Z2M's own bridge reporting itself online.
+#
+# Asking is what turns a silent failure into a sentence. A missing serial-port
+# override, a coordinator on the GPIO header with the UART still off, a stick
+# that needs its firmware flashed: all of them leave the unit running, the
+# install "successful", and the owner with a hub that pairs nothing. Z2M takes
+# a while to come up on this class of board, so give it a real minute before
+# concluding anything.
+if [[ -n "$ZIGBEE_READY" ]]; then
+  say "Checking that Zigbee2MQTT reached the coordinator…"
+  ZIGBEE_LIVE=""
+  for _ in $(seq 1 20); do
+    if curl -fsS --max-time 5 http://localhost:8420/api/v1/hub 2>/dev/null \
+        | grep -q '"connected":true'; then
+      ZIGBEE_LIVE=1
+      break
+    fi
+    sleep 3
+  done
+  if [[ -z "$ZIGBEE_LIVE" ]]; then
+    # A warning, never a failure: the hub itself is fine, and the coordinator
+    # stays configured, so this is something to fix rather than something that
+    # undoes the install.
+    warn "Zigbee2MQTT started but hasn't reached the coordinator. The hub works; Zigbee devices won't pair until it does. Check: journalctl -u gethome-zigbee2mqtt -n 50"
+    ZIGBEE_READY=""
   fi
 fi
 
@@ -857,18 +899,24 @@ printf '@@CAPABILITIES:%s@@\n' "$CAPS"
 say "This hub can talk to: ${CAPS}."
 
 if [[ "$RADIO_BUDGET" == "one" ]]; then
-  # One radio at a time, so say which one has it and how to change that. The
-  # combination worth spelling out is the one where the hub can barely talk to
-  # anything, and it no longer happens by default — Matter takes the board when
-  # no coordinator is plugged in.
-  if [[ -n "$ZIGBEE_READY" ]]; then
+  # One radio at a time, so say which one has it and how to change that. This
+  # branch reads ZIGBEE_CONFIGURED, not ZIGBEE_READY: the board was handed to
+  # the coordinator whether or not Z2M has reached it yet, and telling someone
+  # with a stick in the port that they haven't plugged one in would be worse
+  # than saying nothing. The warning above already covers the "not talking to
+  # it yet" half.
+  if [[ -n "$ZIGBEE_CONFIGURED" ]]; then
     say "This board has memory for one radio at a time, and the Zigbee coordinator you plugged in has it, so Matter is off. You can switch to Matter in the GetHome app — the coordinator stays configured, and Zigbee devices come back when you switch back."
   else
     say "This board has memory for one radio at a time, and with no Zigbee coordinator plugged in that radio is Matter. Plug a stick in whenever you like (SONOFF ZBDongle-E/P, ConBee, SkyConnect) and Zigbee takes over by itself, with no reboot."
   fi
-elif [[ -z "$ZIGBEE_READY" ]]; then
+elif [[ -z "$ZIGBEE_CONFIGURED" ]]; then
   say "No Zigbee coordinator is plugged in, so this hub starts with Matter, Wi-Fi and MQTT devices. Plug one in whenever you like — Zigbee starts by itself, with no reboot."
 fi
 
 printf '@@DONE@@\n'
-say "GetHome Hub is running: ${INFO}"
+# Re-read rather than reprinting the copy taken at the health check. That one
+# predates the detector, so on a board that just handed its radio to Zigbee it
+# ended the install claiming `"matter":true` directly under a line saying
+# Matter is off — and `"claimed":false` on a hub the owner had since claimed.
+say "GetHome Hub is running: $(curl -fsS --max-time 5 http://localhost:8420/api/v1/hub 2>/dev/null || printf '%s' "$INFO")"

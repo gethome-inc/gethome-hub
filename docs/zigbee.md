@@ -78,13 +78,22 @@ into Zigbee2MQTT's own `configuration.yaml` — that file holds the network key
 and the paired-device list, and rewriting it on a replug would lose the user's
 whole Zigbee network.
 
-Presence of a device node only proves something is plugged in, so `install.sh`
-reports what it found and the hub's `GET /api/v1/hub` carries
-`zigbee: {enabled, connected}` — `connected` being the Z2M bridge actually
-saying it is online, not merely that the broker is up. A coordinator wired to
-the Pi's GPIO serial port is the one case that genuinely needs a reboot
-(`enable_uart=1` plus the Bluetooth swap in `config.txt`), and the detector says
-so with `@@WARN:…@@` rather than leaving the user to wonder.
+**A started service is not a working radio, so the installer asks.** Presence of
+a device node only proves something is plugged in, and the detector's success
+means "I found a coordinator and started the unit" — neither says Zigbee2MQTT
+ever reached the stick. The hub already answers that: `GET /api/v1/hub` carries
+`zigbee: {enabled, connected}`, where `connected` is the Z2M bridge saying it is
+online rather than the broker merely being up. So after starting the service
+`install.sh` polls that for a minute and, if it stays false, emits `@@WARN@@`
+naming the journal to read — and drops Zigbee from `@@CAPABILITIES@@`.
+
+That check is not decoration. It is the difference between an install that ends
+"this hub can talk to Zigbee" and a hub that pairs nothing: a missing
+`ZIGBEE2MQTT_CONFIG_SERIAL_PORT` override, a coordinator on the GPIO header with
+the UART still off (`enable_uart=1` plus the Bluetooth swap in `config.txt` —
+the one case that genuinely needs a reboot), or a stick that needs its firmware
+flashed all leave the unit running and the install "successful". A warning,
+never a failure: the hub itself is fine and the coordinator stays configured.
 
 **The identification tables are duplicated** in Studio's
 `Models/ZigbeeModels.swift` (`ZigbeeCatalog`), which classifies devices during
