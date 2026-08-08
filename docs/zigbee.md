@@ -78,6 +78,23 @@ into Zigbee2MQTT's own `configuration.yaml` — that file holds the network key
 and the paired-device list, and rewriting it on a replug would lose the user's
 whole Zigbee network.
 
+**One setting is the exception: `onboarding: false`.** Zigbee2MQTT 2.x offers a
+browser setup wizard and does not bring the Zigbee stack up until somebody
+completes it. On this hub there is nothing for that wizard to ask — the serial
+port and the broker both arrive as environment overrides — so what it produces
+is a service that is `active (running)`, holds a correctly identified
+coordinator, reports nothing wrong, and never pairs anything. The only trace is
+one journal line offering a page on port 8080.
+
+The environment override can't carry this on its own: upstream ignores
+`ZIGBEE2MQTT_CONFIG_ONBOARDING` when no `configuration.yaml` exists yet
+([Koenkk/zigbee2mqtt#32224](https://github.com/Koenkk/zigbee2mqtt/issues/32224)),
+which is exactly the fresh install. So `install.sh` sets the variable *and*
+puts the setting in the file — creating it if absent, or replacing the single
+`onboarding:` line if present. Never a rewrite: the network key and the device
+list have to survive. If that change is made while Z2M is running, `install.sh`
+restarts it, because the detector only restarts on a changed device path.
+
 **A started service is not a working radio, so the installer asks.** Presence of
 a device node only proves something is plugged in, and the detector's success
 means "I found a coordinator and started the unit" — neither says Zigbee2MQTT

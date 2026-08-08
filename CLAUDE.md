@@ -336,6 +336,18 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   reported and never configured. The device path is written as a
   `ZIGBEE2MQTT_CONFIG_*` override and **never** into Zigbee2MQTT's own
   `configuration.yaml`, which holds the network key and the paired-device list.
+  **The single exception is `onboarding`, and it is surgical.** Zigbee2MQTT 2.x
+  runs a browser wizard and leaves the radio alone until somebody finishes it,
+  so a hub nobody configures by hand sits "active (running)" with a correctly
+  identified stick, `zigbee.connected: false` forever, and a setup page on
+  :8080 — observed on a Zero 2 W. The env override alone can't fix it: upstream
+  ignores `ZIGBEE2MQTT_CONFIG_ONBOARDING` when there is no `configuration.yaml`
+  yet ([#32224](https://github.com/Koenkk/zigbee2mqtt/issues/32224)), which is
+  the fresh-install case. So `install.sh` sets the variable *and* creates the
+  file when absent or replaces the one `onboarding:` line when present — never
+  a rewrite, because the key and the device list must survive. It restarts Z2M
+  itself when it changes that, since the detector only restarts on a changed
+  *device path*.
   **Writing that override is load-bearing and used to fail silently.** The
   write was `{ … [[ -n "$PINNED" ]] && echo … } > tmp && mv tmp real`; a
   group's exit status is its last command's, so with nothing pinned — every

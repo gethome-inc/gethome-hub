@@ -582,6 +582,48 @@ if [[ ! -x "$Z2M_DIR/node_modules/.bin/zigbee2mqtt" ]]; then
 fi
 $SUDO chown -R "$SERVICE_USER:$SERVICE_USER" "$Z2M_DATA_DIR"
 
+# ── Zigbee2MQTT must not wait for a browser ────────────────────────────────
+# Zigbee2MQTT 2.x runs an *onboarding* wizard on a web page and does not bring
+# the Zigbee stack up at all until somebody finishes it. On a hub that is
+# nobody's business to configure by hand — the serial port and the broker are
+# both supplied as environment overrides — that is a service which starts,
+# stays "active (running)", never touches the coordinator, and reports nothing
+# wrong. Observed exactly that: a correctly identified SONOFF dongle, the right
+# path in the config, `zigbee.connected: false` forever, and one line in the
+# journal offering a setup page on port 8080.
+#
+# `ZIGBEE2MQTT_CONFIG_ONBOARDING=false` is set on the unit as well, but it
+# cannot be the whole answer: upstream ignores that variable when there is no
+# configuration.yaml yet, which is precisely the fresh-install case. So the
+# file gets the setting too.
+#
+# **This is the one thing written into configuration.yaml, and it is surgical
+# on purpose.** That file holds the network key and the paired-device list;
+# rewriting it would lose somebody's whole Zigbee network. Creating it when it
+# is absent, or replacing one `onboarding:` line when it is present, does
+# neither.
+Z2M_CONFIG="$Z2M_DATA_DIR/configuration.yaml"
+Z2M_ONBOARDING_CHANGED=""
+if [[ ! -f "$Z2M_CONFIG" ]]; then
+  printf 'onboarding: false\n' | $SUDO tee "$Z2M_CONFIG" >/dev/null \
+    && $SUDO chown "$SERVICE_USER:$SERVICE_USER" "$Z2M_CONFIG" \
+    && Z2M_ONBOARDING_CHANGED=1
+elif grep -qE '^onboarding:[[:space:]]*true' "$Z2M_CONFIG" 2>/dev/null; then
+  $SUDO sed -i 's/^onboarding:[[:space:]]*true.*/onboarding: false/' "$Z2M_CONFIG" \
+    && Z2M_ONBOARDING_CHANGED=1
+elif ! grep -qE '^onboarding:' "$Z2M_CONFIG" 2>/dev/null; then
+  printf 'onboarding: false\n' | $SUDO tee -a "$Z2M_CONFIG" >/dev/null \
+    && Z2M_ONBOARDING_CHANGED=1
+fi
+# A running Z2M read the old file at startup, and the detector below only
+# restarts it when the *device path* changed — so without this an existing hub
+# would keep waiting for its browser until the next reboot.
+if [[ -n "$Z2M_ONBOARDING_CHANGED" ]] && command -v systemctl >/dev/null 2>&1 \
+   && $SUDO systemctl is-active --quiet gethome-zigbee2mqtt.service 2>/dev/null; then
+  say "Zigbee2MQTT was waiting on its setup page; turning that off and restarting it."
+  $SUDO systemctl restart gethome-zigbee2mqtt.service >/dev/null 2>&1 || true
+fi
+
 # The detector is the authority on what counts as a coordinator, and it is what
 # starts and stops Zigbee2MQTT — at boot and whenever something is plugged in
 # or unplugged. Installing it unconditionally is what makes buying a stick next
@@ -724,6 +766,11 @@ Environment=NODE_OPTIONS=--max-old-space-size=${Z2M_HEAP_MB}
 Environment=ZIGBEE2MQTT_CONFIG_MQTT_SERVER=mqtt://127.0.0.1:1883
 Environment=ZIGBEE2MQTT_CONFIG_MQTT_BASE_TOPIC=zigbee2mqtt
 Environment=ZIGBEE2MQTT_CONFIG_FRONTEND_ENABLED=false
+# No setup wizard. Zigbee2MQTT 2.x otherwise starts a web page and leaves the
+# radio alone until a human finishes it — see the note by the config above,
+# which is where this is actually enforced, because upstream ignores this
+# variable when configuration.yaml doesn't exist yet.
+Environment=ZIGBEE2MQTT_CONFIG_ONBOARDING=false
 # The coordinator's path comes from the detector, as an override rather than an
 # edit: Zigbee2MQTT's own configuration.yaml holds the network key and the
 # paired-device list, and nothing here may ever rewrite that file.
