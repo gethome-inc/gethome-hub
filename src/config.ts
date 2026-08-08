@@ -12,6 +12,13 @@ const configSchema = z.object({
   DATABASE_FILE: z.string().default(''),
   MQTT_URL: z.string().default('mqtt://127.0.0.1:1883'),
   Z2M_BASE_TOPIC: z.string().default('zigbee2mqtt'),
+  /**
+   * Zigbee2MQTT's own data directory, which the hub reads for one purpose:
+   * when the radio isn't up, Z2M's log says why, and that answer belongs in
+   * the API rather than in a journal on the Pi. The directory belongs to the
+   * same service account the hub runs as, so this needs no privileges.
+   */
+  Z2M_DATA_DIR: z.string().default('/var/lib/gethome/zigbee2mqtt'),
   DATA_DIR: z.string().default('./data'),
   HUB_NAME: z.string().default('GetHome Hub'),
   ADAPTER_ZIGBEE: boolFlag,

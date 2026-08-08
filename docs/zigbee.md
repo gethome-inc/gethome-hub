@@ -172,6 +172,47 @@ running throughout; nothing else on it is affected.
 the person watching the install is usually on another machine, where "check
 `journalctl`" is homework they cannot do.
 
+**The hub is not flashing anything, and that is a decision.** Doing it from the
+Pi would mean carrying a Python toolchain and a per-device firmware table onto a
+415 MB board, writing images to radios nobody here can test, and doing it to
+hardware the owner did not ask us to touch — and a bad write bricks the stick or
+resets its NVM3, taking the paired network with it. The vendor's own browser
+flasher is one cable and one click, it is the tool their firmware is published
+for, and it is the user's decision to make. So the hub's job is to *say what is
+wrong precisely enough that the fix is obvious*, which is the next section.
+
+### The hub says why the radio is down (`zigbee.problem`)
+
+`install.sh` only names this failure while the install is on screen. An owner
+who plugs a coordinator in a month later gets `zigbee.connected: false` and
+nothing else, and the reason is in a log on a machine they are not looking at.
+
+The hub can answer this itself, and it needs no privileges to: Zigbee2MQTT
+writes `<Z2M data>/log/<timestamp>/log.log` into a directory owned by the same
+service account the hub runs as. So `src/adapters/zigbee/diagnosis.ts` reads the
+newest run's log (tail only, seeked — these grow without bound), matches it
+against the failures worth naming, and `GET /hub` carries the answer as
+`zigbee.problem` — see [api.md](api.md#why-zigbee-is-down-zigbeeproblem) for the
+wire shape and the `kind` list. Every app gets it, not just the one that
+happened to be watching the install.
+
+Four rules hold this together:
+
+- **An unrecognised log yields nothing.** A wrong diagnosis is worse than
+  `connected: false`, which the caller already has. Patterns are ordered
+  most-specific-first because they co-occur — a stick with old firmware also
+  logs the generic "Failed to start zigbee-herdsman" a line later, and only the
+  specific one helps.
+- **`summary` is a whole sentence written by the hub**, so an app that has never
+  heard of a new `kind` still says something true. `kind` is what an app branches
+  on to offer a fix.
+- **Nothing here may throw.** No Zigbee2MQTT, never started, an unreadable
+  directory — all expected, all mean "nothing to say", and none of them may turn
+  `GET /hub` (public, the health check) into an error.
+- **It is read behind a 30-second cache** and only while Zigbee is enabled and
+  not connected. A healthy hub never touches the disk for this, and a broken one
+  does not re-read a log for every poll.
+
 ### Zigbee or Matter on a small board
 
 A 512 MB board fits the operating system (~70 MB), the hub (~119 MB), and

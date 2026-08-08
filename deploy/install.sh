@@ -678,6 +678,10 @@ PORT=8420
 DATA_DIR=${DATA_DIR}
 MQTT_URL=mqtt://127.0.0.1:1883
 Z2M_BASE_TOPIC=zigbee2mqtt
+# Zigbee2MQTT's data directory. The hub reads its log from here for one
+# purpose: when the radio is down, Z2M's own log says why, and that answer
+# belongs in the API rather than in a journal only an SSH session can see.
+Z2M_DATA_DIR=${Z2M_DATA_DIR}
 HUB_NAME=GetHome Hub
 LOG_LEVEL=info
 # A bounded heap. Node sizes its default from total memory, which on a small

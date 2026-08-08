@@ -377,6 +377,24 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `ZIGBEE_CONFIGURED` (the board went to the coordinator) drives what it says
   about the *board*, `ZIGBEE_READY` (Z2M is actually talking) drives what it
   claims the hub can talk to.
+- **A radio that is down says why, and the hub reads that itself.** The
+  installer's warning only exists while the install is on screen; an owner who
+  plugs a stick in a month later gets `connected: false` and a reason that lives
+  in a log on a machine they aren't looking at. Zigbee2MQTT writes
+  `<Z2M data>/log/<timestamp>/log.log` under the *same service account the hub
+  runs as*, so `src/adapters/zigbee/diagnosis.ts` reads the newest run's tail —
+  no root, no journal, no SSH — and `GET /hub` carries `zigbee.problem
+  {kind, summary, detail}` for every app. Four rules: an unrecognised log yields
+  **no** problem (a wrong diagnosis is worse than `connected: false`, which the
+  caller already has); patterns go most-specific-first, because old firmware also
+  logs the generic herdsman failure a line later; nothing may throw, since
+  `GET /hub` is public and is the health check; and it is cached 30 s and only
+  consulted while Zigbee is enabled-but-not-connected, so a healthy hub never
+  touches the disk. **The hub does not flash firmware and shouldn't start** —
+  a Python toolchain and a per-device image table on a 415 MB board, written to
+  radios nobody here can test, where a bad write bricks the stick or resets NVM3
+  and takes the paired network with it. Naming the cause precisely is the whole
+  fix; `docs/zigbee.md` is canonical.
 - **systemd's restart limits live in `[Unit]`, not `[Service]`.** They moved in
   v230; the old placement earns "Unknown key 'StartLimitIntervalSec' in section
   [Service], ignoring" on every unit load and a rate limit that silently is not

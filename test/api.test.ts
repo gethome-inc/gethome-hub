@@ -71,6 +71,9 @@ describe.skipIf(!handle)('hub API', () => {
       // The interesting case: a board that affords one radio, so the switch is
       // offered and the hub has a real choice to record.
       radioBudget: 'one',
+      // Nothing there to read, which is the ordinary state for a hub with no
+      // coordinator — and must stay silent rather than becoming an error.
+      z2mDataDir: path.join(dataDir, 'zigbee2mqtt'),
     });
     await app.ready();
   });

@@ -51,7 +51,7 @@ devices, favorites, view everything.
 
 | Method & path | Role | Notes |
 |---|---|---|
-| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section. `radio` is [below](#radio-get-hub-and-put-settingsradio) |
+| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem). `radio` is [further below](#radio-get-hub-and-put-settingsradio) |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
 | `GET /home` · `PATCH /home` | any · owner | home name |
 | `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | any · owner | |
@@ -68,6 +68,42 @@ devices, favorites, view everything.
 | `GET /activity?limit=&before=` | any | reverse-chronological, cursor = `before` id |
 | `GET /settings/ai` · `PUT /settings/ai` · `DELETE /settings/ai` | owner | PUT `{apiKey, model?}` (an Anthropic API key, write-only; a `sk-ant-oat…` subscription token and a model outside the supported list are both refused with 400, an `authType` from an older app is ignored); GET/PUT respond `{provider: "anthropic", model, hasKey, legacySubscriptionToken, status}` where `status` carries `lastError`/`lastRun` health — see [ai-adaptation.md](ai-adaptation.md) |
 | `PUT /settings/radio` | owner | `{mode: "auto"\|"zigbee"\|"matter"}` → `{budget, mode, matter, canRunBoth, applying: true}`. Records a *request*; see below |
+
+### Why Zigbee is down (`zigbee.problem`)
+
+`connected: false` is a fact with several very different causes, and the cause
+used to live only in a log on the hub's own machine — where the person who needs
+it, looking at an app somewhere else, cannot reach it. So the hub reads
+Zigbee2MQTT's log itself (same service account, no privileges, no SSH) and puts
+the answer in the API.
+
+Present only while Zigbee is enabled, not connected, **and** the hub recognised
+the failure. Absent otherwise — including for a hub older than the field — so
+treat its presence as the signal and never its absence.
+
+```json
+"problem": {
+  "kind": "firmware-too-old",
+  "summary": "The Zigbee coordinator works, but its firmware is too old: …",
+  "detail": "error: z2m: Error: Adapter EZSP protocol version (8) is not supported by Host [13-19]."
+}
+```
+
+| `kind` | Means |
+|---|---|
+| `firmware-too-old` | The radio answered and refused: its EZSP version predates what Zigbee2MQTT supports. A **new SONOFF ZBDongle-E ships this way**, so this is the common one — flashing it once fixes it. |
+| `adapter-unidentified` | Zigbee2MQTT could not work out what kind of coordinator it is. Usually a stick on a plain USB-serial chip with no name of its own. |
+| `port-missing` | Zigbee2MQTT could not inspect the USB port (`udevadm` unavailable to the service). |
+| `onboarding-pending` | Zigbee2MQTT is waiting on its own browser setup page. `install.sh` turns that off, so this means something reset it. |
+| `radio-unreachable` | It reached for the radio and got nothing, with no more specific cause found. |
+
+Branch on `kind` to offer a fix; show `summary` when the kind is unfamiliar — it
+is a complete sentence written by the hub, so an app that has never heard of a
+new kind still says something true. `detail` is the deciding line from the log,
+for a disclosure.
+
+An unrecognised log yields **no** `problem` at all. A wrong diagnosis is worse
+than `connected: false`, which the caller already has.
 
 ### Radio (`GET /hub` and `PUT /settings/radio`)
 
