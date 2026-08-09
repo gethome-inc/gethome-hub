@@ -38,8 +38,12 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --conf) CONF_DIR="$2"; shift 2 ;;
     --quiet) QUIET=1; shift ;;
-    # Record the adapter but leave starting the service to the caller —
-    # install.sh is about to bring everything up anyway.
+    # Record the adapter and decide the radio, but don't touch systemd. Used by
+    # the test suite, which drives this script for real and has no services to
+    # start. `install.sh` deliberately does *not* pass it: the detector owns
+    # Zigbee2MQTT's lifecycle, including clearing a rate-limited failure before
+    # starting it, and reimplementing that in the installer is how the two
+    # would drift.
     --no-start) NO_START=1; shift ;;
     *) shift ;;
   esac
@@ -309,9 +313,15 @@ if [[ -z "$FOUND" ]]; then
   # restarting the hub under an owner who was three steps into flashing it).
   # See the note by MATTER_WANTED above.
   if [[ -n "$ZIGBEE_KNOWN" && "$ZIGBEE_ALLOWED" == "1" ]]; then
-    say "This hub's Zigbee coordinator is unplugged. Leaving the radio as it is —"
-    say "put the coordinator back and Zigbee starts on its own, or switch this"
-    say "board to Matter in the GetHome app."
+    if [[ "$BUDGET" == "one" ]]; then
+      # Only a one-radio board has anything to decide, and only there does the
+      # app offer the switch — saying "switch to Matter" on a Pi 4, where
+      # Matter is already running and no switch is shown, would send somebody
+      # looking for a control that isn't there.
+      say "This hub's Zigbee coordinator is unplugged, so the board is still held for it and Matter stays off. Plug the coordinator back in and Zigbee starts on its own, or switch this board to Matter in the GetHome app."
+    else
+      say "This hub's Zigbee coordinator is unplugged. Matter is unaffected; plug the coordinator back in and Zigbee starts on its own."
+    fi
   fi
   apply_matter
   exit 1

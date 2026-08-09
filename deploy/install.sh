@@ -1006,8 +1006,16 @@ if [[ "$RADIO_BUDGET" == "one" ]]; then
   # it yet" half.
   if [[ -n "$ZIGBEE_CONFIGURED" ]]; then
     say "This board has memory for one radio at a time, and the Zigbee coordinator you plugged in has it, so Matter is off. You can switch to Matter in the GetHome app — the coordinator stays configured, and Zigbee devices come back when you switch back."
-  else
+  elif [[ "$MATTER_ON" == "1" ]]; then
     say "This board has memory for one radio at a time, and with no Zigbee coordinator plugged in that radio is Matter. Plug a stick in whenever you like (SONOFF ZBDongle-E/P, ConBee, SkyConnect) and Zigbee takes over by itself, with no reboot."
+  else
+    # The third case, and it only exists because the detector deliberately
+    # doesn't follow a coordinator *out*: a stick was set up on this machine
+    # once and isn't here now, so the board is still held for it and Matter is
+    # off. Saying "that radio is Matter" here — which this branch used to — is
+    # simply false, and it is the kind of false that sends somebody looking for
+    # a Matter device that will never appear.
+    warn "This board has memory for one radio at a time, and it is still held for the Zigbee coordinator that was set up here — which isn't plugged in now, so neither radio is running. Plug the coordinator back in and Zigbee starts by itself, or switch this board to Matter in the GetHome app."
   fi
 elif [[ -z "$ZIGBEE_CONFIGURED" ]]; then
   say "No Zigbee coordinator is plugged in, so this hub starts with Matter, Wi-Fi and MQTT devices. Plug one in whenever you like — Zigbee starts by itself, with no reboot."
