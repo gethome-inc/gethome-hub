@@ -18,6 +18,7 @@ import type { ZigbeeAdapter } from '../adapters/zigbee/adapter.js';
 // it here does not pull the AI stack into the API layer.
 import { isSupportedModel, supportedModelIds } from '../ai/models.js';
 import { RADIO_MODES, readRadioMode, writeRadioMode, type RadioBudget, type RadioMode } from '../core/radio.js';
+import { readZigbeeProblem, type ZigbeeProblem } from '../adapters/zigbee/diagnosis.js';
 import { deviceWire } from './dto.js';
 import { extractToken, requireMember, requireOwner } from './auth.js';
 import { attachWebSocket } from './ws.js';
@@ -41,6 +42,8 @@ export interface ApiDeps {
   /** Where the owner's radio choice is stored, and how many radios fit. */
   dataDir: string;
   radioBudget: RadioBudget;
+  /** Zigbee2MQTT's data directory — read only to say *why* Zigbee is down. */
+  z2mDataDir: string;
 }
 
 interface CommissionJob {
@@ -124,6 +127,38 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
 
   // ── System ────────────────────────────────────────────────────────────────
 
+  /**
+   * Zigbee's state, and — when it is down — why.
+   *
+   * `connected: false` is a fact with several very different causes behind it,
+   * and the answer used to live only in a log on the machine. That is the wrong
+   * place: the person who needs it is looking at an app somewhere else. The hub
+   * can read Zigbee2MQTT's own log (same service account, no privileges) so it
+   * does, and every app gets the reason for free.
+   *
+   * Cached, and only consulted while Zigbee is actually down. `GET /hub` is
+   * public and unauthenticated, so it must not turn into a file read per
+   * request — and a failure that has just been diagnosed does not change from
+   * one second to the next.
+   */
+  let problemCache: { at: number; problem: ZigbeeProblem | undefined } | undefined;
+  const PROBLEM_TTL_MS = 30_000;
+
+  const zigbeeStatus = () => {
+    const enabled = deps.zigbee !== undefined;
+    const connected = deps.zigbee?.connected ?? false;
+    if (!enabled || connected) {
+      problemCache = undefined;
+      return { enabled, connected };
+    }
+    const now = Date.now();
+    if (problemCache === undefined || now - problemCache.at > PROBLEM_TTL_MS) {
+      problemCache = { at: now, problem: readZigbeeProblem(deps.z2mDataDir) };
+    }
+    const { problem } = problemCache;
+    return { enabled, connected, ...(problem !== undefined ? { problem } : {}) };
+  };
+
   app.get('/api/v1/hub', async () => ({
     hubId: deps.hubId,
     name: deps.hubName,
@@ -136,10 +171,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // Additive: an app that doesn't know about this field ignores it, and one
     // that does can say "plug a coordinator in" instead of showing an empty
     // Zigbee section with no explanation.
-    zigbee: {
-      enabled: deps.zigbee !== undefined,
-      connected: deps.zigbee?.connected ?? false,
-    },
+    zigbee: zigbeeStatus(),
     // Also additive. What this hub can actually talk to is not the same on
     // every machine: a 512 MB board affords one radio, so an app that shows
     // "Matter" unconditionally would be lying on half the hardware.

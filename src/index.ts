@@ -112,6 +112,7 @@ async function main(): Promise<void> {
     version,
     dataDir: config.DATA_DIR,
     radioBudget: config.GETHOME_RADIO,
+    z2mDataDir: config.Z2M_DATA_DIR,
     ...(build ? { build } : {}),
     ...(matter ? { matter } : {}),
     ...(zigbee ? { zigbee } : {}),

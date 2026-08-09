@@ -678,6 +678,10 @@ PORT=8420
 DATA_DIR=${DATA_DIR}
 MQTT_URL=mqtt://127.0.0.1:1883
 Z2M_BASE_TOPIC=zigbee2mqtt
+# Zigbee2MQTT's data directory. The hub reads its log from here for one
+# purpose: when the radio is down, Z2M's own log says why, and that answer
+# belongs in the API rather than in a journal only an SSH session can see.
+Z2M_DATA_DIR=${Z2M_DATA_DIR}
 HUB_NAME=GetHome Hub
 LOG_LEVEL=info
 # A bounded heap. Node sizes its default from total memory, which on a small
@@ -947,7 +951,32 @@ if [[ -n "$ZIGBEE_READY" ]]; then
       # A warning, never a failure: the hub itself is fine, and the coordinator
       # stays configured, so this is something to fix rather than something that
       # undoes the install.
-      warn "Zigbee2MQTT started but hasn't reached the coordinator. The hub works; Zigbee devices won't pair until it does. Check: journalctl -u gethome-zigbee2mqtt -n 50"
+      #
+      # And a *named* warning where we can manage it. "Check the journal" is
+      # homework for somebody watching this from another machine, and the one
+      # cause that is near-universal deserves better: a SONOFF ZBDongle-E ships
+      # from the factory running EmberZNet 6.10 (EZSP v8), while Zigbee2MQTT's
+      # ember driver needs EZSP 13 or newer — NCP firmware 7.4.x. So the very
+      # first thing a new owner of the coordinator this project recommends sees
+      # is a radio that answers and then refuses, once, until it is flashed.
+      #
+      # The message says what to do rather than quoting those numbers, and that
+      # is deliberate: they are *protocol* versions, while the flasher shows
+      # *firmware* versions and offers "6.10.3 → 8.0.2" for this very stick.
+      # "Needs 13 or newer" beside an 8.0.2 makes the fix look wrong. The hub's
+      # own `zigbee.problem` keeps the raw line for anyone who wants it.
+      Z2M_TAIL=$($SUDO journalctl -u gethome-zigbee2mqtt -n 80 --no-pager 2>/dev/null || true)
+      case "$Z2M_TAIL" in
+        *"EZSP protocol version"*"is not supported by Host"*)
+          warn "The Zigbee coordinator answered, but its firmware is too old for Zigbee2MQTT. SONOFF ZBDongle-E sticks ship this way, and updating one is a one-time job that needs no cable and no tools: unplug it, put it in a Mac or PC, open https://dongle.sonoff.tech/sonoff-dongle-flasher/ in Chrome or Edge (Safari cannot talk to USB devices), and flash the coordinator firmware it offers. Put it back and this hub picks it up on its own. Everything else here is unaffected."
+          ;;
+        *"No valid USB adapter found"*)
+          warn "Zigbee2MQTT could not identify the coordinator on ${ZIGBEE_ADAPTER:-the configured port}. If this is a generic USB-serial stick, Zigbee2MQTT needs to be told what it is. See: journalctl -u gethome-zigbee2mqtt -n 50"
+          ;;
+        *)
+          warn "Zigbee2MQTT started but hasn't reached the coordinator. The hub works; Zigbee devices won't pair until it does. Check: journalctl -u gethome-zigbee2mqtt -n 50"
+          ;;
+      esac
       ZIGBEE_READY=""
     fi
   fi
@@ -977,8 +1006,16 @@ if [[ "$RADIO_BUDGET" == "one" ]]; then
   # it yet" half.
   if [[ -n "$ZIGBEE_CONFIGURED" ]]; then
     say "This board has memory for one radio at a time, and the Zigbee coordinator you plugged in has it, so Matter is off. You can switch to Matter in the GetHome app — the coordinator stays configured, and Zigbee devices come back when you switch back."
-  else
+  elif [[ "$MATTER_ON" == "1" ]]; then
     say "This board has memory for one radio at a time, and with no Zigbee coordinator plugged in that radio is Matter. Plug a stick in whenever you like (SONOFF ZBDongle-E/P, ConBee, SkyConnect) and Zigbee takes over by itself, with no reboot."
+  else
+    # The third case, and it only exists because the detector deliberately
+    # doesn't follow a coordinator *out*: a stick was set up on this machine
+    # once and isn't here now, so the board is still held for it and Matter is
+    # off. Saying "that radio is Matter" here — which this branch used to — is
+    # simply false, and it is the kind of false that sends somebody looking for
+    # a Matter device that will never appear.
+    warn "This board has memory for one radio at a time, and it is still held for the Zigbee coordinator that was set up here — which isn't plugged in now, so neither radio is running. Plug the coordinator back in and Zigbee starts by itself, or switch this board to Matter in the GetHome app."
   fi
 elif [[ -z "$ZIGBEE_CONFIGURED" ]]; then
   say "No Zigbee coordinator is plugged in, so this hub starts with Matter, Wi-Fi and MQTT devices. Plug one in whenever you like — Zigbee starts by itself, with no reboot."
