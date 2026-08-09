@@ -127,3 +127,17 @@ describe('reading it off disk', () => {
     expect(readZigbeeProblem('/nonexistent/nowhere')).toBeUndefined();
   });
 });
+
+describe('the line handed to an app', () => {
+  it('collapses Zigbee2MQTT\'s own indentation out of the detail', () => {
+    // Taken off a real hub: Z2M writes `error: \tz2m: Error: …`, tab included.
+    // `detail` is rendered as one line in an app, where an embedded tab is a
+    // hole in the middle of the sentence rather than a column.
+    const problem = classifyZigbeeLog(
+      '[2026-08-09 17:34:24] error: \tz2m: Error: Adapter EZSP protocol version (8) ' +
+        'is not supported by Host [13-19].',
+    );
+    expect(problem?.detail).not.toMatch(/\s\s|\t/);
+    expect(problem?.detail).toContain('error: z2m: Error: Adapter EZSP protocol version (8)');
+  });
+});

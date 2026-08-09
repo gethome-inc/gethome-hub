@@ -998,14 +998,21 @@ printf '@@CAPABILITIES:%s@@\n' "$CAPS"
 say "This hub can talk to: ${CAPS}."
 
 if [[ "$RADIO_BUDGET" == "one" ]]; then
-  # One radio at a time, so say which one has it and how to change that. This
-  # branch reads ZIGBEE_CONFIGURED, not ZIGBEE_READY: the board was handed to
-  # the coordinator whether or not Z2M has reached it yet, and telling someone
-  # with a stick in the port that they haven't plugged one in would be worse
-  # than saying nothing. The warning above already covers the "not talking to
-  # it yet" half.
-  if [[ -n "$ZIGBEE_CONFIGURED" ]]; then
+  # One radio at a time, so say which one has it and how to change that — and
+  # keep `ZIGBEE_CONFIGURED` (the board went to the coordinator) apart from
+  # `ZIGBEE_READY` (Zigbee2MQTT actually reached it), because on a small board
+  # the gap between them is a hub running *neither* radio.
+  #
+  # This is the last line before the install ends, and it used to be the
+  # reassuring one in that case: "the coordinator you plugged in has it, so
+  # Matter is off" is true, but printed under a firmware warning and beside
+  # `@@CAPABILITIES:Wi-Fi and MQTT@@` it reads as "all set" on a hub that can
+  # talk to no radio at all. Naming it is the whole point of the check that
+  # produced the warning in the first place.
+  if [[ -n "$ZIGBEE_READY" ]]; then
     say "This board has memory for one radio at a time, and the Zigbee coordinator you plugged in has it, so Matter is off. You can switch to Matter in the GetHome app — the coordinator stays configured, and Zigbee devices come back when you switch back."
+  elif [[ -n "$ZIGBEE_CONFIGURED" ]]; then
+    say "This board has memory for one radio at a time and the coordinator has it, so Matter is off — and until the coordinator is talking, this hub is running neither radio. Sort out the warning above and Zigbee starts on its own. If you would rather use Matter meanwhile, switch this board in the GetHome app; the coordinator stays configured and Zigbee devices come back when you switch back."
   elif [[ "$MATTER_ON" == "1" ]]; then
     say "This board has memory for one radio at a time, and with no Zigbee coordinator plugged in that radio is Matter. Plug a stick in whenever you like (SONOFF ZBDongle-E/P, ConBee, SkyConnect) and Zigbee takes over by itself, with no reboot."
   else
