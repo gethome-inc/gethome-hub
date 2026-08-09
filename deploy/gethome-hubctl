@@ -111,14 +111,66 @@ cmd_update() {
   # it beside the running build, flip the symlink, health-check the result and
   # roll back if it fails. A separate update path would be a second thing to
   # keep correct, and the one that gets less testing is the one that breaks.
+  # One update at a time, enforced here rather than trusted to callers.
+  #
+  # Two of them at once is not a hypothetical: the app's Update button lives on
+  # a page you can leave and come back to, `ssh` sessions are cheap, and a
+  # household can have two Macs. Concurrently they unpack into the same
+  # `releases/` directory and race to flip `current`, which is the one operation
+  # the whole atomic-symlink design exists to make safe.
+  #
+  # `/run/lock` is tmpfs, so a lock left behind by a killed run is gone after a
+  # reboot rather than blocking updates forever. If `flock` isn't here, carry on
+  # unlocked — refusing to update because a lock tool is missing would be worse
+  # than the race it prevents.
+  #
+  # The lock file is chosen by testing the directory, *not* by silencing a
+  # failed `exec`: `exec 9>file 2>/dev/null` applies both redirections to the
+  # shell permanently, so it would send stderr to /dev/null for the rest of the
+  # update — swallowing this function's own refusal message and every error
+  # `install.sh` writes. Same shape as the mosquitto failure that took a whole
+  # round to find.
+  if command -v flock >/dev/null 2>&1; then
+    local lock_file=""
+    local dir candidate
+    for dir in /run/lock /tmp; do
+      [[ -d "$dir" ]] || continue
+      candidate="$dir/gethome-update.lock"
+      # Test the *file*, not the directory: /run/lock is world-writable, but a
+      # lock left by an earlier root run is not, and `exec` failing on it would
+      # leave fd 9 closed and `flock` reporting a bad descriptor — which reads
+      # as "another update is running" when nothing is. The subshell keeps that
+      # `2>/dev/null` off this shell's own stderr, and `>>` creates without
+      # truncating a lock somebody is holding.
+      if ( : >>"$candidate" ) 2>/dev/null; then
+        lock_file="$candidate"
+        break
+      fi
+    done
+    if [[ -n "$lock_file" ]]; then
+      exec 9>"$lock_file"
+      flock -n 9 || die "another update is already running on this hub. Wait for it to finish, then check 'gethome-hubctl status'."
+    fi
+  fi
+
   echo "==> Updating from branch ${branch}…"
+  # A private temp file, not a fixed /tmp path. Two runs sharing one name means
+  # the second overwrites the script the first is still reading, and whichever
+  # finishes first deletes it from under the other. The lock above should stop
+  # that happening; this stops it *mattering* if the lock is ever unavailable.
+  local installer
+  installer="$(mktemp /tmp/gethome-install.XXXXXX.sh)" \
+    || die "couldn't create a temporary file for the installer."
   curl -fsSL "https://raw.githubusercontent.com/${REPO_SLUG}/${branch}/deploy/install.sh" \
-    -o /tmp/gethome-install.sh \
-    || die "couldn't download the installer for branch ${branch}."
-  [[ -s /tmp/gethome-install.sh ]] || die "the installer download was empty — is '${branch}' a real branch?"
-  bash /tmp/gethome-install.sh --branch "$branch"
+    -o "$installer" \
+    || { rm -f "$installer"; die "couldn't download the installer for branch ${branch}."; }
+  if [[ ! -s "$installer" ]]; then
+    rm -f "$installer"
+    die "the installer download was empty — is '${branch}' a real branch?"
+  fi
+  bash "$installer" --branch "$branch"
   local status=$?
-  rm -f /tmp/gethome-install.sh
+  rm -f "$installer"
   return $status
 }
 
