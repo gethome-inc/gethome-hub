@@ -65,6 +65,19 @@ function decide(options: {
   coordinator: boolean;
   /** Stage it as an explicit `--zigbee` pin instead of a detected device. */
   pinned?: boolean;
+  /**
+   * A coordinator was set up on this machine before — `zigbee.env` carries a
+   * `ZIGBEE_ADAPTER=` line, which the detector writes on first sight and never
+   * deletes. That is what tells "this hub does Zigbee and its stick is out"
+   * from "this hub has never seen one".
+   */
+  previouslyConfigured?: boolean;
+  /**
+   * What ADAPTER_MATTER already says. Defaults to a sentinel the script can
+   * never want, so an assertion proves it *wrote* the value rather than found
+   * it. Set it to stage a real mid-flight state instead.
+   */
+  matterNow?: string;
 }): Outcome {
   const conf = tmp();
   const data = tmp();
@@ -73,9 +86,15 @@ function decide(options: {
     path.join(conf, 'hub.env'),
     // ADAPTER_MATTER starts at a value the script can never want, so a test
     // that passes proves the script wrote it rather than left it alone.
-    `DATA_DIR=${data}\nGETHOME_RADIO=${options.budget}\nADAPTER_MATTER=9\n`,
+    `DATA_DIR=${data}\nGETHOME_RADIO=${options.budget}\nADAPTER_MATTER=${options.matterNow ?? '9'}\n`,
   );
   if (options.mode) writeFileSync(path.join(data, 'radio-mode'), options.mode);
+  if (options.previouslyConfigured) {
+    writeFileSync(
+      path.join(conf, 'zigbee.env'),
+      `ZIGBEE_ADAPTER=/dev/serial/by-id/${CERTAIN_NAME}\nZIGBEE2MQTT_CONFIG_SERIAL_PORT=/dev/ttyACM0\n`,
+    );
+  }
   if (options.coordinator) {
     const device = path.join(scan, CERTAIN_NAME);
     writeFileSync(device, '');
@@ -134,6 +153,88 @@ describe('a board that affords one radio', () => {
       matter: '1',
       exitCode: 1,
     });
+  });
+});
+
+describe('a coordinator that is unplugged, not absent', () => {
+  /**
+   * **Follow a coordinator in; never follow one out.**
+   *
+   * Plugging a stick in is an unambiguous instruction. Pulling one out is not:
+   * it is equally "I've finished with Zigbee" and "I'll be back in two
+   * minutes" — and the second is *step one of the firmware update this project
+   * tells people to perform*.
+   *
+   * Guessing "finished" costs a hub restart (rewriting hub.env, ~70 s of a
+   * closed port on a Zero 2 W) at the exact moment the owner is reading the
+   * flashing steps off that hub's own page, which goes unreachable and badges
+   * itself Offline while they read it. Guessing "back in a minute" costs a
+   * radio that was not going to work anyway, because the stick is in their
+   * other hand. So the board stays put and the owner decides, in the app.
+   */
+  it('leaves the board alone when a known coordinator is unplugged', () => {
+    const outcome = decide({
+      budget: 'one',
+      mode: 'auto',
+      coordinator: false,
+      previouslyConfigured: true,
+    });
+    // '9' is the sentinel hub.env starts at, so this passing means the script
+    // wrote nothing at all — no rewrite, and therefore no hub restart.
+    expect(outcome.matter, 'ADAPTER_MATTER is untouched').toBe('9');
+    expect(outcome.exitCode, 'Zigbee still is not running').toBe(1);
+  });
+
+  it('still hands the board to Matter when no coordinator was ever set up', () => {
+    // The other half of the rule, and the trap that made `auto` exist: a
+    // stickless Zero 2 W must not hold 150 MB for a Zigbee2MQTT that will
+    // never start *and* go without Matter.
+    expect(decide({ budget: 'one', mode: 'auto', coordinator: false })).toMatchObject({
+      matter: '1',
+    });
+  });
+
+  it('obeys an owner who asks for Matter after unplugging', () => {
+    // The way back. Nothing is stuck: `PUT /settings/radio` writes the mode and
+    // this script applies it on the next event, coordinator or no coordinator.
+    expect(decide({
+      budget: 'one',
+      mode: 'matter',
+      coordinator: false,
+      previouslyConfigured: true,
+    })).toMatchObject({ matter: '1' });
+  });
+
+  it('gives the board back to Zigbee when the coordinator returns', () => {
+    expect(decide({
+      budget: 'one',
+      mode: 'auto',
+      coordinator: true,
+      previouslyConfigured: true,
+    })).toMatchObject({ matter: '0', exitCode: 0 });
+  });
+
+  it('costs the whole flashing trip zero hub restarts', () => {
+    // Staged as it really stands mid-flash: the board was on Zigbee
+    // (ADAPTER_MATTER=0) and stayed there while the stick was out, so the
+    // coordinator coming back finds the value it already wants.
+    //
+    // `apply_matter` returns early when nothing changed, and that early return
+    // is what skips `systemctl restart gethome-hubd`. Two restarts before this
+    // rule, none after — and the one it removes is the one that landed on the
+    // owner while they were reading the flashing steps off this hub's page.
+    const back = decide({
+      budget: 'one',
+      mode: 'auto',
+      coordinator: true,
+      previouslyConfigured: true,
+      matterNow: '0',
+    });
+    expect(back.matter, 'already right, so nothing to write').toBe('0');
+    // One line, not two: a rewrite appends, so a second ADAPTER_MATTER line is
+    // exactly what a needless write would leave behind.
+    const hubEnv = readFileSync(path.join(back.confDir, 'hub.env'), 'utf8');
+    expect(hubEnv.match(/^ADAPTER_MATTER=/gm)).toHaveLength(1);
   });
 });
 
@@ -330,5 +431,78 @@ describe('what counts as a coordinator', () => {
     // reason a `maybe` is reported to the user instead of being configured:
     // handing somebody's printer to Zigbee2MQTT is worse than asking.
     expect(adopts('usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_0001-if00-port0')).toBe(false);
+  });
+});
+
+/**
+ * Starting Zigbee2MQTT, which is the last thing that stands between a repaired
+ * coordinator and a working radio.
+ *
+ * The tests above all pass `--no-start` — the installer's mode, where it brings
+ * everything up itself. That left the branch that actually starts the unit
+ * uncovered, and it is the branch the most common repair on this whole path
+ * runs through.
+ */
+describe('bringing Zigbee2MQTT up', () => {
+  /**
+   * Run the script for real against a fake `systemctl` that records what it
+   * was asked to do and reports every unit as inactive.
+   */
+  function start(): string[] {
+    const conf = tmp();
+    const data = tmp();
+    const scan = tmp();
+    const bin = tmp();
+    const calls = path.join(tmp(), 'calls');
+    writeFileSync(path.join(conf, 'hub.env'), `DATA_DIR=${data}\nGETHOME_RADIO=both\nADAPTER_MATTER=1\n`);
+    writeFileSync(path.join(scan, CERTAIN_NAME), '');
+    writeFileSync(
+      path.join(bin, 'systemctl'),
+      [
+        '#!/usr/bin/env bash',
+        `printf '%s\\n' "$*" >> ${JSON.stringify(calls)}`,
+        // `is-active` answers "no" the way systemd does, so the script takes
+        // the start branch rather than the restart one.
+        'case "$1" in is-active) exit 3 ;; esac',
+        'exit 0',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    writeFileSync(calls, '');
+    execFileSync('bash', [SCRIPT, '--quiet'], {
+      env: {
+        ...process.env,
+        GETHOME_CONF: conf,
+        GETHOME_ZIGBEE_SCAN_DIR: scan,
+        PATH: `${bin}:${process.env.PATH ?? ''}`,
+      },
+      stdio: 'ignore',
+    });
+    return readFileSync(calls, 'utf8').split('\n').filter(Boolean);
+  }
+
+  /**
+   * The failure this pins is the one a user meets *after* fixing their stick.
+   *
+   * A coordinator whose firmware is too old lets Zigbee2MQTT start and then
+   * refuses, so `Restart=always` retries until StartLimitBurst is spent and
+   * systemd parks the unit in `failed` with `start-limit-hit`. `systemctl
+   * start` then returns an error instead of starting anything until the
+   * failure is reset (systemd.unit(5)).
+   *
+   * So: unplug the stick, flash it, plug it back in. The paths are unchanged,
+   * this script takes the start branch — and without the reset it fails with
+   * "start request repeated too quickly" on a coordinator that is now good.
+   * The user did everything right and Zigbee is still dead.
+   */
+  it('clears a rate-limited failure before starting, or the repair does nothing', () => {
+    const calls = start();
+    const reset = calls.findIndex((c) => c.startsWith('reset-failed '));
+    const started = calls.findIndex((c) => c.startsWith('start '));
+    expect(reset, 'the failed state is cleared').toBeGreaterThanOrEqual(0);
+    expect(started, 'the unit is started').toBeGreaterThanOrEqual(0);
+    expect(reset, 'cleared *before* starting, or it changes nothing').toBeLessThan(started);
+    expect(calls[reset]).toContain('gethome-zigbee2mqtt.service');
+    expect(calls[started]).toContain('gethome-zigbee2mqtt.service');
   });
 });

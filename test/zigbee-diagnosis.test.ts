@@ -34,13 +34,22 @@ const FIRMWARE_TOO_OLD = `
 `;
 
 describe('classifying Zigbee2MQTT failures', () => {
-  it('names a coordinator whose firmware is behind, and both versions', () => {
+  it('names a coordinator whose firmware is behind, and keeps the log line', () => {
     const problem = classifyZigbeeLog(FIRMWARE_TOO_OLD);
     expect(problem?.kind).toBe('firmware-too-old');
-    // The versions are the whole point: "too old" without them is unactionable.
-    expect(problem?.summary).toContain('v8');
-    expect(problem?.summary).toContain('v13');
     expect(problem?.detail).toContain('EZSP protocol version (8)');
+  });
+
+  it('keeps protocol versions out of the summary', () => {
+    // The log's numbers are *protocol* versions; every browser flasher shows
+    // *firmware* versions instead — SONOFF's offers 6.10.3 → 8.0.2 for this
+    // exact stick. "Needs 13 or newer" in front of somebody looking at an
+    // 8.0.2 makes the number they can act on look like the wrong one. The
+    // summary says what to do; `detail` keeps both numbers for anyone who
+    // wants them.
+    const summary = classifyZigbeeLog(FIRMWARE_TOO_OLD)?.summary ?? '';
+    expect(summary).not.toMatch(/\b(8|13|19)\b/);
+    expect(summary).toContain('too old');
   });
 
   it('prefers the specific cause over the generic one that follows it', () => {

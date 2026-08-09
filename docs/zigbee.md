@@ -163,14 +163,42 @@ error: Adapter EZSP protocol version (8) is not supported by Host [13-19]
 Everything above that last line is the hub working correctly — the stick was
 found, identified, opened and answered. Only the firmware is behind.
 
-Flashing is a one-time job and needs no hardware: SONOFF's browser flasher at
-<https://dongle.sonoff.tech> does it over the same USB port, and the NCP images
-live at <https://github.com/itead/Sonoff_Zigbee_Dongle_Firmware>. The hub keeps
-running throughout; nothing else on it is affected.
+Flashing is a one-time job and needs no hardware. SONOFF's browser flasher —
+<https://dongle.sonoff.tech/sonoff-dongle-flasher/>, the flasher itself and not
+the site root — talks to the dongle over WebSerial in Chrome or Edge (Safari
+cannot), identifies it, and proposes the current Stable build on its own. The
+NCP images are at
+<https://github.com/itead/Sonoff_Zigbee_Dongle_Firmware> for anyone who wants
+them, but the browser flow never needs that page. Other EZSP coordinators
+(SkyConnect, SLZB, Connect ZBT) have their maker's own equivalent; the steps are
+the same.
+
+**Never quote the log's numbers as the version to install.** `(8)` and `[13-19]`
+are *EZSP protocol* versions. Every flasher shows *firmware* versions instead —
+SONOFF's offers `6.10.3 → 8.0.2` for this very stick. Put "needs 13 or newer" in
+front of somebody looking at an `8.0.2` and the download they should take looks
+like the wrong one. So `install.sh`, the hub's `zigbee.problem` summary, and
+Studio's card all say *what to do* and leave both numbers in the raw log line.
 
 `install.sh` matches this case by name rather than pointing at the journal —
 the person watching the install is usually on another machine, where "check
 `journalctl`" is homework they cannot do.
+
+**The repair path has a trap of its own, and the detector clears it.** A
+coordinator with old firmware lets Zigbee2MQTT *start* and then refuses, so
+`Restart=always` retries it every `RestartSec` until `StartLimitBurst` is spent —
+five failures inside two minutes — and systemd parks the unit in `failed` with
+`start-limit-hit`. After that `systemctl start` returns an error instead of
+starting anything, until the failure is reset ([systemd.unit(5)][unit]). That is
+exactly the state the owner is in when they unplug the stick, flash it, and plug
+it back in: the fix worked, the device path is unchanged, and the start would
+fail with *"start request repeated too quickly"* on a coordinator that is now
+perfectly good. So `zigbee-detect.sh` runs `systemctl reset-failed` before
+starting a unit that isn't active. It is not a way around the rate limit — that
+exists to stop a *tight* loop, and this script only runs at boot and on USB
+events, so reaching that line means the hardware situation just changed.
+
+[unit]: https://www.freedesktop.org/software/systemd/man/systemd.unit.html#StartLimitIntervalSec=
 
 **The hub is not flashing anything, and that is a decision.** Doing it from the
 Pi would mean carrying a Python toolchain and a per-device firmware table onto a
@@ -228,22 +256,51 @@ hub). Not both. Two separate things decide which:
 that knows whether a coordinator is *actually plugged in* — it runs at boot, on
 every USB plug and unplug, and at the end of the install:
 
+"Coordinator" below has **three** states, not two, and the third is the one
+that matters: *none has ever been set up here*, *one is plugged in*, and *this
+hub's coordinator is unplugged right now*. `zigbee.env` tells the first from the
+third — it is written the first time a coordinator is identified and is never
+deleted.
+
 | Budget | Mode | Coordinator | Result |
 |---|---|---|---|
-| `one` | `auto` | yes | Zigbee runs, `ADAPTER_MATTER=0` |
-| `one` | `auto` | no | Matter runs, Zigbee2MQTT stays down |
-| `one` | `zigbee` | yes | same as `auto` + coordinator |
-| `one` | `zigbee` | no | Matter runs — see below |
-| `one` | `matter` | either | Matter runs; a plugged-in coordinator is recorded but Z2M stays down |
-| `both` | `auto` | either | both run |
-| `both` | `zigbee` | yes | Zigbee runs, Matter off (the owner asked for it) |
-| `both` | `matter` | either | Matter runs, Z2M stays down |
+| `one` | `auto` | plugged in | Zigbee runs, `ADAPTER_MATTER=0` |
+| `one` | `auto` | never any | Matter runs, Zigbee2MQTT stays down |
+| `one` | `auto` | **unplugged** | **nothing changes** — Z2M stops, the board stays where it was |
+| `one` | `zigbee` | plugged in | same as `auto` + coordinator |
+| `one` | `zigbee` | never any | Matter runs — see below |
+| `one` | `zigbee` | **unplugged** | **nothing changes** |
+| `one` | `matter` | any | Matter runs; a plugged-in coordinator is recorded but Z2M stays down |
+| `both` | `auto` | any | both run |
+| `both` | `zigbee` | plugged in | Zigbee runs, Matter off (the owner asked for it) |
+| `both` | `matter` | any | Matter runs, Z2M stays down |
 
 **Matter only ever gives way to Zigbee that is genuinely going to run.** That
-is the row worth reading twice: `mode=zigbee` with no stick plugged in still
-leaves Matter on. Reserving the memory for a coordinator that isn't there is
-how a hub ends up talking to nothing at all — no Zigbee because there is no
+is the row worth reading twice: `mode=zigbee` with no stick ever plugged in
+still leaves Matter on. Reserving the memory for a coordinator that isn't there
+is how a hub ends up talking to nothing at all — no Zigbee because there is no
 stick, no Matter because we saved the room for one.
+
+**And the mirror of it: follow a coordinator *in*, never follow one *out*.**
+Plugging a stick in is an unambiguous instruction, so the detector acts on it
+within seconds. Pulling one out is not — it is equally "I've finished with
+Zigbee" and "I'll be back in two minutes", and the second is *step one of the
+firmware update this project tells people to perform*.
+
+The two guesses do not cost the same. Guessing "finished" rewrites `hub.env` and
+restarts the hub — around 70 seconds of a closed port on a Zero 2 W — landing
+exactly when the owner is reading the flashing steps off that hub's own page,
+which goes unreachable and badges itself Offline while they read it. Then it
+restarts a second time when the stick comes back. Guessing "back in a minute"
+costs a radio that was not going to work anyway, because the stick is in their
+other hand.
+
+So on removal the board stays where it is, Zigbee2MQTT stops (there is nothing
+to talk to), and the owner decides in the app with `PUT /settings/radio` — one
+button, reversible, already there. The whole flash-and-return trip now costs
+**zero** hub restarts instead of two. The cost of the rule is that a hub whose
+coordinator is gone for good keeps Matter off until somebody says so; the app
+is what says so, and `test/deploy-radio.test.ts` pins every row above.
 
 Applying a mode is root work — editing `hub.env`, starting or stopping a unit,
 restarting the hub — and the hub deliberately cannot do any of it. It writes one

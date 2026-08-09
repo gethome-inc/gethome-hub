@@ -208,6 +208,13 @@ fi
 ZIGBEE_ALLOWED=1
 [[ "$MODE" == "matter" ]] && ZIGBEE_ALLOWED=0
 
+# Has a coordinator ever been set up on this machine? `zigbee.env` is written
+# the first time one is identified and is never deleted, so it separates two
+# things that look alike from here: "this hub does Zigbee, and its stick is out
+# right now" from "this hub has never seen a coordinator".
+ZIGBEE_KNOWN=""
+grep -q '^ZIGBEE_ADAPTER=' "$ENV_FILE" 2>/dev/null && ZIGBEE_KNOWN=1
+
 # Matter gives way only when Zigbee is *genuinely going to run*. Turning it off
 # for a coordinator that isn't plugged in is how a hub ends up talking to
 # nothing at all — no Zigbee because there is no stick, no Matter because we
@@ -219,6 +226,30 @@ if [[ "$ZIGBEE_ALLOWED" == "1" && -n "$FOUND" ]]; then
     one:*)       MATTER_WANTED=0 ;;  # one radio's memory, and Zigbee has it
     both:zigbee) MATTER_WANTED=0 ;;  # room for both, owner asked for Zigbee alone
   esac
+elif [[ "$ZIGBEE_ALLOWED" == "1" && -n "$ZIGBEE_KNOWN" ]]; then
+  # **Follow a coordinator in; never follow one out.**
+  #
+  # Plugging a stick in is an unambiguous instruction, so this script acts on
+  # it. Pulling one out is not: it is equally "I've finished with Zigbee" and
+  # "I'll be back in two minutes" — which is *step one of the firmware update
+  # this project tells people to do*. Guessing wrong there is expensive, and
+  # the cost is not theoretical:
+  #
+  #   Switching the radio rewrites hub.env and restarts the hub, ~70 s of a
+  #   closed port on a Zero 2 W. So unplug-flash-replug used to cost two
+  #   restarts — one of them landing exactly when the owner is reading the
+  #   flashing steps off the hub's own page, which goes unreachable and badges
+  #   itself Offline while they read. Doing nothing costs a radio that was
+  #   already not going to work, because the stick is in their other hand.
+  #
+  # So the board stays where it is and the owner decides, in the app, with
+  # `PUT /settings/radio` — which already exists, is reversible, and is one
+  # button. Keeping the current value makes `apply_matter` a no-op rather than
+  # a special case.
+  KEEP_MATTER=$(read_env ADAPTER_MATTER "$HUB_ENV")
+  if [[ -n "$KEEP_MATTER" ]]; then
+    MATTER_WANTED="$KEEP_MATTER"
+  fi
 fi
 
 has_systemd() { command -v systemctl >/dev/null 2>&1; }
@@ -270,9 +301,18 @@ if [[ -z "$FOUND" ]]; then
   if stop_zigbee_if_running; then
     say "Stopping Zigbee2MQTT: the coordinator is gone."
   fi
-  # …and those 150 MB are exactly what Matter needs, so hand them over. This
-  # is the case the installer used to get wrong: it switched Matter off on
-  # every small board at install time, whether or not a stick was ever there.
+  # …and those 150 MB are exactly what Matter needs, so hand them over — but
+  # only when Zigbee was never going to use them. This is the case the
+  # installer used to get wrong in one direction (switching Matter off on every
+  # small board whether or not a stick was ever there) and this script used to
+  # get wrong in the other (switching it back on the moment a stick was pulled,
+  # restarting the hub under an owner who was three steps into flashing it).
+  # See the note by MATTER_WANTED above.
+  if [[ -n "$ZIGBEE_KNOWN" && "$ZIGBEE_ALLOWED" == "1" ]]; then
+    say "This hub's Zigbee coordinator is unplugged. Leaving the radio as it is —"
+    say "put the coordinator back and Zigbee starts on its own, or switch this"
+    say "board to Matter in the GetHome app."
+  fi
   apply_matter
   exit 1
 fi
@@ -381,6 +421,24 @@ if [[ "$CURRENT" != "$FOUND" || "$CURRENT_NODE" != "$FOUND_NODE" ]] \
   say "The coordinator moved to ${FOUND_NODE}; restarting Zigbee2MQTT."
   systemctl restart "$UNIT" >/dev/null 2>&1 || true
 elif ! systemctl is-active --quiet "$UNIT" 2>/dev/null; then
+  # Clear a rate-limited failure before trying, or the most likely repair on
+  # this whole path silently does nothing.
+  #
+  # A coordinator whose firmware is too old lets Zigbee2MQTT start and *then*
+  # refuses, so `Restart=always` retries it every RestartSec until
+  # StartLimitBurst is spent — five failures inside two minutes — and systemd
+  # parks the unit in `failed` with `start-limit-hit`. From then on `systemctl
+  # start` returns an error rather than starting anything, until the failure is
+  # reset (systemd.unit(5), StartLimitIntervalSec).
+  #
+  # That is exactly the state a user is in when they unplug the stick, flash
+  # it, and plug it back in: the fix worked, the paths are unchanged, and the
+  # start below would fail with "start request repeated too quickly" on a
+  # coordinator that is now perfectly good. Resetting here is safe — a unit
+  # that is not failed is unaffected — and it is not a way around the rate
+  # limit, which exists to stop a *tight* loop: this script runs at boot and on
+  # USB events, so reaching this line means the hardware situation just changed.
+  systemctl reset-failed "$UNIT" >/dev/null 2>&1 || true
   say "Starting Zigbee2MQTT…"
   systemctl start "$UNIT" >/dev/null 2>&1 \
     || say "Zigbee2MQTT wouldn't start. See: journalctl -u ${UNIT} -n 50"

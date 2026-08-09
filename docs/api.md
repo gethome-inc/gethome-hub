@@ -84,7 +84,7 @@ treat its presence as the signal and never its absence.
 ```json
 "problem": {
   "kind": "firmware-too-old",
-  "summary": "The Zigbee coordinator works, but its firmware is too old: …",
+  "summary": "The Zigbee coordinator is working, but its firmware is too old for Zigbee2MQTT. …",
   "detail": "error: z2m: Error: Adapter EZSP protocol version (8) is not supported by Host [13-19]."
 }
 ```
@@ -119,10 +119,19 @@ hub is in:
 | `matter` | whether the Matter adapter is **live right now** |
 | `canRunBoth` | `budget === "both"`, restated so an app can hide the switch without parsing the enum |
 
-`auto` follows the hardware: a coordinator takes the board when one is plugged
-in, Matter takes it when one isn't. The full matrix, and why Matter never gives
-way to a coordinator that isn't there, is in
+`auto` follows the hardware **in one direction**: a coordinator takes the board
+within seconds of being plugged in, and Matter takes it on a board where no
+coordinator has ever been set up. Unplugging a coordinator changes *nothing* —
+Zigbee2MQTT stops, the board stays where it was, and switching to Matter is left
+to the owner. Pulling a stick out is ambiguous (finished with Zigbee, or two
+minutes into flashing it?) and the wrong guess restarts the hub under somebody
+who is mid-repair. The full matrix, and why Matter never gives way to a
+coordinator that isn't there, is in
 [zigbee.md](zigbee.md#zigbee-or-matter-on-a-small-board).
+
+So an app looking at `zigbee.connected: false` on a `budget: "one"` hub with
+`matter: false` is looking at a board waiting for its coordinator to come back —
+offer the Matter switch, don't assume it.
 
 **`PUT` records a request and returns immediately — its response is not state.**
 Applying a mode is root work (rewriting `/etc/gethome/hub.env`, stopping or

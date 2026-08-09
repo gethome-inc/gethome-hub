@@ -239,6 +239,18 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   install ends with an additive `@@CAPABILITIES:<list>@@` marker naming what the
   hub actually ended up able to talk to, and Studio shows the same list on the
   hub page.
+  **Follow a coordinator *in*; never follow one *out*.** Plugging a stick in is
+  an unambiguous instruction and the detector acts on it in seconds. Pulling one
+  out is not — it is equally "done with Zigbee" and "two minutes into flashing
+  it", which is *step one of the firmware update we tell people to do*. The
+  guesses cost differently: guessing "done" rewrites `hub.env` and restarts the
+  hub (~70 s of closed port on a Zero 2 W) right as the owner reads the flashing
+  steps off that hub's own page, then restarts again when the stick returns;
+  guessing "back soon" costs a radio that wasn't going to work anyway. So
+  removal changes nothing — Z2M stops, the board stays put, and the owner
+  switches in the app. `zigbee.env` is the memory that tells "never had one"
+  (→ Matter) from "unplugged" (→ leave it alone); it is written on first sight
+  and never deleted. Don't re-add symmetry here.
 - **The hub records the radio choice; it never applies it.** Applying means
   rewriting `/etc/gethome/hub.env`, stopping or starting a unit and restarting
   the hub — all root, none of it something the service user should be able to

@@ -52,14 +52,20 @@ export function classifyZigbeeLog(log: string): ZigbeeProblem | undefined {
   // A SONOFF ZBDongle-E ships running EmberZNet 6.10, which speaks EZSP v8,
   // while Zigbee2MQTT's ember driver needs 13 or newer. The radio answers and
   // then refuses — so this is the one failure where everything looks right.
-  const ezsp = /EZSP protocol version \((\d+)\) is not supported by Host \[([\d-]+)\]/.exec(log);
+  // Deliberately no version numbers in the summary, though the log has two.
+  // These are *protocol* versions (EZSP 8 vs 13+), and every browser flasher
+  // shows *firmware* versions instead — SONOFF's offers "6.10.3 → 8.0.2" for
+  // exactly this stick. Put "needs 13 or newer" in front of somebody looking at
+  // an 8.0.2 and the number they can act on looks like the wrong one. The raw
+  // line keeps both for anyone who wants them.
+  const ezsp = /EZSP protocol version \(\d+\) is not supported by Host \[[\d-]+\]/.exec(log);
   if (ezsp) {
     return {
       kind: 'firmware-too-old',
       summary:
-        `The Zigbee coordinator works, but its firmware is too old: it speaks EZSP v${ezsp[1]} ` +
-        `and Zigbee2MQTT needs v${(ezsp[2] ?? '').split('-')[0]} or newer. Flashing it once fixes ` +
-        `this for good; nothing else on the hub is affected.`,
+        'The Zigbee coordinator is working, but its firmware is too old for Zigbee2MQTT. ' +
+        'Updating it is a one-time job — about a minute, in a browser — and nothing else on ' +
+        'the hub is affected.',
       detail: line(/EZSP protocol version/) ?? ezsp[0],
     };
   }

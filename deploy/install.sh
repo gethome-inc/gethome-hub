@@ -959,10 +959,16 @@ if [[ -n "$ZIGBEE_READY" ]]; then
       # ember driver needs EZSP 13 or newer — NCP firmware 7.4.x. So the very
       # first thing a new owner of the coordinator this project recommends sees
       # is a radio that answers and then refuses, once, until it is flashed.
+      #
+      # The message says what to do rather than quoting those numbers, and that
+      # is deliberate: they are *protocol* versions, while the flasher shows
+      # *firmware* versions and offers "6.10.3 → 8.0.2" for this very stick.
+      # "Needs 13 or newer" beside an 8.0.2 makes the fix look wrong. The hub's
+      # own `zigbee.problem` keeps the raw line for anyone who wants it.
       Z2M_TAIL=$($SUDO journalctl -u gethome-zigbee2mqtt -n 80 --no-pager 2>/dev/null || true)
       case "$Z2M_TAIL" in
         *"EZSP protocol version"*"is not supported by Host"*)
-          warn "The Zigbee coordinator answered, but its firmware is too old for Zigbee2MQTT: it speaks EZSP v8 (EmberZNet 6.10) and the ember driver needs EZSP 13 or newer (NCP 7.4.x). SONOFF ZBDongle-E sticks ship this way — flashing it once fixes it for good, and everything else on this hub is unaffected. SONOFF's own browser flasher is at https://dongle.sonoff.tech and the NCP images are at https://github.com/itead/Sonoff_Zigbee_Dongle_Firmware"
+          warn "The Zigbee coordinator answered, but its firmware is too old for Zigbee2MQTT. SONOFF ZBDongle-E sticks ship this way, and updating one is a one-time job that needs no cable and no tools: unplug it, put it in a Mac or PC, open https://dongle.sonoff.tech/sonoff-dongle-flasher/ in Chrome or Edge (Safari cannot talk to USB devices), and flash the coordinator firmware it offers. Put it back and this hub picks it up on its own. Everything else here is unaffected."
           ;;
         *"No valid USB adapter found"*)
           warn "Zigbee2MQTT could not identify the coordinator on ${ZIGBEE_ADAPTER:-the configured port}. If this is a generic USB-serial stick, Zigbee2MQTT needs to be told what it is. See: journalctl -u gethome-zigbee2mqtt -n 50"
