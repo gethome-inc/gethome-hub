@@ -46,8 +46,15 @@ export interface ZigbeeProblem {
  * already knows.
  */
 export function classifyZigbeeLog(log: string): ZigbeeProblem | undefined {
-  const line = (pattern: RegExp): string | undefined =>
-    log.split('\n').reverse().find((l) => pattern.test(l))?.trim();
+  // Zigbee2MQTT indents its own log lines — `error: \tz2m: Error: …` — and this
+  // string is rendered as one line in an app, where an embedded tab is just a
+  // hole in the sentence. Collapse runs of whitespace rather than reproducing
+  // the file's layout in a place that has none.
+  const tidy = (text: string): string => text.replace(/\s+/g, ' ').trim();
+  const line = (pattern: RegExp): string | undefined => {
+    const found = log.split('\n').reverse().find((l) => pattern.test(l));
+    return found === undefined ? undefined : tidy(found);
+  };
 
   // A SONOFF ZBDongle-E ships running EmberZNet 6.10, which speaks EZSP v8,
   // while Zigbee2MQTT's ember driver needs 13 or newer. The radio answers and
@@ -66,7 +73,7 @@ export function classifyZigbeeLog(log: string): ZigbeeProblem | undefined {
         'The Zigbee coordinator is working, but its firmware is too old for Zigbee2MQTT. ' +
         'Updating it is a one-time job — about a minute, in a browser — and nothing else on ' +
         'the hub is affected.',
-      detail: line(/EZSP protocol version/) ?? ezsp[0],
+      detail: line(/EZSP protocol version/) ?? tidy(ezsp[0]),
     };
   }
 
