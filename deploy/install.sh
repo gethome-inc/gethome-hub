@@ -387,11 +387,18 @@ if [[ -n "$SMALL_BOARD" ]]; then
   # size. Measured on a Zero 2 W running the Desktop image with nothing plugged
   # into its HDMI: pcmanfm, wf-panel-pi, labwc, two xdg-desktop-portals,
   # wireplumber and the user session held about 75 MB between them — more than
-  # the hub's whole Matter adapter, on the one board that has to choose between
-  # radios. Switching somebody's desktop off is not this installer's business.
-  # Saying what it costs, on the machine where it costs the most, is.
+  # the hub's whole Matter adapter. Switching somebody's desktop off is not this
+  # installer's business. Saying what it costs, on the machine where it costs
+  # the most, is.
+  #
+  # The measurement stays in this comment and out of the message. Studio shows
+  # that message to someone who is not going to convert megabytes into anything
+  # — what they can act on is "it takes memory the hub needs" plus the command.
+  # And it must not promise a second radio: RADIO_BUDGET is computed from the
+  # board's RAM above and a desktop makes no difference to it, so "turn it off
+  # and get Matter too" would simply be untrue.
   if [[ "$(systemctl get-default 2>/dev/null || true)" == "graphical.target" ]]; then
-    warn "This Pi is running the desktop version of Raspberry Pi OS. On a ${RAM_MB} MB board the desktop holds roughly 75 MB even with no screen attached — real money on a machine this size, where the hub already runs one radio at a time. The hub works either way. If nobody uses a screen on this Pi, \`sudo systemctl set-default multi-user.target\` and a restart hands that memory back; Raspberry Pi OS Lite is the version that never takes it."
+    warn "This Pi is running the desktop version of Raspberry Pi OS. On a board this small the desktop uses up a good part of the memory the hub needs, for a screen that isn't attached. The hub works either way, it just has less room. If nobody uses a screen on this Pi, run \`sudo systemctl set-default multi-user.target\` and restart it to give that memory back; Raspberry Pi OS Lite is the version that never takes it in the first place."
   fi
 fi
 
