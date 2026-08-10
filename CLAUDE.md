@@ -186,6 +186,18 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   minutes — because a hub can commit a claim and lose the response, and without
   it the retry is told the code is wrong. Both halves are load-bearing; neither
   replaces the typed code for a hub Studio has no key on.
+- **The token is the identity, so `me` is a member id.** A client that claimed
+  over SSH never learns its member id — `gethome-hubctl claim` prints the hub id
+  and the token and nothing else — so it held a working token and could not pick
+  its own row out of `GET /members`. Two answers, both additive: every row
+  carries `isSelf`, and renaming goes through `PATCH /members/me`, which asks
+  for no id at all. Any member may rename *itself* (the owner-only rule guards
+  the shape of the home, not what somebody calls themselves) and no route
+  renames anybody else. Names are trimmed before they are measured, in one
+  schema shared with `POST /pair`: a name that is only spaces is a 400, not a
+  member row with nothing to click on. This is what lets GetHome Studio — which
+  has no accounts and no user name of its own — claim as *the Mac* and offer
+  the rename afterwards.
 - **One hub, one home, one name — and `HUB_NAME` only seeds it.** There used to
   be two names: `GET /hub` answered `HUB_NAME` from `/etc/gethome/hub.env`,
   which the installer writes once and nobody ever edits, while `GET /home`

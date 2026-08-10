@@ -64,6 +64,15 @@ const PAIR_MAX_FAILURES = 10;
 const PAIR_WINDOW_MS = 5 * 60 * 1000;
 
 /**
+ * What a member may be called — one rule, wherever a name arrives.
+ *
+ * `.trim()` runs before the length checks, so " " is a 400 and not a member
+ * nobody can identify in a list. 80 characters is what `PATCH /home` and the
+ * device names already allow; a name is a label in a list, not a sentence.
+ */
+const memberNameSchema = z.string().trim().min(1).max(80);
+
+/**
  * The hub's local API: REST under /api/v1 plus a WebSocket event stream.
  * Auth is a bearer token issued by the pairing claim flow; `GET /api/v1/hub`
  * is the only unauthenticated route (discovery/health).
@@ -200,8 +209,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const body = z
       .object({
         code: z.string().min(4).max(16),
-        memberName: z.string().min(1).max(80),
-        deviceName: z.string().max(120).optional(),
+        // Trimmed before it is measured, so a name that is only whitespace is
+        // refused rather than stored — the client's own tidying is not
+        // something this can assume, and a blank member row is unfixable from
+        // any app: it has nothing to click on.
+        memberName: memberNameSchema,
+        deviceName: z.string().trim().max(120).optional(),
         // A client keeps this random value while retrying. It makes a response
         // lost to a slow Pi or a dropped connection recoverable, instead of
         // presenting a claim that already succeeded as a wrong code.
@@ -394,9 +407,47 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
 
   // ── Members, invites, activity ───────────────────────────────────────────
 
-  app.get('/api/v1/members', authed, async () => {
+  app.get('/api/v1/members', authed, async (request) => {
     const rows = await deps.db.query.members.findMany();
-    return rows.map((row) => ({ id: row.id, name: row.name, role: row.role, createdAt: row.createdAt }));
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      role: row.role,
+      createdAt: row.createdAt,
+      // Which of these is the caller. Additive, and the only way an app can
+      // answer it: the member id is returned once, by `POST /pair`, and the
+      // hub's own `gethome-hubctl claim` prints the hub id and the token and
+      // nothing else — so a Mac that claimed its hub over SSH could not find
+      // itself in a list of names it is standing in.
+      isSelf: row.id === request.member!.id,
+    }));
+  });
+
+  /**
+   * Rename yourself.
+   *
+   * `me` rather than an id because the caller usually does not know its own:
+   * see `isSelf` above. The token already says who this is, so asking for the
+   * id as well would only add a way to get it wrong.
+   *
+   * Any member may do it — the owner-only rule guards the shape of the home
+   * (its rooms, its devices, who is in it), and what somebody calls themselves
+   * is none of that. Renaming *another* member is not offered at all: it is
+   * the one member operation nobody has needed, and an owner who wants a
+   * member gone already has `DELETE`.
+   */
+  app.patch('/api/v1/members/me', authed, async (request) => {
+    const body = z.object({ name: memberNameSchema }).parse(request.body);
+    const before = request.member!;
+    if (body.name !== before.name) {
+      await deps.db.update(members).set({ name: body.name }).where(eq(members.id, before.id));
+      await deps.activity.record({
+        kind: 'member.renamed',
+        message: `${before.name} is now called ${body.name}.`,
+        memberId: before.id,
+      });
+    }
+    return { id: before.id, name: body.name, role: before.role };
   });
 
   app.delete('/api/v1/members/:id', ownerOnly, async (request, reply) => {

@@ -63,7 +63,7 @@ devices, favorites, view everything.
 | `POST /matter/commission` | owner | `{pairingCode}` → `202 {jobId}` (async) |
 | `GET /matter/commission/:jobId` | any | `{status: running\|done\|failed, nodeId?, error?}` |
 | `POST /zigbee/permit-join` | owner | `{seconds}` (0 = close the network) |
-| `GET /members` · `DELETE /members/:id` | any · owner | the owner cannot be removed |
+| `GET /members` · `PATCH /members/me` · `DELETE /members/:id` | any · any (itself) · owner | rows carry `isSelf`; `PATCH` takes `{name}` and renames **the caller**; the owner cannot be removed. See [below](#which-member-you-are-isself-and-patch-membersme) |
 | `GET /invites` · `POST /invites` | owner | `POST` → `201 {code, expiresAt}` |
 | `GET /activity?limit=&before=` | any | reverse-chronological, cursor = `before` id |
 | `GET /settings/ai` · `PUT /settings/ai` · `DELETE /settings/ai` | owner | PUT `{apiKey, model?}` (an Anthropic API key, write-only; a `sk-ant-oat…` subscription token and a model outside the supported list are both refused with 400, an `authType` from an older app is ignored); GET/PUT respond `{provider: "anthropic", model, hasKey, legacySubscriptionToken, status}` where `status` carries `lastError`/`lastRun` health — see [ai-adaptation.md](ai-adaptation.md) |
@@ -176,6 +176,34 @@ force restarts nothing at all.
 The switch is cheap to change your mind about: the coordinator's device path and
 Zigbee2MQTT's paired-device list both survive, so devices on the radio that lost
 the board come back when it is handed back. They read as offline meanwhile.
+
+### Which member you are (`isSelf` and `PATCH /members/me`)
+
+`GET /members` marks the caller's own row:
+
+```json
+[{ "id": "…", "name": "Georgy’s MacBook Pro", "role": "owner", "createdAt": "…", "isSelf": true }]
+```
+
+It is there because nothing else answers the question. The member id is returned
+exactly once, by `POST /pair`, and the shorter route on the hub's own machine —
+`gethome-hubctl claim` — prints the hub id and the token and no member at all,
+so a client that claimed over SSH holds a working token and no idea which of
+these names is its own. Additive: a client that ignores it loses nothing.
+
+`PATCH /members/me {"name": "…"}` → `{id, name, role}` renames whoever the
+bearer token belongs to. Addressed as `me` for the same reason: the token
+already says who this is, and asking for an id as well only adds a way to get it
+wrong. **Any member may rename itself** — the owner-only rule guards the shape
+of the home, not what somebody calls themselves — and renaming *another* member
+is not offered. Names are trimmed and must be 1–80 characters after trimming;
+`POST /pair` applies the same rule. A rename posts `member.renamed` to the
+activity feed, and a name that is already in force writes nothing.
+
+An app that lets a device claim a hub should say what that name will be and let
+it be changed later: GetHome Studio, which has no accounts and no user name of
+its own, offers the Mac's own name and renames through this route from the hub
+page.
 
 ### Device wire shape (`GET /devices` item)
 
