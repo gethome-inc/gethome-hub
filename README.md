@@ -62,9 +62,15 @@ Ubuntu on arm64 work too; they are simply not what we test against.
 The desktop version of Raspberry Pi OS works as well, and on a 512 MB board it
 is worth knowing what it costs: measured at about 75 MB on a Zero 2 W with
 nothing plugged into its HDMI — more than the hub's whole Matter support, on the
-one board that already has to choose between radios. The installer says so when
-it finds one, and names the single command that turns the desktop off. Lite is
-the version that never takes that memory in the first place.
+one board that already has to choose between radios.
+
+**Lite is easy to miss, and missing it is the ordinary mistake.** Raspberry Pi
+Imager opens on an entry called *Raspberry Pi OS (64-bit)*, marks it
+**Recommended**, and keeps Lite one level down under *Raspberry Pi OS (other)*,
+where it is called *Raspberry Pi OS Lite (64-bit)* — the two names are one word
+apart, and only the second one is without a desktop. The installer says so when
+it finds a desktop on a small board, and names the single command that turns it
+off; GetHome Studio says so before the card is written.
 
 **A 32-bit system is refused, even on a 64-bit board.** Writing the 32-bit image
 to a perfectly good Zero 2 W or Pi 4 is an easy mistake and an expensive one —
