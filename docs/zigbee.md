@@ -247,15 +247,31 @@ A 512 MB board fits the operating system (~70 MB), the hub (~119 MB), and
 **one** of Zigbee2MQTT (~150 MB, its own process) or Matter (~60 MB inside the
 hub). Not both. Two separate things decide which:
 
-> Those figures are due a re-measurement and have not had one. They were taken
-> on a Zero 2 W running the **Desktop** image, whose graphical session holds
-> about 75 MB with no screen attached, and they are resident-set numbers taken
-> shortly after a start. On the same board, idle with Zigbee only,
-> `rss + swap` is 62 MB for the hub and 75 MB for Zigbee2MQTT. Nothing here has
-> changed on the strength of that — a snapshot of an idle hub with no paired
-> devices is not the working set — but the budget above should not be treated
-> as settled until it has been measured again on Lite, under load, with devices
-> paired.
+> **Those figures have been measured again, and they are conservative.** On a
+> Zero 2 W with the desktop switched off, the memory cgroup finally enforcing,
+> and one zram device rather than two, ten minutes after a restart, with no
+> devices paired:
+>
+> | | assumed above | Zigbee only | both radios |
+> |---|---|---|---|
+> | hub | 119 MB | 56 MB (peak 59) | **139 MB** (peak 144) |
+> | Zigbee2MQTT | 150 MB | 80 MB (peak 86) | 64 MB (peak 86) |
+> | `MemAvailable` | — | 135 MB | **89 MB** |
+>
+> Both radios really did run together: `radio.matter: true` beside
+> `zigbee.connected: true`, *Matter controller started with 0 commissioned
+> node(s)* in the log, `memory.events` reporting `high 0` on both units against
+> a 200 MB `MemoryHigh`, no OOM, and 34 MB of swap in use compressed to under
+> 10 MB.
+>
+> **The rule is unchanged anyway, and deliberately.** A hub with nothing paired
+> is not a working home: a Matter fabric and Zigbee2MQTT's database both grow
+> per device, and Matter's peak is during commissioning rather than at rest.
+> What this settles is that the *inputs* to the budget are too high — not that
+> its answer is wrong. Changing it needs this board measured with devices
+> paired and left running for days, because being wrong here means hubs that
+> run out of memory in people's homes a week after they were installed, which
+> is the failure this whole architecture was chosen to avoid.
 
 | | Who sets it | Where it lives | What it means |
 |---|---|---|---|

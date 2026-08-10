@@ -354,14 +354,17 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `GETHOME_CGROUP_CONTROLLERS` exist so the test can run the real function
   against files it owns, the same way `GETHOME_ZIGBEE_SCAN_DIR` stages a
   coordinator.
-  **Re-derive the numbers above before leaning on them again.** They were taken
-  on a board running the *Desktop* image, whose graphical session holds ~75 MB
-  with no screen attached — which the installer now warns about on a small
-  board. On that same board, idle with Zigbee only, `rss + swap` is 62 MB for
-  the hub and 75 MB for Z2M, well under the 119/150 the one-radio budget
-  assumes. That is a snapshot of an idle hub with no paired devices, so it
-  settles nothing on its own; it is a reason to measure again on Lite, under
-  load, before the one-radio rule is quoted as arithmetic.
+  **The numbers above have been re-measured and are conservative.** On a
+  Zero 2 W with the desktop off, the memory cgroup enforcing and one zram
+  device, ten minutes after a restart with nothing paired: the hub is 56 MB
+  with Matter off and **139 MB with both radios up** (peak 144 against a 200 MB
+  `MemoryHigh`, `high 0`), Z2M is 64 MB, and `MemAvailable` is 89 MB. Both
+  radios genuinely ran — `radio.matter: true` beside `zigbee.connected: true`.
+  So 178 and 150 are both too high. **The one-radio rule is unchanged anyway**:
+  a hub with no devices is not a working home, both sides grow per device, and
+  Matter's peak is at commissioning, not at rest. Changing it needs the same
+  board with devices paired and days of uptime — `docs/zigbee.md` carries the
+  table and the reasoning.
 - **Don't add compressed swap a system already has.** Raspberry Pi OS Trixie
   ships its own (`systemd-zram-setup@zram0`, presented as `rpi-swap`, with
   writeback to the card), and `gethome-zram.service` added a second one beside
