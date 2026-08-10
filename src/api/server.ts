@@ -4,10 +4,11 @@ import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
-import { home, invites, members, rooms } from '../db/schema.js';
+import { invites, members, rooms } from '../db/schema.js';
 import type { DeviceRegistry } from '../core/registry.js';
 import type { PairingService } from '../core/pairing.js';
 import type { ActivityService } from '../core/activity.js';
+import type { HomeService } from '../core/home.js';
 import type { SettingsService } from '../core/settings.js';
 import type { HubEventBus } from '../core/bus.js';
 import type { Logger } from '../logging.js';
@@ -31,8 +32,13 @@ export interface ApiDeps {
   pairing: PairingService;
   activity: ActivityService;
   settings: SettingsService;
+  /**
+   * The hub's name, and the one place it lives. `GET /hub`, `GET /home` and the
+   * WebSocket hello all read it from here, so a rename cannot move one of them
+   * and leave the others behind — see `core/home.ts`.
+   */
+  home: HomeService;
   hubId: string;
-  hubName: string;
   version: string;
   /** CI's build stamp, when this install came from a published bundle. */
   build?: string;
@@ -170,7 +176,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
 
   app.get('/api/v1/hub', async () => ({
     hubId: deps.hubId,
-    name: deps.hubName,
+    // The home's name. One hub hosts one home, so a hub with a name of its own
+    // was only ever a second place for the same fact to go stale — this route
+    // and `GET /home` answer the same string, and `PATCH /home` moves both.
+    name: deps.home.name,
     version: deps.version,
     // Additive. `version` moves once per release; this identifies the exact
     // build, which is what someone asking "did my update land?" needs.
@@ -235,16 +244,30 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
 
   // ── Home & rooms ─────────────────────────────────────────────────────────
 
-  app.get('/api/v1/home', authed, async () => {
-    const row = await deps.db.query.home.findFirst();
-    return { id: row?.id ?? deps.hubId, name: row?.name ?? deps.hubName };
-  });
+  app.get('/api/v1/home', authed, async () => deps.home.snapshot());
 
+  /**
+   * Rename the home — which renames the hub, because they are the same thing.
+   *
+   * The new name reaches `GET /hub` (public, so Studio's hub list sees it
+   * without a token), the WebSocket hello, and the mDNS advertisement, without
+   * touching root-owned config and without a restart. Nothing else about the
+   * hub changes: the id is minted on the machine's own disk and is what devices,
+   * tokens and saved hubs are keyed by.
+   *
+   * Trimmed before it is measured, so a name of spaces is refused rather than
+   * stored — `min(1)` on an untrimmed string accepts "   " and every screen
+   * showing it then has a hub with no name.
+   */
   app.patch('/api/v1/home', ownerOnly, async (request) => {
-    const body = z.object({ name: z.string().min(1).max(80) }).parse(request.body);
-    const row = await deps.db.query.home.findFirst();
-    if (row) await deps.db.update(home).set({ name: body.name }).where(eq(home.id, row.id));
-    return { id: row?.id, name: body.name };
+    const body = z.object({ name: z.string().trim().min(1).max(80) }).parse(request.body);
+    const result = await deps.home.rename(body.name);
+    await deps.activity.record({
+      kind: 'home.renamed',
+      message: `${request.member!.name} renamed the home to “${body.name}”.`,
+      memberId: request.member!.id,
+    });
+    return result;
   });
 
   app.get('/api/v1/rooms', authed, async () => {

@@ -13,7 +13,7 @@ import { SettingsService } from '../src/core/settings.js';
 import { DeviceRegistry } from '../src/core/registry.js';
 import type { AdapterBus, ProtocolAdapter } from '../src/adapters/adapter.js';
 import type { HubCommand } from '../src/schema/index.js';
-import { openTestDb, resetDb } from './helpers/db.js';
+import { bootedHome, openTestDb, resetDb } from './helpers/db.js';
 
 const handle = await openTestDb();
 const log = pino({ level: 'silent' });
@@ -65,7 +65,7 @@ describe.skipIf(!handle)('hub API', () => {
       activity,
       settings: new SettingsService(db, Buffer.alloc(32).toString('base64')),
       hubId: 'hub-test-1234',
-      hubName: 'Test Hub',
+      home: await bootedHome(db, 'Test Hub'),
       version: '0.1.0-test',
       dataDir,
       // The interesting case: a board that affords one radio, so the switch is
@@ -290,6 +290,64 @@ describe.skipIf(!handle)('hub API', () => {
     });
     expect(ownerRename.statusCode).toBe(200);
     expect((ownerRename.json() as { name: string }).name).toBe('Reading light');
+  });
+
+  /**
+   * The hub's name and the home's name are one string.
+   *
+   * They used to be two: `GET /hub` answered `HUB_NAME` from the environment
+   * and `GET /home` answered the database, so renaming a hub from an app moved
+   * one of them and left every other screen — GetHome Studio's hub list, the
+   * mDNS advertisement — calling it whatever the installer had written a year
+   * earlier. This is the test that stops them drifting apart again.
+   */
+  it('renames the hub and the home together, for the owner only', async () => {
+    const before = await app.inject({ method: 'GET', url: '/api/v1/hub' });
+    expect((before.json() as { name: string }).name).toBe('Test Hub');
+
+    const denied = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/home',
+      headers: auth(memberToken),
+      payload: { name: 'Not yours' },
+    });
+    expect(denied.statusCode).toBe(403);
+
+    const renamed = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/home',
+      headers: auth(ownerToken),
+      payload: { name: '  Дача  ' },
+    });
+    expect(renamed.statusCode).toBe(200);
+    // Trimmed on the way in, so no screen ever renders the padding.
+    expect((renamed.json() as { name: string }).name).toBe('Дача');
+
+    // The public route is the one Studio's hub list polls without a token, so
+    // it is the one that has to have moved.
+    const hub = await app.inject({ method: 'GET', url: '/api/v1/hub' });
+    expect((hub.json() as { name: string }).name).toBe('Дача');
+
+    const home = await app.inject({
+      method: 'GET',
+      url: '/api/v1/home',
+      headers: auth(memberToken),
+    });
+    expect((home.json() as { name: string }).name).toBe('Дача');
+  });
+
+  it('refuses a nameless home rather than storing one', async () => {
+    for (const name of ['', '   ']) {
+      const response = await app.inject({
+        method: 'PATCH',
+        url: '/api/v1/home',
+        headers: auth(ownerToken),
+        payload: { name },
+      });
+      expect(response.statusCode).toBe(400);
+    }
+    const hub = await app.inject({ method: 'GET', url: '/api/v1/hub' });
+    expect((hub.json() as { name: string }).name).toBe('Дача');
   });
 
   it('gates room management to the owner', async () => {

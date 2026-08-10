@@ -7,6 +7,7 @@ export type MdnsBackend = 'auto' | 'avahi' | 'ciao' | 'off';
 
 export interface MdnsOptions {
   hubId: string;
+  /** The name to publish at start; `updateName` replaces it after a rename. */
   hubName: string;
   port: number;
   version: string;
@@ -42,46 +43,87 @@ export class MdnsAdvertiser {
   private service: CiaoService | null = null;
   private avahiFile: string | null = null;
   private resolved: Exclude<MdnsBackend, 'auto'> = 'off';
+  /** The published name — `options.hubName` until the owner renames the hub. */
+  private name: string;
+  /** Remembered so a re-publish for any other reason keeps the TXT right. */
+  private claimed = false;
 
-  constructor(private readonly options: MdnsOptions) {}
+  constructor(private readonly options: MdnsOptions) {
+    this.name = options.hubName;
+  }
 
   async start(claimed: boolean): Promise<void> {
+    this.claimed = claimed;
     this.resolved = this.chooseBackend();
     if (this.resolved === 'off') {
       this.options.log.info('mDNS advertisement disabled; the apps can still connect by address.');
       return;
     }
     if (this.resolved === 'avahi') {
-      this.writeAvahiService(claimed);
+      this.writeAvahiService();
       this.options.log.info(
         `Advertising _gethome._tcp on port ${this.options.port} through avahi (${this.avahiFile}).`,
       );
       return;
     }
-    const { getResponder, Protocol } = await import('@homebridge/ciao');
-    this.responder = getResponder();
-    this.service = this.responder.createService({
-      name: this.options.hubName,
-      type: 'gethome',
-      protocol: Protocol.TCP,
-      port: this.options.port,
-      txt: this.txt(claimed),
-    });
-    await this.service.advertise();
+    await this.advertiseWithCiao();
     this.options.log.info(`Advertising _gethome._tcp on port ${this.options.port}.`);
   }
 
   /** Re-publish TXT when the claim state changes. */
   updateClaimed(claimed: boolean): void {
+    this.claimed = claimed;
     try {
       if (this.resolved === 'avahi' && this.avahiFile) {
-        this.writeAvahiService(claimed);
+        this.writeAvahiService();
       } else {
-        this.service?.updateTxt(this.txt(claimed));
+        this.service?.updateTxt(this.txt());
       }
     } catch (error) {
       this.options.log.warn({ err: error }, 'Could not re-publish the mDNS claim state.');
     }
+  }
+
+  /**
+   * Re-publish under a new name, after the owner renamed the hub.
+   *
+   * The two backends differ in what this costs. Avahi's is a file rewrite,
+   * which it picks up on its own. Ciao's name is the service's identity on the
+   * network and cannot be edited in place, so the old service is ended —
+   * sending the goodbye packets that stop browsers holding onto the old name —
+   * and a new one takes its place. Never throws: a rename that has already been
+   * stored must not fail because a responder wouldn't co-operate, and the
+   * correct name is published anyway at the next start.
+   */
+  async updateName(name: string): Promise<void> {
+    if (name === this.name) return;
+    this.name = name;
+    if (this.resolved === 'off') return;
+    try {
+      if (this.resolved === 'avahi') {
+        if (this.avahiFile) this.writeAvahiService();
+        return;
+      }
+      if (!this.responder) return;
+      await this.service?.end();
+      this.service = null;
+      await this.advertiseWithCiao();
+    } catch (error) {
+      this.options.log.warn({ err: error }, 'Could not re-publish the hub under its new name.');
+    }
+  }
+
+  private async advertiseWithCiao(): Promise<void> {
+    const { getResponder, Protocol } = await import('@homebridge/ciao');
+    this.responder ??= getResponder();
+    this.service = this.responder.createService({
+      name: this.name,
+      type: 'gethome',
+      protocol: Protocol.TCP,
+      port: this.options.port,
+      txt: this.txt(),
+    });
+    await this.service.advertise();
   }
 
   async stop(): Promise<void> {
@@ -101,10 +143,10 @@ export class MdnsAdvertiser {
     return existsSync(this.options.servicesDir) ? 'avahi' : 'ciao';
   }
 
-  private writeAvahiService(claimed: boolean): void {
+  private writeAvahiService(): void {
     const file = path.join(this.options.servicesDir, 'gethome-hub.service');
     mkdirSync(this.options.servicesDir, { recursive: true });
-    const txt = this.txt(claimed);
+    const txt = this.txt();
     const records = Object.entries(txt)
       .map(([key, value]) => `    <txt-record>${key}=${escapeXml(value)}</txt-record>`)
       .join('\n');
@@ -114,7 +156,7 @@ export class MdnsAdvertiser {
 <!DOCTYPE service-group SYSTEM "avahi-service.dtd">
 <!-- Written by the GetHome Hub. Edits are overwritten on every start. -->
 <service-group>
-  <name replace-wildcards="yes">${escapeXml(this.options.hubName)}</name>
+  <name replace-wildcards="yes">${escapeXml(this.name)}</name>
   <service>
     <type>_gethome._tcp</type>
     <port>${this.options.port}</port>
@@ -127,12 +169,12 @@ ${records}
     this.avahiFile = file;
   }
 
-  private txt(claimed: boolean): Record<string, string> {
+  private txt(): Record<string, string> {
     return {
       id: this.options.hubId,
       ver: this.options.version,
       api: '1',
-      claimed: claimed ? '1' : '0',
+      claimed: this.claimed ? '1' : '0',
     };
   }
 }

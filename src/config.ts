@@ -20,7 +20,18 @@ const configSchema = z.object({
    */
   Z2M_DATA_DIR: z.string().default('/var/lib/gethome/zigbee2mqtt'),
   DATA_DIR: z.string().default('./data'),
-  HUB_NAME: z.string().default('GetHome Hub'),
+  /**
+   * The hub's name, used **only to seed it** — on the first boot of a hub that
+   * has never had one. After that the name lives in the database, is what every
+   * route and the mDNS advertisement report, and is changed with `PATCH /home`
+   * (see `core/home.ts`). Editing this on a hub that is already running does
+   * nothing, which is why it is documented as a seed everywhere it appears.
+   *
+   * "My Home" rather than "GetHome Hub" because this one string is now both:
+   * the name of the machine on the network and the name of the home in the
+   * apps, and a home called "GetHome Hub" reads like a product, not a place.
+   */
+  HUB_NAME: z.string().default('My Home'),
   ADAPTER_ZIGBEE: boolFlag,
   ADAPTER_MQTT: boolFlag,
   ADAPTER_MATTER: boolFlag,
