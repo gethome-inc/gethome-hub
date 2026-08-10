@@ -141,6 +141,64 @@ describe.skipIf(!handle)('hub API', () => {
     memberToken = body.token;
   });
 
+  it('points each caller at its own row in the member list', async () => {
+    type Row = { id: string; name: string; role: string; isSelf: boolean };
+    const asMember = (
+      await app.inject({ method: 'GET', url: '/api/v1/members', headers: auth(memberToken) })
+    ).json() as Row[];
+    expect(asMember.find((row) => row.name === 'Anna')).toMatchObject({ role: 'member', isSelf: true });
+    expect(asMember.find((row) => row.name === 'Georgy')).toMatchObject({ role: 'owner', isSelf: false });
+
+    // The same list, read by the other member: only the flag moves.
+    const asOwner = (
+      await app.inject({ method: 'GET', url: '/api/v1/members', headers: auth(ownerToken) })
+    ).json() as Row[];
+    expect(asOwner.find((row) => row.name === 'Georgy')?.isSelf).toBe(true);
+    expect(asOwner.find((row) => row.name === 'Anna')?.isSelf).toBe(false);
+  });
+
+  it('lets a member rename itself, trimming and refusing an empty name', async () => {
+    const renamed = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/members/me',
+      headers: auth(memberToken),
+      payload: { name: "  Anna's iPhone  " },
+    });
+    expect(renamed.statusCode).toBe(200);
+    expect(renamed.json()).toMatchObject({ name: "Anna's iPhone", role: 'member' });
+
+    const rows = (
+      await app.inject({ method: 'GET', url: '/api/v1/members', headers: auth(ownerToken) })
+    ).json() as Array<{ name: string; role: string }>;
+    expect(rows.map((row) => row.name).sort()).toEqual(["Anna's iPhone", 'Georgy']);
+
+    const feed = (
+      await app.inject({ method: 'GET', url: '/api/v1/activity', headers: auth(ownerToken) })
+    ).json() as Array<{ kind: string; message: string }>;
+    expect(feed[0]).toMatchObject({
+      kind: 'member.renamed',
+      message: "Anna is now called Anna's iPhone.",
+    });
+
+    for (const name of ['   ', 'n'.repeat(81)]) {
+      const refused = await app.inject({
+        method: 'PATCH',
+        url: '/api/v1/members/me',
+        headers: auth(memberToken),
+        payload: { name },
+      });
+      expect(refused.statusCode).toBe(400);
+    }
+
+    // No token, no member to rename — the token *is* the identity here.
+    const anonymous = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/members/me',
+      payload: { name: 'Mallory' },
+    });
+    expect(anonymous.statusCode).toBe(401);
+  });
+
   it('serves devices announced by adapters in the wire shape', async () => {
     adapter.bus!.deviceUpserted({
       adapter: 'mqtt',
