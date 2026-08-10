@@ -186,6 +186,27 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   minutes — because a hub can commit a claim and lose the response, and without
   it the retry is told the code is wrong. Both halves are load-bearing; neither
   replaces the typed code for a hub Studio has no key on.
+- **One hub, one home, one name — and `HUB_NAME` only seeds it.** There used to
+  be two names: `GET /hub` answered `HUB_NAME` from `/etc/gethome/hub.env`,
+  which the installer writes once and nobody ever edits, while `GET /home`
+  answered a database row the apps could rename. A home cannot move between
+  hubs, so the second name was never a second fact — only a second place for
+  the first one to be wrong, and it was: a hub renamed to "Дача" in the app
+  still advertised itself as "GetHome Hub" over mDNS and still read "GetHome
+  Hub" in GetHome Studio, where two hubs were two rows with the same name.
+  `src/core/home.ts` holds the one name; `GET /hub`, `GET /home` and the
+  WebSocket hello all read it from there, and `PATCH /home` is the only writer.
+  Three rules: **the environment seeds and the database owns** — `HUB_NAME`
+  names a hub booting for the first time and is inert afterwards, which is why
+  it is documented as a seed in `config.ts`, `.env.example` *and* the `hub.env`
+  the installer writes (a variable that silently stops working is the trap this
+  replaced); **the name is held in memory**, because `GET /hub` is the health
+  check every app and installer polls and must not become a database read per
+  request; and **a rename re-publishes mDNS** (`MdnsAdvertiser.updateName`),
+  because a hub answering to its new name over HTTP while advertising the old
+  one is the same split this change removed. Renaming deliberately needs no
+  root and no restart — the same reason the radio mode lives in the data
+  directory rather than in `hub.env`.
 - matter.js is pinned to a minor (`~0.17.x`) because its API churns; keep all
   matter.js-specific code inside `src/adapters/matter/`.
 - `tsconfig` uses `exactOptionalPropertyTypes` — build optional-field objects

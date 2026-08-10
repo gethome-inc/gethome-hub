@@ -9,7 +9,7 @@ import { ActivityService } from '../src/core/activity.js';
 import { PairingService } from '../src/core/pairing.js';
 import { SettingsService } from '../src/core/settings.js';
 import { DeviceRegistry } from '../src/core/registry.js';
-import { openTestDb } from './helpers/db.js';
+import { bootedHome, openTestDb } from './helpers/db.js';
 
 /**
  * `zigbee.problem` on the wire.
@@ -64,7 +64,7 @@ describe.skipIf(!handle)('why Zigbee is down, over HTTP', () => {
       activity,
       settings: new SettingsService(db, Buffer.alloc(32).toString('base64')),
       hubId: 'hub-z2m',
-      hubName: 'Z2M Hub',
+      home: await bootedHome(db, 'Z2M Hub'),
       version: '0.1.0-test',
       dataDir: dir,
       radioBudget: 'one',

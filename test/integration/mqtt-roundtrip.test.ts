@@ -13,7 +13,7 @@ import { SettingsService } from '../../src/core/settings.js';
 import { DeviceRegistry } from '../../src/core/registry.js';
 import { ZigbeeAdapter } from '../../src/adapters/zigbee/adapter.js';
 import { MqttAdapter } from '../../src/adapters/mqtt/adapter.js';
-import { openTestDb, resetDb } from '../helpers/db.js';
+import { bootedHome, openTestDb, resetDb } from '../helpers/db.js';
 
 /**
  * End-to-end proof over a real MQTT broker: a fake Zigbee2MQTT bridge and a
@@ -99,7 +99,7 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
       activity,
       settings: new SettingsService(db, Buffer.alloc(32).toString('base64')),
       hubId: 'hub-e2e',
-      hubName: 'E2E Hub',
+      home: await bootedHome(db, 'E2E Hub'),
       version: 'e2e',
       zigbee,
     });

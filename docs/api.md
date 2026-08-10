@@ -51,9 +51,9 @@ devices, favorites, view everything.
 
 | Method & path | Role | Notes |
 |---|---|---|
-| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem). `radio` is [further below](#radio-get-hub-and-put-settingsradio) |
+| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem). `radio` is [further below](#radio-get-hub-and-put-settingsradio) |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
-| `GET /home` · `PATCH /home` | any · owner | home name |
+| `GET /home` · `PATCH /home` | any · owner | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name) |
 | `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | any · owner | |
 | `GET /devices` | any | full device list (wire shape below) |
 | `PATCH /devices/:id` | favorite: any; name/roomId: owner | `{name?, roomId?, favorite?}` |
@@ -68,6 +68,36 @@ devices, favorites, view everything.
 | `GET /activity?limit=&before=` | any | reverse-chronological, cursor = `before` id |
 | `GET /settings/ai` · `PUT /settings/ai` · `DELETE /settings/ai` | owner | PUT `{apiKey, model?}` (an Anthropic API key, write-only; a `sk-ant-oat…` subscription token and a model outside the supported list are both refused with 400, an `authType` from an older app is ignored); GET/PUT respond `{provider: "anthropic", model, hasKey, legacySubscriptionToken, status}` where `status` carries `lastError`/`lastRun` health — see [ai-adaptation.md](ai-adaptation.md) |
 | `PUT /settings/radio` | owner | `{mode: "auto"\|"zigbee"\|"matter"}` → `{budget, mode, matter, canRunBoth, applying: true}`. Records a *request*; see below |
+
+### The hub's name is the home's name
+
+One hub hosts exactly one home and a home cannot move between hubs, so there is
+**one name**, stored once, and `GET /hub`, `GET /home` and the WebSocket
+`hello` frame all answer the same string.
+
+There used to be two. `GET /hub` answered `HUB_NAME` from
+`/etc/gethome/hub.env` — written once by the installer and never edited by
+anyone — while `GET /home` answered a database row the apps could rename. So a
+hub whose owner had called it "Дача" in the app still advertised itself as
+"GetHome Hub" over mDNS, still said "GetHome Hub" in GetHome Studio, and two
+hubs on one Mac were two rows with the same name. The second name was never a
+second fact, only a second place for the first one to be wrong.
+
+- **`HUB_NAME` seeds; the database owns.** The environment variable names a hub
+  that has no name yet — a first boot. After that it is inert: editing
+  `hub.env` and restarting changes nothing, and `PATCH /home` is the only way
+  to rename a hub.
+- **A rename needs no restart and no root.** It reaches `GET /hub` (public, so
+  an app that has not been claimed still sees it), the WebSocket hello, and the
+  mDNS advertisement — which is re-published under the new name, by rewriting
+  avahi's service file or by re-creating the `ciao` service.
+- **The name is public.** `GET /hub` is unauthenticated and the name is the
+  mDNS service instance name, so it is visible to anything on the LAN. That is
+  the point — it is how a person with two hubs tells them apart before they can
+  sign in to either — but it is worth knowing when choosing one.
+- **The id is not the name.** `hubId` comes from `<data>/hub-secret.json` on
+  the machine's own disk; devices, tokens and saved hubs are keyed by it, and
+  renaming touches none of them.
 
 ### Why Zigbee is down (`zigbee.problem`)
 

@@ -73,7 +73,10 @@ export function attachWebSocket(socket: WebSocket, deps: ApiDeps): WebSocketHand
       if (authorized) return;
       authorized = true;
       if (socket.readyState !== socket.OPEN) return;
-      socket.send(JSON.stringify({ type: 'hello', hubId: deps.hubId, name: deps.hubName, apiVersion: 1 }));
+      // Read at send time, not captured at attach: the name can change under a
+      // socket that is already open, and the next client to connect must be
+      // told the current one.
+      socket.send(JSON.stringify({ type: 'hello', hubId: deps.hubId, name: deps.home.name, apiVersion: 1 }));
       for (const data of backlog) socket.send(data);
       backlog.length = 0;
     },
