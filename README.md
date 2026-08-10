@@ -59,6 +59,13 @@ run on it.
 The tested operating system is **Raspberry Pi OS Lite (64-bit)**. Debian and
 Ubuntu on arm64 work too; they are simply not what we test against.
 
+The desktop version of Raspberry Pi OS works as well, and on a 512 MB board it
+is worth knowing what it costs: measured at about 75 MB on a Zero 2 W with
+nothing plugged into its HDMI — more than the hub's whole Matter support, on the
+one board that already has to choose between radios. The installer says so when
+it finds one, and names the single command that turns the desktop off. Lite is
+the version that never takes that memory in the first place.
+
 **A 32-bit system is refused, even on a 64-bit board.** Writing the 32-bit image
 to a perfectly good Zero 2 W or Pi 4 is an easy mistake and an expensive one —
 the Pi boots, the install runs for minutes, and only then finds there is nothing
@@ -200,6 +207,16 @@ what compose could not — per-service memory limits, so a runaway Zigbee2MQTT
 costs itself a restart instead of taking the hub down with it. The hub itself is
 *throttled* rather than capped (`MemoryHigh`, no `MemoryMax`): a hard ceiling
 near the real working set turns a busy minute into a kill.
+
+Those limits need a kernel feature Raspberry Pi OS ships **switched off**.
+`cgroup_disable=memory` is in the image's own `cmdline.txt`, so on a stock Pi
+the units carried the right numbers, `systemctl show` read them straight back,
+and the kernel enforced none of them — found on a Zero 2 W, where the unit's
+cgroup had no `memory.*` file at all. The installer takes that parameter out and
+asks for the controller by name, which takes effect at the next restart; it also
+sets `OOMScoreAdjust` on both units, and that is the half that needs no kernel
+feature, no reboot and no cgroup. It is what actually keeps the kernel's choice
+of victim off the hub, from the moment the units start.
 
 ### The prebuilt bundle
 

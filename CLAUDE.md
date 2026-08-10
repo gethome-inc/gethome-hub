@@ -329,6 +329,46 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `ExecStart`, measured at 176 → 139 MB resident with Matter loaded for about
   half a second of startup. They have to be **argv**: `NODE_OPTIONS` refuses
   `--optimize-for-size` outright.
+  **None of those cgroup limits were ever in force on a Raspberry Pi.** The
+  image ships `cgroup_disable=memory` in `cmdline.txt`, so the kernel has no
+  memory controller to enforce them with: the units carried the right numbers,
+  `systemctl show` read them straight back, and the unit's own cgroup had no
+  `memory.*` file at all (`MemoryCurrent=[not set]`, observed on a Zero 2 W).
+  `enable_memory_cgroup()` strips that parameter and adds `cgroup_enable=memory
+  cgroup_memory=1`, and three things keep that safe on the file that decides
+  whether the board boots: the result must still carry `root=`, the original is
+  kept beside it, and it is written as the **single line** the firmware reads —
+  only the first is parsed, so a stray newline drops every parameter after it.
+  It needs a reboot, which the installer deliberately does not perform; Studio's
+  SD path writes the same parameters before first boot, so a card install never
+  meets it. **`OOMScoreAdjust` (-500 hub / +500 Z2M) is the half that works
+  without any of that**, and it is what actually delivers "Z2M dies first" —
+  deliberately not -1000, which would exempt a leaking hub from the OOM killer
+  and cost the whole machine instead of one restart. `GETHOME_CMDLINE` and
+  `GETHOME_CGROUP_CONTROLLERS` exist so the test can run the real function
+  against files it owns, the same way `GETHOME_ZIGBEE_SCAN_DIR` stages a
+  coordinator.
+  **Re-derive the numbers above before leaning on them again.** They were taken
+  on a board running the *Desktop* image, whose graphical session holds ~75 MB
+  with no screen attached — which the installer now warns about on a small
+  board. On that same board, idle with Zigbee only, `rss + swap` is 62 MB for
+  the hub and 75 MB for Z2M, well under the 119/150 the one-radio budget
+  assumes. That is a snapshot of an idle hub with no paired devices, so it
+  settles nothing on its own; it is a reason to measure again on Lite, under
+  load, before the one-radio rule is quoted as arithmetic.
+- **Don't add compressed swap a system already has.** Raspberry Pi OS Trixie
+  ships its own (`systemd-zram-setup@zram0`, presented as `rpi-swap`, with
+  writeback to the card), and `gethome-zram.service` added a second one beside
+  it — two 415 MB devices and `SwapTotal` 830 MB on a board with 415 MB of RAM,
+  where the compressed pages live in the very memory they are saving. The guard
+  was the right idea asked the wrong way: our unit is deliberately early
+  (`DefaultDependencies=no`, `Before=swap.target`) so the hub never starts
+  before its headroom exists, and being early is precisely what made "is a zram
+  swap running?" answer no. The question has to be **"is one configured on this
+  machine"** — `zram_provided_by_the_system()` in `install.sh` and the same
+  check inside the boot-time script, both before anything is created. An
+  install that finds the duplicate disables our unit and says so; the spare
+  device goes at the next reboot.
 - **Name a failure, don't just relay it.** A dropped download, a full card and
   an OOM kill all happen on a Pi and all want different fixes; `install.sh`
   keeps the output and matches them, because by then the actual reason is a

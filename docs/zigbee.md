@@ -247,6 +247,16 @@ A 512 MB board fits the operating system (~70 MB), the hub (~119 MB), and
 **one** of Zigbee2MQTT (~150 MB, its own process) or Matter (~60 MB inside the
 hub). Not both. Two separate things decide which:
 
+> Those figures are due a re-measurement and have not had one. They were taken
+> on a Zero 2 W running the **Desktop** image, whose graphical session holds
+> about 75 MB with no screen attached, and they are resident-set numbers taken
+> shortly after a start. On the same board, idle with Zigbee only,
+> `rss + swap` is 62 MB for the hub and 75 MB for Zigbee2MQTT. Nothing here has
+> changed on the strength of that — a snapshot of an idle hub with no paired
+> devices is not the working set — but the budget above should not be treated
+> as settled until it has been measured again on Lite, under load, with devices
+> paired.
+
 | | Who sets it | Where it lives | What it means |
 |---|---|---|---|
 | **Budget** | `install.sh`, from the board's RAM | `GETHOME_RADIO` in `/etc/gethome/hub.env` | `both` (> 1 GB) or `one` (≤ 1 GB). Measured, not a preference. |
