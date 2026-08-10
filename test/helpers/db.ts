@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createDb, type Db } from '../../src/db/client.js';
 import { runMigrations } from '../../src/db/migrate.js';
+import { HomeService } from '../../src/core/home.js';
 import {
   activity,
   aiMappings,
@@ -58,4 +59,15 @@ export async function resetDb(db: Db): Promise<void> {
   await db.delete(home);
   await db.delete(aiMappings);
   await db.delete(settings);
+}
+
+/**
+ * A `HomeService` with its row created, which is what `src/index.ts` hands the
+ * API on a real hub. `resetDb` deletes the `home` row, so a suite that resets
+ * and then builds a server has to seed it again the same way the hub does.
+ */
+export async function bootedHome(db: Db, name: string): Promise<HomeService> {
+  const service = new HomeService(db, name);
+  await service.boot();
+  return service;
 }

@@ -682,7 +682,10 @@ Z2M_BASE_TOPIC=zigbee2mqtt
 # purpose: when the radio is down, Z2M's own log says why, and that answer
 # belongs in the API rather than in a journal only an SSH session can see.
 Z2M_DATA_DIR=${Z2M_DATA_DIR}
-HUB_NAME=GetHome Hub
+# The hub's name, which is also the home's name — one hub hosts one home. This
+# only seeds it: the first boot copies it into the database, and from then on
+# the apps own it (PATCH /home). Editing this line later does nothing.
+HUB_NAME=My Home
 LOG_LEVEL=info
 # A bounded heap. Node sizes its default from total memory, which on a small
 # board leaves the garbage collector waiting until the kernel is already in

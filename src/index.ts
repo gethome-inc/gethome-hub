@@ -5,10 +5,10 @@ import { loadConfig } from './config.js';
 import { createLogger } from './logging.js';
 import { createDb } from './db/client.js';
 import { runMigrations } from './db/migrate.js';
-import { home } from './db/schema.js';
 import { ensureHubSecret } from './core/crypto.js';
 import { HubEventBus } from './core/bus.js';
 import { ActivityService } from './core/activity.js';
+import { HomeService } from './core/home.js';
 import { PairingService } from './core/pairing.js';
 import { SettingsService } from './core/settings.js';
 import { DeviceRegistry } from './core/registry.js';
@@ -57,9 +57,12 @@ async function main(): Promise<void> {
   const secret = ensureHubSecret(config.DATA_DIR);
   const { db, close } = createDb(config.DATABASE_FILE);
   runMigrations(db);
-  if (!(await db.query.home.findFirst())) {
-    await db.insert(home).values({ name: 'My Home' });
-  }
+
+  // The hub's name and the home's name are one string, stored once. `HUB_NAME`
+  // only seeds it, on the first boot of a hub that has never had one — after
+  // that the database owns it and `PATCH /home` is what changes it.
+  const homeService = new HomeService(db, config.HUB_NAME);
+  await homeService.boot();
 
   const events = new HubEventBus();
   const activity = new ActivityService(db, events);
@@ -107,8 +110,8 @@ async function main(): Promise<void> {
     pairing,
     activity,
     settings,
+    home: homeService,
     hubId: secret.hubId,
-    hubName: config.HUB_NAME,
     version,
     dataDir: config.DATA_DIR,
     radioBudget: config.GETHOME_RADIO,
@@ -130,7 +133,7 @@ async function main(): Promise<void> {
   if (config.MDNS) {
     mdns = new MdnsAdvertiser({
       hubId: secret.hubId,
-      hubName: config.HUB_NAME,
+      hubName: homeService.name,
       port: config.PORT,
       version,
       backend: config.MDNS_BACKEND,
@@ -146,6 +149,15 @@ async function main(): Promise<void> {
     // how a claimed hub kept advertising itself as available to claim.
     pairing.onClaimed = () => mdns?.updateClaimed(true);
   }
+
+  // A rename has to reach the network too, or the hub answers to its new name
+  // over HTTP and advertises its old one until the next restart. Set after the
+  // advertiser exists; a rename in the milliseconds before this is covered by
+  // `start()` publishing whatever the name is by then.
+  homeService.onRenamed = (name) => {
+    log.info({ name }, 'Hub renamed.');
+    void mdns?.updateName(name);
+  };
 
   void registry.start().catch((error) => {
     log.error({ err: error }, 'Device registry failed to start.');

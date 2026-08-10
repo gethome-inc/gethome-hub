@@ -3,7 +3,9 @@
 GetHome Hub is a single Node.js service (`hubd`) with an MQTT broker beside
 it (Mosquitto) and, when a coordinator is plugged in, Zigbee2MQTT. Its store is
 a SQLite file. One hub hosts exactly **one home**; sharing a home means granting
-members access to the hub.
+members access to the hub. They therefore share **one name** — `HUB_NAME` seeds
+it on a hub's first boot, `core/home.ts` owns it after that, and `PATCH /home`
+is the only thing that changes it (see [api.md](api.md)).
 
 Everything runs as systemd units on Linux and launchd agents on macOS — no
 Docker, and no database server. That is a memory decision as much as a
