@@ -327,6 +327,37 @@ describe('deploy/install.sh', () => {
   });
 
   /**
+   * **A backtick in an unquoted heredoc is a command, not punctuation.**
+   *
+   * `<<'DELIM'` is literal; `<<DELIM` expands variables *and* runs command
+   * substitution — which is what the unit heredocs need for `${CONF_DIR}`. A
+   * markdown habit in a comment inside one of them put three lines of
+   * "MemoryMax: command not found" into a real install log, in front of the
+   * user, and silently emptied those words out of the file that was written.
+   * Nothing failed: bash substitutes the empty output of a failed command and
+   * carries on, so `set -e` and the ERR trap never saw it.
+   */
+  it('never puts a backtick in a heredoc bash will expand', () => {
+    const opens = [...installer.matchAll(/<<(')?([A-Z][A-Z0-9_]*)\1?\n/g)];
+    let checked = 0;
+    for (const open of opens) {
+      if (open[1] === "'") continue; // quoted: the body is literal
+      const delimiter = open[2]!;
+      const start = open.index! + open[0].length;
+      const end = installer.indexOf(`\n${delimiter}\n`, start);
+      expect(end, `heredoc ${delimiter} is never closed`).toBeGreaterThan(-1);
+      checked += 1;
+      // An escaped backtick is fine — hub.env carries one deliberately.
+      expect(
+        installer.slice(start, end).replace(/\\`/g, ''),
+        `a backtick in the unquoted heredoc ${delimiter} runs as a command`,
+      ).not.toContain('`');
+    }
+    expect(checked, 'found no unquoted heredocs at all — this scan is broken')
+      .toBeGreaterThan(0);
+  });
+
+  /**
    * A desktop image is the largest single thing in the way on a 512 MB board —
    * measured at ~75 MB on a Zero 2 W with nothing plugged into its HDMI, which
    * is more than the hub's whole Matter adapter on the one board that has to

@@ -329,16 +329,22 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `ExecStart`, measured at 176 → 139 MB resident with Matter loaded for about
   half a second of startup. They have to be **argv**: `NODE_OPTIONS` refuses
   `--optimize-for-size` outright.
-  **None of those cgroup limits were ever in force on a Raspberry Pi.** The
-  image ships `cgroup_disable=memory` in `cmdline.txt`, so the kernel has no
-  memory controller to enforce them with: the units carried the right numbers,
-  `systemctl show` read them straight back, and the unit's own cgroup had no
-  `memory.*` file at all (`MemoryCurrent=[not set]`, observed on a Zero 2 W).
-  `enable_memory_cgroup()` strips that parameter and adds `cgroup_enable=memory
-  cgroup_memory=1`, and three things keep that safe on the file that decides
-  whether the board boots: the result must still carry `root=`, the original is
-  kept beside it, and it is written as the **single line** the firmware reads —
-  only the first is parsed, so a stray newline drops every parameter after it.
+  **None of those cgroup limits were ever in force on a Raspberry Pi.** A Pi
+  boots with `cgroup_disable=memory`, so the kernel has no memory controller to
+  enforce them with: the units carried the right numbers, `systemctl show` read
+  them straight back, and the unit's own cgroup had no `memory.*` file at all
+  (`MemoryCurrent=[not set]`, observed on a Zero 2 W). **The parameter is not in
+  `cmdline.txt`** — the firmware prepends it — so `enable_memory_cgroup()` works
+  by *appending* `cgroup_enable=memory cgroup_memory=1`, which wins because the
+  kernel takes the last setting; stripping a `cgroup_disable=memory` from the
+  file is only for one somebody added by hand. Verified on hardware:
+  `/proc/cmdline` still shows the disable, followed by our two, and
+  `cgroup.controllers` lists `memory`. The gate is therefore
+  `memory_cgroup_live` — whether the controller is *there* — never "did we edit
+  the file". Three things keep the edit safe on the file that decides whether
+  the board boots: the result must still carry `root=`, the original is kept
+  beside it, and it is written as the **single line** the firmware reads — only
+  the first is parsed, so a stray newline drops every parameter after it.
   It needs a reboot, which the installer deliberately does not perform; Studio's
   SD path writes the same parameters before first boot, so a card install never
   meets it. **`OOMScoreAdjust` (-500 hub / +500 Z2M) is the half that works

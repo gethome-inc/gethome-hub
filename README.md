@@ -214,12 +214,13 @@ costs itself a restart instead of taking the hub down with it. The hub itself is
 *throttled* rather than capped (`MemoryHigh`, no `MemoryMax`): a hard ceiling
 near the real working set turns a busy minute into a kill.
 
-Those limits need a kernel feature Raspberry Pi OS ships **switched off**.
-`cgroup_disable=memory` is in the image's own `cmdline.txt`, so on a stock Pi
-the units carried the right numbers, `systemctl show` read them straight back,
-and the kernel enforced none of them — found on a Zero 2 W, where the unit's
-cgroup had no `memory.*` file at all. The installer takes that parameter out and
-asks for the controller by name, which takes effect at the next restart; it also
+Those limits need a kernel feature a Raspberry Pi boots **switched off**. The
+firmware puts `cgroup_disable=memory` on the kernel command line, so on a stock
+Pi the units carried the right numbers, `systemctl show` read them straight
+back, and the kernel enforced none of them — found on a Zero 2 W, where the
+unit's cgroup had no `memory.*` file at all. The installer asks for the
+controller by name after it, which is what wins, and takes effect at the next
+restart; it also
 sets `OOMScoreAdjust` on both units, and that is the half that needs no kernel
 feature, no reboot and no cgroup. It is what actually keeps the kernel's choice
 of victim off the hub, from the moment the units start.

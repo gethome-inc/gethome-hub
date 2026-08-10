@@ -261,22 +261,33 @@ else
     || fail "Could not install: ${MISSING[*]}. Check the network and run the install again."
 fi
 
-# ── The memory limits need a controller Raspberry Pi OS turns off ──────────
+# ── The memory limits need a controller the Raspberry Pi turns off ─────────
 # Every ceiling written below — `MemoryHigh` on the hub, `MemoryMax` on
-# Zigbee2MQTT — is enforced by the kernel's memory cgroup, and Raspberry Pi OS
-# ships `cgroup_disable=memory` in its `cmdline.txt`. Observed on a Zero 2 W:
-# the units carried the right numbers, `systemctl show` read them straight
-# back, and `MemoryCurrent` was `[not set]` with no `memory.*` file anywhere in
-# the unit's own cgroup. The caps were decoration — not on that board
-# particularly, but on every Raspberry Pi this installer has ever run on, since
-# the parameter comes from the image rather than from anything a user did.
+# Zigbee2MQTT — is enforced by the kernel's memory cgroup, and a Raspberry Pi
+# boots with `cgroup_disable=memory`. Observed on a Zero 2 W: the units carried
+# the right numbers, `systemctl show` read them straight back, and
+# `MemoryCurrent` was `[not set]` with no `memory.*` file anywhere in the unit's
+# own cgroup. The caps were decoration — not on that board particularly, but on
+# every Raspberry Pi this installer has ever run on.
 #
-# So take it out and ask for the controller by name. Three things make that
-# safe enough to do to the file that decides whether the board boots: the
-# result must still carry `root=` before it is written, the original is kept
-# beside it, and it is rewritten as the **single line** the firmware requires —
-# only the first line is read, so a stray newline silently drops every
-# parameter after it.
+# **That parameter is not in `cmdline.txt`.** The firmware prepends its own
+# arguments to the file's, and `cgroup_disable=memory` is one of them — so
+# there is usually nothing here to delete, and the deletion below is only for a
+# machine where somebody added one by hand. What does the work is the
+# **append**: the kernel takes the last setting it is given, and anything this
+# script adds lands after the firmware's. Verified on the Zero 2 W this was
+# found on — `/proc/cmdline` still shows `cgroup_disable=memory`, followed by
+# our two, and `/sys/fs/cgroup/cgroup.controllers` lists `memory`.
+#
+# That is also why the check is `memory_cgroup_live` and not "did we edit the
+# file": what matters is whether the controller is actually there, which is the
+# only thing a caller can act on and the only thing that makes a re-run a no-op.
+#
+# Three things make this safe to do to the file that decides whether the board
+# boots: the result must still carry `root=` before it is written, the original
+# is kept beside it, and it is rewritten as the **single line** the firmware
+# requires — only the first line is read, so a stray newline silently drops
+# every parameter after it.
 #
 # It costs a reboot, and this script deliberately does not perform one: an
 # installer that restarts the machine in the middle of the flow its user is
@@ -906,10 +917,14 @@ ${HUB_MEM_HIGH}
 OOMPolicy=continue
 # And when the board genuinely runs out, the kernel should reach for
 # Zigbee2MQTT rather than for the hub. This is the half of that promise which
-# works everywhere: `MemoryMax` needs the memory cgroup, which Raspberry Pi OS
-# disables in `cmdline.txt` — see the section that turns it back on, and note
-# that it only takes effect after a reboot — while `oom_score_adj` needs
-# nothing at all and is in force the moment this unit starts.
+# works everywhere: MemoryMax needs the memory cgroup, which Raspberry Pi OS
+# turns off — see the section that turns it back on, and note that it only
+# takes effect after a reboot — while oom_score_adj needs nothing at all and is
+# in force the moment this unit starts.
+#
+# No backticks in this heredoc. It is unquoted, so bash runs whatever they
+# enclose: three of them here put "MemoryMax: command not found" into a real
+# install log and silently emptied the words out of the file.
 # Deliberately not -1000, which would exempt the hub from the OOM killer
 # outright: a hub that is itself leaking would then take the whole machine down
 # instead of being restarted into a working one.
