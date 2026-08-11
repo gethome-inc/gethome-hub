@@ -59,6 +59,19 @@ run on it.
 The tested operating system is **Raspberry Pi OS Lite (64-bit)**. Debian and
 Ubuntu on arm64 work too; they are simply not what we test against.
 
+The desktop version of Raspberry Pi OS works as well, and on a 512 MB board it
+is worth knowing what it costs: measured at about 75 MB on a Zero 2 W with
+nothing plugged into its HDMI — more than the hub's whole Matter support, on the
+one board that already has to choose between radios.
+
+**Lite is easy to miss, and missing it is the ordinary mistake.** Raspberry Pi
+Imager opens on an entry called *Raspberry Pi OS (64-bit)*, marks it
+**Recommended**, and keeps Lite one level down under *Raspberry Pi OS (other)*,
+where it is called *Raspberry Pi OS Lite (64-bit)* — the two names are one word
+apart, and only the second one is without a desktop. The installer says so when
+it finds a desktop on a small board, and names the single command that turns it
+off; GetHome Studio says so before the card is written.
+
 **A 32-bit system is refused, even on a 64-bit board.** Writing the 32-bit image
 to a perfectly good Zero 2 W or Pi 4 is an easy mistake and an expensive one —
 the Pi boots, the install runs for minutes, and only then finds there is nothing
@@ -200,6 +213,17 @@ what compose could not — per-service memory limits, so a runaway Zigbee2MQTT
 costs itself a restart instead of taking the hub down with it. The hub itself is
 *throttled* rather than capped (`MemoryHigh`, no `MemoryMax`): a hard ceiling
 near the real working set turns a busy minute into a kill.
+
+Those limits need a kernel feature a Raspberry Pi boots **switched off**. The
+firmware puts `cgroup_disable=memory` on the kernel command line, so on a stock
+Pi the units carried the right numbers, `systemctl show` read them straight
+back, and the kernel enforced none of them — found on a Zero 2 W, where the
+unit's cgroup had no `memory.*` file at all. The installer asks for the
+controller by name after it, which is what wins, and takes effect at the next
+restart; it also
+sets `OOMScoreAdjust` on both units, and that is the half that needs no kernel
+feature, no reboot and no cgroup. It is what actually keeps the kernel's choice
+of victim off the hub, from the moment the units start.
 
 ### The prebuilt bundle
 

@@ -19,8 +19,11 @@
 # ran out of memory and the OOM killer took the hub down somewhere between the
 # install finishing and the user pressing Claim. Everything now runs as systemd
 # units against an SQLite file. systemd also gives us what `restart:
-# unless-stopped` gave us and more: MemoryMax, so a runaway Zigbee2MQTT cannot
-# take the hub with it.
+# unless-stopped` gave us and more: a runaway Zigbee2MQTT cannot take the hub
+# with it — through `MemoryMax` where the kernel's memory cgroup is available,
+# and through `OOMScoreAdjust` everywhere. There are two mechanisms rather than
+# one because Raspberry Pi OS ships that cgroup switched off in `cmdline.txt`,
+# so for most of this project's life the caps were not in force at all.
 #
 # Studio follows progress through structured markers on stdout (keep them
 # stable — the install screen is driven by them):
@@ -258,13 +261,168 @@ else
     || fail "Could not install: ${MISSING[*]}. Check the network and run the install again."
 fi
 
+# ── The memory limits need a controller the Raspberry Pi turns off ─────────
+# Every ceiling written below — `MemoryHigh` on the hub, `MemoryMax` on
+# Zigbee2MQTT — is enforced by the kernel's memory cgroup, and a Raspberry Pi
+# boots with `cgroup_disable=memory`. Observed on a Zero 2 W: the units carried
+# the right numbers, `systemctl show` read them straight back, and
+# `MemoryCurrent` was `[not set]` with no `memory.*` file anywhere in the unit's
+# own cgroup. The caps were decoration — not on that board particularly, but on
+# every Raspberry Pi this installer has ever run on.
+#
+# **That parameter is not in `cmdline.txt`.** The firmware prepends its own
+# arguments to the file's, and `cgroup_disable=memory` is one of them — so
+# there is usually nothing here to delete, and the deletion below is only for a
+# machine where somebody added one by hand. What does the work is the
+# **append**: the kernel takes the last setting it is given, and anything this
+# script adds lands after the firmware's. Verified on the Zero 2 W this was
+# found on — `/proc/cmdline` still shows `cgroup_disable=memory`, followed by
+# our two, and `/sys/fs/cgroup/cgroup.controllers` lists `memory`.
+#
+# That is also why the check is `memory_cgroup_live` and not "did we edit the
+# file": what matters is whether the controller is actually there, which is the
+# only thing a caller can act on and the only thing that makes a re-run a no-op.
+#
+# Three things make this safe to do to the file that decides whether the board
+# boots: the result must still carry `root=` before it is written, the original
+# is kept beside it, and it is rewritten as the **single line** the firmware
+# requires — only the first line is read, so a stray newline silently drops
+# every parameter after it.
+#
+# It costs a reboot, and this script deliberately does not perform one: an
+# installer that restarts the machine in the middle of the flow its user is
+# watching would be worse than a limit that starts working a little later.
+# Studio's SD path writes the same parameters onto the card before the first
+# boot, so a hub installed that way never meets this at all.
+#
+# `GETHOME_CMDLINE` and `GETHOME_CGROUP_CONTROLLERS` exist so the tests can
+# exercise this against files they own — the same reason the detector has
+# `GETHOME_ZIGBEE_SCAN_DIR`. Nothing sets them in production.
+memory_cgroup_live() {
+  grep -qw memory "${GETHOME_CGROUP_CONTROLLERS:-/sys/fs/cgroup/cgroup.controllers}" 2>/dev/null
+}
+
+enable_memory_cgroup() {
+  if memory_cgroup_live; then
+    return 0
+  fi
+
+  local file="" candidate current updated param
+  local -a candidates
+  if [[ -n "${GETHOME_CMDLINE:-}" ]]; then
+    candidates=("$GETHOME_CMDLINE")
+  else
+    candidates=(/boot/firmware/cmdline.txt /boot/cmdline.txt)
+  fi
+  for candidate in "${candidates[@]}"; do
+    if [[ -f "$candidate" ]]; then file="$candidate"; break; fi
+  done
+  if [[ -z "$file" ]]; then
+    warn "The kernel's memory accounting is switched off on this machine, and there is no cmdline.txt here to switch it back on — that file is a Raspberry Pi thing. The hub installs and runs normally. What it goes without is the ceiling that keeps Zigbee2MQTT from taking memory the hub needs."
+    return 0
+  fi
+
+  current=$(tr -d '\r\n' < "$file")
+  updated=$(printf '%s' "$current" | sed 's/cgroup_disable=memory//g' | tr -s '[:space:]' ' ')
+  updated="${updated# }"
+  updated="${updated% }"
+  for param in cgroup_enable=memory cgroup_memory=1; do
+    case " $updated " in
+      *" $param "*) ;;
+      *) updated="$updated $param" ;;
+    esac
+  done
+  if [[ "$updated" == "$current" ]]; then
+    return 0
+  fi
+
+  # A command line without `root=` is a machine that does not come back. If the
+  # rewrite lost it, this file is not the file we think it is, and the right
+  # move is to leave it exactly as it was and say so.
+  if [[ -z "$updated" || "$updated" != *"root="* ]]; then
+    warn "Left ${file} alone: the rewritten kernel command line didn't look like one this Pi could boot from, and a wrong one is a Pi that doesn't come back. Nothing changed; this board's memory limits stay off."
+    return 0
+  fi
+
+  $SUDO cp "$file" "${file}.gethome-backup-cgroup" 2>/dev/null || true
+  if ! printf '%s\n' "$updated" | $SUDO tee "${file}.gethome-new" >/dev/null \
+     || ! $SUDO mv "${file}.gethome-new" "$file"; then
+    $SUDO rm -f "${file}.gethome-new" 2>/dev/null || true
+    warn "Could not update ${file}, so this board's memory limits stay off. The hub itself is unaffected."
+    return 0
+  fi
+  warn "Raspberry Pi OS ships with the kernel's memory accounting switched off, so the limits that keep Zigbee2MQTT from crowding out the hub were not actually in force on this board. That is corrected in ${file} and takes effect the next time this Pi is restarted. There is nothing to do now, and nothing else about the boot changed."
+}
+
+# Does this machine already have compressed swap of its own? Configuration
+# counts, not just a running device — see the ordering note below, which is the
+# whole reason this question is asked this way.
+zram_provided_by_the_system() {
+  local conf
+  if [[ -e /etc/systemd/zram-generator.conf ]]; then return 0; fi
+  for conf in /etc/systemd/zram-generator.conf.d/*.conf \
+              /usr/lib/systemd/zram-generator.conf.d/*.conf; do
+    if [[ -e "$conf" ]]; then return 0; fi
+  done
+  # zram-tools, the other common packaging of the same idea.
+  if systemctl cat zramswap.service >/dev/null 2>&1; then return 0; fi
+  if swapon --show=NAME --noheadings 2>/dev/null | grep -q '^/dev/zram'; then return 0; fi
+  return 1
+}
+
 # ── Memory headroom ────────────────────────────────────────────────────────
 # zram before a swapfile: it compresses pages in RAM, so it buys roughly twice
-# the usable memory at the cost of a little CPU, and — unlike a swapfile — it
-# writes nothing to the SD card. The disk swap stays as a backstop for the rare
-# genuine spike; `swappiness=100` is right for zram specifically, where swapping
-# is cheap, and would be wrong if the disk were the only swap.
+# the usable memory at the cost of a little CPU, and — unlike a swapfile — the
+# device this script adds writes nothing to the SD card. The disk swap stays as
+# a backstop for the rare genuine spike; `swappiness=100` is right for zram
+# specifically, where swapping is cheap, and would be wrong if the disk were the
+# only swap.
+#
+# **Unless the machine already has some, in which case leave it alone.**
+# Raspberry Pi OS Trixie ships its own (`systemd-zram-setup@zram0`, from
+# systemd's zram generator, presented as `rpi-swap`) — and this script added a
+# second one anyway. The guard was "is a zram swap already on?", and the unit
+# below is deliberately early (`DefaultDependencies=no`, `Before=swap.target`)
+# so the hub never starts before its headroom exists. Being early is exactly
+# what defeated the guard: the distribution's device was not up yet, the check
+# saw nothing, and the script hot-added its own. Observed on a Zero 2 W — two
+# 415 MB devices and a `SwapTotal` of 830 MB on a board with 415 MB of RAM.
+# Compressed pages live in that same RAM, so twice the swap is twice the worst
+# case, which is the opposite of the headroom this exists for. The question has
+# to be "is one *configured* on this machine", which is answerable at any point
+# in the boot, and not "is one running", which is not.
 if [[ -n "$SMALL_BOARD" ]]; then
+  enable_memory_cgroup
+
+  # A desktop image is the largest single thing in the way on a board this
+  # size. Measured on a Zero 2 W running the Desktop image with nothing plugged
+  # into its HDMI: pcmanfm, wf-panel-pi, labwc, two xdg-desktop-portals,
+  # wireplumber and the user session held about 75 MB between them — more than
+  # the hub's whole Matter adapter. Switching somebody's desktop off is not this
+  # installer's business. Saying what it costs, on the machine where it costs
+  # the most, is.
+  #
+  # The measurement stays in this comment and out of the message. Studio shows
+  # that message to someone who is not going to convert megabytes into anything
+  # — what they can act on is "it takes memory the hub needs" plus the command.
+  # And it must not promise a second radio: RADIO_BUDGET is computed from the
+  # board's RAM above and a desktop makes no difference to it, so "turn it off
+  # and get Matter too" would simply be untrue.
+  if [[ "$(systemctl get-default 2>/dev/null || true)" == "graphical.target" ]]; then
+    warn "This Pi is running the desktop version of Raspberry Pi OS. On a board this small the desktop uses up a good part of the memory the hub needs, for a screen that isn't attached. The hub works either way, it just has less room. If nobody uses a screen on this Pi, run \`sudo systemctl set-default multi-user.target\` and restart it to give that memory back; Raspberry Pi OS Lite is the version that never takes it in the first place."
+  fi
+fi
+
+if [[ -n "$SMALL_BOARD" ]] && zram_provided_by_the_system; then
+  say "Compressed memory is already set up by the operating system; leaving that to it."
+  # An earlier install of ours may be the reason there are two.
+  if [[ -e /etc/systemd/system/gethome-zram.service ]]; then
+    $SUDO systemctl disable gethome-zram.service >/dev/null 2>&1 || true
+    $SUDO rm -f /etc/systemd/system/gethome-zram.service /usr/local/lib/gethome-zram.sh
+    $SUDO systemctl daemon-reload >/dev/null 2>&1 || true
+    warn "An earlier install of the hub had added a second compressed-swap device beside the one this system provides — twice the swap this board should have, on a machine where the compressed pages sit in the memory they are saving. It is switched off now; the spare device itself goes away at the next restart."
+  fi
+elif [[ -n "$SMALL_BOARD" ]]; then
   say "Setting up zram (compressed memory) so a small board has room to breathe…"
   $SUDO tee /usr/local/lib/gethome-zram.sh >/dev/null <<'ZRAM'
 #!/bin/sh
@@ -273,6 +431,17 @@ if [[ -n "$SMALL_BOARD" ]]; then
 # second machine's worth of memory and writes nothing to the SD card.
 set -e
 [ -n "$GETHOME_ZRAM_SIZE" ] || exit 0
+# Stand down if this machine has compressed swap of its own — the same check
+# install.sh makes, repeated here because this unit runs on every boot and the
+# operating system underneath it can gain one at any upgrade. Configuration,
+# not a running device: this unit runs before swap.target, so at this moment
+# the system's own zram is configured but not yet on, and asking whether one is
+# *running* is what produced two of them.
+if [ -e /etc/systemd/zram-generator.conf ] || \
+   ls /etc/systemd/zram-generator.conf.d/*.conf \
+      /usr/lib/systemd/zram-generator.conf.d/*.conf >/dev/null 2>&1; then
+  exit 0
+fi
 modprobe zram || exit 0
 if swapon --show=NAME --noheadings 2>/dev/null | grep -q '^/dev/zram'; then
   exit 0
@@ -309,6 +478,11 @@ UNIT
   $SUDO systemctl daemon-reload >/dev/null 2>&1 || true
   $SUDO systemctl enable --now gethome-zram.service >/dev/null 2>&1 \
     || warn "Could not enable compressed swap. The hub still installs; a board with 512 MB has less headroom without it."
+fi
+
+# Whichever of the two set it up, the swap this board ends up with is
+# compressed and in RAM, so it wants the same tuning either way.
+if [[ -n "$SMALL_BOARD" ]]; then
   $SUDO tee /etc/sysctl.d/60-gethome.conf >/dev/null <<'SYSCTL'
 # Tuned for compressed swap in RAM, which is cheap to use and costs the SD card
 # nothing — the defaults assume swapping means writing to a disk.
@@ -744,6 +918,20 @@ ProtectSystem=full
 ${HUB_MEM_HIGH}
 # A memory spike should cost the hub a restart, not the machine a reboot.
 OOMPolicy=continue
+# And when the board genuinely runs out, the kernel should reach for
+# Zigbee2MQTT rather than for the hub. This is the half of that promise which
+# works everywhere: MemoryMax needs the memory cgroup, which Raspberry Pi OS
+# turns off — see the section that turns it back on, and note that it only
+# takes effect after a reboot — while oom_score_adj needs nothing at all and is
+# in force the moment this unit starts.
+#
+# No backticks in this heredoc. It is unquoted, so bash runs whatever they
+# enclose: three of them here put "MemoryMax: command not found" into a real
+# install log and silently emptied the words out of the file.
+# Deliberately not -1000, which would exempt the hub from the OOM killer
+# outright: a hub that is itself leaking would then take the whole machine down
+# instead of being restarted into a working one.
+OOMScoreAdjust=-500
 
 [Install]
 WantedBy=multi-user.target
@@ -792,6 +980,10 @@ ReadWritePaths=${Z2M_DATA_DIR}
 ${Z2M_MEM_HIGH}
 ${Z2M_MEM_MAX}
 OOMPolicy=continue
+# The optional process, and so the one that should be picked first when the
+# board runs out — the other side of the hub unit's -500, and the only side of
+# it that works before the memory cgroup has been switched back on.
+OOMScoreAdjust=500
 
 [Install]
 WantedBy=multi-user.target

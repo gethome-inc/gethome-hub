@@ -194,4 +194,180 @@ describe('deploy/install.sh', () => {
         .toMatch(new RegExp(`\\bstep ${step}\\b`));
     }
   });
+
+  /**
+   * **The caps above were not in force on a single Raspberry Pi.**
+   *
+   * Raspberry Pi OS ships `cgroup_disable=memory` in `cmdline.txt`, so the
+   * kernel has no memory controller to enforce them with. Observed on a
+   * Zero 2 W: the units carried the right numbers, `systemctl show` read them
+   * straight back, and `MemoryCurrent` was `[not set]` with no `memory.*` file
+   * anywhere in the unit's cgroup.
+   *
+   * The fix edits the file that decides whether the board boots at all, so it
+   * is worth more than a text match: this runs the installer's own function
+   * against a `cmdline.txt` the test owns, exactly the way
+   * `GETHOME_ZIGBEE_SCAN_DIR` lets the Zigbee tests stage a coordinator.
+   */
+  it('turns the memory cgroup back on without breaking the boot', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'gethome-cmdline-'));
+    dirs.push(dir);
+    const controllers = path.join(dir, 'controllers');
+    const cmdline = path.join(dir, 'cmdline.txt');
+
+    /** Run `enable_memory_cgroup` out of install.sh against those two files. */
+    const rewrite = (): string => {
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -euo pipefail
+           SUDO=""
+           warn() { :; }
+           eval "$(sed -n '/^memory_cgroup_live() {/,/^}/p' "$1")"
+           eval "$(sed -n '/^enable_memory_cgroup() {/,/^}/p' "$1")"
+           enable_memory_cgroup`,
+          'bash',
+          path.join(repoRoot, 'deploy', 'install.sh'),
+        ],
+        { env: { ...process.env, GETHOME_CGROUP_CONTROLLERS: controllers, GETHOME_CMDLINE: cmdline } },
+      );
+      return readFileSync(cmdline, 'utf8');
+    };
+
+    // Verbatim from the Zero 2 W this was found on, double space included.
+    const original =
+      'coherent_pool=1M 8250.nr_uarts=0 cgroup_disable=memory snd_bcm2835.enable_hdmi=1  ' +
+      'console=ttyS0,115200 root=PARTUUID=7d25da7f-02 rootfstype=ext4 fsck.repair=yes rootwait quiet splash';
+
+    writeFileSync(controllers, 'cpuset cpu io pids\n'); // no `memory` — the Pi's default
+    writeFileSync(cmdline, `${original}\n`);
+
+    const rewritten = rewrite();
+    // **One line.** The firmware reads the first and ignores the rest, so a
+    // stray newline silently drops every parameter after it.
+    expect(rewritten.trimEnd()).not.toContain('\n');
+    expect(rewritten).not.toContain('cgroup_disable=memory');
+    expect(rewritten).toContain('cgroup_enable=memory');
+    expect(rewritten).toContain('cgroup_memory=1');
+    // Nothing else may be lost — this file is the difference between a Pi that
+    // boots and one that has to be fixed in another machine.
+    for (const kept of original.split(/\s+/).filter((p) => p && p !== 'cgroup_disable=memory')) {
+      expect(rewritten, `${kept} was dropped from the kernel command line`).toContain(kept);
+    }
+
+    // Re-running the installer is the ordinary case: `gethome-hubctl update`
+    // is this script again.
+    expect(rewrite()).toBe(rewritten);
+
+    // A command line with no `root=` is not one we understand, and a wrong
+    // guess there is a Pi that doesn't come back. Leave it exactly as it was.
+    const unfamiliar = 'quiet splash cgroup_disable=memory\n';
+    writeFileSync(cmdline, unfamiliar);
+    expect(rewrite()).toBe(unfamiliar);
+
+    // Debian, Ubuntu, and a Pi that has already been through this: the
+    // controller is live, so there is nothing to do and nothing to say.
+    writeFileSync(controllers, 'cpuset cpu io memory pids\n');
+    writeFileSync(cmdline, `${original}\n`);
+    expect(rewrite()).toBe(`${original}\n`);
+  });
+
+  /**
+   * `MemoryMax` was the whole of "Zigbee2MQTT should die before the hub does",
+   * and it needs a cgroup controller the Pi disables. `oom_score_adj` needs
+   * nothing, works from the first start, and says the same thing to the only
+   * component that actually makes the choice.
+   */
+  it('lets the kernel pick Zigbee2MQTT first when the board runs out of memory', () => {
+    const adjust = (unit: string): number => {
+      const found = unit.match(/^OOMScoreAdjust=(-?\d+)$/m);
+      expect(found, 'OOMScoreAdjust is what works without the memory cgroup').not.toBeNull();
+      return Number(found![1]);
+    };
+    const hub = adjust(installer.slice(
+      installer.indexOf('gethome-hubd.service >/dev/null <<UNIT'),
+      installer.indexOf('gethome-zigbee2mqtt.service >/dev/null <<UNIT'),
+    ));
+    const z2m = adjust(installer.slice(
+      installer.indexOf('gethome-zigbee2mqtt.service >/dev/null <<UNIT'),
+      installer.indexOf('gethome-hubctl'),
+    ));
+    expect(hub, 'the optional process is the one that should be picked').toBeLessThan(z2m);
+    // Not -1000: that exempts the hub from the OOM killer outright, so a hub
+    // that is itself leaking takes the machine down instead of being restarted
+    // into a working one.
+    expect(hub).toBeGreaterThan(-1000);
+  });
+
+  /**
+   * Raspberry Pi OS Trixie ships its own zram (`systemd-zram-setup@zram0`),
+   * and this installer added a second one beside it — two 415 MB devices and
+   * an 830 MB `SwapTotal` on a board with 415 MB of RAM, where the compressed
+   * pages live in the very memory they are saving.
+   *
+   * The cause is the guard, not the intent: our unit is deliberately early
+   * (`Before=swap.target`), so at the moment it asks "is a zram swap running?"
+   * the system's own is configured but not yet on. The question has to be one
+   * that can be answered at any point in the boot.
+   */
+  it('stands down from zram when the distribution already provides it', () => {
+    expect(installer).toMatch(/^zram_provided_by_the_system\(\) \{/m);
+    expect(installer, 'the installer has to consult it, not just define it')
+      .toContain('zram_provided_by_the_system; then');
+
+    const zram = heredoc('ZRAM');
+    const configured = zram.indexOf('zram-generator.conf');
+    const created = zram.indexOf('hot_add');
+    expect(configured, 'the boot-time script must ask the same question').toBeGreaterThan(-1);
+    expect(created, 'and ask it before it creates a device').toBeGreaterThan(configured);
+    // The running-device check may stay as a second line of defence, but it
+    // cannot be the first: being early is exactly what defeated it.
+    expect(zram.slice(0, configured)).not.toContain('swapon --show');
+  });
+
+  /**
+   * **A backtick in an unquoted heredoc is a command, not punctuation.**
+   *
+   * `<<'DELIM'` is literal; `<<DELIM` expands variables *and* runs command
+   * substitution — which is what the unit heredocs need for `${CONF_DIR}`. A
+   * markdown habit in a comment inside one of them put three lines of
+   * "MemoryMax: command not found" into a real install log, in front of the
+   * user, and silently emptied those words out of the file that was written.
+   * Nothing failed: bash substitutes the empty output of a failed command and
+   * carries on, so `set -e` and the ERR trap never saw it.
+   */
+  it('never puts a backtick in a heredoc bash will expand', () => {
+    const opens = [...installer.matchAll(/<<(')?([A-Z][A-Z0-9_]*)\1?\n/g)];
+    let checked = 0;
+    for (const open of opens) {
+      if (open[1] === "'") continue; // quoted: the body is literal
+      const delimiter = open[2]!;
+      const start = open.index! + open[0].length;
+      const end = installer.indexOf(`\n${delimiter}\n`, start);
+      expect(end, `heredoc ${delimiter} is never closed`).toBeGreaterThan(-1);
+      checked += 1;
+      // An escaped backtick is fine — hub.env carries one deliberately.
+      expect(
+        installer.slice(start, end).replace(/\\`/g, ''),
+        `a backtick in the unquoted heredoc ${delimiter} runs as a command`,
+      ).not.toContain('`');
+    }
+    expect(checked, 'found no unquoted heredocs at all — this scan is broken')
+      .toBeGreaterThan(0);
+  });
+
+  /**
+   * A desktop image is the largest single thing in the way on a 512 MB board —
+   * measured at ~75 MB on a Zero 2 W with nothing plugged into its HDMI, which
+   * is more than the hub's whole Matter adapter on the one board that has to
+   * choose between radios. Switching somebody's desktop off is not the
+   * installer's business; saying what it costs is.
+   */
+  it('says what a desktop image costs on a small board', () => {
+    const small = installer.slice(installer.indexOf('# ── Memory headroom'));
+    expect(small).toContain('graphical.target');
+    expect(small, 'name the fix, don\'t just name the problem')
+      .toContain('set-default multi-user.target');
+  });
 });

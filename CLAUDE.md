@@ -362,6 +362,55 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `ExecStart`, measured at 176 → 139 MB resident with Matter loaded for about
   half a second of startup. They have to be **argv**: `NODE_OPTIONS` refuses
   `--optimize-for-size` outright.
+  **None of those cgroup limits were ever in force on a Raspberry Pi.** A Pi
+  boots with `cgroup_disable=memory`, so the kernel has no memory controller to
+  enforce them with: the units carried the right numbers, `systemctl show` read
+  them straight back, and the unit's own cgroup had no `memory.*` file at all
+  (`MemoryCurrent=[not set]`, observed on a Zero 2 W). **The parameter is not in
+  `cmdline.txt`** — the firmware prepends it — so `enable_memory_cgroup()` works
+  by *appending* `cgroup_enable=memory cgroup_memory=1`, which wins because the
+  kernel takes the last setting; stripping a `cgroup_disable=memory` from the
+  file is only for one somebody added by hand. Verified on hardware:
+  `/proc/cmdline` still shows the disable, followed by our two, and
+  `cgroup.controllers` lists `memory`. The gate is therefore
+  `memory_cgroup_live` — whether the controller is *there* — never "did we edit
+  the file". Three things keep the edit safe on the file that decides whether
+  the board boots: the result must still carry `root=`, the original is kept
+  beside it, and it is written as the **single line** the firmware reads — only
+  the first is parsed, so a stray newline drops every parameter after it.
+  It needs a reboot, which the installer deliberately does not perform; Studio's
+  SD path writes the same parameters before first boot, so a card install never
+  meets it. **`OOMScoreAdjust` (-500 hub / +500 Z2M) is the half that works
+  without any of that**, and it is what actually delivers "Z2M dies first" —
+  deliberately not -1000, which would exempt a leaking hub from the OOM killer
+  and cost the whole machine instead of one restart. `GETHOME_CMDLINE` and
+  `GETHOME_CGROUP_CONTROLLERS` exist so the test can run the real function
+  against files it owns, the same way `GETHOME_ZIGBEE_SCAN_DIR` stages a
+  coordinator.
+  **The numbers above have been re-measured and are conservative.** On a
+  Zero 2 W with the desktop off, the memory cgroup enforcing and one zram
+  device, ten minutes after a restart with nothing paired: the hub is 56 MB
+  with Matter off and **139 MB with both radios up** (peak 144 against a 200 MB
+  `MemoryHigh`, `high 0`), Z2M is 64 MB, and `MemAvailable` is 89 MB. Both
+  radios genuinely ran — `radio.matter: true` beside `zigbee.connected: true`.
+  So 178 and 150 are both too high. **The one-radio rule is unchanged anyway**:
+  a hub with no devices is not a working home, both sides grow per device, and
+  Matter's peak is at commissioning, not at rest. Changing it needs the same
+  board with devices paired and days of uptime — `docs/zigbee.md` carries the
+  table and the reasoning.
+- **Don't add compressed swap a system already has.** Raspberry Pi OS Trixie
+  ships its own (`systemd-zram-setup@zram0`, presented as `rpi-swap`, with
+  writeback to the card), and `gethome-zram.service` added a second one beside
+  it — two 415 MB devices and `SwapTotal` 830 MB on a board with 415 MB of RAM,
+  where the compressed pages live in the very memory they are saving. The guard
+  was the right idea asked the wrong way: our unit is deliberately early
+  (`DefaultDependencies=no`, `Before=swap.target`) so the hub never starts
+  before its headroom exists, and being early is precisely what made "is a zram
+  swap running?" answer no. The question has to be **"is one configured on this
+  machine"** — `zram_provided_by_the_system()` in `install.sh` and the same
+  check inside the boot-time script, both before anything is created. An
+  install that finds the duplicate disables our unit and says so; the spare
+  device goes at the next reboot.
 - **Name a failure, don't just relay it.** A dropped download, a full card and
   an OOM kill all happen on a Pi and all want different fixes; `install.sh`
   keeps the output and matches them, because by then the actual reason is a
