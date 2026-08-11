@@ -12,6 +12,8 @@ import { PairingService } from '../src/core/pairing.js';
 import { SettingsService } from '../src/core/settings.js';
 import { DeviceRegistry } from '../src/core/registry.js';
 import { PermitJoinService } from '../src/core/permit-join.js';
+import { AiRunLog } from '../src/core/ai-runs.js';
+import { MappingLibrary } from '../src/ai/library.js';
 import type { AdapterBus, ProtocolAdapter } from '../src/adapters/adapter.js';
 import type { HubCommand } from '../src/schema/index.js';
 import { bootedHome, openTestDb, resetDb } from './helpers/db.js';
@@ -57,6 +59,7 @@ describe.skipIf(!handle)('hub API', () => {
     registry = new DeviceRegistry(db, events, activity, log);
     registry.registerAdapter(adapter);
     await registry.start();
+    const settings = new SettingsService(db, Buffer.alloc(32).toString('base64'));
     app = await buildServer({
       db,
       log,
@@ -64,7 +67,7 @@ describe.skipIf(!handle)('hub API', () => {
       registry,
       pairing,
       activity,
-      settings: new SettingsService(db, Buffer.alloc(32).toString('base64')),
+      settings,
       hubId: 'hub-test-1234',
       home: await bootedHome(db, 'Test Hub'),
       version: '0.1.0-test',
@@ -77,6 +80,10 @@ describe.skipIf(!handle)('hub API', () => {
       z2mDataDir: path.join(dataDir, 'zigbee2mqtt'),
       // No radio, so it reports a closed window and publishes nothing.
       permitJoin: new PermitJoinService(undefined, log, () => {}),
+      aiRuns: new AiRunLog(db, events),
+      // No Zigbee adapter: the library still lists, stores and deletes, which
+      // is the point — none of that needs a radio or a credential.
+      mappings: new MappingLibrary({ db, settings, registry, log }),
     });
     await app.ready();
   });
@@ -392,12 +399,129 @@ describe.skipIf(!handle)('hub API', () => {
       provider: 'anthropic',
       model: null,
       hasKey: true,
+      // On unless the owner has said otherwise, so saving a key is enough.
+      enabled: true,
       legacySubscriptionToken: false,
       status: {},
     });
     expect(JSON.stringify(body)).not.toContain('sk-ant');
 
     const denied = await app.inject({ method: 'GET', url: '/api/v1/settings/ai', headers: auth(memberToken) });
+    expect(denied.statusCode).toBe(403);
+  });
+
+  it('switches adaptation off without asking for the key again', async () => {
+    await app.inject({
+      method: 'PUT',
+      url: '/api/v1/settings/ai',
+      headers: auth(ownerToken),
+      payload: { apiKey: 'sk-ant-test-1234567890' },
+    });
+
+    const patched = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(ownerToken),
+      payload: { enabled: false },
+    });
+    expect(patched.statusCode).toBe(200);
+    const body = patched.json() as { enabled: boolean; hasKey: boolean };
+    // Off, and the credential is still there — those are different requests.
+    expect(body).toMatchObject({ enabled: false, hasKey: true });
+  });
+
+  it('refuses an agent run while adaptation is switched off, and says so', async () => {
+    await app.inject({
+      method: 'PUT',
+      url: '/api/v1/settings/ai',
+      headers: auth(ownerToken),
+      payload: { apiKey: 'sk-ant-test-1234567890' },
+    });
+    await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(ownerToken),
+      payload: { enabled: false },
+    });
+    const hash = 'f'.repeat(64);
+    await app.inject({
+      method: 'PUT',
+      url: `/api/v1/device-mappings/${hash}`,
+      headers: auth(ownerToken),
+      payload: { version: 1, endpoints: [{ endpointId: 1 }] },
+    });
+
+    const repair = await app.inject({
+      method: 'POST',
+      url: `/api/v1/device-mappings/${hash}/repair`,
+      headers: auth(ownerToken),
+    });
+
+    // Not the same refusal as "no key": the hub has a credential and is
+    // declining to use it, and an app has to be able to tell a person which
+    // of the two they need to change.
+    expect(repair.statusCode).toBe(409);
+    expect((repair.json() as { error: string }).error).toBe('ai_disabled');
+
+    await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(ownerToken),
+      payload: { enabled: true },
+    });
+  });
+
+  it('rejects an uploaded mapping with the reasons, not a bare 400', async () => {
+    const hash = 'd'.repeat(64);
+    const bad = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/device-mappings/${hash}`,
+      headers: auth(ownerToken),
+      payload: { version: 1, endpoints: [{ endpointId: 1 }] },
+    });
+
+    // 422, not 400: the request was well-formed and understood — what was
+    // refused is the content, and the difference is what tells an app to offer
+    // a repair rather than blame the upload.
+    expect(bad.statusCode).toBe(422);
+    const body = bad.json() as { error: string; problems: string[] };
+    expect(body.error).toBe('invalid_mapping');
+    expect(body.problems.length).toBeGreaterThan(0);
+
+    // Kept, so the repair route has something to work from.
+    const listed = (await app.inject({
+      method: 'GET',
+      url: '/api/v1/device-mappings',
+      headers: auth(ownerToken),
+    })).json() as Array<{ exposesHash: string; status: string }>;
+    expect(listed.find((entry) => entry.exposesHash === hash)?.status).toBe('rejected');
+  });
+
+  it('will not repair a mapping without a credential, and says which of the two is missing', async () => {
+    await app.inject({ method: 'DELETE', url: '/api/v1/settings/ai', headers: auth(ownerToken) });
+    const hash = 'e'.repeat(64);
+    await app.inject({
+      method: 'PUT',
+      url: `/api/v1/device-mappings/${hash}`,
+      headers: auth(ownerToken),
+      payload: { version: 1, endpoints: [{ endpointId: 1 }] },
+    });
+
+    const repair = await app.inject({
+      method: 'POST',
+      url: `/api/v1/device-mappings/${hash}/repair`,
+      headers: auth(ownerToken),
+    });
+    expect(repair.statusCode).toBe(409);
+    expect((repair.json() as { error: string }).error).toBe('ai_not_configured');
+  });
+
+  it('keeps the mapping library to the owner', async () => {
+    const denied = await app.inject({
+      method: 'GET',
+      url: '/api/v1/device-mappings',
+      headers: auth(memberToken),
+    });
     expect(denied.statusCode).toBe(403);
   });
 
@@ -577,7 +701,7 @@ describe.skipIf(!handle)('hub API', () => {
     // This server is built without an MQTT observer, so the traffic inspector
     // is not on offer — and the socket says so rather than leaving a client to
     // infer it from the hub's version.
-    expect(hello.streams).toEqual(['zigbee']);
+    expect(hello.streams).toEqual(['zigbee', 'ai']);
     socket.close();
   });
 

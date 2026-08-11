@@ -2,6 +2,7 @@ import type { WebSocket } from 'ws';
 import type { ApiDeps } from './server.js';
 import type { MqttFrame } from '../core/mqtt-observer.js';
 import type { ZigbeeLifecycleEvent } from '../core/bus.js';
+import type { AiRunEvent } from '../core/ai-runs.js';
 import { deviceWire } from './dto.js';
 
 /** Controls a subscribed-but-not-yet-authorized WebSocket. */
@@ -13,7 +14,7 @@ export interface WebSocketHandle {
 }
 
 /** Streams a client can ask for beyond the always-on events. */
-const OPTIONAL_STREAMS = ['mqtt', 'zigbee'] as const;
+const OPTIONAL_STREAMS = ['mqtt', 'zigbee', 'ai'] as const;
 type OptionalStream = (typeof OPTIONAL_STREAMS)[number];
 
 /**
@@ -45,6 +46,7 @@ const MAX_CLIENT_MESSAGE_BYTES = 4096;
  *   {"type":"mqtt","frame":{…}}
  *   {"type":"mqtt","dropped":N}              rate limit hit; N frames skipped
  *   {"type":"zigbeeEvent","event":{at,type,ieee,name?}}
+ *   {"type":"aiRun","event":{phase,id,at,kind,exposesHash,step?,ok?,costUsd?}}
  *
  * Client → server (the only inbound frames read):
  *
@@ -128,6 +130,7 @@ export function attachWebSocket(socket: WebSocket, deps: ApiDeps): WebSocketHand
   };
 
   const onZigbeeEvent = (event: ZigbeeLifecycleEvent) => send({ type: 'zigbeeEvent', event });
+  const onAiRun = (event: AiRunEvent) => send({ type: 'aiRun', event });
 
   const available = (stream: OptionalStream): boolean =>
     stream === 'mqtt' ? deps.mqttObserver !== undefined : true;
@@ -149,6 +152,7 @@ export function attachWebSocket(socket: WebSocket, deps: ApiDeps): WebSocketHand
         send({ type: 'mqttBacklog', frames: deps.mqttObserver.recent() });
       }
       if (stream === 'zigbee') deps.events.on('zigbeeEvent', onZigbeeEvent);
+      if (stream === 'ai') deps.events.on('aiRun', onAiRun);
     }
     send({
       type: 'subscribed',
@@ -165,6 +169,7 @@ export function attachWebSocket(socket: WebSocket, deps: ApiDeps): WebSocketHand
         deps.mqttObserver?.detach();
       }
       if (stream === 'zigbee') deps.events.off('zigbeeEvent', onZigbeeEvent);
+      if (stream === 'ai') deps.events.off('aiRun', onAiRun);
     }
     send({ type: 'subscribed', streams: [...subscribed] });
   };
@@ -222,6 +227,7 @@ export function attachWebSocket(socket: WebSocket, deps: ApiDeps): WebSocketHand
       deps.mqttObserver?.detach();
     }
     if (subscribed.has('zigbee')) deps.events.off('zigbeeEvent', onZigbeeEvent);
+    if (subscribed.has('ai')) deps.events.off('aiRun', onAiRun);
     subscribed.clear();
   };
   socket.on('close', detach);

@@ -1,5 +1,6 @@
 import type { Db } from '../db/client.js';
 import type { SettingsService } from '../core/settings.js';
+import type { AiRunLog } from '../core/ai-runs.js';
 import type { Logger } from '../logging.js';
 import type { AppliedAiMapping, ZigbeeAiAssist } from '../adapters/zigbee/adapter.js';
 import type { Z2mDevice, Z2mProfile } from '../adapters/zigbee/exposes-mapper.js';
@@ -8,6 +9,8 @@ export interface LazyAiAssistOptions {
   db: Db;
   settings: SettingsService;
   log: Logger;
+  /** Where each run is recorded and streamed from. */
+  runs?: AiRunLog;
 }
 
 /**
@@ -31,11 +34,17 @@ export function lazyAiAssist(options: LazyAiAssistOptions): ZigbeeAiAssist {
       staticProfile: Z2mProfile,
       requestOptions?: { samples?: Record<string, unknown>[]; force?: boolean },
     ): Promise<AppliedAiMapping | null> {
+      // Read every call, not once: this is what makes a key added through the
+      // API work without a restart, and what makes the owner's switch take
+      // effect the moment they flip it. Two gates, and neither is redundant —
+      // a hub with no key must never construct an API client, and a hub whose
+      // owner has turned adaptation off must not run the agent even though
+      // the credential is still there.
+      const configured = await options.settings.getAiSettings();
+      if (!configured.hasKey || !configured.enabled) return null;
       if (!mapper) {
-        const configured = await options.settings.getAiSettings();
-        if (!configured.hasKey) return null;
         const { AiDeviceMapper } = await import('./mapper.js');
-        mapper = new AiDeviceMapper(options.db, options.settings, options.log);
+        mapper = new AiDeviceMapper(options.db, options.settings, options.log, options.runs);
       }
       return mapper.requestMapping(device, staticProfile, requestOptions);
     },

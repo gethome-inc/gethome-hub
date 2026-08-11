@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import type { EndpointState } from '../schema/index.js';
 import type { MqttFrame } from './mqtt-observer.js';
+import type { AiRunEvent } from './ai-runs.js';
 
 /**
  * Events the hub fans out to WebSocket clients (and internal listeners).
@@ -20,6 +21,7 @@ export interface HubEvents {
   commissioningProgress: [jobId: string, status: string, detail?: string];
   mqttFrame: [frame: MqttFrame];
   zigbeeEvent: [event: ZigbeeLifecycleEvent];
+  aiRun: [event: AiRunEvent];
 }
 
 /**

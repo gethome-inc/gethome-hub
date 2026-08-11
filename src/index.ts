@@ -12,12 +12,14 @@ import { HomeService } from './core/home.js';
 import { PairingService } from './core/pairing.js';
 import { SettingsService } from './core/settings.js';
 import { DeviceRegistry } from './core/registry.js';
+import { AiRunLog } from './core/ai-runs.js';
 import { MqttObserver } from './core/mqtt-observer.js';
 import { PermitJoinService } from './core/permit-join.js';
 import { activityForLifecycleEvent, normalizeBridgeEvent } from './core/zigbee-events.js';
 import { buildServer } from './api/server.js';
 import { MdnsAdvertiser } from './mdns/advertiser.js';
 import { lazyAiAssist } from './ai/lazy.js';
+import { MappingLibrary } from './ai/library.js';
 import type { ZigbeeAdapter } from './adapters/zigbee/adapter.js';
 import type { MqttAdapter } from './adapters/mqtt/adapter.js';
 import type { MatterAdapter } from './adapters/matter/adapter.js';
@@ -74,6 +76,10 @@ async function main(): Promise<void> {
   await pairing.boot();
 
   const registry = new DeviceRegistry(db, events, activity, log.child({ module: 'registry' }));
+  // What the mapping agent does, recorded and streamed. Constructed
+  // unconditionally: a hub with no key never writes a row, and the API still
+  // has to be able to answer "nothing has run".
+  const aiRuns = new AiRunLog(db, events);
 
   // Adapters are *constructed* here and *started* after the API is listening.
   // The modules are imported dynamically for one reason that matters on a small
@@ -97,7 +103,7 @@ async function main(): Promise<void> {
       mqttUrl: config.MQTT_URL,
       baseTopic: config.Z2M_BASE_TOPIC,
       log: log.child({ module: 'zigbee' }),
-      aiAssist: lazyAiAssist({ db, settings, log: log.child({ module: 'ai' }) }),
+      aiAssist: lazyAiAssist({ db, settings, log: log.child({ module: 'ai' }), runs: aiRuns }),
       onBridgeInfo: (info) => permitJoin.observeBridgeInfo(info),
       onBridgeEvent: (raw) => {
         const event = normalizeBridgeEvent(raw);
@@ -151,6 +157,15 @@ async function main(): Promise<void> {
     radioBudget: config.GETHOME_RADIO,
     z2mDataDir: config.Z2M_DATA_DIR,
     permitJoin,
+    aiRuns,
+    mappings: new MappingLibrary({
+      db,
+      settings,
+      registry,
+      log: log.child({ module: 'ai' }),
+      runs: aiRuns,
+      ...(zigbee ? { zigbee } : {}),
+    }),
     ...(build ? { build } : {}),
     ...(matter ? { matter } : {}),
     ...(zigbee ? { zigbee } : {}),

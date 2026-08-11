@@ -1,8 +1,14 @@
 import mqtt from 'mqtt';
-import type { AdapterBus, ProtocolAdapter } from '../adapter.js';
+import type { AdapterBus, DeviceRecognition, ProtocolAdapter } from '../adapter.js';
 import type { CapabilityKind, DeviceKind, EndpointState, HubCommand } from '../../schema/index.js';
 import { UnsupportedCommandError } from '../../schema/index.js';
-import { mapExposes, type CustomFieldSpec, type Z2mDevice, type Z2mProfile } from './exposes-mapper.js';
+import {
+  exposesHash,
+  mapExposes,
+  type CustomFieldSpec,
+  type Z2mDevice,
+  type Z2mProfile,
+} from './exposes-mapper.js';
 import { buildSetPayload } from './commands.js';
 import type { Logger } from '../../logging.js';
 
@@ -27,6 +33,8 @@ export interface ZigbeeAiAssist {
 }
 
 export interface AppliedAiMapping {
+  /** Whether the agent produced this descriptor or somebody uploaded it. */
+  source?: 'ai' | 'imported';
   endpoints: Array<{
     endpointId: number;
     deviceKind: DeviceKind;
@@ -73,6 +81,16 @@ export interface Z2mBridgeInfo {
   permit_join?: boolean;
   permit_join_end?: number;
   permit_join_timeout?: number;
+}
+
+/** How one pass of `adoptDevice` should treat the device's stored mapping. */
+interface AdoptOptions {
+  /** First sight: write an activity row and ask the device for a snapshot. */
+  announce?: boolean;
+  /** Throw the stored mapping away and ask the agent again. */
+  regenerate?: boolean;
+  /** Consult the library even for a device the static mapper placed fully. */
+  consultMapping?: boolean;
 }
 
 export interface ZigbeeAdapterOptions {
@@ -191,8 +209,32 @@ export class ZigbeeAdapter implements ProtocolAdapter {
   async remap(externalId: string): Promise<boolean> {
     const raw = this.rawDefinitions.get(externalId);
     if (!raw) return false;
-    await this.adoptDevice(raw, false, true);
+    await this.adoptDevice(raw, { regenerate: true });
     return true;
+  }
+
+  /** The bridge entries of every tracked device whose published schema hashes
+   *  to `hash` — that is, every device one library entry governs. */
+  devicesOfModel(hash: string): Z2mDevice[] {
+    return [...this.rawDefinitions.values()].filter((device) => exposesHash(device) === hash);
+  }
+
+  /**
+   * Re-adopt every device of one model after its stored mapping changed.
+   *
+   * Distinct from `remap`, which *regenerates* — this applies what is already
+   * in the library, which is what an import or a repair has just written.
+   * Consulting the mapping is forced because a device the static mapper placed
+   * completely would otherwise never ask for it, and somebody who uploaded a
+   * mapping for that device plainly wants it used.
+   */
+  async applyStoredMapping(hash: string): Promise<string[]> {
+    const applied: string[] = [];
+    for (const device of this.devicesOfModel(hash)) {
+      await this.adoptDevice(device, { consultMapping: true });
+      applied.push(device.ieee_address);
+    }
+    return applied;
   }
 
   // ── Internals ───────────────────────────────────────────────────────────
@@ -294,7 +336,7 @@ export class ZigbeeAdapter implements ProtocolAdapter {
       device.remapTimer = undefined;
       const raw = this.rawDefinitions.get(device.ieee);
       if (!raw) return;
-      void this.adoptDevice(raw, false, true).catch((error) => {
+      void this.adoptDevice(raw, { regenerate: true }).catch((error) => {
         this.options.log.warn({ err: error }, `Parameter remap failed for ${device.friendlyName}`);
       });
     }, this.options.parameterRemapDelayMs ?? 5000);
@@ -312,7 +354,7 @@ export class ZigbeeAdapter implements ProtocolAdapter {
       const known = this.byIeee.get(device.ieee_address);
       const fingerprint = JSON.stringify(device.definition?.exposes ?? []);
       if (!known || known.friendlyName !== device.friendly_name || known.fingerprint !== fingerprint) {
-        await this.adoptDevice(device, !known);
+        await this.adoptDevice(device, { announce: !known });
       }
     }
     // Devices no longer in the bridge registry were removed from the network.
@@ -327,7 +369,8 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     }
   }
 
-  private async adoptDevice(device: Z2mDevice, announce: boolean, forceAiRemap = false): Promise<void> {
+  private async adoptDevice(device: Z2mDevice, options: AdoptOptions = {}): Promise<void> {
+    const { announce = false, regenerate = false, consultMapping = false } = options;
     const raw = this.rawDefinitions.get(device.ieee_address) ?? device;
     const profile = mapExposes(raw);
     const previous = this.byIeee.get(raw.ieee_address);
@@ -348,12 +391,16 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     // remap can still upgrade them to typed capabilities.
     const staticallyEmpty = profile.endpoints.every((endpoint) => endpoint.capabilities.length === 0);
     const needsHelp =
-      forceAiRemap || raw.supported === false || staticallyEmpty || profile.uncovered.length > 0;
+      regenerate ||
+      consultMapping ||
+      raw.supported === false ||
+      staticallyEmpty ||
+      profile.uncovered.length > 0;
     if (needsHelp && this.options.aiAssist) {
       try {
         const mapping = await this.options.aiAssist.requestMapping(raw, profile, {
           samples: tracked.samples,
-          ...(forceAiRemap ? { force: true } : {}),
+          ...(regenerate ? { force: true } : {}),
         });
         if (mapping) tracked.aiMapping = mapping;
       } catch (error) {
@@ -374,6 +421,7 @@ export class ZigbeeAdapter implements ProtocolAdapter {
       suggestedName: raw.friendly_name,
       endpoints: mergedEndpoints(tracked),
       needsReview: needsReview(tracked),
+      recognition: recognitionOf(tracked, exposesHash(raw)),
     });
 
     // Seed the button inventory so the apps can render remotes before (and
@@ -543,8 +591,38 @@ function interviewFinished(device: Z2mDevice): boolean {
  * no typed mapping, no custom field, not AI-covered.
  */
 function needsReview(tracked: TrackedDevice): boolean {
-  const aiProperties = tracked.aiMapping?.properties;
-  const leftover = tracked.profile.uncovered.filter((property) => !(aiProperties?.has(property) ?? false));
-  if (leftover.length > 0) return true;
+  if (leftoverProperties(tracked).length > 0) return true;
   return mergedEndpoints(tracked).length === 0;
+}
+
+/** Properties still with no representation after every layer that ran. */
+function leftoverProperties(tracked: TrackedDevice): string[] {
+  const aiProperties = tracked.aiMapping?.properties;
+  return tracked.profile.uncovered.filter((property) => !(aiProperties?.has(property) ?? false));
+}
+
+/**
+ * How this device was placed, for the apps to report.
+ *
+ * `source` is the *highest layer that was needed*, not every layer that ran:
+ * almost every device uses typed capabilities, so saying so about all of them
+ * would carry no information. What a reader wants to know is whether this one
+ * cost an agent run — and, when it didn't, whether it is fully typed or is
+ * only reachable through generic controls.
+ */
+function recognitionOf(tracked: TrackedDevice, hash: string): DeviceRecognition {
+  const aiTyped = tracked.aiMapping?.typedProperties;
+  const source: DeviceRecognition['source'] = tracked.aiMapping
+    ? (tracked.aiMapping.source ?? 'ai')
+    : mergedEndpoints(tracked).length === 0
+      ? 'none'
+      : tracked.profile.unmapped.length > 0
+        ? 'custom-fields'
+        : 'static';
+  return {
+    source,
+    uncovered: leftoverProperties(tracked),
+    unmapped: tracked.profile.unmapped.filter((property) => !(aiTyped?.has(property) ?? false)),
+    exposesHash: hash,
+  };
 }

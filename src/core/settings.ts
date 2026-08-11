@@ -19,6 +19,15 @@ export interface AiSettings {
   /** Whether a key is configured — the secret itself is never exposed. */
   hasKey: boolean;
   /**
+   * The owner's switch, deliberately separate from whether a key is stored.
+   *
+   * Turning AI adaptation off used to mean deleting the credential, which is
+   * not the same request: "stop spending my money on this for now" and "forget
+   * my API key" have different costs to undo. Absent means on, so a hub
+   * configured before this existed keeps behaving exactly as it did.
+   */
+  enabled: boolean;
+  /**
    * The stored secret is a Claude subscription token from before the move to
    * the Messages API and can no longer be used. The owner has to save an
    * Anthropic API key; until they do, mapping runs are skipped and
@@ -75,12 +84,26 @@ export class SettingsService {
     const authType = await this.get<string>('ai_auth_type');
     const model = await this.get<string>('ai_model');
     const encrypted = await this.get<EncryptedValue>('ai_key_encrypted');
+    const enabled = await this.get<boolean>('ai_enabled');
     return {
       provider,
       model,
       hasKey: encrypted !== null,
+      enabled: enabled !== false,
       legacySubscriptionToken: encrypted !== null && authType === LEGACY_OAUTH_AUTH_TYPE,
     };
+  }
+
+  async setAiEnabled(enabled: boolean): Promise<void> {
+    await this.set('ai_enabled', enabled);
+  }
+
+  /** Change which model runs the agent, leaving the credential alone. */
+  async setAiModel(model: string | null): Promise<void> {
+    // A JS null would become SQL NULL against a NOT NULL json column; absence
+    // of the row already means "use the default model".
+    if (model === null) await this.unset('ai_model');
+    else await this.set('ai_model', model);
   }
 
   async setAiSettings(input: { model: string | null; apiKey: string }): Promise<void> {
@@ -106,6 +129,10 @@ export class SettingsService {
     await this.unset('ai_model');
     await this.unset('ai_key_encrypted');
     await this.unset('ai_status');
+    // Back to the default. Leaving a stale `false` behind would mean a hub
+    // whose owner cleared the credential and saved a new one got no AI
+    // adaptation and no indication why.
+    await this.unset('ai_enabled');
   }
 
   /** Decrypt the configured AI secret — in-process use only. */
