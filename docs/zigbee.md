@@ -264,14 +264,29 @@ hub). Not both. Two separate things decide which:
 > a 200 MB `MemoryHigh`, no OOM, and 34 MB of swap in use compressed to under
 > 10 MB.
 >
-> **The rule is unchanged anyway, and deliberately.** A hub with nothing paired
-> is not a working home: a Matter fabric and Zigbee2MQTT's database both grow
-> per device, and Matter's peak is during commissioning rather than at rest.
-> What this settles is that the *inputs* to the budget are too high — not that
-> its answer is wrong. Changing it needs this board measured with devices
-> paired and left running for days, because being wrong here means hubs that
-> run out of memory in people's homes a week after they were installed, which
-> is the failure this whole architecture was chosen to avoid.
+> **Fifteen hours later, still on both radios and still idle**, it had not
+> degraded: `NRestarts` 0 on both units, `memory.events` still `high 0 max 0
+> oom_kill 0`, `memory.peak` unchanged at 144 MB and 86 MB, not one warning or
+> error in the hub's journal, both radios up. `MemAvailable` had *risen* to
+> 172 MB.
+>
+> **Read why it rose, because it is the whole story.** The pair's own demand
+> did not shrink — `rss + swap` was 133 MB for the hub and 90 MB for Z2M,
+> within a couple of megabytes of the ten-minute figures. What changed is that
+> 150 MB of it had been paged out to zram, where it compresses to 38 MB. So a
+> Zero 2 W fits both radios by keeping two thirds of their memory compressed
+> and cold, and that only works while it *is* cold: 133 + 90 resident at once,
+> beside the OS and the page cache, does not fit in 415 MB.
+>
+> **So the rule does not move.** A hub with nothing paired is not a working
+> home — a Matter fabric and Zigbee2MQTT's database both grow per device,
+> Matter's peak is during commissioning rather than at rest, and, above all, a
+> home with devices in it generates the steady traffic that keeps the working
+> set hot. What is settled is that the budget's *inputs* are too high; what is
+> not settled is its answer. Changing it needs this board with devices paired
+> and days of real traffic, because being wrong here means hubs that run out of
+> memory in people's homes a week after they were installed, which is the
+> failure this whole architecture was chosen to avoid.
 
 | | Who sets it | Where it lives | What it means |
 |---|---|---|---|
