@@ -393,11 +393,16 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   with Matter off and **139 MB with both radios up** (peak 144 against a 200 MB
   `MemoryHigh`, `high 0`), Z2M is 64 MB, and `MemAvailable` is 89 MB. Both
   radios genuinely ran — `radio.matter: true` beside `zigbee.connected: true`.
-  So 178 and 150 are both too high. **The one-radio rule is unchanged anyway**:
-  a hub with no devices is not a working home, both sides grow per device, and
-  Matter's peak is at commissioning, not at rest. Changing it needs the same
-  board with devices paired and days of uptime — `docs/zigbee.md` carries the
-  table and the reasoning.
+  So 178 and 150 are both too high. Fifteen idle hours later it had not
+  degraded either: no restarts, `high 0`, `memory.peak` unchanged, both radios
+  still up. **But read how it fits** — the pair's demand stayed at 133 + 90 MB
+  while 150 MB of it went into zram (38 MB compressed), so the board affords
+  both radios by keeping two thirds of them cold, which holds only while they
+  *are* cold. **The one-radio rule is unchanged**: a hub with no devices is not
+  a working home, both sides grow per device, Matter's peak is at commissioning
+  rather than at rest, and devices are exactly what keeps a working set hot.
+  Changing it needs the same board with devices paired and days of real
+  traffic — `docs/zigbee.md` carries the tables and the reasoning.
 - **Don't add compressed swap a system already has.** Raspberry Pi OS Trixie
   ships its own (`systemd-zram-setup@zram0`, presented as `rpi-swap`, with
   writeback to the card), and `gethome-zram.service` added a second one beside
