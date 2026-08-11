@@ -19,6 +19,8 @@ import type { ZigbeeAdapter } from '../adapters/zigbee/adapter.js';
 // it here does not pull the AI stack into the API layer.
 import { isSupportedModel, supportedModelIds } from '../ai/models.js';
 import { RADIO_MODES, readRadioMode, writeRadioMode, type RadioBudget, type RadioMode } from '../core/radio.js';
+import type { MqttObserver } from '../core/mqtt-observer.js';
+import { MAX_WINDOW_SECONDS, type PermitJoinService } from '../core/permit-join.js';
 import { readZigbeeProblem, type ZigbeeProblem } from '../adapters/zigbee/diagnosis.js';
 import { deviceWire } from './dto.js';
 import { extractToken, requireMember, requireOwner } from './auth.js';
@@ -50,6 +52,15 @@ export interface ApiDeps {
   radioBudget: RadioBudget;
   /** Zigbee2MQTT's data directory — read only to say *why* Zigbee is down. */
   z2mDataDir: string;
+  /**
+   * The broker tap behind the apps' traffic inspector. Absent when the MQTT
+   * adapter is off, in which case the `mqtt` WebSocket stream is simply not
+   * advertised — the socket says what it can offer rather than failing a
+   * subscription the client had no way to know about.
+   */
+  mqttObserver?: MqttObserver;
+  /** Owns the Zigbee join window and its countdown. */
+  permitJoin: PermitJoinService;
 }
 
 interface CommissionJob {
@@ -162,16 +173,21 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   const zigbeeStatus = () => {
     const enabled = deps.zigbee !== undefined;
     const connected = deps.zigbee?.connected ?? false;
+    // Whether the network is open belongs on the health check, not only on the
+    // event stream: an app that reconnects, or that has just been opened, has
+    // no other way to learn it and used to draw a "Close Network" button over
+    // a network that closed minutes earlier.
+    const permitJoin = deps.permitJoin.state;
     if (!enabled || connected) {
       problemCache = undefined;
-      return { enabled, connected };
+      return { enabled, connected, permitJoin };
     }
     const now = Date.now();
     if (problemCache === undefined || now - problemCache.at > PROBLEM_TTL_MS) {
       problemCache = { at: now, problem: readZigbeeProblem(deps.z2mDataDir) };
     }
     const { problem } = problemCache;
-    return { enabled, connected, ...(problem !== undefined ? { problem } : {}) };
+    return { enabled, connected, permitJoin, ...(problem !== undefined ? { problem } : {}) };
   };
 
   app.get('/api/v1/hub', async () => ({
@@ -397,12 +413,25 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     return job;
   });
 
+  /**
+   * Open (or close, with 0) the Zigbee network for joining.
+   *
+   * The ceiling used to be 254 — the most a *single* grant can last, which is
+   * a fact about the Zigbee protocol rather than about what a person needs.
+   * `PermitJoinService` makes a longer window out of several grants, so the
+   * limit here is a policy one: long enough to walk to a device and reset it,
+   * short enough that "open forever" is never an accident.
+   *
+   * The reply reports the *live* window, not the request, because Zigbee2MQTT
+   * may already have had one open.
+   */
   app.post('/api/v1/zigbee/permit-join', ownerOnly, async (request, reply) => {
     if (!deps.zigbee) return reply.code(409).send({ error: 'zigbee_disabled' });
-    const body = z.object({ seconds: z.number().int().min(0).max(254) }).parse(request.body);
-    await deps.zigbee.permitJoin(body.seconds);
-    deps.events.emit('permitJoin', body.seconds > 0, body.seconds);
-    return { permitJoin: body.seconds > 0, seconds: body.seconds };
+    const body = z
+      .object({ seconds: z.number().int().min(0).max(MAX_WINDOW_SECONDS) })
+      .parse(request.body);
+    const state = await deps.permitJoin.open(body.seconds);
+    return { permitJoin: state.active, seconds: state.remainingSeconds };
   });
 
   // ── Members, invites, activity ───────────────────────────────────────────

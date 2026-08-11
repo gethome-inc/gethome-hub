@@ -11,6 +11,7 @@ import { ActivityService } from '../src/core/activity.js';
 import { PairingService } from '../src/core/pairing.js';
 import { SettingsService } from '../src/core/settings.js';
 import { DeviceRegistry } from '../src/core/registry.js';
+import { PermitJoinService } from '../src/core/permit-join.js';
 import type { AdapterBus, ProtocolAdapter } from '../src/adapters/adapter.js';
 import type { HubCommand } from '../src/schema/index.js';
 import { bootedHome, openTestDb, resetDb } from './helpers/db.js';
@@ -74,6 +75,8 @@ describe.skipIf(!handle)('hub API', () => {
       // Nothing there to read, which is the ordinary state for a hub with no
       // coordinator — and must stay silent rather than becoming an error.
       z2mDataDir: path.join(dataDir, 'zigbee2mqtt'),
+      // No radio, so it reports a closed window and publishes nothing.
+      permitJoin: new PermitJoinService(undefined, log, () => {}),
     });
     await app.ready();
   });
@@ -525,6 +528,117 @@ describe.skipIf(!handle)('hub API', () => {
     expect(frames[0]).toMatchObject({ type: 'hello', hubId: 'hub-test-1234' });
     const stateFrame = frames.find((frame) => frame.type === 'state') as { state: { onOff: boolean } };
     expect(stateFrame.state.onOff).toBe(false);
+  });
+
+  /** Open an authorized socket and collect its frames. */
+  async function openSocket(): Promise<{
+    socket: WebSocket;
+    frames: Array<Record<string, unknown>>;
+    waitFor: (type: string) => Promise<Record<string, unknown>>;
+  }> {
+    // Harmless when an earlier test already bound it; this keeps each test
+    // standing on its own rather than on declaration order.
+    await app.listen({ port: 0, host: '127.0.0.1' }).catch(() => undefined);
+    const address = app.server.address();
+    if (address === null || typeof address === 'string') throw new Error('no address');
+    const socket = new WebSocket(`ws://127.0.0.1:${address.port}/api/v1/ws?token=${ownerToken}`);
+    const frames: Array<Record<string, unknown>> = [];
+    const waiters: Array<{ type: string; resolve: (frame: Record<string, unknown>) => void }> = [];
+    socket.on('message', (data) => {
+      const frame = JSON.parse(String(data)) as Record<string, unknown>;
+      frames.push(frame);
+      for (const waiter of [...waiters]) {
+        if (waiter.type !== frame.type) continue;
+        waiters.splice(waiters.indexOf(waiter), 1);
+        waiter.resolve(frame);
+      }
+    });
+    const waitFor = (type: string) =>
+      new Promise<Record<string, unknown>>((resolve, reject) => {
+        const existing = frames.find((frame) => frame.type === type);
+        if (existing) return resolve(existing);
+        const timer = setTimeout(() => reject(new Error(`timed out waiting for ${type}`)), 5000);
+        waiters.push({
+          type,
+          resolve: (frame) => {
+            clearTimeout(timer);
+            resolve(frame);
+          },
+        });
+      });
+    await waitFor('hello');
+    return { socket, frames, waitFor };
+  }
+
+  it('advertises which optional streams this hub can offer', async () => {
+    const { socket, waitFor } = await openSocket();
+    const hello = await waitFor('hello');
+
+    // This server is built without an MQTT observer, so the traffic inspector
+    // is not on offer — and the socket says so rather than leaving a client to
+    // infer it from the hub's version.
+    expect(hello.streams).toEqual(['zigbee']);
+    socket.close();
+  });
+
+  it('sends optional-stream events only to a socket that asked for them', async () => {
+    const { socket, frames, waitFor } = await openSocket();
+
+    events.emit('zigbeeEvent', { at: new Date().toISOString(), type: 'joined', ieee: '0xabc' });
+    // An always-on event emitted after it: if the opt-in frame were being
+    // delivered anyway, it would already be in `frames` by the time this
+    // arrives, because both travel the same socket in emit order.
+    adapter.bus!.stateChanged('mqtt', 'lamp-1', 1, { onOff: true });
+    await waitFor('state');
+
+    expect(frames.some((frame) => frame.type === 'zigbeeEvent')).toBe(false);
+    socket.close();
+  });
+
+  it('delivers the Zigbee stream once subscribed, and reports what it refused', async () => {
+    const { socket, waitFor } = await openSocket();
+    socket.send(JSON.stringify({ type: 'subscribe', streams: ['zigbee', 'mqtt', 'nonsense'] }));
+
+    const ack = await waitFor('subscribed');
+    expect(ack.streams).toEqual(['zigbee']);
+    // Asked for, but this hub has no broker tap to give.
+    expect(ack.unavailable).toEqual(['mqtt']);
+
+    events.emit('zigbeeEvent', {
+      at: new Date().toISOString(),
+      type: 'interviewing',
+      ieee: '0xabc',
+      name: 'porch sensor',
+    });
+    const event = (await waitFor('zigbeeEvent')) as { event: { type: string; name: string } };
+    expect(event.event).toMatchObject({ type: 'interviewing', name: 'porch sensor' });
+
+    socket.close();
+  });
+
+  it('stops delivering a stream that was unsubscribed', async () => {
+    const { socket, frames, waitFor } = await openSocket();
+    socket.send(JSON.stringify({ type: 'subscribe', streams: ['zigbee'] }));
+    await waitFor('subscribed');
+
+    socket.send(JSON.stringify({ type: 'unsubscribe', streams: ['zigbee'] }));
+    // The second ack: an empty stream list.
+    await new Promise<void>((resolve) => {
+      const check = () => {
+        const acks = frames.filter((frame) => frame.type === 'subscribed');
+        if (acks.length >= 2) return resolve();
+        setTimeout(check, 20);
+      };
+      check();
+    });
+
+    events.emit('zigbeeEvent', { at: new Date().toISOString(), type: 'left', ieee: '0xabc' });
+    adapter.bus!.stateChanged('mqtt', 'lamp-1', 1, { onOff: false });
+    const before = frames.filter((frame) => frame.type === 'zigbeeEvent').length;
+    await waitFor('state');
+
+    expect(frames.filter((frame) => frame.type === 'zigbeeEvent')).toHaveLength(before);
+    socket.close();
   });
 
   it('rejects unauthorized WebSocket connections', async () => {

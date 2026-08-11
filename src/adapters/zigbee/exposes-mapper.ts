@@ -62,7 +62,11 @@ export interface Z2mDevice {
   type?: string;
   supported?: boolean;
   disabled?: boolean;
+  /** Zigbee2MQTT before 2.x. Superseded by `interview_state`, still published
+   *  by installs in the field, so both are read — see `interviewFinished`. */
   interview_completed?: boolean;
+  /** Zigbee2MQTT 2.x: PENDING | IN_PROGRESS | SUCCESSFUL | FAILED. */
+  interview_state?: string;
   definition?: {
     vendor?: string;
     model?: string;

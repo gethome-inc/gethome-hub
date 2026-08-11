@@ -12,6 +12,9 @@ import { HomeService } from './core/home.js';
 import { PairingService } from './core/pairing.js';
 import { SettingsService } from './core/settings.js';
 import { DeviceRegistry } from './core/registry.js';
+import { MqttObserver } from './core/mqtt-observer.js';
+import { PermitJoinService } from './core/permit-join.js';
+import { activityForLifecycleEvent, normalizeBridgeEvent } from './core/zigbee-events.js';
 import { buildServer } from './api/server.js';
 import { MdnsAdvertiser } from './mdns/advertiser.js';
 import { lazyAiAssist } from './ai/lazy.js';
@@ -81,6 +84,13 @@ async function main(): Promise<void> {
   let mqttAdapter: MqttAdapter | undefined;
   let matter: MatterAdapter | undefined;
 
+  // The Zigbee join window, and its countdown. Constructed before the adapter
+  // so the adapter's `bridge/info` relay has something to report to; the radio
+  // is handed over below, once it exists.
+  const permitJoin = new PermitJoinService(undefined, log.child({ module: 'zigbee' }), (state) => {
+    events.emit('permitJoin', state.active, state.remainingSeconds);
+  });
+
   if (config.ADAPTER_ZIGBEE) {
     const { ZigbeeAdapter } = await import('./adapters/zigbee/adapter.js');
     zigbee = new ZigbeeAdapter({
@@ -88,7 +98,16 @@ async function main(): Promise<void> {
       baseTopic: config.Z2M_BASE_TOPIC,
       log: log.child({ module: 'zigbee' }),
       aiAssist: lazyAiAssist({ db, settings, log: log.child({ module: 'ai' }) }),
+      onBridgeInfo: (info) => permitJoin.observeBridgeInfo(info),
+      onBridgeEvent: (raw) => {
+        const event = normalizeBridgeEvent(raw);
+        if (!event) return;
+        events.emit('zigbeeEvent', event);
+        const entry = activityForLifecycleEvent(event);
+        if (entry) void activity.record(entry).catch(() => undefined);
+      },
     });
+    permitJoin.useRadio(zigbee);
     registry.registerAdapter(zigbee);
   }
   if (config.ADAPTER_MQTT) {
@@ -101,6 +120,21 @@ async function main(): Promise<void> {
     matter = new MatterAdapter({ dataDir: config.DATA_DIR, log: log.child({ module: 'matter' }) });
     registry.registerAdapter(matter);
   }
+
+  // The broker tap behind the apps' traffic inspector. Constructed whenever a
+  // broker is part of this hub's design, and *connected* only while somebody
+  // is watching — a hub with no inspector open pays for none of it. Its
+  // output goes to the UI and nowhere else: it is not an input to device
+  // adoption, and never to the AI mapper.
+  const mqttObserver =
+    config.ADAPTER_ZIGBEE || config.ADAPTER_MQTT
+      ? new MqttObserver({
+          mqttUrl: config.MQTT_URL,
+          z2mBaseTopic: config.Z2M_BASE_TOPIC,
+          log: log.child({ module: 'mqtt-observer' }),
+          onFrame: (frame) => events.emit('mqttFrame', frame),
+        })
+      : undefined;
 
   const app = await buildServer({
     db,
@@ -116,9 +150,11 @@ async function main(): Promise<void> {
     dataDir: config.DATA_DIR,
     radioBudget: config.GETHOME_RADIO,
     z2mDataDir: config.Z2M_DATA_DIR,
+    permitJoin,
     ...(build ? { build } : {}),
     ...(matter ? { matter } : {}),
     ...(zigbee ? { zigbee } : {}),
+    ...(mqttObserver ? { mqttObserver } : {}),
   });
 
   // Listen *before* the adapters start. Starting them first meant a broker that
@@ -168,8 +204,10 @@ async function main(): Promise<void> {
     if (stopping.value) return;
     stopping.value = true;
     log.info(`${signal} received, shutting down…`);
+    permitJoin.stop();
     await mdns?.stop().catch(() => {});
     await app.close().catch(() => {});
+    await mqttObserver?.stop().catch(() => {});
     await registry.stop().catch(() => {});
     try {
       close();

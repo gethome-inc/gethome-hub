@@ -57,6 +57,24 @@ interface TrackedDevice {
   remapTimer?: NodeJS.Timeout | undefined;
 }
 
+/** A device arriving on, or leaving, the network — from `<base>/bridge/event`. */
+export interface Z2mBridgeEvent {
+  type?: string;
+  data?: {
+    friendly_name?: string;
+    ieee_address?: string;
+    status?: string;
+  };
+}
+
+/** The join-window fields of `<base>/bridge/info`. `permit_join_end` is epoch
+ *  seconds (current Z2M); `permit_join_timeout` is seconds remaining (older). */
+export interface Z2mBridgeInfo {
+  permit_join?: boolean;
+  permit_join_end?: number;
+  permit_join_timeout?: number;
+}
+
 export interface ZigbeeAdapterOptions {
   mqttUrl: string;
   baseTopic: string;
@@ -64,6 +82,16 @@ export interface ZigbeeAdapterOptions {
   aiAssist?: ZigbeeAiAssist;
   /** Debounce before a parameter-triggered AI remap (test seam). */
   parameterRemapDelayMs?: number;
+  /**
+   * Zigbee2MQTT's own account of devices joining and being interviewed. The
+   * adapter relays it rather than acting on it: `bridge/devices` is still what
+   * adopts a device, and it only lists devices whose interview finished — so
+   * without this the whole of pairing, which is the minute a user is actually
+   * watching, produced no output at all.
+   */
+  onBridgeEvent?(event: Z2mBridgeEvent): void;
+  /** The bridge's own status, read for the live permit-join window. */
+  onBridgeInfo?(info: Z2mBridgeInfo): void;
 }
 
 const SAMPLE_BUFFER_SIZE = 3;
@@ -187,6 +215,23 @@ export class ZigbeeAdapter implements ProtocolAdapter {
       this.options.log.info(`Zigbee2MQTT is ${state}.`);
       return;
     }
+    // Two bridge topics are relayed rather than dropped. `bridge/event` is the
+    // only account of a device joining *before* its interview finishes, which
+    // is the whole of what the user is watching while they pair something; and
+    // `bridge/info` is the coordinator's own word on whether the network is
+    // open, which beats any timer the hub keeps for itself.
+    if (suffix === 'bridge/event') {
+      if (this.options.onBridgeEvent && payload.startsWith('{')) {
+        this.options.onBridgeEvent(JSON.parse(payload) as Z2mBridgeEvent);
+      }
+      return;
+    }
+    if (suffix === 'bridge/info') {
+      if (this.options.onBridgeInfo && payload.startsWith('{')) {
+        this.options.onBridgeInfo(JSON.parse(payload) as Z2mBridgeInfo);
+      }
+      return;
+    }
     if (suffix.startsWith('bridge/')) return;
 
     if (suffix.endsWith('/availability')) {
@@ -261,7 +306,7 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     const seen = new Set<string>();
     for (const device of devices) {
       if (device.type === 'Coordinator' || device.disabled) continue;
-      if (device.interview_completed === false) continue;
+      if (!interviewFinished(device)) continue;
       seen.add(device.ieee_address);
       this.rawDefinitions.set(device.ieee_address, device);
       const known = this.byIeee.get(device.ieee_address);
@@ -472,6 +517,25 @@ function mergedCustomFields(tracked: TrackedDevice): Map<number, CustomFieldSpec
     result.set(endpoint.endpointId, [...existing, ...endpoint.customFields].slice(0, 32));
   }
   return result;
+}
+
+/**
+ * Whether Zigbee2MQTT has finished interviewing a device, across both of the
+ * fields it has used to say so.
+ *
+ * Zigbee2MQTT 2.x replaced the boolean `interview_completed` with the
+ * four-valued `interview_state`, and a version that publishes only the new
+ * field left the old check reading `undefined === false` — false — so a device
+ * still being interviewed was adopted as if it were ready, with whatever
+ * partial `definition` the bridge had at that instant. Absence of both fields
+ * stays "finished": that is what every version published for a device it was
+ * done with, and refusing an unrecognised shape would adopt nothing at all.
+ */
+function interviewFinished(device: Z2mDevice): boolean {
+  if (device.interview_state !== undefined) {
+    return device.interview_state.toUpperCase() === 'SUCCESSFUL';
+  }
+  return device.interview_completed !== false;
 }
 
 /**
