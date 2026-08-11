@@ -28,7 +28,13 @@ hub can control them.
   researches it on the web (starting from the device's own Zigbee2MQTT
   page), and submits a validated mapping (bring your own Anthropic API key;
   stored encrypted on the hub, used only for this). No credential → devices
-  still appear, flagged "needs review".
+  still appear, flagged "needs review". It can be switched off without
+  deleting the key, every run is recorded (what it searched for, what it read,
+  what it cost), and the answers are a **library** you can download from one
+  hub, upload to another, or write yourself — a schema the hub can't use comes
+  back with the reasons and can be handed to the agent to repair.
+  Only a device's own published description is ever sent; the hub's traffic is
+  structurally incapable of reaching the agent.
   ([docs/ai-adaptation.md](docs/ai-adaptation.md))
 - **One schema for everything** — 27 capabilities (including button/remote
   events, learn-and-replay IR blasters, and a universal generic-control
@@ -37,7 +43,11 @@ hub can control them.
 - **Sharing built in** — pairing-code claim makes you the owner; short-lived
   invite codes add family members. Only hub homes are shareable in GetHome.
 - **Local REST + WebSocket API** ([docs/api.md](docs/api.md)) and mDNS
-  discovery (`_gethome._tcp`).
+  discovery (`_gethome._tcp`). Apps can watch the hub's own MQTT broker live —
+  every Zigbee signal passes through it — plus the Zigbee pairing timeline and
+  the mapping agent's work. Those streams are opt-in and reference-counted, so
+  a hub nobody is inspecting opens no broker tap, and none of that traffic is
+  ever written to the SD card.
 
 Remote access (control away from home through a relay) is planned; v1 is
 LAN-only by design.

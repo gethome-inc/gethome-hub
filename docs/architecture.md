@@ -36,6 +36,10 @@ before the hub had started.
 | `src/core/pairing.ts` | Claim flow: boot pairing code → first claim = owner; owner-minted invite codes (15 min TTL) → members. Opaque bearer tokens, sha256-hashed at rest. |
 | `src/core/crypto.ts` | Hub identity + AES-256-GCM key in `<data>/hub-secret.json` (survives database resets), token generation/hashing, secret encryption. |
 | `src/core/radio.ts` | The owner's Matter-or-Zigbee choice on a board that affords one radio, as a word in `<data>/radio-mode`. Records only — applying it is root work, so a `.path` unit hands it to `gethome-zigbee-detect`. See [zigbee.md](zigbee.md#zigbee-or-matter-on-a-small-board). |
+| `src/core/permit-join.ts` | The Zigbee join window and its countdown. A window longer than one 254-second grant is several, with the last sized to land on the deadline; `bridge/info` is the authority over our own timer. See [api.md](api.md#the-zigbee-join-window). |
+| `src/core/mqtt-observer.ts` | A read-only tap on the broker for the apps' traffic inspector. Reference-counted (connected only while somebody is watching), byte-bounded ring buffer, **nothing persisted**, and not an input to anything — see the design rule below. |
+| `src/core/ai-runs.ts` | One row per mapping-agent run: what it searched for, what it read, what it submitted, what it cost. A summary, never a transcript; bounded at 40 steps and 60 runs. |
+| `src/ai/library.ts` | The device-mapping library over the `ai_mappings` cache: list, download, upload, forget, and hand a rejected descriptor back to the agent to repair. Only `repair` needs a credential, and it loads the agent on demand so the API never carries the Anthropic SDK. |
 | `src/db/` | drizzle over `better-sqlite3`, one file at `<data>/hub.db` (WAL, `synchronous = NORMAL`, foreign keys on). No pool, no socket, no second process. |
 | `src/ai/` | AI device adaptation — the mapping agent (a tool-use loop on the Anthropic Messages API) plus descriptor DSL, model allowlist, failure taxonomy, and backoff — see [ai-adaptation.md](ai-adaptation.md). |
 | `src/api/` | Fastify REST + WebSocket — see [api.md](api.md). |
@@ -68,6 +72,21 @@ before the hub had started.
    telemetry is hidden. See [zigbee.md](zigbee.md) ("The three layers of
    device support") and [device-schema.md](device-schema.md) (the `custom`
    capability).
+7. **Observing is not an input.** The hub can show an app everything on its
+   broker (`core/mqtt-observer.ts`), and none of it feeds device adoption or
+   the AI mapper: adoption reads the retained `bridge/devices` registry, and
+   the agent's only input is one device's entry from it. Permit-join requests,
+   bridge logs and hub status are not devices, and `notDeviceShaped()` refuses
+   them rather than leaving that to convention — see
+   [ai-adaptation.md](ai-adaptation.md) ("What can reach the agent, and what
+   cannot").
+8. **Watching costs nothing when nobody watches.** The traffic tap and the
+   optional WebSocket streams are reference-counted and opt-in: no listener is
+   attached and no broker connection is opened until a client asks, and none of
+   what they carry is written to disk. A phone showing a room of lights must
+   not pay for a developer tool it never opens, and a hub must not write one
+   row per sensor report onto an SD card — the same arithmetic behind the
+   registry's `STATE_FLUSH_MS` debounce.
 
 ## Data flow
 

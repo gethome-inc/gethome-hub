@@ -51,7 +51,7 @@ devices, favorites, view everything.
 
 | Method & path | Role | Notes |
 |---|---|---|
-| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem). `radio` is [further below](#radio-get-hub-and-put-settingsradio) |
+| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio) |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
 | `GET /home` · `PATCH /home` | any · owner | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name) |
 | `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | any · owner | |
@@ -59,14 +59,20 @@ devices, favorites, view everything.
 | `PATCH /devices/:id` | favorite: any; name/roomId: owner | `{name?, roomId?, favorite?}` |
 | `DELETE /devices/:id` | owner | also unpairs at the protocol level |
 | `POST /devices/:id/endpoints/:endpointId/commands` | any | body = canonical command; `202`. IR-remote intents (`irLearn`/`irSaveLearned`/`irSend`/`irDeleteCommand`/`irRenameCommand`) are resolved against the endpoint's stored code library (see [device-schema.md](device-schema.md)) |
-| `POST /devices/:id/remap` | owner | force-regenerate the AI mapping (Zigbee devices); the hub also remaps automatically when a device publishes unknown parameters — see [ai-adaptation.md](ai-adaptation.md) |
+| `POST /devices/:id/remap` | owner | force-regenerate the AI mapping (Zigbee devices); the hub also remaps automatically when a device publishes unknown parameters — see [ai-adaptation.md](ai-adaptation.md). `409 ai_not_configured` with no credential, `409 ai_disabled` when the owner has switched adaptation off |
 | `POST /matter/commission` | owner | `{pairingCode}` → `202 {jobId}` (async) |
 | `GET /matter/commission/:jobId` | any | `{status: running\|done\|failed, nodeId?, error?}` |
-| `POST /zigbee/permit-join` | owner | `{seconds}` (0 = close the network) |
+| `POST /zigbee/permit-join` | owner | `{seconds}`, 0–900 (0 = close the network) → `{permitJoin, seconds}` describing the **live** window, which is not always what was asked for. See [below](#the-zigbee-join-window) |
 | `GET /members` · `PATCH /members/me` · `DELETE /members/:id` | any · any (itself) · owner | rows carry `isSelf`; `PATCH` takes `{name}` and renames **the caller**; the owner cannot be removed. See [below](#which-member-you-are-isself-and-patch-membersme) |
 | `GET /invites` · `POST /invites` | owner | `POST` → `201 {code, expiresAt}` |
 | `GET /activity?limit=&before=` | any | reverse-chronological, cursor = `before` id |
-| `GET /settings/ai` · `PUT /settings/ai` · `DELETE /settings/ai` | owner | PUT `{apiKey, model?}` (an Anthropic API key, write-only; a `sk-ant-oat…` subscription token and a model outside the supported list are both refused with 400, an `authType` from an older app is ignored); GET/PUT respond `{provider: "anthropic", model, hasKey, legacySubscriptionToken, status}` where `status` carries `lastError`/`lastRun` health — see [ai-adaptation.md](ai-adaptation.md) |
+| `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | owner | PUT `{apiKey, model?}` (an Anthropic API key, write-only; a `sk-ant-oat…` subscription token and a model outside the supported list are both refused with 400, an `authType` from an older app is ignored). **PATCH `{enabled?, model?}`** changes those without re-entering the key — the switch is deliberately not the credential. All three respond `{provider: "anthropic", model, hasKey, enabled, legacySubscriptionToken, status}`; `enabled` defaults to true and `status` carries `lastError`/`lastRun` health — see [ai-adaptation.md](ai-adaptation.md) |
+| `GET /ai/runs?limit=` | owner | what the mapping agent did, newest first: `{id, at, kind, vendor, model, exposesHash, modelId, ok, costUsd, turns, durationMs, errorKind, errorMessage, steps}`. A summary, never a transcript — see [ai-adaptation.md](ai-adaptation.md) |
+| `GET /device-mappings` | owner | the mapping library: one entry per device model, `{adapter, exposesHash, vendor, model, status, source, problems, endpoints, deviceIds, createdAt, updatedAt}` |
+| `GET /device-mappings/:exposesHash` | owner | the download — an envelope naming the device, see [below](#the-device-mapping-library) |
+| `PUT /device-mappings/:exposesHash` | owner | the upload. Accepts the envelope or a bare descriptor. `422 {error:"invalid_mapping", problems, issues?}` when the hub can't use it — and it is **kept**, so `…/repair` can work from it |
+| `DELETE /device-mappings/:exposesHash` | owner | forget it; devices of that model fall back to their static mapping |
+| `POST /device-mappings/:exposesHash/repair` | owner | hand a rejected descriptor to the agent with the complaints. `409 ai_not_configured` / `409 ai_disabled` / `409 nothing_to_repair`, `422 no_device` |
 | `PUT /settings/radio` | owner | `{mode: "auto"\|"zigbee"\|"matter"}` → `{budget, mode, matter, canRunBoth, applying: true}`. Records a *request*; see below |
 
 ### The hub's name is the home's name
@@ -227,13 +233,84 @@ page.
 `needsReview: true` marks devices whose automatic mapping was incomplete
 (see [ai-adaptation.md](ai-adaptation.md)).
 
+`recognition` is additive and says **how** the device came to be understood:
+
+```json
+"recognition": {
+  "source": "static",
+  "uncovered": [],
+  "unmapped": ["power_on_behavior"],
+  "exposesHash": "3f2a…64 hex"
+}
+```
+
+`source` names the *highest layer that was needed* — `static` (typed
+capabilities, no key and no cost), `custom-fields` (some parameters are
+reachable only as generic controls), `ai`, `imported`, or `none`. `uncovered`
+is what `needsReview` is about: properties with no representation at all.
+`exposesHash` identifies the device *model*, and so its entry in the mapping
+library. Absent on a device adopted before the hub recorded it, which an app
+must read as "not known" rather than "recognised by nothing".
+
+### The Zigbee join window
+
+`POST /zigbee/permit-join` opens the network for `seconds` and the hub owns
+what happens next. Three things follow from that, and a client should not
+reimplement any of them.
+
+**A window is made of grants.** The Zigbee protocol carries a permit-join
+duration as a uint8 of seconds, so **254 is the most a single grant can last**.
+A longer window is several grants, re-issued by the hub, with the last one
+*sized to land exactly on the deadline* rather than overshooting it. Asking for
+900 is therefore fine; asking a hub older than this field for anything past 254
+is a 400, so treat `zigbee.permitJoin` being present as the capability check.
+
+**Zigbee2MQTT is the authority.** The hub reconciles against `bridge/info`, so
+a window somebody opened from Z2M's own UI is adopted and reported, and a
+`permit_join: false` closes ours whatever we intended. It fails closed: a hub
+that restarts mid-window leaves at most one grant running and nothing renews it.
+
+**The state is on `GET /hub`, not only on the event stream.** An app that has
+just been opened, or has just reconnected, has no other way to learn it — which
+is how GetHome Studio came to draw "Close Network" over a network that had shut
+two minutes earlier. `permitJoin` frames repeat every five seconds while the
+window is open, which is the right rate for a network message and the wrong one
+for a countdown; drive the seconds from a local clock and re-sync on each frame.
+
+### The device-mapping library
+
+`GET /device-mappings/:exposesHash` returns an **envelope**, not a bare
+descriptor, because a descriptor does not say which device it is for:
+
+```json
+{
+  "gethomeDeviceMapping": 1,
+  "adapter": "zigbee",
+  "vendor": "TuYa",
+  "model": "TS0601_thermostat",
+  "exposesHash": "3f2a…",
+  "descriptor": { "version": 1, "endpoints": [ … ] }
+}
+```
+
+`PUT` accepts either that or a bare descriptor — both are things a person
+plausibly has in a file. An envelope whose own `exposesHash` disagrees with the
+one in the URL is **accepted and flagged** (`hashMismatch: true`), not refused:
+a mapping written for a device one firmware revision away is the case this
+exists for, and the sanity checks still have to pass either way.
+
+A document the hub cannot use is a **422 with the reasons, and it is stored**.
+That is the difference between a dead end and a step: `POST …/repair` hands the
+draft and the exact complaints to the agent. Only `repair` needs a credential —
+listing, downloading, uploading and deleting are local operations on JSON.
+
 ## WebSocket
 
 `GET /api/v1/ws?token=<token>` upgrades to a WebSocket. One JSON frame per
-message:
+message. These go to every authorized socket:
 
 ```
-{"type":"hello","hubId","name","apiVersion":1}          on connect
+{"type":"hello","hubId","name","apiVersion":1,"streams":["mqtt","zigbee","ai"]}
 {"type":"state","deviceId","endpointId","state":{…}}    full canonical state after each change
 {"type":"deviceUpserted","device":{…}}                  new device or structure/name change
 {"type":"deviceRemoved","deviceId"}
@@ -241,6 +318,43 @@ message:
 {"type":"permitJoin","active":true,"remainingSeconds":60}
 {"type":"commissioning","jobId","status","detail"?}     Matter commissioning progress
 ```
+
+### Opt-in streams
+
+`hello` advertises which of the three optional streams this hub can serve, so a
+client never has to infer it from a version number — a hub with the MQTT
+adapter off simply lists fewer. Ask for the ones you need:
+
+```
+→ {"type":"subscribe","streams":["mqtt","zigbee","ai"]}
+→ {"type":"unsubscribe","streams":["mqtt"]}
+← {"type":"subscribed","streams":["zigbee","ai"],"unavailable":["mqtt"]}
+```
+
+and then:
+
+```
+{"type":"mqttBacklog","frames":[…]}                     once, on subscribing to "mqtt"
+{"type":"mqtt","frame":{seq,at,topic,channel,direction,payload,truncated,retained}}
+{"type":"mqtt","dropped":N}                             rate limit hit; N frames skipped
+{"type":"zigbeeEvent","event":{at,type,ieee,name?}}     joined|announced|interviewing|interviewed|interview-failed|left
+{"type":"aiRun","event":{phase,id,at,kind,exposesHash,vendor?,model?,step?,ok?,costUsd?,error?}}
+```
+
+**They are opt-in because they are not free.** The MQTT tap is a wildcard
+subscription on the broker and can be thousands of messages a minute; attaching
+it to every socket would make a phone showing a room of lights pay for a
+developer tool it never opens. A socket that never subscribes never has a
+listener attached, and the hub connects to the broker only while at least one
+client is watching — with a minute of linger, so switching screens and back
+does not clear the log. Nothing about that traffic is written to disk: it is a
+stream a person watches, not a record, and one row per sensor report onto an SD
+card is what the registry's state debounce exists to avoid.
+
+Frames are rate-limited per socket and the losses are **reported rather than
+hidden** — a gap nobody is told about is worse than a gap. `mqttBacklog` is the
+few hundred frames the hub had buffered when you subscribed; there is no
+history before that, and an app should say so rather than implying otherwise.
 
 Unauthorized sockets are closed with code `4001`. Clients should reconnect
 with exponential backoff and re-`GET /devices` after reconnecting (frames may

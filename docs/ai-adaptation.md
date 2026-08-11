@@ -32,6 +32,35 @@ uses no agent runs.
 simply appears with whatever mapped statically (typed capabilities + generic
 fields), flagged `needsReview: true` only if something is still `uncovered`.
 
+## What can reach the agent, and what cannot
+
+**The only input is a device.** The hub's broker carries a great deal that is
+not one — permit-join requests, Zigbee2MQTT's own log, bridge status, the hub's
+own commands — and an app can now watch all of it (`docs/api.md`, "Opt-in
+streams"). None of that is ever researched at somebody's expense, and the rule
+is enforced rather than merely observed:
+
+- the agent's only caller is device adoption, driven by the retained
+  `bridge/devices` registry;
+- `notDeviceShaped()` (`src/ai/mapper.ts`) refuses anything without an IEEE
+  address and a published schema, refuses the coordinator — which is the radio,
+  not a device — and refuses a `bridge/…` name. `test/ai-boundary.test.ts` pins
+  it;
+- the system prompt says the same thing, so a run that somehow received
+  something else refuses instead of inventing a mapping for a model that does
+  not exist.
+
+**And there is a switch.** `ai_enabled` is the owner's, deliberately separate
+from whether a credential is stored: "stop spending my money on this for now"
+and "forget my API key" have very different costs to undo, and deleting the key
+used to be the only way to ask for the first. It defaults to on, so a hub
+configured before it existed behaves exactly as it did. It is checked in
+`src/ai/lazy.ts` beside `hasKey` — so the module is not even imported — and
+again in `resolveProvider()` for a mapper somebody constructed directly. An
+explicitly requested run (`POST /devices/:id/remap`, `POST …/repair`) answers
+`409 ai_disabled`, which is a different refusal from `409 ai_not_configured`
+because an app has to be able to say which of the two a person needs to change.
+
 ## The mapping agent
 
 Adaptation runs as a real agent, not a single model call: the hub drives a
@@ -222,7 +251,10 @@ else, and needs no outbound access beyond `api.anthropic.com`. A hub behind a
 restrictive firewall therefore still gets full device research.
 
 No home names, member names, tokens, or any other hub data ever leave the
-machine. Without a configured credential, nothing is sent at all.
+machine — and, since the hub gained a traffic inspector, it is worth saying
+explicitly that **none of that traffic is an input either**: see "What can
+reach the agent, and what cannot" above. Without a configured credential, or
+with the switch off, nothing is sent at all.
 
 ## What the agent produces: MappingDescriptor
 
@@ -287,12 +319,59 @@ bounces failures back to the agent for an in-session retry → the mapper
 re-validates the final submission. A descriptor that still fails is cached as
 `rejected` and the device stays in needs-review.
 
-## Caching
+## The library: caching, carrying and repairing
 
-Accepted descriptors are cached in the `ai_mappings` table keyed by a sha256
-of the device's canonical schema (vendor + model + exposes) — every further
-device of the same model maps instantly and for free, across renames and
-re-pairings. `POST /devices/:id/remap` invalidates and regenerates.
+Accepted descriptors are cached in the `ai_mappings` table keyed by a sha256 of
+the device's canonical schema (vendor + model + exposes; `exposesHash()` lives
+with the exposes mapper, because it is a property of the device's published
+schema rather than of AI). Every further device of the same model maps
+instantly and for free, across renames and re-pairings.
+`POST /devices/:id/remap` invalidates and regenerates.
+
+That cache is now a **library** with five routes over it
+(`src/ai/library.ts`, `docs/api.md`). Three things it makes possible that the
+cache alone did not:
+
+- **Carrying knowledge between hubs.** A hub that was reinstalled used to ask
+  the agent about every device again. Download the entry, upload it to the
+  other hub.
+- **Bringing your own.** A hand-written descriptor, or one copied from a device
+  a firmware revision away, is uploaded the same way. A mismatched
+  `exposesHash` is accepted and flagged rather than refused — that case is the
+  point.
+- **Repairing instead of discarding.** A descriptor the hub refuses is stored
+  *with its problems*, and `POST …/repair` hands both to the agent with a
+  prompt that says fix what is named and leave the rest alone. "Invalid, try
+  again" is a dead end for somebody who cannot read a validation path, and the
+  research is already in the file.
+
+`source` (`ai` | `imported`) and `status` (`generated` | `rejected`) are
+separate columns on purpose: an imported descriptor can be broken and a
+generated one can be perfect, and the offer to repair depends on both.
+
+A cached `rejected` entry is never re-asked automatically — that is what stops
+the hub re-running the agent against a model it cannot get right — but `repair`
+bypasses the cache by construction, because a rejection is exactly what it is
+there to fix.
+
+## The run log
+
+One row per run in `ai_runs`, served by `GET /api/v1/ai/runs` and streamed live
+on the `ai` WebSocket channel: what was sent, every `web_search` query, every
+`web_fetch` URL, what was submitted and why it was refused, plus cost, turns
+and duration.
+
+It is a **summary, never a transcript.** Model prose is the largest thing a run
+produces and the least useful to read later, so it is not stored. Bounded at
+both ends — 40 steps per run, 60 runs retained, `detail` truncated at 2 KB —
+which is tens of kilobytes on a machine whose disk is an SD card.
+
+Before it, the hub recorded exactly two facts under one settings key (the last
+run and the last error), so once a second device had been adopted there was no
+answer at all to "why does this one need review?" or "what am I being charged
+for?". Everything the agent did lived in a log line on a machine nobody is
+looking at. The live stream matters for the same reason: adopting an unknown
+device takes minutes and used to produce no output until it was over.
 
 ## Implementation map
 
