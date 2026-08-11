@@ -1,4 +1,5 @@
 import mqtt from 'mqtt';
+import { StringDecoder } from 'node:string_decoder';
 import type { Logger } from '../logging.js';
 
 /**
@@ -18,6 +19,15 @@ export interface MqttFrame {
   payload: string;
   /** The payload was longer than `MAX_PAYLOAD_BYTES` and is cut. */
   truncated: boolean;
+  /**
+   * What the whole message weighed, cut or not.
+   *
+   * Without it a client can only say "this was cut", which leaves the reader
+   * unable to tell a payload missing fifty bytes from one missing three
+   * megabytes — and forces the app to name our limit, a number from another
+   * repository that goes stale the moment it changes here.
+   */
+  payloadBytes: number;
   retained: boolean;
 }
 
@@ -37,7 +47,25 @@ export interface MqttObserverOptions {
  */
 const MAX_FRAMES = 300;
 const MAX_BUFFER_BYTES = 256 * 1024;
-const MAX_PAYLOAD_BYTES = 2048;
+
+/**
+ * The most of one message an inspector is shown.
+ *
+ * It was 2 KB, which cut the wrong things. Everything somebody actually reads
+ * here is small — a device report is a few hundred bytes, and `bridge/info`,
+ * `bridge/event` and `bridge/health` are one to three kilobytes — so the old
+ * limit sat right in the middle of the useful range and cut messages that had
+ * only just started being interesting. 8 KB clears all of them whole.
+ *
+ * What stays cut is the pair of retained registries, `bridge/devices` and
+ * `bridge/definitions`, and that is deliberate rather than regrettable: they
+ * are hundreds of kilobytes to megabytes of reference data, they are not
+ * traffic anybody watches go past, and holding one costs a Zero 2 W real
+ * memory on a subscription that exists only to be looked at. `payloadBytes`
+ * is what makes that honest — the app says how much of the message it has,
+ * instead of asserting a number from this file.
+ */
+const MAX_PAYLOAD_BYTES = 8192;
 
 /**
  * How long the broker connection outlives the last watcher. Switching to
@@ -169,7 +197,7 @@ export class MqttObserver {
    */
   ingest(topic: string, payload: Buffer, retained = false): void {
     const truncated = payload.byteLength > MAX_PAYLOAD_BYTES;
-    const text = (truncated ? payload.subarray(0, MAX_PAYLOAD_BYTES) : payload).toString('utf8');
+    const text = truncated ? cutToCharacter(payload, MAX_PAYLOAD_BYTES) : payload.toString('utf8');
     this.seq += 1;
     const frame: MqttFrame = {
       seq: this.seq,
@@ -179,6 +207,7 @@ export class MqttObserver {
       direction: this.direction(topic),
       payload: text,
       truncated,
+      payloadBytes: payload.byteLength,
       retained,
     };
     this.push(frame);
@@ -186,12 +215,13 @@ export class MqttObserver {
   }
 
   private push(frame: MqttFrame): void {
+    const weight = frameBytes(frame);
     this.buffer.push(frame);
-    this.bufferBytes += frame.payload.length + frame.topic.length;
+    this.bufferBytes += weight;
     while (this.buffer.length > MAX_FRAMES || this.bufferBytes > MAX_BUFFER_BYTES) {
       const dropped = this.buffer.shift();
       if (!dropped) break;
-      this.bufferBytes -= dropped.payload.length + dropped.topic.length;
+      this.bufferBytes -= frameBytes(dropped);
     }
   }
 
@@ -218,4 +248,29 @@ export class MqttObserver {
     if (/\/set\/\d+$/.test(topic)) return 'out';
     return 'in';
   }
+}
+
+/**
+ * The first `limit` bytes, ending on a whole character.
+ *
+ * `buffer.subarray(0, n).toString('utf8')` cuts by *bytes*, so a limit landing
+ * inside a multi-byte sequence — every Cyrillic or CJK device name is two or
+ * three bytes per character — turns the last one into `U+FFFD`. `StringDecoder`
+ * holds an incomplete sequence back instead of guessing at it, and never
+ * calling `end()` is what drops it: the payload is being cut anyway, and one
+ * missing character at the cut is better than one wrong one.
+ */
+function cutToCharacter(payload: Buffer, limit: number): string {
+  return new StringDecoder('utf8').write(payload.subarray(0, limit));
+}
+
+/**
+ * What a frame costs the buffer, in bytes rather than in UTF-16 units.
+ *
+ * `String.length` counts units, so it under-reports every non-Latin payload by
+ * up to a factor of three — on a Cyrillic-named network the byte ceiling this
+ * exists to enforce was quietly two to three times higher than it reads.
+ */
+function frameBytes(frame: MqttFrame): number {
+  return Buffer.byteLength(frame.payload) + Buffer.byteLength(frame.topic);
 }

@@ -55,21 +55,36 @@ describe('MqttObserver', () => {
     expect(seen.map((frame) => frame.direction)).toEqual(['in', 'out', 'out', 'out', 'out']);
   });
 
-  it('truncates a huge payload and says that it did', () => {
+  it('truncates a huge payload, and says how much there was', () => {
     const { instance, seen } = observer();
-    instance.ingest('zigbee2mqtt/bridge/devices', payload('x'.repeat(10_000)));
+    instance.ingest('zigbee2mqtt/bridge/devices', payload('x'.repeat(200_000)));
 
     const frame = seen[0]!;
     expect(frame.truncated).toBe(true);
-    expect(frame.payload.length).toBe(2048);
+    expect(frame.payload.length).toBe(8192);
+    // The whole point of the field: "cut" alone leaves a reader unable to tell
+    // a payload missing fifty bytes from one missing two hundred kilobytes.
+    expect(frame.payloadBytes).toBe(200_000);
   });
 
-  it('leaves an ordinary payload whole', () => {
+  it('cuts on a character, not on a byte', () => {
+    const { instance, seen } = observer();
+    // Cyrillic is two bytes a character, so a cut at 8192 lands mid-sequence.
+    instance.ingest('zigbee2mqtt/датчик', payload('я'.repeat(9000)));
+
+    const frame = seen[0]!;
+    expect(frame.truncated).toBe(true);
+    expect(frame.payload).not.toContain('�');
+    expect(frame.payload).toBe('я'.repeat(4096));
+  });
+
+  it('leaves an ordinary payload whole, and still reports its size', () => {
     const { instance, seen } = observer();
     instance.ingest('zigbee2mqtt/kitchen lamp', payload('{"state":"ON"}'));
 
     expect(seen[0]!.truncated).toBe(false);
     expect(seen[0]!.payload).toBe('{"state":"ON"}');
+    expect(seen[0]!.payloadBytes).toBe(14);
   });
 
   it('numbers frames so a client can key rows on the sequence', () => {

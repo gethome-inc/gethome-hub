@@ -335,7 +335,7 @@ and then:
 
 ```
 {"type":"mqttBacklog","frames":[…]}                     once, on subscribing to "mqtt"
-{"type":"mqtt","frame":{seq,at,topic,channel,direction,payload,truncated,retained}}
+{"type":"mqtt","frame":{seq,at,topic,channel,direction,payload,truncated,payloadBytes,retained}}
 {"type":"mqtt","dropped":N}                             rate limit hit; N frames skipped
 {"type":"zigbeeEvent","event":{at,type,ieee,name?}}     joined|announced|interviewing|interviewed|interview-failed|left
 {"type":"aiRun","event":{phase,id,at,kind,exposesHash,vendor?,model?,step?,ok?,costUsd?,error?}}
@@ -355,6 +355,17 @@ Frames are rate-limited per socket and the losses are **reported rather than
 hidden** — a gap nobody is told about is worse than a gap. `mqttBacklog` is the
 few hundred frames the hub had buffered when you subscribed; there is no
 history before that, and an app should say so rather than implying otherwise.
+
+A payload over **8 KB** arrives cut, with `truncated: true` and `payloadBytes`
+giving the size of the whole message. In practice that is the two retained
+Zigbee2MQTT registries — `bridge/devices` and `bridge/definitions`, hundreds of
+kilobytes to megabytes of reference data — and nothing else: a device report is
+a few hundred bytes and the bridge's own status topics are one to three
+kilobytes. **Show the reader how much is missing rather than naming the limit**,
+which is a number in this repository that an app cannot keep in step, and don't
+offer a "copy the payload" that quietly hands over the cut copy. Nothing else in
+the hub sees a cut payload: the adapters hold their own broker connections and
+the observer is a separate, read-only tap.
 
 Unauthorized sockets are closed with code `4001`. Clients should reconnect
 with exponential backoff and re-`GET /devices` after reconnecting (frames may

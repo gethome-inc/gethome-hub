@@ -163,7 +163,23 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   onto an SD card is what the registry's `STATE_FLUSH_MS` debounce exists to
   avoid. Its buffer is bounded in **bytes as well as rows**: 300 sensor reports
   are a few kilobytes while one `bridge/devices` on a large network is
-  hundreds. The same rule governs `src/api/ws.ts` — the `mqtt`, `zigbee` and
+  hundreds — counted with `Buffer.byteLength`, not `String.length`, which is
+  UTF-16 units and under-reports a Cyrillic-named network by up to three times.
+  **A cut payload says how much was cut.** The per-message limit was 2 KB and
+  landed in the middle of the useful range: a device report is a few hundred
+  bytes and `bridge/info`, `bridge/event` and `bridge/health` are one to three
+  kilobytes, so the cap fell on messages that had only just become interesting.
+  It is 8 KB, which clears all of those whole and still cuts the two retained
+  registries — `bridge/devices` and `bridge/definitions` are reference data
+  rather than traffic, and holding one costs a Zero 2 W real memory on a
+  subscription that exists to be looked at. Frames therefore carry
+  `payloadBytes` (the whole message's size) beside `truncated`, so an app says
+  "8 KB of 341 KB" instead of asserting a constant from this repository — and
+  the cut lands on a **character**, via `StringDecoder`, because
+  `subarray().toString('utf8')` splits a multi-byte sequence and puts `U+FFFD`
+  on the end of every Cyrillic or CJK name. Nothing but the inspector ever sees
+  a cut payload: the adapters hold their own broker connections.
+  The same rule governs `src/api/ws.ts` — the `mqtt`, `zigbee` and
   `ai` streams are opt-in, so a socket that never subscribes never has a
   listener attached and the iOS app is untouched; `hello` advertises what the
   hub can offer so a client never infers it from a version number; and frames
