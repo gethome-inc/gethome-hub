@@ -239,6 +239,43 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `uncovered` after layers 1–2. This is design rule #6 — full model in
   `docs/zigbee.md` ("The three layers of device support") and
   `docs/architecture.md`. Keep it when editing the mapper.
+- **A name is the house's, a favorite is one person's, and that split decides
+  where each is stored.** Device names, rooms and zones sit on shared rows and
+  everybody sees the same ones; a favorite is `device_favorites` keyed by member
+  (`src/core/favorites.ts`), so pinning the kettle reaches one dashboard. The
+  wire is unchanged — `GET /devices` still answers a boolean called `favorite`,
+  rendered *per caller*, which is why `deviceWire` takes it as an argument and
+  `ws.ts` renders `deviceUpserted` per socket rather than once for the bus.
+  Three rules. **The old `devices.favorite` column stays**, maintained as the
+  union of everybody's pins: `install.sh` rolls back to the previous release
+  when a build fails its health check, by which time the migration has run, and
+  a dropped column would meet an older build that selects it on every device
+  query. **Any member may reshape the home** — rename a device, move it, add or
+  delete a room or a zone. That was owner-only, which sounds careful and locked
+  the feature away from everybody who lives there: Studio claims a hub as *the
+  Mac*, so the owner is usually a laptop in a drawer and the phones are plain
+  members, and a device called `0x54ef44100047c1bf` has to be fixable by whoever
+  is standing in front of it. Owner-only still guards taking things *away*
+  (`DELETE /devices/:id`, members) and every edit is logged with a name.
+  And **the favorites map is not a second source of truth**: it is loaded once
+  at boot, `forgetDevice` is wired to the `deviceRemoved` event and
+  `forgetMember` to `endMembership`, because both deletes are done by the
+  cascade and the map would otherwise hold pins on things that are gone.
+- **Zones are the layer above rooms, and are deliberately not floors.** A room
+  belongs to one zone or to none, and none is the ordinary case — which is the
+  whole argument: a flat has no floors and a garage is not one, so a *floor*
+  field asks every home that isn't a house to leave it blank or lie in it, while
+  a zone called "Second floor" covers the house perfectly. It is also Apple
+  Home's own word (`HMZone`), and the iOS app shows Apple Homes beside hub homes.
+  Two things to keep. `rooms.zone_id` carries **no `ON DELETE` action and the
+  route does that work** (`DELETE /zones/:id` clears the column first): SQLite
+  cannot attach one to a column added by `ALTER TABLE`, and the usual rebuild is
+  unsafe here — drizzle migrates inside a transaction, where
+  `PRAGMA foreign_keys=OFF` is a no-op, so dropping `rooms` would fire
+  `devices.room_id`'s own set-null and quietly empty every room in the home on
+  upgrade. And **every room/zone write broadcasts the `structure` frame** with
+  both lists in full, because rooms are shared and a change on one phone used to
+  reach the others only when they happened to reconnect.
 - **Units are load-bearing** and mirror the GetHome app's Matter schema
   byte-for-byte: level 1–254, mireds, centi-°C, humidity centi-%, covering
   percent-100ths with **0 = open**, battery 0–100, milliwatts, lock 0/1/2,

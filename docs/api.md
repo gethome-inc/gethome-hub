@@ -43,9 +43,20 @@ the machine the code exists to prove access to, so requiring them to recite the
 number adds a step that can only fail. GetHome Studio uses it over SSH, which
 is why the person who installs a hub is never shown a code at all.
 
-Roles: **owner** = structure (rename home/devices, rooms, members, invites,
-commissioning, permit-join, AI settings, device removal). **member** = control
-devices, favorites, view everything.
+Roles: **owner** = renaming the home, members, invites, commissioning,
+permit-join, AI settings, and *removing* devices. **member** = everything else,
+which deliberately includes the shape of the home: controlling devices,
+renaming them, moving them between rooms, and adding, renaming or deleting
+rooms and zones.
+
+**Why members may reshape the home.** These edits were owner-only, which sounds
+careful and in practice locked the feature away from the people who live here:
+GetHome Studio claims a hub as *the Mac*, so the owner is usually a laptop in a
+drawer while every phone joins by invite as a plain member. A device that
+Zigbee2MQTT called `0x54ef44100047c1bf` has to be fixable by whoever is standing
+in front of it. What the owner-only rule still guards is taking things *away* —
+a device or a member — and every edit is written to the activity log with the
+name of whoever made it.
 
 ## REST routes
 
@@ -54,9 +65,10 @@ devices, favorites, view everything.
 | `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio) |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
 | `GET /home` · `PATCH /home` | any · owner | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name) |
-| `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | any · owner | |
+| `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | any | `{id, name, zoneId, sortOrder}`. `POST`/`PATCH` take `{name?, zoneId?, sortOrder?}`; `zoneId: null` means "in no zone", which is different from leaving the field out. Names are trimmed before they are measured (1–80), an unknown `zoneId` is `404 unknown_zone`, and a new room goes to the *end* of the order. Deleting a room does not delete its devices — they are simply in no room. Every write broadcasts the [`structure` frame](#rooms-and-zones) |
+| `GET /zones` · `POST /zones` · `PATCH /zones/:id` · `DELETE /zones/:id` | any | `{id, name, sortOrder}` — the optional layer above rooms, see [below](#rooms-and-zones). Deleting a zone keeps its rooms and leaves them in none |
 | `GET /devices` | any | full device list (wire shape below) |
-| `PATCH /devices/:id` | favorite: any; name/roomId: owner | `{name?, roomId?, favorite?}` |
+| `PATCH /devices/:id` | any | `{name?, roomId?, favorite?}`. Name and room describe the house and everybody sees the same ones; **`favorite` is the caller's own** and nobody else's — see [below](#favorites-are-per-member). `roomId: null` takes a device out of its room; an unknown one is `404 unknown_room`. The response is this caller's view of the device |
 | `DELETE /devices/:id` | owner | also unpairs at the protocol level |
 | `POST /devices/:id/endpoints/:endpointId/commands` | any | body = canonical command; `202`. IR-remote intents (`irLearn`/`irSaveLearned`/`irSend`/`irDeleteCommand`/`irRenameCommand`) are resolved against the endpoint's stored code library (see [device-schema.md](device-schema.md)) |
 | `POST /devices/:id/remap` | owner | force-regenerate the AI mapping (Zigbee devices); the hub also remaps automatically when a device publishes unknown parameters — see [ai-adaptation.md](ai-adaptation.md). `409 ai_not_configured` with no credential, `409 ai_disabled` when the owner has switched adaptation off |
@@ -248,6 +260,58 @@ up afterwards, so the name has to live in the sentence. Clients watching the
 `activity` WebSocket stream get both, which is how a member list stays right
 without polling.
 
+### Rooms and zones
+
+A home has **rooms**, and rooms may sit in a **zone**: "Upstairs", "Garden",
+"Guest house". A room in no zone is the ordinary case, not a gap to fill in.
+
+It is deliberately a zone and not a floor. A flat has no floors and a garage
+isn't one, so a *floor* field asks every home that isn't a house either to
+leave it blank or to lie in it, while a zone that happens to be called "Second
+floor" covers the house perfectly. It is also Apple Home's own word (`HMZone`),
+and the GetHome app shows Apple Homes beside hub homes — one vocabulary for
+both.
+
+Rooms and zones are shared, so a change made on one phone has to reach the
+others without waiting for them to reconnect — which, before this, was the only
+thing that ever re-read them. Every write to either broadcasts one frame
+carrying **both lists in full**:
+
+```
+{"type":"structure","rooms":[{id,name,zoneId,sortOrder}],"zones":[{id,name,sortOrder}]}
+```
+
+Both, because a client redraws its zone sections from the pair and sending half
+would make every app hold the other half from memory; in full, because a home
+has a handful of each and a diff is a way to be subtly wrong for less than it
+costs to send. A client that has never heard of the frame ignores it and keeps
+re-reading on `hello`, as it always did.
+
+Deleting is the case worth knowing: **a deleted room keeps its devices** (they
+end up in no room, and the hub says so on the socket for each of them), and a
+**deleted zone keeps its rooms**. Neither is a way to lose anything.
+
+### Favorites are per member
+
+`favorite` is the **caller's** pin. `GET /devices` answers a different value to
+each member, `PATCH /devices/:id {"favorite":true}` pins the device for whoever
+sent it, and the `deviceUpserted` frame is rendered per socket for the same
+reason.
+
+It used to be one boolean on the device row, which quietly made a favorite a
+property of the *home*: one person pinning the kettle put it on everybody's
+dashboard, and the next person to unpin it took it off yours. Names and rooms
+are shared because they describe the house; a favorite describes a person.
+
+The wire is unchanged — still a field called `favorite`, still a boolean — so
+an app written against the old shared flag reads its own favorites without
+knowing anything happened. Existing pins were carried over to every member the
+hub had at upgrade time, since "everyone can see this" is the honest reading of
+a flag that was shared. The `devices.favorite` column still exists and is
+maintained as the union of everybody's pins; nothing reads it, and it is there
+only so that rolling back to an older build (which `install.sh` does by itself
+when a new one fails its health check) meets a schema it understands.
+
 ### Device wire shape (`GET /devices` item)
 
 ```json
@@ -351,6 +415,8 @@ message. These go to every authorized socket:
 {"type":"state","deviceId","endpointId","state":{…}}    full canonical state after each change
 {"type":"deviceUpserted","device":{…}}                  new device or structure/name change
 {"type":"deviceRemoved","deviceId"}
+{"type":"structure","rooms":[…],"zones":[…]}            rooms/zones changed — both lists in full
+
 {"type":"activity","entry":{id,at,kind,message,deviceId?,memberId?}}
 {"type":"permitJoin","active":true,"remainingSeconds":60}
 {"type":"commissioning","jobId","status","detail"?}     Matter commissioning progress

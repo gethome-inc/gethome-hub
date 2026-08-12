@@ -4,10 +4,13 @@ import path from 'node:path';
 import { createDb, type Db } from '../../src/db/client.js';
 import { runMigrations } from '../../src/db/migrate.js';
 import { HomeService } from '../../src/core/home.js';
+import { FavoritesService } from '../../src/core/favorites.js';
+import type { HubEventBus } from '../../src/core/bus.js';
 import {
   activity,
   aiMappings,
   aiRuns,
+  deviceFavorites,
   devices,
   endpoints,
   home,
@@ -16,6 +19,7 @@ import {
   rooms,
   settings,
   tokens,
+  zones,
 } from '../../src/db/schema.js';
 
 export interface TestDb {
@@ -54,9 +58,11 @@ export async function resetDb(db: Db): Promise<void> {
   await db.delete(tokens);
   await db.delete(invites);
   await db.delete(endpoints);
+  await db.delete(deviceFavorites);
   await db.delete(devices);
   await db.delete(members);
   await db.delete(rooms);
+  await db.delete(zones);
   await db.delete(home);
   await db.delete(aiMappings);
   await db.delete(aiRuns);
@@ -72,4 +78,15 @@ export async function bootedHome(db: Db, name: string): Promise<HomeService> {
   const service = new HomeService(db, name);
   await service.boot();
   return service;
+}
+
+/**
+ * A `FavoritesService` with its rows read in, which is what `src/index.ts`
+ * hands the API. Every suite that builds a server needs one: `GET /devices`
+ * asks it who pinned what, so a server built without it answers 500.
+ */
+export async function loadedFavorites(db: Db, events: HubEventBus): Promise<FavoritesService> {
+  const favorites = new FavoritesService(db, events);
+  await favorites.load();
+  return favorites;
 }

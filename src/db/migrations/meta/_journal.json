@@ -15,6 +15,13 @@
       "when": 1786423287073,
       "tag": "0001_jazzy_zaran",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1786574511209,
+      "tag": "0002_sparkling_exiles",
+      "breakpoints": true
     }
   ]
 }
