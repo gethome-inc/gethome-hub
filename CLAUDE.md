@@ -245,6 +245,19 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   fan mode 0–5, airQuality 0–6. The wire format (field names included) is a
   compatibility contract with the iOS app — never change it without
   versioning the API (`apiVersion` in `GET /hub`).
+- **A device's `friendly_name` is its address until somebody renames it, so it
+  is not a name.** Zigbee2MQTT names a newly joined device after its own IEEE —
+  `friendly_name: "0x54ef44100047c1bf"` — and passing that through as
+  `suggestedName` put eighteen characters of hex on the tile in the GetHome app,
+  which reads as a hub that failed to recognise the device. It hadn't: the same
+  `bridge/devices` record carried a full `exposes` schema, a vendor, a model and
+  upstream's own one-line description, all mapped correctly. `suggestedNameFor()`
+  prefers that description ("Smart plug EU"), then vendor + model, and appends
+  the last four hex digits because two units of one model would otherwise be two
+  identical rows. Not the device *kind* ("Outlet") — the apps already show that
+  on its own line, and repeating it says nothing about which plug this is. Two
+  names always win over it: one somebody set in Z2M, and the owner's, since
+  `insertDevice` writes this on the insert only and never over an existing row.
 - Zigbee2MQTT conversions to watch: cover position is **inverted** (Z2M
   100 = open), temperatures ×100, power W → mW, energy kWh → mWh, hue/sat
   degrees/percent → 0–254 cluster units. `action` enums parse through

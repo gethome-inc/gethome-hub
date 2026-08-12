@@ -418,7 +418,7 @@ export class ZigbeeAdapter implements ProtocolAdapter {
       externalId: raw.ieee_address,
       ...(raw.definition?.vendor ? { vendor: raw.definition.vendor } : {}),
       ...(raw.definition?.model ? { model: raw.definition.model } : {}),
-      suggestedName: raw.friendly_name,
+      suggestedName: suggestedNameFor(raw),
       endpoints: mergedEndpoints(tracked),
       needsReview: needsReview(tracked),
       recognition: recognitionOf(tracked, exposesHash(raw)),
@@ -584,6 +584,42 @@ function interviewFinished(device: Z2mDevice): boolean {
     return device.interview_state.toUpperCase() === 'SUCCESSFUL';
   }
   return device.interview_completed !== false;
+}
+
+/**
+ * What to call a device the first time it is seen.
+ *
+ * Zigbee2MQTT names a newly joined device **after its own address** — a device
+ * is `friendly_name: "0x54ef44100047c1bf"` until somebody opens Z2M's frontend
+ * and renames it there. Passing that straight through put an eighteen-character
+ * hex string on the tile in the GetHome app, which reads as a hub that failed
+ * to recognise the device. It hadn't: the same record carries a full `exposes`
+ * schema, a vendor, a model and upstream's own one-line description, and every
+ * one of them had been mapped correctly.
+ *
+ * So the description is the name — "Smart plug EU", not "Outlet", because the
+ * device *kind* is already a line of its own on the tile and repeating it says
+ * nothing about which plug this is. The short address rides along because two
+ * units of one model would otherwise be two identical rows with no way to tell
+ * them apart; four hex digits is the least that distinguishes them, and it is
+ * the same tail Zigbee2MQTT and the sticker show.
+ *
+ * A name somebody has actually chosen always wins, in either place: Z2M's, when
+ * it is not just the address, and the owner's, because the registry writes this
+ * on the insert only and never over an existing row.
+ */
+export function suggestedNameFor(device: Z2mDevice): string {
+  const chosen = device.friendly_name?.trim();
+  if (chosen && chosen.toLowerCase() !== device.ieee_address.toLowerCase()) return chosen;
+
+  const described = device.definition?.description?.trim();
+  const madeBy = [device.definition?.vendor, device.definition?.model]
+    .map((part) => part?.trim())
+    .filter((part): part is string => !!part)
+    .join(' ');
+  const base = described || madeBy;
+  if (!base) return chosen || device.ieee_address;
+  return `${base} ${device.ieee_address.replace(/^0x/i, '').slice(-4).toUpperCase()}`;
 }
 
 /**

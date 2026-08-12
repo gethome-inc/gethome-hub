@@ -372,6 +372,29 @@ WebSocket stream; only the *failure* and the *departure* are also written to
 the activity log, because the rest is transient and the adapter already writes
 a `zigbee.joined` row once the device is adopted.
 
+### What a new device is called
+
+Zigbee2MQTT names a freshly joined device **after its own IEEE address**, so
+`friendly_name` is `0x54ef44100047c1bf` until somebody opens Z2M's frontend and
+renames it there — which is exactly the errand this project exists to remove.
+Passing it through unchanged is what put eighteen characters of hex on the tile
+in the app, reading as a hub that had failed to recognise the device when it had
+in fact mapped every one of its exposes.
+
+`suggestedNameFor()` therefore names it from the rest of the same record, in
+order: `definition.description` (upstream writes a short human one for every
+device it supports — "Smart plug EU"), then `vendor` + `model`, then the address
+if the record says nothing else at all. The last four hex digits ride along,
+because two units of one model would otherwise be two identical rows with no way
+to tell them apart.
+
+It is deliberately **not** the device kind. "Outlet" is already a line of its own
+in the apps, and a name repeating it says nothing about *which* outlet this is.
+
+Two names always outrank it: one somebody chose in Zigbee2MQTT, and the owner's
+own — `suggestedName` is read on the registry's insert only, never over an
+existing row.
+
 Two fields say whether that interview finished, and both are read:
 Zigbee2MQTT 2.x replaced the boolean `interview_completed` with the four-valued
 `interview_state`, so a version publishing only the new one made
