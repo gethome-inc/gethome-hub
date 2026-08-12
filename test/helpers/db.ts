@@ -7,6 +7,7 @@ import { HomeService } from '../../src/core/home.js';
 import {
   activity,
   aiMappings,
+  aiRuns,
   devices,
   endpoints,
   home,
@@ -58,6 +59,7 @@ export async function resetDb(db: Db): Promise<void> {
   await db.delete(rooms);
   await db.delete(home);
   await db.delete(aiMappings);
+  await db.delete(aiRuns);
   await db.delete(settings);
 }
 

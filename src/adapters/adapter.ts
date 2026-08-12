@@ -2,6 +2,29 @@ import type { CapabilityKind, DeviceKind, EndpointState, HubCommand } from '../s
 
 export type AdapterId = 'zigbee' | 'mqtt' | 'matter';
 
+/**
+ * How a device came to be understood.
+ *
+ * `needsReview` is the verdict and was for a long time the only thing recorded,
+ * so an app could say "something about this device is missing" and never which
+ * of the three layers had placed it or which properties were left over. That
+ * made the layering — typed capabilities, then generic custom fields, then AI —
+ * invisible to the person paying for the third one.
+ *
+ * `source` names the **highest layer that was needed**, so a device reading
+ * `static` was fully understood with no key and no cost, and one reading `ai`
+ * is the reason there is a bill.
+ */
+export interface DeviceRecognition {
+  source: 'static' | 'custom-fields' | 'ai' | 'imported' | 'none';
+  /** Properties with no representation at all — what `needsReview` is about. */
+  uncovered: string[];
+  /** Properties reachable only as generic controls, not typed capabilities. */
+  unmapped: string[];
+  /** Identifies the device *model*, and so its entry in the mapping library. */
+  exposesHash?: string;
+}
+
 /** What an adapter announces when it discovers (or re-reads) a device. */
 export interface AdapterDeviceDescriptor {
   adapter: AdapterId;
@@ -19,6 +42,8 @@ export interface AdapterDeviceDescriptor {
   }>;
   /** Set when automatic mapping was incomplete — surfaced in the apps. */
   needsReview?: boolean;
+  /** How it was placed, and what was left over. */
+  recognition?: DeviceRecognition;
 }
 
 /**

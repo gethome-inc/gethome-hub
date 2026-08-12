@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import { aiMappings } from '../db/schema.js';
@@ -8,8 +7,17 @@ import type {
   AppliedAiMapping,
   ZigbeeAiAssist,
 } from '../adapters/zigbee/adapter.js';
-import type { Z2mDevice, Z2mProfile } from '../adapters/zigbee/exposes-mapper.js';
-import type { CustomFieldSpec } from '../adapters/zigbee/exposes-mapper.js';
+// `exposesHash` is the cache key here, but it is a property of the device's
+// published schema, so it lives with the schema — the adapter records it as
+// part of how a device was recognised and must not import the AI stack to do
+// so. Re-exported because this module is where callers learned to find it.
+import {
+  exposesHash,
+  type CustomFieldSpec,
+  type Z2mDevice,
+  type Z2mProfile,
+} from '../adapters/zigbee/exposes-mapper.js';
+import type { AiRunHandle, AiRunLog } from '../core/ai-runs.js';
 import {
   applyStateRules,
   buildCommandPayload,
@@ -18,10 +26,17 @@ import {
   type DescriptorCustomField,
   type MappingDescriptor,
 } from './descriptor.js';
-import { createMappingAgent, type AgentRunStats, type MappingProvider } from './agent.js';
+import {
+  agentStep,
+  createMappingAgent,
+  type AgentRunStats,
+  type MappingProvider,
+} from './agent.js';
 import { DEFAULT_MODEL } from './models.js';
 import { AiUnavailableError } from './errors.js';
-import { MAPPING_SYSTEM_PROMPT, buildMappingUserPrompt } from './prompts.js';
+import { MAPPING_SYSTEM_PROMPT, buildMappingUserPrompt, buildRepairUserPrompt } from './prompts.js';
+
+export { exposesHash };
 
 /**
  * AI device adaptation. When the static exposes mapper can't fully place a
@@ -59,6 +74,7 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
     private readonly db: Db,
     private readonly settings: SettingsService,
     private readonly log: Logger,
+    private readonly runs?: AiRunLog,
   ) {}
 
   async requestMapping(
@@ -66,6 +82,11 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
     staticProfile: Z2mProfile,
     options?: { samples?: Record<string, unknown>[]; force?: boolean },
   ): Promise<AppliedAiMapping | null> {
+    const notADevice = notDeviceShaped(device);
+    if (notADevice) {
+      this.log.warn({ reason: notADevice }, 'Refused to ask the mapping agent about a non-device.');
+      return null;
+    }
     const hash = exposesHash(device);
 
     if (options?.force) {
@@ -77,7 +98,7 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
       if (cached) {
         if (cached.status === 'rejected') return null;
         const parsed = mappingDescriptorSchema.safeParse(cached.descriptor);
-        return parsed.success ? interpret(parsed.data) : null;
+        return parsed.success ? interpret(parsed.data, sourceOf(cached.source)) : null;
       }
     }
 
@@ -126,36 +147,123 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
     if (!provider) return null;
 
     this.log.info(`Asking the mapping agent about ${device.definition?.model ?? device.friendly_name}…`);
+    return this.runAgent({
+      kind: 'map',
+      device,
+      hash,
+      prompt: buildMappingUserPrompt(device, staticProfile, samples),
+      brief: `${staticProfile.uncovered.length + staticProfile.unmapped.length} property/ies the hub could not place`,
+    });
+  }
+
+  /**
+   * Hand a descriptor that failed validation back to the agent with the exact
+   * complaints, and store whatever it returns.
+   *
+   * This is the other half of letting somebody upload their own mapping: a
+   * file that is nearly right is the common case — hand-written, or copied
+   * from a device one firmware revision away — and "rejected, start again" is
+   * a dead end for a person who cannot read a zod issue path. It deliberately
+   * bypasses the cache: a `rejected` row is exactly what it is here to fix.
+   */
+  async repairMapping(
+    device: Z2mDevice,
+    staticProfile: Z2mProfile,
+    broken: unknown,
+    problems: string[],
+  ): Promise<MappingDescriptor | null> {
+    const notADevice = notDeviceShaped(device);
+    if (notADevice) {
+      this.log.warn({ reason: notADevice }, 'Refused to ask the mapping agent about a non-device.');
+      return null;
+    }
+    const hash = exposesHash(device);
+    const applied = await this.serialize(() =>
+      this.runAgent({
+        kind: 'repair',
+        device,
+        hash,
+        prompt: buildRepairUserPrompt(device, staticProfile, broken, problems),
+        brief: `${problems.length} problem(s) with a supplied descriptor`,
+      }),
+    );
+    if (!applied) return null;
+    const stored = await this.db.query.aiMappings.findFirst({
+      where: and(eq(aiMappings.adapter, 'zigbee'), eq(aiMappings.exposesHash, hash)),
+    });
+    const parsed = mappingDescriptorSchema.safeParse(stored?.descriptor);
+    return parsed.success ? parsed.data : null;
+  }
+
+  /**
+   * One agent run, from the prompt to the stored descriptor.
+   *
+   * Both entry points funnel through here so that the run log, the backoff
+   * ladder and the caching rules cannot drift apart between "map this device"
+   * and "fix this descriptor" — the two differ only in the prompt.
+   */
+  private async runAgent(input: {
+    kind: 'map' | 'repair';
+    device: Z2mDevice;
+    hash: string;
+    prompt: string;
+    brief: string;
+  }): Promise<AppliedAiMapping | null> {
+    const provider = await this.resolveProvider();
+    if (!provider) return null;
+    const { model: configuredModel } = await this.settings.getAiSettings();
+
+    const run: AiRunHandle | undefined = this.runs?.begin({
+      kind: input.kind,
+      adapter: 'zigbee',
+      exposesHash: input.hash,
+      vendor: input.device.definition?.vendor,
+      model: input.device.definition?.model ?? input.device.friendly_name,
+      modelId: configuredModel ?? DEFAULT_MODEL,
+    });
+    run?.step(
+      agentStep(
+        'prompt',
+        input.kind === 'repair'
+          ? 'Sent the device schema and what was wrong with the supplied mapping.'
+          : 'Sent the device schema and its recent reports.',
+        input.brief,
+      ),
+    );
+
     let stats: AgentRunStats | null = null;
     let descriptor: MappingDescriptor;
     try {
-      const candidate = await provider.generate(
-        MAPPING_SYSTEM_PROMPT,
-        buildMappingUserPrompt(device, staticProfile, samples),
-        {
-          onStats: (s) => {
-            stats = s;
-          },
+      const candidate = await provider.generate(MAPPING_SYSTEM_PROMPT, input.prompt, {
+        onStats: (s) => {
+          stats = s;
         },
-      );
+        onStep: (step) => run?.step(step),
+      });
       const parsed = mappingDescriptorSchema.safeParse(candidate);
       if (!parsed.success) {
+        const problems = parsed.error.issues.map(
+          (issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`,
+        );
         this.log.warn({ issues: parsed.error.issues }, 'AI mapping failed validation');
-        await this.store(device, hash, candidate, 'rejected');
+        await this.store(input.device, input.hash, candidate, 'rejected', 'ai', problems);
         await this.recordRun(false, stats);
+        await run?.finish(this.outcome(false, stats, 'invalid_descriptor', problems.join('; ')));
         return null;
       }
       const problems = sanityCheckDescriptor(parsed.data);
       if (problems.length > 0) {
         this.log.warn({ problems }, 'AI mapping failed sanity checks');
-        await this.store(device, hash, parsed.data, 'rejected');
+        await this.store(input.device, input.hash, parsed.data, 'rejected', 'ai', problems);
         await this.recordRun(false, stats);
+        await run?.finish(this.outcome(false, stats, 'failed_sanity_checks', problems.join('; ')));
         return null;
       }
       descriptor = parsed.data;
     } catch (error) {
       if (error instanceof AiUnavailableError) {
         await this.recordUnavailable(error);
+        await run?.finish(this.outcome(false, stats, error.kind, error.message));
         return null;
       }
       // The run failed on its own merits (gave up, never submitted…). The
@@ -163,20 +271,40 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
       // next natural trigger simply tries again.
       this.log.warn({ err: error }, 'AI mapping request failed');
       await this.recordRun(false, stats);
+      await run?.finish(this.outcome(false, stats, 'run_failed', (error as Error).message));
       return null;
     }
 
-    await this.store(device, hash, descriptor, 'generated');
+    await this.store(input.device, input.hash, descriptor, 'generated', 'ai', null);
     await this.recordRun(true, stats);
+    await run?.finish(this.outcome(true, stats));
     this.log.info(
-      `AI mapping stored for ${device.definition?.model ?? device.friendly_name} (${descriptor.endpoints.length} endpoint(s)).`,
+      `AI mapping stored for ${input.device.definition?.model ?? input.device.friendly_name} (${descriptor.endpoints.length} endpoint(s)).`,
     );
-    return interpret(descriptor);
+    return interpret(descriptor, 'ai');
+  }
+
+  private outcome(
+    ok: boolean,
+    stats: AgentRunStats | null,
+    errorKind?: string,
+    errorMessage?: string,
+  ) {
+    return {
+      ok,
+      ...(stats !== null ? { costUsd: stats.costUsd, turns: stats.numTurns, durationMs: stats.durationMs } : {}),
+      ...(errorKind !== undefined ? { errorKind } : {}),
+      ...(errorMessage !== undefined ? { errorMessage } : {}),
+    };
   }
 
   private async resolveProvider(): Promise<MappingProvider | null> {
     if (this.providerOverride) return this.providerOverride;
-    const { provider, model, legacySubscriptionToken } = await this.settings.getAiSettings();
+    const { provider, model, enabled, legacySubscriptionToken } = await this.settings.getAiSettings();
+    // The owner's switch. `lazy.ts` checks it too — that check saves loading
+    // this module at all, and this one is what makes the rule true for a
+    // mapper somebody constructed directly.
+    if (!enabled) return null;
     if (!provider) return null;
     if (legacySubscriptionToken) {
       // A credential saved before the agent moved to the Messages API. It
@@ -240,8 +368,18 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
     hash: string,
     descriptor: unknown,
     status: 'generated' | 'rejected',
+    source: 'ai' | 'imported',
+    problems: string[] | null,
   ): Promise<void> {
     const { provider } = await this.settings.getAiSettings();
+    const row = {
+      descriptor: descriptor as Record<string, unknown>,
+      status,
+      source,
+      problems,
+      provider,
+      updatedAt: new Date(),
+    };
     await this.db
       .insert(aiMappings)
       .values({
@@ -249,28 +387,53 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
         vendor: device.definition?.vendor ?? null,
         model: device.definition?.model ?? null,
         exposesHash: hash,
-        descriptor: descriptor as Record<string, unknown>,
-        status,
-        provider,
+        ...row,
       })
       .onConflictDoUpdate({
         target: [aiMappings.adapter, aiMappings.exposesHash],
-        set: { descriptor: descriptor as Record<string, unknown>, status, provider },
+        set: row,
       });
   }
 }
 
-/** Cache key: the device's published schema, canonicalized. */
-export function exposesHash(device: Z2mDevice): string {
-  const canonical = JSON.stringify({
-    vendor: device.definition?.vendor ?? null,
-    model: device.definition?.model ?? null,
-    exposes: device.definition?.exposes ?? [],
-  });
-  return createHash('sha256').update(canonical, 'utf8').digest('hex');
+/**
+ * Why this input must never reach the agent, or `null` when it may.
+ *
+ * The traffic inspector shows the whole broker — permit-join requests, bridge
+ * logs, hub status, whatever else is on the network — and none of that is a
+ * device. Today nothing routes it here: the agent's only caller is device
+ * adoption, driven by `bridge/devices`. This is the wall that keeps it that
+ * way, so a future caller with a plausible-looking object cannot quietly turn
+ * hub chatter into billed research about a device that does not exist.
+ *
+ * The test for "a device" is the same one the mapping itself rests on: an IEEE
+ * address, and a published schema to map. Anything without both would produce
+ * a descriptor about nothing.
+ */
+export function notDeviceShaped(device: Z2mDevice | null | undefined): string | null {
+  if (!device || typeof device !== 'object') return 'not an object';
+  if (typeof device.ieee_address !== 'string' || device.ieee_address.length === 0) {
+    return 'no IEEE address — this is not a device on the network';
+  }
+  if (!Array.isArray(device.definition?.exposes) || device.definition.exposes.length === 0) {
+    return 'no published schema to map';
+  }
+  if (device.type === 'Coordinator') return 'the coordinator is the radio, not a device';
+  if (typeof device.friendly_name === 'string' && device.friendly_name.startsWith('bridge/')) {
+    return 'a bridge topic is hub traffic, not a device';
+  }
+  return null;
 }
 
-function interpret(descriptor: MappingDescriptor): AppliedAiMapping {
+/** A stored row's `source`, defaulting the way an old row should read. */
+function sourceOf(value: string | null | undefined): 'ai' | 'imported' {
+  return value === 'imported' ? 'imported' : 'ai';
+}
+
+export function interpret(
+  descriptor: MappingDescriptor,
+  source: 'ai' | 'imported',
+): AppliedAiMapping {
   // Typed properties = keys mapped onto real capabilities (they supersede any
   // static custom field); `properties` also includes generic field ids.
   const typedProperties = new Set<string>();
@@ -284,6 +447,7 @@ function interpret(descriptor: MappingDescriptor): AppliedAiMapping {
     for (const field of endpoint.customFields) properties.add(field.id);
   }
   return {
+    source,
     endpoints: descriptor.endpoints.map((endpoint) => ({
       endpointId: endpoint.endpointId,
       deviceKind: endpoint.deviceKind,

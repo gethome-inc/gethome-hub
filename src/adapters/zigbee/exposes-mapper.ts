@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   centiFromCelsius,
   hueFromDegrees,
@@ -62,13 +63,39 @@ export interface Z2mDevice {
   type?: string;
   supported?: boolean;
   disabled?: boolean;
+  /** Zigbee2MQTT before 2.x. Superseded by `interview_state`, still published
+   *  by installs in the field, so both are read — see `interviewFinished`. */
   interview_completed?: boolean;
+  /** Zigbee2MQTT 2.x: PENDING | IN_PROGRESS | SUCCESSFUL | FAILED. */
+  interview_state?: string;
   definition?: {
     vendor?: string;
     model?: string;
     description?: string;
     exposes?: Z2mExpose[];
   } | null;
+}
+
+/**
+ * A device *model*, identified by what it publishes about itself.
+ *
+ * Two units of the same product hash identically, which is what makes an AI
+ * mapping worth caching at all: the second one of a model is placed instantly
+ * and for nothing. It lives here rather than with the AI mapper that named it
+ * because it is a property of the device's published schema — the adapter
+ * records it as part of how a device was recognised, and must not import the
+ * AI stack to do so.
+ *
+ * The friendly name is deliberately not in it: renaming a device in
+ * Zigbee2MQTT must not invalidate a mapping.
+ */
+export function exposesHash(device: Z2mDevice): string {
+  const canonical = JSON.stringify({
+    vendor: device.definition?.vendor ?? null,
+    model: device.definition?.model ?? null,
+    exposes: device.definition?.exposes ?? [],
+  });
+  return createHash('sha256').update(canonical, 'utf8').digest('hex');
 }
 
 export interface Z2mEndpointProfile {

@@ -1,8 +1,14 @@
 import mqtt from 'mqtt';
-import type { AdapterBus, ProtocolAdapter } from '../adapter.js';
+import type { AdapterBus, DeviceRecognition, ProtocolAdapter } from '../adapter.js';
 import type { CapabilityKind, DeviceKind, EndpointState, HubCommand } from '../../schema/index.js';
 import { UnsupportedCommandError } from '../../schema/index.js';
-import { mapExposes, type CustomFieldSpec, type Z2mDevice, type Z2mProfile } from './exposes-mapper.js';
+import {
+  exposesHash,
+  mapExposes,
+  type CustomFieldSpec,
+  type Z2mDevice,
+  type Z2mProfile,
+} from './exposes-mapper.js';
 import { buildSetPayload } from './commands.js';
 import type { Logger } from '../../logging.js';
 
@@ -27,6 +33,8 @@ export interface ZigbeeAiAssist {
 }
 
 export interface AppliedAiMapping {
+  /** Whether the agent produced this descriptor or somebody uploaded it. */
+  source?: 'ai' | 'imported';
   endpoints: Array<{
     endpointId: number;
     deviceKind: DeviceKind;
@@ -57,6 +65,34 @@ interface TrackedDevice {
   remapTimer?: NodeJS.Timeout | undefined;
 }
 
+/** A device arriving on, or leaving, the network — from `<base>/bridge/event`. */
+export interface Z2mBridgeEvent {
+  type?: string;
+  data?: {
+    friendly_name?: string;
+    ieee_address?: string;
+    status?: string;
+  };
+}
+
+/** The join-window fields of `<base>/bridge/info`. `permit_join_end` is epoch
+ *  seconds (current Z2M); `permit_join_timeout` is seconds remaining (older). */
+export interface Z2mBridgeInfo {
+  permit_join?: boolean;
+  permit_join_end?: number;
+  permit_join_timeout?: number;
+}
+
+/** How one pass of `adoptDevice` should treat the device's stored mapping. */
+interface AdoptOptions {
+  /** First sight: write an activity row and ask the device for a snapshot. */
+  announce?: boolean;
+  /** Throw the stored mapping away and ask the agent again. */
+  regenerate?: boolean;
+  /** Consult the library even for a device the static mapper placed fully. */
+  consultMapping?: boolean;
+}
+
 export interface ZigbeeAdapterOptions {
   mqttUrl: string;
   baseTopic: string;
@@ -64,6 +100,16 @@ export interface ZigbeeAdapterOptions {
   aiAssist?: ZigbeeAiAssist;
   /** Debounce before a parameter-triggered AI remap (test seam). */
   parameterRemapDelayMs?: number;
+  /**
+   * Zigbee2MQTT's own account of devices joining and being interviewed. The
+   * adapter relays it rather than acting on it: `bridge/devices` is still what
+   * adopts a device, and it only lists devices whose interview finished — so
+   * without this the whole of pairing, which is the minute a user is actually
+   * watching, produced no output at all.
+   */
+  onBridgeEvent?(event: Z2mBridgeEvent): void;
+  /** The bridge's own status, read for the live permit-join window. */
+  onBridgeInfo?(info: Z2mBridgeInfo): void;
 }
 
 const SAMPLE_BUFFER_SIZE = 3;
@@ -163,8 +209,32 @@ export class ZigbeeAdapter implements ProtocolAdapter {
   async remap(externalId: string): Promise<boolean> {
     const raw = this.rawDefinitions.get(externalId);
     if (!raw) return false;
-    await this.adoptDevice(raw, false, true);
+    await this.adoptDevice(raw, { regenerate: true });
     return true;
+  }
+
+  /** The bridge entries of every tracked device whose published schema hashes
+   *  to `hash` — that is, every device one library entry governs. */
+  devicesOfModel(hash: string): Z2mDevice[] {
+    return [...this.rawDefinitions.values()].filter((device) => exposesHash(device) === hash);
+  }
+
+  /**
+   * Re-adopt every device of one model after its stored mapping changed.
+   *
+   * Distinct from `remap`, which *regenerates* — this applies what is already
+   * in the library, which is what an import or a repair has just written.
+   * Consulting the mapping is forced because a device the static mapper placed
+   * completely would otherwise never ask for it, and somebody who uploaded a
+   * mapping for that device plainly wants it used.
+   */
+  async applyStoredMapping(hash: string): Promise<string[]> {
+    const applied: string[] = [];
+    for (const device of this.devicesOfModel(hash)) {
+      await this.adoptDevice(device, { consultMapping: true });
+      applied.push(device.ieee_address);
+    }
+    return applied;
   }
 
   // ── Internals ───────────────────────────────────────────────────────────
@@ -185,6 +255,23 @@ export class ZigbeeAdapter implements ProtocolAdapter {
       const state = payload.startsWith('{') ? (JSON.parse(payload) as { state?: string }).state : payload;
       this.bridgeOnline = state === 'online';
       this.options.log.info(`Zigbee2MQTT is ${state}.`);
+      return;
+    }
+    // Two bridge topics are relayed rather than dropped. `bridge/event` is the
+    // only account of a device joining *before* its interview finishes, which
+    // is the whole of what the user is watching while they pair something; and
+    // `bridge/info` is the coordinator's own word on whether the network is
+    // open, which beats any timer the hub keeps for itself.
+    if (suffix === 'bridge/event') {
+      if (this.options.onBridgeEvent && payload.startsWith('{')) {
+        this.options.onBridgeEvent(JSON.parse(payload) as Z2mBridgeEvent);
+      }
+      return;
+    }
+    if (suffix === 'bridge/info') {
+      if (this.options.onBridgeInfo && payload.startsWith('{')) {
+        this.options.onBridgeInfo(JSON.parse(payload) as Z2mBridgeInfo);
+      }
       return;
     }
     if (suffix.startsWith('bridge/')) return;
@@ -249,7 +336,7 @@ export class ZigbeeAdapter implements ProtocolAdapter {
       device.remapTimer = undefined;
       const raw = this.rawDefinitions.get(device.ieee);
       if (!raw) return;
-      void this.adoptDevice(raw, false, true).catch((error) => {
+      void this.adoptDevice(raw, { regenerate: true }).catch((error) => {
         this.options.log.warn({ err: error }, `Parameter remap failed for ${device.friendlyName}`);
       });
     }, this.options.parameterRemapDelayMs ?? 5000);
@@ -261,13 +348,13 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     const seen = new Set<string>();
     for (const device of devices) {
       if (device.type === 'Coordinator' || device.disabled) continue;
-      if (device.interview_completed === false) continue;
+      if (!interviewFinished(device)) continue;
       seen.add(device.ieee_address);
       this.rawDefinitions.set(device.ieee_address, device);
       const known = this.byIeee.get(device.ieee_address);
       const fingerprint = JSON.stringify(device.definition?.exposes ?? []);
       if (!known || known.friendlyName !== device.friendly_name || known.fingerprint !== fingerprint) {
-        await this.adoptDevice(device, !known);
+        await this.adoptDevice(device, { announce: !known });
       }
     }
     // Devices no longer in the bridge registry were removed from the network.
@@ -282,7 +369,8 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     }
   }
 
-  private async adoptDevice(device: Z2mDevice, announce: boolean, forceAiRemap = false): Promise<void> {
+  private async adoptDevice(device: Z2mDevice, options: AdoptOptions = {}): Promise<void> {
+    const { announce = false, regenerate = false, consultMapping = false } = options;
     const raw = this.rawDefinitions.get(device.ieee_address) ?? device;
     const profile = mapExposes(raw);
     const previous = this.byIeee.get(raw.ieee_address);
@@ -303,12 +391,16 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     // remap can still upgrade them to typed capabilities.
     const staticallyEmpty = profile.endpoints.every((endpoint) => endpoint.capabilities.length === 0);
     const needsHelp =
-      forceAiRemap || raw.supported === false || staticallyEmpty || profile.uncovered.length > 0;
+      regenerate ||
+      consultMapping ||
+      raw.supported === false ||
+      staticallyEmpty ||
+      profile.uncovered.length > 0;
     if (needsHelp && this.options.aiAssist) {
       try {
         const mapping = await this.options.aiAssist.requestMapping(raw, profile, {
           samples: tracked.samples,
-          ...(forceAiRemap ? { force: true } : {}),
+          ...(regenerate ? { force: true } : {}),
         });
         if (mapping) tracked.aiMapping = mapping;
       } catch (error) {
@@ -326,9 +418,10 @@ export class ZigbeeAdapter implements ProtocolAdapter {
       externalId: raw.ieee_address,
       ...(raw.definition?.vendor ? { vendor: raw.definition.vendor } : {}),
       ...(raw.definition?.model ? { model: raw.definition.model } : {}),
-      suggestedName: raw.friendly_name,
+      suggestedName: suggestedNameFor(raw),
       endpoints: mergedEndpoints(tracked),
       needsReview: needsReview(tracked),
+      recognition: recognitionOf(tracked, exposesHash(raw)),
     });
 
     // Seed the button inventory so the apps can render remotes before (and
@@ -475,12 +568,97 @@ function mergedCustomFields(tracked: TrackedDevice): Map<number, CustomFieldSpec
 }
 
 /**
+ * Whether Zigbee2MQTT has finished interviewing a device, across both of the
+ * fields it has used to say so.
+ *
+ * Zigbee2MQTT 2.x replaced the boolean `interview_completed` with the
+ * four-valued `interview_state`, and a version that publishes only the new
+ * field left the old check reading `undefined === false` — false — so a device
+ * still being interviewed was adopted as if it were ready, with whatever
+ * partial `definition` the bridge had at that instant. Absence of both fields
+ * stays "finished": that is what every version published for a device it was
+ * done with, and refusing an unrecognised shape would adopt nothing at all.
+ */
+function interviewFinished(device: Z2mDevice): boolean {
+  if (device.interview_state !== undefined) {
+    return device.interview_state.toUpperCase() === 'SUCCESSFUL';
+  }
+  return device.interview_completed !== false;
+}
+
+/**
+ * What to call a device the first time it is seen.
+ *
+ * Zigbee2MQTT names a newly joined device **after its own address** — a device
+ * is `friendly_name: "0x54ef44100047c1bf"` until somebody opens Z2M's frontend
+ * and renames it there. Passing that straight through put an eighteen-character
+ * hex string on the tile in the GetHome app, which reads as a hub that failed
+ * to recognise the device. It hadn't: the same record carries a full `exposes`
+ * schema, a vendor, a model and upstream's own one-line description, and every
+ * one of them had been mapped correctly.
+ *
+ * So the description is the name — "Smart plug EU", not "Outlet", because the
+ * device *kind* is already a line of its own on the tile and repeating it says
+ * nothing about which plug this is. The short address rides along because two
+ * units of one model would otherwise be two identical rows with no way to tell
+ * them apart; four hex digits is the least that distinguishes them, and it is
+ * the same tail Zigbee2MQTT and the sticker show.
+ *
+ * A name somebody has actually chosen always wins, in either place: Z2M's, when
+ * it is not just the address, and the owner's, because the registry writes this
+ * on the insert only and never over an existing row.
+ */
+export function suggestedNameFor(device: Z2mDevice): string {
+  const chosen = device.friendly_name?.trim();
+  if (chosen && chosen.toLowerCase() !== device.ieee_address.toLowerCase()) return chosen;
+
+  const described = device.definition?.description?.trim();
+  const madeBy = [device.definition?.vendor, device.definition?.model]
+    .map((part) => part?.trim())
+    .filter((part): part is string => !!part)
+    .join(' ');
+  const base = described || madeBy;
+  if (!base) return chosen || device.ieee_address;
+  return `${base} ${device.ieee_address.replace(/^0x/i, '').slice(-4).toUpperCase()}`;
+}
+
+/**
  * Review is needed only while some property has NO representation at all —
  * no typed mapping, no custom field, not AI-covered.
  */
 function needsReview(tracked: TrackedDevice): boolean {
-  const aiProperties = tracked.aiMapping?.properties;
-  const leftover = tracked.profile.uncovered.filter((property) => !(aiProperties?.has(property) ?? false));
-  if (leftover.length > 0) return true;
+  if (leftoverProperties(tracked).length > 0) return true;
   return mergedEndpoints(tracked).length === 0;
+}
+
+/** Properties still with no representation after every layer that ran. */
+function leftoverProperties(tracked: TrackedDevice): string[] {
+  const aiProperties = tracked.aiMapping?.properties;
+  return tracked.profile.uncovered.filter((property) => !(aiProperties?.has(property) ?? false));
+}
+
+/**
+ * How this device was placed, for the apps to report.
+ *
+ * `source` is the *highest layer that was needed*, not every layer that ran:
+ * almost every device uses typed capabilities, so saying so about all of them
+ * would carry no information. What a reader wants to know is whether this one
+ * cost an agent run — and, when it didn't, whether it is fully typed or is
+ * only reachable through generic controls.
+ */
+function recognitionOf(tracked: TrackedDevice, hash: string): DeviceRecognition {
+  const aiTyped = tracked.aiMapping?.typedProperties;
+  const source: DeviceRecognition['source'] = tracked.aiMapping
+    ? (tracked.aiMapping.source ?? 'ai')
+    : mergedEndpoints(tracked).length === 0
+      ? 'none'
+      : tracked.profile.unmapped.length > 0
+        ? 'custom-fields'
+        : 'static';
+  return {
+    source,
+    uncovered: leftoverProperties(tracked),
+    unmapped: tracked.profile.unmapped.filter((property) => !(aiTyped?.has(property) ?? false)),
+    exposesHash: hash,
+  };
 }

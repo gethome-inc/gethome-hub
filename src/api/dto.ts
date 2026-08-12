@@ -12,6 +12,9 @@ export function deviceWire(device: RegistryDevice) {
     vendor: device.vendor,
     model: device.model,
     needsReview: device.needsReview,
+    // Additive, and absent on a device adopted before the hub recorded it —
+    // which an app must read as "not known", never as "recognised by nothing".
+    ...(device.recognition ? { recognition: device.recognition } : {}),
     endpoints: device.endpoints.map((endpoint) => ({
       endpointId: endpoint.endpointId,
       deviceKind: endpoint.deviceKind,

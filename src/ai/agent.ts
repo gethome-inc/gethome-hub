@@ -78,6 +78,36 @@ const MAX_NUDGES = 2;
 export interface AgentRunContext {
   /** Receives run statistics when the run produced them. */
   onStats?: (stats: AgentRunStats) => void;
+  /** Receives a line per notable thing the run did. Must not throw. */
+  onStep?: (step: AgentStep) => void;
+}
+
+/**
+ * One thing a run did, in the order it did it.
+ *
+ * A summary rather than a transcript, and the distinction is the whole design:
+ * a hub owner watching an unknown device being adapted needs to know what was
+ * searched for, what was read, what was submitted and why it was refused —
+ * none of which requires storing model prose on an SD card. `detail` is one
+ * short string (a query, a URL, a validation error), never a message body.
+ */
+export interface AgentStep {
+  at: string;
+  type: 'prompt' | 'search' | 'fetch' | 'submit' | 'note';
+  summary: string;
+  detail?: string;
+}
+
+/** Keep one step small enough that sixty runs of them stay in the tens of KB. */
+export const MAX_STEP_DETAIL = 2000;
+
+export function agentStep(type: AgentStep['type'], summary: string, detail?: string): AgentStep {
+  return {
+    at: new Date().toISOString(),
+    type,
+    summary,
+    ...(detail !== undefined ? { detail: detail.slice(0, MAX_STEP_DETAIL) } : {}),
+  };
 }
 
 export interface AgentRunStats {
@@ -169,6 +199,27 @@ export function evaluateSubmission(input: unknown, capture: SubmitCapture): Subm
   }
   capture.submitted = parsed.data;
   return { accepted: true, isError: false, text: 'Mapping accepted. You are done — end your reply now.' };
+}
+
+/**
+ * Report the run's server-side research as steps.
+ *
+ * `web_search` and `web_fetch` execute on Anthropic's infrastructure, so the
+ * only trace of them is a `server_tool_use` block in the reply. Reading the
+ * query and the URL out of it is what lets the apps say *what was looked up*
+ * about a device rather than only that "something was".
+ */
+function reportResearch(content: Anthropic.ContentBlock[], run: AgentRunContext | undefined): void {
+  if (!run?.onStep) return;
+  for (const block of content) {
+    if (block.type !== 'server_tool_use') continue;
+    const input = block.input as { query?: unknown; url?: unknown } | null;
+    if (block.name === 'web_search' && typeof input?.query === 'string') {
+      run.onStep(agentStep('search', 'Searched the web.', input.query));
+    } else if (block.name === 'web_fetch' && typeof input?.url === 'string') {
+      run.onStep(agentStep('fetch', 'Read a page.', input.url));
+    }
+  }
 }
 
 /** The research tools, plus the one client-side tool the model answers with. */
@@ -280,6 +331,7 @@ export function createMappingAgent(
           }
 
           usage.add(response.usage);
+          reportResearch(response.content, run);
           // The whole content goes back verbatim — thinking blocks included,
           // which the API requires when continuing a thinking conversation.
           messages.push({ role: 'assistant', content: response.content });
@@ -306,6 +358,9 @@ export function createMappingAgent(
             // already paid for the research — but not the whole turn budget.
             if (nudges >= MAX_NUDGES) break;
             nudges += 1;
+            run?.onStep?.(
+              agentStep('note', 'Answered in prose — asked again for a mapping.'),
+            );
             messages.push({
               role: 'user',
               content:
@@ -328,6 +383,13 @@ export function createMappingAgent(
             }
             const outcome = evaluateSubmission(call.input, capture);
             log.debug({ accepted: outcome.accepted }, 'mapping agent submitted a descriptor');
+            run?.onStep?.(
+              agentStep(
+                'submit',
+                outcome.accepted ? 'Submitted a mapping — accepted.' : 'Submitted a mapping — rejected.',
+                outcome.accepted ? undefined : outcome.text,
+              ),
+            );
             results.push({
               type: 'tool_result',
               tool_use_id: call.id,

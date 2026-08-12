@@ -18,11 +18,17 @@ import type { ZigbeeAdapter } from '../adapters/zigbee/adapter.js';
 // Dependency-free model catalog (a price table and an allowlist) — importing
 // it here does not pull the AI stack into the API layer.
 import { isSupportedModel, supportedModelIds } from '../ai/models.js';
+// Local operations on stored JSON — zod only, no Anthropic SDK in this graph.
+// `MappingLibrary.repair` loads the agent on demand.
+import type { MappingLibrary } from '../ai/library.js';
+import type { AiRunLog } from '../core/ai-runs.js';
 import { RADIO_MODES, readRadioMode, writeRadioMode, type RadioBudget, type RadioMode } from '../core/radio.js';
+import type { MqttObserver } from '../core/mqtt-observer.js';
+import { MAX_WINDOW_SECONDS, type PermitJoinService } from '../core/permit-join.js';
 import { readZigbeeProblem, type ZigbeeProblem } from '../adapters/zigbee/diagnosis.js';
 import { deviceWire } from './dto.js';
 import { extractToken, requireMember, requireOwner } from './auth.js';
-import { attachWebSocket } from './ws.js';
+import { attachWebSocket, MemberSessions, UNAUTHORIZED_CLOSE_CODE } from './ws.js';
 
 export interface ApiDeps {
   db: Db;
@@ -50,6 +56,19 @@ export interface ApiDeps {
   radioBudget: RadioBudget;
   /** Zigbee2MQTT's data directory — read only to say *why* Zigbee is down. */
   z2mDataDir: string;
+  /**
+   * The broker tap behind the apps' traffic inspector. Absent when the MQTT
+   * adapter is off, in which case the `mqtt` WebSocket stream is simply not
+   * advertised — the socket says what it can offer rather than failing a
+   * subscription the client had no way to know about.
+   */
+  mqttObserver?: MqttObserver;
+  /** Owns the Zigbee join window and its countdown. */
+  permitJoin: PermitJoinService;
+  /** What the mapping agent did — one row per run. */
+  aiRuns: AiRunLog;
+  /** Every device model this hub knows how to interpret. */
+  mappings: MappingLibrary;
 }
 
 interface CommissionJob {
@@ -71,6 +90,9 @@ const PAIR_WINDOW_MS = 5 * 60 * 1000;
  * device names already allow; a name is a label in a list, not a sentence.
  */
 const memberNameSchema = z.string().trim().min(1).max(80);
+
+/** A device model's identity in the mapping library: a sha256 hex digest. */
+const hashParam = z.object({ exposesHash: z.string().regex(/^[0-9a-f]{64}$/) });
 
 /**
  * The hub's local API: REST under /api/v1 plus a WebSocket event stream.
@@ -98,6 +120,26 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   const authed = { preHandler: [requireMember(deps.pairing)] };
   const ownerOnly = { preHandler: [requireMember(deps.pairing), requireOwner] };
   const commissionJobs = new Map<string, CommissionJob>();
+  /**
+   * Who is holding a live event stream, so removing them can hang it up.
+   *
+   * Owned by the server rather than injected: the sockets belong to this
+   * instance, and a registry outliving it would be a registry of dead ones.
+   */
+  const sessions = new MemberSessions();
+
+  /**
+   * Why an explicitly requested agent run must not start, or `null` to go
+   * ahead. Two reasons, and they need different words in the app: a hub with
+   * no credential has never been able to do this, while one whose owner turned
+   * adaptation off is being obeyed.
+   */
+  const aiUnavailableReason = async (): Promise<'ai_not_configured' | 'ai_disabled' | null> => {
+    const ai = await deps.settings.getAiSettings();
+    if (!ai.hasKey) return 'ai_not_configured';
+    if (!ai.enabled) return 'ai_disabled';
+    return null;
+  };
 
   /** Forget finished commissioning jobs; the map used to grow for the uptime. */
   const forgetJobLater = (jobId: string) => {
@@ -162,16 +204,21 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   const zigbeeStatus = () => {
     const enabled = deps.zigbee !== undefined;
     const connected = deps.zigbee?.connected ?? false;
+    // Whether the network is open belongs on the health check, not only on the
+    // event stream: an app that reconnects, or that has just been opened, has
+    // no other way to learn it and used to draw a "Close Network" button over
+    // a network that closed minutes earlier.
+    const permitJoin = deps.permitJoin.state;
     if (!enabled || connected) {
       problemCache = undefined;
-      return { enabled, connected };
+      return { enabled, connected, permitJoin };
     }
     const now = Date.now();
     if (problemCache === undefined || now - problemCache.at > PROBLEM_TTL_MS) {
       problemCache = { at: now, problem: readZigbeeProblem(deps.z2mDataDir) };
     }
     const { problem } = problemCache;
-    return { enabled, connected, ...(problem !== undefined ? { problem } : {}) };
+    return { enabled, connected, permitJoin, ...(problem !== undefined ? { problem } : {}) };
   };
 
   app.get('/api/v1/hub', async () => ({
@@ -362,6 +409,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (device.adapter !== 'zigbee' || !deps.zigbee) {
       return reply.code(409).send({ error: 'remap_only_for_zigbee' });
     }
+    // Off means off, including when a person asks by hand. Saying so is what
+    // keeps an app from drawing a button whose only outcome is silence.
+    const refusal = await aiUnavailableReason();
+    if (refusal) return reply.code(409).send({ error: refusal });
     const ok = await deps.zigbee.remap(device.externalId);
     return { requested: ok };
   });
@@ -397,12 +448,25 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     return job;
   });
 
+  /**
+   * Open (or close, with 0) the Zigbee network for joining.
+   *
+   * The ceiling used to be 254 — the most a *single* grant can last, which is
+   * a fact about the Zigbee protocol rather than about what a person needs.
+   * `PermitJoinService` makes a longer window out of several grants, so the
+   * limit here is a policy one: long enough to walk to a device and reset it,
+   * short enough that "open forever" is never an accident.
+   *
+   * The reply reports the *live* window, not the request, because Zigbee2MQTT
+   * may already have had one open.
+   */
   app.post('/api/v1/zigbee/permit-join', ownerOnly, async (request, reply) => {
     if (!deps.zigbee) return reply.code(409).send({ error: 'zigbee_disabled' });
-    const body = z.object({ seconds: z.number().int().min(0).max(254) }).parse(request.body);
-    await deps.zigbee.permitJoin(body.seconds);
-    deps.events.emit('permitJoin', body.seconds > 0, body.seconds);
-    return { permitJoin: body.seconds > 0, seconds: body.seconds };
+    const body = z
+      .object({ seconds: z.number().int().min(0).max(MAX_WINDOW_SECONDS) })
+      .parse(request.body);
+    const state = await deps.permitJoin.open(body.seconds);
+    return { permitJoin: state.active, seconds: state.remainingSeconds };
   });
 
   // ── Members, invites, activity ───────────────────────────────────────────
@@ -450,14 +514,71 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     return { id: before.id, name: body.name, role: before.role };
   });
 
+  /**
+   * Leave the home — the mirror of `PATCH /members/me`, and `me` for the same
+   * reason: the token is the identity, and most callers never learn their own
+   * id. Any member may do it, because leaving is the one decision about a
+   * member that is entirely their own.
+   *
+   * The owner may not. There is no ownership transfer, so a home whose owner
+   * walked out is one nobody can ever invite to, remove from, or configure
+   * again — the same refusal, in the same words, as removing the owner by id.
+   * An owner who is finished with a hub is finished with the hub, and that is
+   * `gethome-hubctl` on the machine, not a route.
+   */
+  app.delete('/api/v1/members/me', authed, async (request, reply) => {
+    const member = request.member!;
+    if (member.role === 'owner') return reply.code(409).send({ error: 'cannot_remove_owner' });
+    await deps.db.delete(members).where(eq(members.id, member.id));
+    await endMembership(member.id, `${member.name} left the home.`, 'member.left');
+    return reply.code(204).send();
+  });
+
   app.delete('/api/v1/members/:id', ownerOnly, async (request, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     const target = await deps.db.query.members.findFirst({ where: eq(members.id, id) });
     if (!target) return reply.code(404).send({ error: 'not_found' });
     if (target.role === 'owner') return reply.code(409).send({ error: 'cannot_remove_owner' });
     await deps.db.delete(members).where(eq(members.id, id));
+    await endMembership(
+      target.id,
+      `${request.member!.name} removed ${target.name} from the home.`,
+      'member.removed',
+    );
     return reply.code(204).send();
   });
+
+  /**
+   * Finish ending a membership: hang up on the member, then write it down.
+   *
+   * **Sockets first, and that ordering is the point.** Deleting the row takes
+   * the member's tokens with it (`tokens.member_id` cascades, and this hub
+   * runs with `foreign_keys = ON`), which ends every REST call they can
+   * make — but a WebSocket authorizes once, when it opens, so the connection
+   * they are already holding would have carried on streaming device state
+   * until it happened to drop. `sessions.revoke` closes it with the same code
+   * an unauthorized socket gets, because it means the same thing and clients
+   * already know to stop reconnecting on it. Doing that *before* the activity
+   * record is what stops the departing member receiving, as their last frame,
+   * the announcement of their own departure.
+   *
+   * The entry carries **no `memberId`**, deliberately twice over.
+   * `activity.member_id` is a foreign key, so naming a member who has just
+   * been deleted fails the insert outright — and naming one about to be
+   * deleted would be nulled by the cascade a moment later anyway. And a
+   * departure is the one entry whose subject can never be looked up
+   * afterwards, so the name belongs in the sentence, which is where a person
+   * reading the log next week will look for it.
+   */
+  async function endMembership(
+    memberId: string,
+    message: string,
+    kind: 'member.left' | 'member.removed',
+  ) {
+    const closed = sessions.revoke(memberId);
+    if (closed > 0) deps.log.info({ memberId, closed }, 'Closed event streams for a former member');
+    await deps.activity.record({ kind, message });
+  }
 
   app.get('/api/v1/invites', ownerOnly, async () => {
     const rows = await deps.db.query.invites.findMany();
@@ -533,9 +654,130 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     return aiSettingsResponse();
   });
 
+  /**
+   * Turn AI adaptation on or off, or change the model, without re-entering the
+   * key.
+   *
+   * `PUT` requires an `apiKey`, so the only way to stop the agent running used
+   * to be `DELETE` — which is a different request. "Stop spending my money on
+   * this for now" and "forget my credential" have very different costs to
+   * undo, and an owner who wanted the first had to pay the second.
+   */
+  app.patch('/api/v1/settings/ai', ownerOnly, async (request) => {
+    const body = z
+      .object({
+        enabled: z.boolean().optional(),
+        model: z
+          .string()
+          .min(1)
+          .max(120)
+          .refine(isSupportedModel, {
+            message: `unsupported model — the mapping agent runs on: ${supportedModelIds().join(', ')}`,
+          })
+          .nullable()
+          .optional(),
+      })
+      .parse(request.body);
+    if (body.enabled !== undefined) await deps.settings.setAiEnabled(body.enabled);
+    if (body.model !== undefined) await deps.settings.setAiModel(body.model);
+    return aiSettingsResponse();
+  });
+
   app.delete('/api/v1/settings/ai', ownerOnly, async (_request, reply) => {
     await deps.settings.clearAiSettings();
     return reply.code(204).send();
+  });
+
+  /**
+   * What the mapping agent did, most recent first.
+   *
+   * Owner-only because it names device models and costs money, and because
+   * `GET /settings/ai` — the other half of the same answer — already is.
+   */
+  app.get('/api/v1/ai/runs', ownerOnly, async (request) => {
+    const query = z
+      .object({ limit: z.coerce.number().int().min(1).max(100).default(30) })
+      .parse(request.query);
+    const rows = await deps.aiRuns.list(query.limit);
+    return rows.map((row) => ({
+      id: row.id,
+      at: row.at.toISOString(),
+      kind: row.kind,
+      adapter: row.adapter,
+      vendor: row.vendor,
+      model: row.model,
+      exposesHash: row.exposesHash,
+      modelId: row.modelId,
+      ok: row.ok,
+      costUsd: row.costUsd,
+      turns: row.turns,
+      durationMs: row.durationMs,
+      errorKind: row.errorKind,
+      errorMessage: row.errorMessage,
+      steps: row.steps,
+    }));
+  });
+
+  // ── The device-mapping library ───────────────────────────────────────────
+
+  /**
+   * Every device model this hub knows how to interpret.
+   *
+   * The cache behind it has existed since AI adaptation shipped, and was
+   * invisible: there was no way to see what the hub had learned, to carry it
+   * to another hub, or to fix an entry that was nearly right. These five
+   * routes are that, and only `repair` needs a credential.
+   */
+  app.get('/api/v1/device-mappings', ownerOnly, async () => deps.mappings.list());
+
+  app.get('/api/v1/device-mappings/:exposesHash', ownerOnly, async (request, reply) => {
+    const { exposesHash } = hashParam.parse(request.params);
+    const envelope = await deps.mappings.get(exposesHash);
+    if (!envelope) return reply.code(404).send({ error: 'not_found' });
+    return envelope;
+  });
+
+  /**
+   * Upload a mapping for one device model.
+   *
+   * A document that fails validation is a **422 with the reasons**, not a 400:
+   * the request was well-formed and the hub understood it perfectly: what it
+   * refused was the content. It is also stored, so `…/repair` can hand it to
+   * the agent along with exactly what was wrong — the difference between a
+   * dead end and a step.
+   */
+  app.put('/api/v1/device-mappings/:exposesHash', ownerOnly, async (request, reply) => {
+    const { exposesHash } = hashParam.parse(request.params);
+    const outcome = await deps.mappings.import(exposesHash, request.body);
+    if (!outcome.ok) {
+      return reply.code(422).send({
+        error: 'invalid_mapping',
+        problems: outcome.problems,
+        ...(outcome.issues ? { issues: outcome.issues } : {}),
+      });
+    }
+    return outcome;
+  });
+
+  app.delete('/api/v1/device-mappings/:exposesHash', ownerOnly, async (request, reply) => {
+    const { exposesHash } = hashParam.parse(request.params);
+    const removed = await deps.mappings.remove(exposesHash);
+    if (!removed) return reply.code(404).send({ error: 'not_found' });
+    return reply.code(204).send();
+  });
+
+  app.post('/api/v1/device-mappings/:exposesHash/repair', ownerOnly, async (request, reply) => {
+    const { exposesHash } = hashParam.parse(request.params);
+    const refusal = await aiUnavailableReason();
+    if (refusal) return reply.code(409).send({ error: refusal });
+    const outcome = await deps.mappings.repair(exposesHash);
+    if (!outcome.ok) {
+      return reply.code(outcome.reason === 'nothing_to_repair' ? 409 : 422).send({
+        error: outcome.reason,
+        message: outcome.message,
+      });
+    }
+    return outcome;
   });
 
   /**
@@ -575,16 +817,16 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // Subscribe synchronously, before the async token check, so an event
     // fired the moment the socket opens is buffered instead of lost in the
     // gap between "connected" and "authorized".
-    const handle = attachWebSocket(socket, deps);
+    const handle = attachWebSocket(socket, deps, sessions);
     void (async () => {
       const token = extractToken(request);
       const member = token ? await deps.pairing.verifyToken(token) : null;
       if (!member) {
         handle.close();
-        socket.close(4001, 'unauthorized');
+        socket.close(UNAUTHORIZED_CLOSE_CODE, 'unauthorized');
         return;
       }
-      handle.authorize();
+      handle.authorize(member.id);
     })();
   });
 

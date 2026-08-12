@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { integer, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 /**
  * The hub's store is a single SQLite file (`<data>/hub.db`).
@@ -62,6 +62,16 @@ export const devices = sqliteTable(
     online: integer('online', { mode: 'boolean' }).notNull().default(true),
     /** Set when automatic (static or AI) mapping was incomplete. */
     needsReview: integer('needs_review', { mode: 'boolean' }).notNull().default(false),
+    /**
+     * How this device came to be understood — `DeviceRecognition` as JSON.
+     *
+     * `needsReview` is the *verdict* and was the only thing recorded, so the
+     * apps could say "something is missing" and never which layer had placed
+     * the device or which properties were left over. Kept on the row rather
+     * than asked of the adapter, so it survives a restart and costs no
+     * round-trip on `GET /devices`.
+     */
+    recognition: text('recognition', { mode: 'json' }),
     createdAt: createdAt(),
   },
   (table) => [uniqueIndex('devices_adapter_external_id').on(table.adapter, table.externalId)],
@@ -140,11 +150,59 @@ export const aiMappings = sqliteTable(
     descriptor: text('descriptor', { mode: 'json' }).notNull(),
     /** generated | verified | rejected */
     status: text('status').notNull().default('generated'),
+    /**
+     * Where the descriptor came from: `ai` (the mapping agent) or `imported`
+     * (a file somebody uploaded). Separate from `status`, which says whether
+     * it is *usable* — an imported descriptor can be rejected and an
+     * AI-generated one can be perfect, and the apps need to say which is which
+     * when they offer to have the agent repair it.
+     */
+    source: text('source').notNull().default('ai'),
+    /** Why a rejected descriptor was rejected — `string[]` as JSON. Kept so a
+     *  failed import can be explained, and handed to the agent to repair. */
+    problems: text('problems', { mode: 'json' }),
     provider: text('provider'),
     createdAt: createdAt(),
+    /**
+     * Nullable, and it has to be: SQLite cannot `ADD COLUMN … NOT NULL`
+     * without a SQL-level default, and drizzle's `$defaultFn` runs in JS. Null
+     * on a row written before this column existed, which reads correctly as
+     * "never touched since" — callers fall back to `createdAt`.
+     */
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' }),
   },
   (table) => [uniqueIndex('ai_mappings_adapter_hash').on(table.adapter, table.exposesHash)],
 );
+
+/**
+ * What the mapping agent did, one row per run.
+ *
+ * A *summary*, never a transcript: the searches it made, the pages it read,
+ * what it submitted and why that was refused. Enough for an owner to see where
+ * their money went and why a device is or isn't understood, without storing
+ * model prose on an SD card. Pruned to `RETAIN_RUNS` — see `core/ai-runs.ts`.
+ */
+export const aiRuns = sqliteTable('ai_runs', {
+  id: uuidPk(),
+  at: createdAt('at'),
+  /** map | repair */
+  kind: text('kind').notNull(),
+  adapter: text('adapter').notNull(),
+  vendor: text('vendor'),
+  model: text('model'),
+  exposesHash: text('exposes_hash').notNull(),
+  /** Which Claude model ran it. */
+  modelId: text('model_id'),
+  /** Whether the run produced a mapping the hub accepted. */
+  ok: integer('ok', { mode: 'boolean' }).notNull().default(false),
+  costUsd: real('cost_usd'),
+  turns: integer('turns'),
+  durationMs: integer('duration_ms'),
+  errorKind: text('error_kind'),
+  errorMessage: text('error_message'),
+  /** `AgentStep[]` as JSON. */
+  steps: text('steps', { mode: 'json' }).notNull(),
+});
 
 /**
  * Key-value settings. AI provider keys are stored here encrypted with the

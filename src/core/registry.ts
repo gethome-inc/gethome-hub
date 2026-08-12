@@ -6,6 +6,7 @@ import type {
   AdapterBus,
   AdapterDeviceDescriptor,
   AdapterId,
+  DeviceRecognition,
   ProtocolAdapter,
 } from '../adapters/adapter.js';
 import {
@@ -31,6 +32,8 @@ export interface RegistryDevice {
   favorite: boolean;
   online: boolean;
   needsReview: boolean;
+  /** How this device was placed, and what was left over — see AdapterBus. */
+  recognition: DeviceRecognition | null;
   endpoints: RegistryEndpoint[];
 }
 
@@ -131,6 +134,7 @@ export class DeviceRegistry implements AdapterBus {
         favorite: row.favorite,
         online: row.online,
         needsReview: row.needsReview,
+        recognition: (row.recognition as DeviceRecognition | null) ?? null,
         endpoints: (byDevice.get(row.id) ?? []).map((endpoint) => ({
           endpointId: endpoint.endpointId,
           deviceKind: endpoint.deviceKind as DeviceKind,
@@ -475,6 +479,7 @@ export class DeviceRegistry implements AdapterBus {
         model: descriptor.model ?? null,
         name,
         needsReview: descriptor.needsReview ?? false,
+        recognition: descriptor.recognition ?? null,
       })
       .onConflictDoNothing()
       .returning();
@@ -490,6 +495,7 @@ export class DeviceRegistry implements AdapterBus {
       favorite: row.favorite,
       online: row.online,
       needsReview: row.needsReview,
+      recognition: descriptor.recognition ?? null,
       endpoints: [],
     };
     for (const endpoint of descriptor.endpoints) {
@@ -532,9 +538,15 @@ export class DeviceRegistry implements AdapterBus {
     device.vendor = descriptor.vendor ?? device.vendor;
     device.model = descriptor.model ?? device.model;
     device.needsReview = descriptor.needsReview ?? false;
+    device.recognition = descriptor.recognition ?? null;
     await this.db
       .update(devices)
-      .set({ vendor: device.vendor, model: device.model, needsReview: device.needsReview })
+      .set({
+        vendor: device.vendor,
+        model: device.model,
+        needsReview: device.needsReview,
+        recognition: device.recognition,
+      })
       .where(eq(devices.id, device.id));
 
     for (const incoming of descriptor.endpoints) {

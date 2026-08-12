@@ -11,6 +11,9 @@ import { ActivityService } from '../src/core/activity.js';
 import { PairingService } from '../src/core/pairing.js';
 import { SettingsService } from '../src/core/settings.js';
 import { DeviceRegistry } from '../src/core/registry.js';
+import { PermitJoinService } from '../src/core/permit-join.js';
+import { AiRunLog } from '../src/core/ai-runs.js';
+import { MappingLibrary } from '../src/ai/library.js';
 import type { AdapterBus, ProtocolAdapter } from '../src/adapters/adapter.js';
 import type { HubCommand } from '../src/schema/index.js';
 import { bootedHome, openTestDb, resetDb } from './helpers/db.js';
@@ -56,6 +59,7 @@ describe.skipIf(!handle)('hub API', () => {
     registry = new DeviceRegistry(db, events, activity, log);
     registry.registerAdapter(adapter);
     await registry.start();
+    const settings = new SettingsService(db, Buffer.alloc(32).toString('base64'));
     app = await buildServer({
       db,
       log,
@@ -63,7 +67,7 @@ describe.skipIf(!handle)('hub API', () => {
       registry,
       pairing,
       activity,
-      settings: new SettingsService(db, Buffer.alloc(32).toString('base64')),
+      settings,
       hubId: 'hub-test-1234',
       home: await bootedHome(db, 'Test Hub'),
       version: '0.1.0-test',
@@ -74,6 +78,12 @@ describe.skipIf(!handle)('hub API', () => {
       // Nothing there to read, which is the ordinary state for a hub with no
       // coordinator — and must stay silent rather than becoming an error.
       z2mDataDir: path.join(dataDir, 'zigbee2mqtt'),
+      // No radio, so it reports a closed window and publishes nothing.
+      permitJoin: new PermitJoinService(undefined, log, () => {}),
+      aiRuns: new AiRunLog(db, events),
+      // No Zigbee adapter: the library still lists, stores and deletes, which
+      // is the point — none of that needs a radio or a credential.
+      mappings: new MappingLibrary({ db, settings, registry, log }),
     });
     await app.ready();
   });
@@ -197,6 +207,89 @@ describe.skipIf(!handle)('hub API', () => {
       payload: { name: 'Mallory' },
     });
     expect(anonymous.statusCode).toBe(401);
+  });
+
+  // Both removal routes, against members minted for the purpose: the suite's
+  // own `memberToken` is what every later test authenticates with, and a test
+  // that revoked it would fail the rest of the file rather than itself.
+  it('lets a member leave, and an owner remove somebody — taking their token with them', async () => {
+    // Leaving: their own decision, so their own token is enough.
+    const leaver = await join('Kolya');
+    const left = await app.inject({
+      method: 'DELETE',
+      url: '/api/v1/members/me',
+      headers: auth(leaver.token),
+    });
+    expect(left.statusCode).toBe(204);
+    // The token went with the row — this is the whole point of removing
+    // somebody, and it rests on the tokens cascade.
+    const afterLeaving = await app.inject({
+      method: 'GET',
+      url: '/api/v1/members',
+      headers: auth(leaver.token),
+    });
+    expect(afterLeaving.statusCode).toBe(401);
+
+    // Removing: the owner's call, by id.
+    const removed = await join('Masha');
+    const gone = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/members/${removed.member.id}`,
+      headers: auth(ownerToken),
+    });
+    expect(gone.statusCode).toBe(204);
+    expect(
+      (
+        await app.inject({
+          method: 'GET',
+          url: '/api/v1/devices',
+          headers: auth(removed.token),
+        })
+      ).statusCode,
+    ).toBe(401);
+
+    // A member cannot remove another member, and the owner cannot be removed
+    // by anyone — including itself, by either route.
+    expect(
+      (
+        await app.inject({
+          method: 'DELETE',
+          url: `/api/v1/members/${removed.member.id}`,
+          headers: auth(memberToken),
+        })
+      ).statusCode,
+    ).toBe(403);
+    expect(
+      (
+        await app.inject({ method: 'DELETE', url: '/api/v1/members/me', headers: auth(ownerToken) })
+      ).statusCode,
+    ).toBe(409);
+
+    const owner = (
+      await app.inject({ method: 'GET', url: '/api/v1/members', headers: auth(ownerToken) })
+    ).json() as Array<{ id: string; isSelf: boolean }>;
+    const ownerRow = owner.find((row) => row.isSelf)!;
+    expect(
+      (
+        await app.inject({
+          method: 'DELETE',
+          url: `/api/v1/members/${ownerRow.id}`,
+          headers: auth(ownerToken),
+        })
+      ).statusCode,
+    ).toBe(409);
+
+    // Both departures are in the log, named — the row they describe is gone,
+    // so the sentence is the only place the name survives. The entry carries
+    // no `memberId` for that reason, and recording one would fail the insert.
+    const feed = (
+      await app.inject({ method: 'GET', url: '/api/v1/activity', headers: auth(ownerToken) })
+    ).json() as Array<{ kind: string; message: string; memberId?: string | null }>;
+    expect(feed.find((row) => row.kind === 'member.left')?.message).toBe('Kolya left the home.');
+    expect(feed.find((row) => row.kind === 'member.removed')?.message).toBe(
+      'Georgy removed Masha from the home.',
+    );
+    expect(feed.find((row) => row.kind === 'member.left')?.memberId ?? null).toBeNull();
   });
 
   it('serves devices announced by adapters in the wire shape', async () => {
@@ -389,12 +482,129 @@ describe.skipIf(!handle)('hub API', () => {
       provider: 'anthropic',
       model: null,
       hasKey: true,
+      // On unless the owner has said otherwise, so saving a key is enough.
+      enabled: true,
       legacySubscriptionToken: false,
       status: {},
     });
     expect(JSON.stringify(body)).not.toContain('sk-ant');
 
     const denied = await app.inject({ method: 'GET', url: '/api/v1/settings/ai', headers: auth(memberToken) });
+    expect(denied.statusCode).toBe(403);
+  });
+
+  it('switches adaptation off without asking for the key again', async () => {
+    await app.inject({
+      method: 'PUT',
+      url: '/api/v1/settings/ai',
+      headers: auth(ownerToken),
+      payload: { apiKey: 'sk-ant-test-1234567890' },
+    });
+
+    const patched = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(ownerToken),
+      payload: { enabled: false },
+    });
+    expect(patched.statusCode).toBe(200);
+    const body = patched.json() as { enabled: boolean; hasKey: boolean };
+    // Off, and the credential is still there — those are different requests.
+    expect(body).toMatchObject({ enabled: false, hasKey: true });
+  });
+
+  it('refuses an agent run while adaptation is switched off, and says so', async () => {
+    await app.inject({
+      method: 'PUT',
+      url: '/api/v1/settings/ai',
+      headers: auth(ownerToken),
+      payload: { apiKey: 'sk-ant-test-1234567890' },
+    });
+    await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(ownerToken),
+      payload: { enabled: false },
+    });
+    const hash = 'f'.repeat(64);
+    await app.inject({
+      method: 'PUT',
+      url: `/api/v1/device-mappings/${hash}`,
+      headers: auth(ownerToken),
+      payload: { version: 1, endpoints: [{ endpointId: 1 }] },
+    });
+
+    const repair = await app.inject({
+      method: 'POST',
+      url: `/api/v1/device-mappings/${hash}/repair`,
+      headers: auth(ownerToken),
+    });
+
+    // Not the same refusal as "no key": the hub has a credential and is
+    // declining to use it, and an app has to be able to tell a person which
+    // of the two they need to change.
+    expect(repair.statusCode).toBe(409);
+    expect((repair.json() as { error: string }).error).toBe('ai_disabled');
+
+    await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(ownerToken),
+      payload: { enabled: true },
+    });
+  });
+
+  it('rejects an uploaded mapping with the reasons, not a bare 400', async () => {
+    const hash = 'd'.repeat(64);
+    const bad = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/device-mappings/${hash}`,
+      headers: auth(ownerToken),
+      payload: { version: 1, endpoints: [{ endpointId: 1 }] },
+    });
+
+    // 422, not 400: the request was well-formed and understood — what was
+    // refused is the content, and the difference is what tells an app to offer
+    // a repair rather than blame the upload.
+    expect(bad.statusCode).toBe(422);
+    const body = bad.json() as { error: string; problems: string[] };
+    expect(body.error).toBe('invalid_mapping');
+    expect(body.problems.length).toBeGreaterThan(0);
+
+    // Kept, so the repair route has something to work from.
+    const listed = (await app.inject({
+      method: 'GET',
+      url: '/api/v1/device-mappings',
+      headers: auth(ownerToken),
+    })).json() as Array<{ exposesHash: string; status: string }>;
+    expect(listed.find((entry) => entry.exposesHash === hash)?.status).toBe('rejected');
+  });
+
+  it('will not repair a mapping without a credential, and says which of the two is missing', async () => {
+    await app.inject({ method: 'DELETE', url: '/api/v1/settings/ai', headers: auth(ownerToken) });
+    const hash = 'e'.repeat(64);
+    await app.inject({
+      method: 'PUT',
+      url: `/api/v1/device-mappings/${hash}`,
+      headers: auth(ownerToken),
+      payload: { version: 1, endpoints: [{ endpointId: 1 }] },
+    });
+
+    const repair = await app.inject({
+      method: 'POST',
+      url: `/api/v1/device-mappings/${hash}/repair`,
+      headers: auth(ownerToken),
+    });
+    expect(repair.statusCode).toBe(409);
+    expect((repair.json() as { error: string }).error).toBe('ai_not_configured');
+  });
+
+  it('keeps the mapping library to the owner', async () => {
+    const denied = await app.inject({
+      method: 'GET',
+      url: '/api/v1/device-mappings',
+      headers: auth(memberToken),
+    });
     expect(denied.statusCode).toBe(403);
   });
 
@@ -525,6 +735,165 @@ describe.skipIf(!handle)('hub API', () => {
     expect(frames[0]).toMatchObject({ type: 'hello', hubId: 'hub-test-1234' });
     const stateFrame = frames.find((frame) => frame.type === 'state') as { state: { onOff: boolean } };
     expect(stateFrame.state.onOff).toBe(false);
+  });
+
+  /** Mint a throwaway member, so a test can revoke one without revoking the suite's. */
+  async function join(name: string): Promise<{ token: string; member: { id: string } }> {
+    const invite = await app.inject({
+      method: 'POST',
+      url: '/api/v1/invites',
+      headers: auth(ownerToken),
+    });
+    const { code } = invite.json() as { code: string };
+    const paired = await app.inject({
+      method: 'POST',
+      url: '/api/v1/pair',
+      payload: { code, memberName: name },
+    });
+    return paired.json() as { token: string; member: { id: string } };
+  }
+
+  /** Open an authorized socket and collect its frames. */
+  async function openSocket(token: string = ownerToken): Promise<{
+    socket: WebSocket;
+    frames: Array<Record<string, unknown>>;
+    waitFor: (type: string) => Promise<Record<string, unknown>>;
+  }> {
+    // Harmless when an earlier test already bound it; this keeps each test
+    // standing on its own rather than on declaration order.
+    await app.listen({ port: 0, host: '127.0.0.1' }).catch(() => undefined);
+    const address = app.server.address();
+    if (address === null || typeof address === 'string') throw new Error('no address');
+    const socket = new WebSocket(`ws://127.0.0.1:${address.port}/api/v1/ws?token=${token}`);
+    const frames: Array<Record<string, unknown>> = [];
+    const waiters: Array<{ type: string; resolve: (frame: Record<string, unknown>) => void }> = [];
+    socket.on('message', (data) => {
+      const frame = JSON.parse(String(data)) as Record<string, unknown>;
+      frames.push(frame);
+      for (const waiter of [...waiters]) {
+        if (waiter.type !== frame.type) continue;
+        waiters.splice(waiters.indexOf(waiter), 1);
+        waiter.resolve(frame);
+      }
+    });
+    const waitFor = (type: string) =>
+      new Promise<Record<string, unknown>>((resolve, reject) => {
+        const existing = frames.find((frame) => frame.type === type);
+        if (existing) return resolve(existing);
+        const timer = setTimeout(() => reject(new Error(`timed out waiting for ${type}`)), 5000);
+        waiters.push({
+          type,
+          resolve: (frame) => {
+            clearTimeout(timer);
+            resolve(frame);
+          },
+        });
+      });
+    await waitFor('hello');
+    return { socket, frames, waitFor };
+  }
+
+  // The half a token cascade cannot do on its own. A socket authorizes once,
+  // when it opens, so a removed member's REST access ended immediately while
+  // the stream they were already holding carried on.
+  it('hangs up the event stream a removed member is already holding', async () => {
+    const doomed = await join('Vitya');
+    const { socket, frames } = await openSocket(doomed.token);
+
+    const closedWith = new Promise<number>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('the socket was never closed')), 5000);
+      socket.on('close', (code) => {
+        clearTimeout(timer);
+        resolve(code);
+      });
+    });
+
+    const removed = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/members/${doomed.member.id}`,
+      headers: auth(ownerToken),
+    });
+    expect(removed.statusCode).toBe(204);
+
+    // 4001 — the same code an unauthorized socket gets, because it means the
+    // same thing and clients already know to stop reconnecting on it rather
+    // than retrying a token that will never work again.
+    expect(await closedWith).toBe(4001);
+
+    // And the last thing they heard was not the announcement of their own
+    // removal: the sockets go before the activity record is written.
+    expect(frames.some((frame) => frame.type === 'activity')).toBe(false);
+  });
+
+  it('advertises which optional streams this hub can offer', async () => {
+    const { socket, waitFor } = await openSocket();
+    const hello = await waitFor('hello');
+
+    // This server is built without an MQTT observer, so the traffic inspector
+    // is not on offer — and the socket says so rather than leaving a client to
+    // infer it from the hub's version.
+    expect(hello.streams).toEqual(['zigbee', 'ai']);
+    socket.close();
+  });
+
+  it('sends optional-stream events only to a socket that asked for them', async () => {
+    const { socket, frames, waitFor } = await openSocket();
+
+    events.emit('zigbeeEvent', { at: new Date().toISOString(), type: 'joined', ieee: '0xabc' });
+    // An always-on event emitted after it: if the opt-in frame were being
+    // delivered anyway, it would already be in `frames` by the time this
+    // arrives, because both travel the same socket in emit order.
+    adapter.bus!.stateChanged('mqtt', 'lamp-1', 1, { onOff: true });
+    await waitFor('state');
+
+    expect(frames.some((frame) => frame.type === 'zigbeeEvent')).toBe(false);
+    socket.close();
+  });
+
+  it('delivers the Zigbee stream once subscribed, and reports what it refused', async () => {
+    const { socket, waitFor } = await openSocket();
+    socket.send(JSON.stringify({ type: 'subscribe', streams: ['zigbee', 'mqtt', 'nonsense'] }));
+
+    const ack = await waitFor('subscribed');
+    expect(ack.streams).toEqual(['zigbee']);
+    // Asked for, but this hub has no broker tap to give.
+    expect(ack.unavailable).toEqual(['mqtt']);
+
+    events.emit('zigbeeEvent', {
+      at: new Date().toISOString(),
+      type: 'interviewing',
+      ieee: '0xabc',
+      name: 'porch sensor',
+    });
+    const event = (await waitFor('zigbeeEvent')) as { event: { type: string; name: string } };
+    expect(event.event).toMatchObject({ type: 'interviewing', name: 'porch sensor' });
+
+    socket.close();
+  });
+
+  it('stops delivering a stream that was unsubscribed', async () => {
+    const { socket, frames, waitFor } = await openSocket();
+    socket.send(JSON.stringify({ type: 'subscribe', streams: ['zigbee'] }));
+    await waitFor('subscribed');
+
+    socket.send(JSON.stringify({ type: 'unsubscribe', streams: ['zigbee'] }));
+    // The second ack: an empty stream list.
+    await new Promise<void>((resolve) => {
+      const check = () => {
+        const acks = frames.filter((frame) => frame.type === 'subscribed');
+        if (acks.length >= 2) return resolve();
+        setTimeout(check, 20);
+      };
+      check();
+    });
+
+    events.emit('zigbeeEvent', { at: new Date().toISOString(), type: 'left', ieee: '0xabc' });
+    adapter.bus!.stateChanged('mqtt', 'lamp-1', 1, { onOff: false });
+    const before = frames.filter((frame) => frame.type === 'zigbeeEvent').length;
+    await waitFor('state');
+
+    expect(frames.filter((frame) => frame.type === 'zigbeeEvent')).toHaveLength(before);
+    socket.close();
   });
 
   it('rejects unauthorized WebSocket connections', async () => {

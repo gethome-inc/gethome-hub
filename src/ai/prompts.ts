@@ -135,7 +135,13 @@ a search.
 without a submission produced nothing. If submit_mapping returns errors, fix the descriptor and call it again; a \
 successful submission ends your task.
 - Map this device, and stop there. Don't propose changes to the hub, to the canonical schema, or to how other \
-devices are handled.`;
+devices are handled.
+
+What you are given is always one physical device's published schema: its exposes tree and its own recent reports. \
+It is never the hub's own traffic — never a bridge message, a permit-join request, a broker log line, a status \
+document or a command the hub sent. If what you were handed does not describe a physical device with parameters to \
+map, do not invent a mapping for it: say so in your reply and submit nothing. A descriptor about something that is \
+not a device would be cached against a model that does not exist.`;
 
 /**
  * The device's page on zigbee2mqtt.io, if we can name it.
@@ -163,6 +169,53 @@ export function zigbee2mqttDevicePage(model: string | null | undefined): string 
  *  and to catch values the exposes tree understates; bounded because every
  *  one of them is input tokens on every turn of the run. */
 const MAX_SAMPLES = 5;
+
+/** How much of a rejected descriptor is worth handing back. Large enough for a
+ *  real multi-endpoint document, small enough that a runaway one can't fill a
+ *  turn with something that was invalid anyway. */
+const MAX_BROKEN_DESCRIPTOR_CHARS = 20_000;
+
+/**
+ * Ask the agent to fix a descriptor the hub refused.
+ *
+ * The case this exists for is a person uploading a mapping they wrote, or
+ * copied from a device one firmware revision away: nearly right, and rejected
+ * on a detail they cannot read out of a zod issue path. Handing the document
+ * *and the exact complaints* back is far cheaper than a fresh run — the
+ * research is already in the file — and it is what turns "rejected" from a
+ * dead end into a step.
+ *
+ * The same system prompt and the same `submit_mapping` tool: this differs from
+ * a first mapping only in what the task message says, so a rule added to one
+ * cannot go missing from the other.
+ */
+export function buildRepairUserPrompt(
+  device: Z2mDevice,
+  staticProfile: Z2mProfile,
+  broken: unknown,
+  problems: string[],
+): string {
+  const vendor = device.definition?.vendor ?? 'unknown';
+  const model = device.definition?.model ?? 'unknown';
+  const document = JSON.stringify(broken, null, 1).slice(0, MAX_BROKEN_DESCRIPTOR_CHARS);
+  return [
+    buildMappingUserPrompt(device, staticProfile, []),
+    '',
+    '# A MappingDescriptor for this device that the hub refused',
+    'Somebody supplied this. Treat it as a draft worth saving, not as a starting point to discard: it may carry ' +
+      'knowledge of the device that the exposes tree does not. Keep everything in it that is right.',
+    document,
+    '',
+    '# Why the hub refused it',
+    ...problems.map((problem) => `- ${problem}`),
+    '',
+    '# Your task',
+    `Fix the descriptor above so it passes, and submit the corrected document for ${vendor} ${model} with the ` +
+      'submit_mapping tool. Change what the complaints name and what is genuinely wrong beside it; do not rewrite ' +
+      'the parts that were already correct. If a rule cannot be repaired because it maps a property that does not ' +
+      'exist on this device, drop that rule rather than inventing a property to justify it.',
+  ].join('\n');
+}
 
 export function buildMappingUserPrompt(
   device: Z2mDevice,

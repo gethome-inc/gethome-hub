@@ -9,6 +9,7 @@ import { ActivityService } from '../src/core/activity.js';
 import { PairingService } from '../src/core/pairing.js';
 import { SettingsService } from '../src/core/settings.js';
 import { DeviceRegistry } from '../src/core/registry.js';
+import { PermitJoinService } from '../src/core/permit-join.js';
 import { bootedHome, openTestDb } from './helpers/db.js';
 
 /**
@@ -70,6 +71,7 @@ describe.skipIf(!handle)('why Zigbee is down, over HTTP', () => {
       radioBudget: 'one',
       z2mDataDir,
       zigbee: fakeZigbee(options.connected),
+      permitJoin: new PermitJoinService(undefined, log, () => {}),
     });
     await server.ready();
     const body = (await server.inject({ method: 'GET', url: '/api/v1/hub' })).json() as HubBody;

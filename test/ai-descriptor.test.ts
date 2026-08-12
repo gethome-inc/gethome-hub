@@ -372,7 +372,7 @@ describe.skipIf(!handle)('AiDeviceMapper', () => {
   beforeEach(async () => {
     await resetDb(db);
     settingsService = new SettingsService(db, Buffer.alloc(32).toString('base64'));
-    mapper = new AiDeviceMapper(db, settingsService, pino({ level: 'silent' }), { dataDir });
+    mapper = new AiDeviceMapper(db, settingsService, pino({ level: 'silent' }));
     generate = vi.fn().mockResolvedValue(soilDescriptor);
     mapper.providerOverride = { generate };
   });

@@ -370,10 +370,60 @@ Subscribed topics (base topic `zigbee2mqtt`, configurable via
 
 | Topic | Use |
 |---|---|
-| `zigbee2mqtt/bridge/devices` | retained device registry incl. `definition.exposes` — the schema source |
+| `zigbee2mqtt/bridge/devices` | retained device registry incl. `definition.exposes` — the schema source, and the **only** thing that adopts a device |
 | `zigbee2mqtt/bridge/state` | Z2M health |
+| `zigbee2mqtt/bridge/event` | a device joining, being interviewed, or leaving — relayed, never acted on |
+| `zigbee2mqtt/bridge/info` | the live permit-join window (`permit_join`, `permit_join_end`) |
 | `zigbee2mqtt/<friendly_name>` | state payloads |
 | `zigbee2mqtt/<friendly_name>/availability` | online/offline |
+
+`bridge/devices` lists a device only once its **interview has finished**, so
+without `bridge/event` the whole of pairing — the minute somebody is standing
+next to a device holding a paperclip in a reset hole — produced no output at
+all. The adapter normalizes those events into the hub's own vocabulary
+(`joined`, `announced`, `interviewing`, `interviewed`, `interview-failed`,
+`left`) in `src/core/zigbee-events.ts` and emits them on the `zigbee`
+WebSocket stream; only the *failure* and the *departure* are also written to
+the activity log, because the rest is transient and the adapter already writes
+a `zigbee.joined` row once the device is adopted.
+
+### What a new device is called
+
+Zigbee2MQTT names a freshly joined device **after its own IEEE address**, so
+`friendly_name` is `0x54ef44100047c1bf` until somebody opens Z2M's frontend and
+renames it there — which is exactly the errand this project exists to remove.
+Passing it through unchanged is what put eighteen characters of hex on the tile
+in the app, reading as a hub that had failed to recognise the device when it had
+in fact mapped every one of its exposes.
+
+`suggestedNameFor()` therefore names it from the rest of the same record, in
+order: `definition.description` (upstream writes a short human one for every
+device it supports — "Smart plug EU"), then `vendor` + `model`, then the address
+if the record says nothing else at all. The last four hex digits ride along,
+because two units of one model would otherwise be two identical rows with no way
+to tell them apart.
+
+It is deliberately **not** the device kind. "Outlet" is already a line of its own
+in the apps, and a name repeating it says nothing about *which* outlet this is.
+
+Two names always outrank it: one somebody chose in Zigbee2MQTT, and the owner's
+own — `suggestedName` is read on the registry's insert only, never over an
+existing row.
+
+Two fields say whether that interview finished, and both are read:
+Zigbee2MQTT 2.x replaced the boolean `interview_completed` with the four-valued
+`interview_state`, so a version publishing only the new one made
+`interview_completed === false` read `undefined === false` and adopted devices
+mid-interview with whatever partial definition the bridge had at that instant.
+
+**Everything else on the broker is visible but inert.** `MqttObserver`
+(`src/core/mqtt-observer.ts`) subscribes to `#` for the apps' traffic
+inspector — including `bridge/logging`, which is where Zigbee2MQTT publishes
+its own log — but it is reference-counted, connects only while a client is
+watching, writes nothing to disk, and is **not an input to anything**: device
+adoption reads `bridge/devices` and the AI mapper reads a device entry, and
+neither can see this. See `docs/api.md` ("Opt-in streams") and
+`docs/ai-adaptation.md` ("What can reach the agent, and what cannot").
 
 Published topics:
 
@@ -381,8 +431,24 @@ Published topics:
 |---|---|
 | `zigbee2mqtt/<friendly_name>/set` | commands (translated from canonical intents) |
 | `zigbee2mqtt/<friendly_name>/get` | state refresh after join |
-| `zigbee2mqtt/bridge/request/permit_join` | open/close the network |
+| `zigbee2mqtt/bridge/request/permit_join` | open/close the network, `{"time": <0–254>}` |
 | `zigbee2mqtt/bridge/request/device/remove` | forget a device |
+
+### The join window is several grants
+
+A permit-join duration travels as a **uint8 of seconds**, so 254 is the most a
+single grant can last — a fact about the Zigbee protocol, not about
+Zigbee2MQTT. `PermitJoinService` (`src/core/permit-join.ts`) makes a longer
+window out of repeated grants, sizing the last one to expire *on* the deadline
+rather than past it: a window that stayed open for three minutes after the
+countdown the owner was shown reached zero would be worse than not offering one.
+
+Zigbee2MQTT is the authority, not that timer. `bridge/info` reports what the
+coordinator is actually doing, so a window opened from Z2M's own UI is adopted
+and a `permit_join: false` newer than our last grant closes ours whatever we
+intended — it knows about restarts and radio failures and the hub does not. It
+fails closed: a hub that restarts mid-window leaves at most one grant running
+and nothing renews it.
 
 Devices are keyed by IEEE address, so Z2M friendly-name changes don't
 duplicate devices. The hub keeps its own device names — it never renames

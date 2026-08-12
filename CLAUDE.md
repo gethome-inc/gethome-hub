@@ -134,6 +134,101 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
 
 ## Conventions that bite if missed
 
+- **Observing is not an input, and the wall is in the code.** The hub can show
+  an app everything on its broker (`core/mqtt-observer.ts`, behind the opt-in
+  `mqtt` WebSocket stream), and none of it reaches device adoption or the AI
+  mapper. Adoption reads the retained `bridge/devices` registry; the agent's
+  only input is one device's entry from it plus that device's own recent
+  payloads. Permit-join requests, `bridge/logging`, bridge status and the hub's
+  own commands are not devices — `notDeviceShaped()` in `src/ai/mapper.ts`
+  refuses anything without an IEEE address and a published schema, refuses the
+  coordinator, and refuses a `bridge/…` name, and the system prompt says the
+  same thing so a run that somehow received one refuses rather than inventing a
+  mapping for a model that does not exist. `test/ai-boundary.test.ts` pins it.
+  **`ai_enabled` is the owner's switch and is deliberately not the credential**:
+  "stop spending my money on this for now" and "forget my API key" have very
+  different costs to undo, and deleting the key used to be the only way to ask
+  for the first. It defaults to on (a hub configured before it existed is
+  unchanged), is checked in `lazy.ts` beside `hasKey` so the module is not even
+  imported, and again in `resolveProvider()` for a mapper somebody constructed
+  directly. An explicit run answers `409 ai_disabled`, which is a *different*
+  refusal from `409 ai_not_configured` because an app has to say which of the
+  two a person needs to change.
+- **Watching costs nothing when nobody is watching.** `MqttObserver` is
+  reference-counted: it opens no broker connection, holds no buffer and makes
+  no wildcard subscription until a client subscribes, and lets go a minute
+  after the last one leaves — long enough that switching screens and back does
+  not clear the log. Nothing it sees is written down, because traffic is a
+  stream a person watches rather than a record, and one row per sensor report
+  onto an SD card is what the registry's `STATE_FLUSH_MS` debounce exists to
+  avoid. Its buffer is bounded in **bytes as well as rows**: 300 sensor reports
+  are a few kilobytes while one `bridge/devices` on a large network is
+  hundreds — counted with `Buffer.byteLength`, not `String.length`, which is
+  UTF-16 units and under-reports a Cyrillic-named network by up to three times.
+  **A cut payload says how much was cut.** The per-message limit was 2 KB and
+  landed in the middle of the useful range: a device report is a few hundred
+  bytes and `bridge/info`, `bridge/event` and `bridge/health` are one to three
+  kilobytes, so the cap fell on messages that had only just become interesting.
+  It is 8 KB, which clears all of those whole and still cuts the two retained
+  registries — `bridge/devices` and `bridge/definitions` are reference data
+  rather than traffic, and holding one costs a Zero 2 W real memory on a
+  subscription that exists to be looked at. Frames therefore carry
+  `payloadBytes` (the whole message's size) beside `truncated`, so an app says
+  "8 KB of 341 KB" instead of asserting a constant from this repository — and
+  the cut lands on a **character**, via `StringDecoder`, because
+  `subarray().toString('utf8')` splits a multi-byte sequence and puts `U+FFFD`
+  on the end of every Cyrillic or CJK name. Nothing but the inspector ever sees
+  a cut payload: the adapters hold their own broker connections.
+  The same rule governs `src/api/ws.ts` — the `mqtt`, `zigbee` and
+  `ai` streams are opt-in, so a socket that never subscribes never has a
+  listener attached and the iOS app is untouched; `hello` advertises what the
+  hub can offer so a client never infers it from a version number; and frames
+  are rate-limited per socket with the losses *reported*, since a gap nobody is
+  told about is worse than a gap.
+- **A join window is several grants, and Zigbee2MQTT is the authority.** A
+  permit-join duration travels as a uint8 of seconds, so **254 is the most one
+  grant can last** — a protocol fact, not a Z2M one. `core/permit-join.ts`
+  re-issues, and sizes the last grant to expire *on* the deadline rather than
+  past it: a network left open for three minutes after the countdown the owner
+  was shown reached zero is worse than not offering a countdown. `bridge/info`
+  (`permit_join`, `permit_join_end`) overrules our own timer, because it knows
+  about restarts and radio failures and we don't, and a window opened from
+  Z2M's own UI is adopted rather than reported as closed. It fails closed. The
+  route's old ceiling of 254 was a protocol fact masquerading as a policy; the
+  limit is 900 now, and `GET /hub` carries `zigbee.permitJoin` because a client
+  that has just connected has no other way to learn the state — which is how
+  GetHome Studio came to draw "Close Network" over a network that had shut two
+  minutes earlier.
+- **Two bridge topics are relayed; the rest are still dropped.**
+  `bridge/devices` lists a device only once its interview *finishes*, so
+  without `bridge/event` the whole of pairing produced no output at all, and
+  `bridge/info` is the join window above. The translation into the hub's
+  vocabulary lives in `core/zigbee-events.ts` with a **type-only** import of
+  the adapter, so adapters still see nothing but `AdapterBus` and the module
+  stays out of a Matter-only hub's graph. Only the *failure* and the
+  *departure* are written to the activity log — the rest is transient and the
+  adapter already writes `zigbee.joined` on adoption, so recording every step
+  would put two rows saying "joined" in a log meant to be read a week later.
+  Read **both** `interview_completed` and `interview_state`: Z2M 2.x replaced
+  the first with the second, so `interview_completed === false` read
+  `undefined === false` on current installs and adopted devices mid-interview.
+- **The AI cache is a library now, and a rejection is a step.** `ai_mappings`
+  has always made the second device of a model free; what was missing was any
+  way to see it, carry it to another hub, or fix an entry that was nearly
+  right. `src/ai/library.ts` adds five routes, and only `repair` needs a
+  credential — listing, downloading, uploading and deleting are local
+  operations on stored JSON, and gating them on a key would be the same mistake
+  as gating the static mapper on one. Three rules: the download is an
+  **envelope**, because a bare descriptor does not say which device it is for,
+  and the upload accepts either; a mismatched `exposesHash` is **accepted and
+  flagged**, since a mapping from a neighbouring firmware revision is the case
+  this exists for; and a refused document is a **422 with the reasons and is
+  kept**, because "invalid, try again" is a dead end for somebody who cannot
+  read a zod issue path — `repair` hands the draft and the complaints back to
+  the agent, bypassing the cache, since a `rejected` row is exactly what it is
+  fixing. `exposesHash` lives with the exposes mapper, not with the AI: it is a
+  property of the device's published schema, and the adapter records it in
+  `DeviceRecognition` without importing the AI stack.
 - **Nothing is unsupported by default — three layers, in order.** Devices are
   made usable by (1) **typed capabilities** (canonical schema), then (2)
   **generic custom fields** (`custom`) for every leftover parameter, generated
@@ -150,6 +245,19 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   fan mode 0–5, airQuality 0–6. The wire format (field names included) is a
   compatibility contract with the iOS app — never change it without
   versioning the API (`apiVersion` in `GET /hub`).
+- **A device's `friendly_name` is its address until somebody renames it, so it
+  is not a name.** Zigbee2MQTT names a newly joined device after its own IEEE —
+  `friendly_name: "0x54ef44100047c1bf"` — and passing that through as
+  `suggestedName` put eighteen characters of hex on the tile in the GetHome app,
+  which reads as a hub that failed to recognise the device. It hadn't: the same
+  `bridge/devices` record carried a full `exposes` schema, a vendor, a model and
+  upstream's own one-line description, all mapped correctly. `suggestedNameFor()`
+  prefers that description ("Smart plug EU"), then vendor + model, and appends
+  the last four hex digits because two units of one model would otherwise be two
+  identical rows. Not the device *kind* ("Outlet") — the apps already show that
+  on its own line, and repeating it says nothing about which plug this is. Two
+  names always win over it: one somebody set in Z2M, and the owner's, since
+  `insertDevice` writes this on the insert only and never over an existing row.
 - Zigbee2MQTT conversions to watch: cover position is **inverted** (Z2M
   100 = open), temperatures ×100, power W → mW, energy kWh → mWh, hue/sat
   degrees/percent → 0–254 cluster units. `action` enums parse through
@@ -198,6 +306,24 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   member row with nothing to click on. This is what lets GetHome Studio — which
   has no accounts and no user name of its own — claim as *the Mac* and offer
   the rename afterwards.
+- **Ending a membership has two halves, and only one of them is the database.**
+  Deleting a member takes their tokens with the row (`tokens.member_id`
+  cascades, `foreign_keys = ON`), which ends every REST call they can make. It
+  does nothing to the WebSocket they are *already* holding: a socket authorizes
+  once, when it opens, so the stream carried on until the connection happened
+  to drop — a hub restart, a Wi-Fi blip, possibly days. `MemberSessions`
+  (`src/api/ws.ts`) is the registry that closes it, and `endMembership` in
+  `server.ts` is the one path both removal routes go through. Three rules.
+  **Sockets before the log write**, or the departing member's last frame is the
+  announcement of their own departure. **`UNAUTHORIZED_CLOSE_CODE` (4001) is
+  reused rather than joined by a sibling** — it already means "this token is no
+  good", clients already stop reconnecting on it, and a second code would have
+  every existing client retry a token that will never work again; it is a
+  cross-repo contract with Studio's `HubSocket` and the iOS `HubClient`.
+  And **registration is scoped to the socket's life** — `authorize` adds,
+  the close handler removes — so the map holds one entry per open connection
+  and none per closed one. `test/api.test.ts` opens a real socket, removes its
+  member, and asserts both the close code and the silence.
 - **One hub, one home, one name — and `HUB_NAME` only seeds it.** There used to
   be two names: `GET /hub` answered `HUB_NAME` from `/etc/gethome/hub.env`,
   which the installer writes once and nobody ever edits, while `GET /home`

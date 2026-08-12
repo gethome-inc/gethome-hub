@@ -11,6 +11,7 @@ import { ActivityService } from '../../src/core/activity.js';
 import { PairingService } from '../../src/core/pairing.js';
 import { SettingsService } from '../../src/core/settings.js';
 import { DeviceRegistry } from '../../src/core/registry.js';
+import { PermitJoinService } from '../../src/core/permit-join.js';
 import { ZigbeeAdapter } from '../../src/adapters/zigbee/adapter.js';
 import { MqttAdapter } from '../../src/adapters/mqtt/adapter.js';
 import { bootedHome, openTestDb, resetDb } from '../helpers/db.js';
@@ -102,6 +103,7 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
       home: await bootedHome(db, 'E2E Hub'),
       version: 'e2e',
       zigbee,
+      permitJoin: new PermitJoinService(zigbee, log, () => {}),
     });
     await app.ready();
 
