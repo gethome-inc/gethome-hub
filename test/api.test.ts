@@ -209,6 +209,104 @@ describe.skipIf(!handle)('hub API', () => {
     expect(anonymous.statusCode).toBe(401);
   });
 
+  // Both removal routes, against members minted for the purpose: the suite's
+  // own `memberToken` is what every later test authenticates with, and a test
+  // that revoked it would fail the rest of the file rather than itself.
+  it('lets a member leave, and an owner remove somebody — taking their token with them', async () => {
+    const join = async (name: string) => {
+      const invite = await app.inject({
+        method: 'POST',
+        url: '/api/v1/invites',
+        headers: auth(ownerToken),
+      });
+      const { code } = invite.json() as { code: string };
+      const paired = await app.inject({
+        method: 'POST',
+        url: '/api/v1/pair',
+        payload: { code, memberName: name },
+      });
+      return (paired.json() as { token: string; member: { id: string } });
+    };
+
+    // Leaving: their own decision, so their own token is enough.
+    const leaver = await join('Kolya');
+    const left = await app.inject({
+      method: 'DELETE',
+      url: '/api/v1/members/me',
+      headers: auth(leaver.token),
+    });
+    expect(left.statusCode).toBe(204);
+    // The token went with the row — this is the whole point of removing
+    // somebody, and it rests on the tokens cascade.
+    const afterLeaving = await app.inject({
+      method: 'GET',
+      url: '/api/v1/members',
+      headers: auth(leaver.token),
+    });
+    expect(afterLeaving.statusCode).toBe(401);
+
+    // Removing: the owner's call, by id.
+    const removed = await join('Masha');
+    const gone = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/members/${removed.member.id}`,
+      headers: auth(ownerToken),
+    });
+    expect(gone.statusCode).toBe(204);
+    expect(
+      (
+        await app.inject({
+          method: 'GET',
+          url: '/api/v1/devices',
+          headers: auth(removed.token),
+        })
+      ).statusCode,
+    ).toBe(401);
+
+    // A member cannot remove another member, and the owner cannot be removed
+    // by anyone — including itself, by either route.
+    expect(
+      (
+        await app.inject({
+          method: 'DELETE',
+          url: `/api/v1/members/${removed.member.id}`,
+          headers: auth(memberToken),
+        })
+      ).statusCode,
+    ).toBe(403);
+    expect(
+      (
+        await app.inject({ method: 'DELETE', url: '/api/v1/members/me', headers: auth(ownerToken) })
+      ).statusCode,
+    ).toBe(409);
+
+    const owner = (
+      await app.inject({ method: 'GET', url: '/api/v1/members', headers: auth(ownerToken) })
+    ).json() as Array<{ id: string; isSelf: boolean }>;
+    const ownerRow = owner.find((row) => row.isSelf)!;
+    expect(
+      (
+        await app.inject({
+          method: 'DELETE',
+          url: `/api/v1/members/${ownerRow.id}`,
+          headers: auth(ownerToken),
+        })
+      ).statusCode,
+    ).toBe(409);
+
+    // Both departures are in the log, named — the row they describe is gone,
+    // so the sentence is the only place the name survives. The entry carries
+    // no `memberId` for that reason, and recording one would fail the insert.
+    const feed = (
+      await app.inject({ method: 'GET', url: '/api/v1/activity', headers: auth(ownerToken) })
+    ).json() as Array<{ kind: string; message: string; memberId?: string | null }>;
+    expect(feed.find((row) => row.kind === 'member.left')?.message).toBe('Kolya left the home.');
+    expect(feed.find((row) => row.kind === 'member.removed')?.message).toBe(
+      'Georgy removed Masha from the home.',
+    );
+    expect(feed.find((row) => row.kind === 'member.left')?.memberId ?? null).toBeNull();
+  });
+
   it('serves devices announced by adapters in the wire shape', async () => {
     adapter.bus!.deviceUpserted({
       adapter: 'mqtt',

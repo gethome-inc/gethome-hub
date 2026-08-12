@@ -507,14 +507,60 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     return { id: before.id, name: body.name, role: before.role };
   });
 
+  /**
+   * Leave the home — the mirror of `PATCH /members/me`, and `me` for the same
+   * reason: the token is the identity, and most callers never learn their own
+   * id. Any member may do it, because leaving is the one decision about a
+   * member that is entirely their own.
+   *
+   * The owner may not. There is no ownership transfer, so a home whose owner
+   * walked out is one nobody can ever invite to, remove from, or configure
+   * again — the same refusal, in the same words, as removing the owner by id.
+   * An owner who is finished with a hub is finished with the hub, and that is
+   * `gethome-hubctl` on the machine, not a route.
+   */
+  app.delete('/api/v1/members/me', authed, async (request, reply) => {
+    const member = request.member!;
+    if (member.role === 'owner') return reply.code(409).send({ error: 'cannot_remove_owner' });
+    await deps.db.delete(members).where(eq(members.id, member.id));
+    await recordDeparture(`${member.name} left the home.`, 'member.left');
+    return reply.code(204).send();
+  });
+
   app.delete('/api/v1/members/:id', ownerOnly, async (request, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     const target = await deps.db.query.members.findFirst({ where: eq(members.id, id) });
     if (!target) return reply.code(404).send({ error: 'not_found' });
     if (target.role === 'owner') return reply.code(409).send({ error: 'cannot_remove_owner' });
     await deps.db.delete(members).where(eq(members.id, id));
+    await recordDeparture(
+      `${request.member!.name} removed ${target.name} from the home.`,
+      'member.removed',
+    );
     return reply.code(204).send();
   });
+
+  /**
+   * Write a departure into the log — after the row is gone, and **without a
+   * `memberId`**.
+   *
+   * Two things make that not an oversight. `activity.member_id` is a foreign
+   * key and this hub runs with `foreign_keys = ON`, so naming a member who has
+   * just been deleted fails the insert outright — and naming one who is about
+   * to be would be nulled out by the cascade a moment later anyway. And a
+   * departure is the one entry whose subject cannot be looked up afterwards,
+   * so the name belongs in the sentence, which is where a person reading the
+   * log next week will look for it.
+   *
+   * Deleting the row takes the member's tokens with it (`tokens.member_id`
+   * cascades), which is what actually ends their access. One bound worth
+   * knowing: a WebSocket they already hold is authorized and stays connected
+   * until it drops — it can still receive state, though every REST call,
+   * command included, is refused from this moment.
+   */
+  async function recordDeparture(message: string, kind: 'member.left' | 'member.removed') {
+    await deps.activity.record({ kind, message });
+  }
 
   app.get('/api/v1/invites', ownerOnly, async () => {
     const rows = await deps.db.query.invites.findMany();
