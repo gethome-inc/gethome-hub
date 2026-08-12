@@ -7,10 +7,76 @@ import { deviceWire } from './dto.js';
 
 /** Controls a subscribed-but-not-yet-authorized WebSocket. */
 export interface WebSocketHandle {
-  /** Send the hello frame plus any events buffered during auth, then go live. */
-  authorize(): void;
+  /**
+   * Send the hello frame plus any events buffered during auth, then go live.
+   *
+   * Takes the member because the socket has to be findable again: a member who
+   * is removed has to lose the connection they are already holding, not just
+   * the next one they open.
+   */
+  authorize(memberId: string): void;
   /** Drop all listeners without ever sending a frame (auth failed). */
   close(): void;
+}
+
+/**
+ * What the hub closes a socket with when the token behind it is no good.
+ *
+ * **A cross-repo contract.** GetHome Studio reads this code to tell "the hub
+ * refused us" from "the network hiccuped" and stops reconnecting on it, which
+ * is the correct behaviour for both cases it covers: a token that never
+ * authenticated, and one that has stopped counting because its member is gone.
+ * Reconnecting cannot fix either, and inventing a second code for the second
+ * case would make every existing client retry it for ever.
+ */
+export const UNAUTHORIZED_CLOSE_CODE = 4001;
+
+/**
+ * The live authorized sockets, by member.
+ *
+ * Authorization happens once, when a socket opens, so without this a member
+ * removed from the home kept the connection they already had: every REST call
+ * refused from the moment their row went, while device state carried on
+ * streaming down a socket nobody could close. The gap closed whenever the
+ * connection happened to drop — a hub restart, a Wi-Fi blip — which is to say,
+ * unpredictably and possibly not for days.
+ *
+ * Registration is scoped to the socket's own life: `authorize` adds and the
+ * `close` handler removes, so a hub that has been up for a month holds one
+ * entry per connection that is actually open and none per connection that
+ * isn't.
+ */
+export class MemberSessions {
+  private readonly byMember = new Map<string, Set<() => void>>();
+
+  register(memberId: string, revoke: () => void): void {
+    const existing = this.byMember.get(memberId);
+    if (existing) existing.add(revoke);
+    else this.byMember.set(memberId, new Set([revoke]));
+  }
+
+  forget(memberId: string, revoke: () => void): void {
+    const existing = this.byMember.get(memberId);
+    if (!existing) return;
+    existing.delete(revoke);
+    if (existing.size === 0) this.byMember.delete(memberId);
+  }
+
+  /**
+   * Close every socket this member holds. Returns how many, for the log.
+   *
+   * The set is copied before iterating: each `revoke` removes its own entry as
+   * the socket tears down, and mutating a `Set` mid-iteration is how you skip
+   * half of it.
+   */
+  revoke(memberId: string): number {
+    const sockets = this.byMember.get(memberId);
+    if (!sockets) return 0;
+    const closing = [...sockets];
+    for (const close of closing) close();
+    this.byMember.delete(memberId);
+    return closing.length;
+  }
 }
 
 /** Streams a client can ask for beyond the always-on events. */
@@ -67,9 +133,15 @@ const MAX_CLIENT_MESSAGE_BYTES = 4096;
  * A `subscribe` that arrives before authorization is held and applied then —
  * a client that sends it immediately must not be silently ignored.
  */
-export function attachWebSocket(socket: WebSocket, deps: ApiDeps): WebSocketHandle {
+export function attachWebSocket(
+  socket: WebSocket,
+  deps: ApiDeps,
+  sessions: MemberSessions,
+): WebSocketHandle {
   let authorized = false;
   let closed = false;
+  /** Whose socket this is, once it is authorized — the registry key. */
+  let memberId: string | null = null;
   const backlog: string[] = [];
   const send = (frame: Record<string, unknown>) => {
     const data = JSON.stringify(frame);
@@ -211,9 +283,26 @@ export function attachWebSocket(socket: WebSocket, deps: ApiDeps): WebSocketHand
     }
   });
 
+  /**
+   * Hang up on this socket because its member is gone.
+   *
+   * Listeners come off first: closing a WebSocket is not instant, and a frame
+   * fired in the meantime must not reach somebody who has just been removed.
+   */
+  const revoke = () => {
+    detach();
+    if (socket.readyState === socket.OPEN) {
+      socket.close(UNAUTHORIZED_CLOSE_CODE, 'membership ended');
+    }
+  };
+
   const detach = () => {
     if (closed) return;
     closed = true;
+    if (memberId !== null) {
+      sessions.forget(memberId, revoke);
+      memberId = null;
+    }
     deps.events.off('stateChanged', onState);
     deps.events.off('deviceUpserted', onUpserted);
     deps.events.off('deviceRemoved', onRemoved);
@@ -233,9 +322,13 @@ export function attachWebSocket(socket: WebSocket, deps: ApiDeps): WebSocketHand
   socket.on('close', detach);
 
   return {
-    authorize() {
-      if (authorized) return;
+    authorize(id: string) {
+      // A socket that has already gone must not register: `detach` has run, so
+      // nothing would ever take the entry back out again.
+      if (authorized || closed) return;
       authorized = true;
+      memberId = id;
+      sessions.register(id, revoke);
       if (socket.readyState !== socket.OPEN) return;
       // Read at send time, not captured at attach: the name can change under a
       // socket that is already open, and the next client to connect must be

@@ -209,6 +209,89 @@ describe.skipIf(!handle)('hub API', () => {
     expect(anonymous.statusCode).toBe(401);
   });
 
+  // Both removal routes, against members minted for the purpose: the suite's
+  // own `memberToken` is what every later test authenticates with, and a test
+  // that revoked it would fail the rest of the file rather than itself.
+  it('lets a member leave, and an owner remove somebody — taking their token with them', async () => {
+    // Leaving: their own decision, so their own token is enough.
+    const leaver = await join('Kolya');
+    const left = await app.inject({
+      method: 'DELETE',
+      url: '/api/v1/members/me',
+      headers: auth(leaver.token),
+    });
+    expect(left.statusCode).toBe(204);
+    // The token went with the row — this is the whole point of removing
+    // somebody, and it rests on the tokens cascade.
+    const afterLeaving = await app.inject({
+      method: 'GET',
+      url: '/api/v1/members',
+      headers: auth(leaver.token),
+    });
+    expect(afterLeaving.statusCode).toBe(401);
+
+    // Removing: the owner's call, by id.
+    const removed = await join('Masha');
+    const gone = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/members/${removed.member.id}`,
+      headers: auth(ownerToken),
+    });
+    expect(gone.statusCode).toBe(204);
+    expect(
+      (
+        await app.inject({
+          method: 'GET',
+          url: '/api/v1/devices',
+          headers: auth(removed.token),
+        })
+      ).statusCode,
+    ).toBe(401);
+
+    // A member cannot remove another member, and the owner cannot be removed
+    // by anyone — including itself, by either route.
+    expect(
+      (
+        await app.inject({
+          method: 'DELETE',
+          url: `/api/v1/members/${removed.member.id}`,
+          headers: auth(memberToken),
+        })
+      ).statusCode,
+    ).toBe(403);
+    expect(
+      (
+        await app.inject({ method: 'DELETE', url: '/api/v1/members/me', headers: auth(ownerToken) })
+      ).statusCode,
+    ).toBe(409);
+
+    const owner = (
+      await app.inject({ method: 'GET', url: '/api/v1/members', headers: auth(ownerToken) })
+    ).json() as Array<{ id: string; isSelf: boolean }>;
+    const ownerRow = owner.find((row) => row.isSelf)!;
+    expect(
+      (
+        await app.inject({
+          method: 'DELETE',
+          url: `/api/v1/members/${ownerRow.id}`,
+          headers: auth(ownerToken),
+        })
+      ).statusCode,
+    ).toBe(409);
+
+    // Both departures are in the log, named — the row they describe is gone,
+    // so the sentence is the only place the name survives. The entry carries
+    // no `memberId` for that reason, and recording one would fail the insert.
+    const feed = (
+      await app.inject({ method: 'GET', url: '/api/v1/activity', headers: auth(ownerToken) })
+    ).json() as Array<{ kind: string; message: string; memberId?: string | null }>;
+    expect(feed.find((row) => row.kind === 'member.left')?.message).toBe('Kolya left the home.');
+    expect(feed.find((row) => row.kind === 'member.removed')?.message).toBe(
+      'Georgy removed Masha from the home.',
+    );
+    expect(feed.find((row) => row.kind === 'member.left')?.memberId ?? null).toBeNull();
+  });
+
   it('serves devices announced by adapters in the wire shape', async () => {
     adapter.bus!.deviceUpserted({
       adapter: 'mqtt',
@@ -654,8 +737,24 @@ describe.skipIf(!handle)('hub API', () => {
     expect(stateFrame.state.onOff).toBe(false);
   });
 
+  /** Mint a throwaway member, so a test can revoke one without revoking the suite's. */
+  async function join(name: string): Promise<{ token: string; member: { id: string } }> {
+    const invite = await app.inject({
+      method: 'POST',
+      url: '/api/v1/invites',
+      headers: auth(ownerToken),
+    });
+    const { code } = invite.json() as { code: string };
+    const paired = await app.inject({
+      method: 'POST',
+      url: '/api/v1/pair',
+      payload: { code, memberName: name },
+    });
+    return paired.json() as { token: string; member: { id: string } };
+  }
+
   /** Open an authorized socket and collect its frames. */
-  async function openSocket(): Promise<{
+  async function openSocket(token: string = ownerToken): Promise<{
     socket: WebSocket;
     frames: Array<Record<string, unknown>>;
     waitFor: (type: string) => Promise<Record<string, unknown>>;
@@ -665,7 +764,7 @@ describe.skipIf(!handle)('hub API', () => {
     await app.listen({ port: 0, host: '127.0.0.1' }).catch(() => undefined);
     const address = app.server.address();
     if (address === null || typeof address === 'string') throw new Error('no address');
-    const socket = new WebSocket(`ws://127.0.0.1:${address.port}/api/v1/ws?token=${ownerToken}`);
+    const socket = new WebSocket(`ws://127.0.0.1:${address.port}/api/v1/ws?token=${token}`);
     const frames: Array<Record<string, unknown>> = [];
     const waiters: Array<{ type: string; resolve: (frame: Record<string, unknown>) => void }> = [];
     socket.on('message', (data) => {
@@ -693,6 +792,38 @@ describe.skipIf(!handle)('hub API', () => {
     await waitFor('hello');
     return { socket, frames, waitFor };
   }
+
+  // The half a token cascade cannot do on its own. A socket authorizes once,
+  // when it opens, so a removed member's REST access ended immediately while
+  // the stream they were already holding carried on.
+  it('hangs up the event stream a removed member is already holding', async () => {
+    const doomed = await join('Vitya');
+    const { socket, frames } = await openSocket(doomed.token);
+
+    const closedWith = new Promise<number>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('the socket was never closed')), 5000);
+      socket.on('close', (code) => {
+        clearTimeout(timer);
+        resolve(code);
+      });
+    });
+
+    const removed = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/members/${doomed.member.id}`,
+      headers: auth(ownerToken),
+    });
+    expect(removed.statusCode).toBe(204);
+
+    // 4001 — the same code an unauthorized socket gets, because it means the
+    // same thing and clients already know to stop reconnecting on it rather
+    // than retrying a token that will never work again.
+    expect(await closedWith).toBe(4001);
+
+    // And the last thing they heard was not the announcement of their own
+    // removal: the sockets go before the activity record is written.
+    expect(frames.some((frame) => frame.type === 'activity')).toBe(false);
+  });
 
   it('advertises which optional streams this hub can offer', async () => {
     const { socket, waitFor } = await openSocket();

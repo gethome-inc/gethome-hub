@@ -306,6 +306,24 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   member row with nothing to click on. This is what lets GetHome Studio — which
   has no accounts and no user name of its own — claim as *the Mac* and offer
   the rename afterwards.
+- **Ending a membership has two halves, and only one of them is the database.**
+  Deleting a member takes their tokens with the row (`tokens.member_id`
+  cascades, `foreign_keys = ON`), which ends every REST call they can make. It
+  does nothing to the WebSocket they are *already* holding: a socket authorizes
+  once, when it opens, so the stream carried on until the connection happened
+  to drop — a hub restart, a Wi-Fi blip, possibly days. `MemberSessions`
+  (`src/api/ws.ts`) is the registry that closes it, and `endMembership` in
+  `server.ts` is the one path both removal routes go through. Three rules.
+  **Sockets before the log write**, or the departing member's last frame is the
+  announcement of their own departure. **`UNAUTHORIZED_CLOSE_CODE` (4001) is
+  reused rather than joined by a sibling** — it already means "this token is no
+  good", clients already stop reconnecting on it, and a second code would have
+  every existing client retry a token that will never work again; it is a
+  cross-repo contract with Studio's `HubSocket` and the iOS `HubClient`.
+  And **registration is scoped to the socket's life** — `authorize` adds,
+  the close handler removes — so the map holds one entry per open connection
+  and none per closed one. `test/api.test.ts` opens a real socket, removes its
+  member, and asserts both the close code and the silence.
 - **One hub, one home, one name — and `HUB_NAME` only seeds it.** There used to
   be two names: `GET /hub` answered `HUB_NAME` from `/etc/gethome/hub.env`,
   which the installer writes once and nobody ever edits, while `GET /home`

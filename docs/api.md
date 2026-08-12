@@ -63,7 +63,7 @@ devices, favorites, view everything.
 | `POST /matter/commission` | owner | `{pairingCode}` → `202 {jobId}` (async) |
 | `GET /matter/commission/:jobId` | any | `{status: running\|done\|failed, nodeId?, error?}` |
 | `POST /zigbee/permit-join` | owner | `{seconds}`, 0–900 (0 = close the network) → `{permitJoin, seconds}` describing the **live** window, which is not always what was asked for. See [below](#the-zigbee-join-window) |
-| `GET /members` · `PATCH /members/me` · `DELETE /members/:id` | any · any (itself) · owner | rows carry `isSelf`; `PATCH` takes `{name}` and renames **the caller**; the owner cannot be removed. See [below](#which-member-you-are-isself-and-patch-membersme) |
+| `GET /members` · `PATCH /members/me` · `DELETE /members/me` · `DELETE /members/:id` | any · any (itself) · any (itself) · owner | rows carry `isSelf`; `PATCH` takes `{name}` and renames **the caller**; `DELETE` on either route answers `204` and revokes that member's tokens; the owner cannot be removed, by anyone or by itself. See [below](#which-member-you-are-isself-and-patch-membersme) |
 | `GET /invites` · `POST /invites` | owner | `POST` → `201 {code, expiresAt}` |
 | `GET /activity?limit=&before=` | any | reverse-chronological, cursor = `before` id |
 | `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | owner | PUT `{apiKey, model?}` (an Anthropic API key, write-only; a `sk-ant-oat…` subscription token and a model outside the supported list are both refused with 400, an `authType` from an older app is ignored). **PATCH `{enabled?, model?}`** changes those without re-entering the key — the switch is deliberately not the credential. All three respond `{provider: "anthropic", model, hasKey, enabled, legacySubscriptionToken, status}`; `enabled` defaults to true and `status` carries `lastError`/`lastRun` health — see [ai-adaptation.md](ai-adaptation.md) |
@@ -210,6 +210,43 @@ An app that lets a device claim a hub should say what that name will be and let
 it be changed later: GetHome Studio, which has no accounts and no user name of
 its own, offers the Mac's own name and renames through this route from the hub
 page.
+
+### Leaving and removing (`DELETE /members/me`, `DELETE /members/:id`)
+
+Both answer `204` and both really do end that member's access, on both
+channels. The row's tokens are deleted with it (`tokens.member_id` cascades,
+and this hub runs with `foreign_keys = ON`), so every later request is a `401`
+— and **any WebSocket that member is already holding is closed**, with code
+`4001`, before the departure is written to the activity log.
+
+That second half is not implied by the first. A socket authorizes once, when
+it opens, so the token cascade alone would have left the connection they
+already had streaming device state until it happened to drop — a hub restart,
+a Wi-Fi blip, possibly days. `4001` is the same code an unauthorized socket
+gets on connect, deliberately: it means the same thing, and a client that
+already stops reconnecting on it needs no change. Closing before the log write
+is what stops a removed member receiving, as their last frame, the
+announcement of their own removal.
+
+`DELETE /members/me` is **leaving**, addressed as `me` for the same reason
+`PATCH` is, and open to any member: whether to stay in somebody's home is the
+one decision about a member that is entirely their own. `DELETE /members/:id`
+is **removal**, and is the owner's.
+
+**The owner can do neither**, to itself or through anyone else — `409
+cannot_remove_owner` from both routes. There is no ownership transfer, so a
+home whose owner left is one nobody can ever invite to, remove from, or
+configure again; an owner finished with a hub is finished with the hub, which
+is `gethome-hubctl` on the machine rather than a route.
+
+Each writes one activity entry — `member.left` or `member.removed` — naming the
+member in the message and carrying **no `memberId`**. That is deliberate twice
+over: `activity.member_id` is a foreign key, so naming a row that has just been
+deleted fails the insert and naming one about to be deleted would be nulled by
+the cascade; and a departure is the one entry whose subject can never be looked
+up afterwards, so the name has to live in the sentence. Clients watching the
+`activity` WebSocket stream get both, which is how a member list stays right
+without polling.
 
 ### Device wire shape (`GET /devices` item)
 
@@ -367,9 +404,13 @@ offer a "copy the payload" that quietly hands over the cut copy. Nothing else in
 the hub sees a cut payload: the adapters hold their own broker connections and
 the observer is a separate, read-only tap.
 
-Unauthorized sockets are closed with code `4001`. Clients should reconnect
-with exponential backoff and re-`GET /devices` after reconnecting (frames may
-have been missed).
+Unauthorized sockets are closed with code `4001`. Clients should reconnect with
+exponential backoff and re-`GET /devices` after reconnecting (frames may have
+been missed) — but **not on `4001`**, which is the hub saying this token is no
+good. It carries two cases and neither is fixed by trying again: a token that
+never authenticated, and one belonging to a member who has since been removed
+or left, whose live socket is closed with the same code the moment their row
+goes. Treat it as a stop, and say so; every other close is worth retrying.
 
 ## Errors
 
