@@ -28,7 +28,7 @@ import { MAX_WINDOW_SECONDS, type PermitJoinService } from '../core/permit-join.
 import { readZigbeeProblem, type ZigbeeProblem } from '../adapters/zigbee/diagnosis.js';
 import { deviceWire } from './dto.js';
 import { extractToken, requireMember, requireOwner } from './auth.js';
-import { attachWebSocket } from './ws.js';
+import { attachWebSocket, MemberSessions, UNAUTHORIZED_CLOSE_CODE } from './ws.js';
 
 export interface ApiDeps {
   db: Db;
@@ -120,6 +120,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   const authed = { preHandler: [requireMember(deps.pairing)] };
   const ownerOnly = { preHandler: [requireMember(deps.pairing), requireOwner] };
   const commissionJobs = new Map<string, CommissionJob>();
+  /**
+   * Who is holding a live event stream, so removing them can hang it up.
+   *
+   * Owned by the server rather than injected: the sockets belong to this
+   * instance, and a registry outliving it would be a registry of dead ones.
+   */
+  const sessions = new MemberSessions();
 
   /**
    * Why an explicitly requested agent run must not start, or `null` to go
@@ -523,7 +530,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const member = request.member!;
     if (member.role === 'owner') return reply.code(409).send({ error: 'cannot_remove_owner' });
     await deps.db.delete(members).where(eq(members.id, member.id));
-    await recordDeparture(`${member.name} left the home.`, 'member.left');
+    await endMembership(member.id, `${member.name} left the home.`, 'member.left');
     return reply.code(204).send();
   });
 
@@ -533,7 +540,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (!target) return reply.code(404).send({ error: 'not_found' });
     if (target.role === 'owner') return reply.code(409).send({ error: 'cannot_remove_owner' });
     await deps.db.delete(members).where(eq(members.id, id));
-    await recordDeparture(
+    await endMembership(
+      target.id,
       `${request.member!.name} removed ${target.name} from the home.`,
       'member.removed',
     );
@@ -541,24 +549,34 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   });
 
   /**
-   * Write a departure into the log — after the row is gone, and **without a
-   * `memberId`**.
+   * Finish ending a membership: hang up on the member, then write it down.
    *
-   * Two things make that not an oversight. `activity.member_id` is a foreign
-   * key and this hub runs with `foreign_keys = ON`, so naming a member who has
-   * just been deleted fails the insert outright — and naming one who is about
-   * to be would be nulled out by the cascade a moment later anyway. And a
-   * departure is the one entry whose subject cannot be looked up afterwards,
-   * so the name belongs in the sentence, which is where a person reading the
-   * log next week will look for it.
+   * **Sockets first, and that ordering is the point.** Deleting the row takes
+   * the member's tokens with it (`tokens.member_id` cascades, and this hub
+   * runs with `foreign_keys = ON`), which ends every REST call they can
+   * make — but a WebSocket authorizes once, when it opens, so the connection
+   * they are already holding would have carried on streaming device state
+   * until it happened to drop. `sessions.revoke` closes it with the same code
+   * an unauthorized socket gets, because it means the same thing and clients
+   * already know to stop reconnecting on it. Doing that *before* the activity
+   * record is what stops the departing member receiving, as their last frame,
+   * the announcement of their own departure.
    *
-   * Deleting the row takes the member's tokens with it (`tokens.member_id`
-   * cascades), which is what actually ends their access. One bound worth
-   * knowing: a WebSocket they already hold is authorized and stays connected
-   * until it drops — it can still receive state, though every REST call,
-   * command included, is refused from this moment.
+   * The entry carries **no `memberId`**, deliberately twice over.
+   * `activity.member_id` is a foreign key, so naming a member who has just
+   * been deleted fails the insert outright — and naming one about to be
+   * deleted would be nulled by the cascade a moment later anyway. And a
+   * departure is the one entry whose subject can never be looked up
+   * afterwards, so the name belongs in the sentence, which is where a person
+   * reading the log next week will look for it.
    */
-  async function recordDeparture(message: string, kind: 'member.left' | 'member.removed') {
+  async function endMembership(
+    memberId: string,
+    message: string,
+    kind: 'member.left' | 'member.removed',
+  ) {
+    const closed = sessions.revoke(memberId);
+    if (closed > 0) deps.log.info({ memberId, closed }, 'Closed event streams for a former member');
     await deps.activity.record({ kind, message });
   }
 
@@ -799,16 +817,16 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // Subscribe synchronously, before the async token check, so an event
     // fired the moment the socket opens is buffered instead of lost in the
     // gap between "connected" and "authorized".
-    const handle = attachWebSocket(socket, deps);
+    const handle = attachWebSocket(socket, deps, sessions);
     void (async () => {
       const token = extractToken(request);
       const member = token ? await deps.pairing.verifyToken(token) : null;
       if (!member) {
         handle.close();
-        socket.close(4001, 'unauthorized');
+        socket.close(UNAUTHORIZED_CLOSE_CODE, 'unauthorized');
         return;
       }
-      handle.authorize();
+      handle.authorize(member.id);
     })();
   });
 

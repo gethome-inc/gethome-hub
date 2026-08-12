@@ -213,13 +213,20 @@ page.
 
 ### Leaving and removing (`DELETE /members/me`, `DELETE /members/:id`)
 
-Both answer `204` and both really do end that member's access: the row's tokens
-are deleted with it (`tokens.member_id` cascades, and this hub runs with
-`foreign_keys = ON`), so every later request from that device is a `401`. One
-bound worth designing around: a WebSocket the member already holds was
-authorized when it opened and stays connected until it drops, so it can still
-*receive* state for a while, while every REST call — commands included — is
-refused from the moment the row goes.
+Both answer `204` and both really do end that member's access, on both
+channels. The row's tokens are deleted with it (`tokens.member_id` cascades,
+and this hub runs with `foreign_keys = ON`), so every later request is a `401`
+— and **any WebSocket that member is already holding is closed**, with code
+`4001`, before the departure is written to the activity log.
+
+That second half is not implied by the first. A socket authorizes once, when
+it opens, so the token cascade alone would have left the connection they
+already had streaming device state until it happened to drop — a hub restart,
+a Wi-Fi blip, possibly days. `4001` is the same code an unauthorized socket
+gets on connect, deliberately: it means the same thing, and a client that
+already stops reconnecting on it needs no change. Closing before the log write
+is what stops a removed member receiving, as their last frame, the
+announcement of their own removal.
 
 `DELETE /members/me` is **leaving**, addressed as `me` for the same reason
 `PATCH` is, and open to any member: whether to stay in somebody's home is the
@@ -397,9 +404,13 @@ offer a "copy the payload" that quietly hands over the cut copy. Nothing else in
 the hub sees a cut payload: the adapters hold their own broker connections and
 the observer is a separate, read-only tap.
 
-Unauthorized sockets are closed with code `4001`. Clients should reconnect
-with exponential backoff and re-`GET /devices` after reconnecting (frames may
-have been missed).
+Unauthorized sockets are closed with code `4001`. Clients should reconnect with
+exponential backoff and re-`GET /devices` after reconnecting (frames may have
+been missed) — but **not on `4001`**, which is the hub saying this token is no
+good. It carries two cases and neither is fixed by trying again: a token that
+never authenticated, and one belonging to a member who has since been removed
+or left, whose live socket is closed with the same code the moment their row
+goes. Treat it as a stop, and say so; every other close is worth retrying.
 
 ## Errors
 

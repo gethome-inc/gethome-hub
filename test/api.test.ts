@@ -213,21 +213,6 @@ describe.skipIf(!handle)('hub API', () => {
   // own `memberToken` is what every later test authenticates with, and a test
   // that revoked it would fail the rest of the file rather than itself.
   it('lets a member leave, and an owner remove somebody — taking their token with them', async () => {
-    const join = async (name: string) => {
-      const invite = await app.inject({
-        method: 'POST',
-        url: '/api/v1/invites',
-        headers: auth(ownerToken),
-      });
-      const { code } = invite.json() as { code: string };
-      const paired = await app.inject({
-        method: 'POST',
-        url: '/api/v1/pair',
-        payload: { code, memberName: name },
-      });
-      return (paired.json() as { token: string; member: { id: string } });
-    };
-
     // Leaving: their own decision, so their own token is enough.
     const leaver = await join('Kolya');
     const left = await app.inject({
@@ -752,8 +737,24 @@ describe.skipIf(!handle)('hub API', () => {
     expect(stateFrame.state.onOff).toBe(false);
   });
 
+  /** Mint a throwaway member, so a test can revoke one without revoking the suite's. */
+  async function join(name: string): Promise<{ token: string; member: { id: string } }> {
+    const invite = await app.inject({
+      method: 'POST',
+      url: '/api/v1/invites',
+      headers: auth(ownerToken),
+    });
+    const { code } = invite.json() as { code: string };
+    const paired = await app.inject({
+      method: 'POST',
+      url: '/api/v1/pair',
+      payload: { code, memberName: name },
+    });
+    return paired.json() as { token: string; member: { id: string } };
+  }
+
   /** Open an authorized socket and collect its frames. */
-  async function openSocket(): Promise<{
+  async function openSocket(token: string = ownerToken): Promise<{
     socket: WebSocket;
     frames: Array<Record<string, unknown>>;
     waitFor: (type: string) => Promise<Record<string, unknown>>;
@@ -763,7 +764,7 @@ describe.skipIf(!handle)('hub API', () => {
     await app.listen({ port: 0, host: '127.0.0.1' }).catch(() => undefined);
     const address = app.server.address();
     if (address === null || typeof address === 'string') throw new Error('no address');
-    const socket = new WebSocket(`ws://127.0.0.1:${address.port}/api/v1/ws?token=${ownerToken}`);
+    const socket = new WebSocket(`ws://127.0.0.1:${address.port}/api/v1/ws?token=${token}`);
     const frames: Array<Record<string, unknown>> = [];
     const waiters: Array<{ type: string; resolve: (frame: Record<string, unknown>) => void }> = [];
     socket.on('message', (data) => {
@@ -791,6 +792,38 @@ describe.skipIf(!handle)('hub API', () => {
     await waitFor('hello');
     return { socket, frames, waitFor };
   }
+
+  // The half a token cascade cannot do on its own. A socket authorizes once,
+  // when it opens, so a removed member's REST access ended immediately while
+  // the stream they were already holding carried on.
+  it('hangs up the event stream a removed member is already holding', async () => {
+    const doomed = await join('Vitya');
+    const { socket, frames } = await openSocket(doomed.token);
+
+    const closedWith = new Promise<number>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('the socket was never closed')), 5000);
+      socket.on('close', (code) => {
+        clearTimeout(timer);
+        resolve(code);
+      });
+    });
+
+    const removed = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/members/${doomed.member.id}`,
+      headers: auth(ownerToken),
+    });
+    expect(removed.statusCode).toBe(204);
+
+    // 4001 — the same code an unauthorized socket gets, because it means the
+    // same thing and clients already know to stop reconnecting on it rather
+    // than retrying a token that will never work again.
+    expect(await closedWith).toBe(4001);
+
+    // And the last thing they heard was not the announcement of their own
+    // removal: the sockets go before the activity record is written.
+    expect(frames.some((frame) => frame.type === 'activity')).toBe(false);
+  });
 
   it('advertises which optional streams this hub can offer', async () => {
     const { socket, waitFor } = await openSocket();
