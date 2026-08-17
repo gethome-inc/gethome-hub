@@ -43,15 +43,16 @@
 #                            machine
 #   @@DONE@@            the install finished successfully
 #
-# The same vocabulary is reused by GetHome Studio's SD-card path, whose
-# first-boot script logs its own two steps before handing over to this
+# The same vocabulary is reused by both of GetHome Studio's install paths. Each
+# writes a small script that logs its own steps before handing over to this
 # installer, and reads the whole log back over SSH:
-#   network    waiting for the Pi to get online
-#   installer  downloading this script
+#   network    waiting for the Pi to get online   (SD-card path only)
+#   installer  downloading this script            (both paths)
 # They are separate on purpose — a Pi that never joined the Wi-Fi and one that
 # joined and was refused the download are different failures with different
-# fixes. Both are step ids in that stream, so don't reuse either here for
-# something else.
+# fixes. The SSH path skips `network` because its preflight has already watched
+# the machine reach the internet. Both are step ids in that stream, so don't
+# reuse either here for something else.
 
 set -euo pipefail
 
