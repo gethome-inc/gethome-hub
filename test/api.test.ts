@@ -421,6 +421,48 @@ describe.skipIf(!handle)('hub API', () => {
     expect(stillPinned.find((device) => device.id === deviceId)?.favorite).toBe(true);
   });
 
+  /**
+   * Both edits are written down with the name of whoever made them — which is
+   * the whole basis for letting any member make them.
+   *
+   * The move entry is the one that needs a test: `updateDevice` mutates the
+   * cached device and hands the *same object* back, so a "did the room
+   * actually change?" check reading it after the call compares the new value
+   * with itself and silently never records anything.
+   */
+  it('writes down who renamed a device and who moved it', async () => {
+    const roomId = (
+      (
+        await app.inject({
+          method: 'POST',
+          url: '/api/v1/rooms',
+          headers: auth(memberToken),
+          payload: { name: 'Study' },
+        })
+      ).json() as { id: string }
+    ).id;
+    const devices = (
+      await app.inject({ method: 'GET', url: '/api/v1/devices', headers: auth(memberToken) })
+    ).json() as Array<{ id: string }>;
+    const deviceId = devices[0]!.id;
+
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/devices/${deviceId}`,
+      headers: auth(memberToken),
+      payload: { name: 'Desk lamp', roomId },
+    });
+
+    const entries = (
+      await app.inject({ method: 'GET', url: '/api/v1/activity', headers: auth(memberToken) })
+    ).json() as Array<{ kind: string; message: string }>;
+    expect(entries.some((entry) => entry.kind === 'device.renamed')).toBe(true);
+    const moved = entries.find((entry) => entry.kind === 'device.moved');
+    expect(moved?.message).toContain('Study');
+    // The name in the sentence is the one it has now, not the one it had.
+    expect(moved?.message).toContain('Desk lamp');
+  });
+
   it('refuses a name of spaces and a room that does not exist', async () => {
     const devices = (
       await app.inject({ method: 'GET', url: '/api/v1/devices', headers: auth(memberToken) })

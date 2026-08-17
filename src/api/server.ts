@@ -594,7 +594,11 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (body.roomId && !(await roomExists(body.roomId))) {
       return reply.code(404).send({ error: 'unknown_room' });
     }
+    // Copied out *now*, because `updateDevice` mutates this very object and
+    // hands it back — reading `before.name` after the call reads the new name,
+    // and the "did anything change?" tests below would all answer no.
     const previousName = before.name;
+    const previousRoomId = before.roomId;
 
     if (body.favorite !== undefined) {
       await deps.favorites.set(memberId, id, body.favorite);
@@ -617,7 +621,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         memberId,
       });
     }
-    if (body.roomId !== undefined && body.roomId !== before.roomId) {
+    if (body.roomId !== undefined && body.roomId !== previousRoomId) {
       const room = body.roomId
         ? await deps.db.query.rooms.findFirst({ where: eq(rooms.id, body.roomId) })
         : undefined;
