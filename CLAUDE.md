@@ -653,9 +653,10 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `install.sh` also denies `docker0` in `avahi-daemon.conf`, so a Docker
   installed later for something else can't get an unreachable `172.17.0.1`
   published for the Pi's name.
-- **Mosquitto listens on the LAN, not loopback.** That is what
-  `deploy/mosquitto`'s config always claimed and what the compose port mapping
-  quietly contradicted — the reason port 1883 was invisible from the user's Mac.
+- **Mosquitto listens on the LAN, not loopback.** That is what the broker
+  config always claimed — now the drop-in `install.sh` writes, which
+  `test/deploy-config.test.ts` parses — and what the compose port mapping
+  quietly contradicted, the reason port 1883 was invisible from the user's Mac.
   MQTT integrations run on other machines; the firewall boundary for a home hub
   is the router.
 - **Only install what is missing.** `install.sh` checks each apt package with
