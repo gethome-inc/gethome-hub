@@ -276,6 +276,16 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   upgrade. And **every room/zone write broadcasts the `structure` frame** with
   both lists in full, because rooms are shared and a change on one phone used to
   reach the others only when they happened to reconnect.
+  **A room's `icon` and `accent` sit beside its name for the same reason it
+  does** — everybody in the home should see the same kitchen in the same colour
+  — and both are **null by default, meaning "the app decides"**: the apps derive
+  a glyph from the name and hand out colours in turn, so a room nobody has
+  styled stores nothing and looks exactly as it always did. The hub deliberately
+  does not validate the vocabulary (an allowlist here would need a hub upgrade
+  for every colour an app adds, and an unknown token costs only a fallback to
+  the derived look), and a restyle is deliberately *not* written to the activity
+  log, which is read a week later and is not where "the kitchen is blue now"
+  belongs.
 - **Units are load-bearing** and mirror the GetHome app's Matter schema
   byte-for-byte: level 1–254, mireds, centi-°C, humidity centi-%, covering
   percent-100ths with **0 = open**, battery 0–100, milliwatts, lock 0/1/2,

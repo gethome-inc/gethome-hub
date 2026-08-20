@@ -65,7 +65,7 @@ name of whoever made it.
 | `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio) |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
 | `GET /home` · `PATCH /home` | any · owner | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name) |
-| `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | any | `{id, name, zoneId, sortOrder}`. `POST`/`PATCH` take `{name?, zoneId?, sortOrder?}`; `zoneId: null` means "in no zone", which is different from leaving the field out. Names are trimmed before they are measured (1–80), an unknown `zoneId` is `404 unknown_zone`, and a new room goes to the *end* of the order. Deleting a room does not delete its devices — they are simply in no room. Every write broadcasts the [`structure` frame](#rooms-and-zones) |
+| `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | any | `{id, name, zoneId, icon, accent, sortOrder}`. `POST`/`PATCH` take `{name?, zoneId?, icon?, accent?, sortOrder?}`; `zoneId: null` means "in no zone", and `icon: null` / `accent: null` mean "back to the look the app derives" — each different from leaving the field out. `icon`/`accent` are opaque app tokens (1–40 chars, see [below](#rooms-and-zones)). Names are trimmed before they are measured (1–80), an unknown `zoneId` is `404 unknown_zone`, and a new room goes to the *end* of the order. Deleting a room does not delete its devices — they are simply in no room. Every write broadcasts the [`structure` frame](#rooms-and-zones) |
 | `GET /zones` · `POST /zones` · `PATCH /zones/:id` · `DELETE /zones/:id` | any | `{id, name, sortOrder}` — the optional layer above rooms, see [below](#rooms-and-zones). Deleting a zone keeps its rooms and leaves them in none |
 | `GET /devices` | any | full device list (wire shape below) |
 | `PATCH /devices/:id` | any | `{name?, roomId?, favorite?}`. Name and room describe the house and everybody sees the same ones; **`favorite` is the caller's own** and nobody else's — see [below](#favorites-are-per-member). `roomId: null` takes a device out of its room; an unknown one is `404 unknown_room`. The response is this caller's view of the device |
@@ -278,7 +278,7 @@ thing that ever re-read them. Every write to either broadcasts one frame
 carrying **both lists in full**:
 
 ```
-{"type":"structure","rooms":[{id,name,zoneId,sortOrder}],"zones":[{id,name,sortOrder}]}
+{"type":"structure","rooms":[{id,name,zoneId,icon,accent,sortOrder}],"zones":[{id,name,sortOrder}]}
 ```
 
 Both, because a client redraws its zone sections from the pair and sending half
@@ -290,6 +290,29 @@ re-reading on `hello`, as it always did.
 Deleting is the case worth knowing: **a deleted room keeps its devices** (they
 end up in no room, and the hub says so on the socket for each of them), and a
 **deleted zone keeps its rooms**. Neither is a way to lose anything.
+
+#### How a room looks is the house's too
+
+`icon` and `accent` are a glyph token and a palette token, stored beside the
+name for the same reason the name is stored at all: everybody who opens the
+home should see the same kitchen, in the same colour.
+
+**Null is the ordinary state, and it means "you decide".** Apps derive a glyph
+from the name — a room called Garage draws a car — and hand out colours in
+turn, so a room nobody has styled stores nothing and looks exactly as it always
+did. A value is somebody having overruled that, and it wins from then on;
+writing `null` hands the room back to the app's own judgement.
+
+The hub does not police the vocabulary. Which glyphs exist, and what `sky`
+looks like, belong to the apps — an allowlist here would mean a hub upgrade
+every time one of them added a colour, and the cost of a token an app doesn't
+recognise is that it falls back to the derived look. They are bounded (1–40
+characters) because a token is a word, not a payload.
+
+Changing a room's look is **not** written to the activity log, where a rename
+is. That log is read a week later, and "somebody changed the kitchen's colour"
+is not what anyone is looking for in it; the `structure` frame above still
+tells every open app the moment it happens.
 
 ### Favorites are per member
 

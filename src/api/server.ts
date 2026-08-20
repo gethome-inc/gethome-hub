@@ -338,6 +338,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         id: row.id,
         name: row.name,
         zoneId: row.zoneId,
+        icon: row.icon,
+        accent: row.accent,
         sortOrder: row.sortOrder,
       })),
       zones: zoneRows.map((row) => ({ id: row.id, name: row.name, sortOrder: row.sortOrder })),
@@ -366,6 +368,16 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    */
   const placeNameSchema = z.string().trim().min(1).max(80);
 
+  /**
+   * A glyph or palette token — an app's own vocabulary, kept opaque here.
+   *
+   * Nullable *and* optional, and the two mean different things: leaving the
+   * field out keeps whatever the room has, while `null` puts the room back to
+   * the look the app derives from its name. Bounded rather than checked
+   * against a list, because the list belongs to the apps — see `schema.ts`.
+   */
+  const lookTokenSchema = z.string().trim().min(1).max(40).nullable().optional();
+
   // Rooms and zones are the shape of a shared home, and **any member may change
   // them.** They were owner-only, which sounds careful and in practice was not:
   // GetHome Studio claims a hub as *the Mac*, so the owner is usually a laptop
@@ -375,6 +387,16 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   // member is still the owner's — and every edit here is written to the
   // activity log with the name of whoever made it.
 
+  /** One shape for a room, so the two routes that answer with one can't drift. */
+  const roomWire = (row: typeof rooms.$inferSelect) => ({
+    id: row.id,
+    name: row.name,
+    zoneId: row.zoneId,
+    icon: row.icon,
+    accent: row.accent,
+    sortOrder: row.sortOrder,
+  });
+
   app.get('/api/v1/rooms', authed, async () => (await readStructure()).rooms);
 
   app.post('/api/v1/rooms', authed, async (request, reply) => {
@@ -382,6 +404,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       .object({
         name: placeNameSchema,
         zoneId: z.uuid().nullable().optional(),
+        icon: lookTokenSchema,
+        accent: lookTokenSchema,
         sortOrder: z.number().int().optional(),
       })
       .parse(request.body);
@@ -393,6 +417,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       .values({
         name: body.name,
         zoneId: body.zoneId ?? null,
+        icon: body.icon ?? null,
+        accent: body.accent ?? null,
         sortOrder: body.sortOrder ?? (await nextSortOrder(rooms)),
       })
       .returning();
@@ -402,9 +428,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       memberId: request.member!.id,
     });
     await announceStructure();
-    return reply
-      .code(201)
-      .send({ id: row!.id, name: row!.name, zoneId: row!.zoneId, sortOrder: row!.sortOrder });
+    return reply.code(201).send(roomWire(row!));
   });
 
   app.patch('/api/v1/rooms/:id', authed, async (request, reply) => {
@@ -415,6 +439,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         // `null` is "no zone", which is a real answer and not the same as
         // leaving the field out — hence nullable *and* optional.
         zoneId: z.uuid().nullable().optional(),
+        icon: lookTokenSchema,
+        accent: lookTokenSchema,
         sortOrder: z.number().int().optional(),
       })
       .parse(request.body);
@@ -428,6 +454,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       .set({
         ...(body.name !== undefined ? { name: body.name } : {}),
         ...(body.zoneId !== undefined ? { zoneId: body.zoneId } : {}),
+        ...(body.icon !== undefined ? { icon: body.icon } : {}),
+        ...(body.accent !== undefined ? { accent: body.accent } : {}),
         ...(body.sortOrder !== undefined ? { sortOrder: body.sortOrder } : {}),
       })
       .where(eq(rooms.id, id))
@@ -440,8 +468,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         memberId: request.member!.id,
       });
     }
+    // A rename is logged and a restyle is not, deliberately: the activity log
+    // is read a week later, and "somebody changed the kitchen's colour" is not
+    // what anyone is looking for in it. The structure frame below still tells
+    // every open app about it immediately.
     await announceStructure();
-    return { id: row.id, name: row.name, zoneId: row.zoneId, sortOrder: row.sortOrder };
+    return roomWire(row);
   });
 
   /**

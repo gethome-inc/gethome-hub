@@ -597,6 +597,77 @@ describe.skipIf(!handle)('hub API', () => {
     expect(unknownZone.statusCode).toBe(404);
   });
 
+  /**
+   * A room's glyph and colour are the house's, like its name — and null is a
+   * real answer that puts it back to whatever the app would have derived.
+   */
+  it('stores a room\u2019s look, and lets it be cleared again', async () => {
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/v1/rooms',
+      headers: auth(memberToken),
+      payload: { name: 'Garage', icon: 'car', accent: 'sky' },
+    });
+    expect(created.statusCode).toBe(201);
+    const room = created.json() as { id: string; icon: string | null; accent: string | null };
+    expect(room.icon).toBe('car');
+    expect(room.accent).toBe('sky');
+
+    // A room nobody has styled carries no look at all — that is what tells an
+    // app to derive one rather than to draw a default it was handed.
+    const plain = await app.inject({
+      method: 'POST',
+      url: '/api/v1/rooms',
+      headers: auth(memberToken),
+      payload: { name: 'Hallway' },
+    });
+    expect((plain.json() as { icon: string | null }).icon).toBeNull();
+
+    // Leaving a field out keeps it; only `null` clears it.
+    const renamed = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/rooms/${room.id}`,
+      headers: auth(memberToken),
+      payload: { name: 'Carport' },
+    });
+    expect((renamed.json() as { icon: string | null }).icon).toBe('car');
+
+    const cleared = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/rooms/${room.id}`,
+      headers: auth(memberToken),
+      payload: { icon: null, accent: null },
+    });
+    expect(cleared.statusCode).toBe(200);
+    expect((cleared.json() as { icon: string | null }).icon).toBeNull();
+    expect((cleared.json() as { accent: string | null }).accent).toBeNull();
+
+    // The list route answers with the same shape the writes do.
+    const listed = (
+      await app.inject({ method: 'GET', url: '/api/v1/rooms', headers: auth(memberToken) })
+    ).json() as Array<{ id: string; icon: string | null; accent: string | null }>;
+    expect(listed.find((entry) => entry.id === room.id)?.accent).toBeNull();
+
+    // A token nobody recognises is still stored: the vocabulary belongs to the
+    // apps, and a hub that refused one would need upgrading for every colour.
+    const unknown = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/rooms/${room.id}`,
+      headers: auth(memberToken),
+      payload: { icon: 'chandelier' },
+    });
+    expect((unknown.json() as { icon: string | null }).icon).toBe('chandelier');
+
+    // Bounded, though — a token is a word, not a payload.
+    const tooLong = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/rooms/${room.id}`,
+      headers: auth(memberToken),
+      payload: { icon: 'x'.repeat(41) },
+    });
+    expect(tooLong.statusCode).toBe(400);
+  });
+
   /** Deleting "Upstairs" must never be a way to lose a bedroom. */
   it('keeps the rooms when their zone is deleted', async () => {
     const zoneId = (

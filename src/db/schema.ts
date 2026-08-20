@@ -71,6 +71,27 @@ export const rooms = sqliteTable('rooms', {
    * foreign key stays as the backstop that refuses if it ever forgets to.
    */
   zoneId: text('zone_id').references(() => zones.id),
+  /**
+   * How the apps draw this room: a glyph token and a palette token.
+   *
+   * Both are the *house's*, exactly like the room's name — everybody who opens
+   * the home sees the same kitchen, in the same colour — which is the whole
+   * reason they are here rather than in each phone's own storage.
+   *
+   * **Null means "you decide", and that is the ordinary state.** The apps
+   * derive a glyph from the name (a room called Garage draws a car) and hand
+   * out colours in turn, so a room nobody has styled has no rows to write and
+   * keeps whatever the app would have chosen anyway. A value here is somebody
+   * having overruled that, and it wins from then on.
+   *
+   * The hub deliberately does **not** validate the vocabulary. Which glyphs
+   * exist and what "sky" looks like belong to the apps; an allowlist here
+   * would mean a hub upgrade every time one of them adds a colour, and the
+   * cost of a token an app doesn't know is that it falls back to the derived
+   * look — which is where the room started.
+   */
+  icon: text('icon'),
+  accent: text('accent'),
   sortOrder: integer('sort_order').notNull().default(0),
   createdAt: createdAt(),
 });

@@ -50,7 +50,15 @@ export interface ZigbeeLifecycleEvent {
 
 /** The shape of the home: its rooms, and the zones some of them sit in. */
 export interface HomeStructure {
-  rooms: Array<{ id: string; name: string; zoneId: string | null; sortOrder: number }>;
+  rooms: Array<{
+    id: string;
+    name: string;
+    zoneId: string | null;
+    /** App-defined glyph and palette tokens; null is "the app decides". */
+    icon: string | null;
+    accent: string | null;
+    sortOrder: number;
+  }>;
   zones: Array<{ id: string; name: string; sortOrder: number }>;
 }
 
