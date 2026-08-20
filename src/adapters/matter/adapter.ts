@@ -45,8 +45,8 @@ export interface MatterAdapterOptions {
  *
  * Needs the host's own network: Matter is site-local UDP (port 5540) plus
  * mDNS (5353), neither of which survives being NAT-ed. The hub runs directly
- * on the host — a systemd unit on Linux, a launchd agent on macOS — so this
- * costs nothing to arrange and is one of the reasons it isn't containerised.
+ * on the host as a systemd unit, so this costs nothing to arrange and is one
+ * of the reasons it isn't containerised.
  */
 export class MatterAdapter implements ProtocolAdapter {
   readonly id = 'matter' as const;

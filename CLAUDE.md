@@ -15,16 +15,32 @@ The `docs/` files are canonical for their domains; read the relevant one before
 touching that code: `architecture.md` (module boundaries, data flow),
 `device-schema.md` (**the** capability/unit/wire contract), `api.md`,
 `zigbee.md`, `matter.md`, `mqtt-integrations.md` (public integrator
-convention), `ai-adaptation.md`, `ecosystem.md`, `macos.md` (native macOS
-deployment — launchd + `deploy/hubctl`).
+convention), `ai-adaptation.md`, `ecosystem.md`.
 
-**There is no Docker and no database server anywhere any more.** Linux runs
-systemd units (`deploy/install.sh`, `deploy/gethome-hubctl`), macOS runs launchd
-agents, and the store is a SQLite file. That was a memory decision: on a
-Raspberry Pi Zero 2 W — 512 MB, the smallest supported board — the Docker daemon
-took ~130 MB and a stock Postgres another ~130 MB before the hub had started,
-and the OOM killer was taking the hub down between the end of the install and
-the user claiming it.
+**There is no Docker and no database server anywhere any more.** The hub runs as
+systemd units (`deploy/install.sh`, `deploy/gethome-hubctl`) and the store is a
+SQLite file. That was a memory decision: on a Raspberry Pi Zero 2 W — 512 MB,
+the smallest supported board — the Docker daemon took ~130 MB and a stock
+Postgres another ~130 MB before the hub had started, and the OOM killer was
+taking the hub down between the end of the install and the user claiming it.
+
+**Deployment is Linux only, and a Mac hub is deferred rather than missing.**
+There was a native macOS path — `install-macos.sh`, launchd agents,
+`deploy/hubctl` — and it was removed because it had quietly stopped being a hub.
+It wrote a Zigbee2MQTT config with no `onboarding: false`, so Z2M 2.x sat in its
+browser wizard and the radio never came up. It never passed `Z2M_DATA_DIR` to
+hubd, so `zigbee.problem` read a Linux path that does not exist on a Mac and
+diagnosed nothing. With no `/etc/avahi/services` the mDNS backend fell to
+`ciao`, which then competes with the Mac's own mDNSResponder for `<host>.local`
+— the exact conflict `mdns/advertiser.ts` exists to avoid. `PUT /settings/radio`
+answered `applying: true` to a file no watcher read. And there was no
+coordinator detection, no prebuilt bundle, no atomic release or rollback, and a
+marker vocabulary Studio had moved on from. **`src/` itself is portable** —
+nothing in it is Linux-only and the suite runs on macOS — so bringing the Mac
+back is deployment work (a darwin bundle, launchd equivalents of the radio
+applier and the coordinator watcher, the `install.sh` marker contract), not a
+port. Don't reintroduce half of it: a second OS that implements none of the
+rules below is the installed-but-unusable trap this file names elsewhere.
 
 ## Build, test, run
 

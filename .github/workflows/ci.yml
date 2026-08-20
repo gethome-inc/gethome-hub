@@ -69,4 +69,4 @@ jobs:
       # `deploy/` is a contract with GetHome Studio, and it is the part of this
       # repository with no type checker behind it.
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
-      - run: shellcheck -S warning deploy/install.sh deploy/zigbee-detect.sh deploy/gethome-hubctl deploy/hubctl deploy/install-macos.sh
+      - run: shellcheck -S warning deploy/install.sh deploy/zigbee-detect.sh deploy/gethome-hubctl
