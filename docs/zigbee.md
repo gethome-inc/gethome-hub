@@ -358,6 +358,21 @@ Switching costs nothing but the switch: the coordinator's device path stays in
 paired devices come back when the board is handed back to Zigbee. They show as
 offline in the app while another radio has the board.
 
+**That last sentence is a thing the hub has to do, not something that follows.**
+Reachability only ever arrives *from* a running radio, so a radio that has been
+switched off reports nothing at all — and the devices behind it were read back
+out of SQLite with the `online` they had when it last ran. They kept it: a home
+whose Zigbee half read perfectly healthy and answered no command, which is the
+opposite of what switching radios is supposed to look like. So
+`DeviceRegistry.start()` marks every device of an adapter that is **not
+registered, or failed to start**, offline, through
+`AdapterBus.radioReachabilityChanged`. It is the same statement the Zigbee
+adapter makes when `bridge/state` goes `offline` — Zigbee2MQTT leaving takes
+the whole network with it whether or not the broker noticed — and it is made in
+both directions, because Zigbee2MQTT ships with per-device availability
+tracking **off**, so a hub that only ever marked devices down would never bring
+them back.
+
 On a `both` board none of this normally fires — `auto` runs everything, and the
 mode exists there only for somebody who wants a radio off deliberately.
 
@@ -369,7 +384,7 @@ Subscribed topics (base topic `zigbee2mqtt`, configurable via
 | Topic | Use |
 |---|---|
 | `zigbee2mqtt/bridge/devices` | retained device registry incl. `definition.exposes` — the schema source, and the **only** thing that adopts a device |
-| `zigbee2mqtt/bridge/state` | Z2M health |
+| `zigbee2mqtt/bridge/state` | Z2M health — and, on each change, the reachability of every device on the radio (see [above](#zigbee-or-matter-on-a-small-board)) |
 | `zigbee2mqtt/bridge/event` | a device joining, being interviewed, or leaving — relayed, never acted on |
 | `zigbee2mqtt/bridge/info` | the live permit-join window (`permit_join`, `permit_join_end`) |
 | `zigbee2mqtt/<friendly_name>` | state payloads |

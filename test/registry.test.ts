@@ -187,6 +187,71 @@ describe.skipIf(!handle)('DeviceRegistry', () => {
     expect(registry.getDevice(deviceId)!.endpoints[0]!.state.reachable).toBe(false);
   });
 
+  it('takes every device on a radio offline when the radio goes', async () => {
+    adapter.bus!.deviceUpserted(lampDescriptor);
+    adapter.bus!.deviceUpserted({ ...lampDescriptor, externalId: 'lamp-2', suggestedName: 'Hall lamp' });
+    await registry.flush();
+
+    adapter.bus!.radioReachabilityChanged('mqtt', false);
+    await registry.flush();
+    expect(registry.listDevices().map((device) => device.online)).toEqual([false, false]);
+    expect(registry.listDevices().every((device) => device.endpoints[0]!.state.reachable === false)).toBe(true);
+
+    adapter.bus!.radioReachabilityChanged('mqtt', true);
+    await registry.flush();
+    expect(registry.listDevices().map((device) => device.online)).toEqual([true, true]);
+  });
+
+  it('leaves other adapters alone when one radio goes', async () => {
+    adapter.bus!.deviceUpserted(lampDescriptor);
+    await registry.flush();
+
+    adapter.bus!.radioReachabilityChanged('zigbee', false);
+    await registry.flush();
+    expect(registry.listDevices()[0]!.online).toBe(true);
+  });
+
+  /**
+   * The case a one-radio board actually produces: the hub restarts with the
+   * Matter adapter switched off, so its devices come back out of SQLite with
+   * the `online` they had when it last ran and nothing is left to correct
+   * them. They must load offline — the app is about to tell somebody that
+   * switching radios is why half their home stopped answering.
+   */
+  it('starts devices of an unregistered adapter offline', async () => {
+    adapter.bus!.deviceUpserted(lampDescriptor);
+    await registry.flush();
+    const deviceId = registry.listDevices()[0]!.id;
+
+    const restarted = new DeviceRegistry(db, events, new ActivityService(db, events), log);
+    await restarted.start();
+    await restarted.flush();
+
+    expect(restarted.getDevice(deviceId)!.online).toBe(false);
+    expect(restarted.getDevice(deviceId)!.endpoints[0]!.state.reachable).toBe(false);
+  });
+
+  it('starts devices of an adapter that failed to start offline', async () => {
+    adapter.bus!.deviceUpserted(lampDescriptor);
+    await registry.flush();
+    const deviceId = registry.listDevices()[0]!.id;
+
+    const broken: ProtocolAdapter = {
+      id: 'mqtt',
+      start: async () => {
+        throw new Error('no broker');
+      },
+      stop: async () => {},
+      execute: async () => {},
+    };
+    const restarted = new DeviceRegistry(db, events, new ActivityService(db, events), log);
+    restarted.registerAdapter(broken);
+    await restarted.start();
+    await restarted.flush();
+
+    expect(restarted.getDevice(deviceId)!.online).toBe(false);
+  });
+
   it('forgets devices at the protocol level on removal', async () => {
     adapter.bus!.deviceUpserted(lampDescriptor);
     await registry.flush();

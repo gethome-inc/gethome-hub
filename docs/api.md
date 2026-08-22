@@ -270,6 +270,15 @@ without polling.
 `needsReview: true` marks devices whose automatic mapping was incomplete
 (see [ai-adaptation.md](ai-adaptation.md)).
 
+`online` is **whether the hub can reach the device**, and it answers for the
+radio as well as for the device. A radio that is switched off, failed to start,
+or lost its Zigbee2MQTT bridge takes every device behind it `offline` — with a
+`deviceUpserted` frame each, exactly as one device going would. That is what a
+one-radio board looks like after `PUT /settings/radio`: half the home reads
+offline until the radio is handed back, and reads online again when it is.
+Without it those devices would have kept the `online` they had before the
+switch, since reachability only ever arrives from a radio that is running.
+
 `recognition` is additive and says **how** the device came to be understood:
 
 ```json

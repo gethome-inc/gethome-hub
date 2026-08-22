@@ -117,6 +117,18 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   serialized write queue, write-through cache, JSON state persistence, event
   fan-out, command routing. Adapter start failures are isolated — the hub must
   keep running (and must boot with no devices/radios at all).
+  **A radio that isn't running is not a home that is fine.** Per-device
+  reachability only ever arrives *from* a running radio, so nothing could say
+  that a radio which is off, failed, or lost its bridge took every device with
+  it — they were read back out of SQLite with the `online` they last had and
+  kept it, so switching a one-radio board to Matter left the Zigbee half
+  reading healthy and answering nothing. `AdapterBus.radioReachabilityChanged`
+  is the statement; `start()` makes it for every adapter that is not registered
+  or failed to start, and the Zigbee adapter makes it on `bridge/state`. **Both
+  directions**, because Z2M ships with availability tracking off, so a hub that
+  only ever marked devices down would never bring them back. It routes through
+  the per-device path on purpose: already serialized, already quiet for a
+  device in that state, already emitting `deviceUpserted`.
   **Endpoint state is written behind a debounce** (`STATE_FLUSH_MS`), because
   persisting on every report meant one whole-row JSON rewrite per sensor
   message, forever, onto an SD card — a power meter alone is a write every few

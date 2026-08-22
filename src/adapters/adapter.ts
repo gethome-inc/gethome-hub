@@ -61,6 +61,20 @@ export interface AdapterBus {
     patch: Partial<EndpointState>,
   ): void;
   reachabilityChanged(adapter: AdapterId, externalId: string, reachable: boolean): void;
+  /**
+   * Whether this adapter's radio is up at all — a statement about every device
+   * it carries, not about one of them.
+   *
+   * Per-device reachability only ever arrives *from* a running radio, so a
+   * radio that is switched off, failed to start, or lost its bridge has no way
+   * to say that the devices behind it are unreachable. They were loaded from
+   * the database with the `online` they last had and would keep reading online
+   * for ever — which on a one-radio board is the whole of what switching radios
+   * does to a home. Reported as `false` when the radio goes, `true` when it
+   * comes back; individual devices are corrected by the usual per-device
+   * reports a moment later.
+   */
+  radioReachabilityChanged(adapter: AdapterId, reachable: boolean): void;
   activity(entry: { kind: string; message: string; externalId?: string; adapter?: AdapterId }): void;
 }
 
