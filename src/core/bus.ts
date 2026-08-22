@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import type { AdapterId } from '../adapters/adapter.js';
 import type { EndpointState } from '../schema/index.js';
 import type { MqttFrame } from './mqtt-observer.js';
 import type { AiRunEvent } from './ai-runs.js';
@@ -18,6 +19,16 @@ export interface HubEvents {
   stateChanged: [deviceId: string, endpointId: number, state: EndpointState];
   activity: [entry: ActivityEvent];
   permitJoin: [active: boolean, remainingSeconds: number];
+  /**
+   * A whole radio came up or went down.
+   *
+   * Not the per-device `deviceUpserted` storm that follows it: those say which
+   * devices went, and this says *why*. Without it an app watched six Zigbee
+   * devices grey out while its own "Zigbee · on" chip sat unchanged, because
+   * what a hub can talk to only ever reached it through `GET /hub` and nothing
+   * asks for that when a stick is pulled out.
+   */
+  radioChanged: [adapter: AdapterId, reachable: boolean];
   commissioningProgress: [jobId: string, status: string, detail?: string];
   mqttFrame: [frame: MqttFrame];
   zigbeeEvent: [event: ZigbeeLifecycleEvent];

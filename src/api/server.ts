@@ -22,10 +22,10 @@ import { isSupportedModel, supportedModelIds } from '../ai/models.js';
 // `MappingLibrary.repair` loads the agent on demand.
 import type { MappingLibrary } from '../ai/library.js';
 import type { AiRunLog } from '../core/ai-runs.js';
-import { RADIO_MODES, readRadioMode, writeRadioMode, type RadioBudget, type RadioMode } from '../core/radio.js';
+import { RADIO_MODES, writeRadioMode, type RadioBudget, type RadioMode } from '../core/radio.js';
 import type { MqttObserver } from '../core/mqtt-observer.js';
 import { MAX_WINDOW_SECONDS, type PermitJoinService } from '../core/permit-join.js';
-import { readZigbeeProblem, type ZigbeeProblem } from '../adapters/zigbee/diagnosis.js';
+import { createHubStatusReader } from '../core/hub-status.js';
 import { deviceWire } from './dto.js';
 import { extractToken, requireMember, requireOwner } from './auth.js';
 import { attachWebSocket, MemberSessions, UNAUTHORIZED_CLOSE_CODE } from './ws.js';
@@ -198,28 +198,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * request — and a failure that has just been diagnosed does not change from
    * one second to the next.
    */
-  let problemCache: { at: number; problem: ZigbeeProblem | undefined } | undefined;
-  const PROBLEM_TTL_MS = 30_000;
-
-  const zigbeeStatus = () => {
-    const enabled = deps.zigbee !== undefined;
-    const connected = deps.zigbee?.connected ?? false;
-    // Whether the network is open belongs on the health check, not only on the
-    // event stream: an app that reconnects, or that has just been opened, has
-    // no other way to learn it and used to draw a "Close Network" button over
-    // a network that closed minutes earlier.
-    const permitJoin = deps.permitJoin.state;
-    if (!enabled || connected) {
-      problemCache = undefined;
-      return { enabled, connected, permitJoin };
-    }
-    const now = Date.now();
-    if (problemCache === undefined || now - problemCache.at > PROBLEM_TTL_MS) {
-      problemCache = { at: now, problem: readZigbeeProblem(deps.z2mDataDir) };
-    }
-    const { problem } = problemCache;
-    return { enabled, connected, permitJoin, ...(problem !== undefined ? { problem } : {}) };
-  };
+  const hubStatus = createHubStatusReader(deps);
 
   app.get('/api/v1/hub', async () => ({
     hubId: deps.hubId,
@@ -236,20 +215,11 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // Additive: an app that doesn't know about this field ignores it, and one
     // that does can say "plug a coordinator in" instead of showing an empty
     // Zigbee section with no explanation.
-    zigbee: zigbeeStatus(),
-    // Also additive. What this hub can actually talk to is not the same on
-    // every machine: a 512 MB board affords one radio, so an app that shows
-    // "Matter" unconditionally would be lying on half the hardware.
-    radio: {
-      /** 'one' when Matter and Zigbee2MQTT don't fit together on this board. */
-      budget: deps.radioBudget,
-      /** What the owner asked for; 'auto' means "follow the hardware". */
-      mode: readRadioMode(deps.dataDir),
-      /** Live, not requested — a switch takes a moment to apply. */
-      matter: deps.matter !== undefined,
-      /** True only when the board could run both at once. */
-      canRunBoth: deps.radioBudget === 'both',
-    },
+    // `zigbee` and `radio` are additive, and are the same two blocks the
+    // `hubStatus` WebSocket frame pushes when they change — one snapshot,
+    // taken in one place, so a client cannot be told two different things
+    // depending on which arrived first.
+    ...hubStatus.snapshot(),
   }));
 
   app.post('/api/v1/pair', async (request, reply) => {
@@ -817,7 +787,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // Subscribe synchronously, before the async token check, so an event
     // fired the moment the socket opens is buffered instead of lost in the
     // gap between "connected" and "authorized".
-    const handle = attachWebSocket(socket, deps, sessions);
+    const handle = attachWebSocket(socket, deps, sessions, hubStatus);
     void (async () => {
       const token = extractToken(request);
       const member = token ? await deps.pairing.verifyToken(token) : null;

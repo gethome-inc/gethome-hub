@@ -363,7 +363,37 @@ message. These go to every authorized socket:
 {"type":"activity","entry":{id,at,kind,message,deviceId?,memberId?}}
 {"type":"permitJoin","active":true,"remainingSeconds":60}
 {"type":"commissioning","jobId","status","detail"?}     Matter commissioning progress
+{"type":"hubStatus","zigbee":{…},"radio":{…}}           a radio came up or went down
 ```
+
+### When a radio comes or goes (`hubStatus`)
+
+Pulling the Zigbee coordinator out of a running hub produces two facts, and
+only one of them used to travel. Zigbee2MQTT stops, so every Zigbee device goes
+unreachable — those arrive as `deviceUpserted` frames, one per device. *Why*
+they went is the `zigbee`/`radio` picture, and that only ever reached a client
+through `GET /hub`, which nothing asks for at that moment. Apps drew a home
+half offline under a chip still reporting Zigbee as live.
+
+The frame carries **the same two blocks `GET /hub` answers with**, built from
+the same snapshot (`src/core/hub-status.ts`) so a client is never told two
+different things depending on which arrived first. Three rules:
+
+- **It fires on the transition, not on a timer.** A join window's countdown has
+  its own frame at its own rate; this one would otherwise repeat the whole
+  status every five seconds while a network is open.
+- **It is sent before the device frames.** The devices say *what*; this says
+  *why*, and an app told in the other order has nothing to explain the grey
+  cards with until it asks.
+- **Absence still means nothing.** A hub older than these fields sends no
+  frame and no blocks, which is not the same as reporting both radios off —
+  the same rule that governs `radio.budget`.
+
+Note what this does **not** do: pulling a coordinator out does not switch a
+one-radio board to Matter. That is deliberate and is covered in
+[zigbee.md](zigbee.md#zigbee-or-matter-on-a-small-board) — removal is
+ambiguous, so the board stays put and the owner decides with
+`PUT /settings/radio`. The frame is what makes that decision an informed one.
 
 ### Opt-in streams
 

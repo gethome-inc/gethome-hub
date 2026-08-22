@@ -110,7 +110,13 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   is the statement; `start()` makes it for every adapter that is not registered
   or failed to start, and the Zigbee adapter makes it on `bridge/state`. **Both
   directions**, because Z2M ships with availability tracking off, so a hub that
-  only ever marked devices down would never bring them back. It routes through
+  only ever marked devices down would never bring them back. It also emits
+  `radioChanged`, which `api/ws.ts` fans out as a `hubStatus` frame carrying
+  the same `zigbee`/`radio` blocks `GET /hub` answers with — from the same
+  snapshot (`core/hub-status.ts`), because two shapes for one fact drift.
+  **Before** the device frames: those say which devices went, this says why,
+  and a client told in the other order draws a home half offline with nothing
+  to explain it. That is the moment somebody pulls a stick out of a Pi. It routes through
   the per-device path on purpose: already serialized, already quiet for a
   device in that state, already emitting `deviceUpserted`.
   **Endpoint state is written behind a debounce** (`STATE_FLUSH_MS`), because

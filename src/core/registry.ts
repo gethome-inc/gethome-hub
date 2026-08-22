@@ -301,6 +301,12 @@ export class DeviceRegistry implements AdapterBus {
    * device that was already offline stays quiet.
    */
   radioReachabilityChanged(adapter: AdapterId, reachable: boolean): void {
+    // Announced first, and deliberately: the frames that follow say which
+    // devices went, and this is the only thing that says why. An app told in
+    // the other order draws a home half offline for however long it takes it
+    // to ask what happened — which, for the radio picture, is until somebody
+    // reopens the app.
+    this.events.emit('radioChanged', adapter, reachable);
     for (const device of this.cache.values()) {
       if (device.adapter !== adapter) continue;
       this.reachabilityChanged(adapter, device.externalId, reachable);

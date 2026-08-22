@@ -793,6 +793,30 @@ describe.skipIf(!handle)('hub API', () => {
     return { socket, frames, waitFor };
   }
 
+  /**
+   * The case a Raspberry Pi Zero produces every time somebody pulls the Zigbee
+   * stick out: the devices go offline (frames of their own), and *why* they
+   * went has to travel too. It used to reach an app only through `GET /hub`,
+   * which nothing asks for at that moment — so a phone drew six grey cards
+   * under a chip still reading "Zigbee · on".
+   */
+  it('pushes the hub status when a radio comes up or goes down', async () => {
+    const { socket, waitFor } = await openSocket();
+
+    registry.radioReachabilityChanged('zigbee', false);
+    const frame = await waitFor('hubStatus');
+
+    // The same two blocks the health check answers with, because they come
+    // from the same snapshot — a client must never have to reconcile them.
+    const health = await app.inject({ method: 'GET', url: '/api/v1/hub' });
+    const body = health.json() as Record<string, unknown>;
+    expect(frame.zigbee).toEqual(body.zigbee);
+    expect(frame.radio).toEqual(body.radio);
+    expect(frame.radio).toMatchObject({ budget: 'one', canRunBoth: false, matter: false });
+
+    socket.close();
+  });
+
   // The half a token cascade cannot do on its own. A socket authorizes once,
   // when it opens, so a removed member's REST access ended immediately while
   // the stream they were already holding carried on.

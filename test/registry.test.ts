@@ -202,6 +202,28 @@ describe.skipIf(!handle)('DeviceRegistry', () => {
     expect(registry.listDevices().map((device) => device.online)).toEqual([true, true]);
   });
 
+  /**
+   * Announced before the devices it takes with it. The per-device frames say
+   * which went; only this says why, and an app told in the other order draws a
+   * home half offline with nothing to explain it.
+   */
+  it('announces a radio change before the devices it takes with it', async () => {
+    adapter.bus!.deviceUpserted(lampDescriptor);
+    await registry.flush();
+
+    const order: string[] = [];
+    events.on('radioChanged', (adapterId, reachable) => {
+      order.push(`radio:${adapterId}:${reachable}`);
+    });
+    events.on('deviceUpserted', () => order.push('device'));
+
+    adapter.bus!.radioReachabilityChanged('mqtt', false);
+    await registry.flush();
+
+    expect(order[0]).toBe('radio:mqtt:false');
+    expect(order).toContain('device');
+  });
+
   it('leaves other adapters alone when one radio goes', async () => {
     adapter.bus!.deviceUpserted(lampDescriptor);
     await registry.flush();

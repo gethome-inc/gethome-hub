@@ -338,7 +338,17 @@ other hand.
 
 So on removal the board stays where it is, Zigbee2MQTT stops (there is nothing
 to talk to), and the owner decides in the app with `PUT /settings/radio` — one
-button, reversible, already there. The whole flash-and-return trip now costs
+button, reversible, already there.
+
+**The apps are told the moment it happens**, which is what makes that an
+informed decision rather than a discovery. Zigbee2MQTT going down publishes
+`bridge/state: offline`, the adapter reports the radio, and the hub sends a
+`hubStatus` WebSocket frame followed by a `deviceUpserted` for every Zigbee
+device it just took offline — see [api.md](api.md#when-a-radio-comes-or-goes-hubstatus).
+Plugging the stick back in is the mirror image, except on a one-radio board
+that had switched to Matter in the meantime: there the detector really does
+change `ADAPTER_MATTER` and restart the hub, and the apps re-sync on the
+`hello` of their reconnected socket. The whole flash-and-return trip now costs
 **zero** hub restarts instead of two. The cost of the rule is that a hub whose
 coordinator is gone for good keeps Matter off until somebody says so; the app
 is what says so, and `test/deploy-radio.test.ts` pins every row above.
