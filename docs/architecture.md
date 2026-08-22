@@ -7,11 +7,10 @@ members access to the hub. They therefore share **one name** — `HUB_NAME` seed
 it on a hub's first boot, `core/home.ts` owns it after that, and `PATCH /home`
 is the only thing that changes it (see [api.md](api.md)).
 
-Everything runs as systemd units on Linux and launchd agents on macOS — no
-Docker, and no database server. That is a memory decision as much as a
-simplicity one: the smallest board this is meant to run on, a Raspberry Pi Zero
-2 W, has 512 MB, and the Docker daemon plus a stock Postgres wanted half of it
-before the hub had started.
+Everything runs as systemd units on Linux — no Docker, and no database server.
+That is a memory decision as much as a simplicity one: the smallest board this
+is meant to run on, a Raspberry Pi Zero 2 W, has 512 MB, and the Docker daemon
+plus a stock Postgres wanted half of it before the hub had started.
 
 ```
                        ┌────────────────────────────── hubd ─────────────────────────────┐

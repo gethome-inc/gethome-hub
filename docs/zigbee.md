@@ -37,8 +37,6 @@ or 5 runs both together and never makes the choice.
      bridge the detector will never adopt on its own),
      `install.sh --zigbee /dev/serial/by-id/usb-...`. Prefer `by-id` paths:
      `/dev/ttyACM0` moves the moment another USB device appears.
-   - **macOS (native):** `install-macos.sh --zigbee auto` (or an explicit
-     `/dev/tty.usb*` path).
 
    **The service is installed but not enabled**, and that is the point.
    Zigbee2MQTT is a second full Node.js process — around 150 MB — and on a

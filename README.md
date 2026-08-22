@@ -2,8 +2,8 @@
 
 A local smart-home hub that brings **Matter**, **Zigbee** (via Zigbee2MQTT), and
 **MQTT** devices together behind one clean, typed device schema — and makes the
-home shareable with family members. It runs on a Mac mini, a Raspberry Pi, or
-any Linux box, entirely on your LAN: no cloud account, no data leaving your
+home shareable with family members. It runs on a Raspberry Pi or any 64-bit
+Linux machine, entirely on your LAN: no cloud account, no data leaving your
 network.
 
 GetHome Hub is the heart of a *hub home* in the [GetHome iOS app](https://github.com/gethome-inc/gethome-ios):
@@ -156,8 +156,6 @@ deciding before you buy a board:
 
 ## Quick start
 
-**Raspberry Pi / Linux**:
-
 ```sh
 curl -fsSL https://raw.githubusercontent.com/gethome-inc/gethome-hub/main/deploy/install.sh | bash
 # to pin a specific Zigbee coordinator instead of letting it be detected:
@@ -175,27 +173,15 @@ Node.js 22 and Mosquitto, registers everything as systemd units, and prints the
 hub comes back on its own after a power cut — plug the Pi in and it runs, with
 nothing to start by hand.
 
-**GetHome Studio claims the hub for you**, so the pairing code is for your
-*other* devices — a phone, a second Mac — rather than something you have to
+The **GetHome Studio** macOS app automates all of this with a guided setup: it
+writes the SD card or finds a Pi already on your network, gets this installer
+running on it, and watches it step by step over SSH.
+
+**Studio claims the hub for you** at the end of that, so the pairing code is for
+your *other* devices — a phone, a second Mac — rather than something you have to
 find. See [docs/api.md](docs/api.md#claiming).
 
-**macOS** (also native; see [docs/macos.md](docs/macos.md)):
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/gethome-inc/gethome-hub/main/deploy/install-macos.sh | bash
-# with a Zigbee USB stick (auto-detects /dev/tty.usb*):
-curl -fsSL https://raw.githubusercontent.com/gethome-inc/gethome-hub/main/deploy/install-macos.sh | bash -s -- --zigbee auto
-```
-
-Requires [Homebrew](https://brew.sh); everything installs per-user (no sudo)
-and runs as launchd agents that start at login. One switch controls it all:
-`deploy/hubctl start|stop|status` — `stop` frees every port and disables
-autostart until the next `start`.
-
-The **GetHome Studio** macOS app automates all of this with a guided setup
-(finds machines on your network, installs locally or over SSH, checks health).
-
-### One switch, on Linux
+### One switch
 
 ```sh
 sudo gethome-hubctl status          # every service, and what the API says
@@ -287,7 +273,9 @@ npm test                                  # vitest — no services needed
 HUB_TEST_MQTT=1 npm test                  # + end-to-end broker round-trip (needs mosquitto)
 ```
 
-Node.js ≥ 22 required. There is no cloud: everything runs from this repo.
+Node.js ≥ 22 required. There is no cloud: everything runs from this repo. The
+hub is *deployed* on Linux only, but it develops and tests fine on macOS — the
+suite needs no radios and keeps its database in a temp file.
 
 ## Architecture (short version)
 
