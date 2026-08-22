@@ -7,8 +7,16 @@ import type { ActivityEvent, HubEventBus } from './bus.js';
  * How much history to keep. The log is a feed a person scrolls, not an audit
  * trail — and it grew without bound on a machine whose disk is an SD card, one
  * row per device event for the life of the hub.
+ *
+ * Two bounds, because they answer different questions. The row cap protects
+ * the disk and is the one that has to hold whatever happens; the age cap
+ * protects relevance, because 5 000 rows is three days in a busy home with
+ * four people and a year of nothing in a quiet one, and a feed that opens on
+ * March is not a feed. Whichever bites first wins — they are one `DELETE`
+ * each in the same pass.
  */
 const RETAIN_ROWS = 5_000;
+const RETAIN_MS = 30 * 24 * 60 * 60 * 1000;
 const PRUNE_EVERY_MS = 60 * 60 * 1000;
 
 export interface ActivityInput {
@@ -47,6 +55,7 @@ export class ActivityService {
       message: row.message,
       ...(row.deviceId ? { deviceId: row.deviceId } : {}),
       ...(row.memberId ? { memberId: row.memberId } : {}),
+      ...(row.data ? { data: row.data as Record<string, unknown> } : {}),
     };
     this.events.emit('activity', event);
   }
@@ -61,7 +70,7 @@ export class ActivityService {
   }
 
   /**
-   * Trim the log back to `RETAIN_ROWS`, at most once an hour.
+   * Trim the log back inside both bounds, at most once an hour.
    *
    * Hung off `record` rather than a timer on purpose: a hub with nothing
    * happening has nothing to prune, and a timer would be one more thing
@@ -72,6 +81,9 @@ export class ActivityService {
     if (now - this.lastPruneAt < PRUNE_EVERY_MS) return;
     this.lastPruneAt = now;
     try {
+      // `at` carries no index, but the scan it costs is bounded by the row cap
+      // the second statement enforces, and it runs once an hour.
+      await this.db.delete(activity).where(lt(activity.at, new Date(now - RETAIN_MS)));
       await this.db.delete(activity).where(
         lt(
           activity.id,
