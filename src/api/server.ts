@@ -1,16 +1,17 @@
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
 import websocket from '@fastify/websocket';
 import { randomUUID } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { eq, max } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
-import { invites, members, rooms } from '../db/schema.js';
+import { invites, members, rooms, zones } from '../db/schema.js';
 import type { DeviceRegistry } from '../core/registry.js';
 import type { PairingService } from '../core/pairing.js';
 import type { ActivityService } from '../core/activity.js';
 import type { HomeService } from '../core/home.js';
+import type { FavoritesService } from '../core/favorites.js';
 import type { SettingsService } from '../core/settings.js';
-import type { HubEventBus } from '../core/bus.js';
+import type { HomeStructure, HubEventBus } from '../core/bus.js';
 import type { Logger } from '../logging.js';
 import { commandSchema } from '../schema/index.js';
 import type { MatterAdapter } from '../adapters/matter/adapter.js';
@@ -35,6 +36,8 @@ export interface ApiDeps {
   log: Logger;
   events: HubEventBus;
   registry: DeviceRegistry;
+  /** Who has pinned what — favorites are per member, not per home. */
+  favorites: FavoritesService;
   pairing: PairingService;
   activity: ActivityService;
   settings: SettingsService;
@@ -317,61 +320,357 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     return result;
   });
 
-  app.get('/api/v1/rooms', authed, async () => {
-    const rows = await deps.db.query.rooms.findMany({ orderBy: (table, { asc }) => [asc(table.sortOrder)] });
-    return rows.map((row) => ({ id: row.id, name: row.name, sortOrder: row.sortOrder }));
+  /**
+   * The shape of the home, as `GET /rooms` + `GET /zones` would answer it.
+   *
+   * One read, because every mutation below broadcasts both lists: a room that
+   * moved between zones changes a room row and nothing else, but the client
+   * redraws its zone sections from the pair, and sending half of it would make
+   * every app hold the other half from memory.
+   */
+  const readStructure = async (): Promise<HomeStructure> => {
+    const [roomRows, zoneRows] = await Promise.all([
+      deps.db.query.rooms.findMany({ orderBy: (table, { asc }) => [asc(table.sortOrder)] }),
+      deps.db.query.zones.findMany({ orderBy: (table, { asc }) => [asc(table.sortOrder)] }),
+    ]);
+    return {
+      rooms: roomRows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        zoneId: row.zoneId,
+        icon: row.icon,
+        accent: row.accent,
+        sortOrder: row.sortOrder,
+      })),
+      zones: zoneRows.map((row) => ({ id: row.id, name: row.name, sortOrder: row.sortOrder })),
+    };
+  };
+
+  /**
+   * Tell every open socket what the home looks like now.
+   *
+   * Rooms are shared, so one person adding one has to reach the other phones
+   * without them reconnecting — which, before this, was the only thing that
+   * ever re-read them.
+   */
+  const announceStructure = async (): Promise<HomeStructure> => {
+    const structure = await readStructure();
+    deps.events.emit('structureChanged', structure);
+    return structure;
+  };
+
+  /**
+   * A room or zone name, with one rule in one place.
+   *
+   * Trimmed before it is measured, exactly like a member's name and the home's:
+   * `min(1)` on an untrimmed string accepts "   " and leaves a room nobody can
+   * point at in a list.
+   */
+  const placeNameSchema = z.string().trim().min(1).max(80);
+
+  /**
+   * A glyph or palette token — an app's own vocabulary, kept opaque here.
+   *
+   * Nullable *and* optional, and the two mean different things: leaving the
+   * field out keeps whatever the room has, while `null` puts the room back to
+   * the look the app derives from its name. Bounded rather than checked
+   * against a list, because the list belongs to the apps — see `schema.ts`.
+   */
+  const lookTokenSchema = z.string().trim().min(1).max(40).nullable().optional();
+
+  // Rooms and zones are the shape of a shared home, and **any member may change
+  // them.** They were owner-only, which sounds careful and in practice was not:
+  // GetHome Studio claims a hub as *the Mac*, so the owner is usually a laptop
+  // in a drawer and every phone in the house joins by invite as a plain member.
+  // That made "add a room" a button nobody who lives there could press. What
+  // the rule really guards is who may take things away — removing a device or a
+  // member is still the owner's — and every edit here is written to the
+  // activity log with the name of whoever made it.
+
+  /** One shape for a room, so the two routes that answer with one can't drift. */
+  const roomWire = (row: typeof rooms.$inferSelect) => ({
+    id: row.id,
+    name: row.name,
+    zoneId: row.zoneId,
+    icon: row.icon,
+    accent: row.accent,
+    sortOrder: row.sortOrder,
   });
 
-  app.post('/api/v1/rooms', ownerOnly, async (request, reply) => {
-    const body = z.object({ name: z.string().min(1).max(80), sortOrder: z.number().int().optional() }).parse(request.body);
+  app.get('/api/v1/rooms', authed, async () => (await readStructure()).rooms);
+
+  app.post('/api/v1/rooms', authed, async (request, reply) => {
+    const body = z
+      .object({
+        name: placeNameSchema,
+        zoneId: z.uuid().nullable().optional(),
+        icon: lookTokenSchema,
+        accent: lookTokenSchema,
+        sortOrder: z.number().int().optional(),
+      })
+      .parse(request.body);
+    if (body.zoneId && !(await zoneExists(body.zoneId))) {
+      return reply.code(404).send({ error: 'unknown_zone' });
+    }
     const [row] = await deps.db
       .insert(rooms)
-      .values({ name: body.name, sortOrder: body.sortOrder ?? 0 })
+      .values({
+        name: body.name,
+        zoneId: body.zoneId ?? null,
+        icon: body.icon ?? null,
+        accent: body.accent ?? null,
+        sortOrder: body.sortOrder ?? (await nextSortOrder(rooms)),
+      })
       .returning();
-    return reply.code(201).send({ id: row!.id, name: row!.name, sortOrder: row!.sortOrder });
+    await deps.activity.record({
+      kind: 'room.added',
+      message: `${request.member!.name} added the room “${body.name}”.`,
+      memberId: request.member!.id,
+    });
+    await announceStructure();
+    return reply.code(201).send(roomWire(row!));
   });
 
-  app.patch('/api/v1/rooms/:id', ownerOnly, async (request, reply) => {
+  app.patch('/api/v1/rooms/:id', authed, async (request, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     const body = z
-      .object({ name: z.string().min(1).max(80).optional(), sortOrder: z.number().int().optional() })
+      .object({
+        name: placeNameSchema.optional(),
+        // `null` is "no zone", which is a real answer and not the same as
+        // leaving the field out — hence nullable *and* optional.
+        zoneId: z.uuid().nullable().optional(),
+        icon: lookTokenSchema,
+        accent: lookTokenSchema,
+        sortOrder: z.number().int().optional(),
+      })
       .parse(request.body);
-    const [row] = await deps.db.update(rooms).set(body).where(eq(rooms.id, id)).returning();
+    const before = await deps.db.query.rooms.findFirst({ where: eq(rooms.id, id) });
+    if (!before) return reply.code(404).send({ error: 'not_found' });
+    if (body.zoneId && !(await zoneExists(body.zoneId))) {
+      return reply.code(404).send({ error: 'unknown_zone' });
+    }
+    const [row] = await deps.db
+      .update(rooms)
+      .set({
+        ...(body.name !== undefined ? { name: body.name } : {}),
+        ...(body.zoneId !== undefined ? { zoneId: body.zoneId } : {}),
+        ...(body.icon !== undefined ? { icon: body.icon } : {}),
+        ...(body.accent !== undefined ? { accent: body.accent } : {}),
+        ...(body.sortOrder !== undefined ? { sortOrder: body.sortOrder } : {}),
+      })
+      .where(eq(rooms.id, id))
+      .returning();
     if (!row) return reply.code(404).send({ error: 'not_found' });
-    return { id: row.id, name: row.name, sortOrder: row.sortOrder };
+    if (body.name !== undefined && body.name !== before.name) {
+      await deps.activity.record({
+        kind: 'room.renamed',
+        message: `${request.member!.name} renamed “${before.name}” to “${body.name}”.`,
+        memberId: request.member!.id,
+      });
+    }
+    // A rename is logged and a restyle is not, deliberately: the activity log
+    // is read a week later, and "somebody changed the kitchen's colour" is not
+    // what anyone is looking for in it. The structure frame below still tells
+    // every open app about it immediately.
+    await announceStructure();
+    return roomWire(row);
   });
 
-  app.delete('/api/v1/rooms/:id', ownerOnly, async (request, reply) => {
+  /**
+   * Delete a room. Its devices are not deleted — they are simply in no room.
+   *
+   * `rooms.id` is `ON DELETE SET NULL` on the device row, so the database has
+   * already done that by the time this returns; `registry.clearRoom` is what
+   * stops the in-memory cache from serving a `roomId` pointing at a room that
+   * is gone, and moves those cards in every app that is watching.
+   */
+  app.delete('/api/v1/rooms/:id', authed, async (request, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const room = await deps.db.query.rooms.findFirst({ where: eq(rooms.id, id) });
+    if (!room) return reply.code(404).send({ error: 'not_found' });
     await deps.db.delete(rooms).where(eq(rooms.id, id));
+    deps.registry.clearRoom(id);
+    await deps.activity.record({
+      kind: 'room.removed',
+      message: `${request.member!.name} removed the room “${room.name}”.`,
+      memberId: request.member!.id,
+    });
+    await announceStructure();
     return reply.code(204).send();
   });
 
+  /**
+   * Zones: the optional layer above rooms — "Upstairs", "Garden", "Guest
+   * house". A room belongs to one or to none, and none is the ordinary case.
+   *
+   * Deliberately not called floors. A flat has no floors and a garage isn't
+   * one, so a *floor* field invites every home that isn't a house to leave it
+   * blank or to lie in it; a zone that happens to be called "Second floor"
+   * covers the house perfectly. It is also Apple Home's word (`HMZone`), and
+   * the GetHome app shows Apple Homes beside hub homes.
+   */
+  app.get('/api/v1/zones', authed, async () => (await readStructure()).zones);
+
+  app.post('/api/v1/zones', authed, async (request, reply) => {
+    const body = z
+      .object({ name: placeNameSchema, sortOrder: z.number().int().optional() })
+      .parse(request.body);
+    const [row] = await deps.db
+      .insert(zones)
+      .values({ name: body.name, sortOrder: body.sortOrder ?? (await nextSortOrder(zones)) })
+      .returning();
+    await deps.activity.record({
+      kind: 'zone.added',
+      message: `${request.member!.name} added the zone “${body.name}”.`,
+      memberId: request.member!.id,
+    });
+    await announceStructure();
+    return reply.code(201).send({ id: row!.id, name: row!.name, sortOrder: row!.sortOrder });
+  });
+
+  app.patch('/api/v1/zones/:id', authed, async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const body = z
+      .object({ name: placeNameSchema.optional(), sortOrder: z.number().int().optional() })
+      .parse(request.body);
+    const [row] = await deps.db
+      .update(zones)
+      .set({
+        ...(body.name !== undefined ? { name: body.name } : {}),
+        ...(body.sortOrder !== undefined ? { sortOrder: body.sortOrder } : {}),
+      })
+      .where(eq(zones.id, id))
+      .returning();
+    if (!row) return reply.code(404).send({ error: 'not_found' });
+    await announceStructure();
+    return { id: row.id, name: row.name, sortOrder: row.sortOrder };
+  });
+
+  /**
+   * Delete a zone. The rooms in it survive and belong to no zone — deleting
+   * "Upstairs" must never be a way to lose a bedroom.
+   *
+   * The rooms are emptied here rather than by the foreign key, because SQLite
+   * cannot attach `ON DELETE SET NULL` to a column added by `ALTER TABLE` and
+   * rebuilding the table to get one would empty every *room* of its devices on
+   * the way past (`db/schema.ts` has the whole story). The plain foreign key is
+   * still there underneath: forget this line and the delete fails loudly rather
+   * than leaving rooms pointing at a zone that has gone.
+   */
+  app.delete('/api/v1/zones/:id', authed, async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const zone = await deps.db.query.zones.findFirst({ where: eq(zones.id, id) });
+    if (!zone) return reply.code(404).send({ error: 'not_found' });
+    await deps.db.update(rooms).set({ zoneId: null }).where(eq(rooms.zoneId, id));
+    await deps.db.delete(zones).where(eq(zones.id, id));
+    await deps.activity.record({
+      kind: 'zone.removed',
+      message: `${request.member!.name} removed the zone “${zone.name}”.`,
+      memberId: request.member!.id,
+    });
+    await announceStructure();
+    return reply.code(204).send();
+  });
+
+  const zoneExists = async (id: string): Promise<boolean> =>
+    (await deps.db.query.zones.findFirst({ where: eq(zones.id, id) })) !== undefined;
+
+  /**
+   * Put a new room or zone at the end rather than at the top.
+   *
+   * `sortOrder` defaulted to 0 for everything, so a home whose rooms had never
+   * been ordered by hand listed them in whatever order SQLite happened to
+   * return — and a room added today could appear above one added last year.
+   */
+  const nextSortOrder = async (table: typeof rooms | typeof zones): Promise<number> => {
+    const [row] = await deps.db.select({ highest: max(table.sortOrder) }).from(table);
+    return (row?.highest ?? -1) + 1;
+  };
+
   // ── Devices & commands ───────────────────────────────────────────────────
 
-  app.get('/api/v1/devices', authed, async () => deps.registry.listDevices().map(deviceWire));
+  app.get('/api/v1/devices', authed, async (request) => {
+    const memberId = request.member!.id;
+    return deps.registry
+      .listDevices()
+      .map((device) => deviceWire(device, deps.favorites.isFavorite(memberId, device.id)));
+  });
 
+  /**
+   * Rename a device, move it to another room, or pin it.
+   *
+   * Two different kinds of change share this route, and they are stored in two
+   * different places. A **name and a room describe the house**: they are one
+   * value on the device row, everybody sees the same one, and any member may
+   * change it — a device called "0x54ef44100047c1bf" is unusable for whoever is
+   * standing in front of it, and the person who can fix that is rarely the one
+   * who happens to hold the owner token. A **favorite describes a person**: it
+   * is stored per member (`core/favorites.ts`), so pinning the kettle puts it
+   * on the caller's dashboard and on nobody else's.
+   *
+   * The response is this caller's view, which is what makes that invisible to
+   * an app: the field is still `favorite`, and it is still a boolean.
+   */
   app.patch('/api/v1/devices/:id', authed, async (request, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     const body = z
       .object({
-        name: z.string().min(1).max(80).optional(),
+        name: z.string().trim().min(1).max(80).optional(),
         roomId: z.uuid().nullable().optional(),
         favorite: z.boolean().optional(),
       })
       .parse(request.body);
-    // Renaming and room assignment shape the shared home — owner only.
-    if ((body.name !== undefined || body.roomId !== undefined) && request.member?.role !== 'owner') {
-      return reply.code(403).send({ error: 'owner_only' });
+    const memberId = request.member!.id;
+    const before = deps.registry.getDevice(id);
+    if (!before) return reply.code(404).send({ error: 'not_found' });
+    if (body.roomId && !(await roomExists(body.roomId))) {
+      return reply.code(404).send({ error: 'unknown_room' });
     }
-    const device = await deps.registry.updateDevice(id, {
-      ...(body.name !== undefined ? { name: body.name } : {}),
-      ...(body.roomId !== undefined ? { roomId: body.roomId } : {}),
-      ...(body.favorite !== undefined ? { favorite: body.favorite } : {}),
-    });
+    // Copied out *now*, because `updateDevice` mutates this very object and
+    // hands it back — reading `before.name` after the call reads the new name,
+    // and the "did anything change?" tests below would all answer no.
+    const previousName = before.name;
+    const previousRoomId = before.roomId;
+
+    if (body.favorite !== undefined) {
+      await deps.favorites.set(memberId, id, body.favorite);
+    }
+
+    const device =
+      body.name !== undefined || body.roomId !== undefined
+        ? await deps.registry.updateDevice(id, {
+            ...(body.name !== undefined ? { name: body.name } : {}),
+            ...(body.roomId !== undefined ? { roomId: body.roomId } : {}),
+          })
+        : before;
     if (!device) return reply.code(404).send({ error: 'not_found' });
-    return deviceWire(device);
+
+    if (body.name !== undefined && body.name !== previousName) {
+      await deps.activity.record({
+        kind: 'device.renamed',
+        message: `${request.member!.name} renamed “${previousName}” to “${body.name}”.`,
+        deviceId: device.id,
+        memberId,
+      });
+    }
+    if (body.roomId !== undefined && body.roomId !== previousRoomId) {
+      const room = body.roomId
+        ? await deps.db.query.rooms.findFirst({ where: eq(rooms.id, body.roomId) })
+        : undefined;
+      await deps.activity.record({
+        kind: 'device.moved',
+        message: room
+          ? `${request.member!.name} moved ${device.name} to ${room.name}.`
+          : `${request.member!.name} took ${device.name} out of its room.`,
+        deviceId: device.id,
+        memberId,
+      });
+    }
+    return deviceWire(device, deps.favorites.isFavorite(memberId, id));
   });
+
+  const roomExists = async (id: string): Promise<boolean> =>
+    (await deps.db.query.rooms.findFirst({ where: eq(rooms.id, id) })) !== undefined;
 
   app.delete('/api/v1/devices/:id', ownerOnly, async (request, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
@@ -577,6 +876,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   ) {
     const closed = sessions.revoke(memberId);
     if (closed > 0) deps.log.info({ memberId, closed }, 'Closed event streams for a former member');
+    // Their pins went with the member row (`device_favorites.member_id`
+    // cascades); this is the in-memory half of the same delete.
+    deps.favorites.forgetMember(memberId);
     await deps.activity.record({ kind, message });
   }
 

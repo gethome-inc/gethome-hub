@@ -14,7 +14,7 @@ import { DeviceRegistry } from '../../src/core/registry.js';
 import { PermitJoinService } from '../../src/core/permit-join.js';
 import { ZigbeeAdapter } from '../../src/adapters/zigbee/adapter.js';
 import { MqttAdapter } from '../../src/adapters/mqtt/adapter.js';
-import { bootedHome, openTestDb, resetDb } from '../helpers/db.js';
+import { bootedHome, loadedFavorites, openTestDb, resetDb } from '../helpers/db.js';
 
 /**
  * End-to-end proof over a real MQTT broker: a fake Zigbee2MQTT bridge and a
@@ -96,6 +96,7 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
       log,
       events,
       registry,
+      favorites: await loadedFavorites(db, events),
       pairing,
       activity,
       settings: new SettingsService(db, Buffer.alloc(32).toString('base64')),

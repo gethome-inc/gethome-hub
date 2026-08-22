@@ -106,7 +106,10 @@ applies the change optimistically; the device's real report reconciles it.
   network. Remote access will arrive as an authenticated relay through the
   GetHome server (future work) — the hub will never be port-forwarded.
 - AuthN: opaque bearer tokens issued at claim time, sha256-hashed at rest.
-- AuthZ: `owner` (structure: rename, rooms, members, commissioning, AI
-  settings, removal) vs `member` (control devices, favorites, view activity).
+- AuthZ: `owner` (renaming the home, members, invites, commissioning, AI
+  settings, *removing* devices) vs `member` (everything else, including
+  controlling devices, renaming them, and adding or editing rooms and zones —
+  Studio claims a hub as the Mac, so the owner is usually not a person in the
+  house; see `docs/api.md`). Favorites are per member, not per home.
 - Secrets: the AI credential (an Anthropic API key) AES-256-GCM-encrypted
   with the hub secret; the key file is 0600 and never leaves the machine.

@@ -9,6 +9,7 @@ import { ensureHubSecret } from './core/crypto.js';
 import { HubEventBus } from './core/bus.js';
 import { ActivityService } from './core/activity.js';
 import { HomeService } from './core/home.js';
+import { FavoritesService } from './core/favorites.js';
 import { PairingService } from './core/pairing.js';
 import { SettingsService } from './core/settings.js';
 import { DeviceRegistry } from './core/registry.js';
@@ -76,6 +77,12 @@ async function main(): Promise<void> {
   await pairing.boot();
 
   const registry = new DeviceRegistry(db, events, activity, log.child({ module: 'registry' }));
+  // Favorites are one member's pins rather than a property of the home, so they
+  // live beside the registry instead of on the device row. Loaded once: this is
+  // read for every device on every `GET /devices` and on every `deviceUpserted`
+  // frame, and a household's worth of pins is a few hundred bytes.
+  const favorites = new FavoritesService(db, events);
+  await favorites.load();
   // What the mapping agent does, recorded and streamed. Constructed
   // unconditionally: a hub with no key never writes a row, and the API still
   // has to be able to answer "nothing has run".
@@ -147,6 +154,7 @@ async function main(): Promise<void> {
     log,
     events,
     registry,
+    favorites,
     pairing,
     activity,
     settings,

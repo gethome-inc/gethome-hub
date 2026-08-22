@@ -29,7 +29,6 @@ export interface RegistryDevice {
   model: string | null;
   name: string;
   roomId: string | null;
-  favorite: boolean;
   online: boolean;
   needsReview: boolean;
   /** How this device was placed, and what was left over — see AdapterBus. */
@@ -131,7 +130,6 @@ export class DeviceRegistry implements AdapterBus {
         model: row.model,
         name: row.name,
         roomId: row.roomId,
-        favorite: row.favorite,
         online: row.online,
         needsReview: row.needsReview,
         recognition: (row.recognition as DeviceRecognition | null) ?? null,
@@ -400,25 +398,48 @@ export class DeviceRegistry implements AdapterBus {
     });
   }
 
+  /**
+   * Rename a device, or move it to another room.
+   *
+   * Favorites are deliberately not here any more: they are one member's pins
+   * (`core/favorites.ts`), not a field of the shared device, so they neither
+   * live in this cache nor travel in a `deviceUpserted` event — which is one
+   * object broadcast to every socket.
+   */
   async updateDevice(
     deviceId: string,
-    fields: { name?: string; roomId?: string | null; favorite?: boolean },
+    fields: { name?: string; roomId?: string | null },
   ): Promise<RegistryDevice | undefined> {
     const device = this.getDevice(deviceId);
     if (!device) return undefined;
     if (fields.name !== undefined) device.name = fields.name;
     if (fields.roomId !== undefined) device.roomId = fields.roomId;
-    if (fields.favorite !== undefined) device.favorite = fields.favorite;
     await this.db
       .update(devices)
       .set({
         ...(fields.name !== undefined ? { name: fields.name } : {}),
         ...(fields.roomId !== undefined ? { roomId: fields.roomId } : {}),
-        ...(fields.favorite !== undefined ? { favorite: fields.favorite } : {}),
       })
       .where(eq(devices.id, deviceId));
     this.events.emit('deviceUpserted', deviceId);
     return device;
+  }
+
+  /**
+   * A room was deleted: every device that was in it is now in none.
+   *
+   * The database has already done this (`rooms.id` is `ON DELETE SET NULL`),
+   * and that is exactly the problem — the cache would have gone on serving a
+   * `roomId` pointing at a room that no longer exists, so an app would keep
+   * drawing a section for it until the hub restarted. Emits per device, so the
+   * apps move those cards without refetching.
+   */
+  clearRoom(roomId: string): void {
+    for (const device of this.cache.values()) {
+      if (device.roomId !== roomId) continue;
+      device.roomId = null;
+      this.events.emit('deviceUpserted', device.id);
+    }
   }
 
   async removeDevice(deviceId: string): Promise<boolean> {
@@ -492,7 +513,6 @@ export class DeviceRegistry implements AdapterBus {
       model: row.model,
       name: row.name,
       roomId: row.roomId,
-      favorite: row.favorite,
       online: row.online,
       needsReview: row.needsReview,
       recognition: descriptor.recognition ?? null,
