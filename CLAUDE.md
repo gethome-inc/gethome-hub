@@ -185,6 +185,31 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   hub can offer so a client never infers it from a version number; and frames
   are rate-limited per socket with the losses *reported*, since a gap nobody is
   told about is worse than a gap.
+- **The activity log records what was *asked*, never what was reported.** It is
+  the home's history and the iOS app's "Recent" feed reads it, so the
+  temptation is to write a row whenever anything changes — which is the
+  `STATE_FLUSH_MS` mistake with a different name: a power meter reports every
+  few seconds, forever, onto an SD card. The line is commands and discrete
+  transitions. `device.command` is written per API call, `device.online` /
+  `device.offline` only when reachability actually flips, and a state report
+  writes nothing at all. The cost of holding that line is that a wall switch
+  somebody flips by hand is invisible; the cost of crossing it is the card.
+  **Start-up is not history**: reachability entries are suppressed for
+  `REACHABILITY_QUIET_MS` after `registry.start()`, because on boot every
+  adapter re-establishes what it can reach and each device whose stored row
+  disagrees produces a transition nobody made — without it, every hub restart
+  filled the feed with "X went offline · X came back" for a home where nothing
+  moved. **Retention is two bounds** (`core/activity.ts`): 5 000 rows for the
+  disk, 30 days for relevance, whichever bites first, pruned at most hourly and
+  hung off the next write so a quiet hub never wakes to do it. And **`message`
+  is the contract, `data` is the convenience**: every entry carries a whole
+  sentence, because Studio renders that and an unknown `kind` must still say
+  something true; `data` repeats it structured (`command`, `deviceName`,
+  `memberName`) so an app can write its own wording, pick an icon and fold a
+  burst — and it copies the *names* because both ids are `ON DELETE SET NULL`
+  and a row read next week may be all that is left of the device. Everything in
+  it is optional; nothing may require it. Adding a kind is safe, and the log is
+  shared by design — any member reads all of it, by name.
 - **A join window is several grants, and Zigbee2MQTT is the authority.** A
   permit-join duration travels as a uint8 of seconds, so **254 is the most one
   grant can last** — a protocol fact, not a Z2M one. `core/permit-join.ts`

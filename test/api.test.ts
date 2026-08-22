@@ -464,9 +464,18 @@ describe.skipIf(!handle)('hub API', () => {
   it('records and serves activity', async () => {
     const response = await app.inject({ method: 'GET', url: '/api/v1/activity', headers: auth(memberToken) });
     expect(response.statusCode).toBe(200);
-    const entries = response.json() as Array<{ kind: string }>;
+    const entries = response.json() as Array<{ kind: string; data?: Record<string, unknown> }>;
     expect(entries.some((entry) => entry.kind === 'member.joined')).toBe(true);
-    expect(entries.some((entry) => entry.kind === 'device.command')).toBe(true);
+
+    // A command carries the whole intent beside the sentence, so an app can
+    // say "Turned on" and name the device even after the row's ids are nulled.
+    const command = entries.find((entry) => entry.kind === 'device.command');
+    expect(command).toBeDefined();
+    expect(command!.data).toMatchObject({
+      command: { type: 'setLevel', level: 128 },
+      deviceName: expect.any(String),
+      memberName: expect.any(String),
+    });
   });
 
   it('stores AI settings without ever returning the key', async () => {
