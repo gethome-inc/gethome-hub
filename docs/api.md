@@ -441,10 +441,10 @@ message. These go to every authorized socket:
 {"type":"activity","entry":{id,at,kind,message,deviceId?,memberId?,data?}}
 {"type":"permitJoin","active":true,"remainingSeconds":60}
 {"type":"commissioning","jobId","status","detail"?}     Matter commissioning progress
-{"type":"hubStatus","zigbee":{…},"radio":{…}}           a radio came up or went down
+{"type":"hubStatus","zigbee":{…},"radio":{…}}           a radio came up, went down, or was switched
 ```
 
-### When a radio comes or goes (`hubStatus`)
+### When a radio comes or goes — or is switched (`hubStatus`)
 
 Pulling the Zigbee coordinator out of a running hub produces two facts, and
 only one of them used to travel. Zigbee2MQTT stops, so every Zigbee device goes
@@ -466,6 +466,17 @@ different things depending on which arrived first. Three rules:
 - **Absence still means nothing.** A hub older than these fields sends no
   frame and no blocks, which is not the same as reporting both radios off —
   the same rule that governs `radio.budget`.
+
+**It also fires when somebody records a new `mode`.** A radio switch is a
+change to the home that any member may make, and the other app in the house
+has to see it — but `PUT /settings/radio` writes a file and returns, and the
+hub restarts afterwards *only* when the change actually moves Matter. So a
+client cannot wait for its socket to bounce: switching between two modes that
+resolve the same way changes `mode` and restarts nothing. Polling is not the
+answer either, since not every app polls — the GetHome iOS app doesn't, so a
+switch made in GetHome Studio never reached the phone at all. The frame is
+sent from the route, and carries a **stale `matter`** for the same reason the
+response does: what is live comes from the adapters, a moment later.
 
 Note what this does **not** do: pulling a coordinator out does not switch a
 one-radio board to Matter. That is deliberate and is covered in

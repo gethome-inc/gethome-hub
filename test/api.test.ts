@@ -778,11 +778,20 @@ describe.skipIf(!handle)('hub API', () => {
     expect(anonymous.statusCode).toBe(401);
   });
 
-  it('streams events over the WebSocket', async () => {
-    await app.listen({ port: 0, host: '127.0.0.1' });
+  /**
+   * The address of the running server, starting it on the first call.
+   * Fastify throws on a second `listen`, and more than one test here needs a
+   * real socket rather than `inject`.
+   */
+  async function listeningPort(): Promise<number> {
+    if (!app.server.listening) await app.listen({ port: 0, host: '127.0.0.1' });
     const address = app.server.address();
     if (address === null || typeof address === 'string') throw new Error('no address');
-    const socket = new WebSocket(`ws://127.0.0.1:${address.port}/api/v1/ws?token=${ownerToken}`);
+    return address.port;
+  }
+
+  it('streams events over the WebSocket', async () => {
+    const socket = new WebSocket(`ws://127.0.0.1:${await listeningPort()}/api/v1/ws?token=${ownerToken}`);
 
     const frames: Array<Record<string, unknown>> = [];
     const gotState = new Promise<void>((resolve, reject) => {
@@ -806,6 +815,52 @@ describe.skipIf(!handle)('hub API', () => {
     expect(frames[0]).toMatchObject({ type: 'hello', hubId: 'hub-test-1234' });
     const stateFrame = frames.find((frame) => frame.type === 'state') as { state: { onOff: boolean } };
     expect(stateFrame.state.onOff).toBe(false);
+  });
+
+  /**
+   * The other app in the house has to hear a radio switch it didn't make.
+   *
+   * `PUT /settings/radio` writes a file and returns; the hub restarts a moment
+   * later *only* when the change actually moves Matter, so a client cannot
+   * wait for a socket to bounce — and the GetHome iOS app does not poll
+   * `GET /hub` at all. Without the push, a mode set from GetHome Studio simply
+   * never reached the phone.
+   */
+  it('pushes the new radio mode to sockets that did not ask for it', async () => {
+    const socket = new WebSocket(`ws://127.0.0.1:${await listeningPort()}/api/v1/ws?token=${memberToken}`);
+
+    const gotStatus = new Promise<Record<string, unknown>>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('no hubStatus frame')), 5000);
+      socket.on('message', (data) => {
+        const frame = JSON.parse(String(data)) as Record<string, unknown>;
+        if (frame.type !== 'hubStatus') return;
+        clearTimeout(timer);
+        resolve(frame);
+      });
+      socket.on('open', () => {
+        void app.inject({
+          method: 'PUT',
+          url: '/api/v1/settings/radio',
+          headers: auth(ownerToken),
+          payload: { mode: 'zigbee' },
+        });
+      });
+      socket.on('error', reject);
+    });
+
+    const frame = (await gotStatus) as { radio: { mode: string }; zigbee: unknown };
+    socket.close();
+    expect(frame.radio.mode).toBe('zigbee');
+    // The whole snapshot, not a radio-shaped fragment: one shape for one fact,
+    // so a client cannot be told two different things by two frames.
+    expect(frame.zigbee).toBeDefined();
+
+    await app.inject({
+      method: 'PUT',
+      url: '/api/v1/settings/radio',
+      headers: auth(ownerToken),
+      payload: { mode: 'matter' },
+    });
   });
 
   /** Mint a throwaway member, so a test can revoke one without revoking the suite's. */

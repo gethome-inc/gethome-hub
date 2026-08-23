@@ -184,6 +184,10 @@ export function attachWebSocket(
   deps.events.on('permitJoin', onPermitJoin);
   deps.events.on('commissioningProgress', onCommissioning);
   deps.events.on('radioChanged', onRadioChanged);
+  // Same frame, other reason: a radio *mode* was recorded. One handler, since
+  // the frame is the whole snapshot and the two causes are indistinguishable
+  // to a client — which is the point, it just has to be current.
+  deps.events.on('hubStatusChanged', onRadioChanged);
 
   // ── Optional streams ──────────────────────────────────────────────────────
 
@@ -323,6 +327,7 @@ export function attachWebSocket(
     deps.events.off('permitJoin', onPermitJoin);
     deps.events.off('commissioningProgress', onCommissioning);
   deps.events.off('radioChanged', onRadioChanged);
+  deps.events.off('hubStatusChanged', onRadioChanged);
     // Leaving these attached would leak one listener per socket against the
     // bus's cap of 100, and hold the broker tap open for a closed window.
     if (subscribed.has('mqtt')) {

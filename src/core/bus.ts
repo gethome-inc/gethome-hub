@@ -29,6 +29,23 @@ export interface HubEvents {
    * asks for that when a stick is pulled out.
    */
   radioChanged: [adapter: AdapterId, reachable: boolean];
+  /**
+   * The hub's capability picture changed for a reason that isn't a radio
+   * coming up or going down — today, somebody recording a new radio *mode*.
+   *
+   * It carries nothing because the answer is `core/hub-status.ts`'s whole
+   * snapshot either way, and a payload here would be a second shape for a
+   * fact that already has one. Kept separate from `radioChanged` because that
+   * one is the registry's statement about reachability and has arguments that
+   * would have to be invented to reuse it.
+   *
+   * Without this, `PUT /settings/radio` wrote a file and told nobody: an app
+   * that had not made the change learned of it only by polling — and only if
+   * it polls at all, and only ever *some* of the time, since a mode change
+   * that doesn't move Matter doesn't restart the hub and so doesn't even
+   * bounce the socket.
+   */
+  hubStatusChanged: [];
   commissioningProgress: [jobId: string, status: string, detail?: string];
   mqttFrame: [frame: MqttFrame];
   zigbeeEvent: [event: ZigbeeLifecycleEvent];

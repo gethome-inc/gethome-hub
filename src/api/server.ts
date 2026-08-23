@@ -824,6 +824,15 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const body = z.object({ mode: z.enum(modes) }).parse(request.body);
     writeRadioMode(deps.dataDir, body.mode);
     deps.log.info({ mode: body.mode }, 'Radio mode requested');
+    // Tell every other client, now. The hub restarts a moment later *only* if
+    // the change actually moves Matter, so a socket bouncing is not something
+    // an app can wait for: switching between two modes that resolve the same
+    // way changes `mode` and restarts nothing. Without this the other app in
+    // the house learned the new mode by polling, if it polls at all — the
+    // GetHome iOS app doesn't, so a switch made in Studio never reached it.
+    // The frame carries a stale `matter` for the same reason the response
+    // does; what is *live* still comes from the adapters.
+    deps.events.emit('hubStatusChanged');
     await deps.activity.record({
       kind: 'hub.radio',
       message: `${request.member!.name} set the radio to ${body.mode}.`,

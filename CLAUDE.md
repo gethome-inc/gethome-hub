@@ -130,6 +130,12 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `radioChanged`, which `api/ws.ts` fans out as a `hubStatus` frame carrying
   the same `zigbee`/`radio` blocks `GET /hub` answers with — from the same
   snapshot (`core/hub-status.ts`), because two shapes for one fact drift.
+  **`PUT /settings/radio` emits the same frame** through `hubStatusChanged`,
+  a separate event because `radioChanged` is the registry's statement about
+  reachability and has arguments a mode change would have to invent. Both
+  matter for the same reason: a mode change that doesn't move Matter restarts
+  nothing, so a client cannot wait for its socket to bounce, and not every app
+  polls `GET /hub` — the iOS app doesn't.
   **Before** the device frames: those say which devices went, this says why,
   and a client told in the other order draws a home half offline with nothing
   to explain it. That is the moment somebody pulls a stick out of a Pi. It routes through
