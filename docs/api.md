@@ -65,7 +65,7 @@ devices, favorites, view everything.
 | `POST /zigbee/permit-join` | owner | `{seconds}`, 0–900 (0 = close the network) → `{permitJoin, seconds}` describing the **live** window, which is not always what was asked for. See [below](#the-zigbee-join-window) |
 | `GET /members` · `PATCH /members/me` · `DELETE /members/me` · `DELETE /members/:id` | any · any (itself) · any (itself) · owner | rows carry `isSelf`; `PATCH` takes `{name}` and renames **the caller**; `DELETE` on either route answers `204` and revokes that member's tokens; the owner cannot be removed, by anyone or by itself. See [below](#which-member-you-are-isself-and-patch-membersme) |
 | `GET /invites` · `POST /invites` | owner | `POST` → `201 {code, expiresAt}` |
-| `GET /activity?limit=&before=` | any | reverse-chronological, cursor = `before` id |
+| `GET /activity?limit=&before=` | any | reverse-chronological, cursor = `before` id; rows carry `data` — see [below](#the-activity-log) |
 | `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | owner | PUT `{apiKey, model?}` (an Anthropic API key, write-only; a `sk-ant-oat…` subscription token and a model outside the supported list are both refused with 400, an `authType` from an older app is ignored). **PATCH `{enabled?, model?}`** changes those without re-entering the key — the switch is deliberately not the credential. All three respond `{provider: "anthropic", model, hasKey, enabled, legacySubscriptionToken, status}`; `enabled` defaults to true and `status` carries `lastError`/`lastRun` health — see [ai-adaptation.md](ai-adaptation.md) |
 | `GET /ai/runs?limit=` | owner | what the mapping agent did, newest first: `{id, at, kind, vendor, model, exposesHash, modelId, ok, costUsd, turns, durationMs, errorKind, errorMessage, steps}`. A summary, never a transcript — see [ai-adaptation.md](ai-adaptation.md) |
 | `GET /device-mappings` | owner | the mapping library: one entry per device model, `{adapter, exposesHash, vendor, model, status, source, problems, endpoints, deviceIds, createdAt, updatedAt}` |
@@ -350,6 +350,59 @@ That is the difference between a dead end and a step: `POST …/repair` hands th
 draft and the exact complaints to the agent. Only `repair` needs a credential —
 listing, downloading, uploading and deleting are local operations on JSON.
 
+### The activity log
+
+The home's history: what people did through the apps, and the handful of things
+that happened to the home itself. It is a feed somebody scrolls, not an audit
+trail, and every member reads the same one — `GET /activity` is open to any
+member and the `activity` WebSocket frame goes to every authorized socket, so
+everyone in the home sees who did what, by name. That is deliberate for a
+family home; there is no per-member scoping and nothing here is private.
+
+```json
+{
+  "id": 4127,
+  "at": "2026-08-22T09:14:02.482Z",
+  "kind": "device.command",
+  "message": "Anna · Desk lamp: setLevel",
+  "deviceId": "…", "memberId": "…",
+  "data": { "command": {"type":"setLevel","level":180},
+            "deviceName": "Desk lamp", "memberName": "Anna" }
+}
+```
+
+`message` is the whole sentence and is all a client needs — Studio renders
+exactly that. `data` is the same facts structured, so an app can compose its
+own wording ("Brightness set"), pick an icon and a tone, and fold a burst of
+commands into one line; the GetHome iOS app does. Both names are copied into it
+because `member_id` and `device_id` are `ON DELETE SET NULL`: a row read next
+week may be all that is left of a device somebody has since removed. `data` is
+**optional everywhere** — rows written before it existed have none, and so do
+kinds with nothing to add.
+
+The kinds: `device.command`, `device.added`, `device.removed`,
+`device.online`, `device.offline`, `member.joined`, `member.left`,
+`member.removed`, `member.renamed`, `home.renamed`, `hub.radio`,
+`adapter.error`, `zigbee.interview-failed`, `zigbee.left`. Treat the list as
+open — a client must render an unknown kind from `message` rather than drop it.
+
+**What is not in it: state.** A device *reporting* — a power meter every few
+seconds, a thermostat every minute — writes nothing here, the same rule that
+keeps `STATE_FLUSH_MS` debouncing state rows onto an SD card. Only commands and
+discrete transitions are recorded, which is also why a wall switch somebody
+flips by hand is invisible: the hub logs what it was asked to do, plus a device
+dropping off the network or coming back. `device.online`/`device.offline` are
+silent for the first minute after start-up, because a reconnect sweep is the
+hub catching up rather than something that happened in the house.
+
+**Retention is two bounds, whichever bites first: 5 000 rows and 30 days.** The
+row cap protects the disk; the age cap protects relevance, because 5 000 rows
+is three days in a busy home and a year of nothing in a quiet one. Pruning runs
+at most once an hour, hung off the next write rather than a timer, so the table
+sits at the cap plus whatever has happened since the last pass — and a hub where
+nothing is happening never wakes up to prune. There is no route to clear it and
+no setting to change it.
+
 ## WebSocket
 
 `GET /api/v1/ws?token=<token>` upgrades to a WebSocket. One JSON frame per
@@ -360,7 +413,7 @@ message. These go to every authorized socket:
 {"type":"state","deviceId","endpointId","state":{…}}    full canonical state after each change
 {"type":"deviceUpserted","device":{…}}                  new device or structure/name change
 {"type":"deviceRemoved","deviceId"}
-{"type":"activity","entry":{id,at,kind,message,deviceId?,memberId?}}
+{"type":"activity","entry":{id,at,kind,message,deviceId?,memberId?,data?}}
 {"type":"permitJoin","active":true,"remainingSeconds":60}
 {"type":"commissioning","jobId","status","detail"?}     Matter commissioning progress
 {"type":"hubStatus","zigbee":{…},"radio":{…}}           a radio came up or went down

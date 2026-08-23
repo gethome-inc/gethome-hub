@@ -15,16 +15,32 @@ The `docs/` files are canonical for their domains; read the relevant one before
 touching that code: `architecture.md` (module boundaries, data flow),
 `device-schema.md` (**the** capability/unit/wire contract), `api.md`,
 `zigbee.md`, `matter.md`, `mqtt-integrations.md` (public integrator
-convention), `ai-adaptation.md`, `ecosystem.md`, `macos.md` (native macOS
-deployment — launchd + `deploy/hubctl`).
+convention), `ai-adaptation.md`, `ecosystem.md`.
 
-**There is no Docker and no database server anywhere any more.** Linux runs
-systemd units (`deploy/install.sh`, `deploy/gethome-hubctl`), macOS runs launchd
-agents, and the store is a SQLite file. That was a memory decision: on a
-Raspberry Pi Zero 2 W — 512 MB, the smallest supported board — the Docker daemon
-took ~130 MB and a stock Postgres another ~130 MB before the hub had started,
-and the OOM killer was taking the hub down between the end of the install and
-the user claiming it.
+**There is no Docker and no database server anywhere any more.** The hub runs as
+systemd units (`deploy/install.sh`, `deploy/gethome-hubctl`) and the store is a
+SQLite file. That was a memory decision: on a Raspberry Pi Zero 2 W — 512 MB,
+the smallest supported board — the Docker daemon took ~130 MB and a stock
+Postgres another ~130 MB before the hub had started, and the OOM killer was
+taking the hub down between the end of the install and the user claiming it.
+
+**Deployment is Linux only, and a Mac hub is deferred rather than missing.**
+There was a native macOS path — `install-macos.sh`, launchd agents,
+`deploy/hubctl` — and it was removed because it had quietly stopped being a hub.
+It wrote a Zigbee2MQTT config with no `onboarding: false`, so Z2M 2.x sat in its
+browser wizard and the radio never came up. It never passed `Z2M_DATA_DIR` to
+hubd, so `zigbee.problem` read a Linux path that does not exist on a Mac and
+diagnosed nothing. With no `/etc/avahi/services` the mDNS backend fell to
+`ciao`, which then competes with the Mac's own mDNSResponder for `<host>.local`
+— the exact conflict `mdns/advertiser.ts` exists to avoid. `PUT /settings/radio`
+answered `applying: true` to a file no watcher read. And there was no
+coordinator detection, no prebuilt bundle, no atomic release or rollback, and a
+marker vocabulary Studio had moved on from. **`src/` itself is portable** —
+nothing in it is Linux-only and the suite runs on macOS — so bringing the Mac
+back is deployment work (a darwin bundle, launchd equivalents of the radio
+applier and the coordinator watcher, the `install.sh` marker contract), not a
+port. Don't reintroduce half of it: a second OS that implements none of the
+rules below is the installed-but-unusable trap this file names elsewhere.
 
 ## Build, test, run
 
@@ -203,6 +219,31 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   hub can offer so a client never infers it from a version number; and frames
   are rate-limited per socket with the losses *reported*, since a gap nobody is
   told about is worse than a gap.
+- **The activity log records what was *asked*, never what was reported.** It is
+  the home's history and the iOS app's "Recent" feed reads it, so the
+  temptation is to write a row whenever anything changes — which is the
+  `STATE_FLUSH_MS` mistake with a different name: a power meter reports every
+  few seconds, forever, onto an SD card. The line is commands and discrete
+  transitions. `device.command` is written per API call, `device.online` /
+  `device.offline` only when reachability actually flips, and a state report
+  writes nothing at all. The cost of holding that line is that a wall switch
+  somebody flips by hand is invisible; the cost of crossing it is the card.
+  **Start-up is not history**: reachability entries are suppressed for
+  `REACHABILITY_QUIET_MS` after `registry.start()`, because on boot every
+  adapter re-establishes what it can reach and each device whose stored row
+  disagrees produces a transition nobody made — without it, every hub restart
+  filled the feed with "X went offline · X came back" for a home where nothing
+  moved. **Retention is two bounds** (`core/activity.ts`): 5 000 rows for the
+  disk, 30 days for relevance, whichever bites first, pruned at most hourly and
+  hung off the next write so a quiet hub never wakes to do it. And **`message`
+  is the contract, `data` is the convenience**: every entry carries a whole
+  sentence, because Studio renders that and an unknown `kind` must still say
+  something true; `data` repeats it structured (`command`, `deviceName`,
+  `memberName`) so an app can write its own wording, pick an icon and fold a
+  burst — and it copies the *names* because both ids are `ON DELETE SET NULL`
+  and a row read next week may be all that is left of the device. Everything in
+  it is optional; nothing may require it. Adding a kind is safe, and the log is
+  shared by design — any member reads all of it, by name.
 - **A join window is several grants, and Zigbee2MQTT is the authority.** A
   permit-join duration travels as a uint8 of seconds, so **254 is the most one
   grant can last** — a protocol fact, not a Z2M one. `core/permit-join.ts`
@@ -225,8 +266,15 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   the adapter, so adapters still see nothing but `AdapterBus` and the module
   stays out of a Matter-only hub's graph. Only the *failure* and the
   *departure* are written to the activity log — the rest is transient and the
-  adapter already writes `zigbee.joined` on adoption, so recording every step
-  would put two rows saying "joined" in a log meant to be read a week later.
+  registry already writes `device.added` on adoption, so recording every step
+  would put several rows saying "joined" in a log meant to be read a week
+  later. The adapter used to write a `zigbee.joined` row of its own and no
+  longer does: it gated that on its **in-memory** `byIeee` map, which is empty
+  on every process start, so each restart re-announced every paired device —
+  "0x54ef44100047c1bf joined over Zigbee", dated now, beside a `device.added`
+  from months ago. A join is the registry's to record because the registry is
+  keyed on the database; anything keyed on adapter memory is a restart
+  artifact, not history.
   Read **both** `interview_completed` and `interview_state`: Z2M 2.x replaced
   the first with the second, so `interview_completed === false` read
   `undefined === false` on current installs and adopted devices mid-interview.
@@ -655,9 +703,10 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `install.sh` also denies `docker0` in `avahi-daemon.conf`, so a Docker
   installed later for something else can't get an unreachable `172.17.0.1`
   published for the Pi's name.
-- **Mosquitto listens on the LAN, not loopback.** That is what
-  `deploy/mosquitto`'s config always claimed and what the compose port mapping
-  quietly contradicted — the reason port 1883 was invisible from the user's Mac.
+- **Mosquitto listens on the LAN, not loopback.** That is what the broker
+  config always claimed — now the drop-in `install.sh` writes, which
+  `test/deploy-config.test.ts` parses — and what the compose port mapping
+  quietly contradicted, the reason port 1883 was invisible from the user's Mac.
   MQTT integrations run on other machines; the firewall boundary for a home hub
   is the router.
 - **Only install what is missing.** `install.sh` checks each apt package with

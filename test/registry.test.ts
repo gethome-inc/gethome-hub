@@ -5,6 +5,7 @@ import { HubEventBus } from '../src/core/bus.js';
 import { ActivityService } from '../src/core/activity.js';
 import type { AdapterBus, ProtocolAdapter } from '../src/adapters/adapter.js';
 import type { HubCommand } from '../src/schema/index.js';
+import { activity } from '../src/db/schema.js';
 import { openTestDb, resetDb } from './helpers/db.js';
 
 const handle = await openTestDb();
@@ -272,6 +273,54 @@ describe.skipIf(!handle)('DeviceRegistry', () => {
     await restarted.flush();
 
     expect(restarted.getDevice(deviceId)!.online).toBe(false);
+  });
+
+  it('records a join once ever, not again when the hub restarts', async () => {
+    adapter.bus!.deviceUpserted(lampDescriptor);
+    await registry.flush();
+
+    // A restart: fresh registry, fresh adapter, same database. Every adapter
+    // re-announces what it can see — its own memory of the network is gone —
+    // and the device must not "join the home" a second time. This is why the
+    // join row belongs to the registry, which is keyed on the database, and
+    // not to an adapter, which is keyed on a map it rebuilds at every boot.
+    const second = new DeviceRegistry(db, events, new ActivityService(db, events), log);
+    const restarted = new FakeAdapter();
+    second.registerAdapter(restarted);
+    await second.start();
+    restarted.bus!.deviceUpserted(lampDescriptor);
+    await second.flush();
+
+    const joins = (await db.select().from(activity)).filter((row) => row.kind === 'device.added');
+    expect(joins).toHaveLength(1);
+  });
+
+  it('logs reachability transitions, but not while the hub is still catching up', async () => {
+    const kinds = async () => (await db.select().from(activity)).map((row) => row.kind);
+
+    adapter.bus!.deviceUpserted(lampDescriptor);
+    await registry.flush();
+
+    // Inside the start-up quiet window: the cache is corrected, the log is not.
+    // A reconnect sweep is the hub catching up, not something that happened.
+    adapter.bus!.reachabilityChanged('mqtt', 'lamp-1', false);
+    await registry.flush();
+    expect(registry.listDevices()[0]!.online).toBe(false);
+    expect(await kinds()).not.toContain('device.offline');
+
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 5 * 60_000);
+    try {
+      adapter.bus!.reachabilityChanged('mqtt', 'lamp-1', true);
+      await registry.flush();
+    } finally {
+      clock.mockRestore();
+    }
+    expect(await kinds()).toContain('device.online');
+
+    // Only the transition: a repeat of what the cache already holds is silent.
+    adapter.bus!.reachabilityChanged('mqtt', 'lamp-1', true);
+    await registry.flush();
+    expect((await kinds()).filter((kind) => kind === 'device.online')).toHaveLength(1);
   });
 
   it('forgets devices at the protocol level on removal', async () => {

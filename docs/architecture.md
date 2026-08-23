@@ -7,11 +7,10 @@ members access to the hub. They therefore share **one name** — `HUB_NAME` seed
 it on a hub's first boot, `core/home.ts` owns it after that, and `PATCH /home`
 is the only thing that changes it (see [api.md](api.md)).
 
-Everything runs as systemd units on Linux and launchd agents on macOS — no
-Docker, and no database server. That is a memory decision as much as a
-simplicity one: the smallest board this is meant to run on, a Raspberry Pi Zero
-2 W, has 512 MB, and the Docker daemon plus a stock Postgres wanted half of it
-before the hub had started.
+Everything runs as systemd units on Linux — no Docker, and no database server.
+That is a memory decision as much as a simplicity one: the smallest board this
+is meant to run on, a Raspberry Pi Zero 2 W, has 512 MB, and the Docker daemon
+plus a stock Postgres wanted half of it before the hub had started.
 
 ```
                        ┌────────────────────────────── hubd ─────────────────────────────┐
@@ -109,6 +108,14 @@ frame to every connected app.
 canonical command → registry routes to the owning adapter → adapter translates
 (Z2M `/set` payload, Matter cluster command, MQTT convention topic). The app
 applies the change optimistically; the device's real report reconciles it.
+
+*Sideways (what happened → everyone):* the outbound path also writes one
+`activity` row, which is where the apps' history comes from — every member gets
+it over REST and over the WebSocket, so a phone that was closed all day opens on
+the same feed as one that was watching. Only *asks* and discrete transitions are
+written; a device reporting is not one, or the log would be the write storm
+`STATE_FLUSH_MS` exists to prevent. Bounded at 5 000 rows and 30 days — see
+[api.md](api.md#the-activity-log).
 
 ## Security model (v1, LAN-only)
 

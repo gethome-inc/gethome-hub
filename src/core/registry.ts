@@ -61,6 +61,19 @@ function isIrLibraryCommand(
 /** How long endpoint-state writes coalesce before they reach the database. */
 const STATE_FLUSH_MS = 2_000;
 
+/**
+ * How long after start-up a device going offline or coming back is *not*
+ * written to the activity log.
+ *
+ * A reconnect sweep is not a story: on boot every adapter re-establishes what
+ * it can reach, and each device whose stored row disagrees with what the radio
+ * now says produces a transition that never happened in the house — the hub is
+ * catching up, not observing. Without this, every hub restart (an update, a
+ * radio switch) filled the feed with "X went offline · X came back" for a home
+ * where nothing moved. The cache is still corrected; only the log stays quiet.
+ */
+const REACHABILITY_QUIET_MS = 60_000;
+
 /** A blank endpoint state, plus the IR library base when the endpoint has one. */
 function freshEndpointState(capabilities: CapabilityKind[]): EndpointState {
   const state = emptyState();
@@ -93,6 +106,8 @@ export class DeviceRegistry implements AdapterBus {
    */
   private readonly dirtyState = new Map<string, { deviceId: string; endpointId: number }>();
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  /** When `start()` began, for `REACHABILITY_QUIET_MS`. 0 until it does. */
+  private startedAt = 0;
 
   constructor(
     private readonly db: Db,
@@ -111,6 +126,7 @@ export class DeviceRegistry implements AdapterBus {
 
   /** Load persisted devices into the cache, then start every adapter. */
   async start(): Promise<void> {
+    this.startedAt = Date.now();
     // Two queries, not one per device. The old shape issued an `endpoints`
     // query inside the device loop, so boot time grew with the size of the
     // home on exactly the machines least able to afford it.
@@ -248,6 +264,7 @@ export class DeviceRegistry implements AdapterBus {
       await this.activityLog.record({
         kind: 'device.removed',
         message: `${cached.name} was removed.`,
+        data: { deviceName: cached.name },
       });
     });
   }
@@ -279,6 +296,18 @@ export class DeviceRegistry implements AdapterBus {
       }
       await this.db.update(devices).set({ online: reachable }).where(eq(devices.id, cached.id));
       this.events.emit('deviceUpserted', cached.id);
+      // A device dropping off the network is one of the few things worth
+      // remembering that nobody did: it answers "since when?" a week later.
+      // Recording the *transition* is what keeps it affordable — this fires
+      // once per change, never per report, so the sensor traffic that
+      // `STATE_FLUSH_MS` exists to keep off the SD card stays off it here too.
+      if (Date.now() - this.startedAt < REACHABILITY_QUIET_MS) return;
+      await this.activityLog.record({
+        kind: reachable ? 'device.online' : 'device.offline',
+        message: reachable ? `${cached.name} is back online.` : `${cached.name} went offline.`,
+        deviceId: cached.id,
+        data: { deviceName: cached.name },
+      });
     });
   }
 
@@ -567,6 +596,7 @@ export class DeviceRegistry implements AdapterBus {
       kind: 'device.added',
       message: `${device.name} joined the home.`,
       deviceId: device.id,
+      data: { deviceName: device.name },
     });
   }
 

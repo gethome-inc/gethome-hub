@@ -98,7 +98,7 @@ const MAX_CLIENT_MESSAGE_BYTES = 4096;
 /**
  * WebSocket event stream. Frames (JSON, one per message):
  *
- *   {"type":"hello","hubId","name","apiVersion":1,"streams":["mqtt","zigbee"]}
+ *   {"type":"hello","hubId","name","apiVersion":1,"streams":["mqtt","zigbee","ai"]}
  *   {"type":"state","deviceId","endpointId","state":{…full canonical state…}}
  *   {"type":"deviceUpserted","device":{…GET /devices item…}}
  *   {"type":"deviceRemoved","deviceId"}
