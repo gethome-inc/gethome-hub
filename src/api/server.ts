@@ -398,6 +398,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       kind: 'room.added',
       message: `${request.member!.name} added the room “${body.name}”.`,
       memberId: request.member!.id,
+      data: { roomName: body.name, memberName: request.member!.name },
     });
     await announceStructure();
     return reply.code(201).send(roomWire(row!));
@@ -438,6 +439,11 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         kind: 'room.renamed',
         message: `${request.member!.name} renamed “${before.name}” to “${body.name}”.`,
         memberId: request.member!.id,
+        data: {
+          roomName: body.name,
+          previousName: before.name,
+          memberName: request.member!.name,
+        },
       });
     }
     // A rename is logged and a restyle is not, deliberately: the activity log
@@ -466,6 +472,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       kind: 'room.removed',
       message: `${request.member!.name} removed the room “${room.name}”.`,
       memberId: request.member!.id,
+      data: { roomName: room.name, memberName: request.member!.name },
     });
     await announceStructure();
     return reply.code(204).send();
@@ -495,6 +502,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       kind: 'zone.added',
       message: `${request.member!.name} added the zone “${body.name}”.`,
       memberId: request.member!.id,
+      data: { zoneName: body.name, memberName: request.member!.name },
     });
     await announceStructure();
     return reply.code(201).send({ id: row!.id, name: row!.name, sortOrder: row!.sortOrder });
@@ -525,6 +533,11 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         kind: 'zone.renamed',
         message: `${request.member!.name} renamed the zone “${before.name}” to “${body.name}”.`,
         memberId: request.member!.id,
+        data: {
+          zoneName: body.name,
+          previousName: before.name,
+          memberName: request.member!.name,
+        },
       });
     }
     await announceStructure();
@@ -552,6 +565,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       kind: 'zone.removed',
       message: `${request.member!.name} removed the zone “${zone.name}”.`,
       memberId: request.member!.id,
+      data: { zoneName: zone.name, memberName: request.member!.name },
     });
     await announceStructure();
     return reply.code(204).send();
@@ -636,6 +650,11 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         message: `${request.member!.name} renamed “${previousName}” to “${body.name}”.`,
         deviceId: device.id,
         memberId,
+        data: {
+          deviceName: body.name,
+          previousName,
+          memberName: request.member!.name,
+        },
       });
     }
     if (body.roomId !== undefined && body.roomId !== previousRoomId) {
@@ -649,6 +668,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
           : `${request.member!.name} took ${device.name} out of its room.`,
         deviceId: device.id,
         memberId,
+        data: {
+          deviceName: device.name,
+          // Absent is "out of every room", which is a real answer and the
+          // reason the sentence above has two forms.
+          ...(room ? { roomName: room.name } : {}),
+          memberName: request.member!.name,
+        },
       });
     }
     return deviceWire(device, deps.favorites.isFavorite(memberId, id));

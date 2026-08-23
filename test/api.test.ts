@@ -459,12 +459,24 @@ describe.skipIf(!handle)('hub API', () => {
 
     const entries = (
       await app.inject({ method: 'GET', url: '/api/v1/activity', headers: auth(memberToken) })
-    ).json() as Array<{ kind: string; message: string }>;
-    expect(entries.some((entry) => entry.kind === 'device.renamed')).toBe(true);
+    ).json() as Array<{
+      kind: string;
+      message: string;
+      data?: { deviceName?: string; previousName?: string; roomName?: string; memberName?: string };
+    }>;
+    const renamed = entries.find((entry) => entry.kind === 'device.renamed');
+    expect(renamed).toBeDefined();
     const moved = entries.find((entry) => entry.kind === 'device.moved');
     expect(moved?.message).toContain('Study');
     // The name in the sentence is the one it has now, not the one it had.
     expect(moved?.message).toContain('Desk lamp');
+
+    // Structured beside the sentence, so an app can word it its own way — the
+    // same contract every other kind here follows.
+    expect(renamed?.data?.deviceName).toBe('Desk lamp');
+    expect(renamed?.data?.previousName).toBe('Reading light');
+    expect(moved?.data?.roomName).toBe('Study');
+    expect(moved?.data?.memberName).toBeTruthy();
   });
 
   it('refuses a name of spaces and a room that does not exist', async () => {
@@ -696,9 +708,15 @@ describe.skipIf(!handle)('hub API', () => {
 
     const entries = (
       await app.inject({ method: 'GET', url: '/api/v1/activity', headers: auth(memberToken) })
-    ).json() as Array<{ kind: string; message: string }>;
+    ).json() as Array<{
+      kind: string;
+      message: string;
+      data?: { zoneName?: string; previousName?: string };
+    }>;
     const entry = entries.find((row) => row.kind === 'zone.renamed');
     expect(entry?.message).toContain('First floor');
+    expect(entry?.data?.zoneName).toBe('First floor');
+    expect(entry?.data?.previousName).toBe('Upstairs');
 
     // A name that is already in force is not a change, so it writes nothing.
     await app.inject({

@@ -325,14 +325,11 @@ tells every open app the moment it happens.
 
 #### What a structural edit writes to the log
 
-`GET /activity` is read a week later, so the kinds it carries are the changes
-somebody would look for: **`room.added` · `room.renamed` · `room.removed` ·
-`zone.added` · `zone.renamed` · `zone.removed` · `device.renamed` ·
-`device.moved`**, each naming the member who made it. (The rest of the
-vocabulary — `home.renamed`, `member.joined` / `.renamed` / `.left` /
-`.removed`, `device.added` / `.removed` / `.command`, `zigbee.*`,
-`matter.commissioned`, `adapter.error`, `hub.radio`, `mqtt.invalid` — is
-documented where those features are.)
+Reshaping the home writes one line each: **`room.added` · `room.renamed` ·
+`room.removed` · `zone.added` · `zone.renamed` · `zone.removed` ·
+`device.renamed` · `device.moved`**, naming the member who did it and what
+they touched — the whole vocabulary and the `data` each kind carries is in
+[the activity log](#the-activity-log).
 
 Two deliberate silences, and both are the same rule: **an edit is logged when
 it changes what other people see, not when it changes how it looks to them.**
@@ -509,12 +506,20 @@ week may be all that is left of a device somebody has since removed. `data` is
 kinds with nothing to add.
 
 The kinds: `device.command`, `device.added`, `device.removed`,
-`device.online`, `device.offline`, `member.joined`, `member.left`,
-`member.removed`, `member.renamed`, `home.renamed`, `hub.radio`,
-`adapter.error`, `zigbee.interview-failed`, `zigbee.left`,
-`zigbee.permit-join`, `zigbee.permit-join-closed`, `matter.commission`. Treat
-the list as open — a client must render an unknown kind from `message` rather
-than drop it.
+`device.online`, `device.offline`, `device.renamed`, `device.moved`,
+`room.added`, `room.renamed`, `room.removed`, `zone.added`, `zone.renamed`,
+`zone.removed`, `member.joined`, `member.left`, `member.removed`,
+`member.renamed`, `home.renamed`, `hub.radio`, `adapter.error`,
+`zigbee.interview-failed`, `zigbee.left`, `zigbee.permit-join`,
+`zigbee.permit-join-closed`, `matter.commission`. Treat the list as open — a
+client must render an unknown kind from `message` rather than drop it.
+
+The seven that reshape the home — the `room.*` and `zone.*` trio each, plus
+`device.renamed` and `device.moved` — carry `data.memberName` and the name of
+what was touched (`roomName`, `zoneName`, `deviceName`), with `previousName`
+on the renames and `roomName` absent on a device taken out of every room. See
+[what a structural edit records](#what-a-structural-edit-writes-to-the-log)
+for the two things that are deliberately *not* logged.
 
 The last three, plus `hub.radio`, all carry `data.memberName`: they are the
 things any member may do to the whole home, so the log is where it says which
