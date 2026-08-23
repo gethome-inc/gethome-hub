@@ -60,6 +60,19 @@ function isIrLibraryCommand(
 /** How long endpoint-state writes coalesce before they reach the database. */
 const STATE_FLUSH_MS = 2_000;
 
+/**
+ * How long after start-up a device going offline or coming back is *not*
+ * written to the activity log.
+ *
+ * A reconnect sweep is not a story: on boot every adapter re-establishes what
+ * it can reach, and each device whose stored row disagrees with what the radio
+ * now says produces a transition that never happened in the house — the hub is
+ * catching up, not observing. Without this, every hub restart (an update, a
+ * radio switch) filled the feed with "X went offline · X came back" for a home
+ * where nothing moved. The cache is still corrected; only the log stays quiet.
+ */
+const REACHABILITY_QUIET_MS = 60_000;
+
 /** A blank endpoint state, plus the IR library base when the endpoint has one. */
 function freshEndpointState(capabilities: CapabilityKind[]): EndpointState {
   const state = emptyState();
@@ -92,6 +105,8 @@ export class DeviceRegistry implements AdapterBus {
    */
   private readonly dirtyState = new Map<string, { deviceId: string; endpointId: number }>();
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  /** When `start()` began, for `REACHABILITY_QUIET_MS`. 0 until it does. */
+  private startedAt = 0;
 
   constructor(
     private readonly db: Db,
@@ -110,6 +125,7 @@ export class DeviceRegistry implements AdapterBus {
 
   /** Load persisted devices into the cache, then start every adapter. */
   async start(): Promise<void> {
+    this.startedAt = Date.now();
     // Two queries, not one per device. The old shape issued an `endpoints`
     // query inside the device loop, so boot time grew with the size of the
     // home on exactly the machines least able to afford it.
@@ -146,9 +162,11 @@ export class DeviceRegistry implements AdapterBus {
     }
     this.log.info(`Device registry loaded ${this.cache.size} device(s).`);
 
+    const running = new Set<AdapterId>();
     for (const adapter of this.adapters.values()) {
       try {
         await adapter.start(this);
+        running.add(adapter.id);
         this.log.info(`Adapter "${adapter.id}" started.`);
       } catch (error) {
         // Adapter failures are isolated: the hub keeps running with the rest.
@@ -158,6 +176,17 @@ export class DeviceRegistry implements AdapterBus {
           message: `The ${adapter.id} adapter failed to start.`,
         });
       }
+    }
+
+    // Whatever isn't running can't speak for its devices, and they have just
+    // been read back with the `online` they had when it last could. A radio the
+    // owner switched off — or one that failed to start — is not a home whose
+    // devices are all fine; it is a home that cannot reach half of itself, and
+    // saying so is the whole of what the apps show when a board hands the radio
+    // over. Registration, not the start, is the test that matters: an adapter
+    // the environment left out was never constructed at all.
+    for (const adapter of new Set([...this.cache.values()].map((device) => device.adapter))) {
+      if (!running.has(adapter)) this.radioReachabilityChanged(adapter, false);
     }
   }
 
@@ -233,6 +262,7 @@ export class DeviceRegistry implements AdapterBus {
       await this.activityLog.record({
         kind: 'device.removed',
         message: `${cached.name} was removed.`,
+        data: { deviceName: cached.name },
       });
     });
   }
@@ -264,7 +294,50 @@ export class DeviceRegistry implements AdapterBus {
       }
       await this.db.update(devices).set({ online: reachable }).where(eq(devices.id, cached.id));
       this.events.emit('deviceUpserted', cached.id);
+      // A device dropping off the network is one of the few things worth
+      // remembering that nobody did: it answers "since when?" a week later.
+      // Recording the *transition* is what keeps it affordable — this fires
+      // once per change, never per report, so the sensor traffic that
+      // `STATE_FLUSH_MS` exists to keep off the SD card stays off it here too.
+      if (Date.now() - this.startedAt < REACHABILITY_QUIET_MS) return;
+      await this.activityLog.record({
+        kind: reachable ? 'device.online' : 'device.offline',
+        message: reachable ? `${cached.name} is back online.` : `${cached.name} went offline.`,
+        deviceId: cached.id,
+        data: { deviceName: cached.name },
+      });
     });
+  }
+
+  /**
+   * A whole radio came up or went down.
+   *
+   * Per-device reachability only ever arrives *from* a running radio, so
+   * nothing was ever able to say that a radio which is switched off, failed to
+   * start, or lost its bridge has taken every device behind it with it. Those
+   * devices were loaded out of SQLite with the `online` they last had, and
+   * kept it: on a one-radio board, switching from Zigbee to Matter left a home
+   * whose Zigbee half read perfectly healthy and answered no command — which is
+   * exactly the fact the apps put on screen. It is the same silence on a
+   * Zigbee2MQTT that has gone away under a broker that hasn't.
+   *
+   * Deliberately routed through the per-device path rather than one bulk
+   * UPDATE: it is already serialized per device, already skips a device that
+   * is in the reported state, and already emits `deviceUpserted` — so a radio
+   * going down publishes the same frames an app handles for one device, and a
+   * device that was already offline stays quiet.
+   */
+  radioReachabilityChanged(adapter: AdapterId, reachable: boolean): void {
+    // Announced first, and deliberately: the frames that follow say which
+    // devices went, and this is the only thing that says why. An app told in
+    // the other order draws a home half offline for however long it takes it
+    // to ask what happened — which, for the radio picture, is until somebody
+    // reopens the app.
+    this.events.emit('radioChanged', adapter, reachable);
+    for (const device of this.cache.values()) {
+      if (device.adapter !== adapter) continue;
+      this.reachabilityChanged(adapter, device.externalId, reachable);
+    }
   }
 
   activity(entry: { kind: string; message: string; externalId?: string; adapter?: AdapterId }): void {
@@ -543,6 +616,7 @@ export class DeviceRegistry implements AdapterBus {
       kind: 'device.added',
       message: `${device.name} joined the home.`,
       deviceId: device.id,
+      data: { deviceName: device.name },
     });
   }
 

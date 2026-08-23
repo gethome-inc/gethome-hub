@@ -7,11 +7,10 @@ members access to the hub. They therefore share **one name** — `HUB_NAME` seed
 it on a hub's first boot, `core/home.ts` owns it after that, and `PATCH /home`
 is the only thing that changes it (see [api.md](api.md)).
 
-Everything runs as systemd units on Linux and launchd agents on macOS — no
-Docker, and no database server. That is a memory decision as much as a
-simplicity one: the smallest board this is meant to run on, a Raspberry Pi Zero
-2 W, has 512 MB, and the Docker daemon plus a stock Postgres wanted half of it
-before the hub had started.
+Everything runs as systemd units on Linux — no Docker, and no database server.
+That is a memory decision as much as a simplicity one: the smallest board this
+is meant to run on, a Raspberry Pi Zero 2 W, has 512 MB, and the Docker daemon
+plus a stock Postgres wanted half of it before the hub had started.
 
 ```
                        ┌────────────────────────────── hubd ─────────────────────────────┐
@@ -32,7 +31,7 @@ before the hub had started.
 |---|---|
 | `src/schema/` | The canonical device schema: 27 capability kinds (incl. a universal `custom` fallback), 16 device kinds, typed endpoint state, command intents (incl. IR learn/replay + `setCustomField`), unit conversions, Matter device-type catalog, zod wire schemas. Dependency-free (zod only) — everything else derives from it. |
 | `src/adapters/` | Protocol drivers. Each implements `ProtocolAdapter` and talks to the rest of the hub only through the narrow `AdapterBus` (announce devices, report state, execute commands). Adapters never touch the database or the API. |
-| `src/core/registry.ts` | `DeviceRegistry` — implements the `AdapterBus`: persists devices/endpoints, merges state patches (per-device write queue + write-through cache), fans events out, routes commands back to the owning adapter. An adapter that fails to start is isolated; the hub keeps running. |
+| `src/core/registry.ts` | `DeviceRegistry` — implements the `AdapterBus`: persists devices/endpoints, merges state patches (per-device write queue + write-through cache), fans events out, routes commands back to the owning adapter. An adapter that fails to start is isolated; the hub keeps running — and its devices are marked offline, because a radio that isn't there cannot report them. |
 | `src/core/pairing.ts` | Claim flow: boot pairing code → first claim = owner; owner-minted invite codes (15 min TTL) → members. Opaque bearer tokens, sha256-hashed at rest. |
 | `src/core/crypto.ts` | Hub identity + AES-256-GCM key in `<data>/hub-secret.json` (survives database resets), token generation/hashing, secret encryption. |
 | `src/core/radio.ts` | The owner's Matter-or-Zigbee choice on a board that affords one radio, as a word in `<data>/radio-mode`. Records only — applying it is root work, so a `.path` unit hands it to `gethome-zigbee-detect`. See [zigbee.md](zigbee.md#zigbee-or-matter-on-a-small-board). |
@@ -81,7 +80,17 @@ before the hub had started.
    them rather than leaving that to convention — see
    [ai-adaptation.md](ai-adaptation.md) ("What can reach the agent, and what
    cannot").
-8. **Watching costs nothing when nobody watches.** The traffic tap and the
+8. **A radio that isn't running says so.** Per-device reachability only ever
+   arrives *from* a running radio, so nothing but the radio itself can report
+   that it has taken every device behind it away. `AdapterBus` therefore
+   carries `radioReachabilityChanged(adapter, reachable)` beside the per-device
+   one, and `DeviceRegistry.start()` fires it for any adapter that is not
+   registered or failed to start. Without it the devices come back out of
+   SQLite with the `online` they last had and keep it for ever: on a one-radio
+   board, switching to Matter left the Zigbee half of a home reading perfectly
+   healthy while answering no command — see
+   [zigbee.md](zigbee.md#zigbee-or-matter-on-a-small-board).
+9. **Watching costs nothing when nobody watches.** The traffic tap and the
    optional WebSocket streams are reference-counted and opt-in: no listener is
    attached and no broker connection is opened until a client asks, and none of
    what they carry is written to disk. A phone showing a room of lights must
@@ -100,6 +109,14 @@ frame to every connected app.
 canonical command → registry routes to the owning adapter → adapter translates
 (Z2M `/set` payload, Matter cluster command, MQTT convention topic). The app
 applies the change optimistically; the device's real report reconciles it.
+
+*Sideways (what happened → everyone):* the outbound path also writes one
+`activity` row, which is where the apps' history comes from — every member gets
+it over REST and over the WebSocket, so a phone that was closed all day opens on
+the same feed as one that was watching. Only *asks* and discrete transitions are
+written; a device reporting is not one, or the log would be the write storm
+`STATE_FLUSH_MS` exists to prevent. Bounded at 5 000 rows and 30 days — see
+[api.md](api.md#the-activity-log).
 
 ## Security model (v1, LAN-only)
 

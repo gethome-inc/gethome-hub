@@ -23,10 +23,10 @@ import { isSupportedModel, supportedModelIds } from '../ai/models.js';
 // `MappingLibrary.repair` loads the agent on demand.
 import type { MappingLibrary } from '../ai/library.js';
 import type { AiRunLog } from '../core/ai-runs.js';
-import { RADIO_MODES, readRadioMode, writeRadioMode, type RadioBudget, type RadioMode } from '../core/radio.js';
+import { RADIO_MODES, writeRadioMode, type RadioBudget, type RadioMode } from '../core/radio.js';
 import type { MqttObserver } from '../core/mqtt-observer.js';
 import { MAX_WINDOW_SECONDS, type PermitJoinService } from '../core/permit-join.js';
-import { readZigbeeProblem, type ZigbeeProblem } from '../adapters/zigbee/diagnosis.js';
+import { createHubStatusReader } from '../core/hub-status.js';
 import { deviceWire } from './dto.js';
 import { extractToken, requireMember, requireOwner } from './auth.js';
 import { attachWebSocket, MemberSessions, UNAUTHORIZED_CLOSE_CODE } from './ws.js';
@@ -201,28 +201,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * request — and a failure that has just been diagnosed does not change from
    * one second to the next.
    */
-  let problemCache: { at: number; problem: ZigbeeProblem | undefined } | undefined;
-  const PROBLEM_TTL_MS = 30_000;
-
-  const zigbeeStatus = () => {
-    const enabled = deps.zigbee !== undefined;
-    const connected = deps.zigbee?.connected ?? false;
-    // Whether the network is open belongs on the health check, not only on the
-    // event stream: an app that reconnects, or that has just been opened, has
-    // no other way to learn it and used to draw a "Close Network" button over
-    // a network that closed minutes earlier.
-    const permitJoin = deps.permitJoin.state;
-    if (!enabled || connected) {
-      problemCache = undefined;
-      return { enabled, connected, permitJoin };
-    }
-    const now = Date.now();
-    if (problemCache === undefined || now - problemCache.at > PROBLEM_TTL_MS) {
-      problemCache = { at: now, problem: readZigbeeProblem(deps.z2mDataDir) };
-    }
-    const { problem } = problemCache;
-    return { enabled, connected, permitJoin, ...(problem !== undefined ? { problem } : {}) };
-  };
+  const hubStatus = createHubStatusReader(deps);
 
   app.get('/api/v1/hub', async () => ({
     hubId: deps.hubId,
@@ -239,20 +218,11 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // Additive: an app that doesn't know about this field ignores it, and one
     // that does can say "plug a coordinator in" instead of showing an empty
     // Zigbee section with no explanation.
-    zigbee: zigbeeStatus(),
-    // Also additive. What this hub can actually talk to is not the same on
-    // every machine: a 512 MB board affords one radio, so an app that shows
-    // "Matter" unconditionally would be lying on half the hardware.
-    radio: {
-      /** 'one' when Matter and Zigbee2MQTT don't fit together on this board. */
-      budget: deps.radioBudget,
-      /** What the owner asked for; 'auto' means "follow the hardware". */
-      mode: readRadioMode(deps.dataDir),
-      /** Live, not requested — a switch takes a moment to apply. */
-      matter: deps.matter !== undefined,
-      /** True only when the board could run both at once. */
-      canRunBoth: deps.radioBudget === 'both',
-    },
+    // `zigbee` and `radio` are additive, and are the same two blocks the
+    // `hubStatus` WebSocket frame pushes when they change — one snapshot,
+    // taken in one place, so a client cannot be told two different things
+    // depending on which arrived first.
+    ...hubStatus.snapshot(),
   }));
 
   app.post('/api/v1/pair', async (request, reply) => {
@@ -288,6 +258,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       kind: 'member.joined',
       message: `${result.member.name} joined the home.`,
       memberId: result.member.id,
+      data: { memberName: result.member.name },
     });
     return result;
   });
@@ -316,6 +287,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       kind: 'home.renamed',
       message: `${request.member!.name} renamed the home to “${body.name}”.`,
       memberId: request.member!.id,
+      data: { homeName: body.name, memberName: request.member!.name },
     });
     return result;
   });
@@ -710,6 +682,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       message: `${request.member!.name} · ${device.name}: ${command.type}`,
       deviceId: device.id,
       memberId: request.member!.id,
+      // The whole command, not a summary of it: it is schema-bounded (the
+      // largest is a 400-character custom field) and it is what lets an app
+      // write "Turned on" instead of "power". The two names ride along
+      // because both ids are `ON DELETE SET NULL` — a week later this row may
+      // be all that is left of the device.
+      data: { command, deviceName: device.name, memberName: request.member!.name },
     });
     return reply.code(202).send({ accepted: true });
   });
@@ -731,9 +709,23 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
 
   // ── Matter commissioning & Zigbee joining ────────────────────────────────
 
-  app.post('/api/v1/matter/commission', ownerOnly, async (request, reply) => {
+  /**
+   * **Any member, not just the owner** — see the note on permit-join below;
+   * the two are one rule and pairing a device is not the shape of the home.
+   */
+  app.post('/api/v1/matter/commission', authed, async (request, reply) => {
     if (!deps.matter) return reply.code(409).send({ error: 'matter_disabled' });
     const body = z.object({ pairingCode: z.string().min(8).max(128) }).parse(request.body);
+    // Recorded on the *request*, not on the result: the hub's log is what was
+    // asked for, and the accessory's own arrival is the registry's
+    // `device.added` a moment later. The pairing code never goes in — it is a
+    // credential for the accessory, and this log is read by every member.
+    await deps.activity.record({
+      kind: 'matter.commission',
+      message: `${request.member!.name} started pairing a Matter accessory.`,
+      memberId: request.member!.id,
+      data: { memberName: request.member!.name },
+    });
     const job: CommissionJob = { id: randomUUID(), status: 'running' };
     commissionJobs.set(job.id, job);
     deps.events.emit('commissioningProgress', job.id, 'running');
@@ -763,6 +755,14 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   /**
    * Open (or close, with 0) the Zigbee network for joining.
    *
+   * **Any member, not just the owner.** Owner-only is for the *shape* of the
+   * home — who is in it, what the rooms are, removing a device somebody else
+   * relies on. Adding one is not that: a member is somebody the owner invited
+   * into their home, and a home where the second phone cannot pair the lamp it
+   * is standing next to is a home with a support call in it. The window is
+   * bounded and self-closing either way, and every open is in the activity log
+   * with the member's name on it.
+   *
    * The ceiling used to be 254 — the most a *single* grant can last, which is
    * a fact about the Zigbee protocol rather than about what a person needs.
    * `PermitJoinService` makes a longer window out of several grants, so the
@@ -772,12 +772,32 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * The reply reports the *live* window, not the request, because Zigbee2MQTT
    * may already have had one open.
    */
-  app.post('/api/v1/zigbee/permit-join', ownerOnly, async (request, reply) => {
+  app.post('/api/v1/zigbee/permit-join', authed, async (request, reply) => {
     if (!deps.zigbee) return reply.code(409).send({ error: 'zigbee_disabled' });
     const body = z
       .object({ seconds: z.number().int().min(0).max(MAX_WINDOW_SECONDS) })
       .parse(request.body);
     const state = await deps.permitJoin.open(body.seconds);
+    // Opening a home's network to strangers for a few minutes is the one
+    // moment it accepts them, and it is now any member's to do — so it is
+    // recorded with the name of whoever did it, the way a command is. The
+    // *live* window is what gets logged, not the request: Zigbee2MQTT may
+    // already have had one open and is the authority on this.
+    await deps.activity.record(
+      state.active
+        ? {
+            kind: 'zigbee.permit-join',
+            message: `${request.member!.name} opened the Zigbee network for ${Math.round(state.remainingSeconds / 60)} min.`,
+            memberId: request.member!.id,
+            data: { memberName: request.member!.name, seconds: state.remainingSeconds },
+          }
+        : {
+            kind: 'zigbee.permit-join-closed',
+            message: `${request.member!.name} closed the Zigbee network.`,
+            memberId: request.member!.id,
+            data: { memberName: request.member!.name },
+          },
+    );
     return { permitJoin: state.active, seconds: state.remainingSeconds };
   });
 
@@ -821,6 +841,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         kind: 'member.renamed',
         message: `${before.name} is now called ${body.name}.`,
         memberId: before.id,
+        data: { memberName: body.name },
       });
     }
     return { id: before.id, name: body.name, role: before.role };
@@ -920,6 +941,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       message: row.message,
       deviceId: row.deviceId,
       memberId: row.memberId,
+      // Same field the `activity` WebSocket frame carries, so a client that
+      // reads the backlog and then follows the stream renders both alike.
+      data: row.data ?? null,
     }));
   });
 
@@ -1108,14 +1132,28 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * Expect this process to be restarted a moment after a mode change that
    * actually moves Matter. The response is sent first.
    */
-  app.put('/api/v1/settings/radio', ownerOnly, async (request) => {
+  app.put('/api/v1/settings/radio', authed, async (request) => {
     // Built from the exported list rather than re-typed, so a mode added to
     // `core/radio.ts` cannot be one the API silently rejects.
     const modes = RADIO_MODES as readonly [RadioMode, ...RadioMode[]];
     const body = z.object({ mode: z.enum(modes) }).parse(request.body);
     writeRadioMode(deps.dataDir, body.mode);
     deps.log.info({ mode: body.mode }, 'Radio mode requested');
-    await deps.activity.record({ kind: 'hub.radio', message: `Radio set to ${body.mode}` });
+    // Tell every other client, now. The hub restarts a moment later *only* if
+    // the change actually moves Matter, so a socket bouncing is not something
+    // an app can wait for: switching between two modes that resolve the same
+    // way changes `mode` and restarts nothing. Without this the other app in
+    // the house learned the new mode by polling, if it polls at all — the
+    // GetHome iOS app doesn't, so a switch made in Studio never reached it.
+    // The frame carries a stale `matter` for the same reason the response
+    // does; what is *live* still comes from the adapters.
+    deps.events.emit('hubStatusChanged');
+    await deps.activity.record({
+      kind: 'hub.radio',
+      message: `${request.member!.name} set the radio to ${body.mode}.`,
+      memberId: request.member!.id,
+      data: { memberName: request.member!.name, mode: body.mode },
+    });
     return {
       budget: deps.radioBudget,
       mode: body.mode,
@@ -1132,7 +1170,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // Subscribe synchronously, before the async token check, so an event
     // fired the moment the socket opens is buffered instead of lost in the
     // gap between "connected" and "authorized".
-    const handle = attachWebSocket(socket, deps, sessions);
+    const handle = attachWebSocket(socket, deps, sessions, hubStatus);
     void (async () => {
       const token = extractToken(request);
       const member = token ? await deps.pairing.verifyToken(token) : null;

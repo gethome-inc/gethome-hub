@@ -4,9 +4,9 @@
 #   gethome-hubctl start|stop|restart|status|logs|zigbee|pairing-code|uninstall
 #   gethome-hubctl claim --name "Georgy" [--device "Georgy's Mac"]
 #
-# The Linux sibling of `deploy/hubctl` (macOS/launchd). Everything here is
-# systemd underneath; the point of the wrapper is that a person — or GetHome
-# Studio over SSH — should not have to know the names of four units.
+# Everything here is systemd underneath; the point of the wrapper is that a
+# person — or GetHome Studio over SSH — should not have to know the names of
+# four units.
 #
 # ── Why `claim` exists ─────────────────────────────────────────────────────
 # The pairing code proves physical access to the machine the hub runs on.

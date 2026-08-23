@@ -50,6 +50,7 @@ describe.skipIf(!enabled)('ZigbeeAdapter runtime AI adaptation', () => {
     deviceRemoved: () => {},
     stateChanged: (_adapter, _externalId, endpointId, patch) => patches.push({ endpointId, patch }),
     reachabilityChanged: () => {},
+    radioReachabilityChanged: () => {},
     activity: () => {},
   };
 

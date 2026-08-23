@@ -253,7 +253,19 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     }
     if (suffix === 'bridge/state') {
       const state = payload.startsWith('{') ? (JSON.parse(payload) as { state?: string }).state : payload;
-      this.bridgeOnline = state === 'online';
+      const online = state === 'online';
+      // Zigbee2MQTT going away takes every device on the radio with it, and
+      // nothing else was ever going to say so: per-device availability arrives
+      // *through* the bridge, so a bridge that is gone reports no absences at
+      // all and the whole network kept reading healthy — the broker is still
+      // up, the hub is still up, and no command works. Both directions matter,
+      // because Z2M ships with availability tracking off, so if a hub only ever
+      // marked devices down they would never come back up. This is a statement
+      // about the radio; the per-device reports correct it from there.
+      if (online !== this.bridgeOnline) {
+        this.bridgeOnline = online;
+        this.bus?.radioReachabilityChanged('zigbee', online);
+      }
       this.options.log.info(`Zigbee2MQTT is ${state}.`);
       return;
     }
@@ -443,12 +455,17 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     }
 
     if (announce) {
-      this.bus?.activity({
-        kind: 'zigbee.joined',
-        message: `${raw.friendly_name} joined over Zigbee.`,
-        adapter: 'zigbee',
-        externalId: raw.ieee_address,
-      });
+      // No activity row here. A join is already written — once, ever — by the
+      // registry as `device.added`, which is keyed on the *database*; this
+      // adapter's `byIeee` map is rebuilt from nothing on every process start,
+      // so `announce` is true for every paired device after a restart. That
+      // put "0x54ef44100047c1bf joined over Zigbee" in the feed each time the
+      // hub came back, dated now, beside a `device.added` from months ago —
+      // the same "start-up is not history" mistake as a reachability sweep,
+      // and a duplicate of a better sentence even when it was right.
+      // The live pairing timeline is unaffected: it rides the `zigbeeEvent`
+      // stream, which is what Studio's pairing card watches.
+
       // Ask the device for a fresh snapshot of its readable controls.
       const get: Record<string, string> = {};
       for (const endpoint of profile.endpoints) {

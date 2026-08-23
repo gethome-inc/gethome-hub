@@ -97,4 +97,4 @@ jobs:
           apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30)
           sudo apt-get update -qq "${apt_opts[@]}"
           sudo apt-get install -y -qq "${apt_opts[@]}" shellcheck
-      - run: shellcheck -S warning deploy/install.sh deploy/zigbee-detect.sh deploy/gethome-hubctl deploy/hubctl deploy/install-macos.sh
+      - run: shellcheck -S warning deploy/install.sh deploy/zigbee-detect.sh deploy/gethome-hubctl

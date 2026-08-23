@@ -325,7 +325,7 @@ describe('MappingDescriptor interpreter', () => {
   });
 });
 
-// ── Mapper caching against Postgres ────────────────────────────────────────
+// ── Mapper caching in the mappings table ───────────────────────────────────
 
 const handle = await openTestDb();
 

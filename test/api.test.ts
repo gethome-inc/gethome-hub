@@ -318,6 +318,10 @@ describe.skipIf(!handle)('hub API', () => {
       name: 'Desk lamp',
       adapter: 'mqtt',
       online: true,
+      // The address on its own protocol, beside the UUID this hub minted —
+      // the only handle an app has for tying a device to something a radio
+      // said about it.
+      externalId: 'lamp-1',
       endpoints: [
         {
           endpointId: 1,
@@ -792,9 +796,18 @@ describe.skipIf(!handle)('hub API', () => {
   it('records and serves activity', async () => {
     const response = await app.inject({ method: 'GET', url: '/api/v1/activity', headers: auth(memberToken) });
     expect(response.statusCode).toBe(200);
-    const entries = response.json() as Array<{ kind: string }>;
+    const entries = response.json() as Array<{ kind: string; data?: Record<string, unknown> }>;
     expect(entries.some((entry) => entry.kind === 'member.joined')).toBe(true);
-    expect(entries.some((entry) => entry.kind === 'device.command')).toBe(true);
+
+    // A command carries the whole intent beside the sentence, so an app can
+    // say "Turned on" and name the device even after the row's ids are nulled.
+    const command = entries.find((entry) => entry.kind === 'device.command');
+    expect(command).toBeDefined();
+    expect(command!.data).toMatchObject({
+      command: { type: 'setLevel', level: 128 },
+      deviceName: expect.any(String),
+      memberName: expect.any(String),
+    });
   });
 
   it('stores AI settings without ever returning the key', async () => {
@@ -1015,7 +1028,7 @@ describe.skipIf(!handle)('hub API', () => {
     expect((info.json() as { radio: { mode: string } }).radio.mode).toBe('matter');
   });
 
-  it('refuses a radio it has never heard of, and anyone who is not the owner', async () => {
+  it('refuses a radio it has never heard of', async () => {
     const nonsense = await app.inject({
       method: 'PUT',
       url: '/api/v1/settings/radio',
@@ -1023,23 +1036,94 @@ describe.skipIf(!handle)('hub API', () => {
       payload: { mode: 'bluetooth' },
     });
     expect(nonsense.statusCode).toBe(400);
-
-    const denied = await app.inject({
-      method: 'PUT',
-      url: '/api/v1/settings/radio',
-      headers: auth(memberToken),
-      payload: { mode: 'auto' },
-    });
-    expect(denied.statusCode).toBe(403);
     // The refused request must not have moved anything.
     expect(readFileSync(path.join(dataDir, 'radio-mode'), 'utf8').trim()).toBe('matter');
   });
 
-  it('streams events over the WebSocket', async () => {
-    await app.listen({ port: 0, host: '127.0.0.1' });
+  /**
+   * Owner-only guards the *shape* of a home — who is in it, what the rooms
+   * are, removing a device somebody else relies on. Which radio is running,
+   * and pairing a device onto it, is not that: a member is somebody the owner
+   * invited in, and a home whose second phone cannot pair the lamp it is
+   * standing next to is a home with a support call in it.
+   */
+  it('lets a member switch the radio, and records who did', async () => {
+    const switched = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/settings/radio',
+      headers: auth(memberToken),
+      payload: { mode: 'zigbee' },
+    });
+    expect(switched.statusCode).toBe(200);
+    expect(readFileSync(path.join(dataDir, 'radio-mode'), 'utf8').trim()).toBe('zigbee');
+
+    // Named, because it is no longer only the owner who can have done it: a
+    // radio switch takes half a home offline and the log has to say whose
+    // phone asked for it.
+    const feed = await app.inject({ method: 'GET', url: '/api/v1/activity', headers: auth(ownerToken) });
+    const rows = feed.json() as Array<{ kind: string; message: string; data?: { memberName?: string } }>;
+    const row = rows.find((entry) => entry.kind === 'hub.radio');
+    expect(row?.message).toContain('zigbee');
+    expect(row?.message).toContain("Anna's iPhone");
+    expect(row?.data?.memberName).toBe("Anna's iPhone");
+
+    // Put it back for whatever runs next.
+    await app.inject({
+      method: 'PUT',
+      url: '/api/v1/settings/radio',
+      headers: auth(ownerToken),
+      payload: { mode: 'matter' },
+    });
+  });
+
+  /**
+   * The same rule, on the two routes that actually pair a device. This hub has
+   * neither radio, so the honest answer is `409 <radio>_disabled` — which is
+   * the assertion: a member reaches the route and is told what is missing,
+   * rather than being turned away at the door with a 403 they cannot act on.
+   */
+  it('lets a member reach the pairing routes rather than turning them away', async () => {
+    const zigbee = await app.inject({
+      method: 'POST',
+      url: '/api/v1/zigbee/permit-join',
+      headers: auth(memberToken),
+      payload: { seconds: 300 },
+    });
+    expect(zigbee.statusCode).toBe(409);
+    expect(zigbee.json()).toMatchObject({ error: 'zigbee_disabled' });
+
+    const matter = await app.inject({
+      method: 'POST',
+      url: '/api/v1/matter/commission',
+      headers: auth(memberToken),
+      payload: { pairingCode: '34970112332' },
+    });
+    expect(matter.statusCode).toBe(409);
+    expect(matter.json()).toMatchObject({ error: 'matter_disabled' });
+
+    // Still a token away from anyone at all, though.
+    const anonymous = await app.inject({
+      method: 'POST',
+      url: '/api/v1/zigbee/permit-join',
+      payload: { seconds: 300 },
+    });
+    expect(anonymous.statusCode).toBe(401);
+  });
+
+  /**
+   * The address of the running server, starting it on the first call.
+   * Fastify throws on a second `listen`, and more than one test here needs a
+   * real socket rather than `inject`.
+   */
+  async function listeningPort(): Promise<number> {
+    if (!app.server.listening) await app.listen({ port: 0, host: '127.0.0.1' });
     const address = app.server.address();
     if (address === null || typeof address === 'string') throw new Error('no address');
-    const socket = new WebSocket(`ws://127.0.0.1:${address.port}/api/v1/ws?token=${ownerToken}`);
+    return address.port;
+  }
+
+  it('streams events over the WebSocket', async () => {
+    const socket = new WebSocket(`ws://127.0.0.1:${await listeningPort()}/api/v1/ws?token=${ownerToken}`);
 
     const frames: Array<Record<string, unknown>> = [];
     const gotState = new Promise<void>((resolve, reject) => {
@@ -1063,6 +1147,52 @@ describe.skipIf(!handle)('hub API', () => {
     expect(frames[0]).toMatchObject({ type: 'hello', hubId: 'hub-test-1234' });
     const stateFrame = frames.find((frame) => frame.type === 'state') as { state: { onOff: boolean } };
     expect(stateFrame.state.onOff).toBe(false);
+  });
+
+  /**
+   * The other app in the house has to hear a radio switch it didn't make.
+   *
+   * `PUT /settings/radio` writes a file and returns; the hub restarts a moment
+   * later *only* when the change actually moves Matter, so a client cannot
+   * wait for a socket to bounce — and the GetHome iOS app does not poll
+   * `GET /hub` at all. Without the push, a mode set from GetHome Studio simply
+   * never reached the phone.
+   */
+  it('pushes the new radio mode to sockets that did not ask for it', async () => {
+    const socket = new WebSocket(`ws://127.0.0.1:${await listeningPort()}/api/v1/ws?token=${memberToken}`);
+
+    const gotStatus = new Promise<Record<string, unknown>>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('no hubStatus frame')), 5000);
+      socket.on('message', (data) => {
+        const frame = JSON.parse(String(data)) as Record<string, unknown>;
+        if (frame.type !== 'hubStatus') return;
+        clearTimeout(timer);
+        resolve(frame);
+      });
+      socket.on('open', () => {
+        void app.inject({
+          method: 'PUT',
+          url: '/api/v1/settings/radio',
+          headers: auth(ownerToken),
+          payload: { mode: 'zigbee' },
+        });
+      });
+      socket.on('error', reject);
+    });
+
+    const frame = (await gotStatus) as { radio: { mode: string }; zigbee: unknown };
+    socket.close();
+    expect(frame.radio.mode).toBe('zigbee');
+    // The whole snapshot, not a radio-shaped fragment: one shape for one fact,
+    // so a client cannot be told two different things by two frames.
+    expect(frame.zigbee).toBeDefined();
+
+    await app.inject({
+      method: 'PUT',
+      url: '/api/v1/settings/radio',
+      headers: auth(ownerToken),
+      payload: { mode: 'matter' },
+    });
   });
 
   /** Mint a throwaway member, so a test can revoke one without revoking the suite's. */
@@ -1120,6 +1250,30 @@ describe.skipIf(!handle)('hub API', () => {
     await waitFor('hello');
     return { socket, frames, waitFor };
   }
+
+  /**
+   * The case a Raspberry Pi Zero produces every time somebody pulls the Zigbee
+   * stick out: the devices go offline (frames of their own), and *why* they
+   * went has to travel too. It used to reach an app only through `GET /hub`,
+   * which nothing asks for at that moment — so a phone drew six grey cards
+   * under a chip still reading "Zigbee · on".
+   */
+  it('pushes the hub status when a radio comes up or goes down', async () => {
+    const { socket, waitFor } = await openSocket();
+
+    registry.radioReachabilityChanged('zigbee', false);
+    const frame = await waitFor('hubStatus');
+
+    // The same two blocks the health check answers with, because they come
+    // from the same snapshot — a client must never have to reconcile them.
+    const health = await app.inject({ method: 'GET', url: '/api/v1/hub' });
+    const body = health.json() as Record<string, unknown>;
+    expect(frame.zigbee).toEqual(body.zigbee);
+    expect(frame.radio).toEqual(body.radio);
+    expect(frame.radio).toMatchObject({ budget: 'one', canRunBoth: false, matter: false });
+
+    socket.close();
+  });
 
   // The half a token cascade cannot do on its own. A socket authorizes once,
   // when it opens, so a removed member's REST access ended immediately while
