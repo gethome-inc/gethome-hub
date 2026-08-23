@@ -232,8 +232,15 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   the adapter, so adapters still see nothing but `AdapterBus` and the module
   stays out of a Matter-only hub's graph. Only the *failure* and the
   *departure* are written to the activity log — the rest is transient and the
-  adapter already writes `zigbee.joined` on adoption, so recording every step
-  would put two rows saying "joined" in a log meant to be read a week later.
+  registry already writes `device.added` on adoption, so recording every step
+  would put several rows saying "joined" in a log meant to be read a week
+  later. The adapter used to write a `zigbee.joined` row of its own and no
+  longer does: it gated that on its **in-memory** `byIeee` map, which is empty
+  on every process start, so each restart re-announced every paired device —
+  "0x54ef44100047c1bf joined over Zigbee", dated now, beside a `device.added`
+  from months ago. A join is the registry's to record because the registry is
+  keyed on the database; anything keyed on adapter memory is a restart
+  artifact, not history.
   Read **both** `interview_completed` and `interview_state`: Z2M 2.x replaced
   the first with the second, so `interview_completed === false` read
   `undefined === false` on current installs and adopted devices mid-interview.

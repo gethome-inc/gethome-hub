@@ -188,6 +188,26 @@ describe.skipIf(!handle)('DeviceRegistry', () => {
     expect(registry.getDevice(deviceId)!.endpoints[0]!.state.reachable).toBe(false);
   });
 
+  it('records a join once ever, not again when the hub restarts', async () => {
+    adapter.bus!.deviceUpserted(lampDescriptor);
+    await registry.flush();
+
+    // A restart: fresh registry, fresh adapter, same database. Every adapter
+    // re-announces what it can see — its own memory of the network is gone —
+    // and the device must not "join the home" a second time. This is why the
+    // join row belongs to the registry, which is keyed on the database, and
+    // not to an adapter, which is keyed on a map it rebuilds at every boot.
+    const second = new DeviceRegistry(db, events, new ActivityService(db, events), log);
+    const restarted = new FakeAdapter();
+    second.registerAdapter(restarted);
+    await second.start();
+    restarted.bus!.deviceUpserted(lampDescriptor);
+    await second.flush();
+
+    const joins = (await db.select().from(activity)).filter((row) => row.kind === 'device.added');
+    expect(joins).toHaveLength(1);
+  });
+
   it('logs reachability transitions, but not while the hub is still catching up', async () => {
     const kinds = async () => (await db.select().from(activity)).map((row) => row.kind);
 

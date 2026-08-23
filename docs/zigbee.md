@@ -384,8 +384,13 @@ all. The adapter normalizes those events into the hub's own vocabulary
 (`joined`, `announced`, `interviewing`, `interviewed`, `interview-failed`,
 `left`) in `src/core/zigbee-events.ts` and emits them on the `zigbee`
 WebSocket stream; only the *failure* and the *departure* are also written to
-the activity log, because the rest is transient and the adapter already writes
-a `zigbee.joined` row once the device is adopted.
+the activity log, because the rest is transient and the **registry** already
+writes a `device.added` row once the device is adopted. That row comes from
+the registry rather than from this adapter deliberately: the registry is keyed
+on the database, so it is written once ever, while the adapter's own device map
+is rebuilt from nothing on each process start. An adapter-side `zigbee.joined`
+row existed until it was noticed re-announcing every paired device on every
+hub restart, dated now.
 
 ### What a new device is called
 
