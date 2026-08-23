@@ -4,6 +4,7 @@ import type { MqttFrame } from '../core/mqtt-observer.js';
 import type { ZigbeeLifecycleEvent } from '../core/bus.js';
 import type { AiRunEvent } from '../core/ai-runs.js';
 import { deviceWire } from './dto.js';
+import type { HubStatusReader } from '../core/hub-status.js';
 
 /** Controls a subscribed-but-not-yet-authorized WebSocket. */
 export interface WebSocketHandle {
@@ -104,6 +105,7 @@ const MAX_CLIENT_MESSAGE_BYTES = 4096;
  *   {"type":"activity","entry":{id,at,kind,message,deviceId?,memberId?}}
  *   {"type":"permitJoin","active","remainingSeconds"}
  *   {"type":"commissioning","jobId","status","detail"?}
+ *   {"type":"hubStatus","zigbee":{…},"radio":{…}}   a radio came up or went down
  *
  * and, only for a client that asked for them:
  *
@@ -137,6 +139,7 @@ export function attachWebSocket(
   socket: WebSocket,
   deps: ApiDeps,
   sessions: MemberSessions,
+  hubStatus: HubStatusReader,
 ): WebSocketHandle {
   let authorized = false;
   let closed = false;
@@ -164,6 +167,15 @@ export function attachWebSocket(
     send({ type: 'permitJoin', active, remainingSeconds });
   const onCommissioning = (jobId: string, status: string, detail?: string) =>
     send({ type: 'commissioning', jobId, status, ...(detail !== undefined ? { detail } : {}) });
+  /**
+   * A radio came up or went down, so what this hub can talk to has changed.
+   *
+   * Carries the same `zigbee` and `radio` blocks `GET /hub` answers with,
+   * from the same snapshot function, so a client never has to reconcile two
+   * shapes. Fired on the transition only — never on the join window's
+   * five-second heartbeat, which has its own frame.
+   */
+  const onRadioChanged = () => send({ type: 'hubStatus', ...hubStatus.snapshot() });
 
   deps.events.on('stateChanged', onState);
   deps.events.on('deviceUpserted', onUpserted);
@@ -171,6 +183,11 @@ export function attachWebSocket(
   deps.events.on('activity', onActivity);
   deps.events.on('permitJoin', onPermitJoin);
   deps.events.on('commissioningProgress', onCommissioning);
+  deps.events.on('radioChanged', onRadioChanged);
+  // Same frame, other reason: a radio *mode* was recorded. One handler, since
+  // the frame is the whole snapshot and the two causes are indistinguishable
+  // to a client — which is the point, it just has to be current.
+  deps.events.on('hubStatusChanged', onRadioChanged);
 
   // ── Optional streams ──────────────────────────────────────────────────────
 
@@ -309,6 +326,8 @@ export function attachWebSocket(
     deps.events.off('activity', onActivity);
     deps.events.off('permitJoin', onPermitJoin);
     deps.events.off('commissioningProgress', onCommissioning);
+  deps.events.off('radioChanged', onRadioChanged);
+  deps.events.off('hubStatusChanged', onRadioChanged);
     // Leaving these attached would leak one listener per socket against the
     // bus's cap of 100, and hold the broker tap open for a closed window.
     if (subscribed.has('mqtt')) {

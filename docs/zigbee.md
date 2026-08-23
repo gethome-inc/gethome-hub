@@ -289,7 +289,7 @@ hub). Not both. Two separate things decide which:
 | | Who sets it | Where it lives | What it means |
 |---|---|---|---|
 | **Budget** | `install.sh`, from the board's RAM | `GETHOME_RADIO` in `/etc/gethome/hub.env` | `both` (> 1 GB) or `one` (≤ 1 GB). Measured, not a preference. |
-| **Mode** | the owner, from the GetHome app | `<data>/radio-mode` | `auto` (default), `zigbee` or `matter`. |
+| **Mode** | any member, from the GetHome app | `<data>/radio-mode` | `auto` (default), `zigbee` or `matter`. |
 
 `gethome-zigbee-detect` is where the two meet, because it is the only thing
 that knows whether a coordinator is *actually plugged in* — it runs at boot, on
@@ -335,8 +335,18 @@ costs a radio that was not going to work anyway, because the stick is in their
 other hand.
 
 So on removal the board stays where it is, Zigbee2MQTT stops (there is nothing
-to talk to), and the owner decides in the app with `PUT /settings/radio` — one
-button, reversible, already there. The whole flash-and-return trip now costs
+to talk to), and a person decides in the app with `PUT /settings/radio` — one
+button, reversible, already there.
+
+**The apps are told the moment it happens**, which is what makes that an
+informed decision rather than a discovery. Zigbee2MQTT going down publishes
+`bridge/state: offline`, the adapter reports the radio, and the hub sends a
+`hubStatus` WebSocket frame followed by a `deviceUpserted` for every Zigbee
+device it just took offline — see [api.md](api.md#when-a-radio-comes-or-goes-hubstatus).
+Plugging the stick back in is the mirror image, except on a one-radio board
+that had switched to Matter in the meantime: there the detector really does
+change `ADAPTER_MATTER` and restart the hub, and the apps re-sync on the
+`hello` of their reconnected socket. The whole flash-and-return trip now costs
 **zero** hub restarts instead of two. The cost of the rule is that a hub whose
 coordinator is gone for good keeps Matter off until somebody says so; the app
 is what says so, and `test/deploy-radio.test.ts` pins every row above.
@@ -358,6 +368,21 @@ Switching costs nothing but the switch: the coordinator's device path stays in
 paired devices come back when the board is handed back to Zigbee. They show as
 offline in the app while another radio has the board.
 
+**That last sentence is a thing the hub has to do, not something that follows.**
+Reachability only ever arrives *from* a running radio, so a radio that has been
+switched off reports nothing at all — and the devices behind it were read back
+out of SQLite with the `online` they had when it last ran. They kept it: a home
+whose Zigbee half read perfectly healthy and answered no command, which is the
+opposite of what switching radios is supposed to look like. So
+`DeviceRegistry.start()` marks every device of an adapter that is **not
+registered, or failed to start**, offline, through
+`AdapterBus.radioReachabilityChanged`. It is the same statement the Zigbee
+adapter makes when `bridge/state` goes `offline` — Zigbee2MQTT leaving takes
+the whole network with it whether or not the broker noticed — and it is made in
+both directions, because Zigbee2MQTT ships with per-device availability
+tracking **off**, so a hub that only ever marked devices down would never bring
+them back.
+
 On a `both` board none of this normally fires — `auto` runs everything, and the
 mode exists there only for somebody who wants a radio off deliberately.
 
@@ -369,7 +394,7 @@ Subscribed topics (base topic `zigbee2mqtt`, configurable via
 | Topic | Use |
 |---|---|
 | `zigbee2mqtt/bridge/devices` | retained device registry incl. `definition.exposes` — the schema source, and the **only** thing that adopts a device |
-| `zigbee2mqtt/bridge/state` | Z2M health |
+| `zigbee2mqtt/bridge/state` | Z2M health — and, on each change, the reachability of every device on the radio (see [above](#zigbee-or-matter-on-a-small-board)) |
 | `zigbee2mqtt/bridge/event` | a device joining, being interviewed, or leaving — relayed, never acted on |
 | `zigbee2mqtt/bridge/info` | the live permit-join window (`permit_join`, `permit_join_end`) |
 | `zigbee2mqtt/<friendly_name>` | state payloads |

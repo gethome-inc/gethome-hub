@@ -164,9 +164,11 @@ export class DeviceRegistry implements AdapterBus {
     }
     this.log.info(`Device registry loaded ${this.cache.size} device(s).`);
 
+    const running = new Set<AdapterId>();
     for (const adapter of this.adapters.values()) {
       try {
         await adapter.start(this);
+        running.add(adapter.id);
         this.log.info(`Adapter "${adapter.id}" started.`);
       } catch (error) {
         // Adapter failures are isolated: the hub keeps running with the rest.
@@ -176,6 +178,17 @@ export class DeviceRegistry implements AdapterBus {
           message: `The ${adapter.id} adapter failed to start.`,
         });
       }
+    }
+
+    // Whatever isn't running can't speak for its devices, and they have just
+    // been read back with the `online` they had when it last could. A radio the
+    // owner switched off — or one that failed to start — is not a home whose
+    // devices are all fine; it is a home that cannot reach half of itself, and
+    // saying so is the whole of what the apps show when a board hands the radio
+    // over. Registration, not the start, is the test that matters: an adapter
+    // the environment left out was never constructed at all.
+    for (const adapter of new Set([...this.cache.values()].map((device) => device.adapter))) {
+      if (!running.has(adapter)) this.radioReachabilityChanged(adapter, false);
     }
   }
 
@@ -296,6 +309,37 @@ export class DeviceRegistry implements AdapterBus {
         data: { deviceName: cached.name },
       });
     });
+  }
+
+  /**
+   * A whole radio came up or went down.
+   *
+   * Per-device reachability only ever arrives *from* a running radio, so
+   * nothing was ever able to say that a radio which is switched off, failed to
+   * start, or lost its bridge has taken every device behind it with it. Those
+   * devices were loaded out of SQLite with the `online` they last had, and
+   * kept it: on a one-radio board, switching from Zigbee to Matter left a home
+   * whose Zigbee half read perfectly healthy and answered no command — which is
+   * exactly the fact the apps put on screen. It is the same silence on a
+   * Zigbee2MQTT that has gone away under a broker that hasn't.
+   *
+   * Deliberately routed through the per-device path rather than one bulk
+   * UPDATE: it is already serialized per device, already skips a device that
+   * is in the reported state, and already emits `deviceUpserted` — so a radio
+   * going down publishes the same frames an app handles for one device, and a
+   * device that was already offline stays quiet.
+   */
+  radioReachabilityChanged(adapter: AdapterId, reachable: boolean): void {
+    // Announced first, and deliberately: the frames that follow say which
+    // devices went, and this is the only thing that says why. An app told in
+    // the other order draws a home half offline for however long it takes it
+    // to ask what happened — which, for the radio picture, is until somebody
+    // reopens the app.
+    this.events.emit('radioChanged', adapter, reachable);
+    for (const device of this.cache.values()) {
+      if (device.adapter !== adapter) continue;
+      this.reachabilityChanged(adapter, device.externalId, reachable);
+    }
   }
 
   activity(entry: { kind: string; message: string; externalId?: string; adapter?: AdapterId }): void {

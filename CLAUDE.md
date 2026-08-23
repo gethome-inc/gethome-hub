@@ -117,6 +117,30 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   serialized write queue, write-through cache, JSON state persistence, event
   fan-out, command routing. Adapter start failures are isolated — the hub must
   keep running (and must boot with no devices/radios at all).
+  **A radio that isn't running is not a home that is fine.** Per-device
+  reachability only ever arrives *from* a running radio, so nothing could say
+  that a radio which is off, failed, or lost its bridge took every device with
+  it — they were read back out of SQLite with the `online` they last had and
+  kept it, so switching a one-radio board to Matter left the Zigbee half
+  reading healthy and answering nothing. `AdapterBus.radioReachabilityChanged`
+  is the statement; `start()` makes it for every adapter that is not registered
+  or failed to start, and the Zigbee adapter makes it on `bridge/state`. **Both
+  directions**, because Z2M ships with availability tracking off, so a hub that
+  only ever marked devices down would never bring them back. It also emits
+  `radioChanged`, which `api/ws.ts` fans out as a `hubStatus` frame carrying
+  the same `zigbee`/`radio` blocks `GET /hub` answers with — from the same
+  snapshot (`core/hub-status.ts`), because two shapes for one fact drift.
+  **`PUT /settings/radio` emits the same frame** through `hubStatusChanged`,
+  a separate event because `radioChanged` is the registry's statement about
+  reachability and has arguments a mode change would have to invent. Both
+  matter for the same reason: a mode change that doesn't move Matter restarts
+  nothing, so a client cannot wait for its socket to bounce, and not every app
+  polls `GET /hub` — the iOS app doesn't.
+  **Before** the device frames: those say which devices went, this says why,
+  and a client told in the other order draws a home half offline with nothing
+  to explain it. That is the moment somebody pulls a stick out of a Pi. It routes through
+  the per-device path on purpose: already serialized, already quiet for a
+  device in that state, already emitting `deviceUpserted`.
   **Endpoint state is written behind a debounce** (`STATE_FLUSH_MS`), because
   persisting on every report meant one whole-row JSON rewrite per sensor
   message, forever, onto an SD card — a power meter alone is a write every few
@@ -354,6 +378,21 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   member row with nothing to click on. This is what lets GetHome Studio — which
   has no accounts and no user name of its own — claim as *the Mac* and offer
   the rename afterwards.
+- **Owner-only guards the shape of the home, not adding to it.** Rooms,
+  members, invites, renames, AI settings and device *removal* are the owner's;
+  `POST /matter/commission`, `POST /zigbee/permit-join` and
+  `PUT /settings/radio` are **any member's**, and were owner-only until a
+  second phone in a real home found every one of them 403. A member is
+  somebody the owner invited in, and a home where they cannot pair the lamp
+  they are standing next to is a home with a support call in it. Three things
+  make it safe to give away and are the test for anything else that moves out
+  of `ownerOnly`: the cost is **bounded** (a join window closes itself, a
+  radio mode is one word the owner can put back), it **destroys nothing** (no
+  device leaves, no membership ends), and it is **named** — each of the three
+  writes an activity row carrying `request.member!.name`, which is the
+  accountability the role check was standing in for. Removal is the mirror
+  image and stays owner-only: unbounded, destructive, and anonymous in a log
+  read a week later.
 - **Ending a membership has two halves, and only one of them is the database.**
   Deleting a member takes their tokens with the row (`tokens.member_id`
   cascades, `foreign_keys = ON`), which ends every REST call they can make. It
@@ -434,7 +473,7 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   not at install time.** 512 MB fits the OS, the hub, and *either* Matter
   (~60 MB in-process) *or* Zigbee2MQTT (~150 MB, its own process). `install.sh`
   writes that as a **budget** (`GETHOME_RADIO=one|both`, measured from RAM);
-  the owner's **mode** (`auto|zigbee|matter`) lives in `<data>/radio-mode` and
+  the home's **mode** (`auto|zigbee|matter`) lives in `<data>/radio-mode` and
   reaches it through `PUT /settings/radio`. `gethome-zigbee-detect` is where the
   two meet, because it is the only thing that knows whether a coordinator is
   actually there. **Matter gives way only to Zigbee that is genuinely going to

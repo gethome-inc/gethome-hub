@@ -188,6 +188,93 @@ describe.skipIf(!handle)('DeviceRegistry', () => {
     expect(registry.getDevice(deviceId)!.endpoints[0]!.state.reachable).toBe(false);
   });
 
+  it('takes every device on a radio offline when the radio goes', async () => {
+    adapter.bus!.deviceUpserted(lampDescriptor);
+    adapter.bus!.deviceUpserted({ ...lampDescriptor, externalId: 'lamp-2', suggestedName: 'Hall lamp' });
+    await registry.flush();
+
+    adapter.bus!.radioReachabilityChanged('mqtt', false);
+    await registry.flush();
+    expect(registry.listDevices().map((device) => device.online)).toEqual([false, false]);
+    expect(registry.listDevices().every((device) => device.endpoints[0]!.state.reachable === false)).toBe(true);
+
+    adapter.bus!.radioReachabilityChanged('mqtt', true);
+    await registry.flush();
+    expect(registry.listDevices().map((device) => device.online)).toEqual([true, true]);
+  });
+
+  /**
+   * Announced before the devices it takes with it. The per-device frames say
+   * which went; only this says why, and an app told in the other order draws a
+   * home half offline with nothing to explain it.
+   */
+  it('announces a radio change before the devices it takes with it', async () => {
+    adapter.bus!.deviceUpserted(lampDescriptor);
+    await registry.flush();
+
+    const order: string[] = [];
+    events.on('radioChanged', (adapterId, reachable) => {
+      order.push(`radio:${adapterId}:${reachable}`);
+    });
+    events.on('deviceUpserted', () => order.push('device'));
+
+    adapter.bus!.radioReachabilityChanged('mqtt', false);
+    await registry.flush();
+
+    expect(order[0]).toBe('radio:mqtt:false');
+    expect(order).toContain('device');
+  });
+
+  it('leaves other adapters alone when one radio goes', async () => {
+    adapter.bus!.deviceUpserted(lampDescriptor);
+    await registry.flush();
+
+    adapter.bus!.radioReachabilityChanged('zigbee', false);
+    await registry.flush();
+    expect(registry.listDevices()[0]!.online).toBe(true);
+  });
+
+  /**
+   * The case a one-radio board actually produces: the hub restarts with the
+   * Matter adapter switched off, so its devices come back out of SQLite with
+   * the `online` they had when it last ran and nothing is left to correct
+   * them. They must load offline — the app is about to tell somebody that
+   * switching radios is why half their home stopped answering.
+   */
+  it('starts devices of an unregistered adapter offline', async () => {
+    adapter.bus!.deviceUpserted(lampDescriptor);
+    await registry.flush();
+    const deviceId = registry.listDevices()[0]!.id;
+
+    const restarted = new DeviceRegistry(db, events, new ActivityService(db, events), log);
+    await restarted.start();
+    await restarted.flush();
+
+    expect(restarted.getDevice(deviceId)!.online).toBe(false);
+    expect(restarted.getDevice(deviceId)!.endpoints[0]!.state.reachable).toBe(false);
+  });
+
+  it('starts devices of an adapter that failed to start offline', async () => {
+    adapter.bus!.deviceUpserted(lampDescriptor);
+    await registry.flush();
+    const deviceId = registry.listDevices()[0]!.id;
+
+    const broken: ProtocolAdapter = {
+      id: 'mqtt',
+      start: async () => {
+        throw new Error('no broker');
+      },
+      stop: async () => {},
+      execute: async () => {},
+    };
+    const restarted = new DeviceRegistry(db, events, new ActivityService(db, events), log);
+    restarted.registerAdapter(broken);
+    await restarted.start();
+    await restarted.flush();
+
+    expect(restarted.getDevice(deviceId)!.online).toBe(false);
+  });
+
   it('records a join once ever, not again when the hub restarts', async () => {
     adapter.bus!.deviceUpserted(lampDescriptor);
     await registry.flush();

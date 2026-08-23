@@ -253,7 +253,19 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     }
     if (suffix === 'bridge/state') {
       const state = payload.startsWith('{') ? (JSON.parse(payload) as { state?: string }).state : payload;
-      this.bridgeOnline = state === 'online';
+      const online = state === 'online';
+      // Zigbee2MQTT going away takes every device on the radio with it, and
+      // nothing else was ever going to say so: per-device availability arrives
+      // *through* the bridge, so a bridge that is gone reports no absences at
+      // all and the whole network kept reading healthy — the broker is still
+      // up, the hub is still up, and no command works. Both directions matter,
+      // because Z2M ships with availability tracking off, so if a hub only ever
+      // marked devices down they would never come back up. This is a statement
+      // about the radio; the per-device reports correct it from there.
+      if (online !== this.bridgeOnline) {
+        this.bridgeOnline = online;
+        this.bus?.radioReachabilityChanged('zigbee', online);
+      }
       this.options.log.info(`Zigbee2MQTT is ${state}.`);
       return;
     }

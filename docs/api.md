@@ -43,9 +43,20 @@ the machine the code exists to prove access to, so requiring them to recite the
 number adds a step that can only fail. GetHome Studio uses it over SSH, which
 is why the person who installs a hub is never shown a code at all.
 
-Roles: **owner** = structure (rename home/devices, rooms, members, invites,
-commissioning, permit-join, AI settings, device removal). **member** = control
-devices, favorites, view everything.
+Roles: **owner** = structure (rename home/devices, rooms, members, invites, AI
+settings, device removal). **member** = control devices, favorites, view
+everything — *and* pair new ones: commissioning, the Zigbee join window and
+the radio switch are open to any member.
+
+**Why those three are not owner-only.** Owner-only guards the *shape* of the
+home — who is in it, what the rooms are, taking away a device somebody else
+relies on. Adding one is not that. A member is somebody the owner invited into
+their home, and a home where the second phone cannot pair the lamp it is
+standing next to is a home with a support call in it. The costs are bounded and
+reversible: a join window closes itself, a radio switch is one word in a file
+that the owner can put back, and neither destroys anything. Every one of the
+three is written to the activity log with the member's name on it, which is the
+accountability the role check was standing in for.
 
 ## REST routes
 
@@ -60,9 +71,9 @@ devices, favorites, view everything.
 | `DELETE /devices/:id` | owner | also unpairs at the protocol level |
 | `POST /devices/:id/endpoints/:endpointId/commands` | any | body = canonical command; `202`. IR-remote intents (`irLearn`/`irSaveLearned`/`irSend`/`irDeleteCommand`/`irRenameCommand`) are resolved against the endpoint's stored code library (see [device-schema.md](device-schema.md)) |
 | `POST /devices/:id/remap` | owner | force-regenerate the AI mapping (Zigbee devices); the hub also remaps automatically when a device publishes unknown parameters — see [ai-adaptation.md](ai-adaptation.md). `409 ai_not_configured` with no credential, `409 ai_disabled` when the owner has switched adaptation off |
-| `POST /matter/commission` | owner | `{pairingCode}` → `202 {jobId}` (async) |
+| `POST /matter/commission` | any | `{pairingCode}` → `202 {jobId}` (async) |
 | `GET /matter/commission/:jobId` | any | `{status: running\|done\|failed, nodeId?, error?}` |
-| `POST /zigbee/permit-join` | owner | `{seconds}`, 0–900 (0 = close the network) → `{permitJoin, seconds}` describing the **live** window, which is not always what was asked for. See [below](#the-zigbee-join-window) |
+| `POST /zigbee/permit-join` | any | `{seconds}`, 0–900 (0 = close the network) → `{permitJoin, seconds}` describing the **live** window, which is not always what was asked for. See [below](#the-zigbee-join-window) |
 | `GET /members` · `PATCH /members/me` · `DELETE /members/me` · `DELETE /members/:id` | any · any (itself) · any (itself) · owner | rows carry `isSelf`; `PATCH` takes `{name}` and renames **the caller**; `DELETE` on either route answers `204` and revokes that member's tokens; the owner cannot be removed, by anyone or by itself. See [below](#which-member-you-are-isself-and-patch-membersme) |
 | `GET /invites` · `POST /invites` | owner | `POST` → `201 {code, expiresAt}` |
 | `GET /activity?limit=&before=` | any | reverse-chronological, cursor = `before` id; rows carry `data` — see [below](#the-activity-log) |
@@ -73,7 +84,7 @@ devices, favorites, view everything.
 | `PUT /device-mappings/:exposesHash` | owner | the upload. Accepts the envelope or a bare descriptor. `422 {error:"invalid_mapping", problems, issues?}` when the hub can't use it — and it is **kept**, so `…/repair` can work from it |
 | `DELETE /device-mappings/:exposesHash` | owner | forget it; devices of that model fall back to their static mapping |
 | `POST /device-mappings/:exposesHash/repair` | owner | hand a rejected descriptor to the agent with the complaints. `409 ai_not_configured` / `409 ai_disabled` / `409 nothing_to_repair`, `422 no_device` |
-| `PUT /settings/radio` | owner | `{mode: "auto"\|"zigbee"\|"matter"}` → `{budget, mode, matter, canRunBoth, applying: true}`. Records a *request*; see below |
+| `PUT /settings/radio` | any | `{mode: "auto"\|"zigbee"\|"matter"}` → `{budget, mode, matter, canRunBoth, applying: true}`. Records a *request*; see below |
 
 ### The hub's name is the home's name
 
@@ -151,7 +162,7 @@ hub is in:
 | Field | Meaning |
 |---|---|
 | `budget` | `"both"` or `"one"` — the *board's*, measured at install time. Not a preference and not settable |
-| `mode` | `"auto"` (default), `"zigbee"` or `"matter"` — the owner's choice, when one has been made |
+| `mode` | `"auto"` (default), `"zigbee"` or `"matter"` — the choice somebody in the home has made, when one has been made |
 | `matter` | whether the Matter adapter is **live right now** |
 | `canRunBoth` | `budget === "both"`, restated so an app can hide the switch without parsing the enum |
 
@@ -159,7 +170,7 @@ hub is in:
 within seconds of being plugged in, and Matter takes it on a board where no
 coordinator has ever been set up. Unplugging a coordinator changes *nothing* —
 Zigbee2MQTT stops, the board stays where it was, and switching to Matter is left
-to the owner. Pulling a stick out is ambiguous (finished with Zigbee, or two
+to a person. Pulling a stick out is ambiguous (finished with Zigbee, or two
 minutes into flashing it?) and the wrong guess restarts the hub under somebody
 who is mid-repair. The full matrix, and why Matter never gives way to a
 coordinator that isn't there, is in
@@ -252,7 +263,8 @@ without polling.
 
 ```json
 {
-  "id": "8b6c…uuid", "name": "Desk lamp", "roomId": null,
+  "id": "8b6c…uuid", "externalId": "0x54ef44100047fea7",
+  "name": "Desk lamp", "roomId": null,
   "favorite": false, "online": true,
   "adapter": "zigbee", "vendor": "IKEA", "model": "LED2003G10",
   "needsReview": false,
@@ -267,8 +279,27 @@ without polling.
 }
 ```
 
+`id` is a UUID this hub minted; **`externalId` is the device's address on its
+own protocol** — a Zigbee IEEE, an MQTT discovery id, a Matter node. It is the
+only handle an app has for tying a device row to something a *radio* said,
+because the Zigbee lifecycle stream (`zigbeeEvent`) is keyed by IEEE and knows
+nothing about the hub's UUIDs. Without it a pairing screen watching both had no
+way to tell that "New device fea7" finishing its interview and "Smart
+temperature and humidity sensor FEA7" arriving were one sensor, and drew them
+as two. It is stable for the life of the pairing and is not a secret — it is
+what Zigbee2MQTT and every MQTT integration already call the device.
+
 `needsReview: true` marks devices whose automatic mapping was incomplete
 (see [ai-adaptation.md](ai-adaptation.md)).
+
+`online` is **whether the hub can reach the device**, and it answers for the
+radio as well as for the device. A radio that is switched off, failed to start,
+or lost its Zigbee2MQTT bridge takes every device behind it `offline` — with a
+`deviceUpserted` frame each, exactly as one device going would. That is what a
+one-radio board looks like after `PUT /settings/radio`: half the home reads
+offline until the radio is handed back, and reads online again when it is.
+Without it those devices would have kept the `online` they had before the
+switch, since reachability only ever arrives from a radio that is running.
 
 `recognition` is additive and says **how** the device came to be understood:
 
@@ -294,6 +325,10 @@ must read as "not known" rather than "recognised by nothing".
 `POST /zigbee/permit-join` opens the network for `seconds` and the hub owns
 what happens next. Three things follow from that, and a client should not
 reimplement any of them.
+
+**Any member may open one**, and every open and close is written to the
+activity log with their name on it — see the roles note under
+[REST routes](#rest-routes).
 
 **A window is made of grants.** The Zigbee protocol carries a permit-join
 duration as a uint8 of seconds, so **254 is the most a single grant can last**.
@@ -374,8 +409,18 @@ kinds with nothing to add.
 The kinds: `device.command`, `device.added`, `device.removed`,
 `device.online`, `device.offline`, `member.joined`, `member.left`,
 `member.removed`, `member.renamed`, `home.renamed`, `hub.radio`,
-`adapter.error`, `zigbee.interview-failed`, `zigbee.left`. Treat the list as
-open — a client must render an unknown kind from `message` rather than drop it.
+`adapter.error`, `zigbee.interview-failed`, `zigbee.left`,
+`zigbee.permit-join`, `zigbee.permit-join-closed`, `matter.commission`. Treat
+the list as open — a client must render an unknown kind from `message` rather
+than drop it.
+
+The last three, plus `hub.radio`, all carry `data.memberName`: they are the
+things any member may do to the whole home, so the log is where it says which
+phone did. `zigbee.permit-join` also carries `data.seconds` — the **live**
+window the hub ended up with, not the number that was asked for.
+`matter.commission` is written when pairing *starts* and never carries the
+pairing code: that is the accessory's credential, and every member reads this
+log.
 
 **What is not in it: state.** A device *reporting* — a power meter every few
 seconds, a thermostat every minute — writes nothing here, the same rule that
@@ -407,7 +452,48 @@ message. These go to every authorized socket:
 {"type":"activity","entry":{id,at,kind,message,deviceId?,memberId?,data?}}
 {"type":"permitJoin","active":true,"remainingSeconds":60}
 {"type":"commissioning","jobId","status","detail"?}     Matter commissioning progress
+{"type":"hubStatus","zigbee":{…},"radio":{…}}           a radio came up, went down, or was switched
 ```
+
+### When a radio comes or goes — or is switched (`hubStatus`)
+
+Pulling the Zigbee coordinator out of a running hub produces two facts, and
+only one of them used to travel. Zigbee2MQTT stops, so every Zigbee device goes
+unreachable — those arrive as `deviceUpserted` frames, one per device. *Why*
+they went is the `zigbee`/`radio` picture, and that only ever reached a client
+through `GET /hub`, which nothing asks for at that moment. Apps drew a home
+half offline under a chip still reporting Zigbee as live.
+
+The frame carries **the same two blocks `GET /hub` answers with**, built from
+the same snapshot (`src/core/hub-status.ts`) so a client is never told two
+different things depending on which arrived first. Three rules:
+
+- **It fires on the transition, not on a timer.** A join window's countdown has
+  its own frame at its own rate; this one would otherwise repeat the whole
+  status every five seconds while a network is open.
+- **It is sent before the device frames.** The devices say *what*; this says
+  *why*, and an app told in the other order has nothing to explain the grey
+  cards with until it asks.
+- **Absence still means nothing.** A hub older than these fields sends no
+  frame and no blocks, which is not the same as reporting both radios off —
+  the same rule that governs `radio.budget`.
+
+**It also fires when somebody records a new `mode`.** A radio switch is a
+change to the home that any member may make, and the other app in the house
+has to see it — but `PUT /settings/radio` writes a file and returns, and the
+hub restarts afterwards *only* when the change actually moves Matter. So a
+client cannot wait for its socket to bounce: switching between two modes that
+resolve the same way changes `mode` and restarts nothing. Polling is not the
+answer either, since not every app polls — the GetHome iOS app doesn't, so a
+switch made in GetHome Studio never reached the phone at all. The frame is
+sent from the route, and carries a **stale `matter`** for the same reason the
+response does: what is live comes from the adapters, a moment later.
+
+Note what this does **not** do: pulling a coordinator out does not switch a
+one-radio board to Matter. That is deliberate and is covered in
+[zigbee.md](zigbee.md#zigbee-or-matter-on-a-small-board) — removal is
+ambiguous, so the board stays put and a person decides with
+`PUT /settings/radio`. The frame is what makes that decision an informed one.
 
 ### Opt-in streams
 
