@@ -397,9 +397,23 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
 
   // ── Matter commissioning & Zigbee joining ────────────────────────────────
 
-  app.post('/api/v1/matter/commission', ownerOnly, async (request, reply) => {
+  /**
+   * **Any member, not just the owner** — see the note on permit-join below;
+   * the two are one rule and pairing a device is not the shape of the home.
+   */
+  app.post('/api/v1/matter/commission', authed, async (request, reply) => {
     if (!deps.matter) return reply.code(409).send({ error: 'matter_disabled' });
     const body = z.object({ pairingCode: z.string().min(8).max(128) }).parse(request.body);
+    // Recorded on the *request*, not on the result: the hub's log is what was
+    // asked for, and the accessory's own arrival is the registry's
+    // `device.added` a moment later. The pairing code never goes in — it is a
+    // credential for the accessory, and this log is read by every member.
+    await deps.activity.record({
+      kind: 'matter.commission',
+      message: `${request.member!.name} started pairing a Matter accessory.`,
+      memberId: request.member!.id,
+      data: { memberName: request.member!.name },
+    });
     const job: CommissionJob = { id: randomUUID(), status: 'running' };
     commissionJobs.set(job.id, job);
     deps.events.emit('commissioningProgress', job.id, 'running');
@@ -429,6 +443,14 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   /**
    * Open (or close, with 0) the Zigbee network for joining.
    *
+   * **Any member, not just the owner.** Owner-only is for the *shape* of the
+   * home — who is in it, what the rooms are, removing a device somebody else
+   * relies on. Adding one is not that: a member is somebody the owner invited
+   * into their home, and a home where the second phone cannot pair the lamp it
+   * is standing next to is a home with a support call in it. The window is
+   * bounded and self-closing either way, and every open is in the activity log
+   * with the member's name on it.
+   *
    * The ceiling used to be 254 — the most a *single* grant can last, which is
    * a fact about the Zigbee protocol rather than about what a person needs.
    * `PermitJoinService` makes a longer window out of several grants, so the
@@ -438,12 +460,32 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * The reply reports the *live* window, not the request, because Zigbee2MQTT
    * may already have had one open.
    */
-  app.post('/api/v1/zigbee/permit-join', ownerOnly, async (request, reply) => {
+  app.post('/api/v1/zigbee/permit-join', authed, async (request, reply) => {
     if (!deps.zigbee) return reply.code(409).send({ error: 'zigbee_disabled' });
     const body = z
       .object({ seconds: z.number().int().min(0).max(MAX_WINDOW_SECONDS) })
       .parse(request.body);
     const state = await deps.permitJoin.open(body.seconds);
+    // Opening a home's network to strangers for a few minutes is the one
+    // moment it accepts them, and it is now any member's to do — so it is
+    // recorded with the name of whoever did it, the way a command is. The
+    // *live* window is what gets logged, not the request: Zigbee2MQTT may
+    // already have had one open and is the authority on this.
+    await deps.activity.record(
+      state.active
+        ? {
+            kind: 'zigbee.permit-join',
+            message: `${request.member!.name} opened the Zigbee network for ${Math.round(state.remainingSeconds / 60)} min.`,
+            memberId: request.member!.id,
+            data: { memberName: request.member!.name, seconds: state.remainingSeconds },
+          }
+        : {
+            kind: 'zigbee.permit-join-closed',
+            message: `${request.member!.name} closed the Zigbee network.`,
+            memberId: request.member!.id,
+            data: { memberName: request.member!.name },
+          },
+    );
     return { permitJoin: state.active, seconds: state.remainingSeconds };
   });
 
@@ -775,14 +817,19 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * Expect this process to be restarted a moment after a mode change that
    * actually moves Matter. The response is sent first.
    */
-  app.put('/api/v1/settings/radio', ownerOnly, async (request) => {
+  app.put('/api/v1/settings/radio', authed, async (request) => {
     // Built from the exported list rather than re-typed, so a mode added to
     // `core/radio.ts` cannot be one the API silently rejects.
     const modes = RADIO_MODES as readonly [RadioMode, ...RadioMode[]];
     const body = z.object({ mode: z.enum(modes) }).parse(request.body);
     writeRadioMode(deps.dataDir, body.mode);
     deps.log.info({ mode: body.mode }, 'Radio mode requested');
-    await deps.activity.record({ kind: 'hub.radio', message: `Radio set to ${body.mode}` });
+    await deps.activity.record({
+      kind: 'hub.radio',
+      message: `${request.member!.name} set the radio to ${body.mode}.`,
+      memberId: request.member!.id,
+      data: { memberName: request.member!.name, mode: body.mode },
+    });
     return {
       budget: deps.radioBudget,
       mode: body.mode,

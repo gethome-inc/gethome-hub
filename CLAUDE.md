@@ -372,6 +372,21 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   member row with nothing to click on. This is what lets GetHome Studio — which
   has no accounts and no user name of its own — claim as *the Mac* and offer
   the rename afterwards.
+- **Owner-only guards the shape of the home, not adding to it.** Rooms,
+  members, invites, renames, AI settings and device *removal* are the owner's;
+  `POST /matter/commission`, `POST /zigbee/permit-join` and
+  `PUT /settings/radio` are **any member's**, and were owner-only until a
+  second phone in a real home found every one of them 403. A member is
+  somebody the owner invited in, and a home where they cannot pair the lamp
+  they are standing next to is a home with a support call in it. Three things
+  make it safe to give away and are the test for anything else that moves out
+  of `ownerOnly`: the cost is **bounded** (a join window closes itself, a
+  radio mode is one word the owner can put back), it **destroys nothing** (no
+  device leaves, no membership ends), and it is **named** — each of the three
+  writes an activity row carrying `request.member!.name`, which is the
+  accountability the role check was standing in for. Removal is the mirror
+  image and stays owner-only: unbounded, destructive, and anonymous in a log
+  read a week later.
 - **Ending a membership has two halves, and only one of them is the database.**
   Deleting a member takes their tokens with the row (`tokens.member_id`
   cascades, `foreign_keys = ON`), which ends every REST call they can make. It
@@ -452,7 +467,7 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   not at install time.** 512 MB fits the OS, the hub, and *either* Matter
   (~60 MB in-process) *or* Zigbee2MQTT (~150 MB, its own process). `install.sh`
   writes that as a **budget** (`GETHOME_RADIO=one|both`, measured from RAM);
-  the owner's **mode** (`auto|zigbee|matter`) lives in `<data>/radio-mode` and
+  the home's **mode** (`auto|zigbee|matter`) lives in `<data>/radio-mode` and
   reaches it through `PUT /settings/radio`. `gethome-zigbee-detect` is where the
   two meet, because it is the only thing that knows whether a coordinator is
   actually there. **Matter gives way only to Zigbee that is genuinely going to

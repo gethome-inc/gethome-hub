@@ -289,7 +289,7 @@ hub). Not both. Two separate things decide which:
 | | Who sets it | Where it lives | What it means |
 |---|---|---|---|
 | **Budget** | `install.sh`, from the board's RAM | `GETHOME_RADIO` in `/etc/gethome/hub.env` | `both` (> 1 GB) or `one` (≤ 1 GB). Measured, not a preference. |
-| **Mode** | the owner, from the GetHome app | `<data>/radio-mode` | `auto` (default), `zigbee` or `matter`. |
+| **Mode** | any member, from the GetHome app | `<data>/radio-mode` | `auto` (default), `zigbee` or `matter`. |
 
 `gethome-zigbee-detect` is where the two meet, because it is the only thing
 that knows whether a coordinator is *actually plugged in* — it runs at boot, on
@@ -335,7 +335,7 @@ costs a radio that was not going to work anyway, because the stick is in their
 other hand.
 
 So on removal the board stays where it is, Zigbee2MQTT stops (there is nothing
-to talk to), and the owner decides in the app with `PUT /settings/radio` — one
+to talk to), and a person decides in the app with `PUT /settings/radio` — one
 button, reversible, already there.
 
 **The apps are told the moment it happens**, which is what makes that an

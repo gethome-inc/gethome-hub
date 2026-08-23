@@ -696,7 +696,7 @@ describe.skipIf(!handle)('hub API', () => {
     expect((info.json() as { radio: { mode: string } }).radio.mode).toBe('matter');
   });
 
-  it('refuses a radio it has never heard of, and anyone who is not the owner', async () => {
+  it('refuses a radio it has never heard of', async () => {
     const nonsense = await app.inject({
       method: 'PUT',
       url: '/api/v1/settings/radio',
@@ -704,16 +704,78 @@ describe.skipIf(!handle)('hub API', () => {
       payload: { mode: 'bluetooth' },
     });
     expect(nonsense.statusCode).toBe(400);
+    // The refused request must not have moved anything.
+    expect(readFileSync(path.join(dataDir, 'radio-mode'), 'utf8').trim()).toBe('matter');
+  });
 
-    const denied = await app.inject({
+  /**
+   * Owner-only guards the *shape* of a home — who is in it, what the rooms
+   * are, removing a device somebody else relies on. Which radio is running,
+   * and pairing a device onto it, is not that: a member is somebody the owner
+   * invited in, and a home whose second phone cannot pair the lamp it is
+   * standing next to is a home with a support call in it.
+   */
+  it('lets a member switch the radio, and records who did', async () => {
+    const switched = await app.inject({
       method: 'PUT',
       url: '/api/v1/settings/radio',
       headers: auth(memberToken),
-      payload: { mode: 'auto' },
+      payload: { mode: 'zigbee' },
     });
-    expect(denied.statusCode).toBe(403);
-    // The refused request must not have moved anything.
-    expect(readFileSync(path.join(dataDir, 'radio-mode'), 'utf8').trim()).toBe('matter');
+    expect(switched.statusCode).toBe(200);
+    expect(readFileSync(path.join(dataDir, 'radio-mode'), 'utf8').trim()).toBe('zigbee');
+
+    // Named, because it is no longer only the owner who can have done it: a
+    // radio switch takes half a home offline and the log has to say whose
+    // phone asked for it.
+    const feed = await app.inject({ method: 'GET', url: '/api/v1/activity', headers: auth(ownerToken) });
+    const rows = feed.json() as Array<{ kind: string; message: string; data?: { memberName?: string } }>;
+    const row = rows.find((entry) => entry.kind === 'hub.radio');
+    expect(row?.message).toContain('zigbee');
+    expect(row?.message).toContain("Anna's iPhone");
+    expect(row?.data?.memberName).toBe("Anna's iPhone");
+
+    // Put it back for whatever runs next.
+    await app.inject({
+      method: 'PUT',
+      url: '/api/v1/settings/radio',
+      headers: auth(ownerToken),
+      payload: { mode: 'matter' },
+    });
+  });
+
+  /**
+   * The same rule, on the two routes that actually pair a device. This hub has
+   * neither radio, so the honest answer is `409 <radio>_disabled` — which is
+   * the assertion: a member reaches the route and is told what is missing,
+   * rather than being turned away at the door with a 403 they cannot act on.
+   */
+  it('lets a member reach the pairing routes rather than turning them away', async () => {
+    const zigbee = await app.inject({
+      method: 'POST',
+      url: '/api/v1/zigbee/permit-join',
+      headers: auth(memberToken),
+      payload: { seconds: 300 },
+    });
+    expect(zigbee.statusCode).toBe(409);
+    expect(zigbee.json()).toMatchObject({ error: 'zigbee_disabled' });
+
+    const matter = await app.inject({
+      method: 'POST',
+      url: '/api/v1/matter/commission',
+      headers: auth(memberToken),
+      payload: { pairingCode: '34970112332' },
+    });
+    expect(matter.statusCode).toBe(409);
+    expect(matter.json()).toMatchObject({ error: 'matter_disabled' });
+
+    // Still a token away from anyone at all, though.
+    const anonymous = await app.inject({
+      method: 'POST',
+      url: '/api/v1/zigbee/permit-join',
+      payload: { seconds: 300 },
+    });
+    expect(anonymous.statusCode).toBe(401);
   });
 
   it('streams events over the WebSocket', async () => {
