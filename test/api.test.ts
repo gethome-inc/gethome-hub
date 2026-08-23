@@ -668,6 +668,55 @@ describe.skipIf(!handle)('hub API', () => {
     expect(tooLong.statusCode).toBe(400);
   });
 
+  /**
+   * A zone's name is copied onto every room in it by the apps, so renaming one
+   * moves what other people see — and used to be the one structural edit that
+   * said nothing in the log.
+   */
+  it('records a zone rename the way it records a room rename', async () => {
+    const zone = await app.inject({
+      method: 'POST',
+      url: '/api/v1/zones',
+      headers: auth(memberToken),
+      payload: { name: 'Upstairs' },
+    });
+    const zoneId = (zone.json() as { id: string }).id;
+
+    const renamed = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/zones/${zoneId}`,
+      headers: auth(memberToken),
+      payload: { name: 'First floor' },
+    });
+    expect(renamed.statusCode).toBe(200);
+
+    const entries = (
+      await app.inject({ method: 'GET', url: '/api/v1/activity', headers: auth(memberToken) })
+    ).json() as Array<{ kind: string; message: string }>;
+    const entry = entries.find((row) => row.kind === 'zone.renamed');
+    expect(entry?.message).toContain('First floor');
+
+    // A name that is already in force is not a change, so it writes nothing.
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/zones/${zoneId}`,
+      headers: auth(memberToken),
+      payload: { name: 'First floor' },
+    });
+    const after = (
+      await app.inject({ method: 'GET', url: '/api/v1/activity', headers: auth(memberToken) })
+    ).json() as Array<{ kind: string }>;
+    expect(after.filter((row) => row.kind === 'zone.renamed')).toHaveLength(1);
+
+    const missing = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/zones/11111111-2222-4333-8444-555555555555',
+      headers: auth(memberToken),
+      payload: { name: 'Nowhere' },
+    });
+    expect(missing.statusCode).toBe(404);
+  });
+
   /** Deleting "Upstairs" must never be a way to lose a bedroom. */
   it('keeps the rooms when their zone is deleted', async () => {
     const zoneId = (

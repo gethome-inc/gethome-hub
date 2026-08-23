@@ -533,6 +533,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const body = z
       .object({ name: placeNameSchema.optional(), sortOrder: z.number().int().optional() })
       .parse(request.body);
+    const before = await deps.db.query.zones.findFirst({ where: eq(zones.id, id) });
+    if (!before) return reply.code(404).send({ error: 'not_found' });
     const [row] = await deps.db
       .update(zones)
       .set({
@@ -542,6 +544,17 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       .where(eq(zones.id, id))
       .returning();
     if (!row) return reply.code(404).send({ error: 'not_found' });
+    // Logged like a room's rename, and for the same reason: a zone's name is
+    // copied onto every room in it in the apps, so this moves what other
+    // people see. Adding, renaming and removing a place are the three things
+    // in this file that change the home's shape and all three say so.
+    if (body.name !== undefined && body.name !== before.name) {
+      await deps.activity.record({
+        kind: 'zone.renamed',
+        message: `${request.member!.name} renamed the zone “${before.name}” to “${body.name}”.`,
+        memberId: request.member!.id,
+      });
+    }
     await announceStructure();
     return { id: row.id, name: row.name, sortOrder: row.sortOrder };
   });

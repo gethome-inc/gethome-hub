@@ -314,6 +314,23 @@ is. That log is read a week later, and "somebody changed the kitchen's colour"
 is not what anyone is looking for in it; the `structure` frame above still
 tells every open app the moment it happens.
 
+#### What a structural edit writes to the log
+
+`GET /activity` is read a week later, so the kinds it carries are the changes
+somebody would look for: **`room.added` · `room.renamed` · `room.removed` ·
+`zone.added` · `zone.renamed` · `zone.removed` · `device.renamed` ·
+`device.moved`**, each naming the member who made it. (The rest of the
+vocabulary — `home.renamed`, `member.joined` / `.renamed` / `.left` /
+`.removed`, `device.added` / `.removed` / `.command`, `zigbee.*`,
+`matter.commissioned`, `adapter.error`, `hub.radio`, `mqtt.invalid` — is
+documented where those features are.)
+
+Two deliberate silences, and both are the same rule: **an edit is logged when
+it changes what other people see, not when it changes how it looks to them.**
+A room's `icon`/`accent` write nothing, and neither does the order rooms are
+listed in — that one never reaches the hub at all, because it is each phone's
+own preference (see the GetHome app's `CLAUDE.md`).
+
 ### Favorites are per member
 
 `favorite` is the **caller's** pin. `GET /devices` answers a different value to
