@@ -263,7 +263,8 @@ without polling.
 
 ```json
 {
-  "id": "8b6c…uuid", "name": "Desk lamp", "roomId": null,
+  "id": "8b6c…uuid", "externalId": "0x54ef44100047fea7",
+  "name": "Desk lamp", "roomId": null,
   "favorite": false, "online": true,
   "adapter": "zigbee", "vendor": "IKEA", "model": "LED2003G10",
   "needsReview": false,
@@ -277,6 +278,16 @@ without polling.
   }]
 }
 ```
+
+`id` is a UUID this hub minted; **`externalId` is the device's address on its
+own protocol** — a Zigbee IEEE, an MQTT discovery id, a Matter node. It is the
+only handle an app has for tying a device row to something a *radio* said,
+because the Zigbee lifecycle stream (`zigbeeEvent`) is keyed by IEEE and knows
+nothing about the hub's UUIDs. Without it a pairing screen watching both had no
+way to tell that "New device fea7" finishing its interview and "Smart
+temperature and humidity sensor FEA7" arriving were one sensor, and drew them
+as two. It is stable for the life of the pairing and is not a secret — it is
+what Zigbee2MQTT and every MQTT integration already call the device.
 
 `needsReview: true` marks devices whose automatic mapping was incomplete
 (see [ai-adaptation.md](ai-adaptation.md)).

@@ -313,6 +313,10 @@ describe.skipIf(!handle)('hub API', () => {
       name: 'Desk lamp',
       adapter: 'mqtt',
       online: true,
+      // The address on its own protocol, beside the UUID this hub minted —
+      // the only handle an app has for tying a device to something a radio
+      // said about it.
+      externalId: 'lamp-1',
       endpoints: [
         {
           endpointId: 1,
