@@ -99,6 +99,14 @@ canonical command → registry routes to the owning adapter → adapter translat
 (Z2M `/set` payload, Matter cluster command, MQTT convention topic). The app
 applies the change optimistically; the device's real report reconciles it.
 
+*Sideways (what happened → everyone):* the outbound path also writes one
+`activity` row, which is where the apps' history comes from — every member gets
+it over REST and over the WebSocket, so a phone that was closed all day opens on
+the same feed as one that was watching. Only *asks* and discrete transitions are
+written; a device reporting is not one, or the log would be the write storm
+`STATE_FLUSH_MS` exists to prevent. Bounded at 5 000 rows and 30 days — see
+[api.md](api.md#the-activity-log).
+
 ## Security model (v1, LAN-only)
 
 - Transport is plain HTTP/WS on the LAN; the API is bound to the local

@@ -285,6 +285,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       kind: 'member.joined',
       message: `${result.member.name} joined the home.`,
       memberId: result.member.id,
+      data: { memberName: result.member.name },
     });
     return result;
   });
@@ -313,6 +314,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       kind: 'home.renamed',
       message: `${request.member!.name} renamed the home to “${body.name}”.`,
       memberId: request.member!.id,
+      data: { homeName: body.name, memberName: request.member!.name },
     });
     return result;
   });
@@ -398,6 +400,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       message: `${request.member!.name} · ${device.name}: ${command.type}`,
       deviceId: device.id,
       memberId: request.member!.id,
+      // The whole command, not a summary of it: it is schema-bounded (the
+      // largest is a 400-character custom field) and it is what lets an app
+      // write "Turned on" instead of "power". The two names ride along
+      // because both ids are `ON DELETE SET NULL` — a week later this row may
+      // be all that is left of the device.
+      data: { command, deviceName: device.name, memberName: request.member!.name },
     });
     return reply.code(202).send({ accepted: true });
   });
@@ -509,6 +517,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         kind: 'member.renamed',
         message: `${before.name} is now called ${body.name}.`,
         memberId: before.id,
+        data: { memberName: body.name },
       });
     }
     return { id: before.id, name: body.name, role: before.role };
@@ -605,6 +614,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       message: row.message,
       deviceId: row.deviceId,
       memberId: row.memberId,
+      // Same field the `activity` WebSocket frame carries, so a client that
+      // reads the backlog and then follows the stream renders both alike.
+      data: row.data ?? null,
     }));
   });
 

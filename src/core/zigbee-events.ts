@@ -50,10 +50,10 @@ export function normalizeBridgeEvent(event: Z2mBridgeEvent): ZigbeeLifecycleEven
  * live on the stream.
  *
  * Most of pairing is transient: "interviewing" matters intensely for the
- * fifteen seconds it is happening and not at all afterwards, and the adapter
- * already writes a `zigbee.joined` row once the device is adopted — so
- * recording every step would put two rows saying "joined" in a log that is
- * meant to be read a week later. What has to outlive the moment is the
+ * fifteen seconds it is happening and not at all afterwards, and the registry
+ * writes `device.added` once the device is adopted — so recording every step
+ * would put several rows saying "joined" in a log that is meant to be read a
+ * week later. What has to outlive the moment is the
  * *failure*: a device that joined and could not be interviewed is present on
  * the network, absent from the app, and gives no other sign of why.
  */

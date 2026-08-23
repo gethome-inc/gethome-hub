@@ -38,6 +38,17 @@ export interface ZigbeeLifecycleEvent {
   name?: string;
 }
 
+/**
+ * One line of the home's history, as stored and as broadcast.
+ *
+ * `message` is the whole sentence and is what a client renders when it knows
+ * nothing else — Studio does exactly that. `data` is the same facts in
+ * structured form, so an app can compose its own sentence, pick an icon and a
+ * tone, and fold a burst: `deviceName`/`memberName` are carried in it because
+ * both foreign keys are `ON DELETE SET NULL`, so a row read next week may name
+ * a device or a member that no longer exists. Optional, and every consumer
+ * must survive its absence — rows written before it existed have none.
+ */
 export interface ActivityEvent {
   id: number;
   at: string;
@@ -45,6 +56,7 @@ export interface ActivityEvent {
   message: string;
   deviceId?: string;
   memberId?: string;
+  data?: Record<string, unknown>;
 }
 
 export class HubEventBus extends EventEmitter<HubEvents> {
