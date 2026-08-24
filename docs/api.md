@@ -43,13 +43,13 @@ the machine the code exists to prove access to, so requiring them to recite the
 number adds a step that can only fail. GetHome Studio uses it over SSH, which
 is why the person who installs a hub is never shown a code at all.
 
-Roles: **owner** = the home's name, members and invites, AI settings and the
-mapping library, and *taking a device away* (removing it, or forcing its
-mapping to be redone). **member** = everything else, which deliberately
-includes both the **shape of the home** — controlling devices, renaming them,
-moving them between rooms, and adding, renaming, restyling or deleting rooms
-and zones — and **bringing new devices in**: Matter commissioning, the Zigbee
-join window, and the radio switch.
+Roles: **owner** = members and invites, AI settings and the mapping library,
+and *taking a device away* (removing it, or forcing its mapping to be redone).
+**member** = everything else, which deliberately includes both the **shape of
+the home** — controlling devices, renaming them, moving them between rooms,
+adding, renaming, restyling or deleting rooms and zones, and **renaming the
+home itself** — and **bringing new devices in**: Matter commissioning, the
+Zigbee join window, and the radio switch.
 
 **Why so little is owner-only.** All of it used to be, which sounds careful and
 in practice locked the home away from the people who live in it: GetHome Studio
@@ -73,7 +73,7 @@ standing in for.
 |---|---|---|
 | `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio) |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
-| `GET /home` · `PATCH /home` | any · owner | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name) |
+| `GET /home` · `PATCH /home` | any | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name). Any member's: it is bounded (one string, and anybody can put it back), destroys nothing, and is written to the activity log with the name of whoever did it |
 | `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | any | `{id, name, zoneId, icon, accent, sortOrder}`. `POST` takes `{name, zoneId?, icon?, accent?, sortOrder?}` — the name is the only required field anywhere here — and `PATCH` takes the same set with every field optional; `zoneId: null` means "in no zone", and `icon: null` / `accent: null` mean "back to the look the app derives" — each different from leaving the field out. `icon`/`accent` are opaque app tokens (1–40 chars, see [below](#rooms-and-zones)). Names are trimmed before they are measured (1–80), an unknown `zoneId` is `404 unknown_zone`, and a new room goes to the *end* of the order. Deleting a room does not delete its devices — they are simply in no room. Every write broadcasts the [`structure` frame](#rooms-and-zones) |
 | `GET /zones` · `POST /zones` · `PATCH /zones/:id` · `DELETE /zones/:id` | any | `{id, name, sortOrder}` — the optional layer above rooms, see [below](#rooms-and-zones). `POST {name, sortOrder?}`, `PATCH {name?, sortOrder?}`; a zone carries no look of its own, since nothing draws a zone as a thing. Deleting a zone keeps its rooms and leaves them in none |
 | `GET /devices` | any | full device list (wire shape below) |
@@ -114,6 +114,14 @@ second fact, only a second place for the first one to be wrong.
   that has no name yet — a first boot. After that it is inert: editing
   `hub.env` and restarting changes nothing, and `PATCH /home` is the only way
   to rename a hub.
+- **Any member may rename it.** This was owner-only and was the last thing
+  describing the *house* that a member could not change — they may already
+  rename a device, move it between rooms, and add, restyle or delete a room or
+  a zone. It failed the way owner-only always fails here: Studio claims a hub
+  as *the Mac*, so the owner is a laptop in a drawer while every phone joins by
+  invite, and "GetHome Hub" was a name only the drawer could fix. A client
+  written against an older hub still has to read a `403 owner_only` as a hub
+  that needs updating, not as a permission anybody in the room can grant.
 - **A rename needs no restart and no root.** It reaches `GET /hub` (public, so
   an app that has not been claimed still sees it), the WebSocket hello, and the
   mDNS advertisement — which is re-published under the new name, by rewriting

@@ -512,17 +512,9 @@ describe.skipIf(!handle)('hub API', () => {
    * mDNS advertisement — calling it whatever the installer had written a year
    * earlier. This is the test that stops them drifting apart again.
    */
-  it('renames the hub and the home together, for the owner only', async () => {
+  it('renames the hub and the home together, for any member', async () => {
     const before = await app.inject({ method: 'GET', url: '/api/v1/hub' });
     expect((before.json() as { name: string }).name).toBe('Test Hub');
-
-    const denied = await app.inject({
-      method: 'PATCH',
-      url: '/api/v1/home',
-      headers: auth(memberToken),
-      payload: { name: 'Not yours' },
-    });
-    expect(denied.statusCode).toBe(403);
 
     const renamed = await app.inject({
       method: 'PATCH',
@@ -545,6 +537,49 @@ describe.skipIf(!handle)('hub API', () => {
       headers: auth(memberToken),
     });
     expect((home.json() as { name: string }).name).toBe('Дача');
+  });
+
+  /**
+   * The home's name was the last thing describing the *house* that a member
+   * could not change, while they could already rename a device, move it, and
+   * add or delete a room outright. Studio claims a hub as *the Mac*, so the
+   * owner is usually a laptop in a drawer — which made "GetHome Hub" a name
+   * only the drawer could fix. The accountability the role check stood in for
+   * is the activity row, so this asserts both halves.
+   */
+  it('lets any member rename the home, and says who did', async () => {
+    const renamed = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/home',
+      headers: auth(memberToken),
+      payload: { name: 'Дача Анны' },
+    });
+    expect(renamed.statusCode).toBe(200);
+
+    const hub = await app.inject({ method: 'GET', url: '/api/v1/hub' });
+    expect((hub.json() as { name: string }).name).toBe('Дача Анны');
+
+    // Asked for rather than spelled out: an earlier test renames this member,
+    // so a literal here would pin one test to another's order.
+    const me = (
+      await app.inject({ method: 'GET', url: '/api/v1/members', headers: auth(memberToken) })
+    ).json() as Array<{ name: string; isSelf?: boolean }>;
+    const myName = me.find((row) => row.isSelf)!.name;
+
+    const entries = (
+      await app.inject({ method: 'GET', url: '/api/v1/activity', headers: auth(memberToken) })
+    ).json() as Array<{ kind: string; message: string; data?: { memberName?: string } }>;
+    const row = entries.find((entry) => entry.kind === 'home.renamed');
+    expect(row?.data?.memberName).toBe(myName);
+    expect(row?.message).toContain(myName);
+
+    // Put it back, so the tests below still describe the hub they expect.
+    await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/home',
+      headers: auth(ownerToken),
+      payload: { name: 'Дача' },
+    });
   });
 
   it('refuses a nameless home rather than storing one', async () => {

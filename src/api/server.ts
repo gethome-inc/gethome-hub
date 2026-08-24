@@ -276,11 +276,27 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * hub changes: the id is minted on the machine's own disk and is what devices,
    * tokens and saved hubs are keyed by.
    *
+   * **Any member's**, and it was owner-only until a phone in a real home found
+   * it 403. It is the last thing describing the *house* that a member could not
+   * change: they may already rename a device, move it between rooms, and add,
+   * restyle or delete a room or a zone outright. Holding the one name back
+   * failed the same way owner-only always fails here — Studio claims a hub as
+   * *the Mac*, so the owner is a laptop in a drawer while every phone joins by
+   * invite, and "GetHome Hub" was a name only the drawer could fix.
+   *
+   * It passes the same three tests the join window and the radio switch passed.
+   * The cost is **bounded**: one string, and anybody who dislikes it can put it
+   * back. It **destroys nothing** — no device leaves, no membership ends, and
+   * the id that devices, tokens and saved hubs are keyed by is untouched. And
+   * it is **named**: the activity row below carries whoever did it, which is
+   * the accountability the role check was standing in for. Taking things away
+   * (a device, a member) is still the owner's.
+   *
    * Trimmed before it is measured, so a name of spaces is refused rather than
    * stored — `min(1)` on an untrimmed string accepts "   " and every screen
    * showing it then has a hub with no name.
    */
-  app.patch('/api/v1/home', ownerOnly, async (request) => {
+  app.patch('/api/v1/home', authed, async (request) => {
     const body = z.object({ name: z.string().trim().min(1).max(80) }).parse(request.body);
     const result = await deps.home.rename(body.name);
     await deps.activity.record({

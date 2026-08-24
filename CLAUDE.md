@@ -331,7 +331,7 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   when a build fails its health check, by which time the migration has run, and
   a dropped column would meet an older build that selects it on every device
   query. **Any member may reshape the home** — rename a device, move it, add or
-  delete a room or a zone. That was owner-only, which sounds careful and locked
+  delete a room or a zone, and rename the home itself. That was owner-only, which sounds careful and locked
   the feature away from everybody who lives there: Studio claims a hub as *the
   Mac*, so the owner is usually a laptop in a drawer and the phones are plain
   members, and a device called `0x54ef44100047c1bf` has to be fixable by whoever
@@ -433,21 +433,27 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   member row with nothing to click on. This is what lets GetHome Studio — which
   has no accounts and no user name of its own — claim as *the Mac* and offer
   the rename afterwards.
-- **Owner-only guards the shape of the home, not adding to it.** Rooms,
-  members, invites, renames, AI settings and device *removal* are the owner's;
-  `POST /matter/commission`, `POST /zigbee/permit-join` and
-  `PUT /settings/radio` are **any member's**, and were owner-only until a
-  second phone in a real home found every one of them 403. A member is
-  somebody the owner invited in, and a home where they cannot pair the lamp
-  they are standing next to is a home with a support call in it. Three things
-  make it safe to give away and are the test for anything else that moves out
-  of `ownerOnly`: the cost is **bounded** (a join window closes itself, a
-  radio mode is one word the owner can put back), it **destroys nothing** (no
-  device leaves, no membership ends), and it is **named** — each of the three
-  writes an activity row carrying `request.member!.name`, which is the
-  accountability the role check was standing in for. Removal is the mirror
-  image and stays owner-only: unbounded, destructive, and anonymous in a log
-  read a week later.
+- **Owner-only guards taking things away, not changing them.** Members,
+  invites, AI settings and device *removal* are the owner's;
+  `POST /matter/commission`, `POST /zigbee/permit-join`,
+  `PUT /settings/radio` and `PATCH /home` are **any member's**, and every one
+  of them was owner-only until a second phone in a real home found it 403. A
+  member is somebody the owner invited in, and a home where they cannot pair
+  the lamp they are standing next to is a home with a support call in it.
+  Three things make it safe to give away and are the test for anything else
+  that moves out of `ownerOnly`: the cost is **bounded** (a join window closes
+  itself, a radio mode is one word the owner can put back, a name is one
+  string anybody can put back), it **destroys nothing** (no device leaves, no
+  membership ends), and it is **named** — each writes an activity row carrying
+  `request.member!.name`, which is the accountability the role check was
+  standing in for. Removal is the mirror image and stays owner-only:
+  unbounded, destructive, and anonymous in a log read a week later.
+  **The home's name was the last one to move**, and it is the clearest case
+  the rule ever had: a member could already rename a device, move it between
+  rooms and delete a room outright, while the one name every app in the house
+  reads was held by whoever claimed the hub — and Studio claims a hub as *the
+  Mac*, so that is a laptop in a drawer. "GetHome Hub" was a name only the
+  drawer could fix.
 - **Ending a membership has two halves, and only one of them is the database.**
   Deleting a member takes their tokens with the row (`tokens.member_id`
   cascades, `foreign_keys = ON`), which ends every REST call they can make. It
