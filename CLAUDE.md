@@ -24,7 +24,7 @@ the smallest supported board — the Docker daemon took ~130 MB and a stock
 Postgres another ~130 MB before the hub had started, and the OOM killer was
 taking the hub down between the end of the install and the user claiming it.
 
-**Deployment is Linux only, and a Mac hub is deferred rather than missing.**
+**Deployment is Linux only, and a Mac hub is gone rather than deferred.**
 There was a native macOS path — `install-macos.sh`, launchd agents,
 `deploy/hubctl` — and it was removed because it had quietly stopped being a hub.
 It wrote a Zigbee2MQTT config with no `onboarding: false`, so Z2M 2.x sat in its
@@ -35,12 +35,20 @@ diagnosed nothing. With no `/etc/avahi/services` the mDNS backend fell to
 — the exact conflict `mdns/advertiser.ts` exists to avoid. `PUT /settings/radio`
 answered `applying: true` to a file no watcher read. And there was no
 coordinator detection, no prebuilt bundle, no atomic release or rollback, and a
-marker vocabulary Studio had moved on from. **`src/` itself is portable** —
-nothing in it is Linux-only and the suite runs on macOS — so bringing the Mac
-back is deployment work (a darwin bundle, launchd equivalents of the radio
-applier and the coordinator watcher, the `install.sh` marker contract), not a
-port. Don't reintroduce half of it: a second OS that implements none of the
-rules below is the installed-but-unusable trap this file names elsewhere.
+marker vocabulary Studio had moved on from. GetHome Studio has since deleted
+its own half too — `LocalMacInstaller`, the This-Mac wizard path and the
+service card — so the product is a Raspberry Pi hub, on both sides.
+
+`src/` stays portable, and that is about *development*: nothing in it is
+Linux-only and the suite runs on macOS, which is where most of it is written.
+It is not a head start on a Mac hub. **If one is ever wanted, write it fresh
+against the system as it is then, and restore nothing from history** — the
+marker contract, the radio budget, the coordinator watcher, the bundle and
+rollback layout and Studio's own flow have all moved since that code last ran,
+so a resurrected copy would be a plausible-looking wrong map rather than a
+starting point. Don't reintroduce half of it either: a second OS that
+implements none of the rules below is the installed-but-unusable trap this file
+names elsewhere.
 
 ## Build, test, run
 
