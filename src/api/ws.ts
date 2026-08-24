@@ -1,7 +1,7 @@
 import type { WebSocket } from 'ws';
 import type { ApiDeps } from './server.js';
 import type { MqttFrame } from '../core/mqtt-observer.js';
-import type { ZigbeeLifecycleEvent } from '../core/bus.js';
+import type { HomeStructure, ZigbeeLifecycleEvent } from '../core/bus.js';
 import type { AiRunEvent } from '../core/ai-runs.js';
 import { deviceWire } from './dto.js';
 import type { HubStatusReader } from '../core/hub-status.js';
@@ -102,6 +102,7 @@ const MAX_CLIENT_MESSAGE_BYTES = 4096;
  *   {"type":"state","deviceId","endpointId","state":{…full canonical state…}}
  *   {"type":"deviceUpserted","device":{…GET /devices item…}}
  *   {"type":"deviceRemoved","deviceId"}
+ *   {"type":"structure","rooms":[…GET /rooms…],"zones":[…GET /zones…]}
  *   {"type":"activity","entry":{id,at,kind,message,deviceId?,memberId?}}
  *   {"type":"permitJoin","active","remainingSeconds"}
  *   {"type":"commissioning","jobId","status","detail"?}
@@ -157,11 +158,20 @@ export function attachWebSocket(
 
   const onState = (deviceId: string, endpointId: number, state: unknown) =>
     send({ type: 'state', deviceId, endpointId, state });
+  // Rendered per socket, because `favorite` is the *reader's* pin and this one
+  // registry object goes to everybody. `memberId` arrives with `authorize`, so
+  // a frame buffered during the token check renders `favorite: false` — never
+  // somebody else's pin, and never a wrong one for long: `hello` goes out ahead
+  // of that backlog and is what makes a client re-read its devices.
   const onUpserted = (deviceId: string) => {
     const device = deps.registry.getDevice(deviceId);
-    if (device) send({ type: 'deviceUpserted', device: deviceWire(device) });
+    if (!device) return;
+    const favorite = memberId !== null && deps.favorites.isFavorite(memberId, deviceId);
+    send({ type: 'deviceUpserted', device: deviceWire(device, favorite) });
   };
   const onRemoved = (deviceId: string) => send({ type: 'deviceRemoved', deviceId });
+  const onStructure = (structure: HomeStructure) =>
+    send({ type: 'structure', rooms: structure.rooms, zones: structure.zones });
   const onActivity = (entry: unknown) => send({ type: 'activity', entry });
   const onPermitJoin = (active: boolean, remainingSeconds: number) =>
     send({ type: 'permitJoin', active, remainingSeconds });
@@ -180,6 +190,7 @@ export function attachWebSocket(
   deps.events.on('stateChanged', onState);
   deps.events.on('deviceUpserted', onUpserted);
   deps.events.on('deviceRemoved', onRemoved);
+  deps.events.on('structureChanged', onStructure);
   deps.events.on('activity', onActivity);
   deps.events.on('permitJoin', onPermitJoin);
   deps.events.on('commissioningProgress', onCommissioning);
@@ -323,6 +334,7 @@ export function attachWebSocket(
     deps.events.off('stateChanged', onState);
     deps.events.off('deviceUpserted', onUpserted);
     deps.events.off('deviceRemoved', onRemoved);
+    deps.events.off('structureChanged', onStructure);
     deps.events.off('activity', onActivity);
     deps.events.off('permitJoin', onPermitJoin);
     deps.events.off('commissioningProgress', onCommissioning);

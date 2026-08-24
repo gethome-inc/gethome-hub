@@ -39,11 +39,12 @@ plus a stock Postgres wanted half of it before the hub had started.
 | `src/core/mqtt-observer.ts` | A read-only tap on the broker for the apps' traffic inspector. Reference-counted (connected only while somebody is watching), byte-bounded ring buffer, **nothing persisted**, and not an input to anything — see the design rule below. |
 | `src/core/ai-runs.ts` | One row per mapping-agent run: what it searched for, what it read, what it submitted, what it cost. A summary, never a transcript; bounded at 40 steps and 60 runs. |
 | `src/ai/library.ts` | The device-mapping library over the `ai_mappings` cache: list, download, upload, forget, and hand a rejected descriptor back to the agent to repair. Only `repair` needs a credential, and it loads the agent on demand so the API never carries the Anthropic SDK. |
-| `src/db/` | drizzle over `better-sqlite3`, one file at `<data>/hub.db` (WAL, `synchronous = NORMAL`, foreign keys on). No pool, no socket, no second process. |
+| `src/core/favorites.ts` | Who has pinned what. A favorite is one **member's**, so it is a row per (device, member) and `GET /devices` renders the boolean per caller — see [api.md](api.md#favorites-are-per-member). Loaded once at boot and kept in memory; it forgets a device when the device is removed and a member when their membership ends, because both deletes are done by the cascade. |
+| `src/core/home.ts` | The one name a hub and its home share. `HUB_NAME` seeds it on a first boot and is inert afterwards; `PATCH /home` is the only writer, and a rename re-publishes mDNS. |
+| `src/db/` | drizzle over `better-sqlite3`, one file at `<data>/hub.db` (WAL, `synchronous = NORMAL`, foreign keys on). No pool, no socket, no second process. Schema + committed SQL migrations, run automatically at boot. |
 | `src/ai/` | AI device adaptation — the mapping agent (a tool-use loop on the Anthropic Messages API) plus descriptor DSL, model allowlist, failure taxonomy, and backoff — see [ai-adaptation.md](ai-adaptation.md). |
 | `src/api/` | Fastify REST + WebSocket — see [api.md](api.md). |
 | `src/mdns/` | `_gethome._tcp` advertisement (@homebridge/ciao) with `id`/`ver`/`api`/`claimed` TXT records. |
-| `src/db/` | Drizzle ORM schema + committed SQL migrations, run automatically at boot. |
 
 ## Design rules
 
@@ -123,7 +124,10 @@ written; a device reporting is not one, or the log would be the write storm
   network. Remote access will arrive as an authenticated relay through the
   GetHome server (future work) — the hub will never be port-forwarded.
 - AuthN: opaque bearer tokens issued at claim time, sha256-hashed at rest.
-- AuthZ: `owner` (structure: rename, rooms, members, commissioning, AI
-  settings, removal) vs `member` (control devices, favorites, view activity).
+- AuthZ: `owner` (renaming the home, members, invites, commissioning, AI
+  settings, *removing* devices) vs `member` (everything else, including
+  controlling devices, renaming them, and adding or editing rooms and zones —
+  Studio claims a hub as the Mac, so the owner is usually not a person in the
+  house; see `docs/api.md`). Favorites are per member, not per home.
 - Secrets: the AI credential (an Anthropic API key) AES-256-GCM-encrypted
   with the hub secret; the key file is 0600 and never leaves the machine.

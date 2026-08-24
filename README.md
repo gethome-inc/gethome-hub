@@ -181,6 +181,30 @@ running on it, and watches it step by step over SSH.
 your *other* devices — a phone, a second Mac — rather than something you have to
 find. See [docs/api.md](docs/api.md#claiming).
 
+### Getting a shell on the hub
+
+Everything in this section runs *on* the hub, so:
+
+```sh
+ssh <user>@<address>
+```
+
+`<user>` is the account you set in Raspberry Pi Imager (`pi` unless you changed
+it). `<address>` is the Pi's IP or its `<hostname>.local` — the same host the
+apps show for the hub, **without** the `:8420`, which is the API and not SSH.
+
+**If GetHome Studio set the hub up, it never asked you for that password** —
+it authorizes its own key on the Pi instead — so the key is usually the
+shortest way in, and on a card install it may be the only one you still know:
+
+```sh
+ssh -i "$HOME/Library/Application Support/gethome-studio/id_ed25519_gethome" pi@192.168.0.200
+```
+
+The quotes are load-bearing: the path contains a space. Use `"$HOME/…"` rather
+than `'~/…'` — a tilde inside quotes is not expanded, and ssh will report a key
+that isn't there.
+
 ### One switch
 
 ```sh
@@ -255,6 +279,34 @@ sudo gethome-hubctl version          # which build is running
 sudo gethome-hubctl update           # install the latest build of main
 sudo gethome-hubctl rollback         # go back to the previous one
 ```
+
+**Installing a branch.** `update` takes `--branch`, which is how an unmerged
+change gets onto real hardware — and how you go back afterwards:
+
+```sh
+sudo gethome-hubctl update --branch my-feature
+sudo gethome-hubctl update --branch main       # back to the released line
+```
+
+It installs the rolling `bundle-<branch>` release described above, with any `/`
+in the name flattened to `-`: branch `alice/new-thing` installs
+`bundle-alice-new-thing`. If CI has not published that branch for this
+processor yet, the installer says which release it looked for; on a board with
+more than 1 GB of memory it then builds from source instead, which takes a
+while, and on a smaller one it stops and tells you to check the workflow rather
+than starting a build that cannot finish.
+
+On a hub too old to have `gethome-hubctl`, the installer does the same job
+directly. The options go **after** `bash -s --`, or they reach bash instead of
+the script:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/gethome-inc/gethome-hub/my-feature/deploy/install.sh \
+  | bash -s -- --branch my-feature
+```
+
+Either way the hub keeps the build it was running until the new one answers its
+health check, so a branch that doesn't start leaves you where you were.
 
 Each build lives in its own directory under `/opt/gethome/releases/` and
 `current` is a symlink to the one that runs, so an update is an atomic flip —

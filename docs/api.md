@@ -43,20 +43,29 @@ the machine the code exists to prove access to, so requiring them to recite the
 number adds a step that can only fail. GetHome Studio uses it over SSH, which
 is why the person who installs a hub is never shown a code at all.
 
-Roles: **owner** = structure (rename home/devices, rooms, members, invites, AI
-settings, device removal). **member** = control devices, favorites, view
-everything — *and* pair new ones: commissioning, the Zigbee join window and
-the radio switch are open to any member.
+Roles: **owner** = the home's name, members and invites, AI settings and the
+mapping library, and *taking a device away* (removing it, or forcing its
+mapping to be redone). **member** = everything else, which deliberately
+includes both the **shape of the home** — controlling devices, renaming them,
+moving them between rooms, and adding, renaming, restyling or deleting rooms
+and zones — and **bringing new devices in**: Matter commissioning, the Zigbee
+join window, and the radio switch.
 
-**Why those three are not owner-only.** Owner-only guards the *shape* of the
-home — who is in it, what the rooms are, taking away a device somebody else
-relies on. Adding one is not that. A member is somebody the owner invited into
-their home, and a home where the second phone cannot pair the lamp it is
-standing next to is a home with a support call in it. The costs are bounded and
-reversible: a join window closes itself, a radio switch is one word in a file
-that the owner can put back, and neither destroys anything. Every one of the
-three is written to the activity log with the member's name on it, which is the
-accountability the role check was standing in for.
+**Why so little is owner-only.** All of it used to be, which sounds careful and
+in practice locked the home away from the people who live in it: GetHome Studio
+claims a hub as *the Mac*, so the owner is usually a laptop in a drawer while
+every phone joins by invite as a plain member. A device that Zigbee2MQTT called
+`0x54ef44100047c1bf` has to be fixable by whoever is standing in front of it,
+and a home where the second phone can't pair the lamp it is standing next to is
+a home with a support call in it.
+
+What the rule still guards is **taking something away** — a device or a member —
+and the settings that spend the owner's money. Everything now open is bounded
+and reversible: a join window closes itself, a radio switch is one word in a
+file the owner can put back, a room deleted keeps its devices and can be made
+again. And every one of these edits is written to the activity log with the
+name of whoever made it, which is the accountability the role check was
+standing in for.
 
 ## REST routes
 
@@ -65,9 +74,10 @@ accountability the role check was standing in for.
 | `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio) |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
 | `GET /home` · `PATCH /home` | any · owner | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name) |
-| `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | any · owner | |
+| `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | any | `{id, name, zoneId, icon, accent, sortOrder}`. `POST` takes `{name, zoneId?, icon?, accent?, sortOrder?}` — the name is the only required field anywhere here — and `PATCH` takes the same set with every field optional; `zoneId: null` means "in no zone", and `icon: null` / `accent: null` mean "back to the look the app derives" — each different from leaving the field out. `icon`/`accent` are opaque app tokens (1–40 chars, see [below](#rooms-and-zones)). Names are trimmed before they are measured (1–80), an unknown `zoneId` is `404 unknown_zone`, and a new room goes to the *end* of the order. Deleting a room does not delete its devices — they are simply in no room. Every write broadcasts the [`structure` frame](#rooms-and-zones) |
+| `GET /zones` · `POST /zones` · `PATCH /zones/:id` · `DELETE /zones/:id` | any | `{id, name, sortOrder}` — the optional layer above rooms, see [below](#rooms-and-zones). `POST {name, sortOrder?}`, `PATCH {name?, sortOrder?}`; a zone carries no look of its own, since nothing draws a zone as a thing. Deleting a zone keeps its rooms and leaves them in none |
 | `GET /devices` | any | full device list (wire shape below) |
-| `PATCH /devices/:id` | favorite: any; name/roomId: owner | `{name?, roomId?, favorite?}` |
+| `PATCH /devices/:id` | any | `{name?, roomId?, favorite?}`. Name and room describe the house and everybody sees the same ones; **`favorite` is the caller's own** and nobody else's — see [below](#favorites-are-per-member). `roomId: null` takes a device out of its room; an unknown one is `404 unknown_room`. The response is this caller's view of the device |
 | `DELETE /devices/:id` | owner | also unpairs at the protocol level |
 | `POST /devices/:id/endpoints/:endpointId/commands` | any | body = canonical command; `202`. IR-remote intents (`irLearn`/`irSaveLearned`/`irSend`/`irDeleteCommand`/`irRenameCommand`) are resolved against the endpoint's stored code library (see [device-schema.md](device-schema.md)) |
 | `POST /devices/:id/remap` | owner | force-regenerate the AI mapping (Zigbee devices); the hub also remaps automatically when a device publishes unknown parameters — see [ai-adaptation.md](ai-adaptation.md). `409 ai_not_configured` with no credential, `409 ai_disabled` when the owner has switched adaptation off |
@@ -259,6 +269,95 @@ up afterwards, so the name has to live in the sentence. Clients watching the
 `activity` WebSocket stream get both, which is how a member list stays right
 without polling.
 
+### Rooms and zones
+
+A home has **rooms**, and rooms may sit in a **zone**: "Upstairs", "Garden",
+"Guest house". A room in no zone is the ordinary case, not a gap to fill in.
+
+It is deliberately a zone and not a floor. A flat has no floors and a garage
+isn't one, so a *floor* field asks every home that isn't a house either to
+leave it blank or to lie in it, while a zone that happens to be called "Second
+floor" covers the house perfectly. It is also Apple Home's own word (`HMZone`),
+and the GetHome app shows Apple Homes beside hub homes — one vocabulary for
+both.
+
+Rooms and zones are shared, so a change made on one phone has to reach the
+others without waiting for them to reconnect — which, before this, was the only
+thing that ever re-read them. Every write to either broadcasts one frame
+carrying **both lists in full**:
+
+```
+{"type":"structure","rooms":[{id,name,zoneId,icon,accent,sortOrder}],"zones":[{id,name,sortOrder}]}
+```
+
+Both, because a client redraws its zone sections from the pair and sending half
+would make every app hold the other half from memory; in full, because a home
+has a handful of each and a diff is a way to be subtly wrong for less than it
+costs to send. A client that has never heard of the frame ignores it and keeps
+re-reading on `hello`, as it always did.
+
+Deleting is the case worth knowing: **a deleted room keeps its devices** (they
+end up in no room, and the hub says so on the socket for each of them), and a
+**deleted zone keeps its rooms**. Neither is a way to lose anything.
+
+#### How a room looks is the house's too
+
+`icon` and `accent` are a glyph token and a palette token, stored beside the
+name for the same reason the name is stored at all: everybody who opens the
+home should see the same kitchen, in the same colour.
+
+**Null is the ordinary state, and it means "you decide".** Apps derive a glyph
+from the name — a room called Garage draws a car — and hand out colours in
+turn, so a room nobody has styled stores nothing and looks exactly as it always
+did. A value is somebody having overruled that, and it wins from then on;
+writing `null` hands the room back to the app's own judgement.
+
+The hub does not police the vocabulary. Which glyphs exist, and what `sky`
+looks like, belong to the apps — an allowlist here would mean a hub upgrade
+every time one of them added a colour, and the cost of a token an app doesn't
+recognise is that it falls back to the derived look. They are bounded (1–40
+characters) because a token is a word, not a payload.
+
+Changing a room's look is **not** written to the activity log, where a rename
+is. That log is read a week later, and "somebody changed the kitchen's colour"
+is not what anyone is looking for in it; the `structure` frame above still
+tells every open app the moment it happens.
+
+#### What a structural edit writes to the log
+
+Reshaping the home writes one line each: **`room.added` · `room.renamed` ·
+`room.removed` · `zone.added` · `zone.renamed` · `zone.removed` ·
+`device.renamed` · `device.moved`**, naming the member who did it and what
+they touched — the whole vocabulary and the `data` each kind carries is in
+[the activity log](#the-activity-log).
+
+Two deliberate silences, and both are the same rule: **an edit is logged when
+it changes what other people see, not when it changes how it looks to them.**
+A room's `icon`/`accent` write nothing, and neither does the order rooms are
+listed in — that one never reaches the hub at all, because it is each phone's
+own preference (see the GetHome app's `CLAUDE.md`).
+
+### Favorites are per member
+
+`favorite` is the **caller's** pin. `GET /devices` answers a different value to
+each member, `PATCH /devices/:id {"favorite":true}` pins the device for whoever
+sent it, and the `deviceUpserted` frame is rendered per socket for the same
+reason.
+
+It used to be one boolean on the device row, which quietly made a favorite a
+property of the *home*: one person pinning the kettle put it on everybody's
+dashboard, and the next person to unpin it took it off yours. Names and rooms
+are shared because they describe the house; a favorite describes a person.
+
+The wire is unchanged — still a field called `favorite`, still a boolean — so
+an app written against the old shared flag reads its own favorites without
+knowing anything happened. Existing pins were carried over to every member the
+hub had at upgrade time, since "everyone can see this" is the honest reading of
+a flag that was shared. The `devices.favorite` column still exists and is
+maintained as the union of everybody's pins; nothing reads it, and it is there
+only so that rolling back to an older build (which `install.sh` does by itself
+when a new one fails its health check) meets a schema it understands.
+
 ### Device wire shape (`GET /devices` item)
 
 ```json
@@ -407,12 +506,20 @@ week may be all that is left of a device somebody has since removed. `data` is
 kinds with nothing to add.
 
 The kinds: `device.command`, `device.added`, `device.removed`,
-`device.online`, `device.offline`, `member.joined`, `member.left`,
-`member.removed`, `member.renamed`, `home.renamed`, `hub.radio`,
-`adapter.error`, `zigbee.interview-failed`, `zigbee.left`,
-`zigbee.permit-join`, `zigbee.permit-join-closed`, `matter.commission`. Treat
-the list as open — a client must render an unknown kind from `message` rather
-than drop it.
+`device.online`, `device.offline`, `device.renamed`, `device.moved`,
+`room.added`, `room.renamed`, `room.removed`, `zone.added`, `zone.renamed`,
+`zone.removed`, `member.joined`, `member.left`, `member.removed`,
+`member.renamed`, `home.renamed`, `hub.radio`, `adapter.error`,
+`zigbee.interview-failed`, `zigbee.left`, `zigbee.permit-join`,
+`zigbee.permit-join-closed`, `matter.commission`. Treat the list as open — a
+client must render an unknown kind from `message` rather than drop it.
+
+The seven that reshape the home — the `room.*` and `zone.*` trio each, plus
+`device.renamed` and `device.moved` — carry `data.memberName` and the name of
+what was touched (`roomName`, `zoneName`, `deviceName`), with `previousName`
+on the renames and `roomName` absent on a device taken out of every room. See
+[what a structural edit records](#what-a-structural-edit-writes-to-the-log)
+for the two things that are deliberately *not* logged.
 
 The last three, plus `hub.radio`, all carry `data.memberName`: they are the
 things any member may do to the whole home, so the log is where it says which
@@ -449,6 +556,8 @@ message. These go to every authorized socket:
 {"type":"state","deviceId","endpointId","state":{…}}    full canonical state after each change
 {"type":"deviceUpserted","device":{…}}                  new device or structure/name change
 {"type":"deviceRemoved","deviceId"}
+{"type":"structure","rooms":[…],"zones":[…]}            rooms/zones changed — both lists in full
+
 {"type":"activity","entry":{id,at,kind,message,deviceId?,memberId?,data?}}
 {"type":"permitJoin","active":true,"remainingSeconds":60}
 {"type":"commissioning","jobId","status","detail"?}     Matter commissioning progress

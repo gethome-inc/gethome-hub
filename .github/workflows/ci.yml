@@ -5,9 +5,15 @@ on:
     branches: [main]
   pull_request:
 
+# Every job carries a timeout, because the default is GitHub's six-hour job
+# limit and that is not a timeout — it is a whole working day of a pull request
+# sitting yellow. One `apt-get` on the shell job hung and burned exactly that
+# (run 103), and the check it was installing never ran. These numbers are a few
+# times the honest duration of each job: a run that reaches one has hung.
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       # No database service any more: the hub's store is a SQLite file, so
@@ -17,8 +23,12 @@ jobs:
       - name: Start Mosquitto
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq mosquitto
+          # A mirror that accepts the connection and then says nothing will
+          # otherwise hold this step open until the job limit kills it — apt
+          # has no timeout of its own. Retries cover the ordinary flake.
+          apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30)
+          sudo apt-get update -qq "${apt_opts[@]}"
+          sudo apt-get install -y -qq "${apt_opts[@]}" mosquitto
           printf 'listener 1883\nallow_anonymous true\n' | sudo tee /etc/mosquitto/conf.d/ci.conf >/dev/null
           sudo systemctl restart mosquitto
       - uses: actions/setup-node@v7
@@ -35,6 +45,7 @@ jobs:
   audit:
     name: Dependency audit
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -64,9 +75,26 @@ jobs:
   shell:
     name: Shell scripts
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       # `deploy/` is a contract with GetHome Studio, and it is the part of this
       # repository with no type checker behind it.
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+      #
+      # ShellCheck ships on the runner image, so this normally installs nothing
+      # and the apt path is the fallback for an image that ever drops it. It was
+      # an unconditional `apt-get update && apt-get install`, and one of those
+      # calls hung until GitHub's six-hour job limit killed the job — a red
+      # cross on a pull request whose scripts were never actually checked.
+      - name: Ensure shellcheck
+        run: |
+          set -euo pipefail
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck --version
+            exit 0
+          fi
+          echo "shellcheck is not on this image; installing it"
+          apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30)
+          sudo apt-get update -qq "${apt_opts[@]}"
+          sudo apt-get install -y -qq "${apt_opts[@]}" shellcheck
       - run: shellcheck -S warning deploy/install.sh deploy/zigbee-detect.sh deploy/gethome-hubctl

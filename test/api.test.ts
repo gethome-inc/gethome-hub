@@ -11,6 +11,7 @@ import { ActivityService } from '../src/core/activity.js';
 import { PairingService } from '../src/core/pairing.js';
 import { SettingsService } from '../src/core/settings.js';
 import { DeviceRegistry } from '../src/core/registry.js';
+import { FavoritesService } from '../src/core/favorites.js';
 import { PermitJoinService } from '../src/core/permit-join.js';
 import { AiRunLog } from '../src/core/ai-runs.js';
 import { MappingLibrary } from '../src/ai/library.js';
@@ -41,6 +42,7 @@ describe.skipIf(!handle)('hub API', () => {
   let app: FastifyInstance;
   let adapter: FakeAdapter;
   let registry: DeviceRegistry;
+  let favorites: FavoritesService;
   let events: HubEventBus;
   let dataDir: string;
   let ownerToken: string;
@@ -60,11 +62,14 @@ describe.skipIf(!handle)('hub API', () => {
     registry.registerAdapter(adapter);
     await registry.start();
     const settings = new SettingsService(db, Buffer.alloc(32).toString('base64'));
+    favorites = new FavoritesService(db, events);
+    await favorites.load();
     app = await buildServer({
       db,
       log,
       events,
       registry,
+      favorites,
       pairing,
       activity,
       settings,
@@ -357,36 +362,145 @@ describe.skipIf(!handle)('hub API', () => {
     expect(invalid.statusCode).toBe(400);
   });
 
-  it('lets members favorite but not rename devices', async () => {
+  /**
+   * A device's name is the house's; a favorite is one person's.
+   *
+   * Renaming used to be owner-only, which read as caution and in practice
+   * locked the feature away from everybody who lives here: Studio claims a hub
+   * as *the Mac*, so the owner is usually a laptop in a drawer and every phone
+   * joined by invite. A device called "0x54ef44100047c1bf" has to be fixable by
+   * whoever is standing in front of it.
+   */
+  it('lets any member rename a device, and keeps favorites personal', async () => {
     const devices = (
       await app.inject({ method: 'GET', url: '/api/v1/devices', headers: auth(memberToken) })
     ).json() as Array<{ id: string }>;
     const deviceId = devices[0]!.id;
 
-    const favorite = await app.inject({
+    const rename = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/devices/${deviceId}`,
+      headers: auth(memberToken),
+      payload: { name: 'Reading light' },
+    });
+    expect(rename.statusCode).toBe(200);
+    expect((rename.json() as { name: string }).name).toBe('Reading light');
+    // Everybody sees the new name: it describes the house.
+    const forOwner = (
+      await app.inject({ method: 'GET', url: '/api/v1/devices', headers: auth(ownerToken) })
+    ).json() as Array<{ id: string; name: string; favorite: boolean }>;
+    expect(forOwner.find((device) => device.id === deviceId)?.name).toBe('Reading light');
+
+    // A favorite does not. The owner pins it; the member's list is unmoved.
+    const pinned = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/devices/${deviceId}`,
+      headers: auth(ownerToken),
+      payload: { favorite: true },
+    });
+    expect(pinned.statusCode).toBe(200);
+    expect((pinned.json() as { favorite: boolean }).favorite).toBe(true);
+
+    const asMember = (
+      await app.inject({ method: 'GET', url: '/api/v1/devices', headers: auth(memberToken) })
+    ).json() as Array<{ id: string; favorite: boolean }>;
+    expect(asMember.find((device) => device.id === deviceId)?.favorite).toBe(false);
+
+    // And each side can unpin its own without touching the other's.
+    await app.inject({
       method: 'PATCH',
       url: `/api/v1/devices/${deviceId}`,
       headers: auth(memberToken),
       payload: { favorite: true },
     });
-    expect(favorite.statusCode).toBe(200);
-
-    const rename = await app.inject({
-      method: 'PATCH',
-      url: `/api/v1/devices/${deviceId}`,
-      headers: auth(memberToken),
-      payload: { name: 'Hacked name' },
-    });
-    expect(rename.statusCode).toBe(403);
-
-    const ownerRename = await app.inject({
+    await app.inject({
       method: 'PATCH',
       url: `/api/v1/devices/${deviceId}`,
       headers: auth(ownerToken),
-      payload: { name: 'Reading light' },
+      payload: { favorite: false },
     });
-    expect(ownerRename.statusCode).toBe(200);
-    expect((ownerRename.json() as { name: string }).name).toBe('Reading light');
+    const stillPinned = (
+      await app.inject({ method: 'GET', url: '/api/v1/devices', headers: auth(memberToken) })
+    ).json() as Array<{ id: string; favorite: boolean }>;
+    expect(stillPinned.find((device) => device.id === deviceId)?.favorite).toBe(true);
+  });
+
+  /**
+   * Both edits are written down with the name of whoever made them — which is
+   * the whole basis for letting any member make them.
+   *
+   * The move entry is the one that needs a test: `updateDevice` mutates the
+   * cached device and hands the *same object* back, so a "did the room
+   * actually change?" check reading it after the call compares the new value
+   * with itself and silently never records anything.
+   */
+  it('writes down who renamed a device and who moved it', async () => {
+    const roomId = (
+      (
+        await app.inject({
+          method: 'POST',
+          url: '/api/v1/rooms',
+          headers: auth(memberToken),
+          payload: { name: 'Study' },
+        })
+      ).json() as { id: string }
+    ).id;
+    const devices = (
+      await app.inject({ method: 'GET', url: '/api/v1/devices', headers: auth(memberToken) })
+    ).json() as Array<{ id: string }>;
+    const deviceId = devices[0]!.id;
+
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/devices/${deviceId}`,
+      headers: auth(memberToken),
+      payload: { name: 'Desk lamp', roomId },
+    });
+
+    const entries = (
+      await app.inject({ method: 'GET', url: '/api/v1/activity', headers: auth(memberToken) })
+    ).json() as Array<{
+      kind: string;
+      message: string;
+      data?: { deviceName?: string; previousName?: string; roomName?: string; memberName?: string };
+    }>;
+    const renamed = entries.find((entry) => entry.kind === 'device.renamed');
+    expect(renamed).toBeDefined();
+    const moved = entries.find((entry) => entry.kind === 'device.moved');
+    expect(moved?.message).toContain('Study');
+    // The name in the sentence is the one it has now, not the one it had.
+    expect(moved?.message).toContain('Desk lamp');
+
+    // Structured beside the sentence, so an app can word it its own way — the
+    // same contract every other kind here follows.
+    expect(renamed?.data?.deviceName).toBe('Desk lamp');
+    expect(renamed?.data?.previousName).toBe('Reading light');
+    expect(moved?.data?.roomName).toBe('Study');
+    expect(moved?.data?.memberName).toBeTruthy();
+  });
+
+  it('refuses a name of spaces and a room that does not exist', async () => {
+    const devices = (
+      await app.inject({ method: 'GET', url: '/api/v1/devices', headers: auth(memberToken) })
+    ).json() as Array<{ id: string }>;
+    const deviceId = devices[0]!.id;
+
+    const blank = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/devices/${deviceId}`,
+      headers: auth(memberToken),
+      payload: { name: '   ' },
+    });
+    expect(blank.statusCode).toBe(400);
+
+    const nowhere = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/devices/${deviceId}`,
+      headers: auth(memberToken),
+      payload: { roomId: '11111111-2222-4333-8444-555555555555' },
+    });
+    expect(nowhere.statusCode).toBe(404);
+    expect((nowhere.json() as { error: string }).error).toBe('unknown_room');
   });
 
   /**
@@ -447,22 +561,254 @@ describe.skipIf(!handle)('hub API', () => {
     expect((hub.json() as { name: string }).name).toBe('Дача');
   });
 
-  it('gates room management to the owner', async () => {
-    const denied = await app.inject({
+  /**
+   * Rooms and zones are the shape of a shared home, and anybody who lives in
+   * it may change them. The owner-only rule that used to sit here guarded the
+   * wrong thing: taking devices and people *away* is still the owner's.
+   */
+  it('lets any member add rooms and zones, and put one inside the other', async () => {
+    const created = await app.inject({
       method: 'POST',
       url: '/api/v1/rooms',
       headers: auth(memberToken),
       payload: { name: 'Kitchen' },
     });
-    expect(denied.statusCode).toBe(403);
+    expect(created.statusCode).toBe(201);
+    const room = created.json() as { id: string; name: string; zoneId: string | null };
+    expect(room.zoneId).toBeNull();
 
+    const zone = await app.inject({
+      method: 'POST',
+      url: '/api/v1/zones',
+      headers: auth(memberToken),
+      payload: { name: 'Ground floor' },
+    });
+    expect(zone.statusCode).toBe(201);
+    const zoneId = (zone.json() as { id: string }).id;
+
+    const moved = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/rooms/${room.id}`,
+      headers: auth(memberToken),
+      payload: { zoneId },
+    });
+    expect(moved.statusCode).toBe(200);
+    expect((moved.json() as { zoneId: string | null }).zoneId).toBe(zoneId);
+
+    // Out of the zone again — `null` is a real answer, not a missing field.
+    const loose = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/rooms/${room.id}`,
+      headers: auth(memberToken),
+      payload: { zoneId: null },
+    });
+    expect((loose.json() as { zoneId: string | null }).zoneId).toBeNull();
+
+    const unknownZone = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/rooms/${room.id}`,
+      headers: auth(memberToken),
+      payload: { zoneId: '11111111-2222-4333-8444-555555555555' },
+    });
+    expect(unknownZone.statusCode).toBe(404);
+  });
+
+  /**
+   * A room's glyph and colour are the house's, like its name — and null is a
+   * real answer that puts it back to whatever the app would have derived.
+   */
+  it('stores a room\u2019s look, and lets it be cleared again', async () => {
     const created = await app.inject({
       method: 'POST',
       url: '/api/v1/rooms',
-      headers: auth(ownerToken),
-      payload: { name: 'Kitchen' },
+      headers: auth(memberToken),
+      payload: { name: 'Garage', icon: 'car', accent: 'sky' },
     });
     expect(created.statusCode).toBe(201);
+    const room = created.json() as { id: string; icon: string | null; accent: string | null };
+    expect(room.icon).toBe('car');
+    expect(room.accent).toBe('sky');
+
+    // A room nobody has styled carries no look at all — that is what tells an
+    // app to derive one rather than to draw a default it was handed.
+    const plain = await app.inject({
+      method: 'POST',
+      url: '/api/v1/rooms',
+      headers: auth(memberToken),
+      payload: { name: 'Hallway' },
+    });
+    expect((plain.json() as { icon: string | null }).icon).toBeNull();
+
+    // Leaving a field out keeps it; only `null` clears it.
+    const renamed = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/rooms/${room.id}`,
+      headers: auth(memberToken),
+      payload: { name: 'Carport' },
+    });
+    expect((renamed.json() as { icon: string | null }).icon).toBe('car');
+
+    const cleared = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/rooms/${room.id}`,
+      headers: auth(memberToken),
+      payload: { icon: null, accent: null },
+    });
+    expect(cleared.statusCode).toBe(200);
+    expect((cleared.json() as { icon: string | null }).icon).toBeNull();
+    expect((cleared.json() as { accent: string | null }).accent).toBeNull();
+
+    // The list route answers with the same shape the writes do.
+    const listed = (
+      await app.inject({ method: 'GET', url: '/api/v1/rooms', headers: auth(memberToken) })
+    ).json() as Array<{ id: string; icon: string | null; accent: string | null }>;
+    expect(listed.find((entry) => entry.id === room.id)?.accent).toBeNull();
+
+    // A token nobody recognises is still stored: the vocabulary belongs to the
+    // apps, and a hub that refused one would need upgrading for every colour.
+    const unknown = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/rooms/${room.id}`,
+      headers: auth(memberToken),
+      payload: { icon: 'chandelier' },
+    });
+    expect((unknown.json() as { icon: string | null }).icon).toBe('chandelier');
+
+    // Bounded, though — a token is a word, not a payload.
+    const tooLong = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/rooms/${room.id}`,
+      headers: auth(memberToken),
+      payload: { icon: 'x'.repeat(41) },
+    });
+    expect(tooLong.statusCode).toBe(400);
+  });
+
+  /**
+   * A zone's name is copied onto every room in it by the apps, so renaming one
+   * moves what other people see — and used to be the one structural edit that
+   * said nothing in the log.
+   */
+  it('records a zone rename the way it records a room rename', async () => {
+    const zone = await app.inject({
+      method: 'POST',
+      url: '/api/v1/zones',
+      headers: auth(memberToken),
+      payload: { name: 'Upstairs' },
+    });
+    const zoneId = (zone.json() as { id: string }).id;
+
+    const renamed = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/zones/${zoneId}`,
+      headers: auth(memberToken),
+      payload: { name: 'First floor' },
+    });
+    expect(renamed.statusCode).toBe(200);
+
+    const entries = (
+      await app.inject({ method: 'GET', url: '/api/v1/activity', headers: auth(memberToken) })
+    ).json() as Array<{
+      kind: string;
+      message: string;
+      data?: { zoneName?: string; previousName?: string };
+    }>;
+    const entry = entries.find((row) => row.kind === 'zone.renamed');
+    expect(entry?.message).toContain('First floor');
+    expect(entry?.data?.zoneName).toBe('First floor');
+    expect(entry?.data?.previousName).toBe('Upstairs');
+
+    // A name that is already in force is not a change, so it writes nothing.
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/zones/${zoneId}`,
+      headers: auth(memberToken),
+      payload: { name: 'First floor' },
+    });
+    const after = (
+      await app.inject({ method: 'GET', url: '/api/v1/activity', headers: auth(memberToken) })
+    ).json() as Array<{ kind: string }>;
+    expect(after.filter((row) => row.kind === 'zone.renamed')).toHaveLength(1);
+
+    const missing = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/zones/11111111-2222-4333-8444-555555555555',
+      headers: auth(memberToken),
+      payload: { name: 'Nowhere' },
+    });
+    expect(missing.statusCode).toBe(404);
+  });
+
+  /** Deleting "Upstairs" must never be a way to lose a bedroom. */
+  it('keeps the rooms when their zone is deleted', async () => {
+    const zoneId = (
+      await app.inject({
+        method: 'POST',
+        url: '/api/v1/zones',
+        headers: auth(memberToken),
+        payload: { name: 'Attic' },
+      })
+    ).json() as { id: string };
+    const roomId = (
+      await app.inject({
+        method: 'POST',
+        url: '/api/v1/rooms',
+        headers: auth(memberToken),
+        payload: { name: 'Studio', zoneId: zoneId.id },
+      })
+    ).json() as { id: string };
+
+    const deleted = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/zones/${zoneId.id}`,
+      headers: auth(memberToken),
+    });
+    expect(deleted.statusCode).toBe(204);
+
+    const rooms = (
+      await app.inject({ method: 'GET', url: '/api/v1/rooms', headers: auth(memberToken) })
+    ).json() as Array<{ id: string; zoneId: string | null }>;
+    const survivor = rooms.find((entry) => entry.id === roomId.id);
+    expect(survivor).toBeDefined();
+    expect(survivor?.zoneId).toBeNull();
+  });
+
+  /**
+   * A deleted room leaves its devices behind, and the *cache* has to hear
+   * about it. The database sets `devices.room_id` to null on its own; the
+   * registry would have gone on serving a room id pointing at nothing until
+   * the hub restarted, so every app would have kept drawing the section.
+   */
+  it('empties a deleted room instead of its devices', async () => {
+    const roomId = (
+      (
+        await app.inject({
+          method: 'POST',
+          url: '/api/v1/rooms',
+          headers: auth(memberToken),
+          payload: { name: 'Hallway' },
+        })
+      ).json() as { id: string }
+    ).id;
+    const devices = (
+      await app.inject({ method: 'GET', url: '/api/v1/devices', headers: auth(memberToken) })
+    ).json() as Array<{ id: string }>;
+    const deviceId = devices[0]!.id;
+
+    const placed = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/devices/${deviceId}`,
+      headers: auth(memberToken),
+      payload: { roomId },
+    });
+    expect((placed.json() as { roomId: string | null }).roomId).toBe(roomId);
+
+    await app.inject({ method: 'DELETE', url: `/api/v1/rooms/${roomId}`, headers: auth(memberToken) });
+
+    const after = (
+      await app.inject({ method: 'GET', url: '/api/v1/devices', headers: auth(memberToken) })
+    ).json() as Array<{ id: string; roomId: string | null }>;
+    expect(after.find((device) => device.id === deviceId)?.roomId).toBeNull();
   });
 
   it('records and serves activity', async () => {
@@ -1047,6 +1393,32 @@ describe.skipIf(!handle)('hub API', () => {
     await waitFor('state');
 
     expect(frames.filter((frame) => frame.type === 'zigbeeEvent')).toHaveLength(before);
+    socket.close();
+  });
+
+  /**
+   * Everyone in the house is looking at the same rooms, so one person adding
+   * one has to reach the other phones now — not whenever they next reconnect,
+   * which used to be the only thing that re-read the structure.
+   */
+  it('announces rooms and zones to every open socket', async () => {
+    const { socket, waitFor } = await openSocket(memberToken);
+
+    await app.inject({
+      method: 'POST',
+      url: '/api/v1/zones',
+      headers: auth(ownerToken),
+      payload: { name: 'Basement' },
+    });
+
+    const frame = (await waitFor('structure')) as {
+      rooms: Array<{ id: string; name: string; zoneId: string | null }>;
+      zones: Array<{ name: string }>;
+    };
+    // Both lists, every time: a client redraws its zone sections from the pair
+    // and would otherwise have to hold half of it from memory.
+    expect(frame.zones.some((zone) => zone.name === 'Basement')).toBe(true);
+    expect(Array.isArray(frame.rooms)).toBe(true);
     socket.close();
   });
 

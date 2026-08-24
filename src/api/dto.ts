@@ -1,7 +1,16 @@
 import type { RegistryDevice } from '../core/registry.js';
 
-/** Device shape served by GET /devices and the deviceUpserted WS frame. */
-export function deviceWire(device: RegistryDevice) {
+/**
+ * Device shape served by GET /devices and the deviceUpserted WS frame.
+ *
+ * `favorite` is the **caller's** pin, not the device's — see
+ * `core/favorites.ts`. The field name and shape are unchanged, deliberately:
+ * an app written against the old shared flag reads its own favorites here
+ * without knowing anything happened. It has to be passed in rather than read
+ * off the device, because one device answers differently to each member, and
+ * the WebSocket renders this per socket for exactly that reason.
+ */
+export function deviceWire(device: RegistryDevice, favorite: boolean) {
   return {
     id: device.id,
     // The device's address on its own protocol — a Zigbee IEEE, an MQTT
@@ -13,7 +22,7 @@ export function deviceWire(device: RegistryDevice) {
     externalId: device.externalId,
     name: device.name,
     roomId: device.roomId,
-    favorite: device.favorite,
+    favorite,
     online: device.online,
     adapter: device.adapter,
     vendor: device.vendor,

@@ -17,6 +17,16 @@ export interface HubEvents {
   deviceUpserted: [deviceId: string];
   deviceRemoved: [deviceId: string];
   stateChanged: [deviceId: string, endpointId: number, state: EndpointState];
+  /**
+   * Rooms or zones changed — the whole of both lists, not a diff.
+   *
+   * A home has a handful of each, so the lists cost less than the round trip a
+   * "go and refetch" frame would provoke, and there is no partial-update path
+   * to get wrong. Everyone in the house is looking at the same rooms, so one
+   * person adding a room has to reach the other phones without waiting for
+   * them to reconnect — which was the only thing that used to re-read them.
+   */
+  structureChanged: [structure: HomeStructure];
   activity: [entry: ActivityEvent];
   permitJoin: [active: boolean, remainingSeconds: number];
   /**
@@ -64,6 +74,20 @@ export interface ZigbeeLifecycleEvent {
   type: 'joined' | 'announced' | 'interviewing' | 'interviewed' | 'interview-failed' | 'left';
   ieee: string;
   name?: string;
+}
+
+/** The shape of the home: its rooms, and the zones some of them sit in. */
+export interface HomeStructure {
+  rooms: Array<{
+    id: string;
+    name: string;
+    zoneId: string | null;
+    /** App-defined glyph and palette tokens; null is "the app decides". */
+    icon: string | null;
+    accent: string | null;
+    sortOrder: number;
+  }>;
+  zones: Array<{ id: string; name: string; sortOrder: number }>;
 }
 
 /**

@@ -10,7 +10,7 @@ import { PairingService } from '../src/core/pairing.js';
 import { SettingsService } from '../src/core/settings.js';
 import { DeviceRegistry } from '../src/core/registry.js';
 import { PermitJoinService } from '../src/core/permit-join.js';
-import { bootedHome, openTestDb } from './helpers/db.js';
+import { bootedHome, loadedFavorites, openTestDb } from './helpers/db.js';
 
 /**
  * `zigbee.problem` on the wire.
@@ -61,6 +61,7 @@ describe.skipIf(!handle)('why Zigbee is down, over HTTP', () => {
       log,
       events,
       registry: new DeviceRegistry(db, events, activity, log),
+      favorites: await loadedFavorites(db, events),
       pairing,
       activity,
       settings: new SettingsService(db, Buffer.alloc(32).toString('base64')),

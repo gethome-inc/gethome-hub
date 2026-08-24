@@ -39,9 +39,59 @@ export const home = sqliteTable('home', {
   createdAt: createdAt(),
 });
 
+/**
+ * The optional layer above rooms: "Upstairs", "Garden", "Guest house".
+ *
+ * Deliberately a *zone* rather than a floor. A room with no zone is the normal
+ * case — a flat has no floors, and a garage isn't one either — where a room
+ * with no *floor* reads as missing data somebody should go and fill in. It is
+ * also Apple Home's own word (`HMZone`), which matters because the GetHome app
+ * mirrors Apple Homes beside hub homes and both have to use one vocabulary.
+ */
+export const zones = sqliteTable('zones', {
+  id: uuidPk(),
+  name: text('name').notNull(),
+  sortOrder: integer('sort_order').notNull().default(0),
+  createdAt: createdAt(),
+});
+
 export const rooms = sqliteTable('rooms', {
   id: uuidPk(),
   name: text('name').notNull(),
+  /**
+   * Null is a room that belongs to no zone — the ordinary case, not a gap.
+   *
+   * **No `onDelete` action, and the route does that work instead.** SQLite
+   * cannot attach a referential action to a column added by `ALTER TABLE`, and
+   * the usual workaround — rebuild the table — is unsafe here: drizzle runs
+   * migrations inside a transaction, `PRAGMA foreign_keys=OFF` is a no-op
+   * inside one, and dropping `rooms` with enforcement on fires
+   * `devices.room_id`'s own set-null, quietly emptying every room in the home
+   * on upgrade. So `DELETE /zones/:id` clears this column first, and the plain
+   * foreign key stays as the backstop that refuses if it ever forgets to.
+   */
+  zoneId: text('zone_id').references(() => zones.id),
+  /**
+   * How the apps draw this room: a glyph token and a palette token.
+   *
+   * Both are the *house's*, exactly like the room's name — everybody who opens
+   * the home sees the same kitchen, in the same colour — which is the whole
+   * reason they are here rather than in each phone's own storage.
+   *
+   * **Null means "you decide", and that is the ordinary state.** The apps
+   * derive a glyph from the name (a room called Garage draws a car) and hand
+   * out colours in turn, so a room nobody has styled has no rows to write and
+   * keeps whatever the app would have chosen anyway. A value here is somebody
+   * having overruled that, and it wins from then on.
+   *
+   * The hub deliberately does **not** validate the vocabulary. Which glyphs
+   * exist and what "sky" looks like belong to the apps; an allowlist here
+   * would mean a hub upgrade every time one of them adds a colour, and the
+   * cost of a token an app doesn't know is that it falls back to the derived
+   * look — which is where the room started.
+   */
+  icon: text('icon'),
+  accent: text('accent'),
   sortOrder: integer('sort_order').notNull().default(0),
   createdAt: createdAt(),
 });
@@ -58,6 +108,16 @@ export const devices = sqliteTable(
     model: text('model'),
     name: text('name').notNull(),
     roomId: text('room_id').references(() => rooms.id, { onDelete: 'set null' }),
+    /**
+     * **Legacy, and kept only so a rollback still boots.** A favorite is one
+     * person's pin, not a property of the home — see `deviceFavorites` — so
+     * nothing reads this column any more. It is maintained as the *union* of
+     * everybody's pins, because `install.sh` flips back to the previous release
+     * when a new build fails its health check, and by then this migration has
+     * already run: a dropped column would meet an older build that selects it
+     * on every `GET /devices` and turn a routine rollback into a dead hub.
+     * Dropping it belongs to a release nobody would roll back across.
+     */
     favorite: integer('favorite', { mode: 'boolean' }).notNull().default(false),
     online: integer('online', { mode: 'boolean' }).notNull().default(true),
     /** Set when automatic (static or AI) mapping was incomplete. */
@@ -94,6 +154,31 @@ export const endpoints = sqliteTable(
     updatedAt: createdAt('updated_at'),
   },
   (table) => [uniqueIndex('endpoints_device_endpoint').on(table.deviceId, table.endpointId)],
+);
+
+/**
+ * Who has pinned what — one row per (device, member).
+ *
+ * Favorites used to be a boolean on the device row, which made them a property
+ * of the *home*: one person pinning the kettle put it on the dashboard of
+ * everybody who lived there, and unpinning it took it off theirs. Names and
+ * rooms are shared because they describe the house; a favorite describes a
+ * person, so it is keyed by member and travels with them. Both foreign keys
+ * cascade, so a removed device or a departing member takes their pins with
+ * them (`foreign_keys = ON`, see `db/client.ts`).
+ */
+export const deviceFavorites = sqliteTable(
+  'device_favorites',
+  {
+    deviceId: text('device_id')
+      .notNull()
+      .references(() => devices.id, { onDelete: 'cascade' }),
+    memberId: text('member_id')
+      .notNull()
+      .references(() => members.id, { onDelete: 'cascade' }),
+    createdAt: createdAt(),
+  },
+  (table) => [uniqueIndex('device_favorites_device_member').on(table.deviceId, table.memberId)],
 );
 
 export const members = sqliteTable('members', {
