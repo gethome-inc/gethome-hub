@@ -24,6 +24,14 @@ import { isSupportedModel, supportedModelIds } from '../ai/models.js';
 import type { MappingLibrary } from '../ai/library.js';
 import type { AiRunLog } from '../core/ai-runs.js';
 import { RADIO_MODES, writeRadioMode, type RadioBudget, type RadioMode } from '../core/radio.js';
+import {
+  canApplyUpdate,
+  checkForUpdate,
+  parseBuild,
+  readUpdateLog,
+  readUpdateRun,
+  requestUpdate,
+} from '../core/update.js';
 import type { MqttObserver } from '../core/mqtt-observer.js';
 import { MAX_WINDOW_SECONDS, type PermitJoinService } from '../core/permit-join.js';
 import { createHubStatusReader } from '../core/hub-status.js';
@@ -72,6 +80,17 @@ export interface ApiDeps {
   aiRuns: AiRunLog;
   /** Every device model this hub knows how to interpret. */
   mappings: MappingLibrary;
+}
+
+/**
+ * Whether two commits are the same one.
+ *
+ * A build stamp carries seven characters and GitHub can answer with forty, so
+ * these are compared by prefix in whichever direction is shorter. Same test
+ * Studio makes.
+ */
+function sameCommit(a: string, b: string): boolean {
+  return a.startsWith(b) || b.startsWith(a);
 }
 
 interface CommissionJob {
@@ -1188,6 +1207,116 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       /** The switch is applied out of process; poll GET /hub for the result. */
       applying: true,
     };
+  });
+
+  // ── Updating the hub ─────────────────────────────────────────────────────
+
+  /**
+   * What is installed, whether anything newer exists, and how a run is going.
+   *
+   * Deliberately its own route rather than more fields on `GET /hub`: that one
+   * is the health check every app and installer polls, it must stay a cheap
+   * read of things already in memory, and this one may go to the network.
+   *
+   * Any member reads it. Only the owner may *start* an update, but the
+   * information is the home's — somebody who cannot press the button still has
+   * to be able to see why the hub is unreachable for the next two minutes.
+   */
+  app.get('/api/v1/system/update', authed, async (request) => {
+    const { refresh } = z
+      .object({ refresh: z.coerce.boolean().optional() })
+      .parse(request.query ?? {});
+    const current = parseBuild(deps.build);
+    // A hub built from source has no stamp, so there is nothing to compare and
+    // asking GitHub would answer a question we could not use. That is a reason
+    // to say "cannot tell", never to say "up to date".
+    const check = current
+      ? await checkForUpdate(refresh === true)
+      : { error: 'no_build_stamp' as const };
+    const run = readUpdateRun(deps.dataDir);
+
+    return {
+      ...(current
+        ? {
+            current: {
+              build: current.build,
+              version: current.version,
+              sha: current.sha,
+              channel: current.channel,
+            },
+          }
+        : { current: { build: deps.build ?? null, version: deps.version } }),
+      ...(check.sha !== undefined
+        ? {
+            latest: { sha: check.sha, ...(check.checkedAt ? { checkedAt: check.checkedAt } : {}) },
+            // Absent, never null, when the hub cannot say — the same three-value
+            // shape every optional field on this wire uses. An app that reads a
+            // missing `available` as `false` would tell somebody they are up to
+            // date on the strength of a failed network call.
+            available: current !== undefined && !sameCommit(current.sha, check.sha),
+          }
+        : {}),
+      ...(check.error !== undefined ? { checkError: check.error } : {}),
+      /** Whether this machine has the runner and the units at all. */
+      canApply: canApplyUpdate(deps.dataDir),
+      ...(run !== undefined ? { run } : {}),
+    };
+  });
+
+  /**
+   * Ask the hub to update itself.
+   *
+   * **Owner only.** The rule elsewhere is that "bringing something new in" —
+   * pairing, the join window, the radio switch — is any member's, because each
+   * is bounded, destroys nothing and is written down with a name. An update is
+   * the first two but not quite the third kind of thing: it replaces the code
+   * every member depends on and runs database migrations that flipping the
+   * symlink back does not undo.
+   *
+   * The response is a receipt, not a state. Nothing has happened yet: a root
+   * unit picks the request up a moment later and restarts this process on the
+   * way. Poll this route for what became of it.
+   */
+  app.post('/api/v1/system/update', ownerOnly, async (request, reply) => {
+    if (!canApplyUpdate(deps.dataDir)) {
+      // A hub installed before any of this existed. Saying so beats letting the
+      // request sit in a directory nothing is watching, which from an app looks
+      // exactly like an update that never starts.
+      return reply.code(409).send({ error: 'update_unsupported' });
+    }
+    const run = readUpdateRun(deps.dataDir);
+    if (run?.state === 'running') {
+      return reply.code(409).send({ error: 'update_in_progress' });
+    }
+    const id = requestUpdate(deps.dataDir);
+    deps.log.info({ id, member: request.member!.id }, 'Hub update requested');
+    // Written here, while this process is still alive to write it: the outcome
+    // is recorded at the next boot, by which time there is no member to name.
+    await deps.activity.record({
+      kind: 'hub.update',
+      message: `${request.member!.name} started a hub update.`,
+      memberId: request.member!.id,
+      data: {
+        memberName: request.member!.name,
+        outcome: 'started',
+        ...(deps.build !== undefined ? { fromBuild: deps.build } : {}),
+      },
+    });
+    return reply.code(202).send({ id, state: 'queued' });
+  });
+
+  /**
+   * What the installer printed. Fetched on demand and never pushed: on a hub
+   * that updates cleanly nobody opens this, and it must not cost every screen a
+   * file read on arrival.
+   */
+  app.get('/api/v1/system/update/log', authed, async (request) => {
+    const { tail } = z
+      .object({ tail: z.coerce.number().int().min(1).max(2000).optional() })
+      .parse(request.query ?? {});
+    // The total goes back too, so an app can say what it is *not* showing
+    // rather than letting a cut log read as the whole story.
+    return readUpdateLog(deps.dataDir, tail ?? 200);
   });
 
   // ── WebSocket event stream ───────────────────────────────────────────────
