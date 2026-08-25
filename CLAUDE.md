@@ -629,6 +629,20 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   empty branch listing aborts rather than deleting everything. The sweep matches
   by building the set of tags the *existing* branches would produce, because
   flattening slashes into the tag name is lossy and cannot be inverted.
+- **A migration has to be readable by the build before it, and that is now a
+  test.** The hub migrates at boot (`src/index.ts`), which is *before* the health
+  check that decides whether the new build is any good — so by the time
+  `install.sh` rolls back, the database has already moved on and the symlink
+  flips into an old build meeting a schema it did not write. While migrations
+  only add, that is fine. The first one that drops or renames turns a failed
+  health check from "recovered by itself" into "neither build starts, SSH to the
+  Pi" — the exact evening the rollback exists to save. `test/migrations.test.ts`
+  reads every SQL file and fails on `DROP TABLE`/`DROP COLUMN`/`RENAME`; the way
+  past it is a `-- gethome:destructive: <why>` line, so taking something away is
+  a decision somebody made rather than one drizzle made for them. `DROP INDEX` is
+  deliberately allowed — an old build without an index is slower, not broken.
+  This is the rule the `devices.favorite` column has always been kept for; it was
+  written down and enforced by nothing.
 - **Versioning is a symlink, not a container.** Each build unpacks into
   `/opt/gethome/releases/<build-id>/` and `current` points at the one that
   runs; CI stamps `VERSION` into the bundle, which names the directory and
