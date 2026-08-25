@@ -99,6 +99,9 @@ describe('the roles migration', () => {
       'device.add',
       'home.structure',
       'hub.radio',
+      // `POST /system/update` was `authed` too by the time this landed, and a
+      // phone that could update the hub yesterday has to be able to today.
+      'hub.update',
     ] as const) {
       expect(access.can(anna, wasAuthed), wasAuthed).toBe(true);
     }

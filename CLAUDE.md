@@ -481,6 +481,34 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `devices.favorite` does: `install.sh` rolls back on a failed health check by
   which time the migration has run, and the older build reads that column on
   every authenticated request.
+  **Deleting a role takes its outstanding invites with it**, and the reasoning
+  is the same shape as the refusal above. `invites.role_id` is a column added
+  by `ALTER TABLE` too, so it carries no `ON DELETE` action and the raw foreign
+  key was what refused — a 500 for an ordinary thing to do. Clearing it would
+  let that code admit its holder as a plain **Member**, which is precisely the
+  silent reassignment `role_in_use` exists to refuse; refusing the delete would
+  be a dead end, since no route revokes an invite. So the codes go: an invite's
+  whole content is "join as this", it lives fifteen minutes, and minting
+  another is one tap.
+- **Anything that touches a permission, a role, a guard or a default is not
+  done until the four suites are.** This is the "Keep the docs in sync" rule
+  applied to the part of the system where the *cost* of drifting is somebody
+  getting access nobody granted them, and it is a standing requirement rather
+  than a nicety — the audit that produced these files found refusals tested for
+  the guest table and almost nowhere else, which is exactly the shape of hole
+  that hides an escalation. `test/access.test.ts` is `AccessService` with no
+  server in front of it: the owner answered without a table, a key a newer
+  build stored, a row an older build wrote, `forgetMember`. `test/roles.test.ts`
+  is the guards and the socket, over a real listening server, and its
+  `[method, url, permission, payload]` tables are where a new route belongs —
+  **both** halves, since a permission with only a refusal test can be broken by
+  denying everybody. `test/roles-migration.test.ts` runs the migration against
+  rows written by the old schema and is what proves "the defaults change
+  nothing" rather than asserting it. `test/pairing.test.ts` owns the invite →
+  role path, which is the only place a role is chosen for somebody who has no
+  member row yet. A new permission key needs a line in the defaults assertion,
+  a guard test both ways, and a row in `docs/api.md`'s two tables; a new guarded
+  route needs its row in the refusal table and an allowed case somewhere.
 - **Ending a membership has two halves, and only one of them is the database.**
   Deleting a member takes their tokens with the row (`tokens.member_id`
   cascades, `foreign_keys = ON`), which ends every REST call they can make. It

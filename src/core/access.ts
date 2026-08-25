@@ -1,6 +1,6 @@
 import { eq, inArray } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
-import { members, roles } from '../db/schema.js';
+import { invites, members, roles } from '../db/schema.js';
 import type { HubEventBus } from './bus.js';
 
 /**
@@ -125,6 +125,13 @@ export const PERMISSIONS: readonly PermissionDescriptor[] = [
     summary: 'Choose whether this hub runs Zigbee or Matter, on a board that runs one at a time.',
   },
   {
+    key: 'hub.update',
+    group: 'Hub',
+    title: 'Update the hub',
+    summary:
+      'Install a newer build when one exists. The home is offline for a few minutes while it happens.',
+  },
+  {
     key: 'hub.ai',
     group: 'Hub',
     title: 'AI adaptation',
@@ -145,6 +152,7 @@ export type PermissionKey =
   | 'member.remove'
   | 'role.manage'
   | 'hub.radio'
+  | 'hub.update'
   | 'hub.ai';
 
 export const PERMISSION_KEYS: readonly PermissionKey[] = PERMISSIONS.map((entry) => entry.key);
@@ -168,7 +176,15 @@ export const BUILTIN_ROLES = [
     key: 'member',
     name: 'Member',
     sortOrder: 1,
-    /** Precisely the routes that were `authed` before roles existed. */
+    /**
+     * Precisely the routes that were `authed` before roles existed.
+     *
+     * `hub.update` is in here for the reason it stopped being owner-only in
+     * the first place: GetHome Studio claims a hub as *the Mac*, so the owner
+     * is a laptop in a drawer and every phone joins by invite — owner-only
+     * there did not mean "an update needs care", it meant the phone in the
+     * owner's own hand could never update their own hub, ever.
+     */
     permissions: [
       'device.control',
       'device.edit',
@@ -176,6 +192,7 @@ export const BUILTIN_ROLES = [
       'home.structure',
       'activity.read',
       'hub.radio',
+      'hub.update',
     ] as PermissionKey[],
   },
   {
@@ -184,8 +201,13 @@ export const BUILTIN_ROLES = [
     sortOrder: 2,
     /**
      * Somebody staying in the house. They can work the lights and keep their
-     * own favorites; they change no names, open no network, and read only
-     * their own line in the activity log.
+     * own favorites; they change no names, open no network, take the home
+     * offline for nobody, and read only their own line in the activity log.
+     *
+     * Guest is the one place the "defaults change nothing" claim looks like it
+     * bends, and it doesn't: every member who exists today becomes **Member**
+     * and keeps everything they had, `hub.update` included. Guest is a role
+     * that did not exist, so it takes nothing from anybody.
      */
     permissions: ['device.control'] as PermissionKey[],
   },
@@ -420,6 +442,23 @@ export class AccessService {
    * this check *is* the referential integrity, and the plain foreign key
    * behind it is what refuses if this ever forgets. Silently reassigning
    * somebody's access is not an option worth having.
+   *
+   * **An outstanding invite is not somebody holding it, and it goes with the
+   * role.** `invites.role_id` is the same kind of column and the same missing
+   * action, so a code minted into this role would otherwise make the delete
+   * fail on a raw foreign key — a 500 for what is an ordinary thing to do.
+   * The two ways out of that are not equal. Clearing the column would let the
+   * code admit its holder as a plain **Member**, which is an escalation
+   * nobody asked for and the exact silent reassignment the paragraph above
+   * refuses. Refusing the delete would be a dead end: no route revokes an
+   * invite, so a home that made a role, invited somebody into it and changed
+   * its mind would be told `role_in_use` about a role nobody wears, with
+   * nothing to do but wait out the expiry. So the codes go. An invite's whole
+   * content is "join as this" — with the role gone it means nothing, it lives
+   * fifteen minutes, and minting another is one tap. Used and expired rows go
+   * too: nothing reads their role, and deleting the row cannot resurrect a
+   * code, since `claim` finds an invite by its hash and a row that isn't there
+   * is simply not a code.
    */
   async deleteRole(id: string): Promise<RoleRefusal | null> {
     const existing = this.byId.get(id);
@@ -427,6 +466,7 @@ export class AccessService {
     if (existing.key === OWNER_ROLE_KEY) return 'role_is_owner';
     if (existing.builtin) return 'role_is_builtin';
     if (this.membersHolding(id).length > 0) return 'role_in_use';
+    await this.db.delete(invites).where(eq(invites.roleId, id));
     await this.db.delete(roles).where(eq(roles.id, id));
     this.byId.delete(id);
     this.byKey.delete(existing.key);

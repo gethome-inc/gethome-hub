@@ -207,6 +207,11 @@ describe.skipIf(!handle)('roles and permissions', () => {
    * existed, and the keys missing from it are the ones that were `ownerOnly`.
    * If this drifts, upgrading a hub silently changes what everybody in the
    * home can do, which is the one outcome this design must not have.
+   *
+   * `hub.update` is in the list for exactly that reason and not as a widening:
+   * `POST /system/update` was `authed` when this branch met it, so a member who
+   * could update yesterday still can. Guest is a role that did not exist, so it
+   * takes nothing from anybody by arriving without it.
    */
   it('ships defaults that reproduce what the hub did before roles existed', async () => {
     const roles = (
@@ -221,6 +226,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
       'home.structure',
       'activity.read',
       'hub.radio',
+      'hub.update',
     ]);
     // The four the old `ownerOnly` guarded, plus the two roles added.
     for (const ownerOnly of [
@@ -669,5 +675,487 @@ describe.skipIf(!handle)('roles and permissions', () => {
       headers: auth(ownerToken),
       payload: { permissions: [...BUILTIN_ROLES[1].permissions] },
     });
+  });
+
+  /**
+   * `activity.read` narrows the socket the same way it narrows the route, and
+   * the ask happens at **send** time rather than when the socket authorized.
+   * A guest whose role gains the permission has to start seeing the home's
+   * lines without reconnecting — an app has no reason to drop a working
+   * connection because somebody edited a matrix on another phone.
+   */
+  it('narrows the activity stream per socket, and widens it without a reconnect', async () => {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/api/v1/ws?token=${guestToken}`);
+    const rows: Array<{ memberId: string | null; message: string }> = [];
+    socket.on('message', (data) => {
+      const frame = JSON.parse(data.toString()) as {
+        type: string;
+        entry?: { memberId: string | null; message: string };
+      };
+      if (frame.type === 'activity' && frame.entry) rows.push(frame.entry);
+    });
+    await new Promise<void>((resolve, reject) => {
+      socket.on('open', () => resolve());
+      socket.on('error', reject);
+    });
+
+    const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 120));
+    const flip = async (token: string, on: boolean) => {
+      await app.inject({
+        method: 'POST',
+        url: `/api/v1/devices/${deviceId}/endpoints/1/commands`,
+        headers: auth(token),
+        payload: { type: 'power', on },
+      });
+      await settle();
+    };
+
+    // Somebody else's line does not reach a guest's socket; their own does.
+    await flip(memberToken, false);
+    expect(rows).toEqual([]);
+    await flip(guestToken, true);
+    expect(rows.map((row) => row.memberId)).toEqual([guestId]);
+
+    // Grant it — on the socket that is already open.
+    rows.length = 0;
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/roles/${await roleId('guest')}`,
+      headers: auth(ownerToken),
+      payload: { permissions: ['device.control', 'activity.read'] },
+    });
+    await flip(memberToken, false);
+    expect(rows.some((row) => row.memberId !== guestId)).toBe(true);
+
+    socket.close();
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/roles/${await roleId('guest')}`,
+      headers: auth(ownerToken),
+      payload: { permissions: [...BUILTIN_ROLES[2].permissions] },
+    });
+  });
+
+  // ── The escalation surface ────────────────────────────────────────────────
+
+  /**
+   * Nothing else in this file proves that somebody without `role.manage`
+   * cannot simply rewrite the matrix — which would make every other refusal
+   * here a formality. Four routes, two tokens, and the table has to come back
+   * unchanged afterwards.
+   */
+  it('refuses everyone without role.manage the matrix itself', async () => {
+    const before = (
+      await app.inject({ method: 'GET', url: '/api/v1/roles', headers: auth(ownerToken) })
+    ).json() as RoleWire[];
+    const guestRole = await roleId('guest');
+    const members = (
+      await app.inject({ method: 'GET', url: '/api/v1/members', headers: auth(ownerToken) })
+    ).json() as MemberRow[];
+    const anna = members.find((row) => row.name === 'Anna')!;
+
+    const cases: Array<[string, string, unknown]> = [
+      ['POST', '/api/v1/roles', { name: 'Superuser', permissions: [...PERMISSION_KEYS] }],
+      ['PATCH', `/api/v1/roles/${guestRole}`, { permissions: [...PERMISSION_KEYS] }],
+      ['DELETE', `/api/v1/roles/${guestRole}`, undefined],
+      ['PATCH', `/api/v1/members/${anna.id}`, { roleId: await roleId('owner') }],
+    ];
+    for (const token of [memberToken, guestToken]) {
+      for (const [method, url, payload] of cases) {
+        const response = await app.inject({
+          method: method as 'GET',
+          url,
+          headers: auth(token),
+          ...(payload !== undefined ? { payload } : {}),
+        });
+        expect(response.statusCode, `${method} ${url}`).toBe(403);
+        expect(response.json(), `${method} ${url}`).toMatchObject({
+          error: 'forbidden',
+          permission: 'role.manage',
+        });
+      }
+    }
+
+    const after = (
+      await app.inject({ method: 'GET', url: '/api/v1/roles', headers: auth(ownerToken) })
+    ).json() as RoleWire[];
+    expect(after).toEqual(before);
+  });
+
+  /**
+   * Deleting a role takes the codes minted into it, because an invite's whole
+   * content is "join as this" and the alternative is worse in both directions:
+   * a cleared column would admit its holder as a plain Member, and a refusal
+   * would be a dead end, since no route revokes an invite. It is also the
+   * shape that used to answer 500 — `invites.role_id` carries no `ON DELETE`
+   * action either, so the raw foreign key was what refused.
+   */
+  it('takes the outstanding invites with a deleted role', async () => {
+    const role = (
+      await app.inject({
+        method: 'POST',
+        url: '/api/v1/roles',
+        headers: auth(ownerToken),
+        payload: { name: 'Dog walker', permissions: ['device.control'] },
+      })
+    ).json() as RoleWire;
+    const { code } = (
+      await app.inject({
+        method: 'POST',
+        url: '/api/v1/invites',
+        headers: auth(ownerToken),
+        payload: { roleId: role.id },
+      })
+    ).json() as { code: string };
+
+    const removed = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/roles/${role.id}`,
+      headers: auth(ownerToken),
+    });
+    expect(removed.statusCode).toBe(204);
+
+    const outstanding = (
+      await app.inject({ method: 'GET', url: '/api/v1/invites', headers: auth(ownerToken) })
+    ).json() as Array<{ roleId: string | null }>;
+    expect(outstanding.every((row) => row.roleId !== role.id)).toBe(true);
+
+    // And the code itself is nothing now — not a Member invite.
+    const claimed = await app.inject({
+      method: 'POST',
+      url: '/api/v1/pair',
+      payload: { code, memberName: 'Nobody' },
+    });
+    expect(claimed.statusCode).toBe(401);
+  });
+
+  /**
+   * There is no ownership transfer, so no route may produce a second owner —
+   * and an invite is the one that would do it without any member row existing
+   * yet to refuse on.
+   */
+  it('refuses to mint an invite into the owner’s role', async () => {
+    const owner = await app.inject({
+      method: 'POST',
+      url: '/api/v1/invites',
+      headers: auth(ownerToken),
+      payload: { roleId: await roleId('owner') },
+    });
+    expect(owner.statusCode).toBe(409);
+    expect(owner.json()).toMatchObject({ error: 'cannot_change_owner' });
+
+    const unknown = await app.inject({
+      method: 'POST',
+      url: '/api/v1/invites',
+      headers: auth(ownerToken),
+      payload: { roleId: '00000000-0000-4000-a000-000000000000' },
+    });
+    expect(unknown.statusCode).toBe(404);
+    expect(unknown.json()).toMatchObject({ error: 'unknown_role' });
+  });
+
+  // ── Working the lights is a permission too ────────────────────────────────
+
+  /**
+   * `device.control` is the one key whose *refusal* nothing exercised, which
+   * is a strange gap for the permission the iOS app hangs its whole
+   * "this card has no control" state on. Taken off the guest role and put
+   * straight back.
+   */
+  it('refuses the commands route to a role without device.control', async () => {
+    const guestRole = await roleId('guest');
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/roles/${guestRole}`,
+      headers: auth(ownerToken),
+      payload: { permissions: [] },
+    });
+
+    const executed = adapter.executed.length;
+    const refused = await app.inject({
+      method: 'POST',
+      url: `/api/v1/devices/${deviceId}/endpoints/1/commands`,
+      headers: auth(guestToken),
+      payload: { type: 'power', on: true },
+    });
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json()).toMatchObject({ error: 'forbidden', permission: 'device.control' });
+    // Refused before the adapter, not after it — a 403 over a lamp that came on
+    // anyway is the worst of both.
+    expect(adapter.executed.length).toBe(executed);
+
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/roles/${guestRole}`,
+      headers: auth(ownerToken),
+      payload: { permissions: [...BUILTIN_ROLES[2].permissions] },
+    });
+  });
+
+  /**
+   * Reading what the hub is running is the floor — somebody who cannot press
+   * the button is exactly who needs to know why the home went quiet for two
+   * minutes — while asking for it is `hub.update`, which Member holds and
+   * Guest does not.
+   *
+   * A member gets past the guard and meets the *machine*: this test hub has no
+   * runner installed, so `409 update_unsupported` is the guard having let them
+   * through, which is the half being asserted.
+   */
+  it('lets anyone watch an update and only hub.update ask for one', async () => {
+    for (const token of [ownerToken, memberToken, guestToken]) {
+      const read = await app.inject({
+        method: 'GET',
+        url: '/api/v1/system/update',
+        headers: auth(token),
+      });
+      expect(read.statusCode).toBe(200);
+      expect(read.json()).toMatchObject({ canApply: false });
+    }
+
+    const refused = await app.inject({
+      method: 'POST',
+      url: '/api/v1/system/update',
+      headers: auth(guestToken),
+    });
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json()).toMatchObject({ error: 'forbidden', permission: 'hub.update' });
+
+    const allowed = await app.inject({
+      method: 'POST',
+      url: '/api/v1/system/update',
+      headers: auth(memberToken),
+    });
+    expect(allowed.statusCode).toBe(409);
+    expect(allowed.json()).toMatchObject({ error: 'update_unsupported' });
+  });
+
+  // ── What the wire actually carries ────────────────────────────────────────
+
+  /**
+   * Every one of these fields is something an app cannot work out for itself.
+   * `POST /pair` carries the permissions so a phone that has just joined knows
+   * what to draw before its second request; `GET /members` carries the role
+   * three ways because the key is for code, the name is for the screen, and
+   * `isSelf` is the only way a client that claimed over SSH can find its own
+   * row; and `PATCH /members/me` answers with the permissions because renaming
+   * yourself is the floor and must not read as a refusal.
+   */
+  it('carries the role and the permissions on every shape an app reads', async () => {
+    const invite = await app.inject({
+      method: 'POST',
+      url: '/api/v1/invites',
+      headers: auth(ownerToken),
+      payload: { roleId: await roleId('guest') },
+    });
+    expect(invite.json()).toMatchObject({ roleName: 'Guest' });
+    const { code } = invite.json() as { code: string };
+
+    const joined = await app.inject({
+      method: 'POST',
+      url: '/api/v1/pair',
+      payload: { code, memberName: 'Dasha' },
+    });
+    const body = joined.json() as {
+      token: string;
+      member: { id: string; role: string; roleKey: string; roleName: string; permissions: string[] };
+    };
+    expect(body.member).toMatchObject({
+      role: 'member',
+      roleKey: 'guest',
+      roleName: 'Guest',
+      permissions: ['device.control'],
+    });
+
+    const rows = (
+      await app.inject({ method: 'GET', url: '/api/v1/members', headers: auth(body.token) })
+    ).json() as MemberRow[];
+    const dasha = rows.find((row) => row.id === body.member.id)!;
+    expect(dasha).toMatchObject({ roleName: 'Guest', isSelf: true });
+    expect(dasha.roleId).toBe(await roleId('guest'));
+    expect(rows.filter((row) => row.isSelf)).toHaveLength(1);
+
+    const renamed = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/members/me',
+      headers: auth(body.token),
+      payload: { name: 'Dasha’s phone' },
+    });
+    expect(renamed.json()).toMatchObject({
+      name: 'Dasha’s phone',
+      roleName: 'Guest',
+      permissions: ['device.control'],
+      isSelf: true,
+    });
+
+    // Tidy up, so the counts the tests below read are the ones they set.
+    await app.inject({
+      method: 'DELETE',
+      url: '/api/v1/members/me',
+      headers: auth(body.token),
+    });
+  });
+
+  // ── The log names what changed ────────────────────────────────────────────
+
+  /**
+   * Every edit to the matrix is written down by name — that accountability is
+   * what the three-part test for a *default* leans on ("bounded, destroys
+   * nothing, named"), so a kind that silently stopped being recorded would take
+   * the argument with it. `message` is the contract: Studio renders that
+   * sentence, and an app that has never heard of the kind still says something
+   * true.
+   */
+  it('writes a sentence for every kind of matrix edit', async () => {
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/v1/roles',
+      headers: auth(ownerToken),
+      payload: { name: 'Gardener', permissions: ['device.control'] },
+    });
+    const role = created.json() as RoleWire;
+
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/roles/${role.id}`,
+      headers: auth(ownerToken),
+      payload: { name: 'Groundskeeper' },
+    });
+
+    const members = (
+      await app.inject({ method: 'GET', url: '/api/v1/members', headers: auth(ownerToken) })
+    ).json() as MemberRow[];
+    const kolya = members.find((row) => row.name.startsWith('Kolya'))!;
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/members/${kolya.id}`,
+      headers: auth(ownerToken),
+      payload: { roleId: role.id },
+    });
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/members/${kolya.id}`,
+      headers: auth(ownerToken),
+      payload: { roleId: await roleId('guest') },
+    });
+    await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/roles/${role.id}`,
+      headers: auth(ownerToken),
+    });
+
+    const log = (
+      await app.inject({
+        method: 'GET',
+        url: '/api/v1/activity?limit=200',
+        headers: auth(ownerToken),
+      })
+    ).json() as Array<{ kind: string; message: string; data: Record<string, unknown> | null }>;
+    const said = (kind: string) => log.find((row) => row.kind === kind);
+
+    expect(said('role.added')?.message).toBe('Georgy added the role Gardener.');
+    expect(said('role.renamed')?.message).toBe(
+      'Georgy renamed the role Gardener to Groundskeeper.',
+    );
+    // Newest first, so this test's own two moves are the head of the list —
+    // an earlier test moved the same member in and out of a role of its own.
+    expect(
+      log
+        .filter((row) => row.kind === 'member.role-changed')
+        .slice(0, 2)
+        .map((row) => row.message),
+    ).toEqual(['Georgy made Kolya’s iPad Guest.', 'Georgy made Kolya’s iPad Groundskeeper.']);
+    expect(said('role.removed')?.message).toBe('Georgy removed the role Groundskeeper.');
+
+    // `data` repeats it structured, so an app can pick an icon and write its
+    // own wording — and it copies the *names*, because both ids are
+    // `ON DELETE SET NULL` and this row may outlive the role it is about.
+    expect(said('role.removed')?.data).toMatchObject({
+      roleName: 'Groundskeeper',
+      memberName: 'Georgy',
+    });
+  });
+
+  // ── The rest of the guest table ───────────────────────────────────────────
+
+  /**
+   * The zone routes were missing from the guest refusal table, and a zone is
+   * exactly the kind of thing somebody staying in the spare room should not be
+   * able to dissolve. The mixed body is the other half of the `PATCH
+   * /devices/:id` rule: a request that asks for both must be refused *whole*,
+   * or a guest renames a device by sending a favorite along with it.
+   */
+  it('refuses a guest the rest of the home’s shape', async () => {
+    const zone = (
+      await app.inject({
+        method: 'POST',
+        url: '/api/v1/zones',
+        headers: auth(ownerToken),
+        payload: { name: 'Garden' },
+      })
+    ).json() as { id: string };
+
+    for (const [method, payload] of [
+      ['PATCH', { name: 'Not yours' }],
+      ['DELETE', undefined],
+    ] as const) {
+      const response = await app.inject({
+        method,
+        url: `/api/v1/zones/${zone.id}`,
+        headers: auth(guestToken),
+        ...(payload !== undefined ? { payload } : {}),
+      });
+      expect(response.statusCode, method).toBe(403);
+      expect(response.json(), method).toMatchObject({
+        error: 'forbidden',
+        permission: 'home.structure',
+      });
+    }
+
+    const mixed = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/devices/${deviceId}`,
+      headers: auth(guestToken),
+      payload: { favorite: false, name: 'Sneaky' },
+    });
+    expect(mixed.statusCode).toBe(403);
+    // Refused whole: neither half was applied.
+    const device = (
+      await app.inject({ method: 'GET', url: '/api/v1/devices', headers: auth(guestToken) })
+    ).json() as Array<{ name: string; favorite: boolean }>;
+    expect(device[0]).toMatchObject({ name: 'Desk lamp', favorite: true });
+
+    await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/zones/${zone.id}`,
+      headers: auth(ownerToken),
+    });
+  });
+
+  /**
+   * The two owner-side routes with no *allowed* case anywhere: taking a device
+   * out of the home, and reading the invites that are outstanding. Last,
+   * because the device does not come back.
+   */
+  it('lets the owner read the invites and take a device out of the home', async () => {
+    const outstanding = await app.inject({
+      method: 'GET',
+      url: '/api/v1/invites',
+      headers: auth(ownerToken),
+    });
+    expect(outstanding.statusCode).toBe(200);
+    expect(Array.isArray(outstanding.json())).toBe(true);
+
+    const removed = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/devices/${deviceId}`,
+      headers: auth(ownerToken),
+    });
+    expect(removed.statusCode).toBe(204);
+    expect(
+      (
+        await app.inject({ method: 'GET', url: '/api/v1/devices', headers: auth(ownerToken) })
+      ).json(),
+    ).toEqual([]);
   });
 });

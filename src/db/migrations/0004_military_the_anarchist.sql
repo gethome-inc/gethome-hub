@@ -32,16 +32,23 @@ VALUES (
   substr(lower(hex(randomblob(2))), 2) || '-a' ||
   substr(lower(hex(randomblob(2))), 2) || '-' || lower(hex(randomblob(6))),
   'owner', 'Owner', 1,
-  '["device.control","device.edit","device.add","device.remove","home.structure","home.rename","activity.read","member.invite","member.remove","role.manage","hub.radio","hub.ai"]',
+  '["device.control","device.edit","device.add","device.remove","home.structure","home.rename","activity.read","member.invite","member.remove","role.manage","hub.radio","hub.update","hub.ai"]',
   0, CAST(strftime('%s', 'now') AS INTEGER) * 1000
 ) ON CONFLICT (`key`) DO NOTHING;--> statement-breakpoint
+-- `hub.update` is the one key here that was never `ownerOnly` *or* `authed` for
+-- long: it arrived owner-only and was opened to every member within a day, once
+-- a real hub showed what "owner" means — Studio claims a hub as the Mac, so the
+-- owner is a laptop in a drawer and the phone in somebody's hand could never
+-- update their own home. Giving it to `member` is therefore the same statement
+-- as every other key in this row: what a member could already do. Guest is the
+-- role that did not exist, so it takes nothing from anybody.
 INSERT INTO `roles` (`id`, `key`, `name`, `builtin`, `permissions`, `sort_order`, `created_at`)
 VALUES (
   lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' ||
   substr(lower(hex(randomblob(2))), 2) || '-a' ||
   substr(lower(hex(randomblob(2))), 2) || '-' || lower(hex(randomblob(6))),
   'member', 'Member', 1,
-  '["device.control","device.edit","device.add","home.structure","activity.read","hub.radio"]',
+  '["device.control","device.edit","device.add","home.structure","activity.read","hub.radio","hub.update"]',
   1, CAST(strftime('%s', 'now') AS INTEGER) * 1000
 ) ON CONFLICT (`key`) DO NOTHING;--> statement-breakpoint
 -- Somebody staying in the house: they work the lights and keep their own

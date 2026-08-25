@@ -140,6 +140,7 @@ it gates its own screens on.
 | `member.remove` | People |
 | `role.manage` | People |
 | `hub.radio` | Hub |
+| `hub.update` | Hub |
 | `hub.ai` | Hub |
 
 #### What the three built-in roles start with
@@ -152,13 +153,24 @@ it gates its own screens on.
 | `home.structure` | ✓ | ✓ | |
 | `activity.read` | ✓ | ✓ | |
 | `hub.radio` | ✓ | ✓ | |
+| `hub.update` | ✓ | ✓ | |
 | `home.rename` · `device.remove` · `member.invite` · `member.remove` · `role.manage` · `hub.ai` | ✓ | | |
 
-**Member is the old behaviour written down.** Those six are, key for key, the
+**Member is the old behaviour written down.** Those seven are, key for key, the
 routes that used to be open to any member; the six below them are the ones that
 used to be owner-only. A hub that updates into this changes nothing about what
 anybody can do — the migration backfills every existing member into Owner or
 Member accordingly, and only an explicit edit moves anything after that.
+
+`hub.update` is the one that looks like an exception and is not.
+`POST /system/update` was owner-only for about a day, and what settled it was
+who the owner *is*: Studio claims a hub as *the Mac*, so the owner is a laptop
+in a drawer, every phone joins by invite, and there is no ownership transfer —
+owner-only did not mean "an update needs care", it meant the phone in somebody's
+hand could never update their own home. It was open to every member by the time
+roles landed, so Member holding it takes nothing from anybody, and Guest is a
+role that did not exist. Being a key rather than either extreme is what lets a
+home that *does* want it kept from the spare room say so.
 
 **Guest is somebody staying in the house.** They work the lights and keep their
 own favorites; they change no names, open no network, and read only their own
@@ -190,6 +202,18 @@ cannot attach one to a column added by `ALTER TABLE` — so that refusal *is* th
 referential integrity, and quietly moving somebody to another role as a side
 effect of a delete is not a behaviour worth having. Move them first, then
 delete.
+
+**An outstanding invite is not somebody holding it, and it goes with the role.**
+`invites.role_id` is the same kind of column with the same missing action, so a
+code minted into a role that is then deleted has to be dealt with here. The two
+alternatives are both worse: clearing the column would let that code admit its
+holder as a plain **Member** — an escalation nobody asked for, and the exact
+silent reassignment the paragraph above refuses — while refusing the delete
+would be a dead end, since no route revokes an invite, so the home would be told
+`role_in_use` about a role nobody wears and could only wait out the expiry. An
+invite's whole content is "join as this"; with the role gone it means nothing,
+it lives fifteen minutes, and minting another is one tap. A client should
+re-read `GET /invites` after deleting a role.
 
 #### Learning what you may do
 
@@ -617,26 +641,38 @@ The outcome also reaches the activity log as a `hub.update` row, written at the
 next boot: the hub cannot record its own update while it is being restarted by
 it. The request is recorded straight away, with the member's name.
 
-**Why any member may do this.** It was owner-only first, on the reasoning that an
-update is not quite "bringing something new in" — it replaces the code everybody
-depends on. What that missed is who the owner *is*: GetHome Studio claims a hub
-as *the Mac*, so the owner is a laptop in a drawer, every phone joins by invite
-as a plain member, and [there is no ownership
+**Why `hub.update` is a key, and why Member starts with it.** It was owner-only
+first, on the reasoning that an update is not quite "bringing something new in" —
+it replaces the code everybody depends on. What that missed is who the owner
+*is*: GetHome Studio claims a hub as *the Mac*, so the owner is a laptop in a
+drawer, every phone joins by invite as a plain member, and [there is no ownership
 transfer](#which-member-you-are-isself-and-patch-membersme) to fix it with. The
 rule therefore did not mean "an update needs care"; it meant the phone in the
 owner's own hand could never update their own hub, for the life of that hub.
 Found on the first one this shipped to — the same discovery that moved renaming a
 device out of `ownerOnly`.
 
-It passes the three tests the others pass. **Bounded**: `install.sh` unpacks
-beside the running build and only moves the symlink once the new one answers, so
-a build that won't start puts itself back unattended. **Destroys nothing**: no
-device leaves, no membership ends — and migrations are written to be readable by
-the build before them, which the automatic rollback turns from a hope into a
-rule. **Named**: the `hub.update` row carries the member's name.
+So it went to every member, which was right about the household and wrong about
+the mechanism: "every member" is not something a home can revisit, and this is
+exactly the kind of thing a home might want kept away from whoever is staying in
+the spare room. As a permission it is both — the default hands it to Member, so
+nobody who could update yesterday has lost anything, while Guest arrives without
+it and either can be moved from the matrix.
 
-Taking something *away* is still the owner's — a device, a member, the credential
-that spends their money. That line has not moved.
+The default passes the three tests every default here passes. **Bounded**:
+`install.sh` unpacks beside the running build and only moves the symlink once the
+new one answers, so a build that won't start puts itself back unattended.
+**Destroys nothing**: no device leaves, no membership ends — and migrations are
+written to be readable by the build before them, which the automatic rollback
+turns from a hope into a rule. **Named**: the `hub.update` row carries the
+member's name.
+
+Reading is the floor rather than a key of its own, and deliberately: somebody who
+*cannot* press the button is exactly who needs to see why the home went quiet for
+two minutes.
+
+Taking something *away* is still guarded harder — a device, a member, the
+credential that spends their money. That line has not moved.
 
 ### The Zigbee join window
 

@@ -1530,10 +1530,11 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * is the health check every app and installer polls, it must stay a cheap
    * read of things already in memory, and this one may go to the network.
    *
-   * Any member reads it, and any member may start one — the reasoning for that
-   * is on `POST` below. Reading is the half that was never in question: the
-   * information is the home's, and somebody watching the hub drop off the
-   * network for two minutes has to be able to see why.
+   * Reading is the floor — no permission at all — and starting one is
+   * `hub.update`, whose reasoning is on `POST` below. That reading was never in
+   * question is the point: the information is the home's, and somebody who
+   * *cannot* press the button is exactly who needs to see why the hub dropped
+   * off the network for two minutes.
    */
   app.get('/api/v1/system/update', authed, async (request) => {
     const { refresh } = z
@@ -1579,10 +1580,11 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   /**
    * Ask the hub to update itself.
    *
-   * **Any member**, and it took a real household to settle that. This was
-   * owner-only on the reasoning that an update is not quite "bringing
-   * something new in": it replaces the code every member depends on and runs
-   * migrations that flipping the symlink back does not undo.
+   * **`hub.update`, which the built-in Member holds** — and the history is why
+   * it is a permission rather than either extreme. It was owner-only first, on
+   * the reasoning that an update is not quite "bringing something new in": it
+   * replaces the code every member depends on and runs migrations that
+   * flipping the symlink back does not undo.
    *
    * What that missed is who the owner *is*. GetHome Studio claims a hub as
    * *the Mac*, so the owner is a laptop in a drawer and every phone joins by
@@ -1593,22 +1595,31 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * to. It is the same discovery that moved renaming a device out of
    * `ownerOnly`, for the same reason.
    *
-   * It passes the three tests the others pass. **Bounded**: install.sh unpacks
-   * beside the running build and only moves the symlink once the new one
-   * answers, so a build that won't start puts itself back unattended.
-   * **Destroys nothing**: no device leaves, no membership ends, and migrations
-   * are written to be readable by the build before them — the rollback is what
-   * makes that a rule rather than a hope. **Named**: the row below carries the
-   * member's name, which is the accountability the role check stood in for.
+   * So it went to every member, which was right about the household and wrong
+   * about the mechanism: "every member" is not a decision a home can revisit,
+   * and this is exactly the kind of thing a home might want to keep away from
+   * whoever is staying in the spare room. As a key it is both — the default
+   * hands it to Member, so nobody who could update yesterday has lost
+   * anything, while Guest arrives without it and a home that disagrees can
+   * move it either way from the matrix.
    *
-   * Taking something *away* is still the owner's — a device, a member, the
+   * It passes the three tests every default here passes. **Bounded**:
+   * install.sh unpacks beside the running build and only moves the symlink
+   * once the new one answers, so a build that won't start puts itself back
+   * unattended. **Destroys nothing**: no device leaves, no membership ends,
+   * and migrations are written to be readable by the build before them — the
+   * rollback is what makes that a rule rather than a hope. **Named**: the row
+   * below carries the member's name, which is the accountability the old role
+   * check stood in for.
+   *
+   * Taking something *away* is still guarded harder — a device, a member, the
    * credential that spends their money. That line is unchanged.
    *
    * The response is a receipt, not a state. Nothing has happened yet: a root
    * unit picks the request up a moment later and restarts this process on the
    * way. Poll this route for what became of it.
    */
-  app.post('/api/v1/system/update', authed, async (request, reply) => {
+  app.post('/api/v1/system/update', needs('hub.update'), async (request, reply) => {
     if (!canApplyUpdate(deps.dataDir)) {
       // A hub installed before any of this existed. Saying so beats letting the
       // request sit in a directory nothing is watching, which from an app looks

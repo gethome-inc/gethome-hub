@@ -91,6 +91,40 @@ describe.skipIf(!handle)('PairingService', () => {
     expect(await pairing.claim(stale.code, 'Boris')).toBeNull();
   });
 
+  /**
+   * An invite carries the role somebody is being admitted *into*, which is the
+   * only chance a home gets to say so — there is no screen between claiming and
+   * being in the house. An invite with no role named stays a Member invite,
+   * exactly as every invite this hub ever minted was.
+   */
+  it('admits a member into the role the invite named', async () => {
+    const bootCode = readFileSync(path.join(dataDir, 'pairing-code'), 'utf8').trim();
+    const owner = await pairing.claim(bootCode, 'Georgy');
+    const guestRole = access.builtinRoleId('guest')!;
+
+    const named = await pairing.createInvite(owner!.member.id, guestRole);
+    expect(named.roleId).toBe(guestRole);
+    const guest = await pairing.claim(named.code, 'Kolya');
+    expect(guest?.member.roleId).toBe(guestRole);
+    expect(access.roleFor(guest!.member.id)?.key).toBe('guest');
+    // The legacy word is written for a build this hub might roll back to, and
+    // it has only two: everybody who isn't the owner reads as a member there.
+    expect(guest?.member.role).toBe('member');
+
+    const plain = await pairing.createInvite(owner!.member.id);
+    expect(plain.roleId).toBe(access.builtinRoleId('member'));
+    const anna = await pairing.claim(plain.code, 'Anna');
+    expect(access.roleFor(anna!.member.id)?.key).toBe('member');
+
+    // A code minted into a role that has since been deleted is nothing — not a
+    // Member invite. `deleteRole` takes its invites with it precisely so this
+    // cannot admit somebody with more access than the home ever offered.
+    const custom = await access.createRole('Cleaner', ['device.control']);
+    const doomed = await pairing.createInvite(owner!.member.id, custom.id);
+    await access.deleteRole(custom.id);
+    expect(await pairing.claim(doomed.code, 'Masha')).toBeNull();
+  });
+
   it('keeps the same pairing code across restarts while unclaimed', async () => {
     const code = readFileSync(path.join(dataDir, 'pairing-code'), 'utf8').trim();
 

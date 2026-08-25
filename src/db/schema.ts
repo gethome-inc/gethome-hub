@@ -212,7 +212,22 @@ export const roles = sqliteTable('roles', {
   name: text('name').notNull(),
   /** Built-in roles cannot be deleted, and `owner` cannot be edited either. */
   builtin: integer('builtin', { mode: 'boolean' }).notNull().default(false),
-  /** `PermissionKey[]` as JSON. Unknown keys are ignored, never dropped. */
+  /**
+   * `PermissionKey[]` as JSON.
+   *
+   * A key this build has never heard of is **ignored on read** — a role row
+   * written by a newer build, met after `install.sh` rolled back to this one,
+   * must not make `can()` throw or the role unreadable, and a permission this
+   * build cannot enforce is one it must not claim to. The row keeps it, so
+   * rolling forward restores it.
+   *
+   * It *is* dropped on write, and that asymmetry is the safer half of a real
+   * trade: keeping unknown keys through an edit would mean a home that
+   * revoked something on the older build finds it granted again the moment the
+   * newer one comes back, with the matrix having said otherwise the whole
+   * time. Losing a grant is visible and one tap to redo; a revoke that quietly
+   * did not happen is neither.
+   */
   permissions: text('permissions', { mode: 'json' }).notNull(),
   sortOrder: integer('sort_order').notNull().default(0),
   createdAt: createdAt(),
