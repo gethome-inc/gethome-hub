@@ -1,4 +1,4 @@
-import { desc, lt, sql } from 'drizzle-orm';
+import { and, desc, eq, lt, sql } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import { activity } from '../db/schema.js';
 import type { ActivityEvent, HubEventBus } from './bus.js';
@@ -60,11 +60,23 @@ export class ActivityService {
     this.events.emit('activity', event);
   }
 
-  async list(limit: number, before?: number) {
+  /**
+   * One page of the log, newest first.
+   *
+   * `onlyMember` narrows it to that member's own rows, which is what a member
+   * without `activity.read` is served: the route answers rather than refusing,
+   * because "what have I done in this house" is a fair question for anyone in
+   * it, and an app whose Recent feed 403s is a broken screen rather than a
+   * withheld one. Rows with no `member_id` — a device dropping off the
+   * network, somebody leaving — are nobody's own and are correctly absent.
+   */
+  async list(limit: number, before?: number, onlyMember?: string) {
+    const cursor = before !== undefined ? lt(activity.id, before) : undefined;
+    const mine = onlyMember !== undefined ? eq(activity.memberId, onlyMember) : undefined;
     return this.db
       .select()
       .from(activity)
-      .where(before !== undefined ? lt(activity.id, before) : undefined)
+      .where(cursor && mine ? and(cursor, mine) : (cursor ?? mine))
       .orderBy(desc(activity.id))
       .limit(Math.min(Math.max(limit, 1), 200));
   }

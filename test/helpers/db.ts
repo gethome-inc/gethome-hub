@@ -1,3 +1,4 @@
+import { eq } from 'drizzle-orm';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -5,6 +6,7 @@ import { createDb, type Db } from '../../src/db/client.js';
 import { runMigrations } from '../../src/db/migrate.js';
 import { HomeService } from '../../src/core/home.js';
 import { FavoritesService } from '../../src/core/favorites.js';
+import { AccessService } from '../../src/core/access.js';
 import type { HubEventBus } from '../../src/core/bus.js';
 import {
   activity,
@@ -16,6 +18,7 @@ import {
   home,
   invites,
   members,
+  roles,
   rooms,
   settings,
   tokens,
@@ -61,6 +64,9 @@ export async function resetDb(db: Db): Promise<void> {
   await db.delete(deviceFavorites);
   await db.delete(devices);
   await db.delete(members);
+  // Built-in roles are seeded by the migration and are part of the schema a
+  // hub boots with, so they stay. A role a test invented does not.
+  await db.delete(roles).where(eq(roles.builtin, false));
   await db.delete(rooms);
   await db.delete(zones);
   await db.delete(home);
@@ -89,4 +95,16 @@ export async function loadedFavorites(db: Db, events: HubEventBus): Promise<Favo
   const favorites = new FavoritesService(db, events);
   await favorites.load();
   return favorites;
+}
+
+/**
+ * An `AccessService` with the roles read in, which is what `src/index.ts` hands
+ * the API and the pairing service. Every suite that builds a server needs one:
+ * it answers "may this member?" on every authenticated route, and the pairing
+ * service asks it for the role a claim should land in.
+ */
+export async function loadedAccess(db: Db, events: HubEventBus): Promise<AccessService> {
+  const access = new AccessService(db, events);
+  await access.load();
+  return access;
 }

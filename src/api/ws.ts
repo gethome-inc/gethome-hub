@@ -1,7 +1,7 @@
 import type { WebSocket } from 'ws';
 import type { ApiDeps } from './server.js';
 import type { MqttFrame } from '../core/mqtt-observer.js';
-import type { HomeStructure, ZigbeeLifecycleEvent } from '../core/bus.js';
+import type { ActivityEvent, HomeStructure, ZigbeeLifecycleEvent } from '../core/bus.js';
 import type { AiRunEvent } from '../core/ai-runs.js';
 import { deviceWire } from './dto.js';
 import type { HubStatusReader } from '../core/hub-status.js';
@@ -47,20 +47,41 @@ export const UNAUTHORIZED_CLOSE_CODE = 4001;
  * entry per connection that is actually open and none per connection that
  * isn't.
  */
-export class MemberSessions {
-  private readonly byMember = new Map<string, Set<() => void>>();
+export interface MemberSession {
+  /** Hang up on this socket — its member is gone. */
+  revoke: () => void;
+  /** Tell this socket what its member may now do. */
+  notifyAccess: () => void;
+}
 
-  register(memberId: string, revoke: () => void): void {
+export class MemberSessions {
+  private readonly byMember = new Map<string, Set<MemberSession>>();
+
+  register(memberId: string, session: MemberSession): void {
     const existing = this.byMember.get(memberId);
-    if (existing) existing.add(revoke);
-    else this.byMember.set(memberId, new Set([revoke]));
+    if (existing) existing.add(session);
+    else this.byMember.set(memberId, new Set([session]));
   }
 
-  forget(memberId: string, revoke: () => void): void {
+  forget(memberId: string, session: MemberSession): void {
     const existing = this.byMember.get(memberId);
     if (!existing) return;
-    existing.delete(revoke);
+    existing.delete(session);
     if (existing.size === 0) this.byMember.delete(memberId);
+  }
+
+  /**
+   * Push a fresh `access` frame at every socket this member is holding.
+   *
+   * Same map, same socket-scoped registration as `revoke` — a role edit and a
+   * removal are the same question asked with different force ("what may you
+   * do now?" and "nothing, and not here"), so they share the registry rather
+   * than keeping two that can disagree about which sockets exist.
+   */
+  notify(memberId: string): void {
+    const sockets = this.byMember.get(memberId);
+    if (!sockets) return;
+    for (const session of [...sockets]) session.notifyAccess();
   }
 
   /**
@@ -74,7 +95,7 @@ export class MemberSessions {
     const sockets = this.byMember.get(memberId);
     if (!sockets) return 0;
     const closing = [...sockets];
-    for (const close of closing) close();
+    for (const session of closing) session.revoke();
     this.byMember.delete(memberId);
     return closing.length;
   }
@@ -98,7 +119,8 @@ const MAX_CLIENT_MESSAGE_BYTES = 4096;
 /**
  * WebSocket event stream. Frames (JSON, one per message):
  *
- *   {"type":"hello","hubId","name","apiVersion":1,"streams":["mqtt","zigbee","ai"]}
+ *   {"type":"hello","hubId","name","apiVersion":1,"streams":[…],"permissions":[…]}
+ *   {"type":"access","role":{…},"permissions":[…],"roles":[…]}   what *you* may do
  *   {"type":"state","deviceId","endpointId","state":{…full canonical state…}}
  *   {"type":"deviceUpserted","device":{…GET /devices item…}}
  *   {"type":"deviceRemoved","deviceId"}
@@ -172,7 +194,61 @@ export function attachWebSocket(
   const onRemoved = (deviceId: string) => send({ type: 'deviceRemoved', deviceId });
   const onStructure = (structure: HomeStructure) =>
     send({ type: 'structure', rooms: structure.rooms, zones: structure.zones });
-  const onActivity = (entry: unknown) => send({ type: 'activity', entry });
+  /**
+   * One line of the home's history.
+   *
+   * Filtered per socket, and **asked at send time rather than captured when
+   * the socket authorized** — so a member granted `activity.read` while their
+   * app is open starts seeing the house on the next line, with no reconnect
+   * and nothing to poll. A member without it still receives their own rows,
+   * which is what keeps a guest's Recent feed a working screen; rows with no
+   * `memberId` (a device dropping off, somebody leaving) are nobody's own and
+   * are correctly withheld.
+   */
+  const onActivity = (entry: ActivityEvent) => {
+    if (memberId !== null && !deps.access.can(memberId, 'activity.read')) {
+      if (entry.memberId !== memberId) return;
+    }
+    send({ type: 'activity', entry });
+  };
+
+  /**
+   * What this member may do — the same answer `GET /me` gives, on the socket.
+   *
+   * Rendered per socket, like `deviceUpserted` and for the same reason: it is
+   * the reader's own answer, not the home's. It carries the roles list too,
+   * because a client redrawing "Anna — Guest" needs the names and a second
+   * round trip for four rows is a round trip nobody needed.
+   *
+   * Sent once behind `hello`, and again whenever this member's role changes or
+   * the role they hold is edited. Without it a phone would sit looking at
+   * controls that had quietly stopped working until something else made it
+   * refetch — the same failure `structure` and `hubStatus` exist to prevent.
+   */
+  const accessFrame = () => {
+    if (memberId === null) return;
+    const role = deps.access.roleFor(memberId);
+    return {
+      type: 'access',
+      role: role ? { id: role.id, key: role.key, name: role.name } : null,
+      permissions: deps.access.permissionsFor(memberId),
+      roles: deps.access.list(),
+    };
+  };
+
+  const notifyAccess = () => {
+    const frame = accessFrame();
+    if (frame) send(frame);
+  };
+
+  /**
+   * Somebody's access changed. Only this socket's member is our business —
+   * the event carries every member the edit touched, and each of their sockets
+   * is registered separately.
+   */
+  const onAccessChanged = (memberIds: string[]) => {
+    if (memberId !== null && memberIds.includes(memberId)) notifyAccess();
+  };
   const onPermitJoin = (active: boolean, remainingSeconds: number) =>
     send({ type: 'permitJoin', active, remainingSeconds });
   const onCommissioning = (jobId: string, status: string, detail?: string) =>
@@ -192,6 +268,7 @@ export function attachWebSocket(
   deps.events.on('deviceRemoved', onRemoved);
   deps.events.on('structureChanged', onStructure);
   deps.events.on('activity', onActivity);
+  deps.events.on('accessChanged', onAccessChanged);
   deps.events.on('permitJoin', onPermitJoin);
   deps.events.on('commissioningProgress', onCommissioning);
   deps.events.on('radioChanged', onRadioChanged);
@@ -317,6 +394,8 @@ export function attachWebSocket(
    * Listeners come off first: closing a WebSocket is not instant, and a frame
    * fired in the meantime must not reach somebody who has just been removed.
    */
+  const session: MemberSession = { revoke: () => revoke(), notifyAccess: () => notifyAccess() };
+
   const revoke = () => {
     detach();
     if (socket.readyState === socket.OPEN) {
@@ -328,7 +407,7 @@ export function attachWebSocket(
     if (closed) return;
     closed = true;
     if (memberId !== null) {
-      sessions.forget(memberId, revoke);
+      sessions.forget(memberId, session);
       memberId = null;
     }
     deps.events.off('stateChanged', onState);
@@ -336,6 +415,7 @@ export function attachWebSocket(
     deps.events.off('deviceRemoved', onRemoved);
     deps.events.off('structureChanged', onStructure);
     deps.events.off('activity', onActivity);
+    deps.events.off('accessChanged', onAccessChanged);
     deps.events.off('permitJoin', onPermitJoin);
     deps.events.off('commissioningProgress', onCommissioning);
   deps.events.off('radioChanged', onRadioChanged);
@@ -359,7 +439,7 @@ export function attachWebSocket(
       if (authorized || closed) return;
       authorized = true;
       memberId = id;
-      sessions.register(id, revoke);
+      sessions.register(id, session);
       if (socket.readyState !== socket.OPEN) return;
       // Read at send time, not captured at attach: the name can change under a
       // socket that is already open, and the next client to connect must be
@@ -371,8 +451,18 @@ export function attachWebSocket(
           name: deps.home.name,
           apiVersion: 1,
           streams: OPTIONAL_STREAMS.filter(available),
+          // What this client may do, in its first frame. An app that had to
+          // wait for a REST answer would draw one paint of every control it is
+          // about to lose — and a client that has never heard of the field
+          // reads none, which is exactly how it behaved before.
+          permissions: deps.access.permissionsFor(id),
         }),
       );
+      // Behind `hello` rather than inside it: the roles list is the *home's*
+      // and belongs in the frame that carries it, and this is the same frame a
+      // later role edit will send, so a client wires one handler, not two.
+      const frame = accessFrame();
+      if (frame) socket.send(JSON.stringify(frame));
       for (const data of backlog) socket.send(data);
       backlog.length = 0;
       const requested = pendingRequest;

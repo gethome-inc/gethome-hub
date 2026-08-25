@@ -43,58 +43,168 @@ the machine the code exists to prove access to, so requiring them to recite the
 number adds a step that can only fail. GetHome Studio uses it over SSH, which
 is why the person who installs a hub is never shown a code at all.
 
-Roles: **owner** = the home's name, members and invites, AI settings and the
-mapping library, and *taking a device away* (removing it, or forcing its
-mapping to be redone). **member** = everything else, which deliberately
-includes both the **shape of the home** — controlling devices, renaming them,
-moving them between rooms, and adding, renaming, restyling or deleting rooms
-and zones — and **bringing new devices in**: Matter commissioning, the Zigbee
-join window, and the radio switch.
+### Roles and permissions
 
-**Why so little is owner-only.** All of it used to be, which sounds careful and
-in practice locked the home away from the people who live in it: GetHome Studio
-claims a hub as *the Mac*, so the owner is usually a laptop in a drawer while
-every phone joins by invite as a plain member. A device that Zigbee2MQTT called
-`0x54ef44100047c1bf` has to be fixable by whoever is standing in front of it,
-and a home where the second phone can't pair the lamp it is standing next to is
-a home with a support call in it.
+A **permission** is a verb this hub understands. A **role** is a named set of
+them. A **member** holds exactly one role. Three roles ship built in — **Owner**,
+**Member**, **Guest** — and a home can add its own; what each one may do is a
+table the home edits, from either app. See
+[Roles and permissions in full](#roles-and-permissions-in-full).
 
-What the rule still guards is **taking something away** — a device or a member —
-and the settings that spend the owner's money. Everything now open is bounded
-and reversible: a join window closes itself, a radio switch is one word in a
-file the owner can put back, a room deleted keeps its devices and can be made
-again. And every one of these edits is written to the activity log with the
-name of whoever made it, which is the accountability the role check was
-standing in for.
+This replaced a single comparison — `member.role !== 'owner'` — which guarded
+fifteen routes and left everything else open to anybody. The only knob was which
+side of the owner line a whole route sat on, and moving it moved it for
+everyone.
+
+**Three things a client should know before reading the table below.**
+
+- **The floor is not a permission.** Reading the home (`GET /hub`, `/home`,
+  `/rooms`, `/zones`, `/devices`, `/members`, `/roles`, `/permissions`, `/me`,
+  the WebSocket), renaming yourself, leaving, and pinning your own favorites are
+  what *being a member* means. No role can take them away, and none of them
+  appears in the matrix. A member with nothing at all would be a token that can
+  only 401 behind an app with nothing to draw.
+- **The owner is never evaluated.** Every check answers `true` for the owner
+  without reading a stored set, so a permission a later hub build adds is theirs
+  automatically and no edit to any table can lock a home out of itself. That
+  backstop is why `role.manage` can be handed to anybody with no escalation
+  guard behind it.
+- **The defaults reproduce exactly what this hub did before roles existed.**
+  `Member` is, key for key, the routes that were open to any member; the keys
+  missing from it are the ones that were owner-only. Updating a hub changes
+  nothing at all until somebody edits the matrix.
+
+**Ask `GET /me` rather than inferring anything from a role name.** A home that
+has edited its own matrix, or invented a role, is one where "member" says
+nothing about what this caller may do — and a button that can only 403 is worse
+than no button.
 
 ## REST routes
 
-| Method & path | Role | Notes |
+| Method & path | Needs | Notes |
 |---|---|---|
 | `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio) |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
-| `GET /home` · `PATCH /home` | any · owner | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name) |
-| `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | any | `{id, name, zoneId, icon, accent, sortOrder}`. `POST` takes `{name, zoneId?, icon?, accent?, sortOrder?}` — the name is the only required field anywhere here — and `PATCH` takes the same set with every field optional; `zoneId: null` means "in no zone", and `icon: null` / `accent: null` mean "back to the look the app derives" — each different from leaving the field out. `icon`/`accent` are opaque app tokens (1–40 chars, see [below](#rooms-and-zones)). Names are trimmed before they are measured (1–80), an unknown `zoneId` is `404 unknown_zone`, and a new room goes to the *end* of the order. Deleting a room does not delete its devices — they are simply in no room. Every write broadcasts the [`structure` frame](#rooms-and-zones) |
-| `GET /zones` · `POST /zones` · `PATCH /zones/:id` · `DELETE /zones/:id` | any | `{id, name, sortOrder}` — the optional layer above rooms, see [below](#rooms-and-zones). `POST {name, sortOrder?}`, `PATCH {name?, sortOrder?}`; a zone carries no look of its own, since nothing draws a zone as a thing. Deleting a zone keeps its rooms and leaves them in none |
-| `GET /devices` | any | full device list (wire shape below) |
-| `PATCH /devices/:id` | any | `{name?, roomId?, favorite?}`. Name and room describe the house and everybody sees the same ones; **`favorite` is the caller's own** and nobody else's — see [below](#favorites-are-per-member). `roomId: null` takes a device out of its room; an unknown one is `404 unknown_room`. The response is this caller's view of the device |
-| `DELETE /devices/:id` | owner | also unpairs at the protocol level |
-| `POST /devices/:id/endpoints/:endpointId/commands` | any | body = canonical command; `202`. IR-remote intents (`irLearn`/`irSaveLearned`/`irSend`/`irDeleteCommand`/`irRenameCommand`) are resolved against the endpoint's stored code library (see [device-schema.md](device-schema.md)) |
-| `POST /devices/:id/remap` | owner | force-regenerate the AI mapping (Zigbee devices); the hub also remaps automatically when a device publishes unknown parameters — see [ai-adaptation.md](ai-adaptation.md). `409 ai_not_configured` with no credential, `409 ai_disabled` when the owner has switched adaptation off |
-| `POST /matter/commission` | any | `{pairingCode}` → `202 {jobId}` (async) |
-| `GET /matter/commission/:jobId` | any | `{status: running\|done\|failed, nodeId?, error?}` |
-| `POST /zigbee/permit-join` | any | `{seconds}`, 0–900 (0 = close the network) → `{permitJoin, seconds}` describing the **live** window, which is not always what was asked for. See [below](#the-zigbee-join-window) |
-| `GET /members` · `PATCH /members/me` · `DELETE /members/me` · `DELETE /members/:id` | any · any (itself) · any (itself) · owner | rows carry `isSelf`; `PATCH` takes `{name}` and renames **the caller**; `DELETE` on either route answers `204` and revokes that member's tokens; the owner cannot be removed, by anyone or by itself. See [below](#which-member-you-are-isself-and-patch-membersme) |
-| `GET /invites` · `POST /invites` | owner | `POST` → `201 {code, expiresAt}` |
-| `GET /activity?limit=&before=` | any | reverse-chronological, cursor = `before` id; rows carry `data` — see [below](#the-activity-log) |
-| `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | owner | PUT `{apiKey, model?}` (an Anthropic API key, write-only; a `sk-ant-oat…` subscription token and a model outside the supported list are both refused with 400, an `authType` from an older app is ignored). **PATCH `{enabled?, model?}`** changes those without re-entering the key — the switch is deliberately not the credential. All three respond `{provider: "anthropic", model, hasKey, enabled, legacySubscriptionToken, status}`; `enabled` defaults to true and `status` carries `lastError`/`lastRun` health — see [ai-adaptation.md](ai-adaptation.md) |
-| `GET /ai/runs?limit=` | owner | what the mapping agent did, newest first: `{id, at, kind, vendor, model, exposesHash, modelId, ok, costUsd, turns, durationMs, errorKind, errorMessage, steps}`. A summary, never a transcript — see [ai-adaptation.md](ai-adaptation.md) |
-| `GET /device-mappings` | owner | the mapping library: one entry per device model, `{adapter, exposesHash, vendor, model, status, source, problems, endpoints, deviceIds, createdAt, updatedAt}` |
-| `GET /device-mappings/:exposesHash` | owner | the download — an envelope naming the device, see [below](#the-device-mapping-library) |
-| `PUT /device-mappings/:exposesHash` | owner | the upload. Accepts the envelope or a bare descriptor. `422 {error:"invalid_mapping", problems, issues?}` when the hub can't use it — and it is **kept**, so `…/repair` can work from it |
-| `DELETE /device-mappings/:exposesHash` | owner | forget it; devices of that model fall back to their static mapping |
-| `POST /device-mappings/:exposesHash/repair` | owner | hand a rejected descriptor to the agent with the complaints. `409 ai_not_configured` / `409 ai_disabled` / `409 nothing_to_repair`, `422 no_device` |
-| `PUT /settings/radio` | any | `{mode: "auto"\|"zigbee"\|"matter"}` → `{budget, mode, matter, canRunBoth, applying: true}`. Records a *request*; see below |
+| `GET /home` · `PATCH /home` | floor · `home.rename` | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name) |
+| `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | floor · `home.structure` | `{id, name, zoneId, icon, accent, sortOrder}`. `POST` takes `{name, zoneId?, icon?, accent?, sortOrder?}` — the name is the only required field anywhere here — and `PATCH` takes the same set with every field optional; `zoneId: null` means "in no zone", and `icon: null` / `accent: null` mean "back to the look the app derives" — each different from leaving the field out. `icon`/`accent` are opaque app tokens (1–40 chars, see [below](#rooms-and-zones)). Names are trimmed before they are measured (1–80), an unknown `zoneId` is `404 unknown_zone`, and a new room goes to the *end* of the order. Deleting a room does not delete its devices — they are simply in no room. Every write broadcasts the [`structure` frame](#rooms-and-zones) |
+| `GET /zones` · `POST /zones` · `PATCH /zones/:id` · `DELETE /zones/:id` | floor · `home.structure` | `{id, name, sortOrder}` — the optional layer above rooms, see [below](#rooms-and-zones). `POST {name, sortOrder?}`, `PATCH {name?, sortOrder?}`; a zone carries no look of its own, since nothing draws a zone as a thing. Deleting a zone keeps its rooms and leaves them in none |
+| `GET /devices` | floor | full device list (wire shape below) |
+| `PATCH /devices/:id` | `device.edit` / floor | `{name?, roomId?, favorite?}`. Name and room describe the house and everybody sees the same ones; **`favorite` is the caller's own** and nobody else's — see [below](#favorites-are-per-member). `roomId: null` takes a device out of its room; an unknown one is `404 unknown_room`. The response is this caller's view of the device |
+| `DELETE /devices/:id` | `device.remove` | also unpairs at the protocol level |
+| `POST /devices/:id/endpoints/:endpointId/commands` | `device.control` | body = canonical command; `202`. IR-remote intents (`irLearn`/`irSaveLearned`/`irSend`/`irDeleteCommand`/`irRenameCommand`) are resolved against the endpoint's stored code library (see [device-schema.md](device-schema.md)) |
+| `POST /devices/:id/remap` | `hub.ai` | force-regenerate the AI mapping (Zigbee devices); the hub also remaps automatically when a device publishes unknown parameters — see [ai-adaptation.md](ai-adaptation.md). `409 ai_not_configured` with no credential, `409 ai_disabled` when the owner has switched adaptation off |
+| `POST /matter/commission` | `device.add` | `{pairingCode}` → `202 {jobId}` (async) |
+| `GET /matter/commission/:jobId` | floor | `{status: running\|done\|failed, nodeId?, error?}` |
+| `POST /zigbee/permit-join` | `device.add` | `{seconds}`, 0–900 (0 = close the network) → `{permitJoin, seconds}` describing the **live** window, which is not always what was asked for. See [below](#the-zigbee-join-window) |
+| `GET /members` · `PATCH /members/me` · `DELETE /members/me` · `DELETE /members/:id` | floor · floor (itself) · floor (itself) · `member.remove` | rows carry `isSelf`, `roleId` and `roleName`; `PATCH` takes `{name}` and renames **the caller**; `DELETE` on either route answers `204` and revokes that member's tokens; the owner cannot be removed, by anyone or by itself. See [below](#which-member-you-are-isself-and-patch-membersme) |
+| `GET /invites` · `POST /invites` | `member.invite` | `POST {roleId?}` → `201 {code, expiresAt, roleId, roleName}`. Omitting `roleId` mints a **Member** invite, which is what every invite this hub has ever made was |
+| `GET /activity?limit=&before=` | floor · `activity.read` | reverse-chronological, cursor = `before` id; rows carry `data` — see [below](#the-activity-log) |
+| `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | `hub.ai` | PUT `{apiKey, model?}` (an Anthropic API key, write-only; a `sk-ant-oat…` subscription token and a model outside the supported list are both refused with 400, an `authType` from an older app is ignored). **PATCH `{enabled?, model?}`** changes those without re-entering the key — the switch is deliberately not the credential. All three respond `{provider: "anthropic", model, hasKey, enabled, legacySubscriptionToken, status}`; `enabled` defaults to true and `status` carries `lastError`/`lastRun` health — see [ai-adaptation.md](ai-adaptation.md) |
+| `GET /ai/runs?limit=` | `hub.ai` | what the mapping agent did, newest first: `{id, at, kind, vendor, model, exposesHash, modelId, ok, costUsd, turns, durationMs, errorKind, errorMessage, steps}`. A summary, never a transcript — see [ai-adaptation.md](ai-adaptation.md) |
+| `GET /device-mappings` | `hub.ai` | the mapping library: one entry per device model, `{adapter, exposesHash, vendor, model, status, source, problems, endpoints, deviceIds, createdAt, updatedAt}` |
+| `GET /device-mappings/:exposesHash` | `hub.ai` | the download — an envelope naming the device, see [below](#the-device-mapping-library) |
+| `PUT /device-mappings/:exposesHash` | `hub.ai` | the upload. Accepts the envelope or a bare descriptor. `422 {error:"invalid_mapping", problems, issues?}` when the hub can't use it — and it is **kept**, so `…/repair` can work from it |
+| `DELETE /device-mappings/:exposesHash` | `hub.ai` | forget it; devices of that model fall back to their static mapping |
+| `POST /device-mappings/:exposesHash/repair` | `hub.ai` | hand a rejected descriptor to the agent with the complaints. `409 ai_not_configured` / `409 ai_disabled` / `409 nothing_to_repair`, `422 no_device` |
+| `PUT /settings/radio` | `hub.radio` | `{mode: "auto"\|"zigbee"\|"matter"}` → `{budget, mode, matter, canRunBoth, applying: true}`. Records a *request*; see below |
+| `GET /me` | floor | `{id, name, role: {id, key, name}, permissions, isOwner}` — who this token belongs to and what it may do. See [below](#roles-and-permissions-in-full) |
+| `GET /permissions` | floor | the catalog: `{key, group, title, summary}` per permission. The hub owns the wording |
+| `GET /roles` | floor | `[{id, key, name, builtin, permissions, memberCount, sortOrder}]` |
+| `POST /roles` · `PATCH /roles/:id` · `DELETE /roles/:id` | `role.manage` | `POST {name, permissions?}` → 201. `PATCH {name?, permissions?}`. `409 role_is_owner`, `409 role_is_builtin`, `409 role_in_use` |
+| `PATCH /members/:id` | `role.manage` | `{roleId}` — put somebody in a different role. `409 cannot_change_owner`, `404 unknown_role` |
+
+### Roles and permissions in full
+
+#### The twelve permissions
+
+`GET /permissions` is the authority and carries a `title` and a `summary` for
+each. **Render those rather than shipping copy of your own** — it is the
+`activity.message` rule applied to a vocabulary that will grow, so an app a
+version behind still draws a complete, truthful matrix instead of a row labelled
+with a key nobody can read. What an app *does* hard-code is the handful of keys
+it gates its own screens on.
+
+| key | group |
+|---|---|
+| `device.control` | Devices |
+| `device.edit` | Devices |
+| `device.add` | Devices |
+| `device.remove` | Devices |
+| `home.structure` | Home |
+| `home.rename` | Home |
+| `activity.read` | Home |
+| `member.invite` | People |
+| `member.remove` | People |
+| `role.manage` | People |
+| `hub.radio` | Hub |
+| `hub.ai` | Hub |
+
+#### What the three built-in roles start with
+
+|  | Owner | Member | Guest |
+|---|:--:|:--:|:--:|
+| `device.control` | ✓ | ✓ | ✓ |
+| `device.edit` | ✓ | ✓ | |
+| `device.add` | ✓ | ✓ | |
+| `home.structure` | ✓ | ✓ | |
+| `activity.read` | ✓ | ✓ | |
+| `hub.radio` | ✓ | ✓ | |
+| `home.rename` · `device.remove` · `member.invite` · `member.remove` · `role.manage` · `hub.ai` | ✓ | | |
+
+**Member is the old behaviour written down.** Those six are, key for key, the
+routes that used to be open to any member; the six below them are the ones that
+used to be owner-only. A hub that updates into this changes nothing about what
+anybody can do — the migration backfills every existing member into Owner or
+Member accordingly, and only an explicit edit moves anything after that.
+
+**Guest is somebody staying in the house.** They work the lights and keep their
+own favorites; they change no names, open no network, and read only their own
+line in the activity log.
+
+#### The owner is a special case on purpose
+
+The owner's stored permission list is **for display only and is never read**.
+Every check answers `true` for the owner without consulting it, which buys three
+things worth keeping:
+
+- a permission a later hub build adds is the owner's automatically, with no
+  migration and nothing to forget;
+- no edit to any table can lock a home out of itself, which is what makes
+  `role.manage` safe to hand to anybody with no escalation guard behind it;
+- and the refusals follow: `PATCH /roles/:id` and `DELETE /roles/:id` answer
+  `409 role_is_owner` (a control that moved a number on a screen and nothing in
+  the world would be worse than no control), no route may *assign* the owner's
+  role, and the owner's own role cannot be changed — `409 cannot_change_owner`,
+  the same rule and the same reason as `cannot_remove_owner`. There is no
+  ownership transfer in this hub.
+
+#### Roles a home invents
+
+`POST /roles` mints one with a key of its own. Built-in roles cannot be deleted
+(`409 role_is_builtin`) and **no role can be deleted while somebody holds it**
+(`409 role_in_use`): `members.role_id` carries no `ON DELETE` action — SQLite
+cannot attach one to a column added by `ALTER TABLE` — so that refusal *is* the
+referential integrity, and quietly moving somebody to another role as a side
+effect of a delete is not a behaviour worth having. Move them first, then
+delete.
+
+#### Learning what you may do
+
+Three ways in, and they answer the same question:
+
+- `GET /me` — `{id, name, role: {id, key, name}, permissions, isOwner}`.
+- The WebSocket `hello` frame carries `permissions`, so a client knows in its
+  first frame and never paints a control it is about to lose.
+- The `access` frame — [below](#what-you-may-do-access) — arrives behind `hello`
+  and again whenever it changes.
+
+`POST /pair` and `PATCH /members/me` both answer with the member shape plus
+`permissions`, so a client that has just joined needs no second request.
+
+**A client that sees no `permissions` field is talking to a hub older than this,
+and must fall back to the old rules — never to "nothing allowed".** Absence is
+not a refusal, the same rule `radio.budget`, `zigbee.problem`, `isSelf` and
+`recognition` all follow.
 
 ### The hub's name is the home's name
 
@@ -209,8 +319,16 @@ the board come back when it is handed back. They read as offline meanwhile.
 `GET /members` marks the caller's own row:
 
 ```json
-[{ "id": "…", "name": "Georgy’s MacBook Pro", "role": "owner", "createdAt": "…", "isSelf": true }]
+[{ "id": "…", "name": "Georgy’s MacBook Pro", "role": "owner",
+   "roleId": "…", "roleKey": "owner", "roleName": "Owner",
+   "createdAt": "…", "isSelf": true }]
 ```
+
+`role` is the legacy two-word string and stays for apps written before roles;
+`roleId`/`roleKey`/`roleName` are the real answer, and the one to render. Note
+that `role` says only *whether this is the owner* — a Guest and a member of a
+role somebody invented both read `"member"` there, which is exactly why an app
+must not infer what somebody may do from it.
 
 It is there because nothing else answers the question. The member id is returned
 exactly once, by `POST /pair`, and the shorter route on the hub's own machine —
@@ -218,8 +336,8 @@ exactly once, by `POST /pair`, and the shorter route on the hub's own machine �
 so a client that claimed over SSH holds a working token and no idea which of
 these names is its own. Additive: a client that ignores it loses nothing.
 
-`PATCH /members/me {"name": "…"}` → `{id, name, role}` renames whoever the
-bearer token belongs to. Addressed as `me` for the same reason: the token
+`PATCH /members/me {"name": "…"}` → the member shape above plus `permissions`,
+renaming whoever the bearer token belongs to. Addressed as `me` for the same reason: the token
 already says who this is, and asking for an id as well only adds a way to get it
 wrong. **Any member may rename itself** — the owner-only rule guards the shape
 of the home, not what somebody calls themselves — and renaming *another* member
@@ -479,10 +597,21 @@ listing, downloading, uploading and deleting are local operations on JSON.
 
 The home's history: what people did through the apps, and the handful of things
 that happened to the home itself. It is a feed somebody scrolls, not an audit
-trail, and every member reads the same one — `GET /activity` is open to any
-member and the `activity` WebSocket frame goes to every authorized socket, so
-everyone in the home sees who did what, by name. That is deliberate for a
-family home; there is no per-member scoping and nothing here is private.
+trail, and everyone who may read it reads the same one, by name — there is no
+filtering by device, room or kind, and nothing in it is private *from the people
+who can see it*. That is deliberate for a family home.
+
+**`activity.read` decides who that is, and it narrows rather than refuses.** A
+member without it still receives their own rows, on `GET /activity` and on the
+socket alike, so their Recent feed is a working screen instead of a 403 — and
+"what have I done in this house" is a fair question for anyone standing in it.
+Rows with no `memberId` (a device dropping off the network, somebody leaving)
+belong to nobody and are correctly absent from that view. Guest is the role that
+ships without it.
+
+The socket's filter is applied **at send time**, not captured when the socket
+authorized, so granting somebody `activity.read` while their app is open starts
+the house arriving on the next line, with no reconnect and nothing to poll.
 
 ```json
 {
@@ -509,10 +638,19 @@ The kinds: `device.command`, `device.added`, `device.removed`,
 `device.online`, `device.offline`, `device.renamed`, `device.moved`,
 `room.added`, `room.renamed`, `room.removed`, `zone.added`, `zone.renamed`,
 `zone.removed`, `member.joined`, `member.left`, `member.removed`,
-`member.renamed`, `home.renamed`, `hub.radio`, `adapter.error`,
+`member.renamed`, `member.role-changed`, `role.added`, `role.renamed`,
+`role.changed`, `role.removed`, `home.renamed`, `hub.radio`, `adapter.error`,
 `zigbee.interview-failed`, `zigbee.left`, `zigbee.permit-join`,
 `zigbee.permit-join-closed`, `matter.commission`. Treat the list as open — a
 client must render an unknown kind from `message` rather than drop it.
+
+The five that move access — `member.role-changed` and the `role.*` four —
+carry `data.memberName` (who did it) and `data.roleName`, with `previousName`
+on a rename and `subjectName` on `member.role-changed`. A permission edit
+records **a sentence, never the diff**: this log is read a week later, where
+"Georgy changed what Guest can do" is the whole of what anybody is looking for,
+and the [`access` frame](#what-you-may-do-access) is what tells an app that is
+open right now. Restyling a role — like restyling a room — writes nothing.
 
 The seven that reshape the home — the `room.*` and `zone.*` trio each, plus
 `device.renamed` and `device.moved` — carry `data.memberName` and the name of
@@ -552,7 +690,8 @@ no setting to change it.
 message. These go to every authorized socket:
 
 ```
-{"type":"hello","hubId","name","apiVersion":1,"streams":["mqtt","zigbee","ai"]}
+{"type":"hello","hubId","name","apiVersion":1,"streams":["mqtt","zigbee","ai"],"permissions":[…]}
+{"type":"access","role":{id,key,name},"permissions":[…],"roles":[…]}   what *you* may do
 {"type":"state","deviceId","endpointId","state":{…}}    full canonical state after each change
 {"type":"deviceUpserted","device":{…}}                  new device or structure/name change
 {"type":"deviceRemoved","deviceId"}
@@ -563,6 +702,34 @@ message. These go to every authorized socket:
 {"type":"commissioning","jobId","status","detail"?}     Matter commissioning progress
 {"type":"hubStatus","zigbee":{…},"radio":{…}}           a radio came up, went down, or was switched
 ```
+
+### What you may do (`access`)
+
+Rendered **per socket**, like `deviceUpserted` and for the same reason: it is
+the reader's own answer, not the home's. It arrives once behind `hello`, and
+again the moment this member's role changes or the role they hold is edited.
+
+```json
+{
+  "type": "access",
+  "role": { "id": "…", "key": "guest", "name": "Guest" },
+  "permissions": ["device.control"],
+  "roles": [{ "id": "…", "key": "owner", "name": "Owner", "builtin": true,
+              "permissions": [ … ], "memberCount": 1, "sortOrder": 0 }]
+}
+```
+
+It carries the roles list too, because a client drawing "Anna — Guest" needs
+those names and a second round trip for four rows is a round trip nobody needed.
+
+**Without it, an app sits looking at controls that have quietly stopped
+working** until something else happens to make it refetch — the same argument
+that put `structure` and `hubStatus` on the socket. It is not a poll and not a
+heartbeat: it fires on the change.
+
+A hub older than this sends no `access` frame and no `permissions` on `hello`.
+That is "this hub has not said", never "you may do nothing" — fall back to the
+old rules.
 
 ### When a radio comes or goes — or is switched (`hubStatus`)
 
@@ -663,5 +830,14 @@ goes. Treat it as a stop, and say so; every other close is worth retrying.
 ## Errors
 
 `400 {error:"invalid_body", issues:[…]}` (zod), `401 unauthorized`,
-`403 owner_only`, `404 not_found`, `409` for protocol-level refusals
-(unsupported command, adapter disabled, cannot remove owner).
+`403 {error:"forbidden", permission:"<key>"}`, `404 not_found`, `409` for
+protocol-level refusals (unsupported command, adapter disabled,
+`cannot_remove_owner`, `cannot_change_owner`, `role_is_owner`,
+`role_is_builtin`, `role_in_use`).
+
+**A refusal names the permission**, because "the hub said no" leaves a person
+with no idea what to ask for; turn it into a sentence naming the thing, not the
+role — a home that has edited its matrix may have granted it to Guest and
+withheld it from Member. `403 owner_only` was the old shape and is gone; a
+client that still recognises it loses nothing by keeping the branch for older
+hubs.

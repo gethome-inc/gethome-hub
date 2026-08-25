@@ -6,7 +6,8 @@ import { pino } from 'pino';
 import { PairingService } from '../src/core/pairing.js';
 import { sha256Hex, generateToken, encryptSecret, decryptSecret } from '../src/core/crypto.js';
 import { invites, tokens } from '../src/db/schema.js';
-import { openTestDb, resetDb } from './helpers/db.js';
+import { HubEventBus } from '../src/core/bus.js';
+import { openTestDb, resetDb, loadedAccess } from './helpers/db.js';
 
 const handle = await openTestDb();
 const log = pino({ level: 'silent' });
@@ -17,11 +18,17 @@ describe.skipIf(!handle)('PairingService', () => {
   const db = handle?.db!;
   let dataDir: string;
   let pairing: PairingService;
+  // The pairing service asks this for the role a claim should land in — the
+  // owner's on a boot code, the invite's otherwise — and tells it about the
+  // member it has just created, so the first request that member makes finds
+  // an answer already in memory.
+  let access: Awaited<ReturnType<typeof loadedAccess>>;
 
   beforeEach(async () => {
     await resetDb(db);
     dataDir = mkdtempSync(path.join(tmpdir(), 'gethome-pairing-'));
-    pairing = new PairingService(db, dataDir, log);
+    access = await loadedAccess(db, new HubEventBus());
+    pairing = new PairingService(db, dataDir, log, access);
     await pairing.boot();
   });
 
@@ -90,7 +97,7 @@ describe.skipIf(!handle)('PairingService', () => {
     // The hub restarts — an update, a power cut, the OOM killer. A code that
     // Studio or the installer read a minute ago has to still be the code, or a
     // finished install ends at "invalid_code" with no way forward.
-    const rebooted = new PairingService(db, dataDir, log);
+    const rebooted = new PairingService(db, dataDir, log, access);
     await rebooted.boot();
 
     expect(readFileSync(path.join(dataDir, 'pairing-code'), 'utf8').trim()).toBe(code);
@@ -124,7 +131,7 @@ describe.skipIf(!handle)('PairingService', () => {
     const code = readFileSync(path.join(dataDir, 'pairing-code'), 'utf8').trim();
     await pairing.claim(code, 'Georgy');
 
-    const rebooted = new PairingService(db, dataDir, log);
+    const rebooted = new PairingService(db, dataDir, log, access);
     await rebooted.boot();
     expect(rebooted.claimed).toBe(true);
     expect(existsSync(path.join(dataDir, 'pairing-code'))).toBe(false);

@@ -1,0 +1,497 @@
+import { eq, inArray } from 'drizzle-orm';
+import type { Db } from '../db/client.js';
+import { members, roles } from '../db/schema.js';
+import type { HubEventBus } from './bus.js';
+
+/**
+ * Who may do what in this home.
+ *
+ * Access used to be one comparison — `member.role !== 'owner'` — which meant
+ * the only knob anybody had was which side of the owner line a whole route sat
+ * on, and moving it moved it for everyone. Roles are rows now, permissions are
+ * a named vocabulary, and the mapping between the two is a table the home
+ * edits from either app.
+ *
+ * Three ideas hold it together, and each is load-bearing:
+ *
+ * 1. **The floor is not a permission.** Reading the home, renaming yourself,
+ *    leaving, and pinning your own favorites are what *being a member* means.
+ *    They are not in the catalog and no role can take them away, because a
+ *    member with nothing at all is a token that can only 401 behind an app
+ *    that cannot draw a single screen.
+ * 2. **The owner is never evaluated.** `can()` answers `true` for the owner
+ *    without reading a stored set. So a permission added by a later hub build
+ *    is the owner's automatically, and no edit to any table can lock a home
+ *    out of itself — which is the safety net that lets `role.manage` be handed
+ *    to anybody without an escalation guard behind it.
+ * 3. **The defaults reproduce what the hub did before roles existed.** The
+ *    `member` set below is, line for line, the routes that were `authed`; the
+ *    keys missing from it are the ones that were `ownerOnly`. Upgrading a hub
+ *    therefore changes nothing at all until somebody edits the matrix — and
+ *    that is a claim `test/roles.test.ts` proves rather than asserts.
+ *
+ * Held in memory and written through, like `FavoritesService` and the home's
+ * name: `can()` runs on every authenticated request, a home has a handful of
+ * roles, and this machine's disk is an SD card.
+ */
+
+/** One entry of the catalog the apps render their matrix from. */
+export interface PermissionDescriptor {
+  key: PermissionKey;
+  /** Which block of the matrix this belongs in. */
+  group: 'Devices' | 'Home' | 'People' | 'Hub';
+  title: string;
+  summary: string;
+}
+
+/**
+ * The vocabulary, and **the hub owns its wording**.
+ *
+ * `GET /permissions` hands these strings to the apps, which render them rather
+ * than shipping copy of their own. It is the `activity.message` rule applied to
+ * a list that will grow: an app one version behind still draws a complete,
+ * truthful matrix instead of a row labelled with a key nobody can read. What
+ * an app *does* hard-code is the handful of keys it gates its own UI on.
+ */
+export const PERMISSIONS: readonly PermissionDescriptor[] = [
+  {
+    key: 'device.control',
+    group: 'Devices',
+    title: 'Control devices',
+    summary: 'Switch things on and off, set brightness and temperature, run scenes.',
+  },
+  {
+    key: 'device.edit',
+    group: 'Devices',
+    title: 'Rename and move devices',
+    summary:
+      'Change what a device is called and which room it is in. Everybody in the home sees the result.',
+  },
+  {
+    key: 'device.add',
+    group: 'Devices',
+    title: 'Add devices',
+    summary: 'Pair a Matter accessory, or open the Zigbee network so a new device can join.',
+  },
+  {
+    key: 'device.remove',
+    group: 'Devices',
+    title: 'Remove devices',
+    summary: 'Take a device out of the home and unpair it. Nothing in the apps undoes this.',
+  },
+  {
+    key: 'home.structure',
+    group: 'Home',
+    title: 'Change rooms and zones',
+    summary:
+      'Add, rename, restyle and delete rooms and zones. A deleted room keeps its devices.',
+  },
+  {
+    key: 'home.rename',
+    group: 'Home',
+    title: 'Rename the home',
+    summary: 'The name everybody sees, and the one this hub answers to on the network.',
+  },
+  {
+    key: 'activity.read',
+    group: 'Home',
+    title: 'See the whole home’s activity',
+    summary:
+      'Read what everybody did, by name. Without this, only your own actions are visible.',
+  },
+  {
+    key: 'member.invite',
+    group: 'People',
+    title: 'Invite people',
+    summary: 'Create an invite code so somebody can join this home.',
+  },
+  {
+    key: 'member.remove',
+    group: 'People',
+    title: 'Remove people',
+    summary: 'End somebody’s access straight away, on every device they signed in with.',
+  },
+  {
+    key: 'role.manage',
+    group: 'People',
+    title: 'Manage roles',
+    summary:
+      'Change what each role can do, and which role each person has. Anyone with this can give it away.',
+  },
+  {
+    key: 'hub.radio',
+    group: 'Hub',
+    title: 'Switch the radio',
+    summary: 'Choose whether this hub runs Zigbee or Matter, on a board that runs one at a time.',
+  },
+  {
+    key: 'hub.ai',
+    group: 'Hub',
+    title: 'AI adaptation',
+    summary:
+      'The API key and its switch, what the agent has spent, and the device-mapping library.',
+  },
+] as const;
+
+export type PermissionKey =
+  | 'device.control'
+  | 'device.edit'
+  | 'device.add'
+  | 'device.remove'
+  | 'home.structure'
+  | 'home.rename'
+  | 'activity.read'
+  | 'member.invite'
+  | 'member.remove'
+  | 'role.manage'
+  | 'hub.radio'
+  | 'hub.ai';
+
+export const PERMISSION_KEYS: readonly PermissionKey[] = PERMISSIONS.map((entry) => entry.key);
+
+const KNOWN_KEYS = new Set<string>(PERMISSION_KEYS);
+
+/** The three roles every hub has, and what they may do out of the box. */
+export const BUILTIN_ROLES = [
+  {
+    key: 'owner',
+    name: 'Owner',
+    sortOrder: 0,
+    /**
+     * Stored for display only. `can()` never reads it — see the owner rule at
+     * the top of this file — so this list going stale costs nothing, which is
+     * exactly why the owner is safe from a future permission being forgotten.
+     */
+    permissions: [...PERMISSION_KEYS],
+  },
+  {
+    key: 'member',
+    name: 'Member',
+    sortOrder: 1,
+    /** Precisely the routes that were `authed` before roles existed. */
+    permissions: [
+      'device.control',
+      'device.edit',
+      'device.add',
+      'home.structure',
+      'activity.read',
+      'hub.radio',
+    ] as PermissionKey[],
+  },
+  {
+    key: 'guest',
+    name: 'Guest',
+    sortOrder: 2,
+    /**
+     * Somebody staying in the house. They can work the lights and keep their
+     * own favorites; they change no names, open no network, and read only
+     * their own line in the activity log.
+     */
+    permissions: ['device.control'] as PermissionKey[],
+  },
+] as const;
+
+export const OWNER_ROLE_KEY = 'owner';
+const DEFAULT_ROLE_KEY = 'member';
+
+export interface RoleRecord {
+  id: string;
+  key: string;
+  name: string;
+  builtin: boolean;
+  permissions: PermissionKey[];
+  sortOrder: number;
+}
+
+/** A role plus how many people hold it — what `DELETE /roles/:id` guards on. */
+export interface RoleWire extends RoleRecord {
+  memberCount: number;
+}
+
+export type RoleRefusal = 'role_is_owner' | 'role_is_builtin' | 'role_in_use' | 'not_found';
+
+/** Keep only keys this build understands, in catalog order, without duplicates. */
+function normalizePermissions(raw: unknown): PermissionKey[] {
+  const wanted = new Set(
+    Array.isArray(raw) ? raw.filter((entry): entry is string => typeof entry === 'string') : [],
+  );
+  return PERMISSION_KEYS.filter((key) => wanted.has(key));
+}
+
+export class AccessService {
+  private readonly byId = new Map<string, RoleRecord>();
+  private readonly byKey = new Map<string, RoleRecord>();
+  /**
+   * Which role each member holds — the one thing `can()` needs that is not on
+   * the role itself. Mirrors `FavoritesService.byMember`: loaded once, kept in
+   * step with the writes that pass through here, and pruned by `forgetMember`
+   * when the row goes, so it never holds a role for somebody who has left.
+   */
+  private readonly roleByMember = new Map<string, string>();
+
+  constructor(
+    private readonly db: Db,
+    private readonly events: HubEventBus,
+  ) {}
+
+  /**
+   * Read the table into memory, creating the built-in roles if this hub has
+   * never had them.
+   *
+   * The migration seeds them too. Doing it again here is what covers a hub
+   * whose database was created before the roles migration *and* restored from a
+   * backup, and it is idempotent — `key` is unique.
+   */
+  async load(): Promise<void> {
+    await this.ensureBuiltins();
+    this.byId.clear();
+    this.byKey.clear();
+    for (const row of await this.db.query.roles.findMany()) {
+      const record: RoleRecord = {
+        id: row.id,
+        key: row.key,
+        name: row.name,
+        builtin: row.builtin,
+        permissions: normalizePermissions(row.permissions),
+        sortOrder: row.sortOrder,
+      };
+      this.byId.set(record.id, record);
+      this.byKey.set(record.key, record);
+    }
+
+    this.roleByMember.clear();
+    for (const row of await this.db.query.members.findMany()) {
+      // A row written by a build older than this column resolves through the
+      // legacy word, which is what makes the migration's backfill a
+      // convenience rather than something correctness depends on.
+      const roleId = row.roleId ?? this.byKey.get(legacyKey(row.role))?.id;
+      if (roleId) this.roleByMember.set(row.id, roleId);
+    }
+  }
+
+  private async ensureBuiltins(): Promise<void> {
+    for (const builtin of BUILTIN_ROLES) {
+      await this.db
+        .insert(roles)
+        .values({
+          key: builtin.key,
+          name: builtin.name,
+          builtin: true,
+          permissions: [...builtin.permissions],
+          sortOrder: builtin.sortOrder,
+        })
+        .onConflictDoNothing();
+    }
+  }
+
+  // ── Asking ────────────────────────────────────────────────────────────────
+
+  /**
+   * May this member do this?
+   *
+   * The owner is answered without reading anything, which is the whole of why
+   * a home cannot be locked out of itself and why a permission this build has
+   * never heard of is still theirs.
+   */
+  can(memberId: string, permission: PermissionKey): boolean {
+    const role = this.roleFor(memberId);
+    if (!role) return false;
+    if (role.key === OWNER_ROLE_KEY) return true;
+    return role.permissions.includes(permission);
+  }
+
+  isOwner(memberId: string): boolean {
+    return this.roleFor(memberId)?.key === OWNER_ROLE_KEY;
+  }
+
+  roleFor(memberId: string): RoleRecord | undefined {
+    const roleId = this.roleByMember.get(memberId);
+    return roleId ? this.byId.get(roleId) : this.byKey.get(DEFAULT_ROLE_KEY);
+  }
+
+  /** What this member may do, as the apps receive it. The owner gets the lot. */
+  permissionsFor(memberId: string): PermissionKey[] {
+    const role = this.roleFor(memberId);
+    if (!role) return [];
+    return role.key === OWNER_ROLE_KEY ? [...PERMISSION_KEYS] : [...role.permissions];
+  }
+
+  role(id: string): RoleRecord | undefined {
+    return this.byId.get(id);
+  }
+
+  roleByKeyName(key: string): RoleRecord | undefined {
+    return this.byKey.get(key);
+  }
+
+  builtinRoleId(key: string): string | undefined {
+    return this.byKey.get(key)?.id;
+  }
+
+  /** Every role, in display order, each with how many people hold it. */
+  list(): RoleWire[] {
+    const counts = new Map<string, number>();
+    for (const roleId of this.roleByMember.values()) {
+      counts.set(roleId, (counts.get(roleId) ?? 0) + 1);
+    }
+    return [...this.byId.values()]
+      .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name))
+      .map((role) => ({ ...role, memberCount: counts.get(role.id) ?? 0 }));
+  }
+
+  // ── Writing ───────────────────────────────────────────────────────────────
+
+  /** Remember a member the pairing flow has just created. */
+  noteMember(memberId: string, roleId: string | null | undefined): void {
+    const resolved = roleId ?? this.byKey.get(DEFAULT_ROLE_KEY)?.id;
+    if (resolved) this.roleByMember.set(memberId, resolved);
+  }
+
+  /** Their row is gone (the cascade did it); this is the in-memory half. */
+  forgetMember(memberId: string): void {
+    this.roleByMember.delete(memberId);
+  }
+
+  async createRole(name: string, permissions: unknown): Promise<RoleRecord> {
+    const sortOrder =
+      Math.max(0, ...[...this.byId.values()].map((role) => role.sortOrder)) + 1;
+    const [row] = await this.db
+      .insert(roles)
+      .values({
+        key: `custom-${crypto.randomUUID()}`,
+        name,
+        builtin: false,
+        permissions: normalizePermissions(permissions),
+        sortOrder,
+      })
+      .returning();
+    if (!row) throw new Error('role insert returned nothing');
+    const record: RoleRecord = {
+      id: row.id,
+      key: row.key,
+      name: row.name,
+      builtin: row.builtin,
+      permissions: normalizePermissions(row.permissions),
+      sortOrder: row.sortOrder,
+    };
+    this.byId.set(record.id, record);
+    this.byKey.set(record.key, record);
+    return record;
+  }
+
+  /**
+   * Rename a role, change what it may do, or both.
+   *
+   * The owner's row is refused: `can()` does not read it, so editing it would
+   * be a control that changes a number on a screen and nothing in the world —
+   * and the one that *looks* like it could take `role.manage` away from the
+   * only person guaranteed to have it.
+   */
+  async updateRole(
+    id: string,
+    patch: { name?: string | undefined; permissions?: unknown },
+  ): Promise<RoleRecord | RoleRefusal> {
+    const existing = this.byId.get(id);
+    if (!existing) return 'not_found';
+    if (existing.key === OWNER_ROLE_KEY) return 'role_is_owner';
+
+    const next: RoleRecord = {
+      ...existing,
+      ...(patch.name !== undefined ? { name: patch.name } : {}),
+      ...(patch.permissions !== undefined
+        ? { permissions: normalizePermissions(patch.permissions) }
+        : {}),
+    };
+    await this.db
+      .update(roles)
+      .set({ name: next.name, permissions: next.permissions })
+      .where(eq(roles.id, id));
+    this.byId.set(id, next);
+    this.byKey.set(next.key, next);
+    this.announce(this.membersHolding(id));
+    return next;
+  }
+
+  /**
+   * Delete a custom role.
+   *
+   * Refused while anybody holds it. `members.role_id` carries no `ON DELETE`
+   * action — SQLite cannot attach one to a column added by `ALTER TABLE` — so
+   * this check *is* the referential integrity, and the plain foreign key
+   * behind it is what refuses if this ever forgets. Silently reassigning
+   * somebody's access is not an option worth having.
+   */
+  async deleteRole(id: string): Promise<RoleRefusal | null> {
+    const existing = this.byId.get(id);
+    if (!existing) return 'not_found';
+    if (existing.key === OWNER_ROLE_KEY) return 'role_is_owner';
+    if (existing.builtin) return 'role_is_builtin';
+    if (this.membersHolding(id).length > 0) return 'role_in_use';
+    await this.db.delete(roles).where(eq(roles.id, id));
+    this.byId.delete(id);
+    this.byKey.delete(existing.key);
+    return null;
+  }
+
+  /**
+   * Put a member in a role.
+   *
+   * Also writes the legacy `members.role` word, because a build this hub might
+   * roll back to reads that column on every authenticated request — see the
+   * comment on the column itself.
+   */
+  async assignRole(memberId: string, roleId: string): Promise<RoleRecord | undefined> {
+    const role = this.byId.get(roleId);
+    if (!role) return undefined;
+    await this.db
+      .update(members)
+      .set({ roleId, role: legacyWord(role.key) })
+      .where(eq(members.id, memberId));
+    this.roleByMember.set(memberId, roleId);
+    this.announce([memberId]);
+    return role;
+  }
+
+  private membersHolding(roleId: string): string[] {
+    const held: string[] = [];
+    for (const [memberId, held_] of this.roleByMember) {
+      if (held_ === roleId) held.push(memberId);
+    }
+    return held;
+  }
+
+  /**
+   * Tell the sockets these members are holding that what they may do changed.
+   *
+   * A role edit has to reach an app that is already open, or somebody watches
+   * a screen full of controls that have quietly stopped working — the same
+   * argument that put `structure` and `hubStatus` on the socket. Nothing is
+   * emitted for nobody, so a role with no members is silent.
+   */
+  private announce(memberIds: string[]): void {
+    if (memberIds.length === 0) return;
+    this.events.emit('accessChanged', memberIds);
+  }
+
+  /** Which members hold a role — used when a role's own permissions move. */
+  async membersWithRole(roleId: string): Promise<string[]> {
+    const rows = await this.db.query.members.findMany({ where: eq(members.roleId, roleId) });
+    return rows.map((row) => row.id);
+  }
+
+  /** Names for a set of member ids, for an activity sentence. */
+  async namesOf(memberIds: string[]): Promise<string[]> {
+    if (memberIds.length === 0) return [];
+    const rows = await this.db.query.members.findMany({ where: inArray(members.id, memberIds) });
+    return rows.map((row) => row.name);
+  }
+}
+
+/** The legacy column understands two words; everything that isn't the owner is a member. */
+function legacyWord(roleKey: string): string {
+  return roleKey === OWNER_ROLE_KEY ? 'owner' : 'member';
+}
+
+function legacyKey(role: string): string {
+  return role === OWNER_ROLE_KEY ? OWNER_ROLE_KEY : DEFAULT_ROLE_KEY;
+}

@@ -433,21 +433,41 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   member row with nothing to click on. This is what lets GetHome Studio — which
   has no accounts and no user name of its own — claim as *the Mac* and offer
   the rename afterwards.
-- **Owner-only guards the shape of the home, not adding to it.** Rooms,
-  members, invites, renames, AI settings and device *removal* are the owner's;
-  `POST /matter/commission`, `POST /zigbee/permit-join` and
-  `PUT /settings/radio` are **any member's**, and were owner-only until a
-  second phone in a real home found every one of them 403. A member is
-  somebody the owner invited in, and a home where they cannot pair the lamp
-  they are standing next to is a home with a support call in it. Three things
-  make it safe to give away and are the test for anything else that moves out
-  of `ownerOnly`: the cost is **bounded** (a join window closes itself, a
-  radio mode is one word the owner can put back), it **destroys nothing** (no
-  device leaves, no membership ends), and it is **named** — each of the three
-  writes an activity row carrying `request.member!.name`, which is the
-  accountability the role check was standing in for. Removal is the mirror
-  image and stays owner-only: unbounded, destructive, and anonymous in a log
-  read a week later.
+- **Access is a table the home edits, and three rules hold it up.** Roles are
+  rows (`roles`), permissions are a named vocabulary owned by
+  `src/core/access.ts`, and a member holds one role; `requirePermission` in
+  `api/auth.ts` is the only guard left — `requireOwner` is gone rather than kept
+  beside it, because two mechanisms are two places for a route to be wrong.
+  `docs/api.md` is canonical.
+  **First, the floor is not a permission.** Reading the home, renaming
+  yourself, leaving, and pinning your own favorites are what *being a member*
+  means and no role can take them away — a member with nothing at all is a token
+  that can only 401 behind an app with nothing to draw. That is why
+  `PATCH /devices/:id` is the one route whose check reads the *body*:
+  `name`/`roomId` are the house's and need `device.edit`, while the caller's own
+  `favorite` needs nothing, and a guest who can work the lights must be able to
+  put the kettle on their own dashboard.
+  **Second, the owner is never evaluated.** `can()` answers `true` for the owner
+  without reading a stored set, so a permission a later build adds is theirs
+  automatically and no edit can lock a home out of itself — which is precisely
+  what makes `role.manage` safe to hand out with no escalation guard. The
+  refusals follow from it: the owner's role cannot be edited, deleted, assigned,
+  or changed out from under them.
+  **Third, the defaults are the old behaviour written down.** `member` is, key
+  for key, what `authed` used to allow; the keys missing from it are what
+  `ownerOnly` used to refuse. Updating a hub changes nothing until somebody
+  edits the matrix, and `test/roles-migration.test.ts` proves that against rows
+  written by the old schema rather than asserting it. The old three-part test
+  for *giving something away* survives as the guidance for **choosing a
+  default**: bounded cost, destroys nothing, and named in the activity log.
+  Two consequences worth knowing. `activity.read` **narrows rather than
+  refuses** — a member without it still reads their own rows, on the route and
+  on the socket, because a Recent feed that 403s is a broken screen; the socket
+  asks at *send* time, so a grant lands with no reconnect. And `members.role` /
+  `invites.role` stay, maintained as owner-or-member, for the same reason
+  `devices.favorite` does: `install.sh` rolls back on a failed health check by
+  which time the migration has run, and the older build reads that column on
+  every authenticated request.
 - **Ending a membership has two halves, and only one of them is the database.**
   Deleting a member takes their tokens with the row (`tokens.member_id`
   cascades, `foreign_keys = ON`), which ends every REST call they can make. It
@@ -465,7 +485,11 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   And **registration is scoped to the socket's life** — `authorize` adds,
   the close handler removes — so the map holds one entry per open connection
   and none per closed one. `test/api.test.ts` opens a real socket, removes its
-  member, and asserts both the close code and the silence.
+  member, and asserts both the close code and the silence. `MemberSessions` now
+  carries a `notifyAccess` channel beside `revoke`, in the same map: a role edit
+  and a removal are one question asked with different force ("what may you do
+  now?" and "nothing, and not here"), and two registries of the same sockets
+  would drift about which are open.
 - **One hub, one home, one name — and `HUB_NAME` only seeds it.** There used to
   be two names: `GET /hub` answered `HUB_NAME` from `/etc/gethome/hub.env`,
   which the installer writes once and nobody ever edits, while `GET /home`

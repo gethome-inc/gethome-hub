@@ -28,7 +28,14 @@ import type { MqttObserver } from '../core/mqtt-observer.js';
 import { MAX_WINDOW_SECONDS, type PermitJoinService } from '../core/permit-join.js';
 import { createHubStatusReader } from '../core/hub-status.js';
 import { deviceWire } from './dto.js';
-import { extractToken, requireMember, requireOwner } from './auth.js';
+import { extractToken, requireMember, requirePermission } from './auth.js';
+import {
+  OWNER_ROLE_KEY,
+  PERMISSIONS,
+  PERMISSION_KEYS,
+  type AccessService,
+  type PermissionKey,
+} from '../core/access.js';
 import { attachWebSocket, MemberSessions, UNAUTHORIZED_CLOSE_CODE } from './ws.js';
 
 export interface ApiDeps {
@@ -38,6 +45,8 @@ export interface ApiDeps {
   registry: DeviceRegistry;
   /** Who has pinned what — favorites are per member, not per home. */
   favorites: FavoritesService;
+  /** Roles, the permission catalog, and every "may this member?" answer. */
+  access: AccessService;
   pairing: PairingService;
   activity: ActivityService;
   settings: SettingsService;
@@ -120,8 +129,20 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   });
   await app.register(websocket);
 
+  /**
+   * The floor: any member of this home, whatever their role.
+   *
+   * Reading the home, renaming yourself, leaving and pinning your own
+   * favorites are what being a member *means*, so none of them is a permission
+   * and none appears in the matrix. A role that could take them away would
+   * leave somebody holding a token that can only 401, behind an app with
+   * nothing to draw.
+   */
   const authed = { preHandler: [requireMember(deps.pairing)] };
-  const ownerOnly = { preHandler: [requireMember(deps.pairing), requireOwner] };
+  /** Everything else names the permission it needs. */
+  const needs = (permission: PermissionKey) => ({
+    preHandler: [requireMember(deps.pairing), requirePermission(deps.access, permission)],
+  });
   const commissionJobs = new Map<string, CommissionJob>();
   /**
    * Who is holding a live event stream, so removing them can hang it up.
@@ -225,6 +246,38 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     ...hubStatus.snapshot(),
   }));
 
+  /**
+   * One member, as every route that answers with one renders them.
+   *
+   * There used to be two shapes — `GET /members` answered
+   * `{id, name, role, createdAt, isSelf}` and `PATCH /members/me` answered
+   * `{id, name, role}` — which is two places for one entity to drift. Roles
+   * added a third question ("and what may they do?"), so this is the moment to
+   * fold them into one function.
+   *
+   * `role` stays the legacy two-word string beside the structured `roleId` /
+   * `roleName`, because an app written before roles reads it and an app
+   * written after has no use for anything but "is this the owner".
+   */
+  const memberWire = (row: { id: string; name: string; role: string; createdAt?: Date }, callerId?: string) => {
+    const role = deps.access.roleFor(row.id);
+    return {
+      id: row.id,
+      role: role?.key === OWNER_ROLE_KEY ? 'owner' : 'member',
+      name: row.name,
+      roleId: role?.id ?? null,
+      roleKey: role?.key ?? null,
+      roleName: role?.name ?? null,
+      ...(row.createdAt !== undefined ? { createdAt: row.createdAt } : {}),
+      // Which of these is the caller. Additive, and the only way an app can
+      // answer it: the member id is returned once, by `POST /pair`, and the
+      // hub's own `gethome-hubctl claim` prints the hub id and the token and
+      // nothing else — so a Mac that claimed its hub over SSH could not find
+      // itself in a list of names it is standing in.
+      ...(callerId !== undefined ? { isSelf: row.id === callerId } : {}),
+    };
+  };
+
   app.post('/api/v1/pair', async (request, reply) => {
     const body = z
       .object({
@@ -254,13 +307,28 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       recordPairFailure(request.ip);
       return reply.code(401).send({ error: 'invalid_code' });
     }
+    const role = deps.access.roleFor(result.member.id);
     await deps.activity.record({
       kind: 'member.joined',
-      message: `${result.member.name} joined the home.`,
+      message: role
+        ? `${result.member.name} joined the home as ${role.name}.`
+        : `${result.member.name} joined the home.`,
       memberId: result.member.id,
-      data: { memberName: result.member.name },
+      data: {
+        memberName: result.member.name,
+        ...(role ? { roleName: role.name } : {}),
+      },
     });
-    return result;
+    // The permissions ride back with the token, so an app that has just joined
+    // knows what it may draw before it has made a second request — and a guest
+    // never flashes a screen full of controls it is about to lose.
+    return {
+      token: result.token,
+      member: {
+        ...memberWire({ id: result.member.id, name: result.member.name, role: result.member.role }),
+        permissions: deps.access.permissionsFor(result.member.id),
+      },
+    };
   });
 
   // ── Home & rooms ─────────────────────────────────────────────────────────
@@ -280,7 +348,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * stored — `min(1)` on an untrimmed string accepts "   " and every screen
    * showing it then has a hub with no name.
    */
-  app.patch('/api/v1/home', ownerOnly, async (request) => {
+  app.patch('/api/v1/home', needs('home.rename'), async (request) => {
     const body = z.object({ name: z.string().trim().min(1).max(80) }).parse(request.body);
     const result = await deps.home.rename(body.name);
     await deps.activity.record({
@@ -371,7 +439,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
 
   app.get('/api/v1/rooms', authed, async () => (await readStructure()).rooms);
 
-  app.post('/api/v1/rooms', authed, async (request, reply) => {
+  app.post('/api/v1/rooms', needs('home.structure'), async (request, reply) => {
     const body = z
       .object({
         name: placeNameSchema,
@@ -404,7 +472,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     return reply.code(201).send(roomWire(row!));
   });
 
-  app.patch('/api/v1/rooms/:id', authed, async (request, reply) => {
+  app.patch('/api/v1/rooms/:id', needs('home.structure'), async (request, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     const body = z
       .object({
@@ -462,7 +530,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * stops the in-memory cache from serving a `roomId` pointing at a room that
    * is gone, and moves those cards in every app that is watching.
    */
-  app.delete('/api/v1/rooms/:id', authed, async (request, reply) => {
+  app.delete('/api/v1/rooms/:id', needs('home.structure'), async (request, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     const room = await deps.db.query.rooms.findFirst({ where: eq(rooms.id, id) });
     if (!room) return reply.code(404).send({ error: 'not_found' });
@@ -490,7 +558,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    */
   app.get('/api/v1/zones', authed, async () => (await readStructure()).zones);
 
-  app.post('/api/v1/zones', authed, async (request, reply) => {
+  app.post('/api/v1/zones', needs('home.structure'), async (request, reply) => {
     const body = z
       .object({ name: placeNameSchema, sortOrder: z.number().int().optional() })
       .parse(request.body);
@@ -508,7 +576,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     return reply.code(201).send({ id: row!.id, name: row!.name, sortOrder: row!.sortOrder });
   });
 
-  app.patch('/api/v1/zones/:id', authed, async (request, reply) => {
+  app.patch('/api/v1/zones/:id', needs('home.structure'), async (request, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     const body = z
       .object({ name: placeNameSchema.optional(), sortOrder: z.number().int().optional() })
@@ -555,7 +623,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * still there underneath: forget this line and the delete fails loudly rather
    * than leaving rooms pointing at a zone that has gone.
    */
-  app.delete('/api/v1/zones/:id', authed, async (request, reply) => {
+  app.delete('/api/v1/zones/:id', needs('home.structure'), async (request, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     const zone = await deps.db.query.zones.findFirst({ where: eq(zones.id, id) });
     if (!zone) return reply.code(404).send({ error: 'not_found' });
@@ -609,6 +677,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    *
    * The response is this caller's view, which is what makes that invisible to
    * an app: the field is still `favorite`, and it is still a boolean.
+   *
+   * **That split is why this is the one route whose permission check is not a
+   * preHandler.** `device.edit` guards the house's half; the caller's own pin
+   * is part of the floor and needs nothing, because a guest who can work the
+   * lights must be able to put the kettle on their own dashboard. Checking the
+   * whole route would have taken that away; not checking it at all would let a
+   * guest rename everybody's devices. So the guard reads the body.
    */
   app.patch('/api/v1/devices/:id', authed, async (request, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
@@ -620,6 +695,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       })
       .parse(request.body);
     const memberId = request.member!.id;
+    const touchesTheHouse = body.name !== undefined || body.roomId !== undefined;
+    if (touchesTheHouse && !deps.access.can(memberId, 'device.edit')) {
+      return reply.code(403).send({ error: 'forbidden', permission: 'device.edit' });
+    }
     const before = deps.registry.getDevice(id);
     if (!before) return reply.code(404).send({ error: 'not_found' });
     if (body.roomId && !(await roomExists(body.roomId))) {
@@ -683,14 +762,14 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   const roomExists = async (id: string): Promise<boolean> =>
     (await deps.db.query.rooms.findFirst({ where: eq(rooms.id, id) })) !== undefined;
 
-  app.delete('/api/v1/devices/:id', ownerOnly, async (request, reply) => {
+  app.delete('/api/v1/devices/:id', needs('device.remove'), async (request, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     const removed = await deps.registry.removeDevice(id);
     if (!removed) return reply.code(404).send({ error: 'not_found' });
     return reply.code(204).send();
   });
 
-  app.post('/api/v1/devices/:id/endpoints/:endpointId/commands', authed, async (request, reply) => {
+  app.post('/api/v1/devices/:id/endpoints/:endpointId/commands', needs('device.control'), async (request, reply) => {
     const params = z
       .object({ id: z.uuid(), endpointId: z.coerce.number().int().min(0) })
       .parse(request.params);
@@ -718,7 +797,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     return reply.code(202).send({ accepted: true });
   });
 
-  app.post('/api/v1/devices/:id/remap', ownerOnly, async (request, reply) => {
+  app.post('/api/v1/devices/:id/remap', needs('hub.ai'), async (request, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     const device = deps.registry.getDevice(id);
     if (!device) return reply.code(404).send({ error: 'not_found' });
@@ -739,7 +818,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * **Any member, not just the owner** — see the note on permit-join below;
    * the two are one rule and pairing a device is not the shape of the home.
    */
-  app.post('/api/v1/matter/commission', authed, async (request, reply) => {
+  app.post('/api/v1/matter/commission', needs('device.add'), async (request, reply) => {
     if (!deps.matter) return reply.code(409).send({ error: 'matter_disabled' });
     const body = z.object({ pairingCode: z.string().min(8).max(128) }).parse(request.body);
     // Recorded on the *request*, not on the result: the hub's log is what was
@@ -798,7 +877,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * The reply reports the *live* window, not the request, because Zigbee2MQTT
    * may already have had one open.
    */
-  app.post('/api/v1/zigbee/permit-join', authed, async (request, reply) => {
+  app.post('/api/v1/zigbee/permit-join', needs('device.add'), async (request, reply) => {
     if (!deps.zigbee) return reply.code(409).send({ error: 'zigbee_disabled' });
     const body = z
       .object({ seconds: z.number().int().min(0).max(MAX_WINDOW_SECONDS) })
@@ -831,18 +910,194 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
 
   app.get('/api/v1/members', authed, async (request) => {
     const rows = await deps.db.query.members.findMany();
-    return rows.map((row) => ({
-      id: row.id,
-      name: row.name,
-      role: row.role,
-      createdAt: row.createdAt,
-      // Which of these is the caller. Additive, and the only way an app can
-      // answer it: the member id is returned once, by `POST /pair`, and the
-      // hub's own `gethome-hubctl claim` prints the hub id and the token and
-      // nothing else — so a Mac that claimed its hub over SSH could not find
-      // itself in a list of names it is standing in.
-      isSelf: row.id === request.member!.id,
-    }));
+    return rows.map((row) => memberWire(row, request.member!.id));
+  });
+
+  /**
+   * Who am I, and what may I do?
+   *
+   * Every other answer to the first half is a search: the member id comes back
+   * exactly once, from `POST /pair`, and `gethome-hubctl claim` — the route
+   * every hub GetHome Studio installs is claimed through — prints the hub id
+   * and the token and no member at all. So a client held a working token and
+   * had to find itself by name in a list of names.
+   *
+   * The second half is the one an app cannot afford to guess. Drawing a button
+   * that can only 403 is worse than drawing none, and inferring the answer
+   * from a role name would put this build's assumptions in front of a home
+   * that has edited its own matrix.
+   */
+  app.get('/api/v1/me', authed, async (request) => {
+    const me = request.member!;
+    const role = deps.access.roleFor(me.id);
+    return {
+      id: me.id,
+      name: me.name,
+      role: role ? { id: role.id, key: role.key, name: role.name } : null,
+      permissions: deps.access.permissionsFor(me.id),
+      isOwner: deps.access.isOwner(me.id),
+    };
+  });
+
+  /**
+   * The permission catalog — and **the hub owns its wording**.
+   *
+   * The apps render `title` and `summary` rather than shipping copy of their
+   * own, which is the `activity.message` rule applied to a list that will
+   * grow: an app a version behind still draws a complete, truthful matrix
+   * instead of a row labelled with a key nobody can read. What an app hard-
+   * codes is the handful of keys it gates its own screens on.
+   */
+  app.get('/api/v1/permissions', authed, async () => PERMISSIONS);
+
+  // ── Roles ────────────────────────────────────────────────────────────────
+
+  /**
+   * Every role in the home, with how many people hold it.
+   *
+   * Open to any member on purpose: a phone rendering "Anna — Guest" needs the
+   * names, and who is in the house and in what capacity is not a secret from
+   * the people who live there. Changing any of it needs `role.manage`.
+   */
+  app.get('/api/v1/roles', authed, async () => deps.access.list());
+
+  const roleRefusal = (
+    reply: import('fastify').FastifyReply,
+    refusal: 'role_is_owner' | 'role_is_builtin' | 'role_in_use' | 'not_found',
+  ) =>
+    refusal === 'not_found'
+      ? reply.code(404).send({ error: 'not_found' })
+      : reply.code(409).send({ error: refusal });
+
+  const permissionListSchema = z.array(z.enum(PERMISSION_KEYS as [PermissionKey, ...PermissionKey[]]));
+  /** A role's name follows the same rule every other name in the hub does. */
+  const roleNameSchema = z.string().trim().min(1).max(80);
+
+  app.post('/api/v1/roles', needs('role.manage'), async (request, reply) => {
+    const body = z
+      .object({ name: roleNameSchema, permissions: permissionListSchema.default([]) })
+      .parse(request.body);
+    const role = await deps.access.createRole(body.name, body.permissions);
+    await deps.activity.record({
+      kind: 'role.added',
+      message: `${request.member!.name} added the role ${role.name}.`,
+      memberId: request.member!.id,
+      data: { roleName: role.name, memberName: request.member!.name },
+    });
+    return reply.code(201).send({ ...role, memberCount: 0 });
+  });
+
+  /**
+   * Rename a role, change what it may do, or both.
+   *
+   * The owner's row is refused (`409 role_is_owner`). Nothing reads it —
+   * `AccessService.can` answers `true` for the owner without consulting a
+   * stored set — so editing it would move a number on a screen and nothing in
+   * the world, while looking exactly like the control that could take
+   * `role.manage` away from the only person guaranteed to have it. That
+   * unconditional answer is also what makes `role.manage` safe to hand out
+   * with no escalation guard behind it: however the matrix is edited, the
+   * owner is still there and can put it back.
+   */
+  app.patch('/api/v1/roles/:id', needs('role.manage'), async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const body = z
+      .object({ name: roleNameSchema.optional(), permissions: permissionListSchema.optional() })
+      .parse(request.body);
+    const before = deps.access.role(id);
+    const result = await deps.access.updateRole(id, body);
+    if (typeof result === 'string') return roleRefusal(reply, result);
+
+    // One sentence, and deliberately not the diff: this log is read a week
+    // later, where "Georgy changed what Guest can do" is the whole of what
+    // anybody is looking for. The `structure`-style live frame is what tells
+    // an app that is open right now.
+    if (body.permissions !== undefined) {
+      await deps.activity.record({
+        kind: 'role.changed',
+        message: `${request.member!.name} changed what ${result.name} can do.`,
+        memberId: request.member!.id,
+        data: { roleName: result.name, memberName: request.member!.name },
+      });
+    }
+    if (body.name !== undefined && before && before.name !== result.name) {
+      await deps.activity.record({
+        kind: 'role.renamed',
+        message: `${request.member!.name} renamed the role ${before.name} to ${result.name}.`,
+        memberId: request.member!.id,
+        data: {
+          roleName: result.name,
+          previousName: before.name,
+          memberName: request.member!.name,
+        },
+      });
+    }
+    const counted = deps.access.list().find((role) => role.id === id);
+    return counted ?? { ...result, memberCount: 0 };
+  });
+
+  /**
+   * Forget a role the home invented.
+   *
+   * Refused while anybody holds it (`409 role_in_use`) rather than quietly
+   * moving those people somewhere else: `members.role_id` carries no
+   * `ON DELETE` action — SQLite cannot attach one to a column added by
+   * `ALTER TABLE` — so this check *is* the referential integrity, and changing
+   * somebody's access as a side effect of a delete is not a behaviour worth
+   * having anyway. Built-in roles never go (`409 role_is_builtin`).
+   */
+  app.delete('/api/v1/roles/:id', needs('role.manage'), async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const name = deps.access.role(id)?.name;
+    const refusal = await deps.access.deleteRole(id);
+    if (refusal) return roleRefusal(reply, refusal);
+    await deps.activity.record({
+      kind: 'role.removed',
+      message: `${request.member!.name} removed the role ${name ?? 'that was there'}.`,
+      memberId: request.member!.id,
+      data: { ...(name ? { roleName: name } : {}), memberName: request.member!.name },
+    });
+    return reply.code(204).send();
+  });
+
+  /**
+   * Put somebody in a different role.
+   *
+   * Two refusals, and both are the owner rule the removal routes already
+   * carry: the owner's own role cannot be changed, and no role whose key is
+   * `owner` can be handed to anybody. There is no ownership transfer in this
+   * hub — a home whose owner changed hands by accident is one nobody can
+   * configure again — so this route deliberately cannot create or move one.
+   */
+  app.patch('/api/v1/members/:id', needs('role.manage'), async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const body = z.object({ roleId: z.uuid() }).parse(request.body);
+    const target = await deps.db.query.members.findFirst({ where: eq(members.id, id) });
+    if (!target) return reply.code(404).send({ error: 'not_found' });
+    if (deps.access.isOwner(target.id)) {
+      return reply.code(409).send({ error: 'cannot_change_owner' });
+    }
+    const wanted = deps.access.role(body.roleId);
+    if (!wanted) return reply.code(404).send({ error: 'unknown_role' });
+    if (wanted.key === OWNER_ROLE_KEY) {
+      return reply.code(409).send({ error: 'cannot_change_owner' });
+    }
+    const before = deps.access.roleFor(target.id);
+    if (before?.id === wanted.id) return memberWire(target, request.member!.id);
+
+    await deps.access.assignRole(target.id, wanted.id);
+    await deps.activity.record({
+      kind: 'member.role-changed',
+      message: `${request.member!.name} made ${target.name} ${wanted.name}.`,
+      memberId: request.member!.id,
+      data: {
+        memberName: request.member!.name,
+        subjectName: target.name,
+        roleName: wanted.name,
+        ...(before ? { previousName: before.name } : {}),
+      },
+    });
+    return memberWire(target, request.member!.id);
   });
 
   /**
@@ -870,7 +1125,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         data: { memberName: body.name },
       });
     }
-    return { id: before.id, name: body.name, role: before.role };
+    return {
+      ...memberWire({ id: before.id, name: body.name, role: before.role }, before.id),
+      permissions: deps.access.permissionsFor(before.id),
+    };
   });
 
   /**
@@ -893,7 +1151,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     return reply.code(204).send();
   });
 
-  app.delete('/api/v1/members/:id', ownerOnly, async (request, reply) => {
+  app.delete('/api/v1/members/:id', needs('member.remove'), async (request, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     const target = await deps.db.query.members.findFirst({ where: eq(members.id, id) });
     if (!target) return reply.code(404).send({ error: 'not_found' });
@@ -937,29 +1195,83 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const closed = sessions.revoke(memberId);
     if (closed > 0) deps.log.info({ memberId, closed }, 'Closed event streams for a former member');
     // Their pins went with the member row (`device_favorites.member_id`
-    // cascades); this is the in-memory half of the same delete.
+    // cascades); this is the in-memory half of the same delete. `access` holds
+    // the same kind of map, keyed the same way, and would otherwise answer for
+    // a member who has left for the life of the process.
     deps.favorites.forgetMember(memberId);
+    deps.access.forgetMember(memberId);
     await deps.activity.record({ kind, message });
   }
 
-  app.get('/api/v1/invites', ownerOnly, async () => {
+  app.get('/api/v1/invites', needs('member.invite'), async () => {
     const rows = await deps.db.query.invites.findMany();
     const now = Date.now();
     return rows
       .filter((row) => row.usedBy === null && row.expiresAt.getTime() > now)
-      .map((row) => ({ id: row.id, role: row.role, expiresAt: row.expiresAt }));
+      .map((row) => {
+        const role = row.roleId ? deps.access.role(row.roleId) : undefined;
+        return {
+          id: row.id,
+          role: row.role,
+          roleId: role?.id ?? null,
+          roleName: role?.name ?? null,
+          expiresAt: row.expiresAt,
+        };
+      });
   });
 
-  app.post('/api/v1/invites', ownerOnly, async (request, reply) => {
-    const invite = await deps.pairing.createInvite(request.member!.id);
-    return reply.code(201).send(invite);
+  /**
+   * Mint an invite code — for a role.
+   *
+   * `invites.role` has carried a role since the first migration and the claim
+   * path has honoured it just as long; this route simply never passed one, so
+   * every invite in the hub's history has been a `member` invite. Omitting
+   * `roleId` still means exactly that, so nothing that already works changes.
+   * Handing somebody the owner's role is refused here for the same reason
+   * `PATCH /members/:id` refuses it: there is no ownership transfer.
+   */
+  app.post('/api/v1/invites', needs('member.invite'), async (request, reply) => {
+    const body = z
+      .object({ roleId: z.uuid().optional() })
+      .parse(request.body ?? {});
+    if (body.roleId) {
+      const role = deps.access.role(body.roleId);
+      if (!role) return reply.code(404).send({ error: 'unknown_role' });
+      if (role.key === OWNER_ROLE_KEY) {
+        return reply.code(409).send({ error: 'cannot_change_owner' });
+      }
+    }
+    const invite = await deps.pairing.createInvite(request.member!.id, body.roleId);
+    const role = invite.roleId ? deps.access.role(invite.roleId) : undefined;
+    return reply.code(201).send({
+      code: invite.code,
+      expiresAt: invite.expiresAt,
+      roleId: invite.roleId,
+      roleName: role?.name ?? null,
+    });
   });
 
+  /**
+   * The home's history.
+   *
+   * **`activity.read` narrows this; it never refuses it.** A member without it
+   * still reads their own rows, which is what keeps a guest's Recent feed a
+   * working screen instead of an error — and it is the honest answer to "what
+   * have I done in this house". Everybody else's lines are the home's to share.
+   *
+   * The log used to promise it had no per-member scoping at all. It still has
+   * none *among the people permitted to read it*: there is no filtering by
+   * device, room or kind, and anyone with the permission sees every line by
+   * name, which is the point in a family home.
+   */
   app.get('/api/v1/activity', authed, async (request) => {
     const query = z
       .object({ limit: z.coerce.number().int().min(1).max(200).default(50), before: z.coerce.number().int().optional() })
       .parse(request.query);
-    const rows = await deps.activity.list(query.limit, query.before);
+    const mine = deps.access.can(request.member!.id, 'activity.read')
+      ? undefined
+      : request.member!.id;
+    const rows = await deps.activity.list(query.limit, query.before, mine);
     return rows.map((row) => ({
       id: row.id,
       at: row.at.toISOString(),
@@ -980,9 +1292,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     return { ...ai, status };
   };
 
-  app.get('/api/v1/settings/ai', ownerOnly, aiSettingsResponse);
+  app.get('/api/v1/settings/ai', needs('hub.ai'), aiSettingsResponse);
 
-  app.put('/api/v1/settings/ai', ownerOnly, async (request) => {
+  app.put('/api/v1/settings/ai', needs('hub.ai'), async (request) => {
     const body = z
       .object({
         // Anthropic is the only provider — tolerated for older clients.
@@ -1028,7 +1340,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * this for now" and "forget my credential" have very different costs to
    * undo, and an owner who wanted the first had to pay the second.
    */
-  app.patch('/api/v1/settings/ai', ownerOnly, async (request) => {
+  app.patch('/api/v1/settings/ai', needs('hub.ai'), async (request) => {
     const body = z
       .object({
         enabled: z.boolean().optional(),
@@ -1048,7 +1360,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     return aiSettingsResponse();
   });
 
-  app.delete('/api/v1/settings/ai', ownerOnly, async (_request, reply) => {
+  app.delete('/api/v1/settings/ai', needs('hub.ai'), async (_request, reply) => {
     await deps.settings.clearAiSettings();
     return reply.code(204).send();
   });
@@ -1059,7 +1371,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * Owner-only because it names device models and costs money, and because
    * `GET /settings/ai` — the other half of the same answer — already is.
    */
-  app.get('/api/v1/ai/runs', ownerOnly, async (request) => {
+  app.get('/api/v1/ai/runs', needs('hub.ai'), async (request) => {
     const query = z
       .object({ limit: z.coerce.number().int().min(1).max(100).default(30) })
       .parse(request.query);
@@ -1093,9 +1405,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * to another hub, or to fix an entry that was nearly right. These five
    * routes are that, and only `repair` needs a credential.
    */
-  app.get('/api/v1/device-mappings', ownerOnly, async () => deps.mappings.list());
+  app.get('/api/v1/device-mappings', needs('hub.ai'), async () => deps.mappings.list());
 
-  app.get('/api/v1/device-mappings/:exposesHash', ownerOnly, async (request, reply) => {
+  app.get('/api/v1/device-mappings/:exposesHash', needs('hub.ai'), async (request, reply) => {
     const { exposesHash } = hashParam.parse(request.params);
     const envelope = await deps.mappings.get(exposesHash);
     if (!envelope) return reply.code(404).send({ error: 'not_found' });
@@ -1111,7 +1423,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * the agent along with exactly what was wrong — the difference between a
    * dead end and a step.
    */
-  app.put('/api/v1/device-mappings/:exposesHash', ownerOnly, async (request, reply) => {
+  app.put('/api/v1/device-mappings/:exposesHash', needs('hub.ai'), async (request, reply) => {
     const { exposesHash } = hashParam.parse(request.params);
     const outcome = await deps.mappings.import(exposesHash, request.body);
     if (!outcome.ok) {
@@ -1124,14 +1436,14 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     return outcome;
   });
 
-  app.delete('/api/v1/device-mappings/:exposesHash', ownerOnly, async (request, reply) => {
+  app.delete('/api/v1/device-mappings/:exposesHash', needs('hub.ai'), async (request, reply) => {
     const { exposesHash } = hashParam.parse(request.params);
     const removed = await deps.mappings.remove(exposesHash);
     if (!removed) return reply.code(404).send({ error: 'not_found' });
     return reply.code(204).send();
   });
 
-  app.post('/api/v1/device-mappings/:exposesHash/repair', ownerOnly, async (request, reply) => {
+  app.post('/api/v1/device-mappings/:exposesHash/repair', needs('hub.ai'), async (request, reply) => {
     const { exposesHash } = hashParam.parse(request.params);
     const refusal = await aiUnavailableReason();
     if (refusal) return reply.code(409).send({ error: refusal });
@@ -1158,7 +1470,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * Expect this process to be restarted a moment after a mode change that
    * actually moves Matter. The response is sent first.
    */
-  app.put('/api/v1/settings/radio', authed, async (request) => {
+  app.put('/api/v1/settings/radio', needs('hub.radio'), async (request) => {
     // Built from the exported list rather than re-typed, so a mode added to
     // `core/radio.ts` cannot be one the API silently rejects.
     const modes = RADIO_MODES as readonly [RadioMode, ...RadioMode[]];

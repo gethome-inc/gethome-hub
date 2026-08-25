@@ -42,6 +42,12 @@ hub can control them.
   conventions shared with the GetHome apps ([docs/device-schema.md](docs/device-schema.md)).
 - **Sharing built in** — pairing-code claim makes you the owner; short-lived
   invite codes add family members. Only hub homes are shareable in GetHome.
+- **Roles and permissions** — Owner, Member and Guest ship built in, a home can
+  add its own, and what each one may do is a table edited from either app. A
+  Guest works the lights and keeps their own favorites without touching the
+  home's names, its network or anybody else's activity. The defaults reproduce
+  exactly what the hub did before roles existed, so updating changes nothing
+  until somebody edits the matrix. See [docs/api.md](docs/api.md#roles-and-permissions-in-full).
 - **Local REST + WebSocket API** ([docs/api.md](docs/api.md)) and mDNS
   discovery (`_gethome._tcp`). Apps can watch the hub's own MQTT broker live —
   every Zigbee signal passes through it — plus the Zigbee pairing timeline and

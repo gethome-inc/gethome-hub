@@ -56,6 +56,18 @@ export interface HubEvents {
    * bounce the socket.
    */
   hubStatusChanged: [];
+  /**
+   * What one or more members may do has changed — their role was swapped, or
+   * the role they hold was edited.
+   *
+   * Carries member ids rather than the new permissions, because the answer is
+   * per member and `api/ws.ts` renders the frame per socket anyway (the same
+   * reason `deviceUpserted` is rendered there and not on the bus). A role edit
+   * has to reach an app that is already open, or somebody sits looking at
+   * controls that have quietly stopped working — the argument that put
+   * `structure` and `hubStatus` on the socket, applied to access.
+   */
+  accessChanged: [memberIds: string[]];
   commissioningProgress: [jobId: string, status: string, detail?: string];
   mqttFrame: [frame: MqttFrame];
   zigbeeEvent: [event: ZigbeeLifecycleEvent];

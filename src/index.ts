@@ -10,6 +10,7 @@ import { HubEventBus } from './core/bus.js';
 import { ActivityService } from './core/activity.js';
 import { HomeService } from './core/home.js';
 import { FavoritesService } from './core/favorites.js';
+import { AccessService } from './core/access.js';
 import { PairingService } from './core/pairing.js';
 import { SettingsService } from './core/settings.js';
 import { DeviceRegistry } from './core/registry.js';
@@ -73,7 +74,13 @@ async function main(): Promise<void> {
   const events = new HubEventBus();
   const activity = new ActivityService(db, events);
   const settings = new SettingsService(db, secret.aesKey);
-  const pairing = new PairingService(db, config.DATA_DIR, log);
+  // Who may do what. Loaded before the pairing service, which writes a
+  // `role_id` on every claim and has to be able to ask for one — and before
+  // anything can serve a request, since every authenticated route asks this.
+  const access = new AccessService(db, events);
+  await access.load();
+
+  const pairing = new PairingService(db, config.DATA_DIR, log, access);
   await pairing.boot();
 
   const registry = new DeviceRegistry(db, events, activity, log.child({ module: 'registry' }));
@@ -155,6 +162,7 @@ async function main(): Promise<void> {
     events,
     registry,
     favorites,
+    access,
     pairing,
     activity,
     settings,
