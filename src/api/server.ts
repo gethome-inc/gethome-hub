@@ -1266,18 +1266,36 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   /**
    * Ask the hub to update itself.
    *
-   * **Owner only.** The rule elsewhere is that "bringing something new in" —
-   * pairing, the join window, the radio switch — is any member's, because each
-   * is bounded, destroys nothing and is written down with a name. An update is
-   * the first two but not quite the third kind of thing: it replaces the code
-   * every member depends on and runs database migrations that flipping the
-   * symlink back does not undo.
+   * **Any member**, and it took a real household to settle that. This was
+   * owner-only on the reasoning that an update is not quite "bringing
+   * something new in": it replaces the code every member depends on and runs
+   * migrations that flipping the symlink back does not undo.
+   *
+   * What that missed is who the owner *is*. GetHome Studio claims a hub as
+   * *the Mac*, so the owner is a laptop in a drawer and every phone joins by
+   * invite as a plain member — and there is no ownership transfer, so that
+   * never changes for the life of the hub. Owner-only therefore did not mean
+   * "an update needs care"; it meant the phone in the owner's own hand could
+   * never update their own hub, ever. Observed, on the first hub this shipped
+   * to. It is the same discovery that moved renaming a device out of
+   * `ownerOnly`, for the same reason.
+   *
+   * It passes the three tests the others pass. **Bounded**: install.sh unpacks
+   * beside the running build and only moves the symlink once the new one
+   * answers, so a build that won't start puts itself back unattended.
+   * **Destroys nothing**: no device leaves, no membership ends, and migrations
+   * are written to be readable by the build before them — the rollback is what
+   * makes that a rule rather than a hope. **Named**: the row below carries the
+   * member's name, which is the accountability the role check stood in for.
+   *
+   * Taking something *away* is still the owner's — a device, a member, the
+   * credential that spends their money. That line is unchanged.
    *
    * The response is a receipt, not a state. Nothing has happened yet: a root
    * unit picks the request up a moment later and restarts this process on the
    * way. Poll this route for what became of it.
    */
-  app.post('/api/v1/system/update', ownerOnly, async (request, reply) => {
+  app.post('/api/v1/system/update', authed, async (request, reply) => {
     if (!canApplyUpdate(deps.dataDir)) {
       // A hub installed before any of this existed. Saying so beats letting the
       // request sit in a directory nothing is watching, which from an app looks

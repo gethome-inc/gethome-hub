@@ -1456,14 +1456,18 @@ describe.skipIf(!handle)('hub API', () => {
       expect(body).not.toHaveProperty('latest');
     });
 
-    it('refuses a member who tries to start one', async () => {
+    it('lets any member start one', async () => {
+      // Owner-only here meant the phone in the owner's own hand could never
+      // update their own hub: Studio claims a hub as *the Mac*, so the owner is
+      // a laptop in a drawer, every phone joins by invite, and there is no
+      // ownership transfer to fix it with. A member is refused below, but for
+      // the machine's sake and never for being a member.
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/system/update',
         headers: auth(memberToken),
       });
-      expect(response.statusCode).toBe(403);
-      expect(response.json()).toMatchObject({ error: 'owner_only' });
+      expect(response.statusCode).not.toBe(403);
     });
 
     it('refuses a machine with no update plumbing, by name', async () => {
@@ -1473,7 +1477,7 @@ describe.skipIf(!handle)('hub API', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/system/update',
-        headers: auth(ownerToken),
+        headers: auth(memberToken),
       });
       expect(response.statusCode).toBe(409);
       expect(response.json()).toMatchObject({ error: 'update_unsupported' });

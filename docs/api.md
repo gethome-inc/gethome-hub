@@ -96,7 +96,7 @@ standing in for.
 | `POST /device-mappings/:exposesHash/repair` | owner | hand a rejected descriptor to the agent with the complaints. `409 ai_not_configured` / `409 ai_disabled` / `409 nothing_to_repair`, `422 no_device` |
 | `PUT /settings/radio` | any | `{mode: "auto"\|"zigbee"\|"matter"}` → `{budget, mode, matter, canRunBoth, applying: true}`. Records a *request*; see below |
 | `GET /system/update` | any | what is installed, whether anything newer exists, and how a run is going — see [below](#updating-the-hub). `?refresh=1` asks GitHub again, behind a one-minute floor |
-| `POST /system/update` | **owner** | ask the hub to update itself → `202 {id, state:"queued"}`. `409 update_unsupported` on a machine with no update plumbing, `409 update_in_progress` while one is running |
+| `POST /system/update` | any | ask the hub to update itself → `202 {id, state:"queued"}`. `409 update_unsupported` on a machine with no update plumbing, `409 update_in_progress` while one is running |
 | `GET /system/update/log?tail=` | any | the tail of what the installer printed: `{lines, total, truncated}`. Default 200 lines, max 2000 |
 
 ### The hub's name is the home's name
@@ -499,13 +499,26 @@ The outcome also reaches the activity log as a `hub.update` row, written at the
 next boot: the hub cannot record its own update while it is being restarted by
 it. The request is recorded straight away, with the member's name.
 
-**Why this is owner-only**, when pairing, the join window and the radio switch
-are not: those are bounded, destroy nothing and are written down with a name. An
-update is the first and the third but not the second — it replaces the code every
-member depends on and runs database migrations that flipping the symlink back
-does not undo. The *information* is any member's, because somebody who cannot
-press the button still has to be able to see why the home is unreachable for the
-next two minutes.
+**Why any member may do this.** It was owner-only first, on the reasoning that an
+update is not quite "bringing something new in" — it replaces the code everybody
+depends on. What that missed is who the owner *is*: GetHome Studio claims a hub
+as *the Mac*, so the owner is a laptop in a drawer, every phone joins by invite
+as a plain member, and [there is no ownership
+transfer](#which-member-you-are-isself-and-patch-membersme) to fix it with. The
+rule therefore did not mean "an update needs care"; it meant the phone in the
+owner's own hand could never update their own hub, for the life of that hub.
+Found on the first one this shipped to — the same discovery that moved renaming a
+device out of `ownerOnly`.
+
+It passes the three tests the others pass. **Bounded**: `install.sh` unpacks
+beside the running build and only moves the symlink once the new one answers, so
+a build that won't start puts itself back unattended. **Destroys nothing**: no
+device leaves, no membership ends — and migrations are written to be readable by
+the build before them, which the automatic rollback turns from a hope into a
+rule. **Named**: the `hub.update` row carries the member's name.
+
+Taking something *away* is still the owner's — a device, a member, the credential
+that spends their money. That line has not moved.
 
 ### The Zigbee join window
 
