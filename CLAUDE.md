@@ -449,10 +449,19 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   put the kettle on their own dashboard.
   **Second, the owner is never evaluated.** `can()` answers `true` for the owner
   without reading a stored set, so a permission a later build adds is theirs
-  automatically and no edit can lock a home out of itself — which is precisely
-  what makes `role.manage` safe to hand out with no escalation guard. The
-  refusals follow from it: the owner's role cannot be edited, deleted, assigned,
-  or changed out from under them.
+  automatically and no edit to the matrix can lock a home out of itself. One
+  refusal follows: the owner's *role* row cannot be edited or deleted
+  (`role_is_owner`), because nothing reads it.
+  **Owner is otherwise an ordinary role** — invitable, assignable, revocable,
+  and holdable by several people at once — held up by two rules instead of the
+  flat refusal it used to be. **Only an owner grants or revokes it**
+  (`403 not_owner`, deliberately not `owner_only`, which both apps read as "this
+  hub is too old"), and that check is what keeps `role.manage` safe to delegate
+  to a role a home invented: without it the permission would quietly mean "can
+  make myself owner" and every other key would be a formality. **A home always
+  keeps one owner** (`cannot_change_owner` / `cannot_remove_owner`, narrowed
+  from "any owner" to "the last"), because granting the role is owner-only, so a
+  home with none has nobody left who could give it one.
   **Third, the defaults are the old behaviour written down.** `member` is, key
   for key, what `authed` used to allow; the keys missing from it are what
   `ownerOnly` used to refuse. Updating a hub changes nothing until somebody
@@ -465,8 +474,8 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   update is not merely "bringing something new in" — it replaces the code every
   member depends on and runs migrations a symlink flip does not undo. What that
   missed is who the owner *is*: Studio claims a hub as *the Mac*, so the owner is
-  a laptop in a drawer, every phone joins by invite, and no ownership transfer
-  exists to fix it with — so owner-only did not mean "this needs care", it meant
+  a laptop in a drawer and every phone joins by invite, with Owner something an
+  owner hands over and nobody had — so owner-only did not mean "this needs care", it meant
   the phone in the owner's own hand could never update their own hub, ever. It
   passes all three tests (the installer's own rollback is what bounds it, which
   is why `test/migrations.test.ts` turns "migrations stay readable by the build

@@ -179,6 +179,60 @@ describe.skipIf(!handle)('access service', () => {
     expect(access.permissionsFor(anna)).toEqual([...BUILTIN_ROLES[1]!.permissions]);
   });
 
+  // ── The last owner ────────────────────────────────────────────────────────
+
+  /**
+   * Owner is an ordinary role now — invitable, assignable, revocable — and
+   * this count is the single thing left holding the old rule up. A home that
+   * loses its last owner cannot get one back: granting the role is itself
+   * owner-only, so there would be nobody able to put it right.
+   */
+  it('counts owners, and knows when there is only one left', async () => {
+    const access = await loaded();
+    const ownerRole = access.builtinRoleId('owner')!;
+    const georgy = await addMember('Georgy', { role: 'owner', roleId: ownerRole });
+    const anna = await addMember('Anna', { role: 'member', roleId: access.builtinRoleId('member') });
+    access.noteMember(georgy, ownerRole);
+    access.noteMember(anna, access.builtinRoleId('member'));
+
+    expect(access.ownerCount()).toBe(1);
+    expect(access.isLastOwner(georgy)).toBe(true);
+    // Not an owner at all, so never the last one — the check has to say no
+    // rather than "there is only one owner and it isn't you".
+    expect(access.isLastOwner(anna)).toBe(false);
+
+    await access.assignRole(anna, ownerRole);
+    expect(access.ownerCount()).toBe(2);
+    expect(access.isLastOwner(georgy)).toBe(false);
+    expect(access.isLastOwner(anna)).toBe(false);
+
+    // Stepping down leaves one, and that one is stuck again.
+    await access.assignRole(georgy, access.builtinRoleId('member')!);
+    expect(access.ownerCount()).toBe(1);
+    expect(access.isLastOwner(anna)).toBe(true);
+  });
+
+  /**
+   * Counted from the in-memory map, so a member who has left has to stop
+   * counting — otherwise the home's last owner reads as its second-to-last and
+   * the guard opens on a home that has nobody.
+   */
+  it('stops counting an owner who has left', async () => {
+    const access = await loaded();
+    const ownerRole = access.builtinRoleId('owner')!;
+    const georgy = await addMember('Georgy', { role: 'owner', roleId: ownerRole });
+    const anna = await addMember('Anna', { role: 'owner', roleId: ownerRole });
+    access.noteMember(georgy, ownerRole);
+    access.noteMember(anna, ownerRole);
+    expect(access.ownerCount()).toBe(2);
+
+    await db.delete(members).where(eq(members.id, anna));
+    access.forgetMember(anna);
+
+    expect(access.ownerCount()).toBe(1);
+    expect(access.isLastOwner(georgy)).toBe(true);
+  });
+
   // ── Editing ───────────────────────────────────────────────────────────────
 
   /**

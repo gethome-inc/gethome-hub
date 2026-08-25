@@ -326,6 +326,35 @@ export class AccessService {
     return this.roleFor(memberId)?.key === OWNER_ROLE_KEY;
   }
 
+  /**
+   * How many people hold the owner role.
+   *
+   * Owner is an ordinary role now — it can be invited into, assigned and taken
+   * away — and this is the one thing left holding the old rule up. A home that
+   * loses its last owner is one nobody can ever configure again: no route
+   * grants the role, because granting it is itself owner-only, so there would
+   * be nobody left who could put it right. Everything else about owning a home
+   * opens up; this does not.
+   *
+   * Counted from the in-memory map rather than the table, like everything else
+   * `can()` reads, and `forgetMember` is what keeps it honest when somebody
+   * leaves.
+   */
+  ownerCount(): number {
+    const ownerRoleId = this.byKey.get(OWNER_ROLE_KEY)?.id;
+    if (!ownerRoleId) return 0;
+    let count = 0;
+    for (const roleId of this.roleByMember.values()) {
+      if (roleId === ownerRoleId) count += 1;
+    }
+    return count;
+  }
+
+  /** Whether moving or removing this member would leave the home ownerless. */
+  isLastOwner(memberId: string): boolean {
+    return this.isOwner(memberId) && this.ownerCount() <= 1;
+  }
+
   roleFor(memberId: string): RoleRecord | undefined {
     const roleId = this.roleByMember.get(memberId);
     return roleId ? this.byId.get(roleId) : this.byKey.get(DEFAULT_ROLE_KEY);

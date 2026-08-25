@@ -1080,25 +1080,42 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   });
 
   /**
-   * Put somebody in a different role.
+   * Put somebody in a different role — including the owner's.
    *
-   * Two refusals, and both are the owner rule the removal routes already
-   * carry: the owner's own role cannot be changed, and no role whose key is
-   * `owner` can be handed to anybody. There is no ownership transfer in this
-   * hub — a home whose owner changed hands by accident is one nobody can
-   * configure again — so this route deliberately cannot create or move one.
+   * **Owner is an ordinary role**, invitable and assignable and revocable, and
+   * two rules take the place of the blanket refusals that used to say
+   * otherwise.
+   *
+   * **Only an owner may hand out the owner's role, or take it back.**
+   * `role.manage` is what edits the matrix, and a home can grant it to a role
+   * it invented — so if that permission alone could promote, it would silently
+   * mean "can make myself owner" and every other permission would be a
+   * formality. This route is the escalation surface and this check is the
+   * guard; `403 not_owner` rather than `owner_only`, which both apps read as
+   * "this hub is too old, update it" and would send somebody to fix a hub that
+   * is working perfectly.
+   *
+   * **A home always keeps one owner.** That is the whole of what the old rule
+   * was protecting: granting the role is itself owner-only, so a home that
+   * lost its last one would have nobody left able to put it right. Moving the
+   * last owner out is `409 cannot_change_owner` — the same code as before,
+   * narrowed to the case that still matters, so an app a version behind shows
+   * a sentence that is still true rather than nothing at all.
    */
   app.patch('/api/v1/members/:id', needs('role.manage'), async (request, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     const body = z.object({ roleId: z.uuid() }).parse(request.body);
     const target = await deps.db.query.members.findFirst({ where: eq(members.id, id) });
     if (!target) return reply.code(404).send({ error: 'not_found' });
-    if (deps.access.isOwner(target.id)) {
-      return reply.code(409).send({ error: 'cannot_change_owner' });
-    }
     const wanted = deps.access.role(body.roleId);
     if (!wanted) return reply.code(404).send({ error: 'unknown_role' });
-    if (wanted.key === OWNER_ROLE_KEY) {
+
+    const touchesOwnership =
+      wanted.key === OWNER_ROLE_KEY || deps.access.isOwner(target.id);
+    if (touchesOwnership && !deps.access.isOwner(request.member!.id)) {
+      return reply.code(403).send({ error: 'not_owner' });
+    }
+    if (wanted.key !== OWNER_ROLE_KEY && deps.access.isLastOwner(target.id)) {
       return reply.code(409).send({ error: 'cannot_change_owner' });
     }
     const before = deps.access.roleFor(target.id);
@@ -1156,15 +1173,18 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * id. Any member may do it, because leaving is the one decision about a
    * member that is entirely their own.
    *
-   * The owner may not. There is no ownership transfer, so a home whose owner
-   * walked out is one nobody can ever invite to, remove from, or configure
-   * again — the same refusal, in the same words, as removing the owner by id.
-   * An owner who is finished with a hub is finished with the hub, and that is
+   * **The last owner may not**, and that is now the only thing stopping them.
+   * An owner who has made somebody else one can walk out like anybody else;
+   * the last one cannot, because granting the role is owner-only and a home
+   * with nobody in it would have no way back. An owner who is finished with a
+   * hub and is the only one left is finished with the hub, and that is
    * `gethome-hubctl` on the machine, not a route.
    */
   app.delete('/api/v1/members/me', authed, async (request, reply) => {
     const member = request.member!;
-    if (member.role === 'owner') return reply.code(409).send({ error: 'cannot_remove_owner' });
+    if (deps.access.isLastOwner(member.id)) {
+      return reply.code(409).send({ error: 'cannot_remove_owner' });
+    }
     await deps.db.delete(members).where(eq(members.id, member.id));
     await endMembership(member.id, `${member.name} left the home.`, 'member.left');
     return reply.code(204).send();
@@ -1174,7 +1194,14 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     const target = await deps.db.query.members.findFirst({ where: eq(members.id, id) });
     if (!target) return reply.code(404).send({ error: 'not_found' });
-    if (target.role === 'owner') return reply.code(409).send({ error: 'cannot_remove_owner' });
+    // Same two rules as moving somebody out of the role: only an owner may
+    // take an owner out of the home, and never the last one.
+    if (deps.access.isOwner(target.id) && !deps.access.isOwner(request.member!.id)) {
+      return reply.code(403).send({ error: 'not_owner' });
+    }
+    if (deps.access.isLastOwner(target.id)) {
+      return reply.code(409).send({ error: 'cannot_remove_owner' });
+    }
     await deps.db.delete(members).where(eq(members.id, id));
     await endMembership(
       target.id,
@@ -1246,8 +1273,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * path has honoured it just as long; this route simply never passed one, so
    * every invite in the hub's history has been a `member` invite. Omitting
    * `roleId` still means exactly that, so nothing that already works changes.
-   * Handing somebody the owner's role is refused here for the same reason
-   * `PATCH /members/:id` refuses it: there is no ownership transfer.
+   *
+   * An **owner invite** is allowed, and gated the same way `PATCH /members/:id`
+   * gates the role: only an owner may mint one. `PairingService.claim` already
+   * reads the invite's role and writes the legacy `owner` word when its key
+   * says so, so nothing downstream needed changing — this route was the only
+   * thing refusing.
    */
   app.post('/api/v1/invites', needs('member.invite'), async (request, reply) => {
     const body = z
@@ -1256,8 +1287,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (body.roleId) {
       const role = deps.access.role(body.roleId);
       if (!role) return reply.code(404).send({ error: 'unknown_role' });
-      if (role.key === OWNER_ROLE_KEY) {
-        return reply.code(409).send({ error: 'cannot_change_owner' });
+      if (role.key === OWNER_ROLE_KEY && !deps.access.isOwner(request.member!.id)) {
+        return reply.code(403).send({ error: 'not_owner' });
       }
     }
     const invite = await deps.pairing.createInvite(request.member!.id, body.roleId);

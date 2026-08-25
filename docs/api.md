@@ -97,7 +97,7 @@ than no button.
 | `GET /matter/commission/:jobId` | floor | `{status: running\|done\|failed, nodeId?, error?}` |
 | `POST /zigbee/permit-join` | `device.add` | `{seconds}`, 0–900 (0 = close the network) → `{permitJoin, seconds}` describing the **live** window, which is not always what was asked for. See [below](#the-zigbee-join-window) |
 | `GET /members` · `PATCH /members/me` · `DELETE /members/me` · `DELETE /members/:id` | floor · floor (itself) · floor (itself) · `member.remove` | rows carry `isSelf`, `roleId` and `roleName`; `PATCH` takes `{name}` and renames **the caller**; `DELETE` on either route answers `204` and revokes that member's tokens; the owner cannot be removed, by anyone or by itself. See [below](#which-member-you-are-isself-and-patch-membersme) |
-| `GET /invites` · `POST /invites` | `member.invite` | `POST {roleId?}` → `201 {code, expiresAt, roleId, roleName}`. Omitting `roleId` mints a **Member** invite, which is what every invite this hub has ever made was |
+| `GET /invites` · `POST /invites` | `member.invite` | `POST {roleId?}` → `201 {code, expiresAt, roleId, roleName}`. Omitting `roleId` mints a **Member** invite, which is what every invite this hub has ever made was. An **owner** invite is allowed and needs the caller to be one (`403 not_owner`) |
 | `GET /activity?limit=&before=` | floor · `activity.read` | reverse-chronological, cursor = `before` id; rows carry `data` — see [below](#the-activity-log) |
 | `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | `hub.ai` | PUT `{apiKey, model?}` (an Anthropic API key, write-only; a `sk-ant-oat…` subscription token and a model outside the supported list are both refused with 400, an `authType` from an older app is ignored). **PATCH `{enabled?, model?}`** changes those without re-entering the key — the switch is deliberately not the credential. All three respond `{provider: "anthropic", model, hasKey, enabled, legacySubscriptionToken, status}`; `enabled` defaults to true and `status` carries `lastError`/`lastRun` health — see [ai-adaptation.md](ai-adaptation.md) |
 | `GET /ai/runs?limit=` | `hub.ai` | what the mapping agent did, newest first: `{id, at, kind, vendor, model, exposesHash, modelId, ok, costUsd, turns, durationMs, errorKind, errorMessage, steps}`. A summary, never a transcript — see [ai-adaptation.md](ai-adaptation.md) |
@@ -111,7 +111,7 @@ than no button.
 | `GET /permissions` | floor | the catalog: `{key, group, title, summary}` per permission. The hub owns the wording |
 | `GET /roles` | floor | `[{id, key, name, builtin, permissions, memberCount, sortOrder}]` |
 | `POST /roles` · `PATCH /roles/:id` · `DELETE /roles/:id` | `role.manage` | `POST {name, permissions?}` → 201. `PATCH {name?, permissions?}`. `409 role_is_owner`, `409 role_is_builtin`, `409 role_in_use` |
-| `PATCH /members/:id` | `role.manage` | `{roleId}` — put somebody in a different role. `409 cannot_change_owner`, `404 unknown_role` |
+| `PATCH /members/:id` | `role.manage` | `{roleId}` — put somebody in a different role, the owner's included. Granting or revoking that one needs the caller to be an owner (`403 not_owner`); the last owner cannot be moved out of it (`409 cannot_change_owner`). `404 unknown_role` |
 | `GET /system/update` | floor | what is installed, whether anything newer exists, and how a run is going — see [below](#updating-the-hub). `?refresh=1` asks GitHub again, behind a one-minute floor. **Reading is the floor on purpose**: somebody who may not press the button still has to see why the home went quiet for two minutes |
 | `POST /system/update` | `hub.update` | ask the hub to update itself → `202 {id, state:"queued"}`. `409 update_unsupported` on a machine with no update plumbing, `409 update_in_progress` while one is running |
 | `GET /system/update/log?tail=` | floor | the tail of what the installer printed: `{lines, total, truncated}`. Default 200 lines, max 2000 |
@@ -165,7 +165,8 @@ Member accordingly, and only an explicit edit moves anything after that.
 `hub.update` is the one that looks like an exception and is not.
 `POST /system/update` was owner-only for about a day, and what settled it was
 who the owner *is*: Studio claims a hub as *the Mac*, so the owner is a laptop
-in a drawer, every phone joins by invite, and there is no ownership transfer —
+in a drawer and every phone joins by invite (Owner is handed over by an owner,
+which nobody had done) —
 owner-only did not mean "an update needs care", it meant the phone in somebody's
 hand could never update their own home. It was open to every member by the time
 roles landed, so Member holding it takes nothing from anybody, and Guest is a
@@ -184,14 +185,36 @@ things worth keeping:
 
 - a permission a later hub build adds is the owner's automatically, with no
   migration and nothing to forget;
-- no edit to any table can lock a home out of itself, which is what makes
-  `role.manage` safe to hand to anybody with no escalation guard behind it;
-- and the refusals follow: `PATCH /roles/:id` and `DELETE /roles/:id` answer
-  `409 role_is_owner` (a control that moved a number on a screen and nothing in
-  the world would be worse than no control), no route may *assign* the owner's
-  role, and the owner's own role cannot be changed — `409 cannot_change_owner`,
-  the same rule and the same reason as `cannot_remove_owner`. There is no
-  ownership transfer in this hub.
+- no edit to any table can lock a home out of itself, so editing the matrix is
+  never the thing that takes a home away from the people in it;
+- and one refusal follows: `PATCH /roles/:id` and `DELETE /roles/:id` answer
+  `409 role_is_owner`, because nothing reads that row — a control that moved a
+  number on a screen and nothing in the world would be worse than no control.
+
+#### Owner is a role somebody holds, and a home always keeps one
+
+The role itself is **ordinary**: it can be invited into (`POST /invites` with
+its `roleId`), assigned (`PATCH /members/:id`) and taken away again. Several
+people can hold it at once, and each of them is answered `true` without a stored
+set being read.
+
+Two rules replace what used to be a flat refusal on all of it.
+
+**Only an owner may grant the owner's role, or take it back.** `role.manage` is
+what edits the matrix and a home can hand it to a role it invented — so if that
+permission alone could promote, it would quietly come to mean "can make myself
+owner" and every other permission would be a formality. That check is what keeps
+`role.manage` safe to delegate. Refused with **`403 not_owner`**, deliberately
+*not* `owner_only`: both GetHome apps read that word as "this hub predates roles,
+update it", and would send somebody to fix a hub that is working perfectly.
+
+**A home always keeps at least one owner.** Moving the last one out of the role
+is `409 cannot_change_owner`; removing them, or their leaving, is
+`409 cannot_remove_owner`. Both codes are the ones that already existed, narrowed
+to the case that still matters — an app a version behind then shows its old
+sentence, which is still roughly true, rather than nothing at all. The reason is
+narrower than it used to be and is the whole of it: granting the role is
+owner-only, so a home with no owner has nobody left who could give it one.
 
 #### Roles a home invents
 
@@ -399,11 +422,13 @@ announcement of their own removal.
 one decision about a member that is entirely their own. `DELETE /members/:id`
 is **removal**, and is the owner's.
 
-**The owner can do neither**, to itself or through anyone else — `409
-cannot_remove_owner` from both routes. There is no ownership transfer, so a
-home whose owner left is one nobody can ever invite to, remove from, or
-configure again; an owner finished with a hub is finished with the hub, which
-is `gethome-hubctl` on the machine rather than a route.
+**The last owner can do neither**, to itself or through anyone else — `409
+cannot_remove_owner` from both routes — and taking an owner out of the home at
+all needs the caller to be one (`403 not_owner`). An owner who has made somebody
+else one can leave like anybody else; the only one left cannot, because a home
+with no owner has nobody who could grant the role back. An owner finished with a
+hub and alone in it is finished with the hub, which is `gethome-hubctl` on the
+machine rather than a route.
 
 Each writes one activity entry — `member.left` or `member.removed` — naming the
 member in the message and carrying **no `memberId`**. That is deliberate twice
@@ -984,7 +1009,7 @@ goes. Treat it as a stop, and say so; every other close is worth retrying.
 `400 {error:"invalid_body", issues:[…]}` (zod), `401 unauthorized`,
 `403 {error:"forbidden", permission:"<key>"}`, `404 not_found`, `409` for
 protocol-level refusals (unsupported command, adapter disabled,
-`cannot_remove_owner`, `cannot_change_owner`, `role_is_owner`,
+`cannot_remove_owner`, `cannot_change_owner`, `not_owner`, `role_is_owner`,
 `role_is_builtin`, `role_in_use`).
 
 **A refusal names the permission**, because "the hub said no" leaves a person

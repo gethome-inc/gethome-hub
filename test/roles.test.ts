@@ -467,7 +467,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
     }
   });
 
-  it('refuses to edit or delete the owner’s role, or to hand it to anybody', async () => {
+  it('refuses to edit or delete the owner’s role', async () => {
     const owner = await roleId('owner');
     expect(
       (
@@ -489,23 +489,13 @@ describe.skipIf(!handle)('roles and permissions', () => {
       ).json(),
     ).toMatchObject({ error: 'role_is_owner' });
 
-    // There is no ownership transfer, so no route may create a second owner.
+    // The one owner this home has cannot be moved out of the role, because
+    // granting it is itself owner-only and there would be nobody left who
+    // could put it back. Assigning it to *somebody else* is allowed now, and
+    // has its own test below.
     const members = (
       await app.inject({ method: 'GET', url: '/api/v1/members', headers: auth(ownerToken) })
     ).json() as MemberRow[];
-    const anna = members.find((row) => row.name === 'Anna')!;
-    expect(
-      (
-        await app.inject({
-          method: 'PATCH',
-          url: `/api/v1/members/${anna.id}`,
-          headers: auth(ownerToken),
-          payload: { roleId: owner },
-        })
-      ).json(),
-    ).toMatchObject({ error: 'cannot_change_owner' });
-
-    // Nor may the owner's own role be changed out from under them.
     const georgy = members.find((row) => row.name === 'Georgy')!;
     expect(
       (
@@ -517,6 +507,17 @@ describe.skipIf(!handle)('roles and permissions', () => {
         })
       ).json(),
     ).toMatchObject({ error: 'cannot_change_owner' });
+
+    // And they cannot leave or be removed while they are the only one.
+    expect(
+      (
+        await app.inject({
+          method: 'DELETE',
+          url: '/api/v1/members/me',
+          headers: auth(ownerToken),
+        })
+      ).json(),
+    ).toMatchObject({ error: 'cannot_remove_owner' });
 
     // A built-in that isn't the owner cannot be deleted either.
     expect(
@@ -880,19 +881,42 @@ describe.skipIf(!handle)('roles and permissions', () => {
   });
 
   /**
-   * There is no ownership transfer, so no route may produce a second owner —
-   * and an invite is the one that would do it without any member row existing
-   * yet to refuse on.
+   * An owner invite is the one route that hands out the role with no member
+   * row existing yet to check against, so it carries the same guard as
+   * `PATCH /members/:id`: only an owner may mint one.
    */
-  it('refuses to mint an invite into the owner’s role', async () => {
+  it('lets an owner mint an owner invite, and nobody else', async () => {
     const owner = await app.inject({
       method: 'POST',
       url: '/api/v1/invites',
       headers: auth(ownerToken),
       payload: { roleId: await roleId('owner') },
     });
-    expect(owner.statusCode).toBe(409);
-    expect(owner.json()).toMatchObject({ error: 'cannot_change_owner' });
+    expect(owner.statusCode).toBe(201);
+    expect(owner.json()).toMatchObject({ roleName: 'Owner' });
+
+    // `member.invite` is not enough — this is the escalation surface.
+    const grant = async (permissions: string[]) => {
+      await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/roles/${await roleId('member')}`,
+        headers: auth(ownerToken),
+        payload: { permissions },
+      });
+    };
+    await grant(['member.invite', 'role.manage']);
+    const refused = await app.inject({
+      method: 'POST',
+      url: '/api/v1/invites',
+      headers: auth(memberToken),
+      payload: { roleId: await roleId('owner') },
+    });
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json()).toMatchObject({ error: 'not_owner' });
+    // Deliberately not `owner_only`: both apps read that as "this hub is too
+    // old, update it" and would send somebody to fix a working hub.
+    expect(refused.json()).not.toMatchObject({ error: 'owner_only' });
+    await grant([...BUILTIN_ROLES[1].permissions]);
 
     const unknown = await app.inject({
       method: 'POST',
@@ -902,6 +926,183 @@ describe.skipIf(!handle)('roles and permissions', () => {
     });
     expect(unknown.statusCode).toBe(404);
     expect(unknown.json()).toMatchObject({ error: 'unknown_role' });
+  });
+
+  // ── Owner is an ordinary role now ─────────────────────────────────────────
+
+  /**
+   * **The escalation surface, and the reason `role.manage` is still safe to
+   * delegate.** A home can grant that permission to a role it invented, so if
+   * it alone could promote, it would quietly mean "can make myself owner" and
+   * every other permission in the matrix would be a formality. Granting the
+   * owner's role is owner-only; everything else about the matrix is not.
+   */
+  it('refuses to promote anybody unless the caller is already an owner', async () => {
+    const ownerRole = await roleId('owner');
+    const members = (
+      await app.inject({ method: 'GET', url: '/api/v1/members', headers: auth(ownerToken) })
+    ).json() as MemberRow[];
+    const anna = members.find((row) => row.name === 'Anna')!;
+    const kolya = members.find((row) => row.name.startsWith('Kolya'))!;
+
+    // A role with `role.manage` and nothing owner-shaped about it.
+    const deputy = (
+      await app.inject({
+        method: 'POST',
+        url: '/api/v1/roles',
+        headers: auth(ownerToken),
+        payload: { name: 'Deputy', permissions: ['role.manage', 'member.remove'] },
+      })
+    ).json() as RoleWire;
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/members/${anna.id}`,
+      headers: auth(ownerToken),
+      payload: { roleId: deputy.id },
+    });
+
+    // It may move other people around — that is what the permission is for.
+    const ordinary = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/members/${kolya.id}`,
+      headers: auth(memberToken),
+      payload: { roleId: await roleId('guest') },
+    });
+    expect(ordinary.statusCode).toBe(200);
+
+    // It may not make anybody an owner, itself included.
+    for (const target of [kolya.id, anna.id]) {
+      const refused = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/members/${target}`,
+        headers: auth(memberToken),
+        payload: { roleId: ownerRole },
+      });
+      expect(refused.statusCode, target).toBe(403);
+      expect(refused.json(), target).toMatchObject({ error: 'not_owner' });
+    }
+
+    // Put Anna back, and the role with her.
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/members/${anna.id}`,
+      headers: auth(ownerToken),
+      payload: { roleId: await roleId('member') },
+    });
+    expect(
+      (
+        await app.inject({
+          method: 'DELETE',
+          url: `/api/v1/roles/${deputy.id}`,
+          headers: auth(ownerToken),
+        })
+      ).statusCode,
+    ).toBe(204);
+  });
+
+  /**
+   * The whole point of opening the role up: a second owner, and then the first
+   * one able to step down. What no route may do is leave the home without one
+   * — granting the role is owner-only, so there would be nobody left who could
+   * put it right.
+   */
+  it('makes a second owner, lets the first step down, and keeps the last', async () => {
+    const ownerRole = await roleId('owner');
+    const members = (
+      await app.inject({ method: 'GET', url: '/api/v1/members', headers: auth(ownerToken) })
+    ).json() as MemberRow[];
+    const anna = members.find((row) => row.name === 'Anna')!;
+    const georgy = members.find((row) => row.name === 'Georgy')!;
+
+    const promoted = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/members/${anna.id}`,
+      headers: auth(ownerToken),
+      payload: { roleId: ownerRole },
+    });
+    expect(promoted.statusCode).toBe(200);
+    expect(promoted.json()).toMatchObject({ roleName: 'Owner', role: 'owner' });
+
+    // She really is one: the owner is answered without a stored set being read.
+    const asAnna = (
+      await app.inject({ method: 'GET', url: '/api/v1/me', headers: auth(memberToken) })
+    ).json() as { isOwner: boolean; permissions: string[] };
+    expect(asAnna.isOwner).toBe(true);
+    expect(asAnna.permissions).toEqual([...PERMISSION_KEYS]);
+    expect(
+      (
+        await app.inject({ method: 'GET', url: '/api/v1/roles', headers: auth(ownerToken) })
+      ).json() as RoleWire[],
+    ).toContainEqual(expect.objectContaining({ key: 'owner', memberCount: 2 }));
+
+    // With two, either may step down — and Anna, now an owner, may do it.
+    const steppedDown = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/members/${georgy.id}`,
+      headers: auth(memberToken),
+      payload: { roleId: await roleId('member') },
+    });
+    expect(steppedDown.statusCode).toBe(200);
+    expect(steppedDown.json()).toMatchObject({ roleName: 'Member', role: 'member' });
+
+    // Anna is the last owner now, so nothing may move or remove her.
+    for (const [method, url, payload] of [
+      ['PATCH', `/api/v1/members/${anna.id}`, { roleId: await roleId('guest') }],
+      ['DELETE', `/api/v1/members/${anna.id}`, undefined],
+    ] as const) {
+      const refused = await app.inject({
+        method,
+        url,
+        headers: auth(memberToken),
+        ...(payload !== undefined ? { payload } : {}),
+      });
+      expect(refused.statusCode, method).toBe(409);
+      expect(refused.json(), method).toMatchObject({
+        error: method === 'DELETE' ? 'cannot_remove_owner' : 'cannot_change_owner',
+      });
+    }
+    // Nor may she leave.
+    expect(
+      (
+        await app.inject({
+          method: 'DELETE',
+          url: '/api/v1/members/me',
+          headers: auth(memberToken),
+        })
+      ).json(),
+    ).toMatchObject({ error: 'cannot_remove_owner' });
+
+    // And a plain member cannot take the role off an owner either.
+    expect(
+      (
+        await app.inject({
+          method: 'PATCH',
+          url: `/api/v1/members/${anna.id}`,
+          headers: auth(ownerToken),
+          payload: { roleId: await roleId('guest') },
+        })
+      ).statusCode,
+    ).toBe(403);
+
+    // Put the home back the way the rest of this file expects it.
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/members/${anna.id}`,
+      headers: auth(memberToken),
+      payload: { roleId: ownerRole },
+    });
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/members/${georgy.id}`,
+      headers: auth(memberToken),
+      payload: { roleId: ownerRole },
+    });
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/members/${anna.id}`,
+      headers: auth(ownerToken),
+      payload: { roleId: await roleId('member') },
+    });
   });
 
   // ── Working the lights is a permission too ────────────────────────────────

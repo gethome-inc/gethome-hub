@@ -111,6 +111,19 @@ describe.skipIf(!handle)('PairingService', () => {
     // it has only two: everybody who isn't the owner reads as a member there.
     expect(guest?.member.role).toBe('member');
 
+    // An owner invite admits a second owner. The route above it decides who
+    // may mint one; by the time a code is being claimed that is settled, and
+    // the legacy word has to say `owner` for a build this hub might roll back
+    // to — the one place two members legitimately read `owner` there.
+    const asOwner = await pairing.createInvite(
+      owner!.member.id,
+      access.builtinRoleId('owner')!,
+    );
+    const second = await pairing.claim(asOwner.code, 'Gera');
+    expect(second?.member.role).toBe('owner');
+    expect(access.isOwner(second!.member.id)).toBe(true);
+    expect(access.ownerCount()).toBe(2);
+
     const plain = await pairing.createInvite(owner!.member.id);
     expect(plain.roleId).toBe(access.builtinRoleId('member'));
     const anna = await pairing.claim(plain.code, 'Anna');
