@@ -8,6 +8,7 @@ import { runMigrations } from './db/migrate.js';
 import { ensureHubSecret } from './core/crypto.js';
 import { HubEventBus } from './core/bus.js';
 import { ActivityService } from './core/activity.js';
+import { recordFinishedUpdate } from './core/update.js';
 import { HomeService } from './core/home.js';
 import { FavoritesService } from './core/favorites.js';
 import { AccessService } from './core/access.js';
@@ -82,6 +83,12 @@ async function main(): Promise<void> {
 
   const pairing = new PairingService(db, config.DATA_DIR, log, access);
   await pairing.boot();
+
+  // An update restarts this process, so the hub cannot write down how its own
+  // update went while it is happening. The runner leaves the outcome in a file
+  // and this is where it becomes one line of the home's history — once, keyed
+  // on the run id, so a reboot a month later doesn't re-announce it.
+  void recordFinishedUpdate(config.DATA_DIR, activity, log).catch(() => undefined);
 
   const registry = new DeviceRegistry(db, events, activity, log.child({ module: 'registry' }));
   // Favorites are one member's pins rather than a property of the home, so they

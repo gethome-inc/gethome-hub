@@ -112,6 +112,9 @@ than no button.
 | `GET /roles` | floor | `[{id, key, name, builtin, permissions, memberCount, sortOrder}]` |
 | `POST /roles` · `PATCH /roles/:id` · `DELETE /roles/:id` | `role.manage` | `POST {name, permissions?}` → 201. `PATCH {name?, permissions?}`. `409 role_is_owner`, `409 role_is_builtin`, `409 role_in_use` |
 | `PATCH /members/:id` | `role.manage` | `{roleId}` — put somebody in a different role. `409 cannot_change_owner`, `404 unknown_role` |
+| `GET /system/update` | floor | what is installed, whether anything newer exists, and how a run is going — see [below](#updating-the-hub). `?refresh=1` asks GitHub again, behind a one-minute floor. **Reading is the floor on purpose**: somebody who may not press the button still has to see why the home went quiet for two minutes |
+| `POST /system/update` | `hub.update` | ask the hub to update itself → `202 {id, state:"queued"}`. `409 update_unsupported` on a machine with no update plumbing, `409 update_in_progress` while one is running |
+| `GET /system/update/log?tail=` | floor | the tail of what the installer printed: `{lines, total, truncated}`. Default 200 lines, max 2000 |
 
 ### Roles and permissions in full
 
@@ -536,6 +539,104 @@ is what `needsReview` is about: properties with no representation at all.
 `exposesHash` identifies the device *model*, and so its entry in the mapping
 library. Absent on a device adopted before the hub recorded it, which an app
 must read as "not known" rather than "recognised by nothing".
+
+### Updating the hub
+
+A hub can update itself when asked. That is what lets a phone do it — GetHome
+Studio drives `gethome-hubctl update` over SSH with a key it planted at install
+time, and an iPhone has no such thing.
+
+**The hub records the request; it never applies it.** Updating means writing
+`/opt/gethome`, moving the `current` symlink and restarting a systemd unit — all
+root, none of it something a network-facing process should be able to do. So
+`POST /system/update` writes one line into the hub's own data directory,
+`gethome-update.path` notices, and `/usr/local/lib/gethome-update.sh` does the
+work as root. The same trade `PUT /settings/radio` makes, for the same reason:
+no sudo rule, nothing new to lock down.
+
+Three consequences for a client, and none of them is optional.
+
+- **The response is a receipt.** Nothing has happened yet, and this process is
+  about to be restarted by what happens next. Poll `GET /system/update`.
+- **The hub goes away in the middle, on purpose.** `install.sh` restarts it, and
+  on a Zero 2 W coming back is over a minute. A failing poll during a run is the
+  expected state, not evidence of anything — an app that concludes "unreachable"
+  there is wrong for the two minutes it matters most.
+- **What is running afterwards comes from `GET /hub`'s `build`**, never from the
+  log. `version` reads the same before and after an update, which is why the
+  stamp exists.
+
+```jsonc
+// GET /system/update
+{
+  "current": { "build": "0.1.0-1590564-main", "version": "0.1.0",
+               "sha": "1590564", "channel": "main" },
+  "latest":  { "sha": "a86c1dc", "checkedAt": "2026-08-24T18:00:00Z" },
+  "available": true,
+  "canApply": true,
+  "run": {
+    "id": "8c1f…", "state": "running", "step": "download",
+    "startedAt": "…", "finishedAt": "…", "heartbeat": "…",
+    "fromBuild": "0.1.0-1590564-main", "liveBuild": "0.1.0-a86c1dc-main",
+    "hubAnswering": true, "warnings": ["…"], "error": "…"
+  }
+}
+```
+
+**`available` is absent when the hub cannot tell**, and that is the field's whole
+point. Nothing anywhere knows what "the latest build" is: `bundle-main` is a
+rolling release that always exists and always moves, so the only answer is to
+compare the commit inside `build` against the head of `main`, which the hub asks
+GitHub for. That call can fail — no internet, a rate limit (unauthenticated
+GitHub allows sixty an hour per address, and one hub is one address for every
+phone in the house) — and a hub built from source has no commit to compare at
+all. Each of those sets `checkError` (`offline` / `rate_limited` /
+`no_build_stamp`) and leaves `available` out. **A missing `available` read as
+`false` tells somebody they are up to date on the strength of a failed network
+call.** The check is lazy and cached six hours: a hub nobody asks never calls out.
+
+`canApply` is whether this machine has the runner and the units at all. A hub
+installed before they existed answers `false` — and one older still has no route
+here, so a `404` means the same thing and is the honest thing for an app to
+report. The way out of both is one update from Studio, after which the hub can
+update itself.
+
+**`state` is five-valued and two of them are easy to get wrong.**
+`succeeded` / `failed` are what they sound like. **`rolled-back` means the new
+build wouldn't start and the hub put itself back — the hub is up and healthy**,
+and reporting it as a failure is the wrong sentence to show somebody whose home
+is working. It is a separate state because the installer cannot say so with its
+exit status: it ends in failure either way and the `current` symlink points at
+the same build either way, so `install.sh` prints a `@@ROLLBACK@@` marker and the
+runner reads that. `stalled` is a run whose heartbeat stopped — the board lost
+power, or the OOM killer took the runner — and it exists so that one power cut
+does not leave a progress bar that never moves and a `409` on every attempt to
+try again. `running` is the rest.
+
+The outcome also reaches the activity log as a `hub.update` row, written at the
+next boot: the hub cannot record its own update while it is being restarted by
+it. The request is recorded straight away, with the member's name.
+
+**Why any member may do this.** It was owner-only first, on the reasoning that an
+update is not quite "bringing something new in" — it replaces the code everybody
+depends on. What that missed is who the owner *is*: GetHome Studio claims a hub
+as *the Mac*, so the owner is a laptop in a drawer, every phone joins by invite
+as a plain member, and [there is no ownership
+transfer](#which-member-you-are-isself-and-patch-membersme) to fix it with. The
+rule therefore did not mean "an update needs care"; it meant the phone in the
+owner's own hand could never update their own hub, for the life of that hub.
+Found on the first one this shipped to — the same discovery that moved renaming a
+device out of `ownerOnly`.
+
+It passes the three tests the others pass. **Bounded**: `install.sh` unpacks
+beside the running build and only moves the symlink once the new one answers, so
+a build that won't start puts itself back unattended. **Destroys nothing**: no
+device leaves, no membership ends — and migrations are written to be readable by
+the build before them, which the automatic rollback turns from a hope into a
+rule. **Named**: the `hub.update` row carries the member's name.
+
+Taking something *away* is still the owner's — a device, a member, the credential
+that spends their money. That line has not moved.
 
 ### The Zigbee join window
 

@@ -186,6 +186,76 @@ describe('deploy/install.sh', () => {
     }
   });
 
+  /**
+   * The two units behind "update my hub from the app".
+   *
+   * The hub writes a run id into its own data directory; `gethome-update.path`
+   * notices and starts `gethome-update.service`, which is root. Three
+   * properties of that pair are load-bearing and none of them is obvious from
+   * reading the unit, so they are pinned here.
+   */
+  describe('the update units', () => {
+    const updateService = installer.slice(
+      installer.indexOf('gethome-update.service >/dev/null <<UNIT'),
+      installer.indexOf('$SUDO touch "${DATA_DIR}/update/enabled"'),
+    );
+    const updatePath = installer.slice(
+      installer.indexOf('gethome-update.path >/dev/null <<UNIT'),
+      installer.indexOf('gethome-update.service >/dev/null <<UNIT'),
+    );
+
+    it('watches the file the hub actually writes', () => {
+      expect(updatePath).toMatch(/^PathModified=\$\{DATA_DIR\}\/update\/request$/m);
+      expect(updatePath).toMatch(/^Unit=gethome-update\.service$/m);
+    });
+
+    it('never runs the update service at boot', () => {
+      // A [Install] section plus `systemctl enable` would update a hub every
+      // time the machine came up, which nobody asked for — and the path unit
+      // is the only thing that should ever start this.
+      expect(updateService).not.toMatch(/^\[Install\]$/m);
+      expect(installer).not.toMatch(/systemctl enable[^\n]*gethome-update\.service/);
+      // The path unit is the half that *is* enabled.
+      expect(installer).toMatch(/systemctl enable --now gethome-update\.path/);
+    });
+
+    it('is not ordered after the hub it restarts', () => {
+      // The installer this runs restarts gethome-hubd half way through. A unit
+      // ordered after the hub is a unit systemd may stop when the hub stops,
+      // which would kill an update in the middle of writing /opt/gethome.
+      expect(updateService).not.toMatch(/^After=gethome-hubd/m);
+    });
+
+    it('does not let systemd time the update out', () => {
+      // A Type=oneshot otherwise gets 90 seconds. A real update is apt, a
+      // bundle download, migrations onto an SD card and up to four minutes of
+      // health check — and the likeliest place a timeout lands is after the
+      // symlink has moved to the new build and before the check that would
+      // have rolled it back, killing the only thing that could undo it.
+      expect(updateService).toMatch(/^TimeoutStartSec=infinity$/m);
+    });
+
+    it('leaves the hub a directory it can write the request into', () => {
+      // The hub is unprivileged; `mkdir -p` here plus the `chown -R` on the
+      // next line is what makes POST /system/update able to write at all.
+      expect(installer).toMatch(/mkdir -p "\$INSTALL_DIR" "\$DATA_DIR" "\$DATA_DIR\/update"/);
+    });
+  });
+
+  /**
+   * @@ROLLBACK@@ is what tells "the new build wouldn't start and the hub put
+   * itself back" from "the hub is down". Both end in `fail()`, and after either
+   * the `current` symlink points where it started, so nothing else can.
+   */
+  it('announces a rollback as its own marker', () => {
+    const rollback = installer.indexOf("printf '@@ROLLBACK:%s@@");
+    expect(rollback, '@@ROLLBACK@@ must be printed').toBeGreaterThan(0);
+    const rollbackSection = installer.slice(rollback, rollback + 400);
+    expect(rollbackSection, 'it belongs with the flip back, not with the failure text')
+      .toContain('Rolling back to the build that was running before');
+    expect(installer, 'and the header list is the contract').toContain('@@ROLLBACK:<build>@@');
+  });
+
   it('keeps the installer step ids Studio mirrors', () => {
     // Renaming one of these silently breaks the app's install checklist —
     // `FirstBootMonitor.installSteps` and `PiInstallView.steps()` hard-code them.

@@ -36,6 +36,11 @@
 #   @@ZIGBEE_FOUND:<device>@@  the coordinator that will be used
 #   @@ZIGBEE_MAYBE:<device>@@  a USB serial device that might be a coordinator
 #                              but doesn't identify itself as one
+#   @@ROLLBACK:<build>@@ the new build wouldn't answer, so the hub was put back
+#                       on this one. It is followed by @@ERROR@@ and a non-zero
+#                       exit like any other failure, which is exactly why it
+#                       exists: without it "rolled back and healthy" and "the
+#                       hub is down" are the same two signals.
 #   @@PAIRING:<code>@@  the pairing code, when the hub is unclaimed
 #   @@CAPABILITIES:<list>@@  what this hub ended up able to talk to, e.g.
 #                            "Zigbee, Wi-Fi and MQTT" — a 512 MB board runs one
@@ -499,7 +504,7 @@ if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
 fi
 # Serial access for a Zigbee coordinator, without running anything as root.
 $SUDO usermod -aG dialout "$SERVICE_USER" >/dev/null 2>&1 || true
-$SUDO mkdir -p "$INSTALL_DIR" "$DATA_DIR" "$Z2M_DATA_DIR" "$CONF_DIR"
+$SUDO mkdir -p "$INSTALL_DIR" "$DATA_DIR" "$DATA_DIR/update" "$Z2M_DATA_DIR" "$CONF_DIR"
 $SUDO chown -R "$SERVICE_USER:$SERVICE_USER" /var/lib/gethome
 $SUDO chmod 0750 /var/lib/gethome "$DATA_DIR"
 
@@ -1008,10 +1013,64 @@ Unit=gethome-zigbee-detect.service
 WantedBy=multi-user.target
 UNIT
 
+# Updating from an app, on the same terms. The hub writes a run id into the
+# same directory and this pair picks it up — so "update my hub" is a button on
+# a phone rather than an SSH session on a laptop, and the hub still holds no
+# privilege it didn't have before.
+#
+# The service is deliberately *not* enabled and carries no [Install] section:
+# it is started by the path unit and must never run at boot, where it would
+# update a hub nobody asked to update. It is also not ordered after the hub,
+# because the installer it runs restarts the hub half way through and this must
+# outlive that.
+$SUDO install -m 0755 "$HUB_DIR/deploy/update-runner.sh" /usr/local/lib/gethome-update.sh 2>/dev/null \
+  || warn "Could not install the update runner; this hub won't be able to update itself from an app."
+
+$SUDO tee /etc/systemd/system/gethome-update.path >/dev/null <<UNIT
+[Unit]
+Description=Notice that a GetHome Hub update was asked for
+
+[Path]
+PathModified=${DATA_DIR}/update/request
+Unit=gethome-update.service
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+$SUDO tee /etc/systemd/system/gethome-update.service >/dev/null <<UNIT
+[Unit]
+Description=Update the GetHome Hub
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+Environment=GETHOME_CONF=${CONF_DIR}
+Environment=GETHOME_DIR=${INSTALL_DIR}
+ExecStart=/usr/local/lib/gethome-update.sh
+# Not a number, and not the 90-second default a Type=oneshot otherwise gets.
+# A real run is apt, a bundle over a domestic line, migrations onto an SD card,
+# up to four minutes of health check and up to another minute waiting on Zigbee
+# — and a source build, which a board over 1 GB is still allowed to do, is
+# twenty minutes on its own. What makes a timeout here dangerous rather than
+# merely annoying is *where* it would land: most likely after the symlink has
+# been flipped to the new build and before the health check that would have
+# rolled it back, killing the only thing that could undo it.
+TimeoutStartSec=infinity
+UNIT
+
+# What the hub reads to know this machine can apply an update at all. A file in
+# the hub's own directory rather than a systemd path it would have to know
+# about: the hub stays portable, and this is written in the same breath as the
+# units, so it cannot promise plumbing that was never installed.
+$SUDO touch "${DATA_DIR}/update/enabled" 2>/dev/null || true
+$SUDO chown -R "$SERVICE_USER:$SERVICE_USER" "${DATA_DIR}/update" 2>/dev/null || true
+
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable gethome-hubd.service >/dev/null 2>&1
 $SUDO systemctl enable gethome-zigbee-detect.service >/dev/null 2>&1 || true
 $SUDO systemctl enable --now gethome-radio.path >/dev/null 2>&1 || true
+$SUDO systemctl enable --now gethome-update.path >/dev/null 2>&1 || true
 $SUDO systemctl restart gethome-hubd.service \
   || fail "The hub is installed but wouldn't start. See: journalctl -u gethome-hubd -n 50"
 
@@ -1053,6 +1112,7 @@ done
 if [[ -z "$HEALTHY" ]]; then
   service_failure gethome-hubd
   if [[ -n "$PREVIOUS_RELEASE" && -d "$PREVIOUS_RELEASE" && "$PREVIOUS_RELEASE" != "$RELEASE_DIR" ]]; then
+    printf '@@ROLLBACK:%s@@\n' "$(basename "$PREVIOUS_RELEASE")"
     say "Rolling back to the build that was running before…"
     $SUDO ln -sfn "$PREVIOUS_RELEASE" "${HUB_DIR}.new"
     $SUDO mv -T "${HUB_DIR}.new" "$HUB_DIR"

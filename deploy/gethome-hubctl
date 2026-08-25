@@ -302,8 +302,12 @@ cmd_uninstall() {
   echo "This removes the GetHome Hub, its services, and everything it stored."
   read -r -p "Type 'remove' to confirm: " answer
   [[ "$answer" == "remove" ]] || { echo "Left alone."; return 1; }
-  $SUDO systemctl disable --now "$HUB_UNIT" "$Z2M_UNIT" "$DETECT_UNIT" gethome-zram.service >/dev/null 2>&1 || true
-  $SUDO rm -f /etc/systemd/system/gethome-*.service
+  # The .path units too, and by name: `gethome-*.service` below is a glob over
+  # one suffix, so both of these survived an uninstall and were left pointing at
+  # units that no longer existed.
+  $SUDO systemctl disable --now "$HUB_UNIT" "$Z2M_UNIT" "$DETECT_UNIT" gethome-zram.service \
+    gethome-radio.path gethome-update.path >/dev/null 2>&1 || true
+  $SUDO rm -f /etc/systemd/system/gethome-*.service /etc/systemd/system/gethome-*.path
   $SUDO rm -f /etc/udev/rules.d/99-gethome-zigbee.rules
   $SUDO rm -f /etc/mosquitto/conf.d/gethome.conf
   $SUDO rm -f /etc/avahi/services/gethome-hub.service
