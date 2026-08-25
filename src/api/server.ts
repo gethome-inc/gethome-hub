@@ -1218,9 +1218,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * is the health check every app and installer polls, it must stay a cheap
    * read of things already in memory, and this one may go to the network.
    *
-   * Any member reads it. Only the owner may *start* an update, but the
-   * information is the home's — somebody who cannot press the button still has
-   * to be able to see why the hub is unreachable for the next two minutes.
+   * Any member reads it, and any member may start one — the reasoning for that
+   * is on `POST` below. Reading is the half that was never in question: the
+   * information is the home's, and somebody watching the hub drop off the
+   * network for two minutes has to be able to see why.
    */
   app.get('/api/v1/system/update', authed, async (request) => {
     const { refresh } = z

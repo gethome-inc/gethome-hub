@@ -186,7 +186,11 @@ if ! command -v gethome-hubctl >/dev/null 2>&1; then
   ERROR_TEXT="This machine has no gethome-hubctl, so the hub can't update itself. Reinstalling it from GetHome Studio brings it forward — nothing paired is lost."
   printf '%s\n' "$ERROR_TEXT" >> "$LOG_FILE"
   write_status
-  exit 1
+  # Zero, like every other outcome — see the note at the foot of this file. This
+  # is the branch somebody presses again, and a handful of non-zero exits inside
+  # systemd's start-limit window would leave the unit refusing to start even
+  # after gethome-hubctl turns up.
+  exit 0
 fi
 
 handle_line "$ gethome-hubctl update --branch $BRANCH"

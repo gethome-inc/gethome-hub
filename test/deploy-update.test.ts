@@ -285,8 +285,14 @@ describe('the unit this runs as', () => {
       `#!/usr/bin/env bash\nprintf '@@ERROR:%s@@\\n' "the card is full"\nexit 1\n`,
       null,
     ],
+    // The fourth outcome, and the one that most wants the rule: a machine with
+    // no gethome-hubctl is a machine somebody presses the button on twice.
+    ['a machine that cannot update itself', undefined, null],
   ])('exits zero after %s', (_name, hubctl, answers) => {
-    const { exitCode } = runUpdate({ hubctl: hubctl as string, hubAnswers: answers as string | null });
+    const { exitCode } = runUpdate({
+      ...(hubctl !== undefined ? { hubctl: hubctl as string } : {}),
+      hubAnswers: answers as string | null,
+    });
     expect(exitCode).toBe(0);
   });
 
