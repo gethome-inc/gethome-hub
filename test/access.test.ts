@@ -87,12 +87,12 @@ describe.skipIf(!handle)('access service', () => {
   it('ignores a permission key a newer build stored, and leaves the row holding it', async () => {
     await db
       .update(roles)
-      .set({ permissions: ['device.control', 'hub.timetravel', 'activity.read'] })
+      .set({ permissions: ['device.edit', 'hub.timetravel', 'activity.read'] })
       .where(eq(roles.key, 'guest'));
 
     const access = await loaded();
     const guest = access.roleByKeyName('guest')!;
-    expect(guest.permissions).toEqual(['device.control', 'activity.read']);
+    expect(guest.permissions).toEqual(['device.edit', 'activity.read']);
 
     const stored = await db.query.roles.findFirst({ where: eq(roles.key, 'guest') });
     expect(stored?.permissions).toContain('hub.timetravel');
@@ -102,12 +102,12 @@ describe.skipIf(!handle)('access service', () => {
   it('normalizes a stored set to catalog order, without duplicates or junk', async () => {
     await db
       .update(roles)
-      .set({ permissions: ['activity.read', 'device.control', 'activity.read', 7, null] })
+      .set({ permissions: ['activity.read', 'device.edit', 'activity.read', 7, null] })
       .where(eq(roles.key, 'guest'));
 
     const access = await loaded();
     expect(access.roleByKeyName('guest')!.permissions).toEqual([
-      'device.control',
+      'device.edit',
       'activity.read',
     ]);
   });
@@ -156,7 +156,7 @@ describe.skipIf(!handle)('access service', () => {
    */
   it('stops counting a member who has left, and frees the role they wore', async () => {
     const access = await loaded();
-    const custom = await access.createRole('Cleaner', ['device.control']);
+    const custom = await access.createRole('Cleaner', ['activity.read']);
     const kolya = await addMember('Kolya', { role: 'member', roleId: custom.id });
     await access.assignRole(kolya, custom.id);
 
@@ -289,12 +289,12 @@ describe.skipIf(!handle)('access service', () => {
     await access.updateRole(access.builtinRoleId('guest')!, { permissions: [] });
     expect(announced).toBe(1);
 
-    await access.updateRole(access.builtinRoleId('member')!, { permissions: ['device.control'] });
+    await access.updateRole(access.builtinRoleId('member')!, { permissions: ['activity.read'] });
     expect(announced).toBe(2);
 
     // Creating and deleting: no holders by definition, and both change the
     // table every open screen is drawing.
-    const custom = await access.createRole('Cleaner', ['device.control']);
+    const custom = await access.createRole('Cleaner', ['activity.read']);
     expect(announced).toBe(3);
     expect(await access.deleteRole(custom.id)).toBeNull();
     expect(announced).toBe(4);

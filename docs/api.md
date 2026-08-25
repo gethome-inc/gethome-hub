@@ -60,10 +60,19 @@ everyone.
 
 - **The floor is not a permission.** Reading the home (`GET /hub`, `/home`,
   `/rooms`, `/zones`, `/devices`, `/members`, `/roles`, `/permissions`, `/me`,
-  the WebSocket), renaming yourself, leaving, and pinning your own favorites are
-  what *being a member* means. No role can take them away, and none of them
-  appears in the matrix. A member with nothing at all would be a token that can
-  only 401 behind an app with nothing to draw.
+  the WebSocket), **working a device**, renaming yourself, leaving, and pinning
+  your own favorites are what *being a member* means. No role can take them
+  away, and none of them appears in the matrix. A member with nothing at all
+  would be a token that can only 401 behind an app with nothing to draw.
+
+  Switching things on was a `device.control` key for a day, and retiring it is
+  the clearest case the floor has. An app whose whole job is working the home
+  cannot have a member who may not work the home — that is not a restricted
+  member, it is a member with no reason to open the app. And a permission every
+  role must hold is a row in the matrix that can only ever be wrong: somebody
+  would turn it off, and find out. So the key is gone rather than shipped
+  switched on for everybody, and `POST /devices/:id/endpoints/:id/commands`
+  takes any token.
 - **The owner is never evaluated.** Every check answers `true` for the owner
   without reading a stored set, so a permission a later hub build adds is theirs
   automatically and no edit to any table can lock a home out of itself. That
@@ -91,7 +100,7 @@ than no button.
 | `GET /devices` | floor | full device list (wire shape below) |
 | `PATCH /devices/:id` | `device.edit` / floor | `{name?, roomId?, favorite?}`. Name and room describe the house and everybody sees the same ones; **`favorite` is the caller's own** and nobody else's — see [below](#favorites-are-per-member). `roomId: null` takes a device out of its room; an unknown one is `404 unknown_room`. The response is this caller's view of the device |
 | `DELETE /devices/:id` | `device.remove` | also unpairs at the protocol level |
-| `POST /devices/:id/endpoints/:endpointId/commands` | `device.control` | body = canonical command; `202`. IR-remote intents (`irLearn`/`irSaveLearned`/`irSend`/`irDeleteCommand`/`irRenameCommand`) are resolved against the endpoint's stored code library (see [device-schema.md](device-schema.md)) |
+| `POST /devices/:id/endpoints/:endpointId/commands` | floor | body = canonical command; `202`. IR-remote intents (`irLearn`/`irSaveLearned`/`irSend`/`irDeleteCommand`/`irRenameCommand`) are resolved against the endpoint's stored code library (see [device-schema.md](device-schema.md)) |
 | `POST /devices/:id/remap` | `hub.ai` | force-regenerate the AI mapping (Zigbee devices); the hub also remaps automatically when a device publishes unknown parameters — see [ai-adaptation.md](ai-adaptation.md). `409 ai_not_configured` with no credential, `409 ai_disabled` when the owner has switched adaptation off |
 | `POST /matter/commission` | `device.add` | `{pairingCode}` → `202 {jobId}` (async) |
 | `GET /matter/commission/:jobId` | floor | `{status: running\|done\|failed, nodeId?, error?}` |
@@ -129,7 +138,6 @@ it gates its own screens on.
 
 | key | group |
 |---|---|
-| `device.control` | Devices |
 | `device.edit` | Devices |
 | `device.add` | Devices |
 | `device.remove` | Devices |
@@ -147,7 +155,6 @@ it gates its own screens on.
 
 |  | Owner | Member | Guest |
 |---|:--:|:--:|:--:|
-| `device.control` | ✓ | ✓ | ✓ |
 | `device.edit` | ✓ | ✓ | |
 | `device.add` | ✓ | ✓ | |
 | `home.structure` | ✓ | ✓ | |
@@ -173,9 +180,11 @@ roles landed, so Member holding it takes nothing from anybody, and Guest is a
 role that did not exist. Being a key rather than either extreme is what lets a
 home that *does* want it kept from the spare room say so.
 
-**Guest is somebody staying in the house.** They work the lights and keep their
-own favorites; they change no names, open no network, and read only their own
-line in the activity log.
+**Guest is somebody staying in the house** — and a role with **no keys at all**,
+which is its honest shape rather than an oversight. They work the lights and keep
+their own favorites because both are the *floor*; what they do not get is
+everything above that line — they change no names, open no network, and read only
+their own line in the activity log.
 
 #### The owner is a special case on purpose
 
@@ -876,7 +885,7 @@ edited or deleted, or somebody moved between roles.
 {
   "type": "access",
   "role": { "id": "…", "key": "guest", "name": "Guest" },
-  "permissions": ["device.control"],
+  "permissions": ["activity.read"],
   "roles": [{ "id": "…", "key": "owner", "name": "Owner", "builtin": true,
               "permissions": [ … ], "memberCount": 1, "sortOrder": 0 }]
 }

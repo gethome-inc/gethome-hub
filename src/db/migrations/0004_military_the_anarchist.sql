@@ -32,7 +32,7 @@ VALUES (
   substr(lower(hex(randomblob(2))), 2) || '-a' ||
   substr(lower(hex(randomblob(2))), 2) || '-' || lower(hex(randomblob(6))),
   'owner', 'Owner', 1,
-  '["device.control","device.edit","device.add","device.remove","home.structure","home.rename","activity.read","member.invite","member.remove","role.manage","hub.radio","hub.update","hub.ai"]',
+  '["device.edit","device.add","device.remove","home.structure","home.rename","activity.read","member.invite","member.remove","role.manage","hub.radio","hub.update","hub.ai"]',
   0, CAST(strftime('%s', 'now') AS INTEGER) * 1000
 ) ON CONFLICT (`key`) DO NOTHING;--> statement-breakpoint
 -- `hub.update` is the one key here that was never `ownerOnly` *or* `authed` for
@@ -48,18 +48,19 @@ VALUES (
   substr(lower(hex(randomblob(2))), 2) || '-a' ||
   substr(lower(hex(randomblob(2))), 2) || '-' || lower(hex(randomblob(6))),
   'member', 'Member', 1,
-  '["device.control","device.edit","device.add","home.structure","activity.read","hub.radio","hub.update"]',
+  '["device.edit","device.add","home.structure","activity.read","hub.radio","hub.update"]',
   1, CAST(strftime('%s', 'now') AS INTEGER) * 1000
 ) ON CONFLICT (`key`) DO NOTHING;--> statement-breakpoint
--- Somebody staying in the house: they work the lights and keep their own
--- favorites, change no names, open no network, and read only their own line in
--- the activity log.
+-- Somebody staying in the house, and a role with no keys at all. Working the
+-- lights and keeping your own favorites are the *floor* — no role grants or
+-- withholds them — so what is left for Guest to be refused is everything
+-- above that line: names, the network, the activity log.
 INSERT INTO `roles` (`id`, `key`, `name`, `builtin`, `permissions`, `sort_order`, `created_at`)
 VALUES (
   lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' ||
   substr(lower(hex(randomblob(2))), 2) || '-a' ||
   substr(lower(hex(randomblob(2))), 2) || '-' || lower(hex(randomblob(6))),
-  'guest', 'Guest', 1, '["device.control"]',
+  'guest', 'Guest', 1, '[]',
   2, CAST(strftime('%s', 'now') AS INTEGER) * 1000
 ) ON CONFLICT (`key`) DO NOTHING;--> statement-breakpoint
 -- Everybody who is already in this home keeps exactly the access they had.

@@ -439,10 +439,16 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `api/auth.ts` is the only guard left — `requireOwner` is gone rather than kept
   beside it, because two mechanisms are two places for a route to be wrong.
   `docs/api.md` is canonical.
-  **First, the floor is not a permission.** Reading the home, renaming
-  yourself, leaving, and pinning your own favorites are what *being a member*
-  means and no role can take them away — a member with nothing at all is a token
-  that can only 401 behind an app with nothing to draw. That is why
+  **First, the floor is not a permission.** Reading the home, **working a
+  device**, renaming yourself, leaving, and pinning your own favorites are what
+  *being a member* means and no role can take them away — a member with nothing
+  at all is a token that can only 401 behind an app with nothing to draw.
+  Switching things on was a `device.control` key for a day, and it is the
+  clearest case the floor has: an app whose whole job is working the home cannot
+  have a member who may not work the home, and a permission every role must hold
+  is a matrix row that can only ever be wrong — somebody turns it off and finds
+  out. Gone, rather than shipped switched on for everybody; the commands route
+  takes any token. That is also why
   `PATCH /devices/:id` is the one route whose check reads the *body*:
   `name`/`roomId` are the house's and need `device.edit`, while the caller's own
   `favorite` needs nothing, and a guest who can work the lights must be able to

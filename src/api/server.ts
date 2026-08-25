@@ -788,7 +788,22 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     return reply.code(204).send();
   });
 
-  app.post('/api/v1/devices/:id/endpoints/:endpointId/commands', needs('device.control'), async (request, reply) => {
+  /**
+   * Work a device.
+   *
+   * **The floor, not a permission**, and it is the one line this whole system
+   * rests on: an app whose job is switching the lights on cannot have a member
+   * who may not switch the lights on — that is not a restricted member, it is a
+   * member with no reason to open the app. Being able to work the home is what
+   * being in the home *means*, alongside reading it, renaming yourself, leaving
+   * and pinning your own favorites.
+   *
+   * There was a `device.control` key for a day and it is gone rather than left
+   * in the catalog switched on for everybody: a permission every role must hold
+   * is a row in the matrix that can only be wrong, and somebody would
+   * eventually turn it off and find out what it means.
+   */
+  app.post('/api/v1/devices/:id/endpoints/:endpointId/commands', authed, async (request, reply) => {
     const params = z
       .object({ id: z.uuid(), endpointId: z.coerce.number().int().min(0) })
       .parse(request.params);

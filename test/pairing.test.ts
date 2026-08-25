@@ -132,7 +132,7 @@ describe.skipIf(!handle)('PairingService', () => {
     // A code minted into a role that has since been deleted is nothing — not a
     // Member invite. `deleteRole` takes its invites with it precisely so this
     // cannot admit somebody with more access than the home ever offered.
-    const custom = await access.createRole('Cleaner', ['device.control']);
+    const custom = await access.createRole('Cleaner', ['activity.read']);
     const doomed = await pairing.createInvite(owner!.member.id, custom.id);
     await access.deleteRole(custom.id);
     expect(await pairing.claim(doomed.code, 'Masha')).toBeNull();

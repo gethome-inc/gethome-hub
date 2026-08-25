@@ -55,12 +55,6 @@ export interface PermissionDescriptor {
  */
 export const PERMISSIONS: readonly PermissionDescriptor[] = [
   {
-    key: 'device.control',
-    group: 'Devices',
-    title: 'Control devices',
-    summary: 'Switch things on and off, set brightness and temperature, run scenes.',
-  },
-  {
     key: 'device.edit',
     group: 'Devices',
     title: 'Rename and move devices',
@@ -141,7 +135,6 @@ export const PERMISSIONS: readonly PermissionDescriptor[] = [
 ] as const;
 
 export type PermissionKey =
-  | 'device.control'
   | 'device.edit'
   | 'device.add'
   | 'device.remove'
@@ -186,7 +179,6 @@ export const BUILTIN_ROLES = [
      * owner's own hand could never update their own hub, ever.
      */
     permissions: [
-      'device.control',
       'device.edit',
       'device.add',
       'home.structure',
@@ -200,16 +192,22 @@ export const BUILTIN_ROLES = [
     name: 'Guest',
     sortOrder: 2,
     /**
-     * Somebody staying in the house. They can work the lights and keep their
-     * own favorites; they change no names, open no network, take the home
-     * offline for nobody, and read only their own line in the activity log.
+     * Somebody staying in the house — and a role with **no keys at all**, which
+     * is the honest shape of it rather than an oversight.
+     *
+     * They work the lights and keep their own favorites, because both of those
+     * are the *floor* and no role grants or withholds them: an app whose whole
+     * job is switching things on cannot have a member who may not switch
+     * anything on. What a guest does not get is everything above that line —
+     * they change no names, open no network, take the home offline for nobody,
+     * and read only their own line in the activity log.
      *
      * Guest is the one place the "defaults change nothing" claim looks like it
      * bends, and it doesn't: every member who exists today becomes **Member**
      * and keeps everything they had, `hub.update` included. Guest is a role
      * that did not exist, so it takes nothing from anybody.
      */
-    permissions: ['device.control'] as PermissionKey[],
+    permissions: [] as PermissionKey[],
   },
 ] as const;
 

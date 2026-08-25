@@ -94,7 +94,6 @@ describe('the roles migration', () => {
     expect(access.roleFor(anna)?.key).toBe('member');
     expect(access.permissionsFor(anna)).toEqual([...BUILTIN_ROLES[1].permissions]);
     for (const wasAuthed of [
-      'device.control',
       'device.edit',
       'device.add',
       'home.structure',
@@ -105,6 +104,9 @@ describe('the roles migration', () => {
     ] as const) {
       expect(access.can(anna, wasAuthed), wasAuthed).toBe(true);
     }
+    // Working a device is the floor now rather than a key, so nobody holds it
+    // and the commands route asks only for a token.
+    expect(PERMISSION_KEYS).not.toContain('device.control' as never);
     for (const wasOwnerOnly of [
       'device.remove',
       'home.rename',

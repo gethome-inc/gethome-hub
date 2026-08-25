@@ -189,7 +189,9 @@ describe.skipIf(!handle)('roles and permissions', () => {
     ).json() as { name: string; role: { key: string }; permissions: string[]; isOwner: boolean };
     expect(asGuest).toMatchObject({ name: 'Kolya', isOwner: false });
     expect(asGuest.role.key).toBe('guest');
-    expect(asGuest.permissions).toEqual(['device.control']);
+    // A role with no keys at all: working the home and pinning your own
+    // favorites are the floor, so there is nothing left for Guest to hold.
+    expect(asGuest.permissions).toEqual([]);
 
     const asOwner = (
       await app.inject({ method: 'GET', url: '/api/v1/me', headers: auth(ownerToken) })
@@ -220,7 +222,6 @@ describe.skipIf(!handle)('roles and permissions', () => {
 
     const member = roles.find((role) => role.key === 'member')!;
     expect(member.permissions).toEqual([
-      'device.control',
       'device.edit',
       'device.add',
       'home.structure',
@@ -240,7 +241,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
       expect(member.permissions).not.toContain(ownerOnly);
     }
 
-    expect(roles.find((role) => role.key === 'guest')!.permissions).toEqual(['device.control']);
+    expect(roles.find((role) => role.key === 'guest')!.permissions).toEqual([]);
     expect(roles.map((role) => role.key)).toEqual(BUILTIN_ROLES.map((role) => role.key));
     // Everybody who was here is somewhere, and the counts say where.
     expect(roles.find((role) => role.key === 'owner')!.memberCount).toBe(1);
@@ -391,7 +392,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
       method: 'PATCH',
       url: `/api/v1/roles/${guestRole}`,
       headers: auth(ownerToken),
-      payload: { permissions: ['device.control', 'home.structure'] },
+      payload: { permissions: ['home.structure'] },
     });
     expect(granted.statusCode).toBe(200);
 
@@ -407,7 +408,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
       method: 'PATCH',
       url: `/api/v1/roles/${guestRole}`,
       headers: auth(ownerToken),
-      payload: { permissions: ['device.control'] },
+      payload: { permissions: ['activity.read'] },
     });
     const refused = await app.inject({
       method: 'POST',
@@ -538,7 +539,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
       method: 'POST',
       url: '/api/v1/roles',
       headers: auth(ownerToken),
-      payload: { name: 'Cleaner', permissions: ['device.control', 'activity.read'] },
+      payload: { name: 'Cleaner', permissions: ['activity.read'] },
     });
     expect(created.statusCode).toBe(201);
     const role = created.json() as RoleWire;
@@ -571,7 +572,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
     // The new role really is what answers for them now.
     expect(
       (await app.inject({ method: 'GET', url: '/api/v1/me', headers: auth(guestToken) })).json(),
-    ).toMatchObject({ permissions: ['device.control', 'activity.read'] });
+    ).toMatchObject({ permissions: ['activity.read'] });
 
     // Move them back, and it goes.
     await app.inject({
@@ -664,10 +665,10 @@ describe.skipIf(!handle)('roles and permissions', () => {
       method: 'PATCH',
       url: `/api/v1/roles/${await roleId('member')}`,
       headers: auth(ownerToken),
-      payload: { permissions: ['device.control'] },
+      payload: { permissions: ['activity.read'] },
     });
     const pushed = (await waitFor((frame) => frame.type === 'access')) as { permissions: string[] };
-    expect(pushed.permissions).toEqual(['device.control']);
+    expect(pushed.permissions).toEqual(['activity.read']);
 
     // **A role this socket does not hold still reaches it**, because the frame
     // carries `roles` — the home's whole table — beside this member's own
@@ -678,7 +679,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
       method: 'POST',
       url: '/api/v1/roles',
       headers: auth(ownerToken),
-      payload: { name: 'House sitter', permissions: ['device.control'] },
+      payload: { name: 'House sitter', permissions: ['activity.read'] },
     });
     const houseSitter = added.json() as RoleWire;
     const onAdd = (await waitFor((frame) => frame.type === 'access')) as {
@@ -686,7 +687,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
       roles: RoleWire[];
     };
     // Its own permissions are untouched; the table it can see is not.
-    expect(onAdd.permissions).toEqual(['device.control']);
+    expect(onAdd.permissions).toEqual(['activity.read']);
     expect(onAdd.roles.map((role) => role.name)).toContain('House sitter');
 
     // Editing a role nobody on this socket holds — the owner's own case.
@@ -695,11 +696,11 @@ describe.skipIf(!handle)('roles and permissions', () => {
       method: 'PATCH',
       url: `/api/v1/roles/${await roleId('guest')}`,
       headers: auth(ownerToken),
-      payload: { permissions: ['device.control', 'activity.read'] },
+      payload: { permissions: ['activity.read', 'home.structure'] },
     });
     const onEdit = (await waitFor((frame) => frame.type === 'access')) as { roles: RoleWire[] };
     expect(onEdit.roles.find((role) => role.key === 'guest')?.permissions).toEqual([
-      'device.control',
+      'home.structure',
       'activity.read',
     ]);
 
@@ -773,7 +774,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
       method: 'PATCH',
       url: `/api/v1/roles/${await roleId('guest')}`,
       headers: auth(ownerToken),
-      payload: { permissions: ['device.control', 'activity.read'] },
+      payload: { permissions: ['activity.read', 'home.structure'] },
     });
     await flip(memberToken, false);
     expect(rows.some((row) => row.memberId !== guestId)).toBe(true);
@@ -847,7 +848,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
         method: 'POST',
         url: '/api/v1/roles',
         headers: auth(ownerToken),
-        payload: { name: 'Dog walker', permissions: ['device.control'] },
+        payload: { name: 'Dog walker', permissions: ['activity.read'] },
       })
     ).json() as RoleWire;
     const { code } = (
@@ -1108,42 +1109,6 @@ describe.skipIf(!handle)('roles and permissions', () => {
   // ── Working the lights is a permission too ────────────────────────────────
 
   /**
-   * `device.control` is the one key whose *refusal* nothing exercised, which
-   * is a strange gap for the permission the iOS app hangs its whole
-   * "this card has no control" state on. Taken off the guest role and put
-   * straight back.
-   */
-  it('refuses the commands route to a role without device.control', async () => {
-    const guestRole = await roleId('guest');
-    await app.inject({
-      method: 'PATCH',
-      url: `/api/v1/roles/${guestRole}`,
-      headers: auth(ownerToken),
-      payload: { permissions: [] },
-    });
-
-    const executed = adapter.executed.length;
-    const refused = await app.inject({
-      method: 'POST',
-      url: `/api/v1/devices/${deviceId}/endpoints/1/commands`,
-      headers: auth(guestToken),
-      payload: { type: 'power', on: true },
-    });
-    expect(refused.statusCode).toBe(403);
-    expect(refused.json()).toMatchObject({ error: 'forbidden', permission: 'device.control' });
-    // Refused before the adapter, not after it — a 403 over a lamp that came on
-    // anyway is the worst of both.
-    expect(adapter.executed.length).toBe(executed);
-
-    await app.inject({
-      method: 'PATCH',
-      url: `/api/v1/roles/${guestRole}`,
-      headers: auth(ownerToken),
-      payload: { permissions: [...BUILTIN_ROLES[2].permissions] },
-    });
-  });
-
-  /**
    * Reading what the hub is running is the floor — somebody who cannot press
    * the button is exactly who needs to know why the home went quiet for two
    * minutes — while asking for it is `hub.update`, which Member holds and
@@ -1215,7 +1180,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
       role: 'member',
       roleKey: 'guest',
       roleName: 'Guest',
-      permissions: ['device.control'],
+      permissions: [],
     });
 
     const rows = (
@@ -1235,7 +1200,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
     expect(renamed.json()).toMatchObject({
       name: 'Dasha’s phone',
       roleName: 'Guest',
-      permissions: ['device.control'],
+      permissions: [],
       isSelf: true,
     });
 
@@ -1262,7 +1227,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
       method: 'POST',
       url: '/api/v1/roles',
       headers: auth(ownerToken),
-      payload: { name: 'Gardener', permissions: ['device.control'] },
+      payload: { name: 'Gardener', permissions: ['activity.read'] },
     });
     const role = created.json() as RoleWire;
 
