@@ -433,27 +433,120 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   member row with nothing to click on. This is what lets GetHome Studio — which
   has no accounts and no user name of its own — claim as *the Mac* and offer
   the rename afterwards.
-- **Owner-only guards the shape of the home, not adding to it.** Rooms,
-  members, invites, renames, AI settings and device *removal* are the owner's;
-  `POST /matter/commission`, `POST /zigbee/permit-join`,
-  `PUT /settings/radio` and `POST /system/update` are **any member's**, and
-  every one of them was owner-only until a real home found it 403. A member is
-  somebody the owner invited in, and a home where they cannot pair the lamp
-  they are standing next to is a home with a support call in it. Three things
-  make it safe to give away and are the test for anything else that moves out
-  of `ownerOnly`: the cost is **bounded** (a join window closes itself, a
-  radio mode is one word the owner can put back), it **destroys nothing** (no
-  device leaves, no membership ends), and it is **named** — each of the three
-  writes an activity row carrying `request.member!.name`, which is the
-  accountability the role check was standing in for. **Updating was the last to
-  move and is the plainest case of the trap**: Studio claims a hub as *the Mac*,
-  so the owner is a laptop in a drawer, every phone joins by invite, and there is
-  no ownership transfer to fix it with — owner-only there did not mean "this
-  needs care", it meant the phone in the owner's own hand could never update
-  their own hub, for the life of that hub. Its cost is bounded by the installer's
-  own rollback, which is what makes "migrations must stay readable by the build
-  before them" a rule rather than a hope. Removal is the mirror image and stays
-  owner-only: unbounded, destructive, and anonymous in a log read a week later.
+- **Access is a table the home edits, and three rules hold it up.** Roles are
+  rows (`roles`), permissions are a named vocabulary owned by
+  `src/core/access.ts`, and a member holds one role; `requirePermission` in
+  `api/auth.ts` is the only guard left — `requireOwner` is gone rather than kept
+  beside it, because two mechanisms are two places for a route to be wrong.
+  `docs/api.md` is canonical.
+  **First, the floor is not a permission.** Reading the home, **working a
+  device**, renaming yourself, leaving, and pinning your own favorites are what
+  *being a member* means and no role can take them away — a member with nothing
+  at all is a token that can only 401 behind an app with nothing to draw.
+  Switching things on was a `device.control` key for a day, and it is the
+  clearest case the floor has: an app whose whole job is working the home cannot
+  have a member who may not work the home, and a permission every role must hold
+  is a matrix row that can only ever be wrong — somebody turns it off and finds
+  out. Gone, rather than shipped switched on for everybody; the commands route
+  takes any token. That is also why
+  `PATCH /devices/:id` is the one route whose check reads the *body*:
+  `name`/`roomId` are the house's and need `device.edit`, while the caller's own
+  `favorite` needs nothing, and a guest who can work the lights must be able to
+  put the kettle on their own dashboard.
+  **Second, the owner is never evaluated.** `can()` answers `true` for the owner
+  without reading a stored set, so a permission a later build adds is theirs
+  automatically and no edit to the matrix can lock a home out of itself. One
+  refusal follows: the owner's *role* row cannot be edited or deleted
+  (`role_is_owner`), because nothing reads it.
+  **Owner is otherwise an ordinary role** — invitable, assignable, revocable,
+  and holdable by several people at once — held up by two rules instead of the
+  flat refusal it used to be. **Only an owner grants or revokes it**
+  (`403 not_owner`, deliberately not `owner_only`, which both apps read as "this
+  hub is too old"), and that check is what keeps `role.manage` safe to delegate
+  to a role a home invented: without it the permission would quietly mean "can
+  make myself owner" and every other key would be a formality. **A home always
+  keeps one owner** (`cannot_change_owner` / `cannot_remove_owner`, narrowed
+  from "any owner" to "the last"), because granting the role is owner-only, so a
+  home with none has nobody left who could give it one.
+  **Third, the defaults are the old behaviour written down.** `member` is, key
+  for key, what `authed` used to allow; the keys missing from it are what
+  `ownerOnly` used to refuse. Updating a hub changes nothing until somebody
+  edits the matrix, and `test/roles-migration.test.ts` proves that against rows
+  written by the old schema rather than asserting it. The old three-part test
+  for *giving something away* survives as the guidance for **choosing a
+  default**: bounded cost, destroys nothing, and named in the activity log.
+  **Updating the hub is the worked example, and the plainest case of the trap
+  the old rule kept falling into.** It was owner-only on the reasoning that an
+  update is not merely "bringing something new in" — it replaces the code every
+  member depends on and runs migrations a symlink flip does not undo. What that
+  missed is who the owner *is*: Studio claims a hub as *the Mac*, so the owner is
+  a laptop in a drawer and every phone joins by invite, with Owner something an
+  owner hands over and nobody had — so owner-only did not mean "this needs care", it meant
+  the phone in the owner's own hand could never update their own hub, ever. It
+  passes all three tests (the installer's own rollback is what bounds it, which
+  is why `test/migrations.test.ts` turns "migrations stay readable by the build
+  before them" from a hope into a rule), so `hub.update` is in **member**'s
+  default set as well as the owner's. It is a permission rather than the floor
+  because a guest staying the weekend has no business restarting the house.
+  **An access change reaches every open socket, not only the members it is
+  about.** The `access` frame has two halves with two audiences: `role` and
+  `permissions` are personal, while `roles` — the whole table, each row with its
+  `memberCount` — is the home's. `announce` named the holders of the edited
+  role, which was right about the first half and left the second stale
+  everywhere else: creating a role reached nobody (it has no holders), deleting
+  one the same (it is refused while held), an owner editing Guest heard nothing
+  about their own edit, and moving one person between roles left two
+  `memberCount`s wrong on every other screen — so both apps drew a matrix that
+  only moved when the page was closed and reopened. It is a broadcast now, and
+  that is not a leak: `accessFrame()` is per socket, so everybody still gets
+  their own answer, and the role table is the floor to read anyway.
+  Two consequences worth knowing. `activity.read` **narrows rather than
+  refuses** — a member without it still reads their own rows, on the route and
+  on the socket, because a Recent feed that 403s is a broken screen; the socket
+  asks at *send* time, so a grant lands with no reconnect. And `members.role` /
+  `invites.role` stay, maintained as owner-or-member, for the same reason
+  `devices.favorite` does: `install.sh` rolls back on a failed health check by
+  which time the migration has run, and the older build reads that column on
+  every authenticated request.
+  **Deleting a role takes its outstanding invites with it**, and the reasoning
+  is the same shape as the refusal above. `invites.role_id` is a column added
+  by `ALTER TABLE` too, so it carries no `ON DELETE` action and the raw foreign
+  key was what refused — a 500 for an ordinary thing to do. Clearing it would
+  let that code admit its holder as a plain **Member**, which is precisely the
+  silent reassignment `role_in_use` exists to refuse; refusing the delete would
+  be a dead end, since no route revokes an invite. So the codes go: an invite's
+  whole content is "join as this", it lives fifteen minutes, and minting
+  another is one tap.
+- **Anything that touches a permission, a role, a guard or a default is not
+  done until the four suites are.** This is the "Keep the docs in sync" rule
+  applied to the part of the system where the *cost* of drifting is somebody
+  getting access nobody granted them, and it is a standing requirement rather
+  than a nicety — the audit that produced these files found refusals tested for
+  the guest table and almost nowhere else, which is exactly the shape of hole
+  that hides an escalation. `test/access.test.ts` is `AccessService` with no
+  server in front of it: the owner answered without a table, a key a newer
+  build stored, a row an older build wrote, `forgetMember`. `test/roles.test.ts`
+  is the guards and the socket, over a real listening server, and its
+  `[method, url, permission, payload]` tables are where a new route belongs —
+  **both** halves, since a permission with only a refusal test can be broken by
+  denying everybody. `test/roles-migration.test.ts` runs the migration against
+  rows written by the old schema and is what proves "the defaults change
+  nothing" rather than asserting it. `test/pairing.test.ts` owns the invite →
+  role path, which is the only place a role is chosen for somebody who has no
+  member row yet. A new permission key needs a line in the defaults assertion,
+  a guard test both ways, and a row in `docs/api.md`'s two tables; a new guarded
+  route needs its row in the refusal table and an allowed case somewhere.
+  **`npm run typecheck` does not cover `test/`** — `tsconfig.json` includes
+  `src` only, so a suite that builds a server with one of `ApiDeps`' required
+  fields missing compiles clean here and fails in CI, where mosquitto exists and
+  `HUB_TEST_MQTT=1` actually runs the e2e suites. It has happened: `access` was
+  added to the deps and two `buildServer` call sites in `test/` never got it,
+  which read as `TypeError: list.map is not a function` on a route answering
+  500. Copy a call from `test/api.test.ts` or `test/roles.test.ts` rather than
+  extending an older one from memory. Closing this properly means a second
+  tsconfig without `rootDir`, and about sixteen unrelated fixture errors in the
+  AI descriptor tests to fix first — worth doing, deliberately not done inside a
+  change about roles.
 - **Ending a membership has two halves, and only one of them is the database.**
   Deleting a member takes their tokens with the row (`tokens.member_id`
   cascades, `foreign_keys = ON`), which ends every REST call they can make. It
@@ -471,7 +564,14 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   And **registration is scoped to the socket's life** — `authorize` adds,
   the close handler removes — so the map holds one entry per open connection
   and none per closed one. `test/api.test.ts` opens a real socket, removes its
-  member, and asserts both the close code and the silence.
+  member, and asserts both the close code and the silence. **Revoking is the
+  only thing this registry does**, and it briefly carried a `notifyAccess`
+  channel beside it on the reasoning that a role edit and a removal are one
+  question asked with different force. They are not: a removal is about one
+  member, and an access change is about the home — see the `announce` note in
+  the access bullet above. Nothing ever called it, and a per-member access
+  channel sitting there unused is an invitation to wire the narrow rule back
+  in, so it is gone.
 - **One hub, one home, one name — and `HUB_NAME` only seeds it.** There used to
   be two names: `GET /hub` answered `HUB_NAME` from `/etc/gethome/hub.env`,
   which the installer writes once and nobody ever edits, while `GET /home`

@@ -14,7 +14,9 @@ import { DeviceRegistry } from '../../src/core/registry.js';
 import { PermitJoinService } from '../../src/core/permit-join.js';
 import { ZigbeeAdapter } from '../../src/adapters/zigbee/adapter.js';
 import { MqttAdapter } from '../../src/adapters/mqtt/adapter.js';
-import { bootedHome, loadedFavorites, openTestDb, resetDb } from '../helpers/db.js';
+import { AiRunLog } from '../../src/core/ai-runs.js';
+import { MappingLibrary } from '../../src/ai/library.js';
+import { bootedHome, loadedFavorites, openTestDb, resetDb, loadedAccess } from '../helpers/db.js';
 
 /**
  * End-to-end proof over a real MQTT broker: a fake Zigbee2MQTT bridge and a
@@ -83,7 +85,8 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
     const dataDir = mkdtempSync(path.join(tmpdir(), 'gethome-e2e-'));
     const events = new HubEventBus();
     const activity = new ActivityService(db, events);
-    const pairing = new PairingService(db, dataDir, log);
+    const access = await loadedAccess(db, events);
+    const pairing = new PairingService(db, dataDir, log, access);
     await pairing.boot();
     registry = new DeviceRegistry(db, events, activity, log);
     const zigbee = new ZigbeeAdapter({ mqttUrl: MQTT_URL, baseTopic: 'zigbee2mqtt', log });
@@ -91,20 +94,27 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
     registry.registerAdapter(new MqttAdapter({ mqttUrl: MQTT_URL, log }));
     await registry.start();
 
+    const settings = new SettingsService(db, Buffer.alloc(32).toString('base64'));
     app = await buildServer({
       db,
       log,
       events,
       registry,
       favorites: await loadedFavorites(db, events),
+      access,
       pairing,
       activity,
-      settings: new SettingsService(db, Buffer.alloc(32).toString('base64')),
+      settings,
       hubId: 'hub-e2e',
       home: await bootedHome(db, 'E2E Hub'),
       version: 'e2e',
+      dataDir,
+      radioBudget: 'both',
+      z2mDataDir: path.join(dataDir, 'zigbee2mqtt'),
       zigbee,
       permitJoin: new PermitJoinService(zigbee, log, () => {}),
+      aiRuns: new AiRunLog(db, events),
+      mappings: new MappingLibrary({ db, settings, registry, log }),
     });
     await app.ready();
 

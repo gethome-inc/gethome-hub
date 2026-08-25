@@ -4,14 +4,26 @@ import path from 'node:path';
 import type { Db } from '../db/client.js';
 import { invites, members, tokens } from '../db/schema.js';
 import { generateNumericCode, generateToken, sha256Hex } from './crypto.js';
+import type { AccessService } from './access.js';
 import type { Logger } from '../logging.js';
 
+/**
+ * The legacy two-word vocabulary, kept because `members.role` is kept.
+ *
+ * What a member may actually do comes from `AccessService` and the role row
+ * `roleId` points at — a home can have as many roles as it likes. This says
+ * only "is this the owner", which is still a real question: the owner cannot
+ * be removed, cannot have its role changed, and is answered `true` by every
+ * permission check without a table being read.
+ */
 export type MemberRole = 'owner' | 'member';
 
 export interface Member {
   id: string;
   name: string;
   role: MemberRole;
+  /** The role row this member holds; null on a row an older build wrote. */
+  roleId: string | null;
 }
 
 export interface ClaimResult {
@@ -70,6 +82,13 @@ export class PairingService {
     private readonly db: Db,
     private readonly dataDir: string,
     private readonly log: Logger,
+    /**
+     * Who may do what. Claiming has to write `role_id`, not only the legacy
+     * word, and the new member has to be in the in-memory map before their
+     * first request — which arrives immediately, since the token is handed
+     * back by this very call.
+     */
+    private readonly access: AccessService,
   ) {}
 
   async boot(): Promise<void> {
@@ -119,15 +138,20 @@ export class PairingService {
 
     if (this.bootCode !== null) {
       if (normalized !== this.bootCode) return null;
+      const ownerRoleId = this.access.builtinRoleId('owner') ?? null;
       const [owner] = await this.db
         .insert(members)
-        .values({ name: memberName, role: 'owner' })
+        .values({ name: memberName, role: 'owner', roleId: ownerRoleId })
         .returning();
       if (!owner) return null;
+      this.access.noteMember(owner.id, ownerRoleId);
       this.clearBootCode();
       this.log.info(`Hub claimed by owner "${memberName}".`);
       this.onClaimed?.();
-      return this.rememberClaim(claimId, await this.issueToken(owner.id, owner.name, 'owner', deviceName));
+      return this.rememberClaim(
+        claimId,
+        await this.issueToken(owner.id, owner.name, 'owner', ownerRoleId, deviceName),
+      );
     }
 
     // Claimed hub: the code must match a live, unused invite.
@@ -136,24 +160,51 @@ export class PairingService {
       where: and(eq(invites.codeHash, codeHash), isNull(invites.usedBy), gt(invites.expiresAt, new Date())),
     });
     if (!invite) return null;
-    const role = invite.role === 'owner' ? 'owner' : 'member';
-    const [member] = await this.db.insert(members).values({ name: memberName, role }).returning();
+    // The invite names the role. A code minted before roles existed carries
+    // only the legacy word, and `member` is what that has always meant.
+    const roleRecord =
+      (invite.roleId ? this.access.role(invite.roleId) : undefined) ??
+      this.access.roleByKeyName(invite.role === 'owner' ? 'owner' : 'member');
+    const roleId = roleRecord?.id ?? null;
+    const role = roleRecord?.key === 'owner' ? 'owner' : 'member';
+    const [member] = await this.db
+      .insert(members)
+      .values({ name: memberName, role, roleId })
+      .returning();
     if (!member) return null;
+    this.access.noteMember(member.id, roleId);
     await this.db.update(invites).set({ usedBy: member.id }).where(eq(invites.id, invite.id));
-    this.log.info(`Member "${memberName}" joined via invite.`);
-    return this.rememberClaim(claimId, await this.issueToken(member.id, member.name, role, deviceName));
+    this.log.info(`Member "${memberName}" joined via invite as ${roleRecord?.name ?? role}.`);
+    return this.rememberClaim(
+      claimId,
+      await this.issueToken(member.id, member.name, role, roleId, deviceName),
+    );
   }
 
-  async createInvite(createdBy: string, role: MemberRole = 'member'): Promise<{ code: string; expiresAt: Date }> {
+  /**
+   * Mint an invite code, for a role.
+   *
+   * `invites.role` has carried a role since the first migration and the claim
+   * path has honoured it just as long — the route simply never passed one, so
+   * every invite was a `member` invite. `roleId` is the real answer now and
+   * the word beside it is the rollback mirror, exactly as on `members`.
+   */
+  async createInvite(
+    createdBy: string,
+    roleId?: string,
+  ): Promise<{ code: string; expiresAt: Date; roleId: string | null }> {
     const code = generateNumericCode();
     const expiresAt = new Date(Date.now() + INVITE_TTL_MS);
+    const role = roleId ? this.access.role(roleId) : undefined;
+    const resolved = role?.id ?? this.access.builtinRoleId('member') ?? null;
     await this.db.insert(invites).values({
       codeHash: sha256Hex(code),
-      role,
+      role: role?.key === 'owner' ? 'owner' : 'member',
+      roleId: resolved,
       createdBy,
       expiresAt,
     });
-    return { code, expiresAt };
+    return { code, expiresAt, roleId: resolved };
   }
 
   /** Resolve a bearer token to its member, refreshing last_used_at now and then. */
@@ -173,13 +224,19 @@ export class PairingService {
         // Never fail a request because a timestamp didn't stick.
       }
     }
-    return { id: member.id, name: member.name, role: member.role as MemberRole };
+    return {
+      id: member.id,
+      name: member.name,
+      role: member.role === 'owner' ? 'owner' : 'member',
+      roleId: member.roleId,
+    };
   }
 
   private async issueToken(
     memberId: string,
     memberName: string,
     role: MemberRole,
+    roleId: string | null,
     deviceName?: string,
   ): Promise<ClaimResult> {
     const token = generateToken();
@@ -188,7 +245,7 @@ export class PairingService {
       tokenHash: sha256Hex(token),
       deviceName: deviceName ?? null,
     });
-    return { token, member: { id: memberId, name: memberName, role } };
+    return { token, member: { id: memberId, name: memberName, role, roleId } };
   }
 
   private get codeFile(): string {

@@ -10,7 +10,9 @@ import { PairingService } from '../src/core/pairing.js';
 import { SettingsService } from '../src/core/settings.js';
 import { DeviceRegistry } from '../src/core/registry.js';
 import { PermitJoinService } from '../src/core/permit-join.js';
-import { bootedHome, loadedFavorites, openTestDb } from './helpers/db.js';
+import { AiRunLog } from '../src/core/ai-runs.js';
+import { MappingLibrary } from '../src/ai/library.js';
+import { bootedHome, loadedFavorites, openTestDb, loadedAccess } from './helpers/db.js';
 
 /**
  * `zigbee.problem` on the wire.
@@ -53,18 +55,24 @@ describe.skipIf(!handle)('why Zigbee is down, over HTTP', () => {
       writeFileSync(path.join(run, 'log.log'), options.log);
     }
     const events = new HubEventBus();
-    const pairing = new PairingService(db, dir, log);
+    const access = await loadedAccess(db, events);
+    const pairing = new PairingService(db, dir, log, access);
     await pairing.boot();
     const activity = new ActivityService(db, events);
+    const registry = new DeviceRegistry(db, events, activity, log);
+    const settings = new SettingsService(db, Buffer.alloc(32).toString('base64'));
     const server = await buildServer({
       db,
       log,
       events,
-      registry: new DeviceRegistry(db, events, activity, log),
+      registry,
       favorites: await loadedFavorites(db, events),
+      access,
       pairing,
       activity,
-      settings: new SettingsService(db, Buffer.alloc(32).toString('base64')),
+      settings,
+      aiRuns: new AiRunLog(db, events),
+      mappings: new MappingLibrary({ db, settings, registry, log }),
       hubId: 'hub-z2m',
       home: await bootedHome(db, 'Z2M Hub'),
       version: '0.1.0-test',

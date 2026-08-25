@@ -181,11 +181,88 @@ export const deviceFavorites = sqliteTable(
   (table) => [uniqueIndex('device_favorites_device_member').on(table.deviceId, table.memberId)],
 );
 
+/**
+ * A named set of permissions — what a role is allowed to do in this home.
+ *
+ * Roles are the *house's*, exactly like room names: everybody who opens the
+ * home sees the same Guest, so they are rows here rather than a preference on
+ * anybody's phone. Three ship built in (`owner`, `member`, `guest`) and the
+ * home can add its own.
+ *
+ * **`permissions` is a JSON array rather than a join table**, for the reason
+ * `endpoints.capabilities` is one: a home has a handful of roles and the
+ * catalog is a dozen keys, the set is only ever read whole, and this runs on
+ * an SD card where a join per authenticated request is a cost with nothing to
+ * show for it. `core/access.ts` holds the whole table in memory anyway.
+ *
+ * **The owner's row is never consulted.** `AccessService.can` answers `true`
+ * for the owner without reading `permissions`, which is what makes a hub
+ * impossible to lock out of and what gives a future permission to the owner
+ * automatically. The row exists so an app can draw the word "Owner"; editing
+ * or deleting it is refused.
+ */
+export const roles = sqliteTable('roles', {
+  id: uuidPk(),
+  /**
+   * The stable handle: `owner`, `member`, `guest`, or a minted one for a role
+   * somebody in the home created. Names are renameable and translated; this
+   * is what code compares against, and only ever for the three built-ins.
+   */
+  key: text('key').notNull().unique(),
+  name: text('name').notNull(),
+  /** Built-in roles cannot be deleted, and `owner` cannot be edited either. */
+  builtin: integer('builtin', { mode: 'boolean' }).notNull().default(false),
+  /**
+   * `PermissionKey[]` as JSON.
+   *
+   * A key this build has never heard of is **ignored on read** — a role row
+   * written by a newer build, met after `install.sh` rolled back to this one,
+   * must not make `can()` throw or the role unreadable, and a permission this
+   * build cannot enforce is one it must not claim to. The row keeps it, so
+   * rolling forward restores it.
+   *
+   * It *is* dropped on write, and that asymmetry is the safer half of a real
+   * trade: keeping unknown keys through an edit would mean a home that
+   * revoked something on the older build finds it granted again the moment the
+   * newer one comes back, with the matrix having said otherwise the whole
+   * time. Losing a grant is visible and one tap to redo; a revoke that quietly
+   * did not happen is neither.
+   */
+  permissions: text('permissions', { mode: 'json' }).notNull(),
+  sortOrder: integer('sort_order').notNull().default(0),
+  createdAt: createdAt(),
+});
+
 export const members = sqliteTable('members', {
   id: uuidPk(),
   name: text('name').notNull(),
-  /** owner | member */
+  /**
+   * **Legacy, and kept for the same reason `devices.favorite` is.** The role
+   * is `roleId` now; this column is maintained as `'owner'` for the owner and
+   * `'member'` for everybody else. `install.sh` rolls back to the previous
+   * release when a build fails its health check — by which time this migration
+   * has run — and that build reads this column on *every authenticated
+   * request*. Dropping it would turn a routine rollback into a hub where
+   * nobody can sign in.
+   *
+   * An older build therefore reads a guest as a member, which is more
+   * permissive than the home asked for and lasts only as long as the failed
+   * update. That is the honest trade: the alternative is a dead hub.
+   */
   role: text('role').notNull(),
+  /**
+   * Which role this member holds.
+   *
+   * **Nullable, and with no `onDelete` action — both are forced.** SQLite
+   * cannot `ADD COLUMN … NOT NULL` without a SQL-level default (drizzle's
+   * `$defaultFn` runs in JS), and it cannot attach a referential action to a
+   * column added by `ALTER TABLE` at all — the same pair of constraints that
+   * shaped `rooms.zone_id`. So `DELETE /roles/:id` does that work by refusing
+   * while a role still has members, and the plain foreign key is the backstop
+   * that refuses if it ever forgets to. A null here resolves through `role`
+   * above, which is what a row written by an older build looks like.
+   */
+  roleId: text('role_id').references(() => roles.id),
   createdAt: createdAt(),
 });
 
@@ -205,7 +282,10 @@ export const invites = sqliteTable('invites', {
   id: uuidPk(),
   /** sha256 hex of the 8-digit invite code. */
   codeHash: text('code_hash').notNull(),
+  /** Legacy mirror of `roleId`, kept for rollback — see `members.role`. */
   role: text('role').notNull().default('member'),
+  /** Which role the person claiming this code joins as. Null = `member`. */
+  roleId: text('role_id').references(() => roles.id),
   createdBy: text('created_by').references(() => members.id, { onDelete: 'set null' }),
   expiresAt: integer('expires_at', { mode: 'timestamp_ms' }).notNull(),
   usedBy: text('used_by').references(() => members.id, { onDelete: 'set null' }),

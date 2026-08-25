@@ -17,7 +17,7 @@ import { AiRunLog } from '../src/core/ai-runs.js';
 import { MappingLibrary } from '../src/ai/library.js';
 import type { AdapterBus, ProtocolAdapter } from '../src/adapters/adapter.js';
 import type { HubCommand } from '../src/schema/index.js';
-import { bootedHome, openTestDb, resetDb } from './helpers/db.js';
+import { bootedHome, loadedAccess, openTestDb, resetDb } from './helpers/db.js';
 
 const handle = await openTestDb();
 const log = pino({ level: 'silent' });
@@ -44,6 +44,7 @@ describe.skipIf(!handle)('hub API', () => {
   let registry: DeviceRegistry;
   let favorites: FavoritesService;
   let events: HubEventBus;
+  let access: Awaited<ReturnType<typeof loadedAccess>>;
   let dataDir: string;
   let ownerToken: string;
   let memberToken: string;
@@ -55,7 +56,8 @@ describe.skipIf(!handle)('hub API', () => {
     dataDir = mkdtempSync(path.join(tmpdir(), 'gethome-api-'));
     events = new HubEventBus();
     const activity = new ActivityService(db, events);
-    const pairing = new PairingService(db, dataDir, log);
+    access = await loadedAccess(db, events);
+    const pairing = new PairingService(db, dataDir, log, access);
     await pairing.boot();
     adapter = new FakeAdapter();
     registry = new DeviceRegistry(db, events, activity, log);
@@ -70,6 +72,7 @@ describe.skipIf(!handle)('hub API', () => {
       events,
       registry,
       favorites,
+      access,
       pairing,
       activity,
       settings,
