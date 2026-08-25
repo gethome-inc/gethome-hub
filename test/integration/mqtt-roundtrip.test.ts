@@ -14,6 +14,8 @@ import { DeviceRegistry } from '../../src/core/registry.js';
 import { PermitJoinService } from '../../src/core/permit-join.js';
 import { ZigbeeAdapter } from '../../src/adapters/zigbee/adapter.js';
 import { MqttAdapter } from '../../src/adapters/mqtt/adapter.js';
+import { AiRunLog } from '../../src/core/ai-runs.js';
+import { MappingLibrary } from '../../src/ai/library.js';
 import { bootedHome, loadedFavorites, openTestDb, resetDb, loadedAccess } from '../helpers/db.js';
 
 /**
@@ -92,20 +94,27 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
     registry.registerAdapter(new MqttAdapter({ mqttUrl: MQTT_URL, log }));
     await registry.start();
 
+    const settings = new SettingsService(db, Buffer.alloc(32).toString('base64'));
     app = await buildServer({
       db,
       log,
       events,
       registry,
       favorites: await loadedFavorites(db, events),
+      access,
       pairing,
       activity,
-      settings: new SettingsService(db, Buffer.alloc(32).toString('base64')),
+      settings,
       hubId: 'hub-e2e',
       home: await bootedHome(db, 'E2E Hub'),
       version: 'e2e',
+      dataDir,
+      radioBudget: 'both',
+      z2mDataDir: path.join(dataDir, 'zigbee2mqtt'),
       zigbee,
       permitJoin: new PermitJoinService(zigbee, log, () => {}),
+      aiRuns: new AiRunLog(db, events),
+      mappings: new MappingLibrary({ db, settings, registry, log }),
     });
     await app.ready();
 

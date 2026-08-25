@@ -509,6 +509,17 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   member row yet. A new permission key needs a line in the defaults assertion,
   a guard test both ways, and a row in `docs/api.md`'s two tables; a new guarded
   route needs its row in the refusal table and an allowed case somewhere.
+  **`npm run typecheck` does not cover `test/`** — `tsconfig.json` includes
+  `src` only, so a suite that builds a server with one of `ApiDeps`' required
+  fields missing compiles clean here and fails in CI, where mosquitto exists and
+  `HUB_TEST_MQTT=1` actually runs the e2e suites. It has happened: `access` was
+  added to the deps and two `buildServer` call sites in `test/` never got it,
+  which read as `TypeError: list.map is not a function` on a route answering
+  500. Copy a call from `test/api.test.ts` or `test/roles.test.ts` rather than
+  extending an older one from memory. Closing this properly means a second
+  tsconfig without `rootDir`, and about sixteen unrelated fixture errors in the
+  AI descriptor tests to fix first — worth doing, deliberately not done inside a
+  change about roles.
 - **Ending a membership has two halves, and only one of them is the database.**
   Deleting a member takes their tokens with the row (`tokens.member_id`
   cascades, `foreign_keys = ON`), which ends every REST call they can make. It
