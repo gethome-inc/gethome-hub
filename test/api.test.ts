@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -1420,6 +1420,135 @@ describe.skipIf(!handle)('hub API', () => {
     expect(frame.zones.some((zone) => zone.name === 'Basement')).toBe(true);
     expect(Array.isArray(frame.rooms)).toBe(true);
     socket.close();
+  });
+
+  /**
+   * Updating the hub.
+   *
+   * The interesting half is the refusals: every one of them is a sentence an
+   * app has to be able to say, and a bare status code is not one.
+   */
+  describe('updating the hub', () => {
+    const updateDir = () => path.join(dataDir, 'update');
+
+    it('tells any member what is installed', async () => {
+      // Information is the home's, even though only the owner may act on it —
+      // somebody who cannot press the button still has to be able to see why
+      // the hub is unreachable for the next two minutes.
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/v1/system/update',
+        headers: auth(memberToken),
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({ canApply: false });
+    });
+
+    it('says it cannot tell rather than saying up to date', async () => {
+      // This hub has no CI stamp, so there is nothing to compare a commit
+      // against. `available` must be *absent*: an app reading a missing field
+      // as `false` would tell somebody they are current on no evidence at all.
+      const body = await app
+        .inject({ method: 'GET', url: '/api/v1/system/update', headers: auth(ownerToken) })
+        .then((r) => r.json());
+      expect(body.checkError).toBe('no_build_stamp');
+      expect(body).not.toHaveProperty('available');
+      expect(body).not.toHaveProperty('latest');
+    });
+
+    it('lets any member start one', async () => {
+      // Owner-only here meant the phone in the owner's own hand could never
+      // update their own hub: Studio claims a hub as *the Mac*, so the owner is
+      // a laptop in a drawer, every phone joins by invite, and there is no
+      // ownership transfer to fix it with. A member is refused below, but for
+      // the machine's sake and never for being a member.
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/system/update',
+        headers: auth(memberToken),
+      });
+      expect(response.statusCode).not.toBe(403);
+    });
+
+    it('refuses a machine with no update plumbing, by name', async () => {
+      // A hub installed before any of this existed. Letting the request sit in
+      // a directory nothing is watching looks, from an app, exactly like an
+      // update that never starts.
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/system/update',
+        headers: auth(memberToken),
+      });
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toMatchObject({ error: 'update_unsupported' });
+    });
+
+    it('records the request and names who made it', async () => {
+      mkdirSync(updateDir(), { recursive: true });
+      writeFileSync(path.join(updateDir(), 'enabled'), '');
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/system/update',
+        headers: auth(ownerToken),
+      });
+      expect(response.statusCode).toBe(202);
+      const { id } = response.json() as { id: string };
+      // The receipt and the file agree: the runner copies this id into its
+      // status, which is how an app tells its own run from somebody else's.
+      expect(readFileSync(path.join(updateDir(), 'request'), 'utf8').trim()).toBe(id);
+
+      // Written while this process is still alive to write it — the outcome is
+      // recorded at the next boot, by which time there is no member to name.
+      const feed = await app
+        .inject({ method: 'GET', url: '/api/v1/activity?limit=5', headers: auth(ownerToken) })
+        .then((r) => r.json() as Array<{ kind: string; message: string }>);
+      expect(feed.some((e) => e.kind === 'hub.update' && e.message.includes('started a hub update')))
+        .toBe(true);
+    });
+
+    it('refuses a second update while one is running', async () => {
+      // A .path unit does not fire while its service is active, so a second
+      // request during a run would be silently dropped. Saying so is the only
+      // honest option.
+      writeFileSync(
+        path.join(updateDir(), 'status.json'),
+        JSON.stringify({
+          id: 'run-1',
+          state: 'running',
+          step: 'download',
+          startedAt: new Date().toISOString(),
+          heartbeat: new Date().toISOString(),
+          fromBuild: '0.1.0-test',
+          hubAnswering: false,
+          warnings: [],
+        }),
+      );
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/system/update',
+        headers: auth(ownerToken),
+      });
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toMatchObject({ error: 'update_in_progress' });
+    });
+
+    it('reports the run to every member', async () => {
+      const body = await app
+        .inject({ method: 'GET', url: '/api/v1/system/update', headers: auth(memberToken) })
+        .then((r) => r.json() as { run?: { state: string; step: string } });
+      expect(body.run).toMatchObject({ state: 'running', step: 'download' });
+    });
+
+    it('serves the installer log, empty and all', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/v1/system/update/log?tail=10',
+        headers: auth(memberToken),
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({ lines: [], total: 0 });
+    });
   });
 
   it('rejects unauthorized WebSocket connections', async () => {

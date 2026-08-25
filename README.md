@@ -280,6 +280,13 @@ sudo gethome-hubctl update           # install the latest build of main
 sudo gethome-hubctl rollback         # go back to the previous one
 ```
 
+**Or from an app.** The GetHome iOS app updates a hub from its Hub page, and
+GetHome Studio does it over SSH — both run exactly this, so the atomic flip,
+the health check and the automatic rollback are the same on every path. Updating
+from an app is the home owner's; every member can watch it happen. A hub
+installed before that existed has to be updated once from Studio or from here,
+after which it can do it itself.
+
 **Installing a branch.** `update` takes `--branch`, which is how an unmerged
 change gets onto real hardware — and how you go back afterwards:
 

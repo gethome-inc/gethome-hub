@@ -435,9 +435,9 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   the rename afterwards.
 - **Owner-only guards the shape of the home, not adding to it.** Rooms,
   members, invites, renames, AI settings and device *removal* are the owner's;
-  `POST /matter/commission`, `POST /zigbee/permit-join` and
-  `PUT /settings/radio` are **any member's**, and were owner-only until a
-  second phone in a real home found every one of them 403. A member is
+  `POST /matter/commission`, `POST /zigbee/permit-join`,
+  `PUT /settings/radio` and `POST /system/update` are **any member's**, and
+  every one of them was owner-only until a real home found it 403. A member is
   somebody the owner invited in, and a home where they cannot pair the lamp
   they are standing next to is a home with a support call in it. Three things
   make it safe to give away and are the test for anything else that moves out
@@ -445,9 +445,15 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   radio mode is one word the owner can put back), it **destroys nothing** (no
   device leaves, no membership ends), and it is **named** — each of the three
   writes an activity row carrying `request.member!.name`, which is the
-  accountability the role check was standing in for. Removal is the mirror
-  image and stays owner-only: unbounded, destructive, and anonymous in a log
-  read a week later.
+  accountability the role check was standing in for. **Updating was the last to
+  move and is the plainest case of the trap**: Studio claims a hub as *the Mac*,
+  so the owner is a laptop in a drawer, every phone joins by invite, and there is
+  no ownership transfer to fix it with — owner-only there did not mean "this
+  needs care", it meant the phone in the owner's own hand could never update
+  their own hub, for the life of that hub. Its cost is bounded by the installer's
+  own rollback, which is what makes "migrations must stay readable by the build
+  before them" a rule rather than a hope. Removal is the mirror image and stays
+  owner-only: unbounded, destructive, and anonymous in a log read a week later.
 - **Ending a membership has two halves, and only one of them is the database.**
   Deleting a member takes their tokens with the row (`tokens.member_id`
   cascades, `foreign_keys = ON`), which ends every REST call they can make. It
@@ -498,12 +504,13 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
 - **`install.sh`'s `@@…@@` markers are a wire protocol.** GetHome Studio drives
   its whole install UI off them (`@@STEP@@`, `@@ERROR@@`, `@@WARN@@`,
   `@@BOARD@@`, `@@PAIRING@@`, `@@ZIGBEE_FOUND@@`, `@@ZIGBEE_MAYBE@@`,
-  `@@CAPABILITIES@@`). Adding a
+  `@@CAPABILITIES@@`, `@@ROLLBACK@@`). Adding a
   marker is safe — unknown ones are ignored — but renaming or removing one, or
   changing a **step id**, breaks the app silently: the step ids (`system`,
   `runtime`, `download`, `zigbee`, `start`, `autostart`, `health`) are mirrored
-  in Studio's `FirstBootMonitor.installSteps` and `PiInstallView.steps()`.
-  Change both repos together. The header comment lists them; keep it accurate.
+  in Studio's `FirstBootMonitor.installSteps` and `PiInstallView.steps()`, and
+  now in the iOS app's `HubUpdateStep` as well, since a phone shows the same
+  checklist while the hub updates itself. Change all three repos together. The header comment lists them; keep it accurate.
 - **Every install path must leave the hub starting on power-up.** Every unit is
   `systemctl enable`d with `Restart=always`. Don't add a path that needs a human
   to start the hub by hand.
@@ -563,6 +570,35 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `apply_matter()` restarts the hub only when the value really changed, because
   this script runs on every USB event and a hub that restarted whenever somebody
   plugged in a phone charger would be worse than the problem being solved.
+- **The hub can update itself, and it records the request exactly the way it
+  records a radio.** `POST /system/update` writes one line into `<data>/update/`,
+  `gethome-update.path` notices, and `deploy/update-runner.sh` (installed as
+  `/usr/local/lib/gethome-update.sh`, root, `Type=oneshot`) runs
+  `gethome-hubctl update`. That is what lets a phone update a hub at all —
+  Studio does it over SSH with a key it planted, and an iPhone has none.
+  Any member may ask; see the owner-only bullet above for why that moved.
+  Six things to keep. **The unit is never enabled and never ordered after the
+  hub**: an enabled update service updates on every boot, and a unit ordered
+  after `gethome-hubd` is one systemd may take down with the hub *this very run
+  is restarting*. **`TimeoutStartSec=infinity`**, because a `Type=oneshot`
+  otherwise gets ninety seconds and the likeliest place that lands is after the
+  symlink has moved to the new build and before the health check that would have
+  rolled it back — killing the only thing that could undo it. **The runner always
+  exits 0**, including on failure: a rolled-back update is not a failed unit, and
+  enough failed starts park the service until somebody runs `reset-failed` on a
+  machine the owner is not sitting at. **A rollback is its own outcome, and only
+  the marker can say so** — `install.sh` ends in `fail()` whether it rolled back
+  or not, and `current` points at the same build either way, so `@@ROLLBACK@@`
+  was added to the marker vocabulary rather than matching its prose. **What is
+  running afterwards is read back from `GET /hub`**, never from the log, the same
+  rule the radio card follows. And **`<data>/update/enabled` is the capability**:
+  `install.sh` touches it in the same breath as it writes the units, because
+  `hub.env` is written *only when absent* and so would never reach an upgraded
+  hub — the trap that makes a `GETHOME_UPDATE=1` variable there the wrong answer.
+  `src/core/update.ts` is the hub's half, and asks GitHub for `main`'s head only
+  when an app asks it to, cached six hours: a hub nobody looks at never calls
+  out. `docs/api.md` is canonical, including why `available` is *absent* rather
+  than false when the hub cannot tell.
 - **64-bit only, and the two 32-bit cases are different problems.** Bundles are
   built for `linux-arm64` and `linux-x64` and nothing else. `armv6l` (Pi 1 /
   Zero / Zero W) is unfixable — no Node.js build exists — and the answer is
@@ -593,6 +629,20 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   empty branch listing aborts rather than deleting everything. The sweep matches
   by building the set of tags the *existing* branches would produce, because
   flattening slashes into the tag name is lossy and cannot be inverted.
+- **A migration has to be readable by the build before it, and that is now a
+  test.** The hub migrates at boot (`src/index.ts`), which is *before* the health
+  check that decides whether the new build is any good — so by the time
+  `install.sh` rolls back, the database has already moved on and the symlink
+  flips into an old build meeting a schema it did not write. While migrations
+  only add, that is fine. The first one that drops or renames turns a failed
+  health check from "recovered by itself" into "neither build starts, SSH to the
+  Pi" — the exact evening the rollback exists to save. `test/migrations.test.ts`
+  reads every SQL file and fails on `DROP TABLE`/`DROP COLUMN`/`RENAME`; the way
+  past it is a `-- gethome:destructive: <why>` line, so taking something away is
+  a decision somebody made rather than one drizzle made for them. `DROP INDEX` is
+  deliberately allowed — an old build without an index is slower, not broken.
+  This is the rule the `devices.favorite` column has always been kept for; it was
+  written down and enforced by nothing.
 - **Versioning is a symlink, not a container.** Each build unpacks into
   `/opt/gethome/releases/<build-id>/` and `current` points at the one that
   runs; CI stamps `VERSION` into the bundle, which names the directory and
