@@ -211,27 +211,43 @@ describe.skipIf(!handle)('access service', () => {
   });
 
   /**
-   * An edit reaches the sockets of the people it is about and nobody else's —
-   * a role with no members is silent, because a frame emitted for nobody is a
-   * fan-out every socket in the home pays for.
+   * **Every access write announces, and it announces to everybody.**
+   *
+   * It used to name the members holding the role that changed, which was right
+   * about the personal half of the `access` frame (`role`, `permissions`) and
+   * wrong about the shared half: the frame also carries `roles`, the whole
+   * table with a `memberCount` on every row. So creating a role reached nobody
+   * (a new role has no holders), deleting one reached nobody (it is refused
+   * while held), and an owner editing Guest heard nothing about their own edit
+   * — the matrix they were looking at did not move until the page was closed
+   * and reopened. Each socket renders its own frame, so a broadcast is still
+   * one answer per member.
    */
-  it('announces an edit to the members holding that role, and to no one else', async () => {
+  it('announces every access write, to everybody', async () => {
     const access = await loaded();
     const anna = await addMember('Anna', { role: 'member', roleId: access.builtinRoleId('member') });
     access.noteMember(anna, access.builtinRoleId('member'));
 
-    const announced: string[][] = [];
-    events.on('accessChanged', (ids) => announced.push([...ids]));
+    let announced = 0;
+    events.on('accessChanged', () => { announced += 1; });
 
+    // A role nobody in this home holds — the case that used to be silent.
     await access.updateRole(access.builtinRoleId('guest')!, { permissions: [] });
-    expect(announced).toEqual([]);
+    expect(announced).toBe(1);
 
     await access.updateRole(access.builtinRoleId('member')!, { permissions: ['device.control'] });
-    expect(announced).toEqual([[anna]]);
+    expect(announced).toBe(2);
 
-    announced.length = 0;
+    // Creating and deleting: no holders by definition, and both change the
+    // table every open screen is drawing.
+    const custom = await access.createRole('Cleaner', ['device.control']);
+    expect(announced).toBe(3);
+    expect(await access.deleteRole(custom.id)).toBeNull();
+    expect(announced).toBe(4);
+
+    // Assigning moves two `memberCount`s, so it is everybody's business too.
     await access.assignRole(anna, access.builtinRoleId('guest')!);
-    expect(announced).toEqual([[anna]]);
+    expect(announced).toBe(5);
     // And the legacy word moved with it, because a build this hub might roll
     // back to reads that column on every authenticated request.
     const row = await db.query.members.findFirst({ where: eq(members.id, anna) });

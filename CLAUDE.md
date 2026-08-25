@@ -473,6 +473,18 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   before them" from a hope into a rule), so `hub.update` is in **member**'s
   default set as well as the owner's. It is a permission rather than the floor
   because a guest staying the weekend has no business restarting the house.
+  **An access change reaches every open socket, not only the members it is
+  about.** The `access` frame has two halves with two audiences: `role` and
+  `permissions` are personal, while `roles` — the whole table, each row with its
+  `memberCount` — is the home's. `announce` named the holders of the edited
+  role, which was right about the first half and left the second stale
+  everywhere else: creating a role reached nobody (it has no holders), deleting
+  one the same (it is refused while held), an owner editing Guest heard nothing
+  about their own edit, and moving one person between roles left two
+  `memberCount`s wrong on every other screen — so both apps drew a matrix that
+  only moved when the page was closed and reopened. It is a broadcast now, and
+  that is not a leak: `accessFrame()` is per socket, so everybody still gets
+  their own answer, and the role table is the floor to read anyway.
   Two consequences worth knowing. `activity.read` **narrows rather than
   refuses** — a member without it still reads their own rows, on the route and
   on the socket, because a Recent feed that 403s is a broken screen; the socket
@@ -537,11 +549,14 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   And **registration is scoped to the socket's life** — `authorize` adds,
   the close handler removes — so the map holds one entry per open connection
   and none per closed one. `test/api.test.ts` opens a real socket, removes its
-  member, and asserts both the close code and the silence. `MemberSessions` now
-  carries a `notifyAccess` channel beside `revoke`, in the same map: a role edit
-  and a removal are one question asked with different force ("what may you do
-  now?" and "nothing, and not here"), and two registries of the same sockets
-  would drift about which are open.
+  member, and asserts both the close code and the silence. **Revoking is the
+  only thing this registry does**, and it briefly carried a `notifyAccess`
+  channel beside it on the reasoning that a role edit and a removal are one
+  question asked with different force. They are not: a removal is about one
+  member, and an access change is about the home — see the `announce` note in
+  the access bullet above. Nothing ever called it, and a per-member access
+  channel sitting there unused is an invitation to wire the narrow rule back
+  in, so it is gone.
 - **One hub, one home, one name — and `HUB_NAME` only seeds it.** There used to
   be two names: `GET /hub` answered `HUB_NAME` from `/etc/gethome/hub.env`,
   which the installer writes once and nobody ever edits, while `GET /home`

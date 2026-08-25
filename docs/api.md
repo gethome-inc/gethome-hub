@@ -844,7 +844,8 @@ message. These go to every authorized socket:
 
 Rendered **per socket**, like `deviceUpserted` and for the same reason: it is
 the reader's own answer, not the home's. It arrives once behind `hello`, and
-again the moment this member's role changes or the role they hold is edited.
+again on **any** access write anywhere in the home — a role created, renamed,
+edited or deleted, or somebody moved between roles.
 
 ```json
 {
@@ -858,6 +859,20 @@ again the moment this member's role changes or the role they hold is edited.
 
 It carries the roles list too, because a client drawing "Anna — Guest" needs
 those names and a second round trip for four rows is a round trip nobody needed.
+
+**That list is why every write reaches every socket**, and it is worth being
+precise about, because the narrower rule looks obviously right and is not. The
+frame has two halves with two audiences: `role` and `permissions` are personal,
+while `roles` — the whole table, each row carrying its own `memberCount` — is
+the home's. Sending only to the members holding the role that changed got the
+personal half right and left the shared half stale everywhere else: a role
+somebody *created* reached nobody (a new role has no holders), a role they
+*deleted* the same (it is refused while held), an owner editing Guest heard
+nothing about their own edit, and moving one person between two roles left both
+`memberCount`s wrong on every other screen. Every client rendering the matrix
+saw it move only when the page was closed and reopened. A broadcast is not a
+leak — each socket still renders its own answer, and the role table is readable
+by every member anyway.
 
 **Without it, an app sits looking at controls that have quietly stopped
 working** until something else happens to make it refetch — the same argument

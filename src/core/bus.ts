@@ -67,7 +67,12 @@ export interface HubEvents {
    * controls that have quietly stopped working — the argument that put
    * `structure` and `hubStatus` on the socket, applied to access.
    */
-  accessChanged: [memberIds: string[]];
+  /**
+   * Somebody's roles or permissions moved. No payload: every socket renders
+   * its own `access` frame, and the frame's `roles` half is shared — see
+   * `AccessService.announce`.
+   */
+  accessChanged: [];
   commissioningProgress: [jobId: string, status: string, detail?: string];
   mqttFrame: [frame: MqttFrame];
   zigbeeEvent: [event: ZigbeeLifecycleEvent];

@@ -398,6 +398,7 @@ export class AccessService {
     };
     this.byId.set(record.id, record);
     this.byKey.set(record.key, record);
+    this.announce();
     return record;
   }
 
@@ -430,7 +431,7 @@ export class AccessService {
       .where(eq(roles.id, id));
     this.byId.set(id, next);
     this.byKey.set(next.key, next);
-    this.announce(this.membersHolding(id));
+    this.announce();
     return next;
   }
 
@@ -470,6 +471,7 @@ export class AccessService {
     await this.db.delete(roles).where(eq(roles.id, id));
     this.byId.delete(id);
     this.byKey.delete(existing.key);
+    this.announce();
     return null;
   }
 
@@ -487,8 +489,11 @@ export class AccessService {
       .update(members)
       .set({ roleId, role: legacyWord(role.key) })
       .where(eq(members.id, memberId));
+    // Everyone, because `roles` carries a `memberCount` per row: moving one
+    // person between two roles changes two of those numbers, on every screen
+    // showing the table.
     this.roleByMember.set(memberId, roleId);
-    this.announce([memberId]);
+    this.announce();
     return role;
   }
 
@@ -501,16 +506,31 @@ export class AccessService {
   }
 
   /**
-   * Tell the sockets these members are holding that what they may do changed.
+   * Tell every open socket that the access picture moved.
    *
    * A role edit has to reach an app that is already open, or somebody watches
    * a screen full of controls that have quietly stopped working — the same
-   * argument that put `structure` and `hubStatus` on the socket. Nothing is
-   * emitted for nobody, so a role with no members is silent.
+   * argument that put `structure` and `hubStatus` on the socket.
+   *
+   * **Everyone, not only the members holding the role that changed**, and that
+   * is not a widening for its own sake: the `access` frame carries `roles` —
+   * the whole table, each row with its `memberCount` — beside this member's own
+   * `role` and `permissions`. The first half is a *shared* fact and the second
+   * is personal, and announcing only to holders got the personal half right
+   * while leaving the shared half stale everywhere else. Which meant: a role
+   * somebody created reached nobody at all (a new role has no holders), a role
+   * they deleted the same (it is refused while held), and an owner editing
+   * Guest heard nothing about their own edit, because the owner does not hold
+   * Guest. The matrix on the screen they were looking at simply did not move
+   * until the page was closed and reopened.
+   *
+   * Each socket renders its own frame, so a broadcast is not a leak: everybody
+   * still gets their own answer, and the role table is the floor to read
+   * anyway. It costs one in-memory `list()` per open socket on an event that
+   * happens when a person edits a role.
    */
-  private announce(memberIds: string[]): void {
-    if (memberIds.length === 0) return;
-    this.events.emit('accessChanged', memberIds);
+  private announce(): void {
+    this.events.emit('accessChanged');
   }
 
   /** Which members hold a role — used when a role's own permissions move. */

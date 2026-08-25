@@ -668,7 +668,57 @@ describe.skipIf(!handle)('roles and permissions', () => {
     const pushed = (await waitFor((frame) => frame.type === 'access')) as { permissions: string[] };
     expect(pushed.permissions).toEqual(['device.control']);
 
+    // **A role this socket does not hold still reaches it**, because the frame
+    // carries `roles` — the home's whole table — beside this member's own
+    // permissions. This is the half that used to be silent, and the symptom
+    // was a matrix that only moved when the page was closed and reopened.
+    frames.length = 0;
+    const added = await app.inject({
+      method: 'POST',
+      url: '/api/v1/roles',
+      headers: auth(ownerToken),
+      payload: { name: 'House sitter', permissions: ['device.control'] },
+    });
+    const houseSitter = added.json() as RoleWire;
+    const onAdd = (await waitFor((frame) => frame.type === 'access')) as {
+      permissions: string[];
+      roles: RoleWire[];
+    };
+    // Its own permissions are untouched; the table it can see is not.
+    expect(onAdd.permissions).toEqual(['device.control']);
+    expect(onAdd.roles.map((role) => role.name)).toContain('House sitter');
+
+    // Editing a role nobody on this socket holds — the owner's own case.
+    frames.length = 0;
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/roles/${await roleId('guest')}`,
+      headers: auth(ownerToken),
+      payload: { permissions: ['device.control', 'activity.read'] },
+    });
+    const onEdit = (await waitFor((frame) => frame.type === 'access')) as { roles: RoleWire[] };
+    expect(onEdit.roles.find((role) => role.key === 'guest')?.permissions).toEqual([
+      'device.control',
+      'activity.read',
+    ]);
+
+    // And deleting one, which by definition has no holders left to tell.
+    frames.length = 0;
+    await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/roles/${houseSitter.id}`,
+      headers: auth(ownerToken),
+    });
+    const onDelete = (await waitFor((frame) => frame.type === 'access')) as { roles: RoleWire[] };
+    expect(onDelete.roles.map((role) => role.name)).not.toContain('House sitter');
+
     socket.close();
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/roles/${await roleId('guest')}`,
+      headers: auth(ownerToken),
+      payload: { permissions: [...BUILTIN_ROLES[2].permissions] },
+    });
     await app.inject({
       method: 'PATCH',
       url: `/api/v1/roles/${await roleId('member')}`,

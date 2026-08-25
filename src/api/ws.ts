@@ -50,8 +50,6 @@ export const UNAUTHORIZED_CLOSE_CODE = 4001;
 export interface MemberSession {
   /** Hang up on this socket — its member is gone. */
   revoke: () => void;
-  /** Tell this socket what its member may now do. */
-  notifyAccess: () => void;
 }
 
 export class MemberSessions {
@@ -68,20 +66,6 @@ export class MemberSessions {
     if (!existing) return;
     existing.delete(session);
     if (existing.size === 0) this.byMember.delete(memberId);
-  }
-
-  /**
-   * Push a fresh `access` frame at every socket this member is holding.
-   *
-   * Same map, same socket-scoped registration as `revoke` — a role edit and a
-   * removal are the same question asked with different force ("what may you
-   * do now?" and "nothing, and not here"), so they share the registry rather
-   * than keeping two that can disagree about which sockets exist.
-   */
-  notify(memberId: string): void {
-    const sockets = this.byMember.get(memberId);
-    if (!sockets) return;
-    for (const session of [...sockets]) session.notifyAccess();
   }
 
   /**
@@ -242,13 +226,17 @@ export function attachWebSocket(
   };
 
   /**
-   * Somebody's access changed. Only this socket's member is our business —
-   * the event carries every member the edit touched, and each of their sockets
-   * is registered separately.
+   * The access picture moved somewhere in the home, so this socket re-sends
+   * its own answer.
+   *
+   * Unconditional, and it used to name the members an edit touched. That was
+   * right about `role`/`permissions` and wrong about `roles`, which every
+   * frame also carries and which is the *home's* table, memberCounts and all —
+   * so a socket that held none of the roles being edited went on drawing a
+   * stale matrix. `accessFrame()` is per-socket, so everybody still receives
+   * only their own answer.
    */
-  const onAccessChanged = (memberIds: string[]) => {
-    if (memberId !== null && memberIds.includes(memberId)) notifyAccess();
-  };
+  const onAccessChanged = () => notifyAccess();
   const onPermitJoin = (active: boolean, remainingSeconds: number) =>
     send({ type: 'permitJoin', active, remainingSeconds });
   const onCommissioning = (jobId: string, status: string, detail?: string) =>
@@ -394,7 +382,7 @@ export function attachWebSocket(
    * Listeners come off first: closing a WebSocket is not instant, and a frame
    * fired in the meantime must not reach somebody who has just been removed.
    */
-  const session: MemberSession = { revoke: () => revoke(), notifyAccess: () => notifyAccess() };
+  const session: MemberSession = { revoke: () => revoke() };
 
   const revoke = () => {
     detach();
