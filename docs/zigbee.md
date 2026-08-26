@@ -453,6 +453,51 @@ adoption reads `bridge/devices` and the AI mapper reads a device entry, and
 neither can see this. See `docs/api.md` ("Opt-in streams") and
 `docs/ai-adaptation.md` ("What can reach the agent, and what cannot").
 
+### A `set` that never reached the device
+
+Publishing to `<name>/set` resolves when the **broker** takes the message.
+Zigbee2MQTT has no per-command reply topic, so `execute()` returning has never
+meant a device did anything — and on a battery device it usually hasn't yet:
+zigbee-herdsman queues an attribute write for a sleeping end device until it
+next checks in. A hub with no account of this answers 200 for a write that will
+land in an hour, or never, and the apps are left showing an optimistic value
+they then silently revert. That was a real bug: an Aqara motion sensor's
+`detection_interval` was set from the phone, came back a minute later, and
+nothing anywhere said why.
+
+`bridge/logging` is the only place the outcome is written down, so it is the
+**third** bridge topic the adapter relays. `parseWriteFailure`
+(`src/adapters/zigbee/write-failures.ts`) reads one line:
+
+```
+Publish 'set' 'detection_interval' to '0x54ef4410006387bc' failed:
+  'Error: ZCL command … failed (Request superseded)'
+```
+
+Four rules, and the first two are the ones that matter.
+
+- **`Request superseded` is not a failure.** It means a *newer* write to the
+  same property took this one's place in the queue, so the value the user asked
+  for is still on its way. Somebody tapping − four times produces four of them
+  for one correct outcome, and reporting those would be worse than reporting
+  nothing. It is dropped in the adapter and again in `DeviceRegistry`, which is
+  the seam a second adapter will arrive at.
+- **Classification is most-specific-first**, the `diagnosis.ts` rule, and here
+  it is load-bearing rather than tidy: a supersede error carries the whole ZCL
+  command in its text, `"timeout":10000` included, so a generic "timed out"
+  match placed ahead of it swallows the one outcome that must not be reported.
+- An unrecognised line yields `null`. Nearly every line is one.
+- What survives becomes `AdapterBus.commandFailed` → the `commandFailed`
+  WebSocket frame (`docs/api.md` is canonical for its shape and for why `kind`
+  is an open string). Nothing is written to the activity log: a write that
+  failed at 17:11 is something on screen now, not history, and `device.command`
+  already recorded the ask.
+
+The hub does **not** try to wake the device, retry, or hold the value to
+replay later. Waking an Aqara sensor means pressing its button, which is a
+person's job; a retry loop against a sleeping device is the queue we already
+have, wrapped in a second one.
+
 Published topics:
 
 | Topic | Use |

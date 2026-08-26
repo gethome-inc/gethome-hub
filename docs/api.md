@@ -866,6 +866,7 @@ message. These go to every authorized socket:
 {"type":"state","deviceId","endpointId","state":{…}}    full canonical state after each change
 {"type":"deviceUpserted","device":{…}}                  new device or structure/name change
 {"type":"deviceRemoved","deviceId"}
+{"type":"commandFailed","deviceId","property","kind","detail"}   a write never reached the device
 {"type":"structure","rooms":[…],"zones":[…]}            rooms/zones changed — both lists in full
 
 {"type":"activity","entry":{id,at,kind,message,deviceId?,memberId?,data?}}
@@ -873,6 +874,63 @@ message. These go to every authorized socket:
 {"type":"commissioning","jobId","status","detail"?}     Matter commissioning progress
 {"type":"hubStatus","zigbee":{…},"radio":{…}}           a radio came up, went down, or was switched
 ```
+
+### A write that didn't land (`commandFailed`)
+
+`POST /devices/:id/commands` answers **202-shaped success for anything it can
+route**, and that is not a bug to be fixed at the route: routing is all it can
+do. The Zigbee adapter publishes to `<base>/<name>/set` and MQTT resolves as
+soon as the *broker* takes the message; Zigbee2MQTT has no per-command reply
+topic, and the device may be a battery sensor that is asleep. So "the hub
+accepted it" has never meant "the device did it", and a client that asks for a
+value and watches the old one come back had no way to tell **still on its way**
+from **refused**. Both apps papered over that by silently reverting, which is
+the worst of the three answers.
+
+```json
+{ "type": "commandFailed", "deviceId": "…", "property": "detection_interval",
+  "kind": "unreachable", "detail": "Device did not respond to attribute write" }
+```
+
+Four things to know.
+
+**It is a report, not a rejection.** It arrives long after the command's own
+response, carries no request id, and changes nothing the hub has stored — the
+hub keeps what devices *report*, so a failed write leaves its state already
+correct. The optimistic value is the client's, and the client is who this is
+for.
+
+**It goes to every socket**, like `structure` and for the same reason: the
+value being written is the house's, so the phone in the next room is drawing
+the same setting with the same wrong value on screen.
+
+**`kind` is open**, deliberately a string rather than a union. Adapters
+classify in their own vocabulary, a client that meets a word it doesn't know
+falls back to `detail`, and a hub that learns a new one must not need every
+client updated first. Zigbee answers two:
+
+| `kind` | Means | What a client should say |
+|---|---|---|
+| `unreachable` | The device never answered. On a **battery** device this is ordinary rather than a fault — a sleeping end device takes a queued write when it next checks in. | "Waiting for the sensor" — and, for a battery device, that waking it applies it now |
+| `refused` | The device or Z2M said no. | `detail`, in the protocol's own words |
+
+**And a `superseded` write never arrives**, which is the one case worth naming
+because it is the common one. When a person taps − four times, each write goes
+into the queue for a sleeping device and each is cancelled by the next:
+zigbee-herdsman reports four errors reading `Request superseded` for a value
+that is about to be set correctly. That is not a failure, it is the queue
+working, and it is dropped twice — in
+`adapters/zigbee/write-failures.ts` where the log line is classified, and again
+in the registry, because the registry is the seam a second adapter will arrive
+at. Clients that coalesce their own writes (the GetHome app debounces a
+stepper) rarely produce one at all.
+
+**Where it comes from.** `bridge/logging` — the third bridge topic the Zigbee
+adapter relays rather than drops, and the narrowest read of one. It is the only
+place the outcome of a `set` is written down. Reading another project's prose
+is a real cost and the same rule applies here as in `diagnosis.ts`: an
+unrecognised line yields nothing, because a wrong diagnosis is worse than the
+silence the caller already has.
 
 ### What you may do (`access`)
 

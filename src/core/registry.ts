@@ -340,6 +340,30 @@ export class DeviceRegistry implements AdapterBus {
     }
   }
 
+  /**
+   * An adapter reporting that a write it forwarded did not land.
+   *
+   * Nothing is rolled back, because nothing was ever applied: the hub stores
+   * what devices *report*, so a write that failed leaves the stored state
+   * already correct. This only travels — the clients are the ones holding an
+   * optimistic value that is now known to be wrong.
+   *
+   * A `superseded` write is not a failure and adapters are expected to drop
+   * it before calling; the check is repeated here because this is the seam a
+   * second adapter will arrive at, and four errors for one corrected value is
+   * a bad thing to have to discover twice.
+   */
+  commandFailed(
+    adapter: AdapterId,
+    externalId: string,
+    failure: { property: string; kind: string; detail: string },
+  ): void {
+    if (failure.kind === 'superseded') return;
+    const deviceId = this.cache.get(this.key(adapter, externalId))?.id;
+    if (!deviceId) return;
+    this.events.emit('commandFailed', { deviceId, ...failure });
+  }
+
   activity(entry: { kind: string; message: string; externalId?: string; adapter?: AdapterId }): void {
     const deviceId =
       entry.adapter && entry.externalId

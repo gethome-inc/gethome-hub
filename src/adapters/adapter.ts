@@ -75,6 +75,27 @@ export interface AdapterBus {
    * reports a moment later.
    */
   radioReachabilityChanged(adapter: AdapterId, reachable: boolean): void;
+  /**
+   * A write this adapter forwarded did not land.
+   *
+   * Commands are fire-and-forget below the registry — the Zigbee adapter
+   * publishes to MQTT and MQTT resolves as soon as the broker takes the
+   * message — so `execute()` resolving has never meant the device did
+   * anything. Without this, an app that asks for a value and sees the old one
+   * come back has no way to tell "still on its way to a sleeping sensor" from
+   * "refused", and neither has the hub.
+   *
+   * It is a *report*, not a rejection: it arrives long after `execute()`
+   * resolved, and it changes no stored state — the hub never applied the value
+   * optimistically, so there is nothing to roll back. `property` names the
+   * thing that was being written the way the adapter's own vocabulary does (a
+   * generic field's id), because that is what the client asked for.
+   */
+  commandFailed(
+    adapter: AdapterId,
+    externalId: string,
+    failure: { property: string; kind: string; detail: string },
+  ): void;
   activity(entry: { kind: string; message: string; externalId?: string; adapter?: AdapterId }): void;
 }
 
