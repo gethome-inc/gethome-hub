@@ -40,7 +40,10 @@ describe.skipIf(!handle)('why Zigbee is down, over HTTP', () => {
 
   /** Enough of a ZigbeeAdapter for `GET /hub`: the server reads `.connected`. */
   const fakeZigbee = (connected: boolean) =>
-    ({ connected }) as unknown as Parameters<typeof buildServer>[0]['zigbee'];
+    // `NonNullable`, because `ApiDeps.zigbee` is optional: without it this
+    // fake's own type carries `| undefined`, which `exactOptionalPropertyTypes`
+    // then refuses at the call site for a hub that definitely has a radio.
+    ({ connected }) as unknown as NonNullable<Parameters<typeof buildServer>[0]['zigbee']>;
 
   interface HubBody {
     zigbee?: { enabled: boolean; connected: boolean; problem?: { kind: string; summary: string } };

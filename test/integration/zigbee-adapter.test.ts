@@ -57,6 +57,10 @@ describe.skipIf(!enabled)('ZigbeeAdapter runtime AI adaptation', () => {
   const humidityMapping: AppliedAiMapping = {
     endpoints: [{ endpointId: 1, deviceKind: 'sensor', capabilities: ['temperature', 'humidity'], primary: 'humidity' }],
     properties: new Set(['soil_moisture']),
+    // Everything this mapping reads it reads onto a *typed* capability
+    // (humidity), which is what tells the adapter not to leave a generic
+    // custom field standing for the same key.
+    typedProperties: new Set(['soil_moisture']),
     extractState: (payload) => {
       const moisture = payload.soil_moisture;
       const map = new Map<number, Partial<EndpointState>>();

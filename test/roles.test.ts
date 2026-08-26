@@ -298,7 +298,11 @@ describe.skipIf(!handle)('roles and permissions', () => {
   });
 
   it('refuses a guest the home’s shape, its name, and the network', async () => {
-    const cases: Array<[string, string, string, unknown]> = [
+    // The payload column is `object | undefined`, not `unknown`: narrowing
+    // `unknown` leaves `{} | null`, which is not an inject payload, and Fastify
+    // then resolves `inject` to its chainable overload — so every
+    // `response.statusCode` below silently stops being type-checked too.
+    const cases: Array<[string, string, string, object | undefined]> = [
       ['POST', '/api/v1/rooms', 'home.structure', { name: 'Cellar' }],
       ['PATCH', `/api/v1/rooms/${roomId}`, 'home.structure', { name: 'Scullery' }],
       ['DELETE', `/api/v1/rooms/${roomId}`, 'home.structure', undefined],
@@ -806,7 +810,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
     ).json() as MemberRow[];
     const anna = members.find((row) => row.name === 'Anna')!;
 
-    const cases: Array<[string, string, unknown]> = [
+    const cases: Array<[string, string, object | undefined]> = [
       ['POST', '/api/v1/roles', { name: 'Superuser', permissions: [...PERMISSION_KEYS] }],
       ['PATCH', `/api/v1/roles/${guestRole}`, { permissions: [...PERMISSION_KEYS] }],
       ['DELETE', `/api/v1/roles/${guestRole}`, undefined],

@@ -36,6 +36,10 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # Two passes: the build's own `src`-only one, then `tsconfig.test.json`
+      # over `test/` as well. The second exists because this job used to be
+      # the *only* thing that ever saw a type error in a suite — and it saw
+      # it as a 500 from a running server rather than as a compile error.
       - run: npm run typecheck
       - run: npm test
         env:

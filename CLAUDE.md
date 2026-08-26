@@ -54,7 +54,8 @@ names elsewhere.
 
 ```sh
 npm install
-npm run typecheck                         # tsc --noEmit (strict, exactOptionalPropertyTypes)
+npm run typecheck                         # strict, exactOptionalPropertyTypes — src *and* test/
+npm run typecheck:test                    # just the test-suite pass, while iterating on a suite
 npm test                                  # vitest — the database is a temp file, so nothing to start
 HUB_TEST_MQTT=1 npm test                  # + end-to-end broker round-trip (needs a local mosquitto)
 npm run dev                               # tsx watch, reads .env
@@ -536,17 +537,39 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   member row yet. A new permission key needs a line in the defaults assertion,
   a guard test both ways, and a row in `docs/api.md`'s two tables; a new guarded
   route needs its row in the refusal table and an allowed case somewhere.
-  **`npm run typecheck` does not cover `test/`** — `tsconfig.json` includes
-  `src` only, so a suite that builds a server with one of `ApiDeps`' required
-  fields missing compiles clean here and fails in CI, where mosquitto exists and
-  `HUB_TEST_MQTT=1` actually runs the e2e suites. It has happened: `access` was
-  added to the deps and two `buildServer` call sites in `test/` never got it,
-  which read as `TypeError: list.map is not a function` on a route answering
-  500. Copy a call from `test/api.test.ts` or `test/roles.test.ts` rather than
-  extending an older one from memory. Closing this properly means a second
-  tsconfig without `rootDir`, and about sixteen unrelated fixture errors in the
-  AI descriptor tests to fix first — worth doing, deliberately not done inside a
-  change about roles.
+  **`npm run typecheck` covers `test/` as well as `src/`, and that is what
+  `tsconfig.test.json` is for.** It did not, for a while, and this is the rule
+  that paid for it: `tsconfig.json` is the *build*, so it is `src`-only with
+  `rootDir: "src"`, and a suite that built a server with one of `ApiDeps`'
+  required fields missing compiled clean locally and failed in CI — where
+  mosquitto exists and `HUB_TEST_MQTT=1` actually runs the e2e suites. It
+  happened twice over the same field: `access` was added to the deps and two
+  `buildServer` call sites in `test/` never got it, which read as
+  `TypeError: list.map is not a function` on a route answering 500, a hundred
+  lines from anything naming the real cause. The second config is that same
+  strictness with `rootDir` widened to the repository root — the only thing
+  that was ever in the way — over `src`, `test` and the two root configs;
+  `typecheck` runs it *after* the build's own pass, so the command CI runs and
+  the command a contributor runs cannot mean different things, and
+  `typecheck:test` is the second half alone for iterating on a suite. Keep both
+  passes: only the `src`-only one enforces `rootDir`, which is what keeps
+  `dist/` flat, and `test/typecheck-config.test.ts` pins all of it — the file
+  list `tsc --showConfig` resolves, the strictness flags, and that
+  `typecheck` really does call `typecheck:test`, because a second config
+  nobody runs is the same gap with a config file in it. Copy a `buildServer`
+  call from `test/api.test.ts` or `test/roles.test.ts` rather than extending
+  an older one from memory — the checker names a missing field now, but it
+  cannot tell you which service the suite actually wanted.
+  **Two shapes of fixture came out of turning it on, and both are worth
+  recognising.** A literal typed as `MappingDescriptor` or `AppliedAiMapping`
+  is a *parsed* one, so it carries what zod's `.default([])` filled in
+  (`customFields`) and what the mapper computed (`typedProperties`) — write a
+  fixture as what the parse would have produced, not as the input a model
+  emits. And a table of request cases must type its payload column as
+  `object | undefined`, never `unknown`: narrowing `unknown` leaves `{} | null`,
+  which is not an inject payload, so Fastify quietly resolves `app.inject` to
+  its *chainable* overload and every `response.statusCode` in the loop stops
+  being checked along with it.
 - **Ending a membership has two halves, and only one of them is the database.**
   Deleting a member takes their tokens with the row (`tokens.member_id`
   cascades, `foreign_keys = ON`), which ends every REST call they can make. It

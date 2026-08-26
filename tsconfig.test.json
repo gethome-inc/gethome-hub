@@ -1,0 +1,22 @@
+{
+  // The test suite's type checker.
+  //
+  // `tsconfig.json` is the *build*, so it is `src`-only with `rootDir: "src"`
+  // — that is what keeps `dist/` flat. The cost of that used to be that
+  // nothing type-checked `test/`: a suite could call `buildServer` with one of
+  // `ApiDeps`' required fields missing, compile clean under `npm run
+  // typecheck`, and fail in CI as `TypeError: list.map is not a function` on a
+  // route answering 500. It happened (`access`, twice), and it was invisible
+  // locally because those suites need a broker this machine did not have.
+  //
+  // So: the same strictness, over the whole repository, with `rootDir` widened
+  // to the root because that is the only thing that was ever in the way.
+  // `npm run typecheck` runs this as well as the build's own pass, so there is
+  // one command and it means what its name says.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true
+  },
+  "include": ["src", "test", "vitest.config.ts", "drizzle.config.ts"]
+}
