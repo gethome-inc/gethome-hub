@@ -204,7 +204,7 @@ describe.skipIf(!handle)('HistoryService', () => {
 
   it('sizes the gap threshold from the series’ own cadence', async () => {
     vi.useFakeTimers();
-    // A sensor that reports every half hour: six buckets apart.
+    // A sensor that reports every six minutes: six buckets apart.
     for (let step = 12; step >= 0; step -= 6) {
       at(-step);
       report({ sensors: { temperatureCenti: 2_000 + step } });
@@ -217,8 +217,8 @@ describe.skipIf(!handle)('HistoryService', () => {
       to: Date.now(),
       points: 1_000,
     });
-    // Four times the median spacing — so half-hourly reporting is drawn as a
-    // continuous line and only a real outage breaks it.
+    // Four times the median spacing — so a sensor with its own slow cadence is
+    // drawn as a continuous line and only a real outage breaks it.
     expect(page.series[0]!.gapBuckets).toBe(24);
   });
 
@@ -237,9 +237,11 @@ describe.skipIf(!handle)('HistoryService', () => {
       to: Date.now(),
       points: 10,
     });
-    // 62 stored buckets into at most 10 points: seven buckets to a point, and
-    // the answer states that width rather than leaving the app to assume one.
-    expect(page.bucketMs).toBe(7 * BUCKET_MS);
+    // 62 stored buckets into at most 10 points is seven to a point — rounded up
+    // to ten, because a width a clock recognises is what the card's footnote
+    // and the time axis both have to read out. The answer states the width it
+    // chose rather than leaving the app to assume one.
+    expect(page.bucketMs).toBe(10 * BUCKET_MS);
     expect(page.series[0]!.points.length).toBeLessThanOrEqual(10);
     // Thinning folds rather than samples: the band still reaches the real
     // extremes of the window.
@@ -247,6 +249,40 @@ describe.skipIf(!handle)('HistoryService', () => {
     const highs = page.series[0]!.points.map((point) => point[2]);
     expect(Math.min(...lows)).toBe(2_000);
     expect(Math.max(...highs)).toBe(2_060);
+  });
+
+  it('rounds a point’s width up to something a clock recognises', async () => {
+    vi.useFakeTimers();
+    // Six hours of a sensor reporting every minute.
+    for (let step = 360; step >= 0; step -= 1) {
+      at(-step);
+      report({ sensors: { temperatureCenti: 2_000 + (step % 20) } });
+    }
+    at(1);
+    await service.flush();
+
+    // 362 buckets into 120 points is 3.02 → 4 by plain arithmetic, which the
+    // card would print as "one point every 4 minutes" and the axis would land
+    // on unrepeatable moments. Five is the next width a clock has a word for.
+    const page = await service.read(DEVICE_ID, {
+      from: Date.now() - 361 * BUCKET_MS,
+      to: Date.now(),
+      points: 120,
+    });
+    expect(page.bucketMs).toBe(5 * BUCKET_MS);
+
+    // An hour asked for with headroom keeps every stored minute — the range
+    // the whole rounding exists to protect. `points` is "at most this many",
+    // and a window of sixty minutes touches sixty-*one* bucket indices, so a
+    // caller that asks for exactly sixty is asking to be thinned by one
+    // fencepost. Callers ask for room.
+    const hour = await service.read(DEVICE_ID, {
+      from: Date.now() - 60 * BUCKET_MS,
+      to: Date.now(),
+      points: 120,
+    });
+    expect(hour.bucketMs).toBe(BUCKET_MS);
+    expect(hour.series[0]!.points.length).toBeGreaterThan(50);
   });
 
   it('folds one quantity reported on several endpoints into one line', async () => {

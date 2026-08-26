@@ -206,7 +206,7 @@ A device that cannot honor an intent answers `409` with an error message.
 ## Recorded readings
 
 The state above is what a reading *is*. What it *was* is recorded separately, in
-five-minute buckets, and served by `GET /devices/:id/history` —
+one-minute buckets, and served by `GET /devices/:id/history` —
 [api.md](api.md#recorded-readings-get-devicesidhistory) is canonical for the wire
 shape and the retention.
 

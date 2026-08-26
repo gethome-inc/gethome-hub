@@ -92,7 +92,7 @@ than no button.
 
 | Method & path | Needs | Notes |
 |---|---|---|
-| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory) |
+| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (60 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory) |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
 | `GET /home` · `PATCH /home` | floor · `home.rename` | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name) |
 | `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | floor · `home.structure` | `{id, name, zoneId, icon, accent, sortOrder}`. `POST` takes `{name, zoneId?, icon?, accent?, sortOrder?}` — the name is the only required field anywhere here — and `PATCH` takes the same set with every field optional; `zoneId: null` means "in no zone", and `icon: null` / `accent: null` mean "back to the look the app derives" — each different from leaving the field out. `icon`/`accent` are opaque app tokens (1–40 chars, see [below](#rooms-and-zones)). Names are trimmed before they are measured (1–80), an unknown `zoneId` is `404 unknown_zone`, and a new room goes to the *end* of the order. Deleting a room does not delete its devices — they are simply in no room. Every write broadcasts the [`structure` frame](#rooms-and-zones) |
@@ -862,13 +862,19 @@ What the temperature, the humidity or the power draw actually did, over the last
 few days. The hub knew what a reading *is* — `endpoints.state` is one row,
 rewritten in place — and had no way to say what it *was*.
 
-**One row per five minutes per quantity, never one per report.** This is the
+**At most one row per minute per quantity, never one per report.** This is the
 same line the activity log holds, for the same machine: a power meter reports
 every few seconds, forever, onto an SD card. Readings are accumulated in memory
 (`src/core/history.ts`) and a closed bucket lands as one row carrying its low,
-its high, and the running total and count the mean is computed from. An ordinary
-home writes about 288 batched transactions a day and a week of it is one to two
-megabytes.
+its high, and the running total and count the mean is computed from.
+
+**"At most" is the load-bearing half**: a bucket nothing reported in writes no
+row, so a sensor that speaks every ten minutes costs exactly the same at a
+one-minute bucket as it would at a five-minute one — it simply lands on the
+minute it actually spoke. The finer bucket is paid for only by the devices that
+genuinely report faster than that, and it is what makes a one-hour chart a line
+rather than a dozen dots. One batched transaction a minute; a week of an
+ordinary home is two to three megabytes.
 
 **The bucket being filled right now is served from memory**, so the chart ends
 *now* rather than up to five minutes ago — which matters because the live value
@@ -876,8 +882,9 @@ is usually on screen right beside it.
 
 Retention is **two bounds**, like the activity log's: seven days, and 500
 distinct recorded quantities. The age bound is also the row cap per quantity
-(2 016), so the only axis that could grow without limit is how many quantities a
-home has, and that is what the second bound is for.
+(10 080, and only a device reporting every single minute for a week reaches it),
+so the only axis that could grow without limit is how many quantities a home
+has, and that is what the second bound is for.
 
 Reading it is the **floor** — a temperature chart is the home being read, the
 same answer `GET /devices` gives.
@@ -889,7 +896,7 @@ GET /api/v1/devices/<id>/history?from=1756108800000&to=1756195200000&points=300&
 ```json
 {
   "start": 1756108800000,
-  "bucketMs": 300000,
+  "bucketMs": 60000,
   "end": 1756195200000,
   "retentionDays": 7,
   "series": [
@@ -915,11 +922,18 @@ Four things about that shape are load-bearing:
   threshold gets one of the two cases wrong every time: a sensor that reports
   twice an hour drawn as permanently broken, or an afternoon of silence drawn as
   perfectly steady.
-- **`bucketMs` is what the hub chose, not what it stores.** A week is 2 016
-  five-minute buckets and a phone draws a few hundred points, so the hub thins
-  to `points` (default 360, max 1 000) by folding whole buckets together — the
-  band still reaches the real extremes — and states the width it used. Never
-  assume five minutes.
+- **`bucketMs` is what the hub chose, not what it stores.** A week is 10 080
+  one-minute buckets and a phone draws a few hundred points, so the hub thins to
+  `points` (default 360, max 1 000) by folding whole buckets together — the band
+  still reaches the real extremes — and states the width it used. Never assume
+  one minute.
+
+  The fold is **rounded up to a width a clock recognises** (1, 2, 3, 5, 10, 15,
+  20, 30, 60 minutes, and so on): plain division lands on "every 28 minutes",
+  which is honest and reads as a glitch in an app that prints that width and
+  labels a time axis with it. And `points` means *at most* this many — a window
+  of sixty minutes touches sixty-**one** bucket indices, so a caller who wants
+  every stored minute of an hour asks for more than sixty.
 
 Values are **integers in the canonical wire units**, so nothing is converted
 between the device report and the chart:
