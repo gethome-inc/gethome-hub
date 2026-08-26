@@ -1,7 +1,7 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { pino } from 'pino';
 import {
   applyStateRules,
@@ -12,6 +12,7 @@ import {
 } from '../src/ai/descriptor.js';
 import { AiDeviceMapper, exposesHash } from '../src/ai/mapper.js';
 import { AiUnavailableError } from '../src/ai/errors.js';
+import type { MappingProvider } from '../src/ai/agent.js';
 import { SettingsService } from '../src/core/settings.js';
 import type { Z2mDevice } from '../src/adapters/zigbee/exposes-mapper.js';
 import { mapExposes } from '../src/adapters/zigbee/exposes-mapper.js';
@@ -41,6 +42,7 @@ const dimmerDescriptor: MappingDescriptor = {
           transform: { kind: 'scale', fromMin: 1, fromMax: 254, toMin: 0, toMax: 1000 },
         },
       ],
+      customFields: [],
     },
   ],
 };
@@ -95,6 +97,7 @@ describe('MappingDescriptor validation', () => {
           primary: 'temperature',
           stateRules: [{ property: 'lock', to: 'lock' }],
           commandRules: [],
+          customFields: [],
         },
       ],
     });
@@ -137,6 +140,7 @@ describe('MappingDescriptor interpreter', () => {
             },
           ],
           commandRules: [],
+          customFields: [],
         },
       ],
     };
@@ -163,6 +167,7 @@ describe('MappingDescriptor interpreter', () => {
             },
           ],
           commandRules: [],
+          customFields: [],
         },
       ],
     };
@@ -186,6 +191,7 @@ describe('MappingDescriptor interpreter', () => {
           },
         ],
         commandRules: [],
+        customFields: [],
       })),
     };
     const patches = applyStateRules(twoRelay, { state_l1: 'ON', state_l2: 'OFF' });
@@ -211,6 +217,7 @@ describe('MappingDescriptor interpreter', () => {
             },
           ],
           commandRules: [],
+          customFields: [],
         },
       ],
     };
@@ -284,6 +291,7 @@ describe('MappingDescriptor interpreter', () => {
             },
             { intent: 'irSendRaw', property: 'rf_send' },
           ],
+          customFields: [],
         },
       ],
     };
@@ -318,6 +326,7 @@ describe('MappingDescriptor interpreter', () => {
           commandRules: [
             { intent: 'setSystemMode', property: 'mode', transform: { kind: 'enumMap', map: { off: 0, heat: 4 } } },
           ],
+          customFields: [],
         },
       ],
     };
@@ -356,6 +365,7 @@ const soilDescriptor: MappingDescriptor = {
         { property: 'temperature', to: 'sensors.temperatureCenti', transform: { kind: 'celsiusToCenti' } },
       ],
       commandRules: [],
+      customFields: [],
     },
   ],
 };
@@ -367,13 +377,16 @@ describe.skipIf(!handle)('AiDeviceMapper', () => {
   const dataDir = mkdtempSync(path.join(tmpdir(), 'gethome-ai-test-'));
   let mapper: AiDeviceMapper;
   let settingsService: SettingsService;
-  let generate: ReturnType<typeof vi.fn>;
+  // Typed as the seam it stands in for, not as a bare `vi.fn()`: a mock
+  // whose shape nothing checks is how a provider signature change lands in
+  // the suite as a runtime failure instead of a compile error.
+  let generate: Mock<MappingProvider['generate']>;
 
   beforeEach(async () => {
     await resetDb(db);
     settingsService = new SettingsService(db, Buffer.alloc(32).toString('base64'));
     mapper = new AiDeviceMapper(db, settingsService, pino({ level: 'silent' }));
-    generate = vi.fn().mockResolvedValue(soilDescriptor);
+    generate = vi.fn<MappingProvider['generate']>().mockResolvedValue(soilDescriptor);
     mapper.providerOverride = { generate };
   });
 

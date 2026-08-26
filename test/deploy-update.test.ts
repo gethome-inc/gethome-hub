@@ -65,7 +65,8 @@ interface Outcome {
  */
 function runUpdate(options: {
   id?: string;
-  hubctl?: string;
+  /** Explicitly undefined-able: "this machine has no gethome-hubctl" is a case. */
+  hubctl?: string | undefined;
   hubAnswers?: string | null;
 }): Outcome {
   const conf = tmp();

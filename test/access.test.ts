@@ -23,7 +23,11 @@ describe.skipIf(!handle)('access service', () => {
   /** Insert a member row directly — the shape the pairing flow leaves behind. */
   const addMember = async (
     name: string,
-    row: { role: string; roleId?: string | null },
+    // `roleId` is spelled out as explicitly-undefined-able because
+    // `builtinRoleId` returns `string | undefined` and several cases below
+    // hand its answer straight over: under `exactOptionalPropertyTypes` a bare
+    // `?:` would refuse that, and the helper already folds it to null.
+    row: { role: string; roleId?: string | null | undefined },
   ): Promise<string> => {
     const [inserted] = await db
       .insert(members)

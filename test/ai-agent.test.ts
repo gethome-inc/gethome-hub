@@ -168,6 +168,7 @@ const validDescriptor: MappingDescriptor = {
         { property: 'soil_moisture', to: 'sensors.humidityCenti', transform: { kind: 'multiply', factor: 100 } },
       ],
       commandRules: [],
+      customFields: [],
     },
   ],
 };

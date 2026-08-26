@@ -16,6 +16,7 @@ import { ZigbeeAdapter } from '../../src/adapters/zigbee/adapter.js';
 import { MqttAdapter } from '../../src/adapters/mqtt/adapter.js';
 import { AiRunLog } from '../../src/core/ai-runs.js';
 import { MappingLibrary } from '../../src/ai/library.js';
+import type { HubCommand } from '../../src/schema/index.js';
 import { bootedHome, loadedFavorites, openTestDb, resetDb, loadedAccess } from '../helpers/db.js';
 
 /**
@@ -312,7 +313,10 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
     // The library base is seeded even before anything is learned.
     expect(irState()).toEqual({ learning: false, commands: [] });
 
-    const command = (payload: unknown) =>
+    // `HubCommand` rather than `unknown`: the intents below are the contract
+    // this suite exists to prove, so a typo in one should be a compile error
+    // and not a 400 nobody reads.
+    const command = (payload: HubCommand) =>
       app.inject({
         method: 'POST',
         url: `/api/v1/devices/${device.id}/endpoints/1/commands`,
