@@ -1,7 +1,12 @@
 import type { WebSocket } from 'ws';
 import type { ApiDeps } from './server.js';
 import type { MqttFrame } from '../core/mqtt-observer.js';
-import type { ActivityEvent, HomeStructure, ZigbeeLifecycleEvent } from '../core/bus.js';
+import type {
+  ActivityEvent,
+  CommandFailure,
+  HomeStructure,
+  ZigbeeLifecycleEvent,
+} from '../core/bus.js';
 import type { AiRunEvent } from '../core/ai-runs.js';
 import { deviceWire } from './dto.js';
 import type { HubStatusReader } from '../core/hub-status.js';
@@ -176,6 +181,19 @@ export function attachWebSocket(
     send({ type: 'deviceUpserted', device: deviceWire(device, favorite) });
   };
   const onRemoved = (deviceId: string) => send({ type: 'deviceRemoved', deviceId });
+  /**
+   * A write that reached the protocol and never reached the device.
+   *
+   * A default frame rather than one of the opt-in streams: it is about one
+   * device rather than about the radio, every app that can *make* a write
+   * needs it, and it is as rare as a command that fails — which is to say the
+   * rate argument that put `mqtt`, `zigbee` and `ai` behind a subscription
+   * does not apply. Sent to every socket, like `structure`, because the value
+   * being written is the house's: the phone in the next room is drawing the
+   * same setting and has the same wrong optimistic value on screen.
+   */
+  const onCommandFailed = (failure: CommandFailure) =>
+    send({ type: 'commandFailed', ...failure });
   const onStructure = (structure: HomeStructure) =>
     send({ type: 'structure', rooms: structure.rooms, zones: structure.zones });
   /**
@@ -254,6 +272,7 @@ export function attachWebSocket(
   deps.events.on('stateChanged', onState);
   deps.events.on('deviceUpserted', onUpserted);
   deps.events.on('deviceRemoved', onRemoved);
+  deps.events.on('commandFailed', onCommandFailed);
   deps.events.on('structureChanged', onStructure);
   deps.events.on('activity', onActivity);
   deps.events.on('accessChanged', onAccessChanged);
@@ -401,6 +420,7 @@ export function attachWebSocket(
     deps.events.off('stateChanged', onState);
     deps.events.off('deviceUpserted', onUpserted);
     deps.events.off('deviceRemoved', onRemoved);
+    deps.events.off('commandFailed', onCommandFailed);
     deps.events.off('structureChanged', onStructure);
     deps.events.off('activity', onActivity);
     deps.events.off('accessChanged', onAccessChanged);

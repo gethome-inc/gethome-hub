@@ -316,8 +316,38 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   that has just connected has no other way to learn the state — which is how
   GetHome Studio came to draw "Close Network" over a network that had shut two
   minutes earlier.
-- **Two bridge topics are relayed; the rest are still dropped.**
-  `bridge/devices` lists a device only once its interview *finishes*, so
+- **A command that reached the protocol is not a command that reached the
+  device, and `bridge/logging` is the only thing that knows.** Publishing to
+  `<name>/set` resolves when the *broker* takes the message and Z2M has no
+  per-command reply topic, so `POST /devices/:id/commands` answers 200 for a
+  write a sleeping battery sensor will not see for an hour — and both apps
+  papered over that by drawing the optimistic value and then silently
+  reverting it. `parseWriteFailure`
+  (`src/adapters/zigbee/write-failures.ts`) reads the one line that says
+  otherwise, `AdapterBus.commandFailed` carries it, and `api/ws.ts` fans it out
+  as a `commandFailed` frame to **every** socket — like `structure`, because
+  the value being written is the house's and the phone in the next room has the
+  same wrong value on screen. Four rules. **`Request superseded` is not a
+  failure**: it is a *newer* write to the same property taking this one's place
+  in the queue, so somebody tapping − four times generates four of them for one
+  correct outcome; dropped in the adapter and again in `DeviceRegistry`, which
+  is the seam a second adapter arrives at. **Classification is
+  most-specific-first** — the `diagnosis.ts` rule, and here it is load-bearing
+  rather than tidy, because a supersede error carries the whole ZCL command
+  including `"timeout":10000` and a generic "timed out" match placed first
+  swallows the one outcome that must not be reported. **An unrecognised line
+  yields nothing**, which is nearly every line. And **nothing is written to the
+  activity log**: a write that failed at 17:11 is on screen now rather than
+  history, and `device.command` already recorded the ask. `kind` is an open
+  string on purpose — adapters classify in their own vocabulary and a client
+  that meets a new word falls back to `detail`. The hub does not retry, wake
+  the device, or hold the value to replay: waking an Aqara sensor is a person
+  pressing its button, and a retry loop against a sleeping device is the queue
+  we already have wrapped in a second one. `docs/zigbee.md` and `docs/api.md`
+  are canonical.
+- **Two bridge topics are relayed for device lifecycle; the rest are still
+  dropped** (`bridge/logging` is the third relay, above, and reads only failed
+  writes). `bridge/devices` lists a device only once its interview *finishes*, so
   without `bridge/event` the whole of pairing produced no output at all, and
   `bridge/info` is the join window above. The translation into the hub's
   vocabulary lives in `core/zigbee-events.ts` with a **type-only** import of
