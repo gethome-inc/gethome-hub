@@ -40,6 +40,12 @@ hub can control them.
   events, learn-and-replay IR blasters, and a universal generic-control
   fallback so *any* device parameter is usable), 16 device kinds, exact unit
   conventions shared with the GetHome apps ([docs/device-schema.md](docs/device-schema.md)).
+- **Recorded readings** — temperature, humidity, air quality, power and the
+  rest are kept in five-minute buckets for a week, so an app can show what the
+  last few days actually looked like. One row per bucket rather than one per
+  report, which is what keeps it to a megabyte or two and a few hundred writes a
+  day on an SD card; a device that goes quiet leaves a real hole rather than a
+  flat line. ([docs/api.md](docs/api.md#recorded-readings-get-devicesidhistory))
 - **Sharing built in** — pairing-code claim makes you the owner; short-lived
   invite codes add family members. Only hub homes are shareable in GetHome.
 - **Roles and permissions** — Owner, Member and Guest ship built in, a home can

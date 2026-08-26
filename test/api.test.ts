@@ -17,7 +17,7 @@ import { AiRunLog } from '../src/core/ai-runs.js';
 import { MappingLibrary } from '../src/ai/library.js';
 import type { AdapterBus, ProtocolAdapter } from '../src/adapters/adapter.js';
 import type { HubCommand } from '../src/schema/index.js';
-import { bootedHome, loadedAccess, openTestDb, resetDb } from './helpers/db.js';
+import { bootedHome, loadedAccess, openTestDb, resetDb, startedHistory } from './helpers/db.js';
 
 const handle = await openTestDb();
 const log = pino({ level: 'silent' });
@@ -45,6 +45,7 @@ describe.skipIf(!handle)('hub API', () => {
   let favorites: FavoritesService;
   let events: HubEventBus;
   let access: Awaited<ReturnType<typeof loadedAccess>>;
+  let history: Awaited<ReturnType<typeof startedHistory>>;
   let dataDir: string;
   let ownerToken: string;
   let memberToken: string;
@@ -66,6 +67,7 @@ describe.skipIf(!handle)('hub API', () => {
     const settings = new SettingsService(db, Buffer.alloc(32).toString('base64'));
     favorites = new FavoritesService(db, events);
     await favorites.load();
+    history = await startedHistory(db, events);
     app = await buildServer({
       db,
       log,
@@ -75,6 +77,7 @@ describe.skipIf(!handle)('hub API', () => {
       access,
       pairing,
       activity,
+      history,
       settings,
       hubId: 'hub-test-1234',
       home: await bootedHome(db, 'Test Hub'),
@@ -97,6 +100,7 @@ describe.skipIf(!handle)('hub API', () => {
   });
 
   afterAll(async () => {
+    await history.stop();
     await app.close();
     await handle?.close();
   });
@@ -108,6 +112,10 @@ describe.skipIf(!handle)('hub API', () => {
       hubId: 'hub-test-1234',
       apiVersion: 1,
       claimed: false,
+      // The *presence* of this block is what tells an app the hub records
+      // readings at all, which is how it knows to offer a chart rather than a
+      // doorway to a 404.
+      history: { bucketSeconds: 300, retentionDays: 7 },
     });
   });
 
@@ -335,6 +343,65 @@ describe.skipIf(!handle)('hub API', () => {
         },
       ],
     });
+  });
+
+  it('serves a device\u2019s recorded readings to any member, and 404s an unknown device', async () => {
+    const devices = (
+      await app.inject({ method: 'GET', url: '/api/v1/devices', headers: auth(memberToken) })
+    ).json() as Array<{ id: string }>;
+    const deviceId = devices[0]!.id;
+
+    adapter.bus!.stateChanged('mqtt', 'lamp-1', 1, {
+      sensors: { temperatureCenti: 2_140 },
+      power: { activeMilliwatts: 8_000 },
+    });
+    await registry.flush();
+    await history.flush();
+
+    // Reading the home is the floor, so the plainest member gets this — the
+    // same answer `GET /devices` gives, and for the same reason.
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/v1/devices/${deviceId}/history`,
+      headers: auth(memberToken),
+    });
+    expect(response.statusCode).toBe(200);
+    const page = response.json() as {
+      bucketMs: number;
+      start: number;
+      retentionDays: number;
+      series: Array<{ kind: string; unit: string; points: number[][] }>;
+    };
+    expect(page.retentionDays).toBe(7);
+    expect(page.series.map((entry) => entry.kind).sort()).toEqual(['power', 'temperature']);
+    const temperature = page.series.find((entry) => entry.kind === 'temperature')!;
+    expect(temperature.unit).toBe('centiCelsius');
+    expect(temperature.points).toHaveLength(1);
+    expect(temperature.points[0]!.slice(1)).toEqual([2_140, 2_140, 2_140]);
+
+    // `series=` narrows to the line actually on screen.
+    const narrowed = (
+      await app.inject({
+        method: 'GET',
+        url: `/api/v1/devices/${deviceId}/history?series=power`,
+        headers: auth(memberToken),
+      })
+    ).json() as { series: Array<{ kind: string }> };
+    expect(narrowed.series.map((entry) => entry.kind)).toEqual(['power']);
+
+    const missing = await app.inject({
+      method: 'GET',
+      url: '/api/v1/devices/44444444-4444-4444-a444-444444444444/history',
+      headers: auth(memberToken),
+    });
+    expect(missing.statusCode).toBe(404);
+
+    const backwards = await app.inject({
+      method: 'GET',
+      url: `/api/v1/devices/${deviceId}/history?from=${Date.now()}&to=${Date.now() - 1_000}`,
+      headers: auth(memberToken),
+    });
+    expect(backwards.statusCode).toBe(400);
   });
 
   it('accepts canonical commands and routes them to the adapter', async () => {

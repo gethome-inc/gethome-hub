@@ -33,6 +33,7 @@ import {
   requestUpdate,
 } from '../core/update.js';
 import type { MqttObserver } from '../core/mqtt-observer.js';
+import { isHistoryKind, type HistoryKind, type HistoryService } from '../core/history.js';
 import { MAX_WINDOW_SECONDS, type PermitJoinService } from '../core/permit-join.js';
 import { createHubStatusReader } from '../core/hub-status.js';
 import { deviceWire } from './dto.js';
@@ -57,6 +58,8 @@ export interface ApiDeps {
   access: AccessService;
   pairing: PairingService;
   activity: ActivityService;
+  /** What the home's readings did over the last few days — `core/history.ts`. */
+  history: HistoryService;
   settings: SettingsService;
   /**
    * The hub's name, and the one place it lives. `GET /hub`, `GET /home` and the
@@ -255,6 +258,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     ...(deps.build ? { build: deps.build } : {}),
     apiVersion: 1,
     claimed: deps.pairing.claimed,
+    // Additive, and the *presence* of this block is what says the hub records
+    // readings at all — an app that finds it absent leaves the chart section
+    // off rather than offering a doorway to a 404. It carries the two numbers
+    // an app would otherwise have to hard-code from this repository, which is
+    // exactly how `activityRetentionNote` came to be deliberately vague.
+    history: deps.history.describe(),
     // Additive: an app that doesn't know about this field ignores it, and one
     // that does can say "plug a coordinator in" instead of showing an empty
     // Zigbee section with no explanation.
@@ -829,6 +838,51 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       data: { command, deviceName: device.name, memberName: request.member!.name },
     });
     return reply.code(202).send({ accepted: true });
+  });
+
+  /**
+   * What this device's readings did, over a window.
+   *
+   * **`authed`, with no permission of its own.** Reading the home is the floor
+   * — the same answer `GET /devices` and `GET /activity` give — and a
+   * temperature chart is the home being read. A role that may work the lights
+   * but not look at how cold the room got would be a rule nobody asked for.
+   *
+   * `from`/`to` are epoch milliseconds and default to the last day; `points`
+   * is how many the caller can draw, and the hub thins to it and *says which
+   * width it chose*, so a phone never assumes one. `series` narrows to named
+   * quantities, which is what lets the app fetch only the line on screen.
+   *
+   * An unknown `series` name is dropped rather than refused: the vocabulary
+   * grows, and an app one version ahead asking for a quantity this hub has
+   * never heard of should get the rest of its chart, not a 400.
+   */
+  app.get('/api/v1/devices/:id/history', authed, async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    if (!deps.registry.getDevice(id)) return reply.code(404).send({ error: 'not_found' });
+    const query = z
+      .object({
+        from: z.coerce.number().int().optional(),
+        to: z.coerce.number().int().optional(),
+        points: z.coerce.number().int().min(2).max(1_000).optional(),
+        series: z.string().optional(),
+      })
+      .parse(request.query);
+    const to = query.to ?? Date.now();
+    const from = query.from ?? to - 24 * 60 * 60 * 1000;
+    if (from >= to) return reply.code(400).send({ error: 'invalid_range' });
+    const named = query.series
+      ?.split(',')
+      .map((entry) => entry.trim())
+      .filter(isHistoryKind);
+    const kinds: readonly HistoryKind[] | undefined =
+      named && named.length > 0 ? named : undefined;
+    return deps.history.read(id, {
+      from,
+      to,
+      ...(query.points !== undefined ? { points: query.points } : {}),
+      ...(kinds !== undefined ? { kinds } : {}),
+    });
   });
 
   app.post('/api/v1/devices/:id/remap', needs('hub.ai'), async (request, reply) => {

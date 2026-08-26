@@ -8,6 +8,7 @@ import { runMigrations } from './db/migrate.js';
 import { ensureHubSecret } from './core/crypto.js';
 import { HubEventBus } from './core/bus.js';
 import { ActivityService } from './core/activity.js';
+import { HistoryService } from './core/history.js';
 import { recordFinishedUpdate } from './core/update.js';
 import { HomeService } from './core/home.js';
 import { FavoritesService } from './core/favorites.js';
@@ -91,6 +92,12 @@ async function main(): Promise<void> {
   void recordFinishedUpdate(config.DATA_DIR, activity, log).catch(() => undefined);
 
   const registry = new DeviceRegistry(db, events, activity, log.child({ module: 'registry' }));
+  // What the readings did, so an app can draw the last few days. Listens on
+  // the bus rather than hooking the registry: nothing on the report path
+  // changes, and a hub that never serves a chart still costs only a `Math.min`
+  // per report and one wakeup every five minutes.
+  const history = new HistoryService(db, events, log.child({ module: 'history' }));
+  await history.start();
   // Favorites are one member's pins rather than a property of the home, so they
   // live beside the registry instead of on the device row. Loaded once: this is
   // read for every device on every `GET /devices` and on every `deviceUpserted`
@@ -172,6 +179,7 @@ async function main(): Promise<void> {
     access,
     pairing,
     activity,
+    history,
     settings,
     home: homeService,
     hubId: secret.hubId,
@@ -247,6 +255,9 @@ async function main(): Promise<void> {
     await app.close().catch(() => {});
     await mqttObserver?.stop().catch(() => {});
     await registry.stop().catch(() => {});
+    // Before `close()`: the bucket being filled right now has never been
+    // written, and this is the one chance it gets.
+    await history.stop().catch(() => {});
     try {
       close();
     } catch {

@@ -92,7 +92,7 @@ than no button.
 
 | Method & path | Needs | Notes |
 |---|---|---|
-| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio) |
+| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory) |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
 | `GET /home` · `PATCH /home` | floor · `home.rename` | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name) |
 | `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | floor · `home.structure` | `{id, name, zoneId, icon, accent, sortOrder}`. `POST` takes `{name, zoneId?, icon?, accent?, sortOrder?}` — the name is the only required field anywhere here — and `PATCH` takes the same set with every field optional; `zoneId: null` means "in no zone", and `icon: null` / `accent: null` mean "back to the look the app derives" — each different from leaving the field out. `icon`/`accent` are opaque app tokens (1–40 chars, see [below](#rooms-and-zones)). Names are trimmed before they are measured (1–80), an unknown `zoneId` is `404 unknown_zone`, and a new room goes to the *end* of the order. Deleting a room does not delete its devices — they are simply in no room. Every write broadcasts the [`structure` frame](#rooms-and-zones) |
@@ -101,6 +101,7 @@ than no button.
 | `PATCH /devices/:id` | `device.edit` / floor | `{name?, roomId?, favorite?}`. Name and room describe the house and everybody sees the same ones; **`favorite` is the caller's own** and nobody else's — see [below](#favorites-are-per-member). `roomId: null` takes a device out of its room; an unknown one is `404 unknown_room`. The response is this caller's view of the device |
 | `DELETE /devices/:id` | `device.remove` | also unpairs at the protocol level |
 | `POST /devices/:id/endpoints/:endpointId/commands` | floor | body = canonical command; `202`. IR-remote intents (`irLearn`/`irSaveLearned`/`irSend`/`irDeleteCommand`/`irRenameCommand`) are resolved against the endpoint's stored code library (see [device-schema.md](device-schema.md)) |
+| `GET /devices/:id/history?from=&to=&points=&series=` | floor | what this device's readings did over a window, already thinned to a drawable size — see [below](#recorded-readings-get-devicesidhistory). `from`/`to` are epoch ms and default to the last day; `from >= to` is `400 invalid_range`; an unknown device is `404` |
 | `POST /devices/:id/remap` | `hub.ai` | force-regenerate the AI mapping (Zigbee devices); the hub also remaps automatically when a device publishes unknown parameters — see [ai-adaptation.md](ai-adaptation.md). `409 ai_not_configured` with no credential, `409 ai_disabled` when the owner has switched adaptation off |
 | `POST /matter/commission` | `device.add` | `{pairingCode}` → `202 {jobId}` (async) |
 | `GET /matter/commission/:jobId` | floor | `{status: running\|done\|failed, nodeId?, error?}` |
@@ -854,6 +855,100 @@ at most once an hour, hung off the next write rather than a timer, so the table
 sits at the cap plus whatever has happened since the last pass — and a hub where
 nothing is happening never wakes up to prune. There is no route to clear it and
 no setting to change it.
+
+### Recorded readings (`GET /devices/:id/history`)
+
+What the temperature, the humidity or the power draw actually did, over the last
+few days. The hub knew what a reading *is* — `endpoints.state` is one row,
+rewritten in place — and had no way to say what it *was*.
+
+**One row per five minutes per quantity, never one per report.** This is the
+same line the activity log holds, for the same machine: a power meter reports
+every few seconds, forever, onto an SD card. Readings are accumulated in memory
+(`src/core/history.ts`) and a closed bucket lands as one row carrying its low,
+its high, and the running total and count the mean is computed from. An ordinary
+home writes about 288 batched transactions a day and a week of it is one to two
+megabytes.
+
+**The bucket being filled right now is served from memory**, so the chart ends
+*now* rather than up to five minutes ago — which matters because the live value
+is usually on screen right beside it.
+
+Retention is **two bounds**, like the activity log's: seven days, and 500
+distinct recorded quantities. The age bound is also the row cap per quantity
+(2 016), so the only axis that could grow without limit is how many quantities a
+home has, and that is what the second bound is for.
+
+Reading it is the **floor** — a temperature chart is the home being read, the
+same answer `GET /devices` gives.
+
+```
+GET /api/v1/devices/<id>/history?from=1756108800000&to=1756195200000&points=300&series=temperature,humidity
+```
+
+```json
+{
+  "start": 1756108800000,
+  "bucketMs": 300000,
+  "end": 1756195200000,
+  "retentionDays": 7,
+  "series": [
+    { "kind": "temperature", "unit": "centiCelsius", "gapBuckets": 6,
+      "points": [[0, 2140, 2180, 2160], [1, 2150, 2190, 2170], [7, 2050, 2060, 2055]] }
+  ]
+}
+```
+
+Four things about that shape are load-bearing:
+
+- **A point is `[offset, min, max, mean]`**, and `offset` counts `bucketMs` from
+  `start`. Tuples rather than objects because a week of one series is hundreds
+  of points and the field names would be most of the payload.
+- **A gap is a missing offset.** Not a null, not a zero — the offsets that
+  aren't there *are* the hole. In the example above nothing was recorded between
+  offsets 1 and 7. Drawing a line through it would be the hub claiming to know
+  something it doesn't; a device that is offline reports nothing, so its silence
+  is a real absence.
+- **`gapBuckets` says how long a hole has to be before it stops being a lull**,
+  derived per series from its own observed cadence (the median spacing times
+  four, floored at three points and capped at two hours of wall time). A fixed
+  threshold gets one of the two cases wrong every time: a sensor that reports
+  twice an hour drawn as permanently broken, or an afternoon of silence drawn as
+  perfectly steady.
+- **`bucketMs` is what the hub chose, not what it stores.** A week is 2 016
+  five-minute buckets and a phone draws a few hundred points, so the hub thins
+  to `points` (default 360, max 1 000) by folding whole buckets together — the
+  band still reaches the real extremes — and states the width it used. Never
+  assume five minutes.
+
+Values are **integers in the canonical wire units**, so nothing is converted
+between the device report and the chart:
+
+| `kind` | `unit` | from |
+|---|---|---|
+| `temperature` | `centiCelsius` | `sensors.temperatureCenti` |
+| `humidity` | `centiPercent` | `sensors.humidityCenti` |
+| `illuminance` | `lux` | `sensors.illuminanceLux`, rounded |
+| `pressure` | `deciHectopascal` | `sensors.pressureHPa` × 10 |
+| `co2` | `ppm` | `sensors.co2ppm` |
+| `pm25` | `deciMicrogramsPerCubicMetre` | `sensors.pm25` × 10 |
+| `flow` | `milliCubicMetresPerHour` | `sensors.flowCubicMetersPerHour` × 1000 |
+| `power` | `milliwatt` | `power.activeMilliwatts` |
+| `battery` | `percent` | `battery.percent` |
+| `thermostatTemperature` | `centiCelsius` | `thermostat.localTemperatureCenti` |
+
+The three quantities the wire carries as floats get an explicit scale here
+because a `REAL` column costs eight bytes a value where a varint costs one or
+two, and a whole lux or a tenth of a hPa is far below anything a chart shows. An
+unknown name in `series=` is **dropped rather than refused**, so an app one
+version ahead still gets the rest of its chart.
+
+One quantity reported on several endpoints of the same device — a two-channel
+meter — folds into one line: the device page asks about the device.
+
+Booleans are deliberately **not** here. "When was the light on" wants transitions
+rather than buckets and a step chart rather than a line; that is a different
+table and a different control, not a widening of this one.
 
 ## WebSocket
 
