@@ -337,4 +337,85 @@ describe.skipIf(!handle)('DeviceRegistry', () => {
     expect(registry.listDevices()).toHaveLength(0);
     expect(removed).toHaveBeenCalledWith(deviceId);
   });
+
+  describe('a write that reached the protocol and not the device', () => {
+    /**
+     * `execute()` resolving has never meant the device did anything — the
+     * Zigbee adapter publishes to MQTT and MQTT resolves when the broker takes
+     * the message. This is the only route by which "it didn't land" reaches a
+     * client at all.
+     */
+    it('names the device by its own id, not the adapter’s', async () => {
+      adapter.bus!.deviceUpserted(lampDescriptor);
+      await registry.flush();
+      const deviceId = registry.listDevices()[0]!.id;
+
+      const failed = vi.fn();
+      events.on('commandFailed', failed);
+      adapter.bus!.commandFailed('mqtt', 'lamp-1', {
+        property: 'detection_interval',
+        kind: 'unreachable',
+        detail: 'Device did not respond',
+      });
+
+      expect(failed).toHaveBeenCalledWith({
+        deviceId,
+        property: 'detection_interval',
+        kind: 'unreachable',
+        detail: 'Device did not respond',
+      });
+    });
+
+    it('drops a superseded write, which is not a failure', async () => {
+      // A newer write to the same property replaced this one in the queue, so
+      // the value is still on its way. The Zigbee adapter drops these before
+      // calling; the registry repeats the check because this is the seam a
+      // second adapter arrives at.
+      adapter.bus!.deviceUpserted(lampDescriptor);
+      await registry.flush();
+
+      const failed = vi.fn();
+      events.on('commandFailed', failed);
+      adapter.bus!.commandFailed('mqtt', 'lamp-1', {
+        property: 'detection_interval',
+        kind: 'superseded',
+        detail: 'Request superseded',
+      });
+
+      expect(failed).not.toHaveBeenCalled();
+    });
+
+    it('says nothing about a device it does not track', () => {
+      // The coordinator, or something mid-interview. There is no id to name.
+      const failed = vi.fn();
+      events.on('commandFailed', failed);
+      adapter.bus!.commandFailed('mqtt', 'nobody', {
+        property: 'state',
+        kind: 'refused',
+        detail: 'nope',
+      });
+
+      expect(failed).not.toHaveBeenCalled();
+    });
+
+    it('writes nothing to the activity log', async () => {
+      // The log is read a week later; a write that failed at 17:11 is not
+      // history, it is a thing on screen right now. `device.command` already
+      // recorded the ask.
+      const rows = async () => db.select().from(activity);
+
+      adapter.bus!.deviceUpserted(lampDescriptor);
+      await registry.flush();
+      const before = (await rows()).length;
+
+      adapter.bus!.commandFailed('mqtt', 'lamp-1', {
+        property: 'detection_interval',
+        kind: 'refused',
+        detail: 'nope',
+      });
+      await registry.flush();
+
+      expect(await rows()).toHaveLength(before);
+    });
+  });
 });

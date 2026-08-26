@@ -10,6 +10,7 @@ import {
   type Z2mProfile,
 } from './exposes-mapper.js';
 import { buildSetPayload } from './commands.js';
+import { parseWriteFailure } from './write-failures.js';
 import type { Logger } from '../../logging.js';
 
 /**
@@ -286,6 +287,16 @@ export class ZigbeeAdapter implements ProtocolAdapter {
       }
       return;
     }
+    // A third bridge topic, and the narrowest read of one yet: `bridge/logging`
+    // is the *only* place a `set` that didn't land is written down. Publishing
+    // to `<name>/set` resolves when the broker takes the message, so without
+    // this the hub answers 200 for a write a sleeping sensor will not see for
+    // an hour, and the apps have nothing to distinguish that from a refusal.
+    // Everything that isn't a failed `set` is dropped by the parser.
+    if (suffix === 'bridge/logging') {
+      this.handleBridgeLog(payload);
+      return;
+    }
     if (suffix.startsWith('bridge/')) return;
 
     if (suffix.endsWith('/availability')) {
@@ -480,6 +491,37 @@ export class ZigbeeAdapter implements ProtocolAdapter {
         await this.publish(`${this.base}/${raw.friendly_name}/get`, JSON.stringify(get)).catch(() => {});
       }
     }
+  }
+
+  /**
+   * One `bridge/logging` line, kept only if it reports a `set` that failed on
+   * a device this adapter knows.
+   *
+   * Three things are dropped without a word, and each is deliberate. A line
+   * the parser doesn't recognise — nearly all of them — because a wrong
+   * diagnosis is worse than the silence the caller already has (the
+   * `diagnosis.ts` rule). A `superseded` write, because that is a *newer*
+   * write to the same property taking its place and the value is still on its
+   * way; a person tapping − four times would otherwise watch four errors
+   * arrive for one correct outcome. And a name that maps to no device we
+   * track, which is the coordinator or a device mid-interview.
+   */
+  private handleBridgeLog(payload: string): void {
+    if (!payload.startsWith('{')) return;
+    const entry = JSON.parse(payload) as { level?: string; message?: string };
+    if (entry.level !== 'error' || typeof entry.message !== 'string') return;
+
+    const failure = parseWriteFailure(entry.message);
+    if (!failure || failure.kind === 'superseded') return;
+
+    const device = this.byFriendlyName.get(failure.name);
+    if (!device) return;
+
+    this.bus?.commandFailed('zigbee', device.ieee, {
+      property: failure.property,
+      kind: failure.kind,
+      detail: failure.detail,
+    });
   }
 
   private async publish(topic: string, payload: string): Promise<void> {

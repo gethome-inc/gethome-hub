@@ -45,12 +45,14 @@ describe.skipIf(!enabled)('ZigbeeAdapter runtime AI adaptation', () => {
 
   const upserts: AdapterDeviceDescriptor[] = [];
   const patches: Array<{ endpointId: number; patch: Partial<EndpointState> }> = [];
+  const failures: Array<{ property: string; kind: string; detail: string }> = [];
   const bus: AdapterBus = {
     deviceUpserted: (descriptor) => upserts.push(descriptor),
     deviceRemoved: () => {},
     stateChanged: (_adapter, _externalId, endpointId, patch) => patches.push({ endpointId, patch }),
     reachabilityChanged: () => {},
     radioReachabilityChanged: () => {},
+    commandFailed: (_adapter, _externalId, failure) => failures.push(failure),
     activity: () => {},
   };
 

@@ -73,10 +73,44 @@ export interface HubEvents {
    * `AccessService.announce`.
    */
   accessChanged: [];
+  /**
+   * A write the hub forwarded did not land on the device.
+   *
+   * `POST /devices/:id/commands` answers 200 for anything it can route,
+   * because routing is all it does: the Zigbee adapter publishes to MQTT, and
+   * MQTT resolves when the *broker* takes the message. So a client that asks
+   * for a value and watches the old one come back has had no way to tell "on
+   * its way to a sleeping sensor" from "refused", and the apps papered over
+   * the difference by silently reverting.
+   *
+   * It goes to **every** socket rather than only the one that asked, for the
+   * same reason `structure` does: the value is the house's, so a write made on
+   * one phone that fails is a fact the phone in the next room is also drawing.
+   */
+  commandFailed: [failure: CommandFailure];
   commissioningProgress: [jobId: string, status: string, detail?: string];
   mqttFrame: [frame: MqttFrame];
   zigbeeEvent: [event: ZigbeeLifecycleEvent];
   aiRun: [event: AiRunEvent];
+}
+
+/**
+ * A command that reached the protocol and did not reach the device.
+ *
+ * `kind` is deliberately open (a plain `string`) rather than a union: the
+ * adapters classify in their own vocabulary, an app that meets a word it does
+ * not know falls back to `detail`, and a hub that learns a new one should not
+ * need every client updated first. Today the Zigbee adapter answers
+ * `unreachable` or `refused` — see `adapters/zigbee/write-failures.ts`, which
+ * also explains why `superseded` never reaches here.
+ */
+export interface CommandFailure {
+  deviceId: string;
+  /** What was being written, in the vocabulary the client asked in. */
+  property: string;
+  kind: string;
+  /** The protocol's own words. Apps show this rather than paraphrase it. */
+  detail: string;
 }
 
 /**
