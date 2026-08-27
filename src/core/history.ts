@@ -16,12 +16,12 @@ import type { Logger } from '../logging.js';
  * table with a row per report.
  *
  * **Everything here follows from that one constraint.** Readings are
- * accumulated in memory and land as *at most one row per minute per quantity*,
- * which is the `STATE_FLUSH_MS` idea from `core/registry.ts` applied to
- * storage: one batched transaction a minute, each carrying a row only for the
- * quantities that actually reported in it, against the tens of thousands of
- * whole-row rewrites a single chatty power meter already costs. A week of an
- * ordinary home is two to three megabytes.
+ * accumulated in memory and land as *at most one row per five minutes per
+ * quantity*, which is the `STATE_FLUSH_MS` idea from `core/registry.ts` applied
+ * to storage: one batched transaction every five minutes, each carrying a row
+ * only for the quantities that actually reported in it, against the tens of
+ * thousands of whole-row rewrites a single chatty power meter already costs. A
+ * week of an ordinary home is one to two megabytes.
  *
  * Four things are load-bearing and easy to undo by accident:
  *
@@ -39,31 +39,33 @@ import type { Logger } from '../logging.js';
  *    claiming to know something it doesn't.
  * 4. **Two bounds, like the activity log.** Age (a week) and the number of
  *    recorded quantities (500). The age bound is also the row cap per series
- *    (10 080 at a one-minute bucket), so the only axis that could otherwise
- *    grow without limit is how many quantities a home has — and the cap is a
- *    ceiling rather than a typical, since a series only has a row for a minute
- *    something was actually reported in.
+ *    (2 016), so the only axis that could otherwise grow without limit is how
+ *    many quantities a home has — and the cap is a ceiling rather than a
+ *    typical, since a series only has a row for a bucket something was
+ *    actually reported in.
  */
 
 /**
  * How long readings coalesce before one row is written.
  *
- * **A minute, and the reason it can be is that an empty bucket costs nothing.**
- * A row exists only where a reading arrived, so a sensor that reports every ten
- * minutes writes exactly the same number of rows at a one-minute bucket as at a
- * five-minute one — it just lands on the minute it actually spoke instead of
- * being rounded into a five-minute slot. The finer bucket is paid for only by
- * the devices that genuinely report faster than that (metering plugs, Matter
- * sensors on a 60-second subscription), and it is what makes a one-hour chart a
- * line of sixty points rather than a dozen dots.
+ * **Five minutes, and the min/max band is why it costs the chart so little.**
+ * A one-minute bucket was tried and reverted: it buys the *timing* of a spike
+ * and nothing else, because a bucket already carries the low and the high of
+ * everything that happened inside it — a kettle that ran for ninety seconds
+ * still shows as a tall band, just without saying which ninety seconds. Paying
+ * five times the rows on every chatty meter for that is the wrong trade on a
+ * board whose disk is an SD card.
  *
- * Fifteen minutes was asked for as a range and is deliberately not offered: at
- * any realistic reporting cadence a quarter of an hour is one to three
- * readings, and three dots say less than the number already on the tile above
- * the chart. The limit there is how often a device speaks, which no bucket size
- * can change.
+ * An hour is therefore thirteen bucket indices, which is a curve rather than a
+ * dozen dots once the apps draw the readings as readings — see
+ * `DeviceHistoryCard`, which marks each point when a series is sparse.
+ *
+ * What the bucket size cannot buy at all is a window shorter than that. Fifteen
+ * minutes was asked for and is deliberately not a range: the limit there is how
+ * often a device *speaks*, not how finely the hub records, and most sensors
+ * report every few minutes at best.
  */
-export const BUCKET_MS = 60 * 1000;
+export const BUCKET_MS = 5 * 60 * 1000;
 
 /** How far back the hub keeps them. */
 const RETAIN_DAYS = 7;
@@ -72,9 +74,9 @@ const RETAIN_MS = RETAIN_DAYS * 24 * 60 * 60 * 1000;
 /**
  * How many distinct quantities this hub will record.
  *
- * The age bound already caps the rows *per* series at 10 080 — and only a
- * device reporting every single minute for a week reaches that — so this is the
- * one axis left. 500 is far past a large home (a hundred devices with three
+ * The age bound already caps the rows *per* series at 2 016 — and only a device
+ * reporting in every single bucket for a week reaches that — so this is the one
+ * axis left. 500 is far past a large home (a hundred devices with three
  * readings each is 300) and exists so that a misbehaving adapter — or a future
  * decision to record `custom` fields — cannot quietly turn a bounded table
  * into an unbounded one.

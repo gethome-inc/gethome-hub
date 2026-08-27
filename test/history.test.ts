@@ -204,7 +204,7 @@ describe.skipIf(!handle)('HistoryService', () => {
 
   it('sizes the gap threshold from the series’ own cadence', async () => {
     vi.useFakeTimers();
-    // A sensor that reports every six minutes: six buckets apart.
+    // A sensor that reports every half hour: six buckets apart.
     for (let step = 12; step >= 0; step -= 6) {
       at(-step);
       report({ sensors: { temperatureCenti: 2_000 + step } });
@@ -238,10 +238,10 @@ describe.skipIf(!handle)('HistoryService', () => {
       points: 10,
     });
     // 62 stored buckets into at most 10 points is seven to a point — rounded up
-    // to ten, because a width a clock recognises is what the card's footnote
-    // and the time axis both have to read out. The answer states the width it
-    // chose rather than leaving the app to assume one.
-    expect(page.bucketMs).toBe(10 * BUCKET_MS);
+    // to twelve, an hour, because a width a clock recognises is what the card's
+    // footnote and the time axis both have to read out. The answer states the
+    // width it chose rather than leaving the app to assume one.
+    expect(page.bucketMs).toBe(12 * BUCKET_MS);
     expect(page.series[0]!.points.length).toBeLessThanOrEqual(10);
     // Thinning folds rather than samples: the band still reaches the real
     // extremes of the window.
@@ -253,36 +253,37 @@ describe.skipIf(!handle)('HistoryService', () => {
 
   it('rounds a point’s width up to something a clock recognises', async () => {
     vi.useFakeTimers();
-    // Six hours of a sensor reporting every minute.
-    for (let step = 360; step >= 0; step -= 1) {
+    // Five hours of a sensor reporting in every bucket.
+    for (let step = 60; step >= 0; step -= 1) {
       at(-step);
       report({ sensors: { temperatureCenti: 2_000 + (step % 20) } });
     }
     at(1);
     await service.flush();
 
-    // 362 buckets into 120 points is 3.02 → 4 by plain arithmetic, which the
-    // card would print as "one point every 4 minutes" and the axis would land
-    // on unrepeatable moments. Five is the next width a clock has a word for.
+    // 62 buckets into at most 14 points is five buckets — twenty-five minutes,
+    // which the card would print under the chart and the axis would label with
+    // unrepeatable moments. Half an hour is the next width a clock has a word
+    // for.
     const page = await service.read(DEVICE_ID, {
-      from: Date.now() - 361 * BUCKET_MS,
+      from: Date.now() - 61 * BUCKET_MS,
       to: Date.now(),
-      points: 120,
+      points: 14,
     });
-    expect(page.bucketMs).toBe(5 * BUCKET_MS);
+    expect(page.bucketMs).toBe(6 * BUCKET_MS);
 
-    // An hour asked for with headroom keeps every stored minute — the range
+    // An hour asked for with headroom keeps every stored bucket — the range
     // the whole rounding exists to protect. `points` is "at most this many",
-    // and a window of sixty minutes touches sixty-*one* bucket indices, so a
-    // caller that asks for exactly sixty is asking to be thinned by one
-    // fencepost. Callers ask for room.
+    // and an hour touches *thirteen* bucket indices, not twelve, so a caller
+    // that asks for exactly twelve is asking to be thinned by one fencepost.
+    // Callers ask for room.
     const hour = await service.read(DEVICE_ID, {
-      from: Date.now() - 60 * BUCKET_MS,
+      from: Date.now() - 12 * BUCKET_MS,
       to: Date.now(),
       points: 120,
     });
     expect(hour.bucketMs).toBe(BUCKET_MS);
-    expect(hour.series[0]!.points.length).toBeGreaterThan(50);
+    expect(hour.series[0]!.points.length).toBeGreaterThan(10);
   });
 
   it('folds one quantity reported on several endpoints into one line', async () => {

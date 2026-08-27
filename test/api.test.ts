@@ -115,7 +115,7 @@ describe.skipIf(!handle)('hub API', () => {
       // The *presence* of this block is what tells an app the hub records
       // readings at all, which is how it knows to offer a chart rather than a
       // doorway to a 404.
-      history: { bucketSeconds: 60, retentionDays: 7 },
+      history: { bucketSeconds: 300, retentionDays: 7 },
     });
   });
 

@@ -264,15 +264,17 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   temperature — and the tempting shape, a row per report, is exactly the mistake
   `STATE_FLUSH_MS` and `device.command` each exist to avoid: a power meter
   reports every few seconds, forever, onto an SD card. So readings accumulate in
-  memory and **at most one one-minute bucket lands as one row** (`min`, `max`,
-  `sum`, `n`) — one batched transaction a minute against the tens of thousands
-  of whole-row rewrites one chatty meter already costs, and a week of an
-  ordinary home is two to three megabytes. **"At most" is what makes the minute
-  affordable**: a bucket nothing reported in writes no row, so a sensor speaking
-  every ten minutes costs exactly what it would at a five-minute bucket and
-  simply lands on the minute it spoke — only devices that genuinely report
-  faster pay for the resolution, and that resolution is what makes a one-hour
-  chart a line rather than a dozen dots. Seven things to keep. **Nothing touches the disk on
+  memory and **at most one five-minute bucket lands as one row** (`min`, `max`,
+  `sum`, `n`) — ~288 batched transactions a day against the tens of thousands of
+  whole-row rewrites one chatty meter already costs, and a week of an ordinary
+  home is one to two megabytes. **A one-minute bucket was tried and reverted**,
+  and the reason is the band: a bucket already carries the low and the high of
+  everything inside it, so a finer one buys the *timing* of a spike and nothing
+  else — a kettle that ran for ninety seconds still shows as a tall band either
+  way. Five times the rows on every chatty meter is the wrong trade for that on
+  an SD card. An hour is therefore thirteen bucket indices, which the apps draw
+  as a curve by **marking the points when a series is sparse** rather than by
+  recording more of them. Seven things to keep. **Nothing touches the disk on
   the report path** — `observe` is field reads and a `Math.min`, hung off the
   bus's `stateChanged` so `DeviceRegistry` is untouched. **A bucket merges
   rather than replaces**: the upsert takes `min(…)`/`max(…)` and adds `sum`/`n`,
@@ -286,12 +288,12 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   tells an app how long a hole has to be before it stops drawing through it,
   because a fixed threshold draws a half-hourly sensor as permanently broken or
   an afternoon of silence as perfectly steady. **A thinned point's width is
-  rounded up to something a clock recognises** (1, 2, 3, 5, 10, 15, 30, 60
-  minutes…): plain division lands on "every 28 minutes", which is honest and
+  rounded up to something a clock recognises** (5, 10, 15, 20, 30, 60
+  minutes…): plain division lands on "every 25 minutes", which is honest and
   reads as a glitch in the app that prints it under the chart and labels a time
-  axis with it — and `points` is *at most*, so a window of sixty minutes touches
-  sixty-**one** bucket indices and a caller wanting every stored minute of an
-  hour asks for more than sixty. **Two bounds again** — seven days
+  axis with it — and `points` is *at most*, so an hour touches **thirteen**
+  bucket indices rather than twelve, and a caller wanting every stored bucket of
+  one asks for more than twelve. **Two bounds again** — seven days
   and 500 recorded quantities — where the age bound is also the per-series row
   cap, so the only unbounded axis is how many quantities a home has; the prune
   runs **per series** (`series_id = ? AND bucket < ?` is a prefix of the key,
