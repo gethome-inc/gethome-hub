@@ -17,7 +17,14 @@ import { MqttAdapter } from '../../src/adapters/mqtt/adapter.js';
 import { AiRunLog } from '../../src/core/ai-runs.js';
 import { MappingLibrary } from '../../src/ai/library.js';
 import type { HubCommand } from '../../src/schema/index.js';
-import { bootedHome, loadedFavorites, openTestDb, resetDb, loadedAccess } from '../helpers/db.js';
+import {
+  bootedHome,
+  loadedFavorites,
+  openTestDb,
+  resetDb,
+  loadedAccess,
+  startedHistory,
+} from '../helpers/db.js';
 
 /**
  * End-to-end proof over a real MQTT broker: a fake Zigbee2MQTT bridge and a
@@ -105,6 +112,7 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
       access,
       pairing,
       activity,
+      history: await startedHistory(db, events),
       settings,
       hubId: 'hub-e2e',
       home: await bootedHome(db, 'E2E Hub'),

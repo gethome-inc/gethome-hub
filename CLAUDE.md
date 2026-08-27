@@ -259,6 +259,61 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   and a row read next week may be all that is left of the device. Everything in
   it is optional; nothing may require it. Adding a kind is safe, and the log is
   shared by design — any member reads all of it, by name.
+- **Readings are recorded in buckets, and that is the same line the activity log
+  holds.** `src/core/history.ts` is what lets an app draw the last few days of a
+  temperature — and the tempting shape, a row per report, is exactly the mistake
+  `STATE_FLUSH_MS` and `device.command` each exist to avoid: a power meter
+  reports every few seconds, forever, onto an SD card. So readings accumulate in
+  memory and **at most one five-minute bucket lands as one row** (`min`, `max`,
+  `sum`, `n`) — ~288 batched transactions a day against the tens of thousands of
+  whole-row rewrites one chatty meter already costs, and a week of an ordinary
+  home is one to two megabytes. **A one-minute bucket was tried and reverted**,
+  and the reason is the band: a bucket already carries the low and the high of
+  everything inside it, so a finer one buys the *timing* of a spike and nothing
+  else — a kettle that ran for ninety seconds still shows as a tall band either
+  way. Five times the rows on every chatty meter is the wrong trade for that on
+  an SD card. An hour is therefore thirteen bucket indices, which the apps draw
+  as a curve by **marking the points when a series is sparse** rather than by
+  recording more of them. Seven things to keep. **Nothing touches the disk on
+  the report path** — `observe` is field reads and a `Math.min`, hung off the
+  bus's `stateChanged` so `DeviceRegistry` is untouched. **A bucket merges
+  rather than replaces**: the upsert takes `min(…)`/`max(…)` and adds `sum`/`n`,
+  which is what makes a restart *inside* a bucket safe and a backwards clock
+  jump harmless on a board with no RTC — and it is why the mean is computed on
+  read, since a stored average cannot be merged. **`flush()` closes due buckets
+  itself**, because a flush that left a finished bucket in memory was one wrong
+  call away from readings that never reached the disk. **A gap is an absence**:
+  no report, no sample, no point at that offset — and `gapBuckets` (the series'
+  own median spacing ×4, floored at three points, capped at two hours) is what
+  tells an app how long a hole has to be before it stops drawing through it,
+  because a fixed threshold draws a half-hourly sensor as permanently broken or
+  an afternoon of silence as perfectly steady. **`leading` is that same honesty
+  pointed the other way**: a window's first reading lands wherever the sensor
+  happened to speak, so an hour of a twenty-minute sensor opens a third of the
+  way across with empty axis to its left — which reads as "nothing recorded"
+  while the hub knows exactly what it was. One index seek returns the reading
+  *before* `from`, bounded by that series' own `gapBuckets` and absent past it,
+  so an app can draw the line entering the window rather than beginning in
+  mid-air. It has to be the hub's answer rather than the app widening its own
+  `from`, because a wider request changes the span and the span picks the
+  emitted `bucketMs` — asking for a little context either side would silently
+  coarsen the whole chart. **A thinned point's width is
+  rounded up to something a clock recognises** (5, 10, 15, 20, 30, 60
+  minutes…): plain division lands on "every 25 minutes", which is honest and
+  reads as a glitch in the app that prints it under the chart and labels a time
+  axis with it — and `points` is *at most*, so an hour touches **thirteen**
+  bucket indices rather than twelve, and a caller wanting every stored bucket of
+  one asks for more than twelve. **Two bounds again** — seven days
+  and 500 recorded quantities — where the age bound is also the per-series row
+  cap, so the only unbounded axis is how many quantities a home has; the prune
+  runs **per series** (`series_id = ? AND bucket < ?` is a prefix of the key,
+  a bare `bucket < ?` is a full scan) and hangs off a write, so a quiet hub
+  never wakes for it. And **the table is `WITHOUT ROWID`**, which drizzle cannot
+  express — the migration is hand-finished and `db:generate` must never be
+  allowed to write it back to a plain table. Reading is the **floor**, not a
+  permission: a temperature chart is the home being read. Booleans are
+  deliberately out — transitions, not buckets; a step chart, not a line.
+  `docs/api.md` is canonical.
 - **A join window is several grants, and Zigbee2MQTT is the authority.** A
   permit-join duration travels as a uint8 of seconds, so **254 is the most one
   grant can last** — a protocol fact, not a Z2M one. `core/permit-join.ts`

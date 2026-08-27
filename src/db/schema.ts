@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { integer, primaryKey, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 /**
  * The hub's store is a single SQLite file (`<data>/hub.db`).
@@ -301,6 +301,84 @@ export const activity = sqliteTable('activity', {
   message: text('message').notNull(),
   data: text('data', { mode: 'json' }),
 });
+
+/**
+ * One recorded quantity: this device's temperature, that plug's power.
+ *
+ * A dictionary rather than three columns repeated on every sample — the whole
+ * point of the split. A week of one series is 2 016 rows; carrying the uuid,
+ * the endpoint and the word "temperature" on each of them would be more bytes
+ * of *identity* than of readings, on a machine whose disk is an SD card.
+ *
+ * `id` is an autoincrement integer for the same reason: it is the first half
+ * of every `history` row's key, and a uuid there would cost 36 bytes per
+ * sample where a varint costs one or two.
+ *
+ * The cascade is real here, unlike `rooms.zone_id` — these are new
+ * `CREATE TABLE`s rather than columns bolted on with `ALTER TABLE`, so SQLite
+ * accepts a referential action and a removed device takes its history with it.
+ */
+export const historySeries = sqliteTable(
+  'history_series',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    deviceId: text('device_id')
+      .notNull()
+      .references(() => devices.id, { onDelete: 'cascade' }),
+    endpointId: integer('endpoint_id').notNull(),
+    /** `HistoryKind` — `temperature`, `humidity`, `power`… see `core/history.ts`. */
+    kind: text('kind').notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex('history_series_device_endpoint_kind').on(
+      table.deviceId,
+      table.endpointId,
+      table.kind,
+    ),
+  ],
+);
+
+/**
+ * What a series did, five minutes at a time.
+ *
+ * **One row per bucket, never one per report.** This is the `STATE_FLUSH_MS`
+ * rule from `core/registry.ts` carried into storage: a power meter reports
+ * every few seconds, forever, and a table that took a row each time would put
+ * tens of thousands of writes a day onto a card for one device. Readings are
+ * accumulated in memory (`core/history.ts`) and one bucket lands as one row.
+ *
+ * `min`/`max` are what the chart's band is drawn from and `sum`/`n` are what
+ * its line is: the average is computed on read rather than stored, because a
+ * *stored* average cannot be merged — and merging is exactly what the write
+ * has to do when a hub restarts inside a bucket it had already half written.
+ *
+ * Values are **integers in the canonical wire units** (centi-°C, centi-%, mW,
+ * ppm, %), so a sample costs a varint or two and no conversion happens between
+ * here and the app. The two quantities the wire carries as floats get an
+ * explicit scale, documented with `HISTORY_KINDS`.
+ *
+ * The migration declares this `WITHOUT ROWID`, which drizzle has no way to
+ * express: the table then *is* its own index on `(series_id, bucket)` — no
+ * rowid, no second b-tree to keep, and a chart's week of one series is one
+ * contiguous range scan. Roughly 20 bytes a row all in.
+ */
+export const history = sqliteTable(
+  'history',
+  {
+    seriesId: integer('series_id')
+      .notNull()
+      .references(() => historySeries.id, { onDelete: 'cascade' }),
+    /** `floor(epochMs / BUCKET_MS)` — see `core/history.ts`. */
+    bucket: integer('bucket').notNull(),
+    min: integer('min').notNull(),
+    max: integer('max').notNull(),
+    /** Running total and count, so buckets merge and the average is exact. */
+    sum: integer('sum').notNull(),
+    n: integer('n').notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.seriesId, table.bucket] })],
+);
 
 export const aiMappings = sqliteTable(
   'ai_mappings',

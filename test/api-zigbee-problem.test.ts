@@ -12,7 +12,13 @@ import { DeviceRegistry } from '../src/core/registry.js';
 import { PermitJoinService } from '../src/core/permit-join.js';
 import { AiRunLog } from '../src/core/ai-runs.js';
 import { MappingLibrary } from '../src/ai/library.js';
-import { bootedHome, loadedFavorites, openTestDb, loadedAccess } from './helpers/db.js';
+import {
+  bootedHome,
+  loadedFavorites,
+  openTestDb,
+  loadedAccess,
+  startedHistory,
+} from './helpers/db.js';
 
 /**
  * `zigbee.problem` on the wire.
@@ -73,6 +79,7 @@ describe.skipIf(!handle)('why Zigbee is down, over HTTP', () => {
       access,
       pairing,
       activity,
+      history: await startedHistory(db, events),
       settings,
       aiRuns: new AiRunLog(db, events),
       mappings: new MappingLibrary({ db, settings, registry, log }),

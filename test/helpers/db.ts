@@ -1,4 +1,5 @@
 import { eq } from 'drizzle-orm';
+import { pino } from 'pino';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -7,6 +8,7 @@ import { runMigrations } from '../../src/db/migrate.js';
 import { HomeService } from '../../src/core/home.js';
 import { FavoritesService } from '../../src/core/favorites.js';
 import { AccessService } from '../../src/core/access.js';
+import { HistoryService } from '../../src/core/history.js';
 import type { HubEventBus } from '../../src/core/bus.js';
 import {
   activity,
@@ -15,6 +17,8 @@ import {
   deviceFavorites,
   devices,
   endpoints,
+  history,
+  historySeries,
   home,
   invites,
   members,
@@ -61,6 +65,8 @@ export async function resetDb(db: Db): Promise<void> {
   await db.delete(tokens);
   await db.delete(invites);
   await db.delete(endpoints);
+  await db.delete(history);
+  await db.delete(historySeries);
   await db.delete(deviceFavorites);
   await db.delete(devices);
   await db.delete(members);
@@ -107,4 +113,17 @@ export async function loadedAccess(db: Db, events: HubEventBus): Promise<AccessS
   const access = new AccessService(db, events);
   await access.load();
   return access;
+}
+
+/**
+ * A started `HistoryService`, which is what `src/index.ts` hands the API.
+ *
+ * Every suite that builds a server needs one — `GET /hub` asks it what it
+ * records, so a server built without it answers 500 on the health check every
+ * other test leans on.
+ */
+export async function startedHistory(db: Db, events: HubEventBus): Promise<HistoryService> {
+  const service = new HistoryService(db, events, pino({ level: 'silent' }));
+  await service.start();
+  return service;
 }

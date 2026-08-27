@@ -203,6 +203,29 @@ Generic controls (the `custom` capability) — one intent for every field:
 
 A device that cannot honor an intent answers `409` with an error message.
 
+## Recorded readings
+
+The state above is what a reading *is*. What it *was* is recorded separately, in
+five-minute buckets, and served by `GET /devices/:id/history` —
+[api.md](api.md#recorded-readings-get-devicesidhistory) is canonical for the wire
+shape and the retention.
+
+The part that belongs here is the **units**, because they are the same contract
+as everything above: stored values are integers in the canonical wire unit, so
+nothing is converted between a device report and a chart. Ten quantities are
+recorded — `temperature`, `humidity`, `illuminance`, `pressure`, `co2`, `pm25`,
+`flow`, `power`, `battery`, `thermostatTemperature` — and the three the wire
+carries as floats get an explicit scale (`illuminance` rounds to whole lux,
+`pressure` is ×10, `pm25` is ×10, `flow` is ×1000), since a `REAL` column costs
+eight bytes a value on an SD card and a tenth of a hPa is far below anything a
+chart can show.
+
+**A quantity added to `EndpointState` is not recorded until it is added to
+`KINDS` in `src/core/history.ts`** — deliberately a list rather than a sweep over
+whatever happens to be numeric, because that is what keeps a bounded table
+bounded and stops a vendor's diagnostic counter becoming a line on somebody's
+chart.
+
 ## Device-type catalog
 
 `src/schema/catalog.ts` maps Matter device-type IDs (Descriptor cluster) to

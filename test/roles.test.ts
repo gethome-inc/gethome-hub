@@ -17,7 +17,14 @@ import { MappingLibrary } from '../src/ai/library.js';
 import { BUILTIN_ROLES, PERMISSION_KEYS, type RoleWire } from '../src/core/access.js';
 import type { AdapterBus, ProtocolAdapter } from '../src/adapters/adapter.js';
 import type { HubCommand } from '../src/schema/index.js';
-import { bootedHome, loadedAccess, loadedFavorites, openTestDb, resetDb } from './helpers/db.js';
+import {
+  bootedHome,
+  loadedAccess,
+  loadedFavorites,
+  openTestDb,
+  resetDb,
+  startedHistory,
+} from './helpers/db.js';
 
 const handle = await openTestDb();
 const log = pino({ level: 'silent' });
@@ -112,6 +119,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
       access,
       pairing,
       activity,
+      history: await startedHistory(db, events),
       settings,
       hubId: 'hub-roles-test',
       home: await bootedHome(db, 'Roles Hub'),

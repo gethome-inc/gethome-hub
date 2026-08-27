@@ -34,6 +34,18 @@ const migrationFiles = readdirSync(migrationsDir)
   .filter((name) => name.endsWith('.sql'))
   .sort();
 
+/**
+ * Where the roles migration sits in that list.
+ *
+ * **Named, not counted.** This was `migrationFiles.length - 1` — "the last
+ * one" — which was true on the day it was written and quietly stopped being
+ * true the next time anything was added: the suite then wrote its old-build
+ * members *after* the roles migration had already run and backfilled, and
+ * failed on an invite whose `role_id` nothing had filled in. A suite about one
+ * migration has to say which one.
+ */
+const ROLES_MIGRATION = migrationFiles.findIndex((name) => name.startsWith('0004_')) + 1;
+
 /** Apply `migrationFiles[from..to)` — the journal's order, a slice at a time. */
 function apply(sqlite: Database.Database, from: number, to: number): void {
   for (const name of migrationFiles.slice(from, to)) {
@@ -60,7 +72,7 @@ describe('the roles migration', () => {
 
     // A hub as it stood before roles existed: everything up to `0003`, and the
     // two words `members.role` could hold.
-    apply(sqlite, 0, migrationFiles.length - 1);
+    apply(sqlite, 0, ROLES_MIGRATION - 1);
     const now = Date.now();
     sqlite
       .prepare('INSERT INTO members (id, name, role, created_at) VALUES (?, ?, ?, ?)')
@@ -75,7 +87,7 @@ describe('the roles migration', () => {
       .run('33333333-3333-4333-a333-333333333333', 'a'.repeat(64), 'member', now + 900_000, now);
 
     // …and then the release that adds roles.
-    apply(sqlite, migrationFiles.length - 1, migrationFiles.length);
+    apply(sqlite, ROLES_MIGRATION - 1, ROLES_MIGRATION);
 
     const db = drizzle(sqlite, { schema });
     const access = new AccessService(db, new HubEventBus());
