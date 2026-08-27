@@ -1,4 +1,4 @@
-import { and, eq, gte, inArray, lt, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, lt, lte, sql } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import { history, historySeries } from '../db/schema.js';
 import type { EndpointState } from '../schema/index.js';
@@ -204,6 +204,29 @@ export interface HistorySeriesPage {
    */
   gapBuckets: number;
   points: HistoryPoint[];
+  /**
+   * The last reading *before* the window, when there is one close enough to
+   * join to the first reading inside it.
+   *
+   * A chart of the last hour drawn from readings alone starts wherever the
+   * sensor happened to speak — mid-air, a third of the way in, with empty axis
+   * to its left that reads as "nothing recorded" when in fact the hub knows
+   * perfectly well what the temperature was. This is the row that lets the app
+   * draw the line *entering* the window instead: not a new reading, just the
+   * other end of a segment that crosses the boundary.
+   *
+   * Only the hub can answer it, which is why it is here rather than left to the
+   * app widening its own `from`: widening the request would change `span`, and
+   * with it the emitted `bucketMs`, so asking for context would silently coarsen
+   * the whole chart.
+   *
+   * Bounded by this series' own `gapBuckets`: past that the silence is a hole,
+   * and a line drawn out of it would be the invention the missing-offset design
+   * exists to avoid. Absent when there is no such reading — never null-padded.
+   *
+   * `at` is epoch ms, **not** an offset: it does not sit on the emitted grid.
+   */
+  leading?: { at: number; min: number; max: number; avg: number };
 }
 
 export interface HistoryPage {
@@ -629,11 +652,67 @@ export class HistoryService {
         const cell = grouped.get(offset)!;
         return [offset, cell.min, cell.max, Math.round(cell.sum / cell.n)];
       });
+      const gapBuckets = gapThreshold(offsets, emittedMs);
+
+      // One reading from *before* the window, so the app can draw the line
+      // entering it rather than beginning in mid-air a third of the way across.
+      //
+      // How far back is worth looking is this series' own answer: `gapBuckets`
+      // emitted offsets, each `step` stored buckets wide, plus the fencepost the
+      // app allows for. Past that the silence is a hole and there is nothing
+      // honest to join to.
+      //
+      // The cost is one index seek — `series_id` is the leading column of the
+      // primary key and the scan stops at the first row — so it is the same
+      // shape of lookup as the prune, and no more expensive than one extra
+      // point on the wire.
+      //
+      // Only closed buckets can be here: `this.open` holds the bucket being
+      // filled *now*, which is inside the window whenever `to` is now and after
+      // it whenever `to` is in the past. So there is nothing to merge in from
+      // memory, unlike the window itself.
+      const lookback = (gapBuckets + 1) * step;
+      const earlier =
+        matching.length > 0
+          ? await this.db
+              .select({
+                bucket: history.bucket,
+                min: history.min,
+                max: history.max,
+                sum: history.sum,
+                n: history.n,
+              })
+              .from(history)
+              .where(
+                and(
+                  inArray(
+                    history.seriesId,
+                    matching.map((row) => row.id),
+                  ),
+                  lt(history.bucket, fromBucket),
+                  gte(history.bucket, fromBucket - lookback),
+                ),
+              )
+              .orderBy(desc(history.bucket))
+              .limit(1)
+          : [];
+      const leading = earlier[0];
+
       series.push({
         kind: spec.kind,
         unit: spec.unit,
-        gapBuckets: gapThreshold(offsets, emittedMs),
+        gapBuckets,
         points: values,
+        ...(leading !== undefined
+          ? {
+              leading: {
+                at: leading.bucket * BUCKET_MS,
+                min: leading.min,
+                max: leading.max,
+                avg: Math.round(leading.sum / leading.n),
+              },
+            }
+          : {}),
       });
     }
 

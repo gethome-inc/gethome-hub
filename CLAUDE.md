@@ -287,7 +287,17 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   own median spacing ×4, floored at three points, capped at two hours) is what
   tells an app how long a hole has to be before it stops drawing through it,
   because a fixed threshold draws a half-hourly sensor as permanently broken or
-  an afternoon of silence as perfectly steady. **A thinned point's width is
+  an afternoon of silence as perfectly steady. **`leading` is that same honesty
+  pointed the other way**: a window's first reading lands wherever the sensor
+  happened to speak, so an hour of a twenty-minute sensor opens a third of the
+  way across with empty axis to its left — which reads as "nothing recorded"
+  while the hub knows exactly what it was. One index seek returns the reading
+  *before* `from`, bounded by that series' own `gapBuckets` and absent past it,
+  so an app can draw the line entering the window rather than beginning in
+  mid-air. It has to be the hub's answer rather than the app widening its own
+  `from`, because a wider request changes the span and the span picks the
+  emitted `bucketMs` — asking for a little context either side would silently
+  coarsen the whole chart. **A thinned point's width is
   rounded up to something a clock recognises** (5, 10, 15, 20, 30, 60
   minutes…): plain division lands on "every 25 minutes", which is honest and
   reads as a glitch in the app that prints it under the chart and labels a time

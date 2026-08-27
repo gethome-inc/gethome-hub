@@ -355,6 +355,61 @@ describe.skipIf(!handle)('HistoryService', () => {
     expect((await db.select({ n: count() }).from(historySeries))[0]!.n).toBe(500);
   });
 
+  it('carries the reading before the window, so a chart can start at its edge', async () => {
+    vi.useFakeTimers();
+    // Eleven consecutive buckets, each a different temperature, so the one
+    // that comes back is identifiable rather than merely present.
+    for (let bucket = 0; bucket <= 10; bucket += 1) {
+      at(bucket);
+      report({ sensors: { temperatureCenti: 2_000 + bucket * 10 } });
+    }
+    at(11);
+    await service.flush();
+
+    // A window that deliberately starts *after* the series does. Without a
+    // leading row the app has nothing to draw from the left edge to the first
+    // reading, so an hour of a sensor that speaks every twenty minutes opens
+    // with a third of the card empty and reads as "nothing recorded".
+    const page = await service.read(DEVICE_ID, {
+      from: origin + 6 * BUCKET_MS,
+      to: origin + 10 * BUCKET_MS,
+    });
+
+    const series = page.series[0]!;
+    expect(series.points).toHaveLength(5);
+    expect(series.leading).toEqual({
+      at: origin + 5 * BUCKET_MS,
+      min: 2_050,
+      max: 2_050,
+      avg: 2_050,
+    });
+    // Epoch ms, not an offset: it does not sit on the emitted grid.
+    expect(series.leading!.at).toBeLessThan(page.start);
+  });
+
+  it('leaves the reading before the window out when the silence is a hole', async () => {
+    vi.useFakeTimers();
+    // One reading, then a long silence, then the window's own readings. The
+    // old one is real, and joining a line to it across twenty buckets of
+    // nothing would be exactly the invention the missing-offset design avoids.
+    at(0);
+    report({ sensors: { temperatureCenti: 1_000 } });
+    for (let bucket = 20; bucket <= 24; bucket += 1) {
+      at(bucket);
+      report({ sensors: { temperatureCenti: 2_000 + bucket } });
+    }
+    at(25);
+    await service.flush();
+
+    const page = await service.read(DEVICE_ID, {
+      from: origin + 20 * BUCKET_MS,
+      to: origin + 24 * BUCKET_MS,
+    });
+
+    expect(page.series[0]!.points).toHaveLength(5);
+    expect(page.series[0]!.leading).toBeUndefined();
+  });
+
   it('forgets a removed device rather than writing against rows the cascade took', async () => {
     vi.useFakeTimers();
     at(0);

@@ -906,12 +906,13 @@ GET /api/v1/devices/<id>/history?from=1756108800000&to=1756195200000&points=300&
   "retentionDays": 7,
   "series": [
     { "kind": "temperature", "unit": "centiCelsius", "gapBuckets": 6,
+      "leading": { "at": 1756108200000, "min": 2130, "max": 2150, "avg": 2140 },
       "points": [[0, 2140, 2180, 2160], [1, 2150, 2190, 2170], [7, 2050, 2060, 2055]] }
   ]
 }
 ```
 
-Four things about that shape are load-bearing:
+Five things about that shape are load-bearing:
 
 - **A point is `[offset, min, max, mean]`**, and `offset` counts `bucketMs` from
   `start`. Tuples rather than objects because a week of one series is hundreds
@@ -939,6 +940,28 @@ Four things about that shape are load-bearing:
   time axis with it. And `points` means *at most* this many — an hour touches
   **thirteen** bucket indices rather than twelve, so a caller who wants every
   stored bucket of one asks for more than twelve.
+- **`leading` is the reading *before* the window**, and it is optional. A chart
+  drawn from `points` alone begins wherever the sensor happened to speak — for a
+  sensor reporting every twenty minutes, an hour opens a third of the way across
+  with empty axis to its left, which reads as "nothing recorded" when the hub
+  knows perfectly well what the temperature was. This is the other end of the
+  segment that crosses `from`, so an app can draw the line *entering* the window
+  instead of starting in mid-air. It is **not a reading inside the window** and
+  must not be charted as one: no marker, no place in a scrub, no contribution to
+  a min/max readout.
+
+  `at` is **epoch ms, not an offset** — it does not sit on the emitted grid.
+  It is bounded by that series' own `gapBuckets`: past that the silence is a
+  hole, there is nothing honest to join to, and the field is **absent** rather
+  than null. Only the hub can answer this, which is why it is not left to an app
+  widening its own `from`: that would change the span, and with it the emitted
+  `bucketMs`, so asking for context would silently coarsen the whole chart.
+
+  What happens at the **other** edge is deliberately not here. Whether to hold
+  the last reading out to the right of the window is a drawing decision about a
+  stretch both ends already agree is empty, and the app has `gapBuckets` to make
+  it with; this field exists because only the hub can reach data the app does
+  not have.
 
 Values are **integers in the canonical wire units**, so nothing is converted
 between the device report and the chart:
