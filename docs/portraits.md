@@ -121,23 +121,27 @@ column that would otherwise mean the same thing twice.
 ## Serving
 
 One generation at a time, hub-wide (`409 portrait_busy`) — a Zero 2 W holds two
-of these in memory at once, and a queue would be worse than a refusal here for
-the reason in the next paragraph. The route is **synchronous**, holding the
-request for the minutes an image takes, which is what lets an app run one
+of these in memory at once. The route is **synchronous**, holding the request
+for the tens of seconds an image takes, which is what lets an app run one
 uninterrupted animation from "reading your photo" to the finished portrait. If
 the phone gives up, the hub finishes, stores and announces anyway: nothing is
 lost but the animation.
 
-**Budget minutes, not seconds, and set your own timeout from that.**
-`gpt-image-1.5` answered in tens of seconds; `gpt-image-2` at `quality: high`
-spends roughly fifteen times the image tokens on a 1024² frame and runs a
-four-stage understand-plan-generate-review pass, so three to five minutes is the
-ordinary case. The hub waits ten before it gives up — OpenAI's own guidance for
-`high` — so a client that gives up sooner is choosing to abandon its animation,
-not saving anybody the money: the request is billed and the picture is stored
-either way. It is also why a second asker is refused rather than queued; waiting
-out somebody else's five minutes before your own is not a queue anybody wants to
-be in.
+**Budget tens of seconds, and don't size a timeout from the open web.** OpenAI's
+own latency guidance puts most generations at 30–45 s, with a complex prompt
+coming "close to two minutes"; independent benchmarking puts the median lower.
+`gpt-image-2` is *faster* than the `gpt-image-1.5` it replaced, not slower. The
+multi-minute numbers that turn up in blog posts are measured through reseller
+proxies and small Azure quotas, where queue wait dominates — the hub waits four
+minutes, which is twice the documented worst case and no more, because a
+deadline sized from somebody else's congestion holds a stuck request, and the
+one drawing slot with it, for no reason.
+
+**A second asker is refused rather than queued**, and the reason is money before
+it is time: every drawing bills the home, so a queue turns four impatient taps
+into four charges while a refusal makes the second one free. The rest follows —
+one image in memory at a time on a 512 MB board, and nobody waiting out a
+stranger's drawing before their own begins.
 
 `GET /portraits/:id` is the first route in this API that answers something other
 than JSON. A portrait's bytes never change — a new one gets a new id — so it

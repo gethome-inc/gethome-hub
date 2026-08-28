@@ -89,11 +89,12 @@ export class PortraitService {
   /**
    * One at a time, hub-wide: a Zero 2 W holds two of these in memory at once.
    *
-   * A second asker is **refused, not queued**. Queueing looks kinder and is
-   * worse here: the route is synchronous on purpose, so every waiting request
-   * is a connection held open for however long the ones in front of it take —
-   * minutes each — with nothing on screen able to say why. A `409` arrives at
-   * once and names the reason, which is what the apps show.
+   * A second asker is **refused, not queued**, and the reason is money before
+   * it is anything else: every drawing bills the home, so a queue turns four
+   * impatient taps into four charges while a refusal makes the second one
+   * free. The rest follows — one image in memory at a time on a 512 MB board,
+   * and a `409` that arrives at once and names the reason, which is what the
+   * apps show, rather than a connection held open behind somebody else's.
    */
   private drawing = false;
 

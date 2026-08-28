@@ -980,18 +980,16 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * front of the kettle is the one who wants a picture of it, and on a hub
    * Studio claimed as *the Mac* that person is never the owner.
    *
-   * Deliberately synchronous. It holds the request for the **minutes** an
-   * image takes — `gpt-image-2` at high quality is three to five, not the tens
-   * of seconds `gpt-image-1.5` was — which is what lets the app show one
-   * uninterrupted animation from "reading your photo" to the finished
-   * portrait; and if the phone gives up or walks out of range, the hub
-   * finishes, stores, and announces it anyway, so nothing is lost but the
-   * animation.
+   * Deliberately synchronous. It holds the request for the tens of seconds an
+   * image takes, which is what lets the app show one uninterrupted animation
+   * from "reading your photo" to the finished portrait — and if the phone
+   * gives up or walks out of range, the hub finishes, stores, and announces it
+   * anyway, so nothing is lost but the animation.
    *
-   * Which is also why a second asker gets `409 portrait_busy` rather than a
-   * place in a queue: holding a synchronous request open behind somebody
-   * else's would be minutes of a connection with nothing on screen able to
-   * say why. See `PortraitService.draw`.
+   * A second asker gets `409 portrait_busy` rather than a place in a queue,
+   * and the reason is money before it is time: every drawing bills the home,
+   * so a queue turns four impatient taps into four charges while a refusal
+   * makes the second one free. See `PortraitService.draw`.
    */
   app.post(
     '/api/v1/devices/:id/portraits',
