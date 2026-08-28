@@ -353,8 +353,12 @@ cmd_mqtt() {
     # the machine with credentials the broker no longer accepts.
     if [[ -f "$CONF_DIR/mqtt.env" ]]; then
       $SUDO rm -f "$kept"
-      [[ -n "$update_failed" ]] \
-        && echo "Note: the installer reported a problem, but the new passwords are in force."
+      # A plain `if`, not `[[ … ]] && echo`: a test-and-command as the last
+      # statement of a branch takes the branch's exit status with it, which is
+      # the shape that silently skipped a `mv` in install.sh once already.
+      if [[ -n "$update_failed" ]]; then
+        echo "Note: the installer reported a problem, but the new passwords are in force."
+      fi
     else
       $SUDO mv "$kept" "$CONF_DIR/mqtt.env" \
         || die "the installer did not finish, and the old credentials could not be put back. They are in $kept."
