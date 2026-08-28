@@ -202,6 +202,37 @@ describe('supported models', () => {
     expect(defaultModelFor('openai')).toBe(PROVIDER_MODELS.openai.choices[0]?.id);
   });
 
+  /**
+   * The two pairs are the same shape on purpose — the thorough tier and the
+   * cheaper one — and each is named by an **explicit** id. `gpt-5.6` routes to
+   * Sol today and is OpenAI's to re-point tomorrow, which would move which
+   * model a home runs and what a run costs with nothing in this repository
+   * changed to explain it; the alias stays priced so a hub that stored it
+   * keeps working, and stays out of `choices` so nothing new picks it up.
+   */
+  it('pins Opus 5 / Sonnet 5 and Sol / Terra by their explicit ids', () => {
+    expect(PROVIDER_MODELS.anthropic.choices.map((choice) => choice.id)).toEqual([
+      'claude-opus-5',
+      'claude-sonnet-5',
+    ]);
+    expect(PROVIDER_MODELS.openai.choices.map((choice) => choice.id)).toEqual([
+      'gpt-5.6-sol',
+      'gpt-5.6-terra',
+    ]);
+    expect(defaultModelFor('openai')).toBe('gpt-5.6-sol');
+
+    // Accepted, priced, and never offered.
+    expect(isSupportedModel('gpt-5.6', 'openai')).toBe(true);
+    expect(PROVIDER_MODELS.openai.choices.some((choice) => choice.id === 'gpt-5.6')).toBe(false);
+    expect(estimateCostUsd('gpt-5.6', { input_tokens: 1_000_000 })).toBe(
+      estimateCostUsd('gpt-5.6-sol', { input_tokens: 1_000_000 }),
+    );
+
+    // Luna is cheap and is not on the list: this job is reasoning-heavy and
+    // runs a handful of times in a hub's life.
+    expect(isSupportedModel('gpt-5.6-luna', 'openai')).toBe(false);
+  });
+
   it('keeps the two allowlists apart, so a model cannot be sent to the wrong API', () => {
     expect(isSupportedModel('claude-opus-5', 'openai')).toBe(false);
     expect(isSupportedModel('gpt-5.6', 'anthropic')).toBe(false);

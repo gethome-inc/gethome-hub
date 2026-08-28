@@ -776,7 +776,7 @@ the second provider reads exactly what it read before — plus a per-provider ha
                                  "note": "The most thorough. Recommended.", "recommended": true },
                                { "id": "claude-sonnet-5", "label": "Sonnet 5",
                                  "note": "Cheaper per run, and good at this." } ] },
-    "openai":    { "hasKey": true, "model": "gpt-5.6", "models": [ … ] }
+    "openai":    { "hasKey": true, "model": "gpt-5.6-sol", "models": [ … ] }
   },
   "mapping":   { "provider": "anthropic", "choosable": true },
   "portraits": { "model": "gpt-image-2", "maxPerDevice": 6, "budgetBytes": 314572800 }
