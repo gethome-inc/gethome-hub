@@ -42,7 +42,17 @@ export class AiUnavailableError extends Error {
 // reads the HTTP status the Messages API actually returned, and only falls
 // through to here for the cases a status code cannot separate (a 400 that is
 // really an exhausted credit balance) or for errors that never reached HTTP.
-const USAGE_LIMIT = /usage limit|spend limit|monthly limit|weekly limit|limit reached|quota exceeded/i;
+//
+// **`limit reached` is the loosest alternative here, so it yields to anything
+// more specific.** OpenAI's ordinary per-minute 429 says "Rate limit reached
+// for <model> in organization …", which that alternative would otherwise claim
+// as an exhausted account cap — and the two are answered very differently: a
+// rate limit is a short retry, a cap waits for the provider's own reset and
+// tells the owner their month is spent. Most-specific-first, the same rule
+// `diagnosis.ts` and the Zigbee write failures follow.
+const USAGE_CAP = /usage limit|spend limit|monthly limit|weekly limit|quota exceeded/i;
+const LIMIT_REACHED = /limit reached/i;
+const SAYS_RATE_LIMIT = /rate.?limit/i;
 const RATE_LIMIT = /rate.?limit|\b429\b|too many requests|number of request/i;
 const AUTH = /\b401\b|\b403\b|authentication|unauthorized|forbidden|invalid (?:api.?key|bearer|token)|api.?key.*invalid|token.*(?:expired|revoked)|expired.*token/i;
 const BILLING = /\b402\b|billing|credit balance|insufficient credit|payment required|purchase credits/i;
@@ -50,12 +60,21 @@ const OVERLOADED = /\b529\b|overloaded|capacity constraints/i;
 const NETWORK = /\benotfound\b|\beconnrefused\b|\betimedout\b|\beconnreset\b|fetch failed|network error|socket hang up|connection error/i;
 
 /**
+ * An exhausted account cap rather than a speed bump — see the note above the
+ * patterns for why `limit reached` alone is not enough to say so.
+ */
+function isUsageCap(text: string): boolean {
+  if (USAGE_CAP.test(text)) return true;
+  return LIMIT_REACHED.test(text) && !SAYS_RATE_LIMIT.test(text);
+}
+
+/**
  * Classify an error/result text from an agent run into a transient
  * availability failure, or `null` when the text does not look like an
  * account/service problem (i.e. the run failed on its own merits).
  */
 export function classifyAgentFailure(text: string): AiUnavailableError | null {
-  if (USAGE_LIMIT.test(text)) {
+  if (isUsageCap(text)) {
     return new AiUnavailableError('usage_limit', text, parseResetHint(text));
   }
   if (RATE_LIMIT.test(text)) {
@@ -106,7 +125,7 @@ export function classifyApiError(error: unknown, now: Date = new Date()): AiUnav
   if (status === 429) {
     // A 429 is a rate limit unless the body says an account cap is exhausted
     // — those want the provider's own reset time, not a short retry.
-    const kind: AiFailureKind = USAGE_LIMIT.test(message) ? 'usage_limit' : 'rate_limited';
+    const kind: AiFailureKind = isUsageCap(message) ? 'usage_limit' : 'rate_limited';
     return new AiUnavailableError(kind, message, retryAfter ?? parseResetHint(message, now));
   }
   if (status === 401 || status === 403) return new AiUnavailableError('auth_failed', message);

@@ -26,13 +26,8 @@ import {
   type DescriptorCustomField,
   type MappingDescriptor,
 } from './descriptor.js';
-import {
-  agentStep,
-  createMappingAgent,
-  type AgentRunStats,
-  type MappingProvider,
-} from './agent.js';
-import { DEFAULT_MODEL } from './models.js';
+import { agentStep, type AgentRunStats, type MappingProvider } from './agent-core.js';
+import { defaultModelFor } from './models.js';
 import { AiUnavailableError } from './errors.js';
 import { MAPPING_SYSTEM_PROMPT, buildMappingUserPrompt, buildRepairUserPrompt } from './prompts.js';
 
@@ -211,7 +206,11 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
   }): Promise<AppliedAiMapping | null> {
     const provider = await this.resolveProvider();
     if (!provider) return null;
-    const { model: configuredModel } = await this.settings.getAiSettings();
+    // Which vendor and model this run is about to spend money on. Read from
+    // the resolved provider rather than from the flat `model` field, or every
+    // OpenAI run would be recorded under whatever Claude model is configured.
+    const ai = await this.settings.getAiSettings();
+    const ranOn = ai.provider ?? 'anthropic';
 
     const run: AiRunHandle | undefined = this.runs?.begin({
       kind: input.kind,
@@ -219,7 +218,8 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
       exposesHash: input.hash,
       vendor: input.device.definition?.vendor,
       model: input.device.definition?.model ?? input.device.friendly_name,
-      modelId: configuredModel ?? DEFAULT_MODEL,
+      provider: ranOn,
+      modelId: ai[ranOn].model ?? defaultModelFor(ranOn),
     });
     run?.step(
       agentStep(
@@ -300,13 +300,17 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
 
   private async resolveProvider(): Promise<MappingProvider | null> {
     if (this.providerOverride) return this.providerOverride;
-    const { provider, model, enabled, legacySubscriptionToken } = await this.settings.getAiSettings();
+    const ai = await this.settings.getAiSettings();
     // The owner's switch. `lazy.ts` checks it too — that check saves loading
     // this module at all, and this one is what makes the rule true for a
     // mapper somebody constructed directly.
-    if (!enabled) return null;
+    if (!ai.enabled) return null;
+    // Which provider recognises devices: the home's stored choice when it has
+    // both keys, and otherwise whichever key there is. `settings.ts` resolves
+    // that, so there is one answer rather than one per caller.
+    const provider = ai.provider;
     if (!provider) return null;
-    if (legacySubscriptionToken) {
+    if (provider === 'anthropic' && ai.legacySubscriptionToken) {
       // A credential saved before the agent moved to the Messages API. It
       // cannot authenticate, and a bare 401 on the next device announcement
       // would tell the owner nothing — surface the actual fix instead.
@@ -319,9 +323,18 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
       );
       return null;
     }
-    const secret = await this.settings.aiKey();
+    const secret = await this.settings.aiKey(provider);
     if (!secret) return null;
-    return createMappingAgent({ secret }, model, this.log);
+    // Imported here rather than at the top, so a home running on one provider
+    // never loads the other's client — which for Anthropic means not loading
+    // its SDK at all. The provider-neutral half both share is `agent-core.ts`,
+    // which is what makes that possible.
+    if (provider === 'openai') {
+      const { createOpenAiMappingAgent } = await import('./openai-agent.js');
+      return createOpenAiMappingAgent({ secret }, ai.openai.model, this.log);
+    }
+    const { createMappingAgent } = await import('./agent.js');
+    return createMappingAgent({ secret }, ai.anthropic.model, this.log);
   }
 
   /** Transient account/service failure: arm the backoff gate and surface it. */
@@ -352,13 +365,14 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
   private async recordRun(ok: boolean, stats: AgentRunStats | null): Promise<void> {
     this.failureCount = 0;
     this.unavailableUntil = 0;
-    const { model } = await this.settings.getAiSettings();
+    const ai = await this.settings.getAiSettings();
+    const ranOn = ai.provider ?? 'anthropic';
     await this.settings.setAiStatus({
       lastRun: {
         at: new Date().toISOString(),
         ok,
         ...(stats !== null ? { costUsd: stats.costUsd } : {}),
-        model: model ?? DEFAULT_MODEL,
+        model: ai[ranOn].model ?? defaultModelFor(ranOn),
       },
     });
   }

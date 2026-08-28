@@ -39,6 +39,8 @@ export interface AiRunStart {
   exposesHash: string;
   vendor?: string | undefined;
   model?: string | undefined;
+  /** anthropic | openai. Absent on rows written before the second provider. */
+  provider?: string | undefined;
   modelId?: string | undefined;
 }
 
@@ -132,6 +134,7 @@ export class AiRunLog {
             vendor: input.vendor ?? null,
             model: input.model ?? null,
             exposesHash: input.exposesHash,
+            provider: input.provider ?? null,
             modelId: input.modelId ?? null,
             ok: outcome.ok,
             costUsd: outcome.costUsd ?? null,

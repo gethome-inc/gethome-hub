@@ -92,7 +92,7 @@ than no button.
 
 | Method & path | Needs | Notes |
 |---|---|---|
-| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory) |
+| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits) |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
 | `GET /home` · `PATCH /home` | floor · `home.rename` | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name) |
 | `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | floor · `home.structure` | `{id, name, zoneId, icon, accent, sortOrder}`. `POST` takes `{name, zoneId?, icon?, accent?, sortOrder?}` — the name is the only required field anywhere here — and `PATCH` takes the same set with every field optional; `zoneId: null` means "in no zone", and `icon: null` / `accent: null` mean "back to the look the app derives" — each different from leaving the field out. `icon`/`accent` are opaque app tokens (1–40 chars, see [below](#rooms-and-zones)). Names are trimmed before they are measured (1–80), an unknown `zoneId` is `404 unknown_zone`, and a new room goes to the *end* of the order. Deleting a room does not delete its devices — they are simply in no room. Every write broadcasts the [`structure` frame](#rooms-and-zones) |
@@ -102,6 +102,11 @@ than no button.
 | `DELETE /devices/:id` | `device.remove` | also unpairs at the protocol level |
 | `POST /devices/:id/endpoints/:endpointId/commands` | floor | body = canonical command; `202`. IR-remote intents (`irLearn`/`irSaveLearned`/`irSend`/`irDeleteCommand`/`irRenameCommand`) are resolved against the endpoint's stored code library (see [device-schema.md](device-schema.md)) |
 | `GET /devices/:id/history?from=&to=&points=&series=` | floor | what this device's readings did over a window, already thinned to a drawable size — see [below](#recorded-readings-get-devicesidhistory). `from`/`to` are epoch ms and default to the last day; `from >= to` is `400 invalid_range`; an unknown device is `404` |
+| `GET /devices/:id/portraits` | floor | the pictures this home has had drawn of a device, newest first: `{id, at, bytes, provider, model, fromPhoto, selected}`. Reading is the floor — a portrait is what the device *looks like*, so a guest whose dashboard could not draw it would be looking at a different home. See [below](#device-portraits) |
+| `GET /portraits/:portraitId` | floor | the PNG itself — `image/png`, a strong `ETag` and `Cache-Control: immutable`, because a portrait's bytes never change (a new one gets a new id) |
+| `POST /devices/:id/portraits` | `hub.ai` | draw one. `{photo?: base64, photoType?}` — absent draws from the device's kind alone. Synchronous, and it holds the request for the minutes an image takes. `409 openai_not_configured` (its own code: portraits are OpenAI's job, and a hub can be configured for recognition and not for this), `409 portrait_busy`, `409 no_space`, `502 {error:"provider_failed", kind, detail}` carrying OpenAI's own sentence |
+| `PATCH /devices/:id/portraits` | `device.edit` | `{selected: id\|null}` — which one the home sees. `null` is a *state*: the procedural sphere, chosen over every picture there is |
+| `DELETE /portraits/:portraitId` | `device.edit` | forget one, file and row |
 | `POST /devices/:id/remap` | `hub.ai` | force-regenerate the AI mapping (Zigbee devices); the hub also remaps automatically when a device publishes unknown parameters — see [ai-adaptation.md](ai-adaptation.md). `409 ai_not_configured` with no credential, `409 ai_disabled` when the owner has switched adaptation off |
 | `POST /matter/commission` | `device.add` | `{pairingCode}` → `202 {jobId}` (async) |
 | `GET /matter/commission/:jobId` | floor | `{status: running\|done\|failed, nodeId?, error?}` |
@@ -109,8 +114,8 @@ than no button.
 | `GET /members` · `PATCH /members/me` · `DELETE /members/me` · `DELETE /members/:id` | floor · floor (itself) · floor (itself) · `member.remove` | rows carry `isSelf`, `roleId` and `roleName`; `PATCH` takes `{name}` and renames **the caller**; `DELETE` on either route answers `204` and revokes that member's tokens; the owner cannot be removed, by anyone or by itself. See [below](#which-member-you-are-isself-and-patch-membersme) |
 | `GET /invites` · `POST /invites` | `member.invite` | `POST {roleId?}` → `201 {code, expiresAt, roleId, roleName}`. Omitting `roleId` mints a **Member** invite, which is what every invite this hub has ever made was. An **owner** invite is allowed and needs the caller to be one (`403 not_owner`) |
 | `GET /activity?limit=&before=` | floor · `activity.read` | reverse-chronological, cursor = `before` id; rows carry `data` — see [below](#the-activity-log) |
-| `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | `hub.ai` | PUT `{apiKey, model?}` (an Anthropic API key, write-only; a `sk-ant-oat…` subscription token and a model outside the supported list are both refused with 400, an `authType` from an older app is ignored). **PATCH `{enabled?, model?}`** changes those without re-entering the key — the switch is deliberately not the credential. All three respond `{provider: "anthropic", model, hasKey, enabled, legacySubscriptionToken, status}`; `enabled` defaults to true and `status` carries `lastError`/`lastRun` health — see [ai-adaptation.md](ai-adaptation.md) |
-| `GET /ai/runs?limit=` | `hub.ai` | what the mapping agent did, newest first: `{id, at, kind, vendor, model, exposesHash, modelId, ok, costUsd, turns, durationMs, errorKind, errorMessage, steps}`. A summary, never a transcript — see [ai-adaptation.md](ai-adaptation.md) |
+| `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | `hub.ai` | The home's AI: two credentials, two models, which provider recognises devices, and the switch. **PATCH is the write** — every field optional, absence means "leave this alone": `{enabled?, anthropicApiKey?, openaiApiKey?, anthropicModel?, openaiModel?, model?, mappingProvider?, clear?}`. `model` is `anthropicModel` under the name this route has always used; `clear: "anthropic"\|"openai"` forgets one credential and leaves the other; `mappingProvider` naming a provider with no key is `400 provider_not_configured`. Keys are told apart by prefix, so one pasted in the other's field is a 400 rather than a 401 an hour later, and a `sk-ant-oat…` subscription token is still refused. **PUT is unchanged** (`{apiKey, model?}`, an Anthropic key, required) for apps that have not moved. See [the answer's shape](#the-ai-settings-answer) |
+| `GET /ai/runs?limit=` | `hub.ai` | what the mapping agent did, newest first: `{id, at, kind, vendor, model, exposesHash, provider, modelId, ok, costUsd, turns, durationMs, errorKind, errorMessage, steps}`. A summary, never a transcript — see [ai-adaptation.md](ai-adaptation.md) |
 | `GET /device-mappings` | `hub.ai` | the mapping library: one entry per device model, `{adapter, exposesHash, vendor, model, status, source, problems, endpoints, deviceIds, createdAt, updatedAt}` |
 | `GET /device-mappings/:exposesHash` | `hub.ai` | the download — an envelope naming the device, see [below](#the-device-mapping-library) |
 | `PUT /device-mappings/:exposesHash` | `hub.ai` | the upload. Accepts the envelope or a bare descriptor. `422 {error:"invalid_mapping", problems, issues?}` when the hub can't use it — and it is **kept**, so `…/repair` can work from it |
@@ -162,11 +167,12 @@ it gates its own screens on.
 | `activity.read` | ✓ | ✓ | |
 | `hub.radio` | ✓ | ✓ | |
 | `hub.update` | ✓ | ✓ | |
-| `home.rename` · `device.remove` · `member.invite` · `member.remove` · `role.manage` · `hub.ai` | ✓ | | |
+| `hub.ai` | ✓ | ✓ | |
+| `home.rename` · `device.remove` · `member.invite` · `member.remove` · `role.manage` | ✓ | | |
 
-**Member is the old behaviour written down.** Those seven are, key for key, the
-routes that used to be open to any member; the six below them are the ones that
-used to be owner-only. A hub that updates into this changes nothing about what
+**Member is the old behaviour written down, with two deliberate exceptions.**
+Those keys are, key for key, the routes that used to be open to any member; the
+five below them are the ones that used to be owner-only. A hub that updates into this changes nothing about what
 anybody can do — the migration backfills every existing member into Owner or
 Member accordingly, and only an explicit edit moves anything after that.
 
@@ -180,6 +186,17 @@ hand could never update their own home. It was open to every member by the time
 roles landed, so Member holding it takes nothing from anybody, and Guest is a
 role that did not exist. Being a key rather than either extreme is what lets a
 home that *does* want it kept from the spare room say so.
+
+`hub.ai` is the second exception, and it moved on the same argument. It guards
+the AI keys, the adaptation switch, the mapping library and *drawing a device
+portrait* — all of which spend the home's money, which is a real reason for care
+and not a reason for owner-only: the person standing in front of the kettle is
+the one who wants a picture of it, and on a hub Studio claimed as the Mac that
+person is never the owner. Guest is where the line falls. Unlike `hub.update`
+this is a genuine change to what a member may do, so it travels with a migration
+that grants it to hubs that already exist — `ensureBuiltins()` inserts with
+`ON CONFLICT DO NOTHING` and would never reach a `member` row that is already
+there.
 
 **Guest is somebody staying in the house** — and a role with **no keys at all**,
 which is its honest shape rather than an oversight. They work the lights and keep
@@ -738,6 +755,102 @@ two minutes earlier. `permitJoin` frames repeat every five seconds while the
 window is open, which is the right rate for a network message and the wrong one
 for a countdown; drive the seconds from a local clock and re-sync on each frame.
 
+### The AI settings answer
+
+`GET /settings/ai` carries every flat field it always did — an app that predates
+the second provider reads exactly what it read before — plus a per-provider half:
+
+```json
+{
+  "provider": "anthropic", "model": "claude-opus-5", "hasKey": true,
+  "enabled": true, "legacySubscriptionToken": false,
+  "status": { "lastRun": { "at": "…", "ok": true, "costUsd": 0.41, "model": "claude-opus-5" } },
+
+  "anthropic": { "hasKey": true,  "model": "claude-opus-5" },
+  "openai":    { "hasKey": true,  "model": null },
+  "mappingChoosable": true,
+
+  "providers": {
+    "anthropic": { "hasKey": true, "model": "claude-opus-5",
+                   "models": [ { "id": "claude-opus-5", "label": "Opus 5",
+                                 "note": "The most thorough. Recommended.", "recommended": true },
+                               { "id": "claude-sonnet-5", "label": "Sonnet 5",
+                                 "note": "Cheaper per run, and good at this." } ] },
+    "openai":    { "hasKey": true, "model": "gpt-5.6-sol", "models": [ … ] }
+  },
+  "mapping":   { "provider": "anthropic", "choosable": true },
+  "portraits": { "model": "gpt-image-2", "maxPerDevice": 6, "budgetBytes": 314572800 }
+}
+```
+
+Four things an app should not work out for itself.
+
+**The model list is the hub's.** `providers.<name>.models` carries the id, a
+label a person reads, a one-line note and exactly one `recommended`. This is the
+`GET /permissions` rule applied to models: ids and tiers move, and an app that
+shipped its own list would offer one this hub refuses or miss one it accepts.
+The allowlist behind it is deliberately longer than `models` — a hub already set
+to an older model keeps working rather than being told its setting is invalid.
+
+**`provider` and `mapping.provider` are the same answer**: which provider would
+recognise a device right now. With one key there is no choice to make; with two,
+the home's stored choice decides, and `mapping.choosable` is what an app shows
+its picker on. A stored choice only counts while that provider still has a key,
+so clearing a credential moves the answer rather than leaving the hub pointed at
+something it cannot authenticate.
+
+**`hasKey` is "can the agent run at all"** — either credential — because that is
+the question `409 ai_not_configured` answers. Whether *Anthropic* is configured
+is `providers.anthropic.hasKey`.
+
+**`enabled` governs adaptation only.** It exists because the agent runs by
+itself when an unknown device turns up; nobody draws a portrait by accident, so
+portraits are not gated on it.
+
+Key material is never returned, by any route, in any field.
+
+### Device portraits
+
+A portrait is the picture the apps float on a device's page, and it is the
+**house's**: everybody in the home sees the same kettle, so it is drawn once on
+the hub and stored there rather than on whichever phone asked for it. The hub
+already knows the device's canonical `kind`, so a caller sends nothing but
+"draw this device", optionally with a photo to restyle — which is also what
+keeps two apps from producing two different-looking homes.
+
+Drawing needs an **OpenAI** key (`gpt-image-2`, which supports transparent
+backgrounds in preview and is used for a clean cut-out).
+Recognition may be running on Anthropic at the same time, which is why the
+refusal is `openai_not_configured` rather than `ai_not_configured`.
+
+The bytes are files under `<data>/portraits/`, not rows: a 1024² transparent PNG
+is a megabyte or two, and putting that through SQLite's WAL is the write
+amplification the whole store is arranged to avoid. The row is the record of
+one, and the file is deleted with it.
+
+**Two bounds and a floor**, the shape every other store here has. Six per
+device; 300 MB per hub, sweeping oldest-first; and a refusal to draw at all
+below 500 MB of free disk — filling the card the home runs on is a far worse
+outcome than not getting a picture. **A selected portrait is never evicted**: it
+is the one on screen. Drawing takes the selection, so the newest is always the
+one the home is looking at.
+
+`selected: null` while portraits exist is a **state, not an absence** — it means
+somebody chose the procedural sphere over every picture they have, which the
+apps have always offered and which would otherwise need a field of its own.
+
+Drawing is serialised hub-wide (`409 portrait_busy`) and synchronous: the
+request is held for the minutes an image takes, which is what lets an
+app run one uninterrupted animation from "reading your photo" to the finished
+portrait. If the phone gives up or walks out of range the hub finishes, stores
+and announces anyway — nothing is lost but the animation. Every change
+broadcasts `{"type":"portraits","deviceId"}` to every socket, because the phone
+in the next room is looking at the same device.
+
+Only the *drawing* is written to the activity log (`device.portrait`). Choosing
+between portraits and deleting one are restyles, and a restyle is not what
+somebody reads the log for a week later — the same line `rooms.icon` holds.
+
 ### The device-mapping library
 
 `GET /device-mappings/:exposesHash` returns an **envelope**, not a bare
@@ -808,6 +921,7 @@ kinds with nothing to add.
 
 The kinds: `device.command`, `device.added`, `device.removed`,
 `device.online`, `device.offline`, `device.renamed`, `device.moved`,
+`device.portrait`,
 `room.added`, `room.renamed`, `room.removed`, `zone.added`, `zone.renamed`,
 `zone.removed`, `member.joined`, `member.left`, `member.removed`,
 `member.renamed`, `member.role-changed`, `role.added`, `role.renamed`,
@@ -1005,6 +1119,7 @@ message. These go to every authorized socket:
 {"type":"deviceRemoved","deviceId"}
 {"type":"commandFailed","deviceId","property","kind","detail"}   a write never reached the device
 {"type":"structure","rooms":[…],"zones":[…]}            rooms/zones changed — both lists in full
+{"type":"portraits","deviceId"}                         a device's portraits changed — go and re-read the list
 
 {"type":"activity","entry":{id,at,kind,message,deviceId?,memberId?,data?}}
 {"type":"permitJoin","active":true,"remainingSeconds":60}

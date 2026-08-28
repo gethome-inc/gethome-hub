@@ -1,8 +1,24 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { z } from 'zod';
 import type { Logger } from '../logging.js';
-import { mappingDescriptorSchema, sanityCheckDescriptor } from './descriptor.js';
 import { AiUnavailableError, classifyApiError } from './errors.js';
+import {
+  AGENT_MAX_BUDGET_USD,
+  AGENT_MAX_TURNS,
+  AGENT_TIMEOUT_MS,
+  EFFORT,
+  MAX_NUDGES,
+  MAX_OUTPUT_TOKENS,
+  NUDGE_TEXT,
+  SUBMIT_MAPPING_DESCRIPTION,
+  agentStep,
+  evaluateSubmission,
+  submitMappingSchema,
+  type AgentAuth,
+  type AgentRunContext,
+  type AgentRunStats,
+  type MappingProvider,
+  type SubmitCapture,
+} from './agent-core.js';
 import { DEFAULT_MODEL, estimateCostUsd, isSupportedModel, supportedModelIds } from './models.js';
 
 /**
@@ -44,106 +60,28 @@ import { DEFAULT_MODEL, estimateCostUsd, isSupportedModel, supportedModelIds } f
  */
 
 export { DEFAULT_MODEL } from './models.js';
-
-/** Agentic turns — one request/response round each. */
-export const AGENT_MAX_TURNS = 40;
-/** Hard ceiling per run, checked against the running cost estimate. */
-export const AGENT_MAX_BUDGET_USD = 2;
-export const AGENT_TIMEOUT_MS = 10 * 60 * 1000;
-
-/**
- * Output ceiling per turn, covering thinking *and* the tool call. Generous
- * on purpose: a truncated `submit_mapping` call is a wasted run, and a
- * multi-endpoint descriptor plus high-effort reasoning is not small.
- */
-const MAX_OUTPUT_TOKENS = 32_000;
-
-/**
- * Kept at `high`, which is what the Agent SDK run used. Device adaptation is
- * reasoning-heavy, but this migration deliberately changes one thing at a
- * time — raising effort would quietly raise the per-run bill at the same
- * moment the footprint dropped, and that is the owner's call to make.
- */
-const EFFORT = 'high' as const;
+// Re-exported because this module is where callers learned to find them, and
+// because a provider is the only thing that changed — see `agent-core.ts`.
+export {
+  agentStep,
+  evaluateSubmission,
+  AGENT_MAX_BUDGET_USD,
+  AGENT_MAX_TURNS,
+  AGENT_TIMEOUT_MS,
+  MAX_STEP_DETAIL,
+  type AgentAuth,
+  type AgentRunContext,
+  type AgentRunStats,
+  type AgentStep,
+  type MappingProvider,
+  type SubmissionOutcome,
+  type SubmitCapture,
+} from './agent-core.js';
 
 /** Research budget per run. High enough for a genuinely obscure device,
  *  low enough that a confused run cannot spend the whole cost cap on search. */
 const WEB_SEARCH_MAX_USES = 8;
 const WEB_FETCH_MAX_USES = 8;
-
-/** How many times a run may be reminded that prose is not an answer. */
-const MAX_NUDGES = 2;
-
-/** Everything the runner needs beyond the prompts (absent in unit-test mocks). */
-export interface AgentRunContext {
-  /** Receives run statistics when the run produced them. */
-  onStats?: (stats: AgentRunStats) => void;
-  /** Receives a line per notable thing the run did. Must not throw. */
-  onStep?: (step: AgentStep) => void;
-}
-
-/**
- * One thing a run did, in the order it did it.
- *
- * A summary rather than a transcript, and the distinction is the whole design:
- * a hub owner watching an unknown device being adapted needs to know what was
- * searched for, what was read, what was submitted and why it was refused —
- * none of which requires storing model prose on an SD card. `detail` is one
- * short string (a query, a URL, a validation error), never a message body.
- */
-export interface AgentStep {
-  at: string;
-  type: 'prompt' | 'search' | 'fetch' | 'submit' | 'note';
-  summary: string;
-  detail?: string;
-}
-
-/** Keep one step small enough that sixty runs of them stay in the tens of KB. */
-export const MAX_STEP_DETAIL = 2000;
-
-export function agentStep(type: AgentStep['type'], summary: string, detail?: string): AgentStep {
-  return {
-    at: new Date().toISOString(),
-    type,
-    summary,
-    ...(detail !== undefined ? { detail: detail.slice(0, MAX_STEP_DETAIL) } : {}),
-  };
-}
-
-export interface AgentRunStats {
-  /** Estimated from token usage and list prices — see models.ts. */
-  costUsd: number;
-  numTurns: number;
-  durationMs: number;
-}
-
-/**
- * The seam the mapper talks through (and tests override): produce a raw,
- * unvalidated MappingDescriptor candidate or throw. `AiUnavailableError`
- * means "the account/service is down, back off"; any other error means "this
- * run failed" and is not cached.
- */
-export interface MappingProvider {
-  generate(systemPrompt: string, userPrompt: string, run?: AgentRunContext): Promise<unknown>;
-}
-
-export interface AgentAuth {
-  /** An Anthropic API key. Subscription tokens are not accepted — see the
-   *  note at the top of this file. */
-  secret: string;
-}
-
-/** The last candidate the model submitted, valid or not. */
-export interface SubmitCapture {
-  submitted: unknown;
-}
-
-export interface SubmissionOutcome {
-  /** True when the descriptor passed both schema and sanity checks. */
-  accepted: boolean;
-  isError: boolean;
-  text: string;
-}
 
 /**
  * The `submit_mapping` tool definition. Its `input_schema` is generated from
@@ -160,45 +98,11 @@ export interface SubmissionOutcome {
  * model gets a real error message instead of a silently narrowed schema.
  */
 export function submitMappingTool(): Anthropic.Tool {
-  const schema = z.toJSONSchema(mappingDescriptorSchema, { target: 'draft-7' }) as Record<string, unknown>;
-  // `$schema` is metadata about the document, not about the tool input.
-  delete schema.$schema;
   return {
     name: 'submit_mapping',
-    description:
-      'Submit the final MappingDescriptor for this device. Call this once you have decided how every property ' +
-      'the hub does not already handle maps onto the canonical schema — it is the only way to return an answer, ' +
-      'and a run that ends without it produced nothing. If the descriptor fails validation the errors are ' +
-      'returned to you: fix them and call this again. A successful submission ends the task.',
-    input_schema: schema as Anthropic.Tool['input_schema'],
+    description: SUBMIT_MAPPING_DESCRIPTION,
+    input_schema: submitMappingSchema() as Anthropic.Tool['input_schema'],
   };
-}
-
-/**
- * Validate a submission and record it. An invalid *last* submission is still
- * captured — the mapper records the rejection, which is what stops the hub
- * re-asking about a device model whose descriptor the model cannot get right.
- */
-export function evaluateSubmission(input: unknown, capture: SubmitCapture): SubmissionOutcome {
-  const parsed = mappingDescriptorSchema.safeParse(input);
-  if (!parsed.success) {
-    capture.submitted = input;
-    const issues = parsed.error.issues
-      .map((issue) => `- ${issue.path.join('.') || '(root)'}: ${issue.message}`)
-      .join('\n');
-    return { accepted: false, isError: true, text: `Descriptor rejected — schema errors:\n${issues}` };
-  }
-  const problems = sanityCheckDescriptor(parsed.data);
-  if (problems.length > 0) {
-    capture.submitted = parsed.data;
-    return {
-      accepted: false,
-      isError: true,
-      text: `Descriptor rejected — sanity checks failed:\n${problems.map((p) => `- ${p}`).join('\n')}`,
-    };
-  }
-  capture.submitted = parsed.data;
-  return { accepted: true, isError: false, text: 'Mapping accepted. You are done — end your reply now.' };
 }
 
 /**
@@ -303,16 +207,33 @@ export function createMappingAgent(
 
           let response: Anthropic.Message;
           try {
-            response = await client.messages.create(
+            // `stream()`, not `create()`, and that is load-bearing rather
+            // than a preference: the SDK refuses a non-streaming request
+            // whose `max_tokens` could take it past the API's ten-minute
+            // ceiling, and the threshold is 21,333 — so at MAX_OUTPUT_TOKENS
+            // every run threw `Streaming is required for operations that may
+            // take longer than 10 minutes` before it ever reached the
+            // network. Nothing here is displayed as it arrives, so
+            // `finalMessage()` collects the whole `Message` and the loop
+            // below is unchanged.
+            const stream = client.messages.stream(
               {
                 model: modelId,
                 max_tokens: MAX_OUTPUT_TOKENS,
-                // One cached breakpoint covers the tool definitions and the
-                // system prompt — the large, byte-identical prefix every turn
-                // of every run shares.
+                // Two breakpoints, which is what the Messages API asks of an
+                // agent loop. The explicit one covers the tool definitions
+                // and the system prompt — the large, byte-identical prefix
+                // every turn of every run shares, and tools sort ahead of
+                // system in the cached prefix. The top-level field then
+                // places a second one on the last block of `messages`, which
+                // is the half that was missing: this conversation carries the
+                // whole of the model's research and grows for up to
+                // AGENT_MAX_TURNS turns, and without it every turn re-sent
+                // all of it at full input price.
                 system: [
                   { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } },
                 ],
+                cache_control: { type: 'ephemeral' },
                 messages,
                 tools,
                 thinking: { type: 'adaptive' },
@@ -320,6 +241,7 @@ export function createMappingAgent(
               },
               { signal: controller.signal },
             );
+            response = await stream.finalMessage();
           } catch (error) {
             if (controller.signal.aborted) {
               throw new AiUnavailableError(
@@ -363,9 +285,7 @@ export function createMappingAgent(
             );
             messages.push({
               role: 'user',
-              content:
-                'You have not called submit_mapping yet, and it is the only way to return an answer. ' +
-                'Submit the MappingDescriptor now.',
+              content: NUDGE_TEXT,
             });
             continue;
           }
