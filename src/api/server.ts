@@ -1632,7 +1632,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       .string()
       .min(8)
       .max(4000)
-      .refine((key) => !key.trim().startsWith('sk-ant-oat'), {
+      // Anthropic's field only. `detail` is `issues[0]`, and an `sk-ant-oat…`
+      // trips this *and* the OpenAI-field check below — so pasted into the
+      // OpenAI box it answered "the hub needs an Anthropic API key", which is
+      // advice about the other field. Gated here, the right sentence surfaces:
+      // an `sk-ant-` anything belongs in the Anthropic field, and once it is
+      // there this says what kind of Anthropic key it has to be.
+      .refine((key) => (provider === 'anthropic' ? !key.trim().startsWith('sk-ant-oat') : true), {
         message:
           'that is a Claude subscription token; the hub needs an Anthropic API key (sk-ant-api…) from platform.claude.com',
       })

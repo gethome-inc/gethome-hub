@@ -994,6 +994,35 @@ describe.skipIf(!handle)('hub API', () => {
       detail: expect.stringContaining('Anthropic key'),
     });
 
+    // A *subscription* token in the OpenAI field is the same mistake, and the
+    // sentence has to be about the field it was pasted into: `detail` is the
+    // first issue, so an ungated `sk-ant-oat` check answered "the hub needs an
+    // Anthropic API key" — advice about the other box entirely.
+    const subscription = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { openaiApiKey: 'sk-ant-oat01-subscription-token-000000' },
+    });
+    expect(subscription.statusCode).toBe(400);
+    expect(subscription.json()).toMatchObject({
+      error: 'invalid_body',
+      detail: expect.stringContaining('belongs in the Anthropic field'),
+    });
+
+    // In the field it does belong in, it still says what kind of key is wanted.
+    const inItsOwnField = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { anthropicApiKey: 'sk-ant-oat01-subscription-token-000000' },
+    });
+    expect(inItsOwnField.statusCode).toBe(400);
+    expect(inItsOwnField.json()).toMatchObject({
+      error: 'invalid_body',
+      detail: expect.stringContaining('subscription token'),
+    });
+
     const chosen = await app.inject({
       method: 'PATCH',
       url: '/api/v1/settings/ai',
