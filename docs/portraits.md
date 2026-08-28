@@ -58,12 +58,12 @@ response field, and the hub ships its production `node_modules` to a Raspberry
 Pi — the same reasoning that keeps the GitHub update check and the installer's
 health poll on `fetch`.
 
-**`gpt-image-1.5` is pinned, and the pin is load-bearing.** It supports
-`background: transparent`, which `gpt-image-2` dropped, and a transparent
-cut-out is the whole point: the apps float the object over their own glow and
-contact shadow, so a boxed image would be a grey slab on the page. A model that
-rejected `transparent` would fail with OpenAI's own message rather than quietly
-returning a square.
+**`gpt-image-2` is pinned.** `gpt-image-1.5` is deprecated; the newer model
+supports `background: transparent` in preview, and a transparent cut-out is the
+whole point: the apps float the object over their own glow and contact shadow,
+so a boxed image would be a grey slab on the page. A model that rejected
+`transparent` would fail with OpenAI's own message rather than quietly returning
+a square.
 
 Failures carry the vendor's own sentence and a `kind` from the shared
 classifier in `src/ai/errors.ts` — which branches on HTTP status rather than on

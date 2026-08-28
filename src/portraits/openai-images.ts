@@ -9,17 +9,17 @@
  * handing back typed content blocks for a forty-turn tool loop; nothing here
  * needs that.
  *
- * **`gpt-image-1.5` is pinned, and the pin is load-bearing.** It supports
- * `background: transparent`, which `gpt-image-2` dropped, and a transparent
- * cut-out is the whole point: the apps float the object over their own glow and
- * contact shadow, so a baked-in white square would be a grey slab on the page.
- * If a future model rejects `transparent` the request fails with OpenAI's own
- * message rather than silently returning a boxed image.
+ * **`gpt-image-2` is pinned.** Its transparent-background support is currently
+ * preview, but a transparent cut-out is the whole point: the apps float the
+ * object over their own glow and contact shadow, so a baked-in white square
+ * would be a grey slab on the page. If OpenAI changes that preview capability,
+ * the request fails with the provider's own message rather than silently
+ * returning a boxed image.
  */
 
 import { classifyApiError } from '../ai/errors.js';
 
-export const PORTRAIT_MODEL = 'gpt-image-1.5';
+export const PORTRAIT_MODEL = 'gpt-image-2';
 
 /** Square, because every surface that draws a portrait draws it in a square. */
 const SIZE = '1024x1024';

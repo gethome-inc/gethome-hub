@@ -534,9 +534,9 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   sphere, chosen — rather than an absence, which is what saves a column meaning
   the same thing twice. And **no thumbnails are made here**: that would mean a
   native image library on a 415 MB board for something each app already derives
-  and caches. `gpt-image-1.5` is pinned because it still supports transparent
-  backgrounds, which is the whole point of a cut-out the apps float over their
-  own glow.
+  and caches. `gpt-image-2` is pinned because it supports transparent
+  backgrounds in preview, which is the whole point of a cut-out the apps float
+  over their own glow.
 - **`<data>/pairing-code` is a contract, and it now *survives* restarts.** It
   used to be re-minted on every boot, and that was the bug: any code that had
   been read — `install.sh`'s `@@PAIRING@@` marker, or a value Studio fetched a

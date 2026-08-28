@@ -60,6 +60,7 @@ interface SentRequest {
   instructions: string;
   input: Array<Record<string, unknown>>;
   tools: Array<Record<string, unknown>>;
+  include: string[];
   reasoning: { effort: string };
   store: boolean;
   max_output_tokens: number;
@@ -124,6 +125,7 @@ describe('the mapping agent on OpenAI', () => {
     expect(submit.parameters).not.toHaveProperty('$schema');
 
     expect(request.instructions).toBe('a system prompt');
+    expect(request.include).toEqual(['reasoning.encrypted_content']);
     expect(request.reasoning.effort).toBe('high');
     expect(request.store).toBe(false);
     expect(request.model).toBe(defaultModelFor('openai'));
@@ -183,7 +185,12 @@ describe('the mapping agent on OpenAI', () => {
   it('reports each hosted search as a step, with what was looked up', async () => {
     queue(
       ok([
-        { type: 'web_search_call', id: 'ws_1', status: 'completed', action: { type: 'search', query: 'aqara soil sensor zigbee2mqtt' } },
+        {
+          type: 'web_search_call',
+          id: 'ws_1',
+          status: 'completed',
+          action: { type: 'search', queries: ['aqara soil sensor zigbee2mqtt'] },
+        },
         submitCall(validDescriptor),
       ]),
     );
@@ -201,6 +208,12 @@ describe('the mapping agent on OpenAI', () => {
   it('stops when a turn runs out of output tokens', async () => {
     queue({ status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [] });
     await expect(agent().generate('system', 'user')).rejects.toThrow(/max_output_tokens/);
+  });
+
+  it('does not mistake a failed response for prose and retry it', async () => {
+    queue({ status: 'failed', error: { message: 'The response could not be completed.' }, output: [] });
+    await expect(agent().generate('system', 'user')).rejects.toThrow(/response failed: The response could not be completed/);
+    expect(sent).toHaveLength(1);
   });
 
   /**
@@ -245,7 +258,22 @@ describe('the mapping agent on OpenAI', () => {
     );
     let cost = -1;
     await agent().generate('system', 'user', { onStats: (stats) => (cost = stats.costUsd) });
-    // A million cached input tokens at a tenth of $5, and nothing else.
-    expect(cost).toBeCloseTo(0.5, 5);
+    // A million cached input tokens at a tenth of $4, and nothing else.
+    expect(cost).toBeCloseTo(0.4, 5);
+  });
+
+  it('counts a cache write at its documented cache-write rate', async () => {
+    queue(
+      ok([submitCall(validDescriptor)], {
+        input_tokens: 2_000_000,
+        input_tokens_details: { cache_write_tokens: 1_000_000 },
+        output_tokens: 0,
+      }),
+    );
+    let cost = -1;
+    await agent().generate('system', 'user', { onStats: (stats) => (cost = stats.costUsd) });
+    // One million regular input tokens ($4) plus one million cache-write
+    // tokens ($5 = 1.25x the input rate).
+    expect(cost).toBeCloseTo(9, 5);
   });
 });
