@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import { COMMAND_TYPES, type HubCommandType } from '../src/schema/commands.js';
 import { CAPABILITY_KINDS, type CapabilityKind } from '../src/schema/capabilities.js';
-import { HISTORY_KINDS } from '../src/core/history.js';
+import { HISTORY_KINDS, HISTORY_UNITS } from '../src/core/history.js';
+import { displayUnit, displayValue, knowsHistoryUnit } from '../src/mcp/devices.js';
 import { actionSchema, toHubCommand, type McpAction } from '../src/mcp/commands.js';
 import { TOOLS, TOOLS_BY_NAME } from '../src/mcp/catalog.js';
 import type { RegistryEndpoint } from '../src/core/registry.js';
@@ -185,6 +186,36 @@ describe('MCP stays level with the hub', () => {
         `get_device_history does not offer "${kind}", which the hub records.`,
       ).toBe(true);
     }
+  });
+
+  /**
+   * The units promise, at the one place it was broken.
+   *
+   * `HistoryService` stores what the sensor reported in the hub's own scale,
+   * because a stored average cannot be merged — so every recorded unit has to
+   * be converted on the way out or a temperature reaches a model as `2150`
+   * next to the word `centiCelsius`, which it reports as two thousand degrees.
+   */
+  it('converts every unit the hub records into one a reader can use', () => {
+    // Checked against what the hub actually records, not a copied list: a new
+    // recorded quantity in a new unit fails here until something can show it.
+    const unknown = HISTORY_UNITS.filter((unit) => !knowsHistoryUnit(unit));
+    expect(
+      unknown,
+      `src/mcp/devices.ts cannot display these recorded units: ${unknown.join(', ')}`,
+    ).toEqual([]);
+
+    expect(displayUnit('centiCelsius')).toBe('°C');
+    expect(displayValue('centiCelsius', 2150)).toBe(21.5);
+    expect(displayValue('milliwatt', 45_600)).toBe(45.6);
+    expect(displayValue('deciHectopascal', 10_132)).toBe(1013.2);
+    expect(displayValue('centiPercent', 4850)).toBe(48.5);
+    expect(displayValue('percent', 87)).toBe(87);
+
+    // An unknown unit is passed through rather than guessed at: a wrong scale
+    // is worse than an unfamiliar name, and the name travels with the number.
+    expect(displayUnit('parsecs')).toBe('parsecs');
+    expect(displayValue('parsecs', 12)).toBe(12);
   });
 
   it('every tool is described well enough for a model to choose it', () => {

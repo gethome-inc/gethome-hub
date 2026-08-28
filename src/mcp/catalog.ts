@@ -12,6 +12,8 @@ import {
   DEVICE_PAGE_LIMIT,
   deviceDetail,
   deviceRow,
+  displayUnit,
+  displayValue,
   primaryEndpoint,
   resolveDevice,
   structureIndex,
@@ -405,23 +407,34 @@ export const TOOLS: readonly ToolDefinition[] = [
         };
       }
 
-      const values = series.points.map((point) => point[3]);
-      const min = Math.min(...series.points.map((point) => point[1]));
-      const max = Math.max(...series.points.map((point) => point[2]));
+      // Converted here, and this is the one route that used to leak the wire.
+      // `HistoryService` stores what the sensor reported in the hub's own
+      // scale, because a stored average cannot be merged; every client
+      // converts on read. A temperature handed over as `2150` beside the word
+      // `centiCelsius` is one a model reports as two thousand degrees.
+      const unit = displayUnit(series.unit);
+      const show = (value: number) => displayValue(series.unit, value);
+      const points = series.points.map(
+        (point) => [point[0], show(point[1]), show(point[2]), show(point[3])] as const,
+      );
+
+      const values = points.map((point) => point[3]);
+      const min = Math.min(...points.map((point) => point[1]));
+      const max = Math.max(...points.map((point) => point[2]));
       const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
 
       return {
         text:
           `${found.device.name} ${args.quantity} over the last ${args.range}: ` +
-          `low ${min}, high ${max}, average ${Math.round(mean * 10) / 10} (${series.unit}), ` +
-          `from ${series.points.length} points.`,
+          `low ${min} ${unit}, high ${max} ${unit}, ` +
+          `average ${Math.round(mean * 10) / 10} ${unit}, from ${points.length} points.`,
         structured: {
-          unit: series.unit,
+          unit,
           bucketMs: page.bucketMs,
           start: page.start,
           end: page.end,
           retentionDays: page.retentionDays,
-          points: series.points,
+          points,
         },
       };
     },

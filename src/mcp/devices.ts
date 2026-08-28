@@ -419,3 +419,48 @@ export function actionsFor(endpoint: RegistryEndpoint): string[] {
 
   return actions;
 }
+
+/**
+ * Recorded readings arrive in the hub's storage units; charts convert.
+ *
+ * `src/core/history.ts` stores what the sensor reported, in the wire's own
+ * scale — `centiCelsius`, `deciHectopascal`, `milliwatt` — because a stored
+ * average cannot be merged and a stored *converted* average cannot be merged
+ * either. Every client converts on read: the iOS app has
+ * `DeviceHistoryKind.display(fromStored:)` and this is that function.
+ *
+ * It exists because the MCP layer's whole promise is that nothing on the wire
+ * reaches a model in the wire's units, and history was the one route that
+ * broke it: a temperature came back as `2150` beside a unit string reading
+ * `centiCelsius`, which a model reports as two thousand degrees.
+ */
+const HISTORY_DISPLAY: Record<string, { unit: string; scale: number; places: number }> = {
+  centiCelsius: { unit: '°C', scale: 0.01, places: 1 },
+  centiPercent: { unit: '%', scale: 0.01, places: 1 },
+  lux: { unit: 'lx', scale: 1, places: 0 },
+  deciHectopascal: { unit: 'hPa', scale: 0.1, places: 1 },
+  ppm: { unit: 'ppm', scale: 1, places: 0 },
+  deciMicrogramsPerCubicMetre: { unit: 'µg/m³', scale: 0.1, places: 1 },
+  milliCubicMetresPerHour: { unit: 'm³/h', scale: 0.001, places: 3 },
+  milliwatt: { unit: 'W', scale: 0.001, places: 2 },
+  percent: { unit: '%', scale: 1, places: 0 },
+};
+
+/** Whether this layer knows how to show a unit the hub records. */
+export function knowsHistoryUnit(storedUnit: string): boolean {
+  return storedUnit in HISTORY_DISPLAY;
+}
+
+/** The unit a reader sees, for a unit the hub stores. */
+export function displayUnit(storedUnit: string): string {
+  return HISTORY_DISPLAY[storedUnit]?.unit ?? storedUnit;
+}
+
+/** One stored reading in the units the rest of the MCP surface speaks. */
+export function displayValue(storedUnit: string, value: number): number {
+  const spec = HISTORY_DISPLAY[storedUnit];
+  // An unknown unit is passed through rather than guessed at — a wrong scale
+  // is worse than an unfamiliar name, and the name travels with the number.
+  if (!spec) return value;
+  return round(value * spec.scale, spec.places);
+}

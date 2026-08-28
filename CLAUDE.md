@@ -183,7 +183,14 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   converting through `src/schema/units.ts`, because the wire's conventions read
   as nonsense out of context and a model given them acts on them: `setLevel`
   takes 1–254, so "set it to twelve" becomes 5%, and a covering puts 0 at fully
-  *open*, so "close the blinds" sent as 0 throws them wide.
+  *open*, so "close the blinds" sent as 0 throws them wide. **Recorded readings
+  are the same promise at the one place it was nearly broken**: `core/history.ts`
+  stores what the sensor reported in the hub's own scale, since a stored average
+  cannot be merged, so `src/mcp/devices.ts` converts on the way out — a
+  temperature handed over as `2150` beside the word `centiCelsius` is one a
+  model reports as two thousand degrees. `HISTORY_UNITS` is exported from
+  `core/history.ts` so `test/mcp-coverage.test.ts` can check that layer against
+  what is *actually* recorded rather than a copied list.
 - **AI mappings are data, not code**: `MappingDescriptor`
   (`src/ai/descriptor.ts`) is zod-validated and interpreted. Never execute
   model output. The mapping is produced by an autonomous agent

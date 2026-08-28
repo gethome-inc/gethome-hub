@@ -188,6 +188,16 @@ export type HistoryKind = (typeof KINDS)[number]['kind'];
 /** The vocabulary, for the docs and for validating a `series=` filter. */
 export const HISTORY_KINDS: readonly HistoryKind[] = KINDS.map((entry) => entry.kind);
 
+/**
+ * Every unit this table stores in, deduplicated.
+ *
+ * Exported so a consumer that has to convert can be *checked* against what is
+ * recorded rather than against a list somebody copied out of here — which is
+ * what `test/mcp-coverage.test.ts` does for the MCP layer. Adding a quantity
+ * in a new unit fails that suite until something knows how to display it.
+ */
+export const HISTORY_UNITS: readonly string[] = [...new Set(KINDS.map((entry) => entry.unit))];
+
 export function isHistoryKind(value: unknown): value is HistoryKind {
   return typeof value === 'string' && (HISTORY_KINDS as readonly string[]).includes(value);
 }
