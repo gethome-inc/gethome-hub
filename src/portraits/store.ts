@@ -240,7 +240,25 @@ export class PortraitService {
     if (!row) return null;
     await this.db.delete(devicePortraits).where(eq(devicePortraits.id, id));
     await this.unlink(row.deviceId, row.id);
+    // Deleting the picture a home was looking at must not quietly turn the
+    // device back into a sphere: `null` means somebody *chose* the sphere, and
+    // nobody did. The newest remaining takes the slot, which is the same rule
+    // `store` follows when a new one arrives. `prune` never reaches this — it
+    // refuses to evict a selected portrait in the first place.
+    if (row.selected) await this.promoteNewest(row.deviceId);
     return row.deviceId;
+  }
+
+  /** The newest portrait a device still has becomes the one the home sees. */
+  private async promoteNewest(deviceId: string): Promise<void> {
+    const [newest] = await this.db
+      .select({ id: devicePortraits.id })
+      .from(devicePortraits)
+      .where(eq(devicePortraits.deviceId, deviceId))
+      .orderBy(desc(devicePortraits.at))
+      .limit(1);
+    if (!newest) return;
+    await this.db.update(devicePortraits).set({ selected: true }).where(eq(devicePortraits.id, newest.id));
   }
 
   /**

@@ -987,6 +987,12 @@ describe.skipIf(!handle)('hub API', () => {
       payload: { openaiApiKey: 'sk-ant-api-1234567890' },
     });
     expect(swapped.statusCode).toBe(400);
+    // And the sentence reaches the app: a schema message written to be read is
+    // no use at all if every refusal arrives as a bare `invalid_body`.
+    expect(swapped.json()).toMatchObject({
+      error: 'invalid_body',
+      detail: expect.stringContaining('Anthropic key'),
+    });
 
     const chosen = await app.inject({
       method: 'PATCH',

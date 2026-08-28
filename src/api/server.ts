@@ -240,7 +240,16 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
 
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof z.ZodError) {
-      return reply.code(400).send({ error: 'invalid_body', issues: error.issues });
+      // `issues` is the whole of what was wrong, for a developer. `detail` is
+      // the first message, for a person: several of these schemas carry a
+      // sentence written to be read — "that is a Claude subscription token",
+      // "that looks like an OpenAI key — it belongs in the OpenAI field" — and
+      // without somewhere for an app to find one, every such refusal reads as
+      // a bare "the hub didn't accept that", which is the least useful true
+      // thing it could say.
+      return reply
+        .code(400)
+        .send({ error: 'invalid_body', detail: error.issues[0]?.message, issues: error.issues });
     }
     const err = error as Error & { statusCode?: number };
     request.log.error({ err }, 'request failed');

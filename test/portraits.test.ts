@@ -340,6 +340,28 @@ describe.skipIf(!handle)('device portraits', () => {
     expect(await portraits.list(deviceId)).toHaveLength(0);
   });
 
+  /**
+   * `selected: null` means somebody *chose* the sphere over every picture they
+   * have. Deleting the one on screen is not that choice, so the newest
+   * remaining takes its place rather than leaving the device looking like a
+   * home that had opted out.
+   */
+  it('hands the slot to the newest remaining when the one on screen is deleted', async () => {
+    await settings.setAiKey('openai', 'sk-proj-1234567890');
+    const older = (await draw()).json() as { id: string };
+    const newer = (await draw()).json() as { id: string };
+    expect((await portraits.list(deviceId)).find((row) => row.selected)?.id).toBe(newer.id);
+
+    expect(
+      (await app.inject({ method: 'DELETE', url: `/api/v1/portraits/${newer.id}`, headers: auth(memberToken) }))
+        .statusCode,
+    ).toBe(204);
+
+    const left = await portraits.list(deviceId);
+    expect(left.map((row) => row.id)).toEqual([older.id]);
+    expect(left[0]?.selected).toBe(true);
+  });
+
   // ── Bounds ────────────────────────────────────────────────────────────────
 
   /**
