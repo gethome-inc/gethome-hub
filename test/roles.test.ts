@@ -24,6 +24,7 @@ import {
   openTestDb,
   resetDb,
   startedHistory,
+  testBroker,
 } from './helpers/db.js';
 
 const handle = await openTestDb();
@@ -127,6 +128,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
       dataDir,
       radioBudget: 'one',
       z2mDataDir: path.join(dataDir, 'zigbee2mqtt'),
+      mqtt: testBroker(),
       permitJoin: new PermitJoinService(undefined, log, () => {}),
       aiRuns: new AiRunLog(db, events),
       mappings: new MappingLibrary({ db, settings, registry, log }),
@@ -245,6 +247,12 @@ describe.skipIf(!handle)('roles and permissions', () => {
       'member.remove',
       'role.manage',
       'hub.ai',
+      // Not what `ownerOnly` guarded — the broker had no password then — but
+      // owner-only for a reason the others do not have: a credential that
+      // leaves the building cannot be revoked by removing a member, so
+      // handing one out defaults to the owner's call. See `BUILTIN_ROLES`.
+      'hub.mqtt',
+      'hub.mqtt.admin',
     ]) {
       expect(member.permissions).not.toContain(ownerOnly);
     }
@@ -321,6 +329,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
       ['PUT', '/api/v1/settings/radio', 'hub.radio', { mode: 'matter' }],
       ['DELETE', `/api/v1/devices/${deviceId}`, 'device.remove', undefined],
       ['GET', '/api/v1/settings/ai', 'hub.ai', undefined],
+      ['GET', '/api/v1/settings/mqtt', 'hub.mqtt', undefined],
       ['POST', '/api/v1/invites', 'member.invite', {}],
       ['GET', '/api/v1/roles', '', undefined],
     ];
@@ -438,6 +447,94 @@ describe.skipIf(!handle)('roles and permissions', () => {
     expect(log.find((row) => row.kind === 'role.changed')?.message).toBe(
       'Georgy changed what Guest can do.',
     );
+  });
+
+  /**
+   * The broker credentials, both halves.
+   *
+   * A permission with only a refusal test can be broken by denying everybody,
+   * and here that failure has a second shape worth pinning: `hub.mqtt.admin`
+   * is an *addition* to `hub.mqtt` rather than a second door, so a member who
+   * has been granted the base key must get the limited account and must not
+   * get the hub's own one. Handing out the full-access password to somebody
+   * the home only meant to let wire up a devboard is the whole thing this
+   * split exists to prevent.
+   *
+   * It has to sit *below* the test that counts `role.changed` rows: that one
+   * asserts an exact total over the whole log, so any test which edits a role
+   * before it makes it fail on a number rather than on anything real.
+   */
+  it('gives an owner both broker accounts and a granted member only the safe one', async () => {
+    const asOwner = (
+      await app.inject({
+        method: 'GET',
+        url: '/api/v1/settings/mqtt',
+        headers: auth(ownerToken),
+      })
+    ).json() as {
+      requiresPassword: boolean;
+      host: string;
+      port: number;
+      accounts: Array<{ id: string; username: string; password: string; recommended: boolean }>;
+    };
+    expect(asOwner.requiresPassword).toBe(true);
+    expect(asOwner.port).toBe(1883);
+    expect(asOwner.accounts.map((account) => account.id)).toEqual(['integrations', 'hub']);
+    // The limited one leads, because it is the one almost everybody wants.
+    expect(asOwner.accounts[0]).toMatchObject({
+      username: 'gethome',
+      password: 'integration-secret',
+      recommended: true,
+    });
+    expect(asOwner.accounts[1]).toMatchObject({
+      username: 'gethome-hub',
+      password: 'hub-secret',
+      recommended: false,
+    });
+    // Built from the address the request arrived on: the hub reaches its
+    // broker over loopback and an ESP32 cannot, so answering with what the
+    // hub dials would print an address that can never work.
+    expect(asOwner.host.length).toBeGreaterThan(0);
+    expect(asOwner.host).not.toContain(':');
+
+    const memberRole = await roleId('member');
+    const restore = (
+      await app.inject({ method: 'GET', url: '/api/v1/roles', headers: auth(ownerToken) })
+    ).json() as RoleWire[];
+    const before = restore.find((role) => role.key === 'member')!.permissions;
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/roles/${memberRole}`,
+      headers: auth(ownerToken),
+      payload: { permissions: [...before, 'hub.mqtt'] },
+    });
+
+    const asMember = (
+      await app.inject({
+        method: 'GET',
+        url: '/api/v1/settings/mqtt',
+        headers: auth(memberToken),
+      })
+    ).json() as { accounts: Array<{ id: string; password: string }> };
+    expect(asMember.accounts.map((account) => account.id)).toEqual(['integrations']);
+    expect(JSON.stringify(asMember)).not.toContain('hub-secret');
+
+    // Reading a credential is written down, which is what makes delegating
+    // `hub.mqtt` in the matrix a decision the home can review afterwards.
+    const feed = (
+      await app.inject({ method: 'GET', url: '/api/v1/activity', headers: auth(ownerToken) })
+    ).json() as Array<{ kind: string; message: string }>;
+    const looked = feed.filter((entry) => entry.kind === 'hub.mqtt');
+    expect(looked.length).toBe(2);
+    expect(looked.some((entry) => entry.message.includes('full access'))).toBe(true);
+    expect(looked.some((entry) => entry.message.includes('Anna'))).toBe(true);
+
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/roles/${memberRole}`,
+      headers: auth(ownerToken),
+      payload: { permissions: before },
+    });
   });
 
   /**

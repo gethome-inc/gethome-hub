@@ -17,7 +17,7 @@ import { AiRunLog } from '../src/core/ai-runs.js';
 import { MappingLibrary } from '../src/ai/library.js';
 import type { AdapterBus, ProtocolAdapter } from '../src/adapters/adapter.js';
 import type { HubCommand } from '../src/schema/index.js';
-import { bootedHome, loadedAccess, openTestDb, resetDb, startedHistory } from './helpers/db.js';
+import { bootedHome, loadedAccess, openTestDb, resetDb, startedHistory, testBroker } from './helpers/db.js';
 
 const handle = await openTestDb();
 const log = pino({ level: 'silent' });
@@ -89,6 +89,7 @@ describe.skipIf(!handle)('hub API', () => {
       // Nothing there to read, which is the ordinary state for a hub with no
       // coordinator — and must stay silent rather than becoming an error.
       z2mDataDir: path.join(dataDir, 'zigbee2mqtt'),
+      mqtt: testBroker(),
       // No radio, so it reports a closed window and publishes nothing.
       permitJoin: new PermitJoinService(undefined, log, () => {}),
       aiRuns: new AiRunLog(db, events),

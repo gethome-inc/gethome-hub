@@ -662,7 +662,150 @@ fi
 # integration the user builds. It listens on the LAN, not just loopback: DIY
 # boards and wired controllers live on other machines, and the firewall
 # boundary for a home hub is the router.
+#
+# ── It asks for a password, and there are two accounts ─────────────────────
+# It used to be `allow_anonymous true`, and that was a hole the size of the
+# whole product: everything else a member may do is behind a token and a role,
+# while anybody on the home Wi-Fi could open a broker connection and publish
+# `zigbee2mqtt/<device>/set` to work every light and lock in the house, or
+# `bridge/request/permit_join` to open the Zigbee network. The REST API's
+# access table is not worth much with that sitting next to it.
+#
+# Two accounts, because "who may read the home" and "who may drive the radio"
+# are different questions:
+#
+#   gethome-hub  full read/write. hubd and Zigbee2MQTT sign in as this, and it
+#                is what an owner is shown only when they ask for it.
+#   gethome      the one an owner is actually handed. It publishes under
+#                `gethome/#` — the public integrator convention, see
+#                docs/mqtt-integrations.md — and *reads* Zigbee device state,
+#                so a board somebody builds can react to a motion sensor. It
+#                cannot write to `zigbee2mqtt/#` at all, so a devboard that is
+#                lost, resold or compromised cannot switch the house off or
+#                open the network for pairing.
+#
+# Both are minted here, once, and reused on every later run: rotating them on
+# each update would silently break every integration the owner had wired in.
+# `GET /settings/mqtt` is how they reach an app.
+MQTT_HUB_USER="gethome-hub"
+MQTT_APP_USER="gethome"
+MQTT_ENV="$CONF_DIR/mqtt.env"
+MQTT_PASSWD_FILE="/etc/mosquitto/gethome.passwd"
+MQTT_ACL_FILE="/etc/mosquitto/gethome.acl"
+# Set once the broker really is asking for a password, which is what decides
+# whether the units get credentials and what the closing summary says.
+MQTT_SECURED=""
+
+# 16 bytes of urandom as hex. Hex rather than base64 on purpose: this value is
+# also handed to people to paste into ESP32 sketches and Home Assistant YAML,
+# and it travels through a `mqtt://user:pass@host` URL in `mqtt.env`, where a
+# `/` or a `+` would have to be percent-encoded by every reader.
+#
+# `od -N16` reads exactly sixteen bytes and exits; the obvious
+# `tr -dc … </dev/urandom | head -c 32` cannot be used under `set -o pipefail`,
+# where `tr` dying of SIGPIPE fails the whole pipeline.
+gen_secret() { od -An -N16 -tx1 /dev/urandom | tr -d ' \n'; }
+
+# One key out of mqtt.env, or empty. Read through $SUDO because the file is
+# 0600 root — the passwords in it are the only thing on this machine that lets
+# something drive the home without a hub token.
+mqtt_env_value() {
+  local existing=""
+  existing=$($SUDO cat "$MQTT_ENV" 2>/dev/null || true)
+  printf '%s\n' "$existing" | awk -F= -v key="$1" '$1 == key { sub(/^[^=]*=/, ""); print; exit }'
+}
+
+MQTT_HUB_PASS="$(mqtt_env_value MQTT_PASSWORD)"
+MQTT_APP_PASS="$(mqtt_env_value MQTT_INTEGRATION_PASSWORD)"
+# A hub that already exists and has no credentials is one whose broker has been
+# open until now — so somebody may have wired a devboard straight into it, and
+# that board is about to stop being able to publish. That is worth saying out
+# loud once, at the end, where the user is looking; it is not worth leaving the
+# hole open for.
+MQTT_WAS_OPEN=""
+[[ -z "$MQTT_HUB_PASS" && -f "$CONF_DIR/hub.env" ]] && MQTT_WAS_OPEN=1
+[[ -n "$MQTT_HUB_PASS" ]] || MQTT_HUB_PASS="$(gen_secret)"
+[[ -n "$MQTT_APP_PASS" ]] || MQTT_APP_PASS="$(gen_secret)"
+
 $SUDO mkdir -p /etc/mosquitto/conf.d
+
+# ── Never lock the hub out of its own broker ───────────────────────────────
+# `mosquitto_passwd` ships with the broker, so this should always be present.
+# If it somehow isn't, writing `allow_anonymous false` beside a password file
+# that does not exist would take Zigbee and every MQTT device down for good, on
+# a hub that installed perfectly — the installed-but-unusable trap. Stay open,
+# and say so loudly enough that it gets fixed.
+if command -v mosquitto_passwd >/dev/null 2>&1; then
+  if $SUDO mosquitto_passwd -c -b "$MQTT_PASSWD_FILE" "$MQTT_HUB_USER" "$MQTT_HUB_PASS" >/dev/null 2>&1 \
+    && $SUDO mosquitto_passwd -b "$MQTT_PASSWD_FILE" "$MQTT_APP_USER" "$MQTT_APP_PASS" >/dev/null 2>&1; then
+    MQTT_SECURED=1
+  else
+    warn "Could not write the MQTT password file, so the broker is staying open to the local network."
+  fi
+else
+  warn "mosquitto_passwd is missing, so the MQTT broker is staying open to the local network."
+fi
+
+if [[ -n "$MQTT_SECURED" ]]; then
+  # ── What each account may touch ──────────────────────────────────────────
+  # Only `read`, `write` and `readwrite` are used. mosquitto also understands
+  # `deny`, which would express "everything under zigbee2mqtt/ except
+  # bridge/info" in one line — and a config option an older broker does not
+  # parse is a fatal error, which here means a hub with no Zigbee and no MQTT
+  # at all. Listing what is allowed cannot fail that way.
+  #
+  # `zigbee2mqtt/+` is one level, so it is every device's state topic and none
+  # of `bridge/#`. The three bridge topics that are named are the ones a DIY
+  # integration actually wants; `bridge/info` is deliberately not among them,
+  # because it carries Zigbee2MQTT's own configuration and we are not going to
+  # depend on upstream redacting the network key from it.
+  $SUDO tee "$MQTT_ACL_FILE" >/dev/null <<MOSQACL
+# GetHome Hub — written by deploy/install.sh. Do not edit; it is rewritten on
+# every install and update.
+#
+# Nothing appears above the first "user" line: those rules would apply to
+# anonymous clients, and there are none.
+
+# The hub itself and Zigbee2MQTT.
+user ${MQTT_HUB_USER}
+topic readwrite #
+
+# Integrations the owner builds (docs/mqtt-integrations.md). They own the
+# gethome/ tree outright, and may watch the home without being able to drive
+# it: no write to zigbee2mqtt/ anywhere, so no device control and no
+# permit_join, and no read of bridge/info.
+user ${MQTT_APP_USER}
+topic readwrite gethome/#
+topic read zigbee2mqtt/+
+topic read zigbee2mqtt/bridge/state
+topic read zigbee2mqtt/bridge/event
+topic read zigbee2mqtt/bridge/devices
+MOSQACL
+
+  # ── These two files are read by the broker, not by root ──────────────────
+  # mosquitto opens password_file and acl_file *after* it has dropped
+  # privileges to its own account, so a 0600 root-owned password file is one
+  # it cannot read — and the broker then refuses to start outright:
+  #
+  #   Error: Unable to open pwfile "/etc/mosquitto/gethome.passwd".
+  #
+  # which is port 1883 closed, Zigbee dead and every MQTT device gone, on a hub
+  # that installed perfectly. Reproduced against mosquitto 2.0.18.
+  #
+  # So this is not a tidy-up that may fail quietly: if the files cannot be made
+  # readable by the broker and unreadable by everyone else, we do not turn
+  # authentication on at all. An open broker is a hole; a broker that will not
+  # start is a hub with no radios, and this script must never choose the second
+  # while trying to fix the first.
+  if ! { getent group mosquitto >/dev/null 2>&1 \
+    && $SUDO chown root:mosquitto "$MQTT_PASSWD_FILE" "$MQTT_ACL_FILE" 2>/dev/null \
+    && $SUDO chmod 0640 "$MQTT_PASSWD_FILE" "$MQTT_ACL_FILE" 2>/dev/null; }; then
+    MQTT_SECURED=""
+    $SUDO rm -f "$MQTT_PASSWD_FILE" "$MQTT_ACL_FILE" 2>/dev/null || true
+    warn "The MQTT broker's own account can't read the password file this machine would need, so the broker is staying open to the local network."
+  fi
+fi
+
 # ── Add nothing the distribution's own config already sets ─────────────────
 # This file is included *after* /etc/mosquitto/mosquitto.conf, which on Debian
 # and Raspberry Pi OS already contains `persistence` and
@@ -672,20 +815,79 @@ $SUDO mkdir -p /etc/mosquitto/conf.d
 #   Error: Duplicate persistence_location value in configuration.
 #
 # which is exactly how the broker ended up down, port 1883 closed, and Zigbee
-# unable to work at all on a hub that otherwise installed perfectly. Two lines
-# is the whole of what we need; keep it that way.
-$SUDO tee /etc/mosquitto/conf.d/gethome.conf >/dev/null <<'MOSQ'
-# GetHome Hub. The broker is local plumbing between hubd, Zigbee2MQTT and any
-# MQTT integrations on the home network — anonymous and unencrypted, which is
-# fine inside a home LAN and is not fine exposed to the internet. Do not
-# forward port 1883 through your router.
+# unable to work at all on a hub that otherwise installed perfectly. Keep this
+# to the few lines we genuinely need — `password_file` and `acl_file` are not
+# among what Debian sets, which is the only reason they can be here.
+if [[ -n "$MQTT_SECURED" ]]; then
+  $SUDO tee /etc/mosquitto/conf.d/gethome.conf >/dev/null <<MOSQ
+# GetHome Hub. The broker is the plumbing between hubd, Zigbee2MQTT and any
+# MQTT integrations on the home network. It listens on the LAN because those
+# integrations run on other machines, and it asks for a password because
+# everything reachable through it — every light, lock and socket in the home —
+# is otherwise open to anyone who joins the Wi-Fi.
 #
-# Deliberately nothing else here: /etc/mosquitto/mosquitto.conf already sets
-# persistence, its location and the log destination, and mosquitto refuses to
-# start if a string option is given twice.
+# The accounts and what each may touch are in ${MQTT_ACL_FILE}; the passwords
+# are in ${MQTT_ENV}, and an app reads them from GET /settings/mqtt. It is
+# still unencrypted, so do not forward port 1883 through your router.
+listener 1883
+allow_anonymous false
+password_file ${MQTT_PASSWD_FILE}
+acl_file ${MQTT_ACL_FILE}
+MOSQ
+else
+  $SUDO tee /etc/mosquitto/conf.d/gethome.conf >/dev/null <<'MOSQ_OPEN'
+# GetHome Hub — fallback. This broker takes anonymous connections because the
+# installer could not set a password up (the warning above says why), which
+# means anyone on this network can read the home and control every Zigbee
+# device on it. Re-run the installer to close it.
 listener 1883
 allow_anonymous true
-MOSQ
+MOSQ_OPEN
+fi
+
+# ── The credentials, where systemd can hand them to both services ──────────
+# Deliberately *not* hub.env: that file is written only when it is absent, so
+# an upgraded hub would never see a new variable in it — the same trap that
+# makes a `GETHOME_UPDATE=1` line there the wrong answer. This one is rewritten
+# on every run and pulled in by both units.
+#
+# It carries `MQTT_URL` with the credentials in it as well as the two fields
+# beside it, and that redundancy is the rollback story. `install.sh` puts the
+# previous build back when a new one fails its health check, and that build may
+# predate `MQTT_USERNAME` — but every build the hub has ever had reads
+# `MQTT_URL`, and this file is listed *after* hub.env so its value is the one
+# that survives. The current build is right either way: `loadConfig` lifts the
+# credentials out of whichever URL it is given, and an explicit `MQTT_USERNAME`
+# outranks them.
+#
+# 0600 root: systemd reads EnvironmentFile as PID 1, before it drops to the
+# service account, so nothing here needs to be readable by the hub itself.
+if [[ -n "$MQTT_SECURED" ]]; then
+  $SUDO tee "$MQTT_ENV" >/dev/null <<MQTTENV
+# GetHome Hub — MQTT broker credentials. Written by deploy/install.sh and
+# rewritten on every install and update; the passwords themselves are minted
+# once and kept. Read by gethome-hubd and gethome-zigbee2mqtt through
+# EnvironmentFile=, and shown to an owner by GET /settings/mqtt.
+#
+# ${MQTT_HUB_USER} is full access. ${MQTT_APP_USER} is the one to give your own
+# devices: it owns gethome/# and can only read Zigbee. See ${MQTT_ACL_FILE}.
+MQTT_URL=mqtt://${MQTT_HUB_USER}:${MQTT_HUB_PASS}@127.0.0.1:1883
+MQTT_USERNAME=${MQTT_HUB_USER}
+MQTT_PASSWORD=${MQTT_HUB_PASS}
+MQTT_INTEGRATION_USERNAME=${MQTT_APP_USER}
+MQTT_INTEGRATION_PASSWORD=${MQTT_APP_PASS}
+ZIGBEE2MQTT_CONFIG_MQTT_USER=${MQTT_HUB_USER}
+ZIGBEE2MQTT_CONFIG_MQTT_PASSWORD=${MQTT_HUB_PASS}
+MQTTENV
+  $SUDO chown root:root "$MQTT_ENV" 2>/dev/null || true
+  $SUDO chmod 0600 "$MQTT_ENV" 2>/dev/null || true
+else
+  # No credentials, so no file: a stale one would hand both services a password
+  # the broker is no longer checking, and hubd would fail to connect to a
+  # broker that would have taken it anonymously.
+  $SUDO rm -f "$MQTT_ENV" 2>/dev/null || true
+fi
+
 $SUDO systemctl enable mosquitto >/dev/null 2>&1 || true
 if ! $SUDO systemctl restart mosquitto >/dev/null 2>&1; then
   warn "The MQTT broker didn't start. Zigbee and MQTT devices need it — the reason is below."
@@ -909,6 +1111,16 @@ Group=${SERVICE_USER}
 SupplementaryGroups=dialout
 WorkingDirectory=${HUB_DIR}
 EnvironmentFile=${CONF_DIR}/hub.env
+# The broker credentials, kept out of hub.env because that file is written only
+# when it is absent and so never reaches a hub being upgraded. Optional with
+# a leading dash: a hub whose installer could not set a password up has no such
+# file and must still start, connecting to its broker anonymously as it always
+# did. (No backticks in this heredoc — it is unquoted, so bash would run them.)
+#
+# **After** hub.env, which is what makes the MQTT_URL in it win. That matters
+# only after a rollback, when the build being started again may be older than
+# MQTT_USERNAME and the URL is the only way it can authenticate.
+EnvironmentFile=-${CONF_DIR}/mqtt.env
 ExecStart=${NODE_BIN} ${HUB_V8_FLAGS} ${HUB_DIR}/dist/index.js
 Restart=always
 RestartSec=5
@@ -976,6 +1188,11 @@ Environment=ZIGBEE2MQTT_CONFIG_ONBOARDING=false
 # edit: Zigbee2MQTT's own configuration.yaml holds the network key and the
 # paired-device list, and nothing here may ever rewrite that file.
 EnvironmentFile=-${CONF_DIR}/zigbee.env
+# ZIGBEE2MQTT_CONFIG_MQTT_USER / _PASSWORD, from the same file the hub reads.
+# An override rather than an edit, for the reason above it: configuration.yaml
+# holds the network key and the paired-device list and nothing here may rewrite
+# it. Optional, so a hub with an open broker still starts.
+EnvironmentFile=-${CONF_DIR}/mqtt.env
 ExecStart=${NODE_BIN} ${Z2M_DIR}/node_modules/zigbee2mqtt/index.js
 Restart=always
 RestartSec=10
@@ -1071,6 +1288,16 @@ $SUDO systemctl enable gethome-hubd.service >/dev/null 2>&1
 $SUDO systemctl enable gethome-zigbee-detect.service >/dev/null 2>&1 || true
 $SUDO systemctl enable --now gethome-radio.path >/dev/null 2>&1 || true
 $SUDO systemctl enable --now gethome-update.path >/dev/null 2>&1 || true
+# Zigbee2MQTT, when it is already running, is holding a broker connection that
+# was opened before any of this and may have been anonymous. Its unit has just
+# gained the credentials, so it needs restarting to pick them up — but only if
+# it is actually up: starting it here would hold ~150 MB open for a coordinator
+# that may not exist, which is exactly why `gethome-zigbee-detect` owns its
+# lifecycle and this unit is never enabled.
+if systemctl is-active --quiet gethome-zigbee2mqtt.service 2>/dev/null; then
+  $SUDO systemctl restart gethome-zigbee2mqtt.service >/dev/null 2>&1 \
+    || warn "Zigbee2MQTT didn't restart after the broker credentials changed; Zigbee may be down."
+fi
 $SUDO systemctl restart gethome-hubd.service \
   || fail "The hub is installed but wouldn't start. See: journalctl -u gethome-hubd -n 50"
 
@@ -1282,6 +1509,21 @@ if [[ "$RADIO_BUDGET" == "one" ]]; then
   fi
 elif [[ -z "$ZIGBEE_CONFIGURED" ]]; then
   say "No Zigbee coordinator is plugged in, so this hub starts with Matter, Wi-Fi and MQTT devices. Plug one in whenever you like — Zigbee starts by itself, with no reboot."
+fi
+
+# ── The broker asks for a password now ─────────────────────────────────────
+# Only on a hub that already existed and had an open broker: a fresh install
+# has nothing wired into it yet, and telling somebody their integrations broke
+# before they have written one is noise on the last screen of a setup.
+#
+# It is a warning rather than a failure because the hub itself is fine — this
+# is about the boards *around* it, and the fix is two fields in whatever wrote
+# them, with the credentials one tap away in the app.
+if [[ -n "$MQTT_WAS_OPEN" && -n "$MQTT_SECURED" ]]; then
+  warn "The MQTT broker now asks for a username and password, so anything you wired into it yourself has stopped being able to publish. Open your hub in the GetHome app to copy the credentials — use the account named for your own devices — and put them into your board or integration. Zigbee, Matter and the apps are unaffected."
+fi
+if [[ -z "$MQTT_SECURED" ]]; then
+  warn "This hub's MQTT broker takes connections with no password, so anyone on this network can read the home and control its Zigbee devices. Re-run the installer to close it."
 fi
 
 printf '@@DONE@@\n'

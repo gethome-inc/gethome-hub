@@ -226,12 +226,18 @@ sudo gethome-hubctl status          # every service, and what the API says
 sudo gethome-hubctl logs 100
 sudo gethome-hubctl zigbee          # the coordinator, and re-check what's attached
 sudo gethome-hubctl pairing-code    # for another device
+sudo gethome-hubctl mqtt            # the broker's two accounts (--rotate to change them)
 ```
 
 The API answers at `http://<hub>:8420/api/v1/hub`, and the MQTT broker at
-`mqtt://<hub>:1883` for devices on the same network. The broker is anonymous
-and unencrypted, which is right for a home LAN and wrong for the internet —
-don't forward 1883 through your router.
+`mqtt://<hub>:1883` for devices on the same network. The broker asks for a
+username and password: `sudo gethome-hubctl mqtt` prints the two accounts, and
+the apps show them too. Use the one named for your own devices — it can publish
+under `gethome/` and watch what the home reports, but it cannot control Zigbee
+devices or open the network for pairing, so a devboard built against it cannot
+take the home over. The connection is still unencrypted, which is right for a
+home LAN and wrong for the internet — don't forward 1883 through your router.
+See [mqtt-integrations.md](docs/mqtt-integrations.md).
 
 ### There is no Docker, and no database server
 

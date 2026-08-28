@@ -132,6 +132,23 @@ export const PERMISSIONS: readonly PermissionDescriptor[] = [
     summary:
       'The API key and its switch, what the agent has spent, and the device-mapping library.',
   },
+  {
+    key: 'hub.mqtt',
+    group: 'Hub',
+    title: 'Connect your own devices over MQTT',
+    summary:
+      'See the username and password for wiring a board or an integration into this home. ' +
+      'That account can publish your own devices and read what the home reports, but not ' +
+      'control Zigbee devices or open the network for pairing.',
+  },
+  {
+    key: 'hub.mqtt.admin',
+    group: 'Hub',
+    title: 'Full access to the MQTT broker',
+    summary:
+      'See the hub’s own broker password, which can control every Zigbee device directly ' +
+      'and open the network for pairing. Worth having for debugging; it is the keys to the home.',
+  },
 ] as const;
 
 export type PermissionKey =
@@ -146,7 +163,9 @@ export type PermissionKey =
   | 'role.manage'
   | 'hub.radio'
   | 'hub.update'
-  | 'hub.ai';
+  | 'hub.ai'
+  | 'hub.mqtt'
+  | 'hub.mqtt.admin';
 
 export const PERMISSION_KEYS: readonly PermissionKey[] = PERMISSIONS.map((entry) => entry.key);
 
@@ -177,6 +196,19 @@ export const BUILTIN_ROLES = [
      * is a laptop in a drawer and every phone joins by invite — owner-only
      * there did not mean "an update needs care", it meant the phone in the
      * owner's own hand could never update their own hub, ever.
+     *
+     * **Neither MQTT key is here, and that is the one place the "bounded
+     * cost" test comes out differently.** Every other permission is a request
+     * this hub carries out and can stop carrying out: removing a member takes
+     * their tokens with the row and hangs up the socket they were holding, so
+     * whatever they could do, they cannot do a second later. A broker password
+     * is not like that — it is a secret that leaves the building. Nothing here
+     * can un-tell somebody a password, and the only way to take one back is to
+     * mint another and go round every board in the house that had it. Handing
+     * one out is therefore the owner's call by default, exactly as it would be
+     * for a front-door key. A home that wants it otherwise says so in the
+     * matrix, and `hub.mqtt` alone is the safe half of the answer: it is the
+     * account that cannot switch anything on.
      */
     permissions: [
       'device.edit',

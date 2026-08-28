@@ -18,6 +18,7 @@ import {
   openTestDb,
   loadedAccess,
   startedHistory,
+  testBroker,
 } from './helpers/db.js';
 
 /**
@@ -89,6 +90,7 @@ describe.skipIf(!handle)('why Zigbee is down, over HTTP', () => {
       dataDir: dir,
       radioBudget: 'one',
       z2mDataDir,
+      mqtt: testBroker(),
       zigbee: fakeZigbee(options.connected),
       permitJoin: new PermitJoinService(undefined, log, () => {}),
     });

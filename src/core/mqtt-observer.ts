@@ -1,6 +1,7 @@
 import mqtt from 'mqtt';
 import { StringDecoder } from 'node:string_decoder';
 import type { Logger } from '../logging.js';
+import { brokerCredentials } from '../mqtt-auth.js';
 
 /**
  * Which conversation a message belongs to. The apps group by this rather than
@@ -33,6 +34,14 @@ export interface MqttFrame {
 
 export interface MqttObserverOptions {
   mqttUrl: string;
+  /**
+   * Broker credentials, when the broker asks for them. Empty on a hub
+   * installed before `install.sh` started minting them — the drop-in it
+   * writes then still says `allow_anonymous true`, so an anonymous connect is
+   * the correct behaviour rather than a fallback.
+   */
+  username?: string;
+  password?: string;
   z2mBaseTopic: string;
   log: Logger;
   /** Called for every frame, in arrival order. Must not throw. */
@@ -162,6 +171,7 @@ export class MqttObserver {
     const client = mqtt.connect(this.options.mqttUrl, {
       clientId: `gethome-hub-observer-${Math.random().toString(16).slice(2, 8)}`,
       reconnectPeriod: 5000,
+      ...brokerCredentials(this.options),
     });
     this.client = client;
     client.on('connect', () => {

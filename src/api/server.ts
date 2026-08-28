@@ -33,6 +33,7 @@ import {
   requestUpdate,
 } from '../core/update.js';
 import type { MqttObserver } from '../core/mqtt-observer.js';
+import { hostFromRequest, mqttAccess, type MqttBrokerConfig } from '../core/mqtt-access.js';
 import { isHistoryKind, type HistoryKind, type HistoryService } from '../core/history.js';
 import { MAX_WINDOW_SECONDS, type PermitJoinService } from '../core/permit-join.js';
 import { createHubStatusReader } from '../core/hub-status.js';
@@ -79,6 +80,14 @@ export interface ApiDeps {
   radioBudget: RadioBudget;
   /** Zigbee2MQTT's data directory — read only to say *why* Zigbee is down. */
   z2mDataDir: string;
+  /**
+   * How to sign in to this hub's broker, for `GET /settings/mqtt`.
+   *
+   * Required rather than optional: an absent one would have to answer
+   * "no password" — indistinguishable from an open broker — which is the
+   * single most misleading thing this route could say.
+   */
+  mqtt: MqttBrokerConfig;
   /**
    * The broker tap behind the apps' traffic inspector. Absent when the MQTT
    * adapter is off, in which case the `mqtt` WebSocket stream is simply not
@@ -1574,6 +1583,41 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       });
     }
     return outcome;
+  });
+
+  /**
+   * The broker credentials, for somebody wiring their own device into this home.
+   *
+   * There are two accounts and this returns the ones the caller may use, never
+   * a list with the passwords blanked out — a row somebody cannot act on reads
+   * as broken. `hub.mqtt` is the base and gets the limited account;
+   * `hub.mqtt.admin` adds the hub's own full-access one, and is deliberately an
+   * *addition* rather than a second door, so there is still one guard per route.
+   *
+   * **It writes to the activity log, which no other GET here does.** That is
+   * the point rather than an oversight: everything else this API hands out is a
+   * request the hub carries out and can stop carrying out, while a broker
+   * password is a secret that leaves the building and cannot be taken back. The
+   * whole reason it is safe to delegate `hub.mqtt` in the matrix is that the
+   * home can see afterwards who was given one.
+   */
+  app.get('/api/v1/settings/mqtt', needs('hub.mqtt'), async (request) => {
+    const admin = deps.access.can(request.member!.id, 'hub.mqtt.admin');
+    const answer = mqttAccess({
+      config: deps.mqtt,
+      requestHost: hostFromRequest(request.headers.host),
+      canUseIntegrations: true,
+      canUseFullAccess: admin,
+    });
+    await deps.activity.record({
+      kind: 'hub.mqtt',
+      message: admin
+        ? `${request.member!.name} looked up the MQTT broker credentials, including full access.`
+        : `${request.member!.name} looked up the MQTT credentials for connecting a device.`,
+      memberId: request.member!.id,
+      data: { memberName: request.member!.name, full: admin },
+    });
+    return answer;
   });
 
   /**

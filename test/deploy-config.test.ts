@@ -21,12 +21,39 @@ describe('deploy/install.sh', () => {
     for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
   });
 
-  /** Pull a heredoc body out of the installer by its delimiter. */
+  /**
+   * Pull a heredoc body out of the installer by its delimiter.
+   *
+   * Quoted or not: the broker drop-in became unquoted when it started naming
+   * the password and ACL files it writes, and a helper that silently matched
+   * neither would have turned "this config is wrong" into "this test cannot
+   * find the config".
+   */
   function heredoc(delimiter: string): string {
-    const pattern = new RegExp(`<<'${delimiter}'\\n([\\s\\S]*?)\\n${delimiter}\\n`);
+    const pattern = new RegExp(`<<'?${delimiter}'?\\n([\\s\\S]*?)\\n${delimiter}\\n`);
     const found = installer.match(pattern);
     expect(found, `heredoc ${delimiter} not found in install.sh`).not.toBeNull();
     return found![1]!;
+  }
+
+  /**
+   * The broker config as it lands on a Pi: our drop-in and ACL with the
+   * installer's own paths swapped for ones this test owns.
+   */
+  function brokerFiles(dir: string, port: number): { conf: string; acl: string } {
+    const substitutions: Record<string, string> = {
+      '${MQTT_PASSWD_FILE}': path.join(dir, 'gethome.passwd'),
+      '${MQTT_ACL_FILE}': path.join(dir, 'gethome.acl'),
+      '${MQTT_ENV}': '/etc/gethome/mqtt.env',
+      '${MQTT_HUB_USER}': 'gethome-hub',
+      '${MQTT_APP_USER}': 'gethome',
+    };
+    const substitute = (text: string): string =>
+      Object.entries(substitutions).reduce((acc, [from, to]) => acc.split(from).join(to), text);
+    return {
+      conf: substitute(heredoc('MOSQ')).replace('listener 1883', `listener ${port}`),
+      acl: substitute(heredoc('MOSQACL')),
+    };
   }
 
   /**
@@ -46,7 +73,17 @@ describe('deploy/install.sh', () => {
   it('writes a mosquitto drop-in that loads alongside the distribution config', () => {
     const dropIn = heredoc('MOSQ');
     expect(dropIn).toContain('listener 1883');
-    expect(dropIn).toContain('allow_anonymous true');
+    // **The broker asks for a password.** It used to be `allow_anonymous true`,
+    // which meant anybody on the home Wi-Fi could publish
+    // `zigbee2mqtt/<device>/set` and work every light and lock in the house
+    // without a hub token — the whole role table on port 8420 sitting next to
+    // an open door on 1883.
+    expect(dropIn).toContain('allow_anonymous false');
+    expect(dropIn).toMatch(/^password_file /m);
+    expect(dropIn).toMatch(/^acl_file /m);
+    // The fallback is the *other* file, and it must stay a separate branch: a
+    // hub whose installer could not set a password up has to keep working.
+    expect(heredoc('MOSQ_OPEN')).toContain('allow_anonymous true');
 
     // Whatever else it grows, it must not repeat what Debian already sets.
     for (const duplicated of ['persistence_location', 'log_dest', 'pid_file']) {
@@ -59,7 +96,10 @@ describe('deploy/install.sh', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'gethome-mosq-'));
     dirs.push(dir);
     mkdirSync(path.join(dir, 'conf.d'));
-    writeFileSync(path.join(dir, 'conf.d', 'gethome.conf'), dropIn + '\n');
+    const files = brokerFiles(dir, 1883);
+    writeFileSync(path.join(dir, 'conf.d', 'gethome.conf'), files.conf + '\n');
+    writeFileSync(path.join(dir, 'gethome.acl'), files.acl + '\n');
+    writeFileSync(path.join(dir, 'gethome.passwd'), '');
     // Debian / Raspberry Pi OS ship exactly this.
     writeFileSync(
       path.join(dir, 'mosquitto.conf'),
@@ -86,6 +126,99 @@ describe('deploy/install.sh', () => {
     }
     expect(output).not.toMatch(/Duplicate .* value in configuration/i);
     expect(output).not.toMatch(/^\s*Error:/im);
+  });
+
+  /**
+   * **Never lock the hub out of its own broker.**
+   *
+   * Turning authentication on is three files that all have to land: the
+   * password file, the ACL, and the drop-in that names them. mosquitto opens
+   * the first two *after* dropping privileges to its own account, so a
+   * root-owned 0600 password file is a broker that refuses to start —
+   * "Error: Unable to open pwfile", port 1883 closed, Zigbee and every MQTT
+   * device gone, on a hub that installed perfectly. Reproduced against
+   * mosquitto 2.0.18.
+   *
+   * An open broker is a hole. A broker that will not start is a hub with no
+   * radios at all, and this installer must never pick the second while trying
+   * to fix the first — so every step that can fail has to clear `MQTT_SECURED`
+   * and fall back, rather than leave the drop-in pointing at a file nobody can
+   * read.
+   */
+  it('refuses to switch the broker to passwords unless every part of it landed', () => {
+    const section = installer.slice(
+      installer.indexOf('# ── Mosquitto ──'),
+      installer.indexOf('# ── mDNS ──'),
+    );
+    expect(section).not.toBe('');
+
+    // Nothing is written on the strength of `mosquitto_passwd` existing.
+    expect(section).toMatch(/command -v mosquitto_passwd/);
+    // The broker's own account has to be able to read both files, and failing
+    // that is a reason to stay open rather than a warning to skip past.
+    expect(section).toMatch(/chown root:mosquitto/);
+    expect(section).toMatch(/chmod 0640/);
+    // Three places can give up, and each has to clear the flag.
+    expect(section.match(/MQTT_SECURED=""/g)?.length ?? 0).toBeGreaterThanOrEqual(1);
+    expect(section).toMatch(/MQTT_SECURED=1/);
+    // The drop-in, the credentials file and the ACL are all behind it.
+    expect(section).toMatch(/if \[\[ -n "\$MQTT_SECURED" \]\]; then/);
+
+    // **The passwords are minted once and kept.** Rotating them on every run
+    // would silently break every integration the owner had wired in, on every
+    // update — and `gethome-hubctl update` is this script again.
+    expect(section).toMatch(/mqtt_env_value MQTT_PASSWORD/);
+    expect(section).toMatch(/mqtt_env_value MQTT_INTEGRATION_PASSWORD/);
+    expect(section, 'an existing password has to survive a re-run')
+      .toMatch(/\[\[ -n "\$MQTT_HUB_PASS" \]\] \|\| MQTT_HUB_PASS=/);
+
+    // A stale credentials file beside an open broker is the other way round of
+    // the same lockout: both services would send a password nobody is checking.
+    expect(section).toMatch(/rm -f "\$MQTT_ENV"/);
+  });
+
+  /**
+   * The credentials reach both services through systemd, and never through
+   * hub.env — which is written *only when it is absent*, so a new variable in
+   * it would never reach a hub being upgraded. That is the same trap that makes
+   * a `GETHOME_UPDATE=1` line there the wrong answer.
+   */
+  it('hands the broker credentials to both units, after hub.env', () => {
+    const hubUnit = installer.slice(
+      installer.indexOf('gethome-hubd.service >/dev/null <<UNIT'),
+      installer.indexOf('gethome-zigbee2mqtt.service >/dev/null <<UNIT'),
+    );
+    const z2mUnit = installer.slice(
+      installer.indexOf('gethome-zigbee2mqtt.service >/dev/null <<UNIT'),
+      installer.indexOf('gethome-hubctl'),
+    );
+
+    for (const unit of [hubUnit, z2mUnit]) {
+      expect(unit).not.toBe('');
+      // Optional, with a leading dash: a hub whose installer could not set a
+      // password up has no such file and must still start.
+      expect(unit).toMatch(/^EnvironmentFile=-\$\{CONF_DIR\}\/mqtt\.env$/m);
+    }
+
+    // **Order is the rollback story.** `install.sh` puts the previous build
+    // back when a new one fails its health check, and that build may predate
+    // MQTT_USERNAME — but every build the hub has ever had reads MQTT_URL, and
+    // a later EnvironmentFile is the one that wins.
+    const hubEnvAt = hubUnit.indexOf('EnvironmentFile=${CONF_DIR}/hub.env');
+    const mqttEnvAt = hubUnit.indexOf('EnvironmentFile=-${CONF_DIR}/mqtt.env');
+    expect(hubEnvAt).toBeGreaterThan(-1);
+    expect(mqttEnvAt, 'mqtt.env has to be read after hub.env').toBeGreaterThan(hubEnvAt);
+
+    const credentials = heredoc('MQTTENV');
+    expect(credentials).toMatch(/^MQTT_URL=mqtt:\/\/\$\{MQTT_HUB_USER\}:/m);
+    expect(credentials).toMatch(/^MQTT_USERNAME=/m);
+    expect(credentials).toMatch(/^MQTT_INTEGRATION_USERNAME=/m);
+    // Zigbee2MQTT reads its own names for the same account — an override, never
+    // an edit to configuration.yaml, which holds the network key.
+    expect(credentials).toMatch(/^ZIGBEE2MQTT_CONFIG_MQTT_USER=/m);
+    expect(credentials).toMatch(/^ZIGBEE2MQTT_CONFIG_MQTT_PASSWORD=/m);
+    expect(installer, 'the file holds every password on this machine')
+      .toMatch(/chmod 0600 "\$MQTT_ENV"/);
   });
 
   it('refuses 32-bit systems by name, and only builds 64-bit bundles', () => {

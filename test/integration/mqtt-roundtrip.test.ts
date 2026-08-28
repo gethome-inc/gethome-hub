@@ -24,6 +24,7 @@ import {
   resetDb,
   loadedAccess,
   startedHistory,
+  testBroker,
 } from '../helpers/db.js';
 
 /**
@@ -120,6 +121,7 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
       dataDir,
       radioBudget: 'both',
       z2mDataDir: path.join(dataDir, 'zigbee2mqtt'),
+      mqtt: testBroker(),
       zigbee,
       permitJoin: new PermitJoinService(zigbee, log, () => {}),
       aiRuns: new AiRunLog(db, events),
