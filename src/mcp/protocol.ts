@@ -33,6 +33,14 @@
  *
  * Adding it back is a real piece of work, not a line: `server/discover`, per
  * request `_meta` validation, and a second dispatch path beside this one.
+ *
+ * **And nothing is broken by staying here until mid-2027.** A 2026-07-28
+ * client falls back to the `initialize` handshake against a server on
+ * 2025-11-25 or older — that fallback is in the official SDKs, and it is what
+ * the revision's twelve-month deprecation window is for. The stateless core
+ * that revision is named for is something this endpoint already has, so the
+ * gap is the discovery flow and the extensions framework. Revisit when a
+ * client we care about pins the new version, or when that window closes.
  */
 export const SUPPORTED_PROTOCOL_VERSIONS = [
   '2025-11-25',

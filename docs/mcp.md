@@ -88,7 +88,9 @@ claude mcp add --transport http gethome \
 ```
 
 **Claude Desktop** — its config takes stdio servers only, so it goes through
-`mcp-remote`. In `claude_desktop_config.json`:
+`mcp-remote`. This is the whole of `claude_desktop_config.json`; if yours
+already has an `mcpServers` block, put the `gethome` entry inside it rather than
+pasting a second one:
 
 ```json
 {
@@ -478,6 +480,18 @@ told at the worst moment — a client that sends no version, or one we do not
 know, is answered with the newest entry, so it would be handed `2026-07-28` and
 could proceed on a dispatch path this endpoint answers `-32601` to. Supporting
 it is real work, not a line in a list.
+
+**Nothing is broken by that today, and the deadline is July 2027.** A
+2026-07-28 client falls back to the `initialize` handshake when it meets a
+server on 2025-11-25 or earlier — that fallback is in the official SDKs, and it
+is what the revision's twelve-month deprecation window is for. The cost of
+staying here is one extra round trip while such a client probes with
+`server/discover` and is refused, and a client *pinned* to 2026-07-28 (an
+opt-in mode, not the default) refusing this hub outright. The headline of that
+revision is a stateless core, which this endpoint already is — no
+`Mcp-Session-Id`, no per-session state — so what is left to gain is the
+discovery flow and the extensions framework, neither of which anything here
+asks for. Revisit when a client we care about pins it, or by mid-2027.
 
 ## Managing it
 
