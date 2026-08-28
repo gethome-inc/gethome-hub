@@ -211,7 +211,7 @@ export async function sendAndConfirm(
   endpoint: RegistryEndpoint,
   command: HubCommand,
 ): Promise<CommandOutcome> {
-  const settled = waitForAnswer(events, device.id);
+  const settled = waitForAnswer(events, device.id, endpoint.endpointId);
 
   try {
     await registry.execute(device.id, endpoint.endpointId, command);
@@ -234,7 +234,14 @@ export async function sendAndConfirm(
 
   if (answer.kind === 'changed') {
     const fresh = registry.getDevice(device.id) ?? device;
-    const state = describeState(fresh, primaryEndpoint(fresh));
+    // The endpoint that was commanded, not the device's first one. On a
+    // two-gang switch those are different endpoints, and reporting the state
+    // of the one nobody touched is the same class of wrong as settling on its
+    // report — a confident sentence about the other gang.
+    const answered =
+      fresh.endpoints.find((candidate) => candidate.endpointId === endpoint.endpointId) ??
+      primaryEndpoint(fresh);
+    const state = describeState(fresh, answered);
     return { ok: true, summary: `${device.name} is now ${state}.`, state };
   }
 
@@ -255,17 +262,33 @@ type Answer =
 /**
  * Listen for whichever of the two frames arrives first, then always detach.
  *
+ * **A device is not an endpoint, and confirmation has to match the endpoint
+ * that was commanded.** A two-gang switch is one device with two endpoints,
+ * and its second gang reports on its own — so a `stateChanged` for the device
+ * was enough to settle this waiter as a *success* even when the report came
+ * from an endpoint nobody had touched and the commanded one had not answered
+ * yet. That turned "the light is now on" into a sentence about a different
+ * switch entirely.
+ *
+ * `commandFailed` is matched on the device alone because that is all the bus
+ * carries — `CommandFailure` has no `endpointId` (see `core/bus.ts`). The
+ * asymmetry is deliberate rather than overlooked: a stray failure makes this
+ * report a refusal it cannot fully attribute, which is the safe direction, and
+ * narrowing it would mean widening a wire contract two apps already read.
+ *
  * The bus is capped at 100 listeners because the WebSocket fan-out attaches
  * one per client, so a listener left behind by a tool call is a leak that
  * eventually silences the whole hub with a MaxListeners warning. Both
  * listeners come off on every path out of here, including the throw above.
  */
-function waitForAnswer(events: HubEventBus, deviceId: string) {
+function waitForAnswer(events: HubEventBus, deviceId: string, endpointId: number) {
   let done: ((answer: Answer) => void) | undefined;
   let timer: NodeJS.Timeout | undefined;
 
-  const onChanged = (changedId: string) => {
-    if (changedId === deviceId) finish({ kind: 'changed' });
+  const onChanged = (changedId: string, changedEndpointId: number) => {
+    if (changedId === deviceId && changedEndpointId === endpointId) {
+      finish({ kind: 'changed' });
+    }
   };
   const onFailed = (failure: CommandFailure) => {
     if (failure.deviceId === deviceId) finish({ kind: 'failed', failure });

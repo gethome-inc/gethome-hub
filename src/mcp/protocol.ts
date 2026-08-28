@@ -13,9 +13,28 @@
  * formats; `server.ts` supplies the handlers.
  */
 
-/** Spec revisions this server will agree to speak. Newest first. */
+/**
+ * Spec revisions this server will agree to speak. Newest first.
+ *
+ * **`2026-07-28` is deliberately absent, and it is not a matter of being
+ * behind.** That revision is a different protocol wearing the same name: it
+ * *removes* the `initialize` / `notifications/initialized` handshake, makes
+ * every request self-describing through `_meta`
+ * (`io.modelcontextprotocol/protocolVersion`, `/clientInfo`,
+ * `/clientCapabilities`), retires `Mcp-Session-Id`, and **requires** servers to
+ * implement `server/discover`. This server implements the handshake and none
+ * of that.
+ *
+ * Listing it anyway would be a lie told at the worst moment: a client that
+ * sends no `protocolVersion` — or one we do not know — is answered with the
+ * newest entry here, so it would be told `2026-07-28` and could then proceed
+ * on the modern dispatch path, which this endpoint answers `-32601` to. The
+ * version we name has to be one we can actually behave like.
+ *
+ * Adding it back is a real piece of work, not a line: `server/discover`, per
+ * request `_meta` validation, and a second dispatch path beside this one.
+ */
 export const SUPPORTED_PROTOCOL_VERSIONS = [
-  '2026-07-28',
   '2025-11-25',
   '2025-06-18',
   '2025-03-26',

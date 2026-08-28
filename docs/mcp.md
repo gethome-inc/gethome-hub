@@ -328,7 +328,9 @@ So `control_device` sends, then waits up to **1.5 seconds** for one of those,
 and answers with whichever happened:
 
 - **the device reported new state** — it worked, and the summary says what the
-  device now *is*;
+  device now *is*. The report has to come from the endpoint that was commanded:
+  a two-gang switch is one device with two endpoints, and its other gang
+  reporting is not news about this one;
 - **the hub reported a failure** — it did not, and the summary is the protocol's
   own words rather than a paraphrase, because only the adapter knows what
   "unreachable" meant here;
@@ -464,8 +466,18 @@ every handler, with fan-out and partial failure to get right, for a shape the
 spec has dropped.
 
 Version negotiation answers with the client's own version when it is one of
-`2026-07-28`, `2025-11-25`, `2025-06-18` or `2025-03-26`, and with our newest
-otherwise, leaving the client to decide whether it can live with that.
+`2025-11-25`, `2025-06-18` or `2025-03-26`, and with our newest otherwise,
+leaving the client to decide whether it can live with that.
+
+**`2026-07-28` is deliberately not in that set**, and not because we are behind:
+that revision is a different protocol under the same name. It removes the
+`initialize` handshake, makes every request self-describing through `_meta`,
+retires `Mcp-Session-Id`, and *requires* servers to implement `server/discover`.
+This one implements the handshake and none of that. Naming it would be a lie
+told at the worst moment — a client that sends no version, or one we do not
+know, is answered with the newest entry, so it would be handed `2026-07-28` and
+could proceed on a dispatch path this endpoint answers `-32601` to. Supporting
+it is real work, not a line in a list.
 
 ## Managing it
 

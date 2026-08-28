@@ -15,7 +15,7 @@ import { PermitJoinService } from '../src/core/permit-join.js';
 import { AiRunLog } from '../src/core/ai-runs.js';
 import { MappingLibrary } from '../src/ai/library.js';
 import { McpTokenService } from '../src/mcp/tokens.js';
-import { LATEST_PROTOCOL_VERSION } from '../src/mcp/protocol.js';
+import { LATEST_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS } from '../src/mcp/protocol.js';
 import type { AdapterBus, ProtocolAdapter } from '../src/adapters/adapter.js';
 import type { HubCommand } from '../src/schema/index.js';
 import { bootedHome, loadedAccess, openTestDb, resetDb, startedHistory } from './helpers/db.js';
@@ -29,6 +29,12 @@ class FakeAdapter implements ProtocolAdapter {
   executed: Array<{ externalId: string; endpointId: number; command: HubCommand }> = [];
   /** When set, `execute` reports the write as having failed on the device. */
   failWith: string | null = null;
+  /**
+   * When set, `execute` answers with a `stateChanged` for this endpoint rather
+   * than staying silent — so a test can have the *wrong* gang of a two-gang
+   * switch report while the commanded one says nothing.
+   */
+  reportOnEndpoint: number | null = null;
   async start(bus: AdapterBus) {
     this.bus = bus;
   }
@@ -41,6 +47,9 @@ class FakeAdapter implements ProtocolAdapter {
         kind: 'unreachable',
         detail: this.failWith,
       });
+    }
+    if (this.reportOnEndpoint !== null) {
+      this.bus!.stateChanged('mqtt', externalId, this.reportOnEndpoint, { onOff: true });
     }
   }
 }
@@ -152,6 +161,17 @@ describe.skipIf(!handle)('MCP server', () => {
       suggestedName: 'Desk lamp',
       endpoints: [{ endpointId: 1, deviceKind: 'light', capabilities: ['onOff'], primary: 'onOff' }],
     });
+    // One device, two gangs — the shape that made a report from the endpoint
+    // nobody touched read as confirmation of the one that was commanded.
+    adapter.bus!.deviceUpserted({
+      adapter: 'mqtt',
+      externalId: 'switch-2gang',
+      suggestedName: 'Hall switch',
+      endpoints: [
+        { endpointId: 1, deviceKind: 'wallSwitch', capabilities: ['onOff'], primary: 'onOff' },
+        { endpointId: 2, deviceKind: 'wallSwitch', capabilities: ['onOff'], primary: 'onOff' },
+      ],
+    });
     await registry.flush();
     adapter.bus!.stateChanged('mqtt', 'lamp-1', 1, {
       onOff: true,
@@ -178,6 +198,30 @@ describe.skipIf(!handle)('MCP server', () => {
       const body = response.json() as { result: { protocolVersion: string; serverInfo: unknown } };
       expect(body.result.protocolVersion).toBe('2025-06-18');
       expect(body.result.serverInfo).toMatchObject({ name: 'gethome-hub' });
+    });
+
+    it('never advertises a revision whose dispatch this server does not implement', async () => {
+      // `2026-07-28` removes the initialize handshake, makes every request
+      // self-describing through `_meta` and *requires* `server/discover`. This
+      // server implements the handshake and none of that, so naming it would
+      // hand a modern client a version it would then act on — and every one of
+      // its calls would come back -32601.
+      expect(SUPPORTED_PROTOCOL_VERSIONS).not.toContain('2026-07-28');
+      expect(LATEST_PROTOCOL_VERSION).toBe('2025-11-25');
+
+      const discover = await rpc({ jsonrpc: '2.0', id: 1, method: 'server/discover' });
+      expect((discover.json() as { error: { code: number } }).error.code).toBe(-32_601);
+    });
+
+    it('answers a client that sends no version at all with one it can honour', async () => {
+      const response = await rpc({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: { capabilities: {} },
+      });
+      const body = response.json() as { result: { protocolVersion: string } };
+      expect(SUPPORTED_PROTOCOL_VERSIONS).toContain(body.result.protocolVersion);
     });
 
     it('falls back to its own newest version for one it does not know', async () => {
@@ -306,13 +350,13 @@ describe.skipIf(!handle)('MCP server', () => {
   describe('reading the home', () => {
     it('describes the home', async () => {
       const answer = await call('get_home');
-      expect(answer.result?.structuredContent).toMatchObject({ name: 'Test Home', deviceCount: 2 });
+      expect(answer.result?.structuredContent).toMatchObject({ name: 'Test Home', deviceCount: 3 });
     });
 
     it('lists devices as one line each, never full state', async () => {
       const answer = await call('list_devices');
       const devices = answer.result?.structuredContent.devices as Array<Record<string, unknown>>;
-      expect(devices).toHaveLength(2);
+      expect(devices).toHaveLength(3);
       expect(devices[0]).toHaveProperty('ref');
       expect(devices[0]).not.toHaveProperty('endpoints');
       expect(answer.result?.content[0]?.text).toContain('Desk lamp');
@@ -396,6 +440,35 @@ describe.skipIf(!handle)('MCP server', () => {
       adapter.failWith = null;
       expect(answer.result?.isError).toBe(true);
       expect(answer.result?.content[0]?.text).toContain('Device did not respond');
+    });
+
+    it('does not read another endpoint’s report as confirmation', async () => {
+      adapter.executed = [];
+      // The command goes to endpoint 1; the *other* gang reports.
+      adapter.reportOnEndpoint = 2;
+      const answer = await call('control_device', {
+        device: 'Hall switch',
+        action: { action: 'on' },
+      });
+      adapter.reportOnEndpoint = null;
+
+      expect(adapter.executed[0]?.endpointId).toBe(1);
+      // Not confirmed: the endpoint that was commanded never answered.
+      expect(answer.result?.content[0]?.text).toContain('has not reported back yet');
+      expect(answer.result?.content[0]?.text).not.toContain('is now');
+    });
+
+    it('reads the commanded endpoint’s own report as confirmation', async () => {
+      adapter.executed = [];
+      adapter.reportOnEndpoint = 1;
+      const answer = await call('control_device', {
+        device: 'Hall switch',
+        action: { action: 'on' },
+      });
+      adapter.reportOnEndpoint = null;
+
+      expect(answer.result?.content[0]?.text).toContain('is now');
+      expect(answer.result?.structuredContent.ok).toBe(true);
     });
 
     it('writes a line in the home’s history naming the assistant', async () => {
