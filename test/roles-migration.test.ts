@@ -86,8 +86,11 @@ describe('the roles migration', () => {
       )
       .run('33333333-3333-4333-a333-333333333333', 'a'.repeat(64), 'member', now + 900_000, now);
 
-    // …and then the release that adds roles.
-    apply(sqlite, ROLES_MIGRATION - 1, ROLES_MIGRATION);
+    // …and then the release that adds roles, and everything since. The claim
+    // is about what an old hub ends up holding *today*, so it has to be
+    // evaluated at HEAD: `0006` grants `hub.ai` to the member row this
+    // migration created, and stopping at `0004` would leave that unproven.
+    apply(sqlite, ROLES_MIGRATION - 1, migrationFiles.length);
 
     const db = drizzle(sqlite, { schema });
     const access = new AccessService(db, new HubEventBus());
@@ -100,8 +103,10 @@ describe('the roles migration', () => {
       ...PERMISSION_KEYS,
     ]);
 
-    // The member holds precisely what the routes marked `authed` used to allow,
-    // and none of what `ownerOnly` used to refuse.
+    // The member holds what the routes marked `authed` used to allow, plus the
+    // two keys deliberately moved since — `hub.update` and `hub.ai`, both for
+    // the same reason: the owner is a Mac in a drawer, so owner-only meant the
+    // phone in somebody's hand could never do it at all.
     const anna = '22222222-2222-4222-a222-222222222222';
     expect(access.roleFor(anna)?.key).toBe('member');
     expect(access.permissionsFor(anna)).toEqual([...BUILTIN_ROLES[1].permissions]);
@@ -113,6 +118,11 @@ describe('the roles migration', () => {
       // `POST /system/update` was `authed` too by the time this landed, and a
       // phone that could update the hub yesterday has to be able to today.
       'hub.update',
+      // `hub.ai` never was, and is the one thing this migration *changes*
+      // rather than preserves. It is granted by an `UPDATE` because
+      // `ensureBuiltins()` would not reach a row that already exists — which
+      // is exactly the case this suite is set up to reproduce.
+      'hub.ai',
     ] as const) {
       expect(access.can(anna, wasAuthed), wasAuthed).toBe(true);
     }
@@ -124,7 +134,6 @@ describe('the roles migration', () => {
       'home.rename',
       'member.invite',
       'member.remove',
-      'hub.ai',
       'role.manage',
     ] as const) {
       expect(access.can(anna, wasOwnerOnly), wasOwnerOnly).toBe(false);

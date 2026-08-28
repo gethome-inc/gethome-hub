@@ -15,7 +15,7 @@ The `docs/` files are canonical for their domains; read the relevant one before
 touching that code: `architecture.md` (module boundaries, data flow),
 `device-schema.md` (**the** capability/unit/wire contract), `api.md`,
 `zigbee.md`, `matter.md`, `mqtt-integrations.md` (public integrator
-convention), `ai-adaptation.md`, `ecosystem.md`.
+convention), `ai-adaptation.md`, `portraits.md`, `ecosystem.md`.
 
 **There is no Docker and no database server anywhere any more.** The hub runs as
 systemd units (`deploy/install.sh`, `deploy/gethome-hubctl`) and the store is a
@@ -166,11 +166,26 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   every call, so a key added later works without a restart.
 - **AI mappings are data, not code**: `MappingDescriptor`
   (`src/ai/descriptor.ts`) is zod-validated and interpreted. Never execute
-  model output. The mapping is produced by an autonomous agent
-  (`src/ai/agent.ts` — a tool-use loop on the Anthropic Messages API with the
-  server-side `web_search`/`web_fetch` research tools, `submit_mapping` as its
-  only answer channel, backoff on account failures; `docs/ai-adaptation.md` is
-  canonical), authenticated with the owner's Anthropic API key.
+  model output. The mapping is produced by an autonomous agent with
+  `submit_mapping` as its only answer channel and backoff on account failures
+  (`docs/ai-adaptation.md` is canonical), authenticated with the home's own API
+  key.
+  **There are two agents and one run.** `src/ai/agent-core.ts` holds everything
+  that is not a vendor's API — the guardrails, the `AgentStep` vocabulary, the
+  `submit_mapping` schema, `evaluateSubmission`, the `MappingProvider` seam —
+  and **imports no SDK**, which is the load-bearing half: a home configured with
+  only an OpenAI key must never load the Anthropic SDK to satisfy an import
+  chain, so `resolveProvider()` imports whichever half it needs. `agent.ts` is
+  the Anthropic loop (Messages API, server-side `web_search`/`web_fetch`);
+  `openai-agent.ts` is the same run on the Responses API over plain `fetch` —
+  no second SDK for a Pi to download — with hosted search and **no fetch tool**,
+  because there is no hosted equivalent and giving the *hub* one would break the
+  documented promise that it opens no connection to third-party sites.
+  Two rules for the pair. **Effort is `high` on both and is not exposed**: the
+  cost lever somebody can actually calibrate is the model, and two settings for
+  one decision is one too many. And **the hub owns the model list** — the apps
+  render `providers.<name>.models` rather than shipping ids of their own, the
+  `GET /permissions` rule applied to a vocabulary that moves.
   **It used to run on the Claude Agent SDK, and moving off it was a memory
   decision like dropping Docker.** That SDK ships a 276 MB native binary — 74%
   of the hub's whole download — and spawned a ~315 MB subprocess per run, of
@@ -481,9 +496,30 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   pin all of these.
 - The Matter reducer (`src/adapters/matter/reducer.ts`) is a 1:1 port of the
   iOS `MatterStateReducer` — keep them in lockstep if either changes.
-- Secrets: tokens are stored sha256-only; the AI credential (an Anthropic API
-  key) AES-256-GCM-encrypted with the hub secret (`<data>/hub-secret.json`,
-  0600); the API never returns key material. Keep it that way.
+- Secrets: tokens are stored sha256-only; each AI credential (an Anthropic key,
+  an OpenAI key, one slot per provider) AES-256-GCM-encrypted with the hub
+  secret (`<data>/hub-secret.json`, 0600); the API never returns key material.
+  Keep it that way — it is also the reason portraits are drawn *here* rather
+  than by handing a phone the key.
+- **A device's portrait is the house's, so the hub draws it and keeps it**
+  (`src/portraits/`, `docs/portraits.md` is canonical). The app used to do this
+  with a key in its own Keychain and the images in its own storage, which made a
+  picture one phone's: a second person opened the same kettle and saw a grey
+  sphere. Four rules. **The bytes are files, the record is a row** —
+  `<data>/portraits/<device>/<id>.png` beside a `device_portraits` row, because
+  a 1024² PNG through the WAL is the write amplification the rest of the store
+  is arranged to avoid. **This is not the `STATE_FLUSH_MS` case**: every other
+  bound here is about write *frequency*, and a portrait is one deliberate write
+  per press — so it gets a bound on *bulk* instead (6 per device, 300 MB per
+  hub, oldest-unselected first) plus the one thing only a large file needs, a
+  refusal to draw below 500 MB free. **A selected portrait is never evicted**,
+  and `selected: null` while portraits exist is a *state* — the procedural
+  sphere, chosen — rather than an absence, which is what saves a column meaning
+  the same thing twice. And **no thumbnails are made here**: that would mean a
+  native image library on a 415 MB board for something each app already derives
+  and caches. `gpt-image-1.5` is pinned because it still supports transparent
+  backgrounds, which is the whole point of a cut-out the apps float over their
+  own glow.
 - **`<data>/pairing-code` is a contract, and it now *survives* restarts.** It
   used to be re-minted on every boot, and that was the bug: any code that had
   been read — `install.sh`'s `@@PAIRING@@` marker, or a value Studio fetched a
@@ -1055,7 +1091,8 @@ After landing a change, update the docs it invalidates in the same change:
 schema/units/wire → `docs/device-schema.md` (+ the iOS repo needs a matching
 change — flag it); routes/auth → `docs/api.md`; adapter behavior/topics →
 `docs/zigbee.md` / `docs/matter.md` / `docs/mqtt-integrations.md`; AI
-trigger/DSL → `docs/ai-adaptation.md`; module boundaries → this file +
+trigger/DSL → `docs/ai-adaptation.md`; portraits → `docs/portraits.md`;
+module boundaries → this file +
 `docs/architecture.md`; installer markers, autostart or Zigbee detection →
 `docs/zigbee.md` + the marker list in `deploy/install.sh` (and flag the Studio
 repo); anything README restates → `README.md`.

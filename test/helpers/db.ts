@@ -9,12 +9,14 @@ import { HomeService } from '../../src/core/home.js';
 import { FavoritesService } from '../../src/core/favorites.js';
 import { AccessService } from '../../src/core/access.js';
 import { HistoryService } from '../../src/core/history.js';
+import { PortraitService } from '../../src/portraits/store.js';
 import type { HubEventBus } from '../../src/core/bus.js';
 import {
   activity,
   aiMappings,
   aiRuns,
   deviceFavorites,
+  devicePortraits,
   devices,
   endpoints,
   history,
@@ -68,6 +70,7 @@ export async function resetDb(db: Db): Promise<void> {
   await db.delete(history);
   await db.delete(historySeries);
   await db.delete(deviceFavorites);
+  await db.delete(devicePortraits);
   await db.delete(devices);
   await db.delete(members);
   // Built-in roles are seeded by the migration and are part of the schema a
@@ -126,4 +129,18 @@ export async function startedHistory(db: Db, events: HubEventBus): Promise<Histo
   const service = new HistoryService(db, events, pino({ level: 'silent' }));
   await service.start();
   return service;
+}
+
+/**
+ * A portrait service writing into a temp directory. Nothing here draws — that
+ * needs an OpenAI key — so a suite gets the routes, the rows and the bounds
+ * without a network.
+ */
+export function testPortraits(db: Db, events: HubEventBus, dataDir?: string): PortraitService {
+  return new PortraitService(
+    db,
+    events,
+    dataDir ?? mkdtempSync(path.join(tmpdir(), 'gethome-portraits-')),
+    pino({ level: 'silent' }),
+  );
 }

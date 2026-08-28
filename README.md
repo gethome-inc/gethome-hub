@@ -26,9 +26,10 @@ hub can control them.
   device starts publishing later, are mapped into the schema by an
   autonomous mapping agent: it reads the device's published schema,
   researches it on the web (starting from the device's own Zigbee2MQTT
-  page), and submits a validated mapping (bring your own Anthropic API key;
-  stored encrypted on the hub, used only for this). No credential → devices
-  still appear, flagged "needs review". It can be switched off without
+  page), and submits a validated mapping. **Bring your own account** — an
+  Anthropic or an OpenAI API key, stored encrypted on the hub and used only for
+  this; with both, you choose which one does the research. No credential →
+  devices still appear, flagged "needs review". It can be switched off without
   deleting the key, every run is recorded (what it searched for, what it read,
   what it cost), and the answers are a **library** you can download from one
   hub, upload to another, or write yourself — a schema the hub can't use comes
@@ -36,6 +37,13 @@ hub can control them.
   Only a device's own published description is ever sent; the hub's traffic is
   structurally incapable of reaching the agent.
   ([docs/ai-adaptation.md](docs/ai-adaptation.md))
+- **Device portraits** — an AI-drawn picture of each device, the floating object
+  the GetHome app shows on a device's page. Drawn on the hub with the home's
+  OpenAI key and **stored on the hub**, so everybody in the home sees the same
+  kettle rather than one person's phone holding the only copy. Bounded on
+  purpose — a few per device, a few hundred megabytes in total, and it refuses
+  to draw at all when the card is nearly full.
+  ([docs/portraits.md](docs/portraits.md))
 - **One schema for everything** — 27 capabilities (including button/remote
   events, learn-and-replay IR blasters, and a universal generic-control
   fallback so *any* device parameter is usable), 16 device kinds, exact unit

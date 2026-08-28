@@ -197,6 +197,14 @@ export function attachWebSocket(
   const onStructure = (structure: HomeStructure) =>
     send({ type: 'structure', rooms: structure.rooms, zones: structure.zones });
   /**
+   * A device's portraits moved. Wired here **first**, before anything else in
+   * this change: `activity`, `hubStatus` and `access` each spent a release
+   * falling into a `default` arm and reaching nobody, and the pattern is now
+   * four for four — the always-on frames are the ones to wire before the
+   * heavy opt-in streams, not after.
+   */
+  const onPortraits = (deviceId: string) => send({ type: 'portraits', deviceId });
+  /**
    * One line of the home's history.
    *
    * Filtered per socket, and **asked at send time rather than captured when
@@ -274,6 +282,7 @@ export function attachWebSocket(
   deps.events.on('deviceRemoved', onRemoved);
   deps.events.on('commandFailed', onCommandFailed);
   deps.events.on('structureChanged', onStructure);
+  deps.events.on('portraitsChanged', onPortraits);
   deps.events.on('activity', onActivity);
   deps.events.on('accessChanged', onAccessChanged);
   deps.events.on('permitJoin', onPermitJoin);
@@ -422,6 +431,7 @@ export function attachWebSocket(
     deps.events.off('deviceRemoved', onRemoved);
     deps.events.off('commandFailed', onCommandFailed);
     deps.events.off('structureChanged', onStructure);
+    deps.events.off('portraitsChanged', onPortraits);
     deps.events.off('activity', onActivity);
     deps.events.off('accessChanged', onAccessChanged);
     deps.events.off('permitJoin', onPermitJoin);
