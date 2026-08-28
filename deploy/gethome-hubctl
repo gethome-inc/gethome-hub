@@ -327,12 +327,47 @@ cmd_mqtt() {
     echo "will stop working until you give it the new ones."
     read -r -p "Type 'rotate' to confirm: " answer
     [[ "$answer" == "rotate" ]] || { echo "Left alone."; return 1; }
-    $SUDO rm -f "$CONF_DIR/mqtt.env"
+
+    # ── Set the old credentials aside; never delete them ────────────────────
     # The installer mints a password when it finds none, writes the broker's
     # password file and ACL from it, and restarts everything that needs to
-    # reconnect. Doing any of that here would be a second copy of it.
-    cmd_update || die "the installer did not finish; the old passwords may still be in force."
+    # reconnect — so deleting this file is how the rotation is *asked for*.
+    # Doing any of that here would be a second copy of it.
+    #
+    # But deleting it outright is the "dead broker" trap reached from the one
+    # command meant to fix things. If the installer fails before it gets to
+    # the credential block — a dropped download, a full card — mosquitto is
+    # still enforcing the *old* password file while nothing on the machine can
+    # say what was in it, and the next restart of hubd or Zigbee2MQTT connects
+    # anonymously and is refused: Zigbee and MQTT down, with no way back short
+    # of running the installer again.
+    local kept="$CONF_DIR/mqtt.env.rotating"
+    $SUDO mv "$CONF_DIR/mqtt.env" "$kept" \
+      || die "could not set the current credentials aside; nothing was changed."
+    local update_failed=""
+    cmd_update || update_failed=1
+    # **The file being there is the authority, not the exit status.** The
+    # installer writes it in the same breath as the broker's password file, so
+    # a run that reached that point has rotated both — even if it failed later
+    # and rolled the build back. Putting the old file back then would leave
+    # the machine with credentials the broker no longer accepts.
+    if [[ -f "$CONF_DIR/mqtt.env" ]]; then
+      $SUDO rm -f "$kept"
+      [[ -n "$update_failed" ]] \
+        && echo "Note: the installer reported a problem, but the new passwords are in force."
+    else
+      $SUDO mv "$kept" "$CONF_DIR/mqtt.env" \
+        || die "the installer did not finish, and the old credentials could not be put back. They are in $kept."
+      die "the installer did not finish, so nothing was rotated — the old passwords are still in force."
+    fi
     echo
+  fi
+
+  # An interrupted rotation — Ctrl-C between the two moves above, or a reboot —
+  # leaves the credentials beside their own name and the hub with none. Putting
+  # them back is always right: the broker is still enforcing them.
+  if [[ ! -f "$CONF_DIR/mqtt.env" && -f "$CONF_DIR/mqtt.env.rotating" ]]; then
+    $SUDO mv "$CONF_DIR/mqtt.env.rotating" "$CONF_DIR/mqtt.env" 2>/dev/null || true
   fi
 
   if [[ ! -f "$CONF_DIR/mqtt.env" ]]; then
