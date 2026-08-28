@@ -207,16 +207,33 @@ export function createMappingAgent(
 
           let response: Anthropic.Message;
           try {
-            response = await client.messages.create(
+            // `stream()`, not `create()`, and that is load-bearing rather
+            // than a preference: the SDK refuses a non-streaming request
+            // whose `max_tokens` could take it past the API's ten-minute
+            // ceiling, and the threshold is 21,333 — so at MAX_OUTPUT_TOKENS
+            // every run threw `Streaming is required for operations that may
+            // take longer than 10 minutes` before it ever reached the
+            // network. Nothing here is displayed as it arrives, so
+            // `finalMessage()` collects the whole `Message` and the loop
+            // below is unchanged.
+            const stream = client.messages.stream(
               {
                 model: modelId,
                 max_tokens: MAX_OUTPUT_TOKENS,
-                // One cached breakpoint covers the tool definitions and the
-                // system prompt — the large, byte-identical prefix every turn
-                // of every run shares.
+                // Two breakpoints, which is what the Messages API asks of an
+                // agent loop. The explicit one covers the tool definitions
+                // and the system prompt — the large, byte-identical prefix
+                // every turn of every run shares, and tools sort ahead of
+                // system in the cached prefix. The top-level field then
+                // places a second one on the last block of `messages`, which
+                // is the half that was missing: this conversation carries the
+                // whole of the model's research and grows for up to
+                // AGENT_MAX_TURNS turns, and without it every turn re-sent
+                // all of it at full input price.
                 system: [
                   { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } },
                 ],
+                cache_control: { type: 'ephemeral' },
                 messages,
                 tools,
                 thinking: { type: 'adaptive' },
@@ -224,6 +241,7 @@ export function createMappingAgent(
               },
               { signal: controller.signal },
             );
+            response = await stream.finalMessage();
           } catch (error) {
             if (controller.signal.aborted) {
               throw new AiUnavailableError(

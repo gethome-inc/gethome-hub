@@ -125,8 +125,31 @@ named where they fall.
 4. **Guardrails**: at most 40 turns, a per-run cost cap computed from token
    usage (`src/ai/models.ts`), a 10-minute wall-clock watchdog, one run at a
    time hub-wide, and concurrent requests for the same device model share a
-   single run. The system prompt carries a cache breakpoint, so every turn
-   after the first reads the large static prefix at cache rates.
+   single run.
+
+**The Anthropic turn is streamed, and that is a requirement rather than a
+preference.** The SDK refuses a *non-streaming* request whose `max_tokens`
+could take the generation past the API's ten-minute ceiling — the line falls at
+21,333 output tokens and `MAX_OUTPUT_TOKENS` is 32,000 — so `messages.create`
+threw `Streaming is required for operations that may take longer than 10
+minutes` before a single request reached the network. Worse than the outright
+failure was its shape: the refusal carries no HTTP status, so `classifyApiError`
+read it as a transport problem, and a run that could never work armed the
+backoff gate and retried for ever with the real cause behind a retry timer —
+exactly what `errors.ts` warns about arming a gate over the hub's own bug.
+`messages.stream(…)` + `finalMessage()` collects the same `Message`, so nothing
+else in the loop changes. `test/ai-agent.test.ts` pins it, and its SDK mock
+reproduces the guard: the old mock stubbed `create` with a bare `vi.fn()`, which
+is more permissive than the real client, which is why a whole suite passed over
+an agent that could not make a request.
+
+**Two cache breakpoints, which is what an agent loop asks for.** The explicit
+one sits on the system prompt and covers the tool definitions with it (tools
+sort ahead of system in the cached prefix) — the large, byte-identical prefix
+every turn of every run shares. The top-level `cache_control` field then places
+a second on the last block of `messages`, and that is the half that was missing:
+this conversation carries the whole of the model's research and grows for up to
+40 turns, so without it every turn re-sent all of it at full input price.
 
 The result is still **data, not code**: whatever the model submits is
 re-validated by the mapper and interpreted rule-by-rule exactly like any

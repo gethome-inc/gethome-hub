@@ -195,6 +195,23 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   bundle went 117 MB → 29 MB. The cost is that Claude subscription tokens no
   longer authenticate; only API keys do, and `src/ai/models.ts` is an
   allowlist because the `_20260209` research tools need Opus 4.6+/Sonnet 4.6+.
+  **The Anthropic turn is streamed, and a mock that is laxer than the SDK is
+  how that went unnoticed.** `messages.create` refuses a non-streaming request
+  whose `max_tokens` could run past the API's ten-minute ceiling — the line is
+  21,333 and `MAX_OUTPUT_TOKENS` is 32,000 — so every run threw before it
+  reached the network, and because that refusal carries no HTTP status
+  `classifyApiError` read it as a transport failure: a run that could never
+  work armed the backoff gate and retried for ever, with the real cause behind
+  a retry timer. `messages.stream(…)` + `finalMessage()` returns the same
+  `Message`, so the loop is otherwise untouched. It survived 489 green tests
+  because `test/ai-agent.test.ts` stubbed `create` with a bare `vi.fn()`, which
+  accepts what the real client refuses — a mock more permissive than the thing
+  it stands in for tests the mock. It reproduces the guard now. **And there are
+  two cache breakpoints**: the explicit one on the system prompt (which covers
+  the tools with it — they sort ahead of system in the prefix), plus the
+  top-level `cache_control` field for the growing conversation tail, which
+  carries the whole of the model's research over up to 40 turns and was being
+  re-sent at full price every one of them.
 
 ## Conventions that bite if missed
 

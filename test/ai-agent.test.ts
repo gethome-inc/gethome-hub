@@ -16,16 +16,40 @@ import {
 
 // The agent constructs its own Anthropic client, so the loop is exercised by
 // mocking the SDK rather than by threading a client through the signature.
-const { createMock } = vi.hoisted(() => ({ createMock: vi.fn() }));
+//
+// **The mock reproduces the SDK's own client-side guards, and that is the
+// point of it rather than a flourish.** This file used to stub `create` with a
+// bare `vi.fn()`, which is strictly more permissive than the real SDK — so the
+// whole suite passed over an agent that could not make a single request: the
+// SDK refuses a *non-streaming* call whose `max_tokens` could run past the
+// API's ten-minute ceiling, and MAX_OUTPUT_TOKENS is well over that line. A
+// mock that accepts what the real client refuses does not test the code, it
+// tests the mock. `create` therefore throws exactly as the SDK does, and every
+// reply goes through `stream`.
+const { createMock, nonStreamingCeiling } = vi.hoisted(() => ({
+  createMock: vi.fn(),
+  // The SDK's arithmetic: a request is refused when its expected generation
+  // time (an hour per 128K output tokens) exceeds the ten-minute default.
+  nonStreamingCeiling: Math.floor((600_000 * 128_000) / 3_600_000),
+}));
 vi.mock('@anthropic-ai/sdk', () => ({
   default: class MockAnthropic {
-    messages = { create: createMock };
+    messages = {
+      create: async (params: { max_tokens: number }) => {
+        if (params.max_tokens > nonStreamingCeiling) {
+          throw new Error('Streaming is required for operations that may take longer than 10 minutes.');
+        }
+        return createMock(params);
+      },
+      stream: (params: unknown) => ({ finalMessage: async () => createMock(params) }),
+    };
   },
 }));
 
 const { AGENT_MAX_TURNS, createMappingAgent, evaluateSubmission, submitMappingTool } = await import(
   '../src/ai/agent.js'
 );
+const { MAX_OUTPUT_TOKENS } = await import('../src/ai/agent-core.js');
 
 // ── Failure classification ────────────────────────────────────────────────
 
@@ -409,6 +433,29 @@ describe('the mapping agent loop', () => {
     expect(toolTypes).toEqual(['web_search_20260209', 'web_fetch_20260209', 'submit_mapping']);
     expect(sent[0]!.system[0].cache_control).toEqual({ type: 'ephemeral' });
     expect(sent[0]!.model).toBe(DEFAULT_MODEL);
+  });
+
+  it('caches the conversation tail as well as the system prefix', async () => {
+    queue(reply({ stop_reason: 'tool_use', content: [submitCall(validDescriptor)] }));
+    await agent().generate('system prompt', 'user');
+
+    // Two breakpoints: the explicit one on the shared prefix, and the
+    // top-level field, which places a second on the last block of `messages`.
+    // Without it every turn re-sends the whole of the model's research at
+    // full input price, and this loop runs for up to AGENT_MAX_TURNS turns.
+    expect(sent[0]!.cache_control).toEqual({ type: 'ephemeral' });
+  });
+
+  it('streams, because MAX_OUTPUT_TOKENS is past what a plain request may ask for', async () => {
+    // The regression this file exists to stop coming back: at these token
+    // counts the SDK refuses a non-streaming call before it reaches the
+    // network, and the hub read that refusal as a transient *network* failure
+    // — so device recognition armed its backoff gate and retried for ever,
+    // with the real cause hidden behind the retry timer.
+    expect(MAX_OUTPUT_TOKENS).toBeGreaterThan(nonStreamingCeiling);
+
+    queue(reply({ stop_reason: 'tool_use', content: [submitCall(validDescriptor)] }));
+    await expect(agent().generate('system', 'user')).resolves.toMatchObject({ version: 1 });
   });
 
   it('resumes a paused turn without inserting a user message', async () => {
