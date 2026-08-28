@@ -104,7 +104,7 @@ than no button.
 | `GET /devices/:id/history?from=&to=&points=&series=` | floor | what this device's readings did over a window, already thinned to a drawable size — see [below](#recorded-readings-get-devicesidhistory). `from`/`to` are epoch ms and default to the last day; `from >= to` is `400 invalid_range`; an unknown device is `404` |
 | `GET /devices/:id/portraits` | floor | the pictures this home has had drawn of a device, newest first: `{id, at, bytes, provider, model, fromPhoto, selected}`. Reading is the floor — a portrait is what the device *looks like*, so a guest whose dashboard could not draw it would be looking at a different home. See [below](#device-portraits) |
 | `GET /portraits/:portraitId` | floor | the PNG itself — `image/png`, a strong `ETag` and `Cache-Control: immutable`, because a portrait's bytes never change (a new one gets a new id) |
-| `POST /devices/:id/portraits` | `hub.ai` | draw one. `{photo?: base64, photoType?}` — absent draws from the device's kind alone. Synchronous, and it holds the request for the tens of seconds an image takes. `409 openai_not_configured` (its own code: portraits are OpenAI's job, and a hub can be configured for recognition and not for this), `409 portrait_busy`, `409 no_space`, `502 {error:"provider_failed", kind, detail}` carrying OpenAI's own sentence |
+| `POST /devices/:id/portraits` | `hub.ai` | draw one. `{photo?: base64, photoType?}` — absent draws from the device's kind alone. Synchronous, and it holds the request for the minutes an image takes. `409 openai_not_configured` (its own code: portraits are OpenAI's job, and a hub can be configured for recognition and not for this), `409 portrait_busy`, `409 no_space`, `502 {error:"provider_failed", kind, detail}` carrying OpenAI's own sentence |
 | `PATCH /devices/:id/portraits` | `device.edit` | `{selected: id\|null}` — which one the home sees. `null` is a *state*: the procedural sphere, chosen over every picture there is |
 | `DELETE /portraits/:portraitId` | `device.edit` | forget one, file and row |
 | `POST /devices/:id/remap` | `hub.ai` | force-regenerate the AI mapping (Zigbee devices); the hub also remaps automatically when a device publishes unknown parameters — see [ai-adaptation.md](ai-adaptation.md). `409 ai_not_configured` with no credential, `409 ai_disabled` when the owner has switched adaptation off |
@@ -840,7 +840,7 @@ somebody chose the procedural sphere over every picture they have, which the
 apps have always offered and which would otherwise need a field of its own.
 
 Drawing is serialised hub-wide (`409 portrait_busy`) and synchronous: the
-request is held for the tens of seconds an image takes, which is what lets an
+request is held for the minutes an image takes, which is what lets an
 app run one uninterrupted animation from "reading your photo" to the finished
 portrait. If the phone gives up or walks out of range the hub finishes, stores
 and announces anyway — nothing is lost but the animation. Every change

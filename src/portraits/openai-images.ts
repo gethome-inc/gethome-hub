@@ -25,14 +25,36 @@ export const PORTRAIT_MODEL = 'gpt-image-2';
 const SIZE = '1024x1024';
 const QUALITY = 'high';
 
+/**
+ * Asked for rather than assumed, because two things downstream depend on it and
+ * neither would say so if it changed. `background: transparent` is honoured
+ * only on an alpha-capable format — JPEG is refused outright — and the store
+ * writes these bytes to `<id>.png` while the route serves them as `image/png`.
+ * PNG is the current default, which is exactly the kind of fact that moves
+ * under a model pin without anybody noticing.
+ */
+const OUTPUT_FORMAT = 'png';
+
 const GENERATIONS_URL = 'https://api.openai.com/v1/images/generations';
 const EDITS_URL = 'https://api.openai.com/v1/images/edits';
 
 /**
- * Generous: an image is a single request that genuinely takes tens of seconds,
- * and the app is holding its own request open behind this one.
+ * Ten minutes, and the number moved with the model.
+ *
+ * `gpt-image-1.5` answered in tens of seconds, so three minutes was generous.
+ * `gpt-image-2` at `quality: high` spends roughly fifteen times the image
+ * tokens on a 1024² frame and runs a four-stage understand-plan-generate-review
+ * pass: three to five minutes is the ordinary case, and OpenAI's own guidance
+ * for `high` is a timeout of ten. At three this deadline would have fired
+ * *before the ordinary case finished*, so almost every portrait would have
+ * come back "OpenAI took too long to answer" — a failure invented here, on a
+ * request the provider was still working on and had already billed.
+ *
+ * The one thing that makes a wait this long affordable is that nothing queues
+ * behind it: a second asker is refused with `portrait_busy` rather than made
+ * to wait out somebody else's five minutes as well as their own.
  */
-const TIMEOUT_MS = 3 * 60 * 1000;
+const TIMEOUT_MS = 10 * 60 * 1000;
 
 /** Something the caller can put on screen, with the vendor's own words in it. */
 export class PortraitDrawError extends Error {
@@ -69,6 +91,7 @@ export async function drawPortrait(options: DrawOptions): Promise<Buffer> {
           size: SIZE,
           n: 1,
           background: 'transparent',
+          output_format: OUTPUT_FORMAT,
           quality: QUALITY,
         }),
       };
@@ -111,6 +134,7 @@ function editForm(prompt: string, photo: { bytes: Buffer; contentType: string })
   form.set('size', SIZE);
   form.set('n', '1');
   form.set('background', 'transparent');
+  form.set('output_format', OUTPUT_FORMAT);
   form.set('quality', QUALITY);
   form.set(
     'image',

@@ -121,11 +121,23 @@ column that would otherwise mean the same thing twice.
 ## Serving
 
 One generation at a time, hub-wide (`409 portrait_busy`) — a Zero 2 W holds two
-of these in memory at once. The route is **synchronous**, holding the request
-for the tens of seconds an image takes, which is what lets an app run one
+of these in memory at once, and a queue would be worse than a refusal here for
+the reason in the next paragraph. The route is **synchronous**, holding the
+request for the minutes an image takes, which is what lets an app run one
 uninterrupted animation from "reading your photo" to the finished portrait. If
 the phone gives up, the hub finishes, stores and announces anyway: nothing is
 lost but the animation.
+
+**Budget minutes, not seconds, and set your own timeout from that.**
+`gpt-image-1.5` answered in tens of seconds; `gpt-image-2` at `quality: high`
+spends roughly fifteen times the image tokens on a 1024² frame and runs a
+four-stage understand-plan-generate-review pass, so three to five minutes is the
+ordinary case. The hub waits ten before it gives up — OpenAI's own guidance for
+`high` — so a client that gives up sooner is choosing to abandon its animation,
+not saving anybody the money: the request is billed and the picture is stored
+either way. It is also why a second asker is refused rather than queued; waiting
+out somebody else's five minutes before your own is not a queue anybody wants to
+be in.
 
 `GET /portraits/:id` is the first route in this API that answers something other
 than JSON. A portrait's bytes never change — a new one gets a new id — so it
