@@ -8,6 +8,7 @@ import { runMigrations } from '../../src/db/migrate.js';
 import { HomeService } from '../../src/core/home.js';
 import { FavoritesService } from '../../src/core/favorites.js';
 import { AccessService } from '../../src/core/access.js';
+import { McpTokenService } from '../../src/mcp/tokens.js';
 import { HistoryService } from '../../src/core/history.js';
 import type { HubEventBus } from '../../src/core/bus.js';
 import {
@@ -126,4 +127,15 @@ export async function startedHistory(db: Db, events: HubEventBus): Promise<Histo
   const service = new HistoryService(db, events, pino({ level: 'silent' }));
   await service.start();
   return service;
+}
+
+/**
+ * An `McpTokenService`, which is what `src/index.ts` hands the API.
+ *
+ * Nothing to load — it reads its table per call — but it is a required field
+ * on `ApiDeps`, so every suite that builds a server needs one and this is the
+ * one place that knows how to make it.
+ */
+export function mcpTokenService(db: Db): McpTokenService {
+  return new McpTokenService(db);
 }

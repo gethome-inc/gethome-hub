@@ -135,6 +135,14 @@ describe.skipIf(!handle)('access service', () => {
     // And `hub.update` is on the member side of that line, so a phone that
     // could update this hub before roles existed still can.
     expect(reloaded.can(oldMember, 'hub.update')).toBe(true);
+    // `hub.mcp` is on the other side of it. An assistant's token outlives
+    // every session it is used in and lives on a machine the home does not
+    // control, so it is the owner's to hand out — and adding the key must not
+    // quietly hand it to everybody who was already a member.
+    expect(reloaded.can(oldMember, 'hub.mcp')).toBe(false);
+    // The owner is never evaluated against a stored set, so a key added by a
+    // later build is theirs without any migration of role rows.
+    expect(reloaded.can(oldOwner, 'hub.mcp')).toBe(true);
   });
 
   // ── Members coming and going ──────────────────────────────────────────────

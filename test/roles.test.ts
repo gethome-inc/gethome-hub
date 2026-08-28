@@ -24,6 +24,7 @@ import {
   openTestDb,
   resetDb,
   startedHistory,
+  mcpTokenService
 } from './helpers/db.js';
 
 const handle = await openTestDb();
@@ -118,6 +119,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
       favorites: await loadedFavorites(db, events),
       access,
       pairing,
+      mcpTokens: mcpTokenService(db),
       activity,
       history: await startedHistory(db, events),
       settings,
@@ -245,6 +247,10 @@ describe.skipIf(!handle)('roles and permissions', () => {
       'member.remove',
       'role.manage',
       'hub.ai',
+      // Handing an outside assistant a door into the house is not a bounded
+      // act the way an update is: the token lives in a config file on somebody
+      // else's laptop until a person revokes it.
+      'hub.mcp',
     ]) {
       expect(member.permissions).not.toContain(ownerOnly);
     }
@@ -321,6 +327,10 @@ describe.skipIf(!handle)('roles and permissions', () => {
       ['PUT', '/api/v1/settings/radio', 'hub.radio', { mode: 'matter' }],
       ['DELETE', `/api/v1/devices/${deviceId}`, 'device.remove', undefined],
       ['GET', '/api/v1/settings/ai', 'hub.ai', undefined],
+      ['GET', '/api/v1/settings/mcp', 'hub.mcp', undefined],
+      ['PUT', '/api/v1/settings/mcp', 'hub.mcp', { enabled: true }],
+      ['POST', '/api/v1/settings/mcp/tokens', 'hub.mcp', { label: 'Sneaky' }],
+      ['DELETE', '/api/v1/settings/mcp/tokens/whatever', 'hub.mcp', undefined],
       ['POST', '/api/v1/invites', 'member.invite', {}],
       ['GET', '/api/v1/roles', '', undefined],
     ];
@@ -1156,6 +1166,78 @@ describe.skipIf(!handle)('roles and permissions', () => {
     });
     expect(allowed.statusCode).toBe(409);
     expect(allowed.json()).toMatchObject({ error: 'update_unsupported' });
+  });
+
+  /**
+   * The allowed half of `hub.mcp`.
+   *
+   * A permission tested only through its refusals can be broken by denying
+   * everybody, which is the failure this repository's own rule exists to
+   * catch — so the owner really does get through all four routes, and the
+   * plaintext really does come back exactly once.
+   */
+  it('lets an owner run assistant access end to end, and nobody else near it', async () => {
+    const off = await app.inject({
+      method: 'GET',
+      url: '/api/v1/settings/mcp',
+      headers: auth(ownerToken),
+    });
+    expect(off.statusCode).toBe(200);
+    expect(off.json()).toMatchObject({ enabled: false, tokens: [] });
+
+    const on = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/settings/mcp',
+      headers: auth(ownerToken),
+      payload: { enabled: true },
+    });
+    expect(on.statusCode).toBe(200);
+    expect(on.json()).toMatchObject({ enabled: true });
+
+    const minted = await app.inject({
+      method: 'POST',
+      url: '/api/v1/settings/mcp/tokens',
+      headers: auth(ownerToken),
+      payload: { label: 'Claude Desktop', canControl: true },
+    });
+    expect(minted.statusCode).toBe(201);
+    const token = minted.json() as { id: string; token: string; canControl: boolean };
+    expect(token.token.startsWith('ghm_')).toBe(true);
+    expect(token.canControl).toBe(true);
+
+    // …and it is never readable again.
+    const listed = await app.inject({
+      method: 'GET',
+      url: '/api/v1/settings/mcp',
+      headers: auth(ownerToken),
+    });
+    const body = listed.json() as { tokens: Array<Record<string, unknown>> };
+    expect(body.tokens).toHaveLength(1);
+    expect(body.tokens[0]).not.toHaveProperty('token');
+
+    // A member is not an owner here: this one is deliberately not in the
+    // member default set, unlike `hub.update`.
+    const refused = await app.inject({
+      method: 'GET',
+      url: '/api/v1/settings/mcp',
+      headers: auth(memberToken),
+    });
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json()).toMatchObject({ error: 'forbidden', permission: 'hub.mcp' });
+
+    const revoked = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/settings/mcp/tokens/${token.id}`,
+      headers: auth(ownerToken),
+    });
+    expect(revoked.statusCode).toBe(204);
+
+    await app.inject({
+      method: 'PUT',
+      url: '/api/v1/settings/mcp',
+      headers: auth(ownerToken),
+      payload: { enabled: false },
+    });
   });
 
   // ── What the wire actually carries ────────────────────────────────────────

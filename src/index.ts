@@ -17,6 +17,7 @@ import { PairingService } from './core/pairing.js';
 import { SettingsService } from './core/settings.js';
 import { DeviceRegistry } from './core/registry.js';
 import { AiRunLog } from './core/ai-runs.js';
+import { McpTokenService } from './mcp/tokens.js';
 import { MqttObserver } from './core/mqtt-observer.js';
 import { PermitJoinService } from './core/permit-join.js';
 import { activityForLifecycleEvent, normalizeBridgeEvent } from './core/zigbee-events.js';
@@ -108,6 +109,11 @@ async function main(): Promise<void> {
   // unconditionally: a hub with no key never writes a row, and the API still
   // has to be able to answer "nothing has run".
   const aiRuns = new AiRunLog(db, events);
+  // The credentials an assistant connects with. A plain table reader — the MCP
+  // server itself is loaded on demand by the API, only once a hub has actually
+  // been switched on, so a home that never uses this pays for nothing but this
+  // one object.
+  const mcpTokens = new McpTokenService(db);
 
   // Adapters are *constructed* here and *started* after the API is listening.
   // The modules are imported dynamically for one reason that matters on a small
@@ -178,6 +184,7 @@ async function main(): Promise<void> {
     favorites,
     access,
     pairing,
+    mcpTokens,
     activity,
     history,
     settings,

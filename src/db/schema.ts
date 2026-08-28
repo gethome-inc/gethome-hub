@@ -278,6 +278,52 @@ export const tokens = sqliteTable('tokens', {
   lastUsedAt: integer('last_used_at', { mode: 'timestamp_ms' }),
 });
 
+/**
+ * Tokens an assistant holds — the MCP server's own credential, deliberately
+ * **not** a row in `tokens` above.
+ *
+ * Two reasons, and the first is the load-bearing one. A member's token is the
+ * whole API: it passes `requireMember` and therefore every route the member's
+ * role allows. An MCP token is handed to a program running on somebody's
+ * laptop, configured once and left in a JSON file for months — so it is a
+ * different table verified by a different function, and an MCP token 401s on
+ * every REST route *by construction* rather than by a check somebody has to
+ * remember to write. The second is revocation: pulling an assistant's access
+ * must not sign a phone out, and one table per lifetime is what makes that
+ * true without a `kind` column every query would have to filter on.
+ *
+ * `memberId` is who minted it, so the activity log can name a person for what
+ * the assistant did, and so ending a membership takes its assistants with it
+ * (`ON DELETE CASCADE`, the same rule `tokens` follows).
+ *
+ * `revokedAt` rather than a delete: a row that is gone cannot say *why* a
+ * client that still holds the string is being refused, and the list a person
+ * reads is more useful for showing what was turned off than for hiding it.
+ * Verification checks it; the management route filters on it.
+ */
+export const mcpTokens = sqliteTable('mcp_tokens', {
+  id: uuidPk(),
+  /** What a person calls this connection — "Claude Desktop on the MacBook". */
+  label: text('label').notNull(),
+  memberId: text('member_id')
+    .notNull()
+    .references(() => members.id, { onDelete: 'cascade' }),
+  /** sha256 hex of the opaque token; the plaintext is shown once and never stored. */
+  tokenHash: text('token_hash').notNull().unique(),
+  /**
+   * Whether this connection may work the home, or only look at it.
+   *
+   * Chosen when the token is minted and never edited — "make my read-only
+   * assistant able to unlock the door" is a new decision, and a new decision
+   * deserves a new token rather than a switch on an old one that some config
+   * file somewhere is still holding.
+   */
+  canControl: integer('can_control', { mode: 'boolean' }).notNull().default(false),
+  createdAt: createdAt(),
+  lastUsedAt: integer('last_used_at', { mode: 'timestamp_ms' }),
+  revokedAt: integer('revoked_at', { mode: 'timestamp_ms' }),
+});
+
 export const invites = sqliteTable('invites', {
   id: uuidPk(),
   /** sha256 hex of the 8-digit invite code. */

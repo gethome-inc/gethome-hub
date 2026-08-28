@@ -17,7 +17,7 @@ import { AiRunLog } from '../src/core/ai-runs.js';
 import { MappingLibrary } from '../src/ai/library.js';
 import type { AdapterBus, ProtocolAdapter } from '../src/adapters/adapter.js';
 import type { HubCommand } from '../src/schema/index.js';
-import { bootedHome, loadedAccess, openTestDb, resetDb, startedHistory } from './helpers/db.js';
+import { bootedHome, loadedAccess, openTestDb, resetDb, startedHistory, mcpTokenService } from './helpers/db.js';
 
 const handle = await openTestDb();
 const log = pino({ level: 'silent' });
@@ -76,6 +76,7 @@ describe.skipIf(!handle)('hub API', () => {
       favorites,
       access,
       pairing,
+      mcpTokens: mcpTokenService(db),
       activity,
       history,
       settings,

@@ -132,6 +132,13 @@ export const PERMISSIONS: readonly PermissionDescriptor[] = [
     summary:
       'The API key and its switch, what the agent has spent, and the device-mapping library.',
   },
+  {
+    key: 'hub.mcp',
+    group: 'Hub',
+    title: 'Assistant access',
+    summary:
+      'Let an outside assistant see and work this home, and mint or revoke the tokens it connects with.',
+  },
 ] as const;
 
 export type PermissionKey =
@@ -146,7 +153,8 @@ export type PermissionKey =
   | 'role.manage'
   | 'hub.radio'
   | 'hub.update'
-  | 'hub.ai';
+  | 'hub.ai'
+  | 'hub.mcp';
 
 export const PERMISSION_KEYS: readonly PermissionKey[] = PERMISSIONS.map((entry) => entry.key);
 
@@ -177,6 +185,15 @@ export const BUILTIN_ROLES = [
      * is a laptop in a drawer and every phone joins by invite — owner-only
      * there did not mean "an update needs care", it meant the phone in the
      * owner's own hand could never update their own hub, ever.
+     *
+     * `hub.mcp` is deliberately **not** here, and it is the counter-example to
+     * the paragraph above. Updating is bounded: the installer rolls itself
+     * back, and the home is the same home afterwards. Handing an outside
+     * assistant a door into the house is neither bounded nor undone by
+     * anything the hub can do — the token lives in a config file on somebody
+     * else's laptop until a person revokes it. So it joins `member.invite`
+     * and `role.manage` on the owner's side of the line: grantable to a role
+     * a home decides to trust, never on by default.
      */
     permissions: [
       'device.edit',

@@ -1,4 +1,8 @@
-import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
+import Fastify, {
+  type FastifyBaseLogger,
+  type FastifyInstance,
+  type FastifyReply,
+} from 'fastify';
 import websocket from '@fastify/websocket';
 import { randomUUID } from 'node:crypto';
 import { eq, max } from 'drizzle-orm';
@@ -46,6 +50,7 @@ import {
   type PermissionKey,
 } from '../core/access.js';
 import { attachWebSocket, MemberSessions, UNAUTHORIZED_CLOSE_CODE } from './ws.js';
+import type { McpTokenService } from '../mcp/tokens.js';
 
 export interface ApiDeps {
   db: Db;
@@ -61,6 +66,7 @@ export interface ApiDeps {
   /** What the home's readings did over the last few days — `core/history.ts`. */
   history: HistoryService;
   settings: SettingsService;
+  mcpTokens: McpTokenService;
   /**
    * The hub's name, and the one place it lives. `GET /hub`, `GET /home` and the
    * WebSocket hello all read it from here, so a rename cannot move one of them
@@ -264,6 +270,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // an app would otherwise have to hard-code from this repository, which is
     // exactly how `activityRetentionNote` came to be deliberately vague.
     history: deps.history.describe(),
+    // Additive, and *only* a capability. Its presence says this build can run
+    // an MCP server at all, which is what lets an app decide whether to draw
+    // the section; whether one is actually switched on, and which assistants
+    // are connected, is behind `GET /settings/mcp`, because this route is
+    // public and a hub should not announce to the network that there is an
+    // assistant door and whether it is open.
+    mcp: { available: true },
     // Additive: an app that doesn't know about this field ignores it, and one
     // that does can say "plug a coordinator in" instead of showing an empty
     // Zigbee section with no explanation.
@@ -1589,6 +1602,195 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * Expect this process to be restarted a moment after a mode change that
    * actually moves Matter. The response is sent first.
    */
+  /**
+   * The MCP server — an assistant's door into the home.
+   *
+   * Four management routes and two that speak the protocol. The split matters:
+   * managing this needs `hub.mcp` and a *member's* token, while speaking MCP
+   * needs an **MCP token**, which is a different table verified by a different
+   * function (`src/mcp/tokens.ts`). An MCP token therefore 401s on every route
+   * above and below this one by construction rather than by a check somebody
+   * has to remember, and a member's token cannot drive the MCP endpoint.
+   *
+   * `docs/mcp.md` is canonical.
+   */
+
+  const mcpSettingsResponse = async () => ({
+    enabled: await deps.settings.getMcpEnabled(),
+    tokens: (await deps.mcpTokens.list()).map((token) => ({
+      id: token.id,
+      label: token.label,
+      canControl: token.canControl,
+      createdAt: token.createdAt.toISOString(),
+      lastUsedAt: token.lastUsedAt?.toISOString() ?? null,
+    })),
+  });
+
+  app.get('/api/v1/settings/mcp', needs('hub.mcp'), mcpSettingsResponse);
+
+  app.put('/api/v1/settings/mcp', needs('hub.mcp'), async (request) => {
+    const body = z.object({ enabled: z.boolean() }).parse(request.body);
+    const before = await deps.settings.getMcpEnabled();
+    await deps.settings.setMcpEnabled(body.enabled);
+    if (before !== body.enabled) {
+      await deps.activity.record({
+        kind: body.enabled ? 'mcp.enabled' : 'mcp.disabled',
+        message: body.enabled
+          ? 'Assistant access was switched on'
+          : 'Assistant access was switched off',
+        memberId: request.member!.id,
+        data: { memberName: request.member!.name },
+      });
+    }
+    return mcpSettingsResponse();
+  });
+
+  /**
+   * Mint a connection.
+   *
+   * The plaintext is in this response and nowhere else, ever — it is sha256'd
+   * on the way into the table, exactly as a member's token is. An app that
+   * loses it mints another and revokes the first; there is no route that reads
+   * one back, and adding one would make the table a store of live secrets
+   * instead of a store of hashes.
+   */
+  app.post('/api/v1/settings/mcp/tokens', needs('hub.mcp'), async (request, reply) => {
+    const body = z
+      .object({
+        label: z
+          .string()
+          .transform((value) => value.trim())
+          .pipe(z.string().min(1).max(80)),
+        canControl: z.boolean().default(false),
+      })
+      .parse(request.body);
+
+    const minted = await deps.mcpTokens.mint({
+      label: body.label,
+      canControl: body.canControl,
+      memberId: request.member!.id,
+    });
+
+    await deps.activity.record({
+      kind: 'mcp.token-added',
+      message: `${body.label} was given ${body.canControl ? 'control of' : 'read access to'} this home`,
+      memberId: request.member!.id,
+      data: {
+        memberName: request.member!.name,
+        client: body.label,
+        canControl: body.canControl,
+      },
+    });
+
+    return reply.code(201).send({
+      id: minted.id,
+      label: minted.label,
+      canControl: minted.canControl,
+      createdAt: minted.createdAt.toISOString(),
+      lastUsedAt: null,
+      token: minted.token,
+    });
+  });
+
+  app.delete('/api/v1/settings/mcp/tokens/:id', needs('hub.mcp'), async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const existing = (await deps.mcpTokens.list()).find((token) => token.id === id);
+    const revoked = await deps.mcpTokens.revoke(id);
+    if (!revoked) return reply.code(404).send({ error: 'unknown_token' });
+
+    await deps.activity.record({
+      kind: 'mcp.token-revoked',
+      message: `${existing?.label ?? 'An assistant'} no longer has access to this home`,
+      memberId: request.member!.id,
+      data: { memberName: request.member!.name, client: existing?.label },
+    });
+    return reply.code(204).send();
+  });
+
+  /**
+   * The MCP endpoint itself.
+   *
+   * Stateless Streamable HTTP: one POST carries one JSON-RPC message and the
+   * answer comes straight back as JSON. No `Mcp-Session-Id`, which the spec
+   * makes optional and which would buy nothing here — there is no per-session
+   * state to keep, and not keeping any is what makes this cost a Raspberry Pi
+   * nothing between calls.
+   *
+   * The module is loaded on first use and cached. A hub with MCP switched off
+   * never parses it at all, the same argument `src/index.ts` makes for
+   * `@matter/main`.
+   */
+  let mcpModule: typeof import('../mcp/handler.js') | undefined;
+  const loadMcp = async () => {
+    mcpModule ??= await import('../mcp/handler.js');
+    return mcpModule;
+  };
+
+  const answerMcp = async (body: unknown, reply: FastifyReply, token: string | null) => {
+    if (!(await deps.settings.getMcpEnabled())) {
+      // 404 rather than 403: a hub whose owner has not switched this on should
+      // not confirm to an unauthenticated caller that the feature is even here.
+      return reply.code(404).send({ error: 'not_found' });
+    }
+
+    if (!token) {
+      // A plain 401 with no `WWW-Authenticate`. Advertising OAuth here makes
+      // Claude Code drop the bearer header it was configured with and start a
+      // flow this hub cannot finish, so the absence of that header is
+      // load-bearing rather than an omission.
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+
+    const identity = await deps.mcpTokens.verify(token);
+    if (!identity) return reply.code(401).send({ error: 'unauthorized' });
+
+    const mcp = await loadMcp();
+    const answer = await mcp.answer({
+      body,
+      identity,
+      registry: deps.registry,
+      history: deps.history,
+      activity: deps.activity,
+      home: deps.home,
+      events: deps.events,
+      readStructure,
+      version: deps.version,
+      ...(deps.build ? { build: deps.build } : {}),
+    });
+
+    // A notification gets 202 and an empty body — the spec's rule, and the
+    // only one a client actually sends is `notifications/initialized`.
+    if (answer === null) return reply.code(202).send();
+    return reply.send(answer);
+  };
+
+  app.post('/api/v1/mcp', async (request, reply) =>
+    answerMcp(request.body, reply, extractToken(request)),
+  );
+
+  /**
+   * The same endpoint with the token in the path.
+   *
+   * For clients that can be handed a URL and nothing else — which is every
+   * client reached through a tunnel, since the connector UIs offer OAuth or
+   * nothing and have no field for a header. It is the same token, checked the
+   * same way; what it costs is that the secret is now in a URL, which is why
+   * the apps offer the header form first and name this as the fallback.
+   */
+  app.post('/api/v1/mcp/t/:token', async (request, reply) => {
+    const { token } = request.params as { token: string };
+    return answerMcp(request.body, reply, token);
+  });
+
+  /**
+   * The transport requires the endpoint to answer both verbs. This server
+   * never opens a server-initiated stream — there is nothing it would push —
+   * so the honest answer to a GET is that the method is not allowed.
+   */
+  app.get('/api/v1/mcp', async (_request, reply) =>
+    reply.code(405).header('Allow', 'POST').send({ error: 'method_not_allowed' }),
+  );
+
   app.put('/api/v1/settings/radio', needs('hub.radio'), async (request) => {
     // Built from the exported list rather than re-typed, so a mode added to
     // `core/radio.ts` cannot be one the API silently rejects.

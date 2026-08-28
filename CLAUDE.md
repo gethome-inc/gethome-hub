@@ -15,7 +15,8 @@ The `docs/` files are canonical for their domains; read the relevant one before
 touching that code: `architecture.md` (module boundaries, data flow),
 `device-schema.md` (**the** capability/unit/wire contract), `api.md`,
 `zigbee.md`, `matter.md`, `mqtt-integrations.md` (public integrator
-convention), `ai-adaptation.md`, `ecosystem.md`.
+convention), `ai-adaptation.md`, `mcp.md` (the assistant-facing face on the
+API), `ecosystem.md`.
 
 **There is no Docker and no database server anywhere any more.** The hub runs as
 systemd units (`deploy/install.sh`, `deploy/gethome-hubctl`) and the store is a
@@ -164,6 +165,25 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   static import loaded it whether or not the adapter was enabled. The AI
   mapper keeps the seam for a second reason — the credential check runs on
   every call, so a key added later works without a restart.
+- **`src/mcp/` is an assistant-facing face on the API, in-process and
+  dependency-free.** The hub speaks the Model Context Protocol so Claude (and
+  anything else that speaks it) can look at the home and work it —
+  `docs/mcp.md` is canonical. Four things are load-bearing. **No SDK**:
+  `@modelcontextprotocol/sdk` was in this graph once under the Agent SDK and
+  left with it, so MCP is implemented by hand in a few hundred lines and the
+  JSON Schema in `tools/list` comes from zod's own `z.toJSONSchema` — the
+  feature adds **no dependency at all**, which is the whole reason it fits.
+  **Loaded on demand**: `src/api/server.ts` imports it dynamically on the first
+  request to an enabled hub, the argument `index.ts` already makes for
+  `@matter/main`, so a home that never switches it on never parses the catalog.
+  **Its own credential table**: `mcp_tokens`, never `tokens`, so an MCP token
+  401s on every REST route by construction rather than by a check somebody has
+  to remember — and revoking an assistant does not sign a phone out. And **it
+  speaks human units** (percent, °C, kelvin, `openPercent: 100` is open),
+  converting through `src/schema/units.ts`, because the wire's conventions read
+  as nonsense out of context and a model given them acts on them: `setLevel`
+  takes 1–254, so "set it to twelve" becomes 5%, and a covering puts 0 at fully
+  *open*, so "close the blinds" sent as 0 throws them wide.
 - **AI mappings are data, not code**: `MappingDescriptor`
   (`src/ai/descriptor.ts`) is zod-validated and interpreted. Never execute
   model output. The mapping is produced by an autonomous agent
@@ -603,6 +623,28 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   be a dead end, since no route revokes an invite. So the codes go: an invite's
   whole content is "join as this", it lives fifteen minutes, and minting
   another is one tap.
+- **The MCP surface is part of the API, not a mirror of it — and a mirror
+  drifts.** `src/mcp/` puts an assistant-facing face on capability that already
+  exists, so a change to the device schema, the command union, the capability
+  list or the recorded quantities is not finished until `src/mcp/` and
+  `docs/mcp.md` say so too. This is the "keep the docs in sync" rule applied to
+  a **second consumer that nothing points at**: when the wire changes the apps
+  break loudly — a Codable model stops decoding, a switch stops being
+  exhaustive — and MCP does not. It goes on compiling and quietly stops being
+  able to do the new thing, on a hub nobody is looking at, for as long as it
+  takes somebody to notice. So it is pinned by a test rather than by memory.
+  `test/mcp-coverage.test.ts` asserts that every `HubCommandType` in
+  `COMMAND_TYPES`, every `CapabilityKind` and every `HistoryKind` is **either**
+  reachable through a tool **or** named in that file's excluded map with a
+  reason — so adding a command type fails the suite until somebody decides
+  which it is, which makes it a decision rather than an omission. It is the
+  same trade `test/migrations.test.ts` makes for a destructive migration, and
+  it has already earned itself once: it caught `toggle` on its first run, where
+  the MCP layer deliberately resolves the toggle locally so the answer can say
+  *what* it did rather than that something was toggled. Adding a route an
+  assistant would plausibly want is the half a test cannot check — that one is
+  on you, and the argument for leaving it out belongs in `docs/mcp.md`'s "what
+  is deliberately not exposed" table beside the others.
 - **Anything that touches a permission, a role, a guard or a default is not
   done until the four suites are.** This is the "Keep the docs in sync" rule
   applied to the part of the system where the *cost* of drifting is somebody
@@ -1053,7 +1095,8 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
 
 After landing a change, update the docs it invalidates in the same change:
 schema/units/wire → `docs/device-schema.md` (+ the iOS repo needs a matching
-change — flag it); routes/auth → `docs/api.md`; adapter behavior/topics →
+change — flag it, **and check `src/mcp/` still covers it**); routes/auth →
+`docs/api.md`; the MCP tools, their units or what they refuse → `docs/mcp.md`; adapter behavior/topics →
 `docs/zigbee.md` / `docs/matter.md` / `docs/mqtt-integrations.md`; AI
 trigger/DSL → `docs/ai-adaptation.md`; module boundaries → this file +
 `docs/architecture.md`; installer markers, autostart or Zigbee detection →

@@ -24,6 +24,7 @@ import {
   resetDb,
   loadedAccess,
   startedHistory,
+  mcpTokenService
 } from '../helpers/db.js';
 
 /**
@@ -111,6 +112,7 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
       favorites: await loadedFavorites(db, events),
       access,
       pairing,
+      mcpTokens: mcpTokenService(db),
       activity,
       history: await startedHistory(db, events),
       settings,

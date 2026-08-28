@@ -142,6 +142,28 @@ export class SettingsService {
     return decryptSecret(encrypted, this.aesKey);
   }
 
+  /**
+   * Whether the hub answers MCP at all.
+   *
+   * Off unless somebody says otherwise — the opposite of `ai_enabled`'s
+   * nil-means-on, and deliberately so. An absent `ai_enabled` means a hub
+   * configured before the switch existed, which was already doing adaptation;
+   * an absent `mcp_enabled` means a hub that has never been asked to let an
+   * outside assistant in, and the safe reading of silence there is "no".
+   *
+   * It lives here rather than in `hub.env` because `install.sh` writes that
+   * file only when it is absent, so a variable added there would never reach
+   * an upgraded hub — the same trap that made `<data>/update/enabled` a file
+   * rather than a `GETHOME_UPDATE=1` line.
+   */
+  async getMcpEnabled(): Promise<boolean> {
+    return (await this.get<boolean>('mcp_enabled')) === true;
+  }
+
+  async setMcpEnabled(enabled: boolean): Promise<void> {
+    await this.set('mcp_enabled', enabled);
+  }
+
   async getAiStatus(): Promise<AiStatus> {
     return (await this.get<AiStatus>('ai_status')) ?? {};
   }

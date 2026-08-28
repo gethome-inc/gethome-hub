@@ -18,6 +18,7 @@ import {
   openTestDb,
   loadedAccess,
   startedHistory,
+  mcpTokenService
 } from './helpers/db.js';
 
 /**
@@ -78,6 +79,7 @@ describe.skipIf(!handle)('why Zigbee is down, over HTTP', () => {
       favorites: await loadedFavorites(db, events),
       access,
       pairing,
+      mcpTokens: mcpTokenService(db),
       activity,
       history: await startedHistory(db, events),
       settings,

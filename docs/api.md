@@ -92,7 +92,7 @@ than no button.
 
 | Method & path | Needs | Notes |
 |---|---|---|
-| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory) |
+| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `mcp: {available: true}` says this build can run an MCP server, and deliberately says nothing else: this route is public, so whether one is switched on and which assistants are connected live behind `GET /settings/mcp` — see [mcp.md](mcp.md) |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
 | `GET /home` · `PATCH /home` | floor · `home.rename` | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name) |
 | `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | floor · `home.structure` | `{id, name, zoneId, icon, accent, sortOrder}`. `POST` takes `{name, zoneId?, icon?, accent?, sortOrder?}` — the name is the only required field anywhere here — and `PATCH` takes the same set with every field optional; `zoneId: null` means "in no zone", and `icon: null` / `accent: null` mean "back to the look the app derives" — each different from leaving the field out. `icon`/`accent` are opaque app tokens (1–40 chars, see [below](#rooms-and-zones)). Names are trimmed before they are measured (1–80), an unknown `zoneId` is `404 unknown_zone`, and a new room goes to the *end* of the order. Deleting a room does not delete its devices — they are simply in no room. Every write broadcasts the [`structure` frame](#rooms-and-zones) |
@@ -110,6 +110,10 @@ than no button.
 | `GET /invites` · `POST /invites` | `member.invite` | `POST {roleId?}` → `201 {code, expiresAt, roleId, roleName}`. Omitting `roleId` mints a **Member** invite, which is what every invite this hub has ever made was. An **owner** invite is allowed and needs the caller to be one (`403 not_owner`) |
 | `GET /activity?limit=&before=` | floor · `activity.read` | reverse-chronological, cursor = `before` id; rows carry `data` — see [below](#the-activity-log) |
 | `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | `hub.ai` | PUT `{apiKey, model?}` (an Anthropic API key, write-only; a `sk-ant-oat…` subscription token and a model outside the supported list are both refused with 400, an `authType` from an older app is ignored). **PATCH `{enabled?, model?}`** changes those without re-entering the key — the switch is deliberately not the credential. All three respond `{provider: "anthropic", model, hasKey, enabled, legacySubscriptionToken, status}`; `enabled` defaults to true and `status` carries `lastError`/`lastRun` health — see [ai-adaptation.md](ai-adaptation.md) |
+| `GET /settings/mcp` · `PUT /settings/mcp` | `hub.mcp` | `{enabled, tokens: [{id, label, canControl, createdAt, lastUsedAt}]}` — the MCP server's switch and its connections. `PUT {enabled}`. A token's plaintext is never in this answer. See [mcp.md](mcp.md) |
+| `POST /settings/mcp/tokens` | `hub.mcp` | `{label, canControl}` → `201` with **the plaintext token, returned exactly once**. `canControl` decides whether that connection may work the home or only read it, and is fixed at mint time |
+| `DELETE /settings/mcp/tokens/:id` | `hub.mcp` | `204`; `404 unknown_token`. Revokes rather than deletes, so the list can still say what was turned off |
+| `POST /mcp` · `POST /mcp/t/:token` | an **MCP token** | the MCP endpoint — JSON-RPC 2.0, stateless Streamable HTTP. `404` while MCP is switched off. Authenticated by `mcp_tokens`, never by a member's token, so an MCP credential cannot reach any other route here. `GET /mcp` answers `405`. Canonical: [mcp.md](mcp.md) |
 | `GET /ai/runs?limit=` | `hub.ai` | what the mapping agent did, newest first: `{id, at, kind, vendor, model, exposesHash, modelId, ok, costUsd, turns, durationMs, errorKind, errorMessage, steps}`. A summary, never a transcript — see [ai-adaptation.md](ai-adaptation.md) |
 | `GET /device-mappings` | `hub.ai` | the mapping library: one entry per device model, `{adapter, exposesHash, vendor, model, status, source, problems, endpoints, deviceIds, createdAt, updatedAt}` |
 | `GET /device-mappings/:exposesHash` | `hub.ai` | the download — an envelope naming the device, see [below](#the-device-mapping-library) |
@@ -128,7 +132,7 @@ than no button.
 
 ### Roles and permissions in full
 
-#### The twelve permissions
+#### The thirteen permissions
 
 `GET /permissions` is the authority and carries a `title` and a `summary` for
 each. **Render those rather than shipping copy of your own** — it is the
@@ -151,6 +155,7 @@ it gates its own screens on.
 | `hub.radio` | Hub |
 | `hub.update` | Hub |
 | `hub.ai` | Hub |
+| `hub.mcp` | Hub |
 
 #### What the three built-in roles start with
 
@@ -162,7 +167,7 @@ it gates its own screens on.
 | `activity.read` | ✓ | ✓ | |
 | `hub.radio` | ✓ | ✓ | |
 | `hub.update` | ✓ | ✓ | |
-| `home.rename` · `device.remove` · `member.invite` · `member.remove` · `role.manage` · `hub.ai` | ✓ | | |
+| `home.rename` · `device.remove` · `member.invite` · `member.remove` · `role.manage` · `hub.ai` · `hub.mcp` | ✓ | | |
 
 **Member is the old behaviour written down.** Those seven are, key for key, the
 routes that used to be open to any member; the six below them are the ones that
@@ -180,6 +185,16 @@ hand could never update their own home. It was open to every member by the time
 roles landed, so Member holding it takes nothing from anybody, and Guest is a
 role that did not exist. Being a key rather than either extreme is what lets a
 home that *does* want it kept from the spare room say so.
+
+**`hub.mcp` is the counter-example, and it is on the owner's side.** It looks
+like the same shape of key as `hub.update` and it is not: an update is bounded —
+the installer rolls itself back and the home is the same home afterwards —
+whereas letting an outside assistant in mints a token that lives in a config
+file on a machine this home does not control, until a person revokes it. That
+fails the "bounded cost, destroys nothing" test the paragraph above passes, so
+it starts where `member.invite` and `role.manage` start: grantable to a role a
+home decides to trust, never on by default. It is a *new* key besides, so no
+existing hub's members lose anything by its arriving. See [mcp.md](mcp.md).
 
 **Guest is somebody staying in the house** — and a role with **no keys at all**,
 which is its honest shape rather than an oversight. They work the lights and keep
