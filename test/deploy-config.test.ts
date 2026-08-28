@@ -178,6 +178,75 @@ describe('deploy/install.sh', () => {
   });
 
   /**
+   * **The passwords are minted once, and a re-run must not touch them.**
+   *
+   * `gethome-hubctl update` is this script again, and so is every install the
+   * owner re-runs — so a `gen_secret` on each pass would silently break every
+   * board they had wired in, every time the hub updated, with no message
+   * anywhere. Reading the installer cannot prove that; this runs its own two
+   * functions against a file the test owns, the way the cgroup test runs
+   * `enable_memory_cgroup`.
+   */
+  it('mints broker passwords once and reuses them on every later run', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'gethome-cred-'));
+    dirs.push(dir);
+
+    /** One pass of the installer's credential block, in isolation. */
+    const pass = (): { hub: string; app: string; wasOpen: string } => {
+      const output = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -euo pipefail
+           SUDO=""
+           CONF_DIR="$2"
+           MQTT_ENV="$CONF_DIR/mqtt.env"
+           eval "$(sed -n '/^gen_secret() {/,/^}/p' "$1")"
+           eval "$(sed -n '/^mqtt_env_value() {/,/^}/p' "$1")"
+           MQTT_HUB_PASS="$(mqtt_env_value MQTT_PASSWORD)"
+           MQTT_APP_PASS="$(mqtt_env_value MQTT_INTEGRATION_PASSWORD)"
+           MQTT_WAS_OPEN=""
+           [[ -z "$MQTT_HUB_PASS" && -f "$CONF_DIR/hub.env" ]] && MQTT_WAS_OPEN=1
+           [[ -n "$MQTT_HUB_PASS" ]] || MQTT_HUB_PASS="$(gen_secret)"
+           [[ -n "$MQTT_APP_PASS" ]] || MQTT_APP_PASS="$(gen_secret)"
+           printf '%s %s %s\n' "$MQTT_HUB_PASS" "$MQTT_APP_PASS" "\${MQTT_WAS_OPEN:-no}"
+           printf 'MQTT_PASSWORD=%s\nMQTT_INTEGRATION_PASSWORD=%s\n' \
+             "$MQTT_HUB_PASS" "$MQTT_APP_PASS" > "$MQTT_ENV"`,
+          'bash',
+          path.join(repoRoot, 'deploy', 'install.sh'),
+          dir,
+        ],
+        { encoding: 'utf8' },
+      ).trim().split(' ');
+      return { hub: output[0]!, app: output[1]!, wasOpen: output[2]! };
+    };
+
+    const first = pass();
+    // 32 hex characters. Hex because this value also travels through a
+    // `mqtt://user:pass@host` URL and gets pasted into ESP32 sketches, where a
+    // `/` or a `+` would have to be percent-encoded by every reader.
+    expect(first.hub).toMatch(/^[0-9a-f]{32}$/);
+    expect(first.app).toMatch(/^[0-9a-f]{32}$/);
+    expect(first.app, 'the two accounts must not share a password').not.toBe(first.hub);
+    // A hub that did not exist before is not one whose integrations just broke.
+    expect(first.wasOpen).toBe('no');
+
+    const second = pass();
+    expect(second.hub, 'an update must not rotate the broker password').toBe(first.hub);
+    expect(second.app).toBe(first.app);
+
+    // An existing hub whose broker had no password: new credentials, and the
+    // one warning that says the owner's own boards have stopped publishing.
+    rmSync(path.join(dir, 'mqtt.env'));
+    writeFileSync(path.join(dir, 'hub.env'), 'PORT=8420\n');
+    const upgraded = pass();
+    expect(upgraded.wasOpen).toBe('1');
+    expect(upgraded.hub).not.toBe(first.hub);
+    // And it is said once, not on every run afterwards.
+    expect(pass().wasOpen).toBe('no');
+  });
+
+  /**
    * The credentials reach both services through systemd, and never through
    * hub.env — which is written *only when it is absent*, so a new variable in
    * it would never reach a hub being upgraded. That is the same trap that makes
