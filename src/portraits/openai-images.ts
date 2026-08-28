@@ -39,22 +39,23 @@ const GENERATIONS_URL = 'https://api.openai.com/v1/images/generations';
 const EDITS_URL = 'https://api.openai.com/v1/images/edits';
 
 /**
- * Four minutes, which is a safety net rather than an expectation.
+ * Ten minutes, and the number comes from this hub rather than from the web.
  *
- * **An image takes tens of seconds.** OpenAI's own latency guidance puts most
- * generations at 30–45 s and says a complex prompt may come "close to two
- * minutes"; independent benchmarking puts the median lower still. `gpt-image-2`
- * is *faster* than the `gpt-image-1.5` it replaced here, not slower — it
- * generates in a single pass.
+ * The published figures disagree wildly and both extremes are misleading.
+ * OpenAI's own latency guidance says 30–45 s with a complex prompt "close to
+ * two minutes"; blog posts measuring reseller proxies and small Azure quotas
+ * report three to five, which is mostly their queue. **What a real GetHome hub
+ * does is two to five minutes** — measured here, on this prompt, at
+ * `quality: high` with a transparent background and a photo to restyle, which
+ * is a heavier request than any benchmark runs.
  *
- * So this is twice the documented worst case and nothing more. Beware the
- * multi-minute figures on the open web: they are measured through reseller
- * proxies and small Azure quotas, where queue wait dominates and the article is
- * usually about how to get *out* of it. Sizing a deadline from somebody else's
- * congestion would mean holding a stuck request — and the hub's one drawing
- * slot with it — for ten minutes to no purpose.
+ * So the deadline is sized from the observation, not from either source: about
+ * twice the slowest run seen. Anything tighter kills a drawing the provider is
+ * still working on and has already billed — which is exactly what a four-minute
+ * deadline would have done, and why this note now records where the number
+ * came from.
  */
-const TIMEOUT_MS = 4 * 60 * 1000;
+const TIMEOUT_MS = 10 * 60 * 1000;
 
 /** Something the caller can put on screen, with the vendor's own words in it. */
 export class PortraitDrawError extends Error {
