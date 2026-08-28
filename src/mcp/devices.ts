@@ -192,8 +192,15 @@ export function describeState(
   if (state.covering) {
     parts.push(`${openPercent(state.covering.currentPositionLiftPercent100ths)}% open`);
   }
+  // **The thermostat's reading is labelled and the ambient one is not.** A TRV
+  // reports both — Z2M maps `local_temperature` onto the thermostat and
+  // `temperature` onto the sensors — so this line used to read
+  // `21.5 °C · 19.8 °C` with nothing saying which was the room and which was
+  // the valve's own idea of it. One of the two has to say what it is, and it
+  // is this one, because "19.8 °C" unqualified is what every other device in
+  // the house means by a temperature.
   if (state.thermostat?.localTemperatureCenti !== undefined) {
-    parts.push(`${round(celsiusFromCenti(state.thermostat.localTemperatureCenti), 1)} °C`);
+    parts.push(`thermostat ${round(celsiusFromCenti(state.thermostat.localTemperatureCenti), 1)} °C`);
   }
   if (state.sensors.temperatureCenti !== undefined) {
     parts.push(`${round(celsiusFromCenti(state.sensors.temperatureCenti), 1)} °C`);
@@ -286,8 +293,13 @@ export function readingsFor(endpoint: RegistryEndpoint): Record<string, unknown>
   }
   if (state.thermostat) {
     const t = state.thermostat;
+    // **Its own key, because `temperatureC` below belongs to the sensors.**
+    // Both were written here under one name and the sensors block runs
+    // second, so on any device carrying both — a TRV maps `local_temperature`
+    // here and `temperature` there — the ambient reading silently overwrote
+    // the thermostat's own and there was no key left holding it.
     if (t.localTemperatureCenti !== undefined) {
-      out['temperatureC'] = round(celsiusFromCenti(t.localTemperatureCenti), 1);
+      out['thermostatTemperatureC'] = round(celsiusFromCenti(t.localTemperatureCenti), 1);
     }
     if (t.occupiedHeatingSetpointCenti !== undefined) {
       out['heatingSetpointC'] = round(celsiusFromCenti(t.occupiedHeatingSetpointCenti), 1);
@@ -326,7 +338,15 @@ export function readingsFor(endpoint: RegistryEndpoint): Record<string, unknown>
   }
 
   const s = state.sensors;
-  if (s.temperatureCenti !== undefined) out['temperatureC'] = round(celsiusFromCenti(s.temperatureCenti), 1);
+  // `temperatureC` is "the temperature this device reports": the ambient
+  // sensor's when there is one, and otherwise the thermostat's own, so a plain
+  // thermostat still answers under the name a model will look for. A device
+  // with both answers under both, and neither reading is lost.
+  if (s.temperatureCenti !== undefined) {
+    out['temperatureC'] = round(celsiusFromCenti(s.temperatureCenti), 1);
+  } else if (out['thermostatTemperatureC'] !== undefined) {
+    out['temperatureC'] = out['thermostatTemperatureC'];
+  }
   if (s.humidityCenti !== undefined) out['humidityPercent'] = round(s.humidityCenti / 100, 1);
   if (s.illuminanceLux !== undefined) out['illuminanceLux'] = Math.round(s.illuminanceLux);
   if (s.pressureHPa !== undefined) out['pressureHPa'] = round(s.pressureHPa, 1);

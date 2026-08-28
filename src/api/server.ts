@@ -1727,9 +1727,17 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   };
 
   const answerMcp = async (body: unknown, reply: FastifyReply, token: string | null) => {
-    if (!(await deps.settings.getMcpEnabled())) {
-      // 404 rather than 403: a hub whose owner has not switched this on should
-      // not confirm to an unauthenticated caller that the feature is even here.
+    const mcpEnabled = await deps.settings.getMcpEnabled();
+    if (!mcpEnabled) {
+      // **404 rather than 403, and rather than 401.** A hub with this switched
+      // off has no MCP endpoint — there is nothing to be authorized for, and
+      // both of the other codes would say there is, inviting a client to go
+      // and find a credential that cannot exist yet.
+      //
+      // It hides less than it looks like it does, and deliberately so: the
+      // `mcp` block on the public `GET /hub` already says this *build* can run
+      // a server. What that block does not say, and this does not either, is
+      // anything about who may reach it.
       return reply.code(404).send({ error: 'not_found' });
     }
 
@@ -1753,6 +1761,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       activity: deps.activity,
       home: deps.home,
       events: deps.events,
+      // An assistant is the member who minted it reaching the home through
+      // another door; it must not get further through that one than they do.
+      access: deps.access,
       readStructure,
       version: deps.version,
       ...(deps.build ? { build: deps.build } : {}),
@@ -1786,10 +1797,20 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * The transport requires the endpoint to answer both verbs. This server
    * never opens a server-initiated stream — there is nothing it would push —
    * so the honest answer to a GET is that the method is not allowed.
+   *
+   * **Gated the same way the POST is.** It used to answer 405 unconditionally,
+   * so a hub with MCP switched off said "no such thing" to one verb and "wrong
+   * verb for the thing" to the other — two answers about one route, and the
+   * pair of them says more than either. Whatever the POST hides, the GET has
+   * to hide too, or it is not hidden. It costs nothing now that the setting is
+   * cached.
    */
-  app.get('/api/v1/mcp', async (_request, reply) =>
-    reply.code(405).header('Allow', 'POST').send({ error: 'method_not_allowed' }),
-  );
+  app.get('/api/v1/mcp', async (_request, reply) => {
+    if (!(await deps.settings.getMcpEnabled())) {
+      return reply.code(404).send({ error: 'not_found' });
+    }
+    return reply.code(405).header('Allow', 'POST').send({ error: 'method_not_allowed' });
+  });
 
   app.put('/api/v1/settings/radio', needs('hub.radio'), async (request) => {
     // Built from the exported list rather than re-typed, so a mode added to

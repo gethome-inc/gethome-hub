@@ -63,6 +63,7 @@ describe.skipIf(!handle)('MCP server', () => {
   let settings: SettingsService;
   let mcpTokens: McpTokenService;
   let history: Awaited<ReturnType<typeof startedHistory>>;
+  let activityLog: ActivityService;
   let dataDir: string;
   let ownerToken: string;
   let ownerId: string;
@@ -91,6 +92,7 @@ describe.skipIf(!handle)('MCP server', () => {
     dataDir = mkdtempSync(path.join(tmpdir(), 'gethome-mcp-'));
     events = new HubEventBus();
     const activity = new ActivityService(db, events);
+    activityLog = activity;
     const access = await loadedAccess(db, events);
     const pairing = new PairingService(db, dataDir, log, access);
     await pairing.boot();
@@ -172,10 +174,37 @@ describe.skipIf(!handle)('MCP server', () => {
         { endpointId: 2, deviceKind: 'wallSwitch', capabilities: ['onOff'], primary: 'onOff' },
       ],
     });
+    // A radiator valve reports the room *and* its own head, which is the shape
+    // that had two different temperatures writing to one key.
+    adapter.bus!.deviceUpserted({
+      adapter: 'mqtt',
+      externalId: 'trv-1',
+      suggestedName: 'Radiator valve',
+      endpoints: [
+        {
+          endpointId: 1,
+          deviceKind: 'climate',
+          capabilities: ['thermostat', 'temperature'],
+          primary: 'thermostat',
+        },
+      ],
+    });
     await registry.flush();
     adapter.bus!.stateChanged('mqtt', 'lamp-1', 1, {
       onOff: true,
       level: { current: 200, min: 1, max: 254 },
+    });
+    adapter.bus!.stateChanged('mqtt', 'trv-1', 1, {
+      thermostat: {
+        localTemperatureCenti: 1980,
+        occupiedHeatingSetpointCenti: 2100,
+        heatSetpointMinCenti: 500,
+        heatSetpointMaxCenti: 3000,
+        coolSetpointMinCenti: 1600,
+        coolSetpointMaxCenti: 3200,
+        systemMode: 4,
+      },
+      sensors: { temperatureCenti: 2150 },
     });
     await registry.flush();
   });
@@ -270,6 +299,43 @@ describe.skipIf(!handle)('MCP server', () => {
       expect(response.headers['allow']).toBe('POST');
     });
 
+    /**
+     * Both verbs hide the same thing, or neither does.
+     *
+     * The GET used to answer 405 whether or not MCP was on, so a switched-off
+     * hub said "no such thing" to a POST and "wrong verb for the thing" to a
+     * GET — and the pair of answers says more than either one.
+     */
+    it('answers both verbs 404 while assistant access is switched off', async () => {
+      await settings.setMcpEnabled(false);
+      try {
+        const get = await app.inject({ method: 'GET', url: '/api/v1/mcp' });
+        expect(get.statusCode).toBe(404);
+
+        const post = await app.inject({
+          method: 'POST',
+          url: '/api/v1/mcp',
+          headers: auth(controlToken),
+          payload: { jsonrpc: '2.0', id: 1, method: 'ping' },
+        });
+        expect(post.statusCode).toBe(404);
+      } finally {
+        await settings.setMcpEnabled(true);
+      }
+    });
+
+    /**
+     * The switch is cached, so this is what proves the cache is write-through
+     * rather than timed: a hub turned off has to stop answering *now*, not
+     * when some interval lapses.
+     */
+    it('stops and starts answering the moment the switch moves', async () => {
+      await settings.setMcpEnabled(false);
+      expect((await rpc({ jsonrpc: '2.0', id: 1, method: 'ping' })).statusCode).toBe(404);
+      await settings.setMcpEnabled(true);
+      expect((await rpc({ jsonrpc: '2.0', id: 1, method: 'ping' })).statusCode).toBe(200);
+    });
+
     it('never advertises OAuth on a 401, so a bearer client does not fall back to it', async () => {
       const response = await app.inject({ method: 'POST', url: '/api/v1/mcp', payload: {} });
       expect(response.statusCode).toBe(401);
@@ -350,13 +416,13 @@ describe.skipIf(!handle)('MCP server', () => {
   describe('reading the home', () => {
     it('describes the home', async () => {
       const answer = await call('get_home');
-      expect(answer.result?.structuredContent).toMatchObject({ name: 'Test Home', deviceCount: 3 });
+      expect(answer.result?.structuredContent).toMatchObject({ name: 'Test Home', deviceCount: 4 });
     });
 
     it('lists devices as one line each, never full state', async () => {
       const answer = await call('list_devices');
       const devices = answer.result?.structuredContent.devices as Array<Record<string, unknown>>;
-      expect(devices).toHaveLength(3);
+      expect(devices).toHaveLength(4);
       expect(devices[0]).toHaveProperty('ref');
       expect(devices[0]).not.toHaveProperty('endpoints');
       expect(answer.result?.content[0]?.text).toContain('Desk lamp');
@@ -389,6 +455,57 @@ describe.skipIf(!handle)('MCP server', () => {
       const answer = await call('get_device', { device: 'kettle' });
       expect(answer.result?.isError).toBe(true);
       expect(answer.result?.content[0]?.text).toContain('No device matches');
+    });
+
+    /**
+     * A TRV reports the room *and* its own valve head — Z2M maps
+     * `local_temperature` onto the thermostat and `temperature` onto the
+     * sensors — and both used to be written to one `temperatureC`. The sensors
+     * block runs second, so the thermostat's own reading was overwritten and
+     * no key was left holding it, while the one-line state read
+     * `21.5 °C · 19.8 °C` with nothing saying which was which.
+     */
+    it('keeps a thermostat’s own temperature apart from the room’s', async () => {
+      const answer = await call('get_device', { device: 'Radiator valve' });
+      const detail = answer.result?.structuredContent as {
+        endpoints: Array<{ readings: Record<string, unknown> }>;
+      };
+      const readings = detail.endpoints[0]!.readings;
+      expect(readings['thermostatTemperatureC']).toBe(19.8);
+      expect(readings['temperatureC']).toBe(21.5);
+
+      const list = await call('list_devices', { search: 'Radiator' });
+      const line = (list.result?.structuredContent.devices as Array<{ state: string }>)[0]!.state;
+      expect(line).toContain('thermostat 19.8 °C');
+      expect(line).toContain('21.5 °C');
+    });
+
+    /**
+     * `state` selects on the device's typed `onOff`, never on the sentence
+     * `describeState` writes for a person.
+     *
+     * **This pins the rule rather than catching a bug**, and the distinction is
+     * worth being honest about: the filter used to read
+     * `row.state.startsWith('on')`, and on every input constructible today that
+     * agrees with the typed value, because `describeState` happens to put
+     * on/off first whenever it has one. Nothing was ever wrong on screen. What
+     * was wrong is that a filter's answer depended on the word order of a
+     * sentence written for humans — reorder those parts, or capitalise one, and
+     * `list_devices({state:'on'})` starts answering "nothing" rather than
+     * failing. So this test cannot go red for the old implementation, and is
+     * here for the change that would otherwise go unnoticed.
+     */
+    it('selects on what the device reports, not on how its line reads', async () => {
+      const on = await call('list_devices', { state: 'on' });
+      const names = (on.result?.structuredContent.devices as Array<{ name: string }>).map(
+        (row) => row.name,
+      );
+      // The lamp reported `onOff: true`. The valve reports a temperature and no
+      // `onOff` at all, and the second lamp has reported nothing — neither is
+      // "on", however its line happens to begin.
+      expect(names).toContain('Desk lamp');
+      expect(names).not.toContain('Radiator valve');
+      expect(names).not.toContain('Hall switch');
     });
   });
 
@@ -428,6 +545,44 @@ describe.skipIf(!handle)('MCP server', () => {
       // The lamp is on, so a toggle is "off" — and saying which is what lets
       // the answer report what happened rather than that something happened.
       expect(adapter.executed[0]?.command).toMatchObject({ type: 'power', on: false });
+    });
+
+    /**
+     * "Set the thermostat to heat at 21" is one natural call carrying two
+     * fields, and a setpoint and a mode are two commands on the wire.
+     *
+     * This used to rank them — the setpoint won, the mode was dropped with
+     * nothing recorded, and the answer still said "X is now …", so the
+     * assistant reported the whole instruction as done while the device stayed
+     * in whatever mode it was in. Silently doing half of what was asked is the
+     * one outcome a model cannot recover from, because nothing tells it to.
+     */
+    it('refuses a thermostat action naming a setpoint and a mode together', async () => {
+      adapter.executed = [];
+      const answer = await call('control_device', {
+        device: 'Radiator valve',
+        action: { action: 'thermostat', heatingC: 21, mode: 'heat' },
+      });
+      expect(answer.result?.isError).toBe(true);
+      expect(answer.result?.content[0]?.text).toContain('one of heatingC, coolingC or mode');
+      // Nothing half-done: the refusal is instead of the command, not after it.
+      expect(adapter.executed).toHaveLength(0);
+    });
+
+    it('still takes a thermostat setpoint, or a mode, on its own', async () => {
+      adapter.executed = [];
+      await call('control_device', {
+        device: 'Radiator valve',
+        action: { action: 'thermostat', heatingC: 21 },
+      });
+      expect(adapter.executed[0]?.command).toMatchObject({ type: 'setHeatingSetpoint', centi: 2100 });
+
+      adapter.executed = [];
+      await call('control_device', {
+        device: 'Radiator valve',
+        action: { action: 'thermostat', mode: 'heat' },
+      });
+      expect(adapter.executed[0]?.command).toMatchObject({ type: 'setSystemMode' });
     });
 
     it('reports the hub’s own sentence when a write does not reach the device', async () => {
@@ -485,6 +640,99 @@ describe.skipIf(!handle)('MCP server', () => {
     });
   });
 
+  /**
+   * The tool that had no test at all, which is how it kept the wire in the one
+   * place the wire was never meant to reach a model.
+   *
+   * `HistoryService` stores readings in the hub's own scale, because a stored
+   * average cannot be merged — so a temperature is `centiCelsius` and 2140 is
+   * 21.4 °C. And a stored point's first element is an *offset into the emitted
+   * grid*, an integer index, not a time: handing that over beside a `start` in
+   * epoch ms makes the obvious reading, `start + offset`, wrong by a factor of
+   * `bucketMs`.
+   */
+  describe('recorded readings', () => {
+    beforeAll(async () => {
+      adapter.bus!.stateChanged('mqtt', 'trv-1', 1, {
+        sensors: { temperatureCenti: 2_140 },
+      });
+      await registry.flush();
+      await history.flush();
+    });
+
+    it('answers in the unit a person uses, never the one the hub stores', async () => {
+      const answer = await call('get_device_history', {
+        device: 'Radiator valve',
+        quantity: 'temperature',
+        range: 'day',
+      });
+      const page = answer.result?.structuredContent as {
+        unit: string;
+        points: Array<{ at: string; min: number; max: number; avg: number }>;
+      };
+      expect(page.unit).toBe('°C');
+      expect(page.points.length).toBeGreaterThan(0);
+      // 2140 centi-°C, not two thousand degrees.
+      // Room temperature, not two thousand degrees: the readings recorded are
+      // 21.4-21.5 °C, stored as 2140-2150 centi-°C. A range rather than a
+      // number because they share a five-minute bucket and the mean is
+      // computed on read.
+      const avg = page.points.at(-1)!.avg;
+      expect(avg).toBeGreaterThan(21);
+      expect(avg).toBeLessThan(22);
+      expect(answer.result?.content[0]?.text).toContain('°C');
+    });
+
+    it('gives every point a real time, not a grid index', async () => {
+      const answer = await call('get_device_history', {
+        device: 'Radiator valve',
+        quantity: 'temperature',
+        range: 'day',
+      });
+      const page = answer.result?.structuredContent as {
+        start: string;
+        end: string;
+        bucketMs: number;
+        points: Array<{ at: string }>;
+      };
+      const start = Date.parse(page.start);
+      const end = Date.parse(page.end);
+      expect(Number.isNaN(start)).toBe(false);
+      expect(Number.isNaN(end)).toBe(false);
+
+      for (const point of page.points) {
+        const at = Date.parse(point.at);
+        expect(Number.isNaN(at)).toBe(false);
+        expect(at).toBeGreaterThanOrEqual(start);
+        expect(at).toBeLessThanOrEqual(end + page.bucketMs);
+      }
+
+      // The reading was recorded now, so the last point has to land near the
+      // end of the window — which is exactly what a bare offset could not do.
+      expect(end - Date.parse(page.points.at(-1)!.at)).toBeLessThan(2 * page.bucketMs);
+    });
+
+    it('says when the low and the high happened, not only what they were', async () => {
+      const answer = await call('get_device_history', {
+        device: 'Radiator valve',
+        quantity: 'temperature',
+        range: 'day',
+      });
+      expect(answer.result?.content[0]?.text).toMatch(/low .* at \d\d:\d\d/);
+      expect(answer.result?.content[0]?.text).toMatch(/high .* at \d\d:\d\d/);
+    });
+
+    it('says plainly when nothing was recorded', async () => {
+      const answer = await call('get_device_history', {
+        device: 'Radiator valve',
+        quantity: 'co2',
+        range: 'day',
+      });
+      expect(answer.result?.content[0]?.text).toContain('no recorded co2');
+      expect(answer.result?.structuredContent).toMatchObject({ points: [] });
+    });
+  });
+
   describe('management routes', () => {
     it('never returns a token’s plaintext after it is minted', async () => {
       const response = await app.inject({
@@ -524,6 +772,95 @@ describe.skipIf(!handle)('MCP server', () => {
       const response = await app.inject({ method: 'GET', url: '/api/v1/hub' });
       const body = response.json() as { mcp?: Record<string, unknown> };
       expect(body.mcp).toEqual({ available: true });
+    });
+  });
+
+  /**
+   * An assistant is the member who minted it reaching the home through another
+   * door, and it must not get further through that one than they do.
+   *
+   * `activity.read` is the case, because it is the only permission an MCP tool
+   * touches — and it *narrows* rather than refusing, which is exactly the shape
+   * that goes wrong quietly: `get_activity` called `list(limit)` with no third
+   * argument while the REST route had always passed one, so nothing 403'd and
+   * nothing looked broken. The home just came back in full.
+   */
+  describe('a token carries its member’s permissions', () => {
+    let narrowedToken: string;
+    let narrowedId: string;
+
+    beforeAll(async () => {
+      // The reachable shape: a home that grants a role assistant access
+      // without giving it the whole home's history.
+      const role = await app.inject({
+        method: 'POST',
+        url: '/api/v1/roles',
+        headers: auth(ownerToken),
+        payload: { name: 'Assistant keeper', permissions: ['hub.mcp'] },
+      });
+      expect(role.statusCode).toBe(201);
+      const { id: roleId } = role.json() as { id: string };
+
+      const invite = await app.inject({
+        method: 'POST',
+        url: '/api/v1/invites',
+        headers: auth(ownerToken),
+        payload: { roleId },
+      });
+      expect(invite.statusCode).toBe(201);
+      const { code } = invite.json() as { code: string };
+
+      const joined = await app.inject({
+        method: 'POST',
+        url: '/api/v1/pair',
+        payload: { code, memberName: 'Keeper' },
+      });
+      expect(joined.statusCode).toBe(200);
+      const member = joined.json() as { token: string; member: { id: string } };
+      narrowedId = member.member.id;
+
+      // Minted through the route, by the member themselves, so the test walks
+      // the path a home actually takes rather than reaching past the guard.
+      const minted = await app.inject({
+        method: 'POST',
+        url: '/api/v1/settings/mcp/tokens',
+        headers: auth(member.token),
+        payload: { label: 'Keeper’s Claude', canControl: false },
+      });
+      expect(minted.statusCode).toBe(201);
+      narrowedToken = (minted.json() as { token: string }).token;
+
+      await activityLog.record({
+        kind: 'note',
+        message: 'The owner did something',
+        memberId: ownerId,
+      });
+      await activityLog.record({
+        kind: 'note',
+        message: 'The keeper did something',
+        memberId: narrowedId,
+      });
+    });
+
+    it('narrows get_activity to the member’s own rows without activity.read', async () => {
+      const answer = await call('get_activity', {}, narrowedToken);
+      const messages = (answer.result!.structuredContent.entries as Array<{ message: string }>).map(
+        (entry) => entry.message,
+      );
+      expect(messages).toContain('The keeper did something');
+      expect(messages).not.toContain('The owner did something');
+    });
+
+    it('leaves the whole log to a member who has activity.read', async () => {
+      // The owner is answered `true` without a stored set, which is what makes
+      // this the other half rather than a restatement: a permission with only
+      // a refusal test can be broken by denying everybody.
+      const answer = await call('get_activity', {}, controlToken);
+      const messages = (answer.result!.structuredContent.entries as Array<{ message: string }>).map(
+        (entry) => entry.message,
+      );
+      expect(messages).toContain('The keeper did something');
+      expect(messages).toContain('The owner did something');
     });
   });
 });

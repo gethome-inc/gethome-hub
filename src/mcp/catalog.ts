@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import type { HomeStructure } from '../core/bus.js';
+import type { AccessService } from '../core/access.js';
 import type { ActivityService } from '../core/activity.js';
 import type { HistoryService, HistoryKind } from '../core/history.js';
 import { HISTORY_KINDS } from '../core/history.js';
@@ -38,6 +39,21 @@ export interface McpContext {
   activity: ActivityService;
   home: HomeService;
   events: HubEventBus;
+  /**
+   * The minting member's own permissions, because an assistant is that member
+   * reaching the home through another door and must not get further through it
+   * than they do.
+   *
+   * Today it answers exactly one question — `activity.read`, which *narrows*
+   * the feed rather than refusing it — and that is precisely the one this
+   * layer got wrong: `get_activity` called `list(limit)` with no third
+   * argument while `GET /api/v1/activity` had always passed one, so a role
+   * that may not read the whole home's history had an assistant that could.
+   * The service rather than a resolved boolean, so the next permission an MCP
+   * tool has to respect is a call rather than another field to thread through
+   * `AnswerInput`.
+   */
+  access: AccessService;
   readStructure: () => Promise<HomeStructure>;
   /** Whether this connection may work the home, or only look at it. */
   canControl: boolean;
@@ -195,24 +211,39 @@ export const TOOLS: readonly ToolDefinition[] = [
         search?: string;
       };
       const index = await indexFor(ctx);
-      let rows = ctx.registry.listDevices().map((device) => deviceRow(device, index));
+      // Each device is kept beside its row, because `state` on the row is the
+      // **sentence** `describeState` writes for a person and the `state` filter
+      // is a question about the device. Matching `row.state.startsWith('on')`
+      // worked only for as long as `describeState` happened to put on/off
+      // first: reorder those parts, or capitalise one, and the filter starts
+      // answering "nothing" rather than failing. The typed `onOff` is what the
+      // filter actually means, and it is one field away.
+      let found = ctx.registry
+        .listDevices()
+        .map((device) => ({ device, row: deviceRow(device, index) }));
 
       if (args.room) {
         const wanted = args.room.toLowerCase();
-        rows = rows.filter((row) => row.room?.toLowerCase() === wanted);
+        found = found.filter((entry) => entry.row.room?.toLowerCase() === wanted);
       }
       if (args.kind) {
         const wanted = args.kind.toLowerCase();
-        rows = rows.filter((row) => row.kind.toLowerCase() === wanted);
+        found = found.filter((entry) => entry.row.kind.toLowerCase() === wanted);
       }
       if (args.search) {
         const wanted = args.search.toLowerCase();
-        rows = rows.filter((row) => row.name.toLowerCase().includes(wanted));
+        found = found.filter((entry) => entry.row.name.toLowerCase().includes(wanted));
       }
-      if (args.state === 'offline') rows = rows.filter((row) => !row.online);
-      if (args.state === 'on') rows = rows.filter((row) => row.online && row.state.startsWith('on'));
-      if (args.state === 'off') rows = rows.filter((row) => row.online && row.state.startsWith('off'));
+      if (args.state === 'offline') found = found.filter((entry) => !entry.row.online);
+      if (args.state === 'on' || args.state === 'off') {
+        const wanted = args.state === 'on';
+        found = found.filter(
+          (entry) =>
+            entry.row.online && primaryEndpoint(entry.device)?.state.onOff === wanted,
+        );
+      }
 
+      const rows = found.map((entry) => entry.row);
       const total = rows.length;
       const shown = rows.slice(0, DEVICE_PAGE_LIMIT);
       const truncated = total > shown.length;
@@ -367,7 +398,9 @@ export const TOOLS: readonly ToolDefinition[] = [
     title: 'Read a device’s recorded readings',
     description:
       'What one measurement did over a window — temperature, humidity, CO₂, power and so on. ' +
-      'The hub records five-minute buckets and keeps about a week, so anything older is gone.',
+      'Each point is a stretch of time `bucketMs` wide, starting at its own `at`, with the ' +
+      'low, high and mean of everything inside it. The hub records five-minute buckets and ' +
+      'keeps about a week, so anything older is gone.',
     schema: z.object({
       device: deviceRef,
       quantity: z
@@ -412,27 +445,46 @@ export const TOOLS: readonly ToolDefinition[] = [
       // scale, because a stored average cannot be merged; every client
       // converts on read. A temperature handed over as `2150` beside the word
       // `centiCelsius` is one a model reports as two thousand degrees.
+      //
+      // **The time axis is the same promise, and it was the half still
+      // broken.** A stored point's first element is an *offset into the
+      // emitted grid* — `Math.floor((bucket - fromBucket) / step)`, an integer
+      // index — and handing that over unlabelled beside a `start` in epoch ms
+      // is the `centiCelsius` mistake wearing a different unit: the obvious
+      // reading, `start + offset`, is wrong by a factor of `bucketMs`. So the
+      // grid is resolved here and every point carries an ISO `at`, which is
+      // the word `get_activity` already uses for the same idea.
       const unit = displayUnit(series.unit);
       const show = (value: number) => displayValue(series.unit, value);
-      const points = series.points.map(
-        (point) => [point[0], show(point[1]), show(point[2]), show(point[3])] as const,
-      );
+      const at = (offset: number) => new Date(page.start + offset * page.bucketMs);
+      const points = series.points.map((point) => ({
+        at: at(point[0]).toISOString(),
+        min: show(point[1]),
+        max: show(point[2]),
+        avg: show(point[3]),
+      }));
 
-      const values = points.map((point) => point[3]);
-      const min = Math.min(...points.map((point) => point[1]));
-      const max = Math.max(...points.map((point) => point[2]));
-      const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+      const lowest = points.reduce((best, point) => (point.min < best.min ? point : best));
+      const highest = points.reduce((best, point) => (point.max > best.max ? point : best));
+      const mean = points.reduce((sum, point) => sum + point.avg, 0) / points.length;
+      // A time somebody would say out loud. The date is left off because the
+      // range is already named in the same sentence and every point in it is
+      // inside that window.
+      const clock = (iso: string) => iso.slice(11, 16);
 
       return {
         text:
           `${found.device.name} ${args.quantity} over the last ${args.range}: ` +
-          `low ${min} ${unit}, high ${max} ${unit}, ` +
+          `low ${lowest.min} ${unit} at ${clock(lowest.at)}, ` +
+          `high ${highest.max} ${unit} at ${clock(highest.at)}, ` +
           `average ${Math.round(mean * 10) / 10} ${unit}, from ${points.length} points.`,
         structured: {
           unit,
+          // How wide one point is. Kept, because a point is a stretch of time
+          // rather than an instant, and `min`/`max` are that stretch's band.
           bucketMs: page.bucketMs,
-          start: page.start,
-          end: page.end,
+          start: new Date(page.start).toISOString(),
+          end: new Date(page.end).toISOString(),
           retentionDays: page.retentionDays,
           points,
         },
@@ -450,7 +502,14 @@ export const TOOLS: readonly ToolDefinition[] = [
     annotations: READ_ONLY,
     async run(input, ctx) {
       const { limit } = input as { limit: number };
-      const rows = await ctx.activity.list(limit);
+      // The same narrowing `GET /api/v1/activity` applies, asked the same way.
+      // `activity.read` never refuses the feed — a member without it still
+      // reads their own rows, which is the honest answer to "what have I done
+      // in this house" — so an assistant minted by that member sees exactly
+      // what they see and no more. Without this the MCP door was the one way
+      // round a permission the whole rest of the hub honours.
+      const mine = ctx.access.can(ctx.memberId, 'activity.read') ? undefined : ctx.memberId;
+      const rows = await ctx.activity.list(limit, undefined, mine);
       return {
         text: rows.length
           ? rows.map((row) => `${row.at.toISOString()} — ${row.message}`).join('\n')

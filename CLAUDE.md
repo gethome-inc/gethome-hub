@@ -178,7 +178,17 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `@matter/main`, so a home that never switches it on never parses the catalog.
   **Its own credential table**: `mcp_tokens`, never `tokens`, so an MCP token
   401s on every REST route by construction rather than by a check somebody has
-  to remember — and revoking an assistant does not sign a phone out. And **it
+  to remember — and revoking an assistant does not sign a phone out. That
+  separation is what makes the next rule easy to forget: **a token carries its
+  minting member's permissions, and the tools have to ask.** An assistant is
+  that member reaching the home through another door and must not get further
+  through it than they do, so `AccessService` is on `McpContext`. Today it
+  answers one question, `activity.read`, and that is precisely the one this
+  layer got wrong — it *narrows* the feed rather than refusing it, so
+  `get_activity` calling `list(limit)` with no third argument, where
+  `GET /api/v1/activity` had always passed one, threw no error and looked
+  perfectly healthy while handing over the whole home's history. Nothing else a
+  tool does is behind a permission today; when something is, ask the service. And **it
   speaks human units** (percent, °C, kelvin, `openPercent: 100` is open),
   converting through `src/schema/units.ts`, because the wire's conventions read
   as nonsense out of context and a model given them acts on them: `setLevel`

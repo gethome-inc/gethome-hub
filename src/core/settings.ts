@@ -156,12 +156,33 @@ export class SettingsService {
    * an upgraded hub — the same trap that made `<data>/update/enabled` a file
    * rather than a `GETHOME_UPDATE=1` line.
    */
+  /**
+   * Whether the MCP server answers at all.
+   *
+   * **Cached, and the cache is write-through rather than timed.** This is the
+   * one setting read *before* authentication, on a public route: `answerMcp`
+   * asks it on every POST to `/api/v1/mcp` — including one carrying a token
+   * that turns out to be nothing — so an uncached read is one SQLite query per
+   * unauthenticated request, on an SD card, with no rate limiting in front of
+   * it. That is the hazard `createHubStatusReader` is cached for, and the
+   * reason is written beside it: a public health check must not become a read
+   * per request.
+   *
+   * It is invalidated by the writer rather than by a clock because this is a
+   * switch somebody flips to shut an assistant out. A thirty-second window in
+   * which a hub that has been turned off still answers is worse than the read
+   * it saves, and "off" arriving late is the direction that matters.
+   */
+  private mcpEnabled?: boolean;
+
   async getMcpEnabled(): Promise<boolean> {
-    return (await this.get<boolean>('mcp_enabled')) === true;
+    this.mcpEnabled ??= (await this.get<boolean>('mcp_enabled')) === true;
+    return this.mcpEnabled;
   }
 
   async setMcpEnabled(enabled: boolean): Promise<void> {
     await this.set('mcp_enabled', enabled);
+    this.mcpEnabled = enabled;
   }
 
   async getAiStatus(): Promise<AiStatus> {

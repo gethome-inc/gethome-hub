@@ -1,3 +1,4 @@
+import type { AccessService } from '../core/access.js';
 import type { ActivityService } from '../core/activity.js';
 import type { HomeStructure, HubEventBus } from '../core/bus.js';
 import type { HistoryService } from '../core/history.js';
@@ -30,6 +31,7 @@ export interface AnswerInput {
   activity: ActivityService;
   home: HomeService;
   events: HubEventBus;
+  access: AccessService;
   readStructure: () => Promise<HomeStructure>;
   version: string;
   build?: string;
@@ -43,6 +45,7 @@ export async function answer(input: AnswerInput): Promise<RpcResponse | null> {
     activity: input.activity,
     home: input.home,
     events: input.events,
+    access: input.access,
     readStructure: input.readStructure,
     canControl: input.identity.canControl,
     memberId: input.identity.memberId,

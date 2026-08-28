@@ -212,10 +212,20 @@ reading is an absent key — "this device does not measure humidity" and
 | `brightnessPercent`, `saturationPercent`, `fanPercent`, `batteryPercent`, `humidityPercent` | 0–100 |
 | `openPercent` | 0–100, **100 is fully open** |
 | `colorTemperatureKelvin`, `hueDegrees` | kelvin, degrees |
-| `temperatureC`, `heatingSetpointC`, `coolingSetpointC` | °C |
+| `temperatureC`, `thermostatTemperatureC`, `heatingSetpointC`, `coolingSetpointC` | °C |
 | `powerWatts`, `energyKilowattHours`, `illuminanceLux`, `pressureHPa`, `co2Ppm` | as named |
 | `lock`, `fanMode`, `thermostatMode`, `airQuality`, `smokeAlarm` | a word, not a number |
 | `settings` | the device's generic fields: `{ id, label, unit, settable, value, options?, min?, max? }` |
+
+**A thermostat's own reading has its own key.** A radiator valve reports two
+temperatures — the room, and the valve head's idea of it — and both used to be
+written to `temperatureC`, where the second overwrote the first and left no key
+holding it. `thermostatTemperatureC` is the device's own; `temperatureC` is the
+ambient sensor's, falling back to the thermostat's when a device has no separate
+sensor, so a plain thermostat still answers under the name a model looks for and
+one carrying both loses neither. The one-line `state` labels the thermostat's
+half for the same reason: `thermostat 19.8 °C · 21.5 °C` rather than two bare
+numbers.
 
 `src/mcp/devices.ts` is the full list. `actions` is derived from the
 capabilities the device actually reports, so a model is never invited to send a
@@ -250,7 +260,7 @@ Every action is in ordinary units:
 | `brightness` | `percent` 0–100 | does **not** switch the light on |
 | `color_temperature` | `kelvin` 1000–10000 | warm ≈ 2200, daylight ≈ 6500 |
 | `color` | `hueDegrees` 0–360, `saturationPercent` 0–100 | |
-| `thermostat` | `heatingC?`, `coolingC?`, `mode?`: `off`\|`auto`\|`cool`\|`heat` | one at a time; a setpoint wins over a mode |
+| `thermostat` | `heatingC?`, `coolingC?`, `mode?`: `off`\|`auto`\|`cool`\|`heat` | **exactly one per call**; naming two is refused |
 | `lock` · `unlock` | — | |
 | `covering` | `openPercent` 0–100 | **100 is fully open** |
 | `covering_open` · `covering_close` · `covering_stop` | — | |
@@ -261,6 +271,15 @@ Every action is in ordinary units:
 | `ir_send` | `commandId` | an id from the device's `irCommands` |
 | `setting` | `fieldId`, `value` | a generic field from `readings.settings` |
 
+**A thermostat action takes exactly one field, and naming two is refused rather
+than ranked.** A setpoint and a mode are separate commands on the device and
+this tool sends one, so "set the thermostat to heat at 21" — one natural call
+carrying `heatingC` *and* `mode` — used to send the setpoint and drop the mode
+with nothing recorded, then answer "the valve is now …", which reports the whole
+instruction as done. Silently doing half of what was asked is the one outcome a
+model cannot recover from, because nothing tells it to. The refusal names the
+three fields and says to send one call each.
+
 ### get_device_history
 
 What one measurement did over a window. The hub records five-minute buckets and
@@ -269,24 +288,35 @@ keeps about a week, so anything older is gone.
 ```
 Input   { device, quantity, range = "day", points = 60 }
 Returns { unit, bucketMs, start, end, retentionDays,
-          points: [[offset, min, max, mean], …] }
+          points: [{ at, min, max, avg }, …] }
 ```
 
 `quantity` is one of `temperature`, `humidity`, `illuminance`, `pressure`,
 `co2`, `pm25`, `flow`, `power`, `battery`, `thermostatTemperature`.
 `range` is `hour`, `day` or `week`; `points` is 2–200.
 
-A point is a stretch of time, so it carries a low and a high as well as a mean —
-drawing only the mean flattens a lamp that went on and off inside one bucket.
-`offset` is the bucket index from `start`, and a bucket nothing was reported in
-is simply absent, so a gap in the array is a real gap.
+A point is a stretch of time `bucketMs` wide starting at its own `at`, so it
+carries a low and a high as well as a mean — drawing only the mean flattens a
+lamp that went on and off inside one bucket. A bucket nothing was reported in is
+simply absent, so a gap in the array is a real gap.
 
-**Values are converted here.** `src/core/history.ts` stores what the sensor
-reported in the hub's own scale — a temperature is `centiCelsius` — because a
-stored average cannot be merged. Every client converts on read, and this is
-the MCP layer's half: `unit` is `°C`, not `centiCelsius`, and the numbers match.
+**Both axes are converted here, and the time one was the half that got missed.**
+`src/core/history.ts` stores what the sensor reported in the hub's own scale — a
+temperature is `centiCelsius` — because a stored average cannot be merged, so
+every client converts on read and `unit` is `°C` with numbers to match.
 `test/mcp-coverage.test.ts` checks that against what the hub actually records,
 so a new quantity in a new unit fails the suite until something can show it.
+
+The same rule governs `at`. On the REST wire a point's first element is an
+*offset into the emitted grid* — an integer index, not a time — and handing that
+to a model beside a `start` in epoch ms is `centiCelsius` wearing a different
+unit: the obvious reading, `start + offset`, is wrong by a factor of `bucketMs`.
+So the grid is resolved here and every point carries an ISO `at`, which is the
+word `get_activity` uses for the same idea. `start` and `end` are ISO too.
+
+The text summary names **when** the low and the high happened, because "when was
+it coldest?" is the question a chart gets asked and a bare low/high/average
+cannot answer it.
 
 ### get_activity
 
@@ -297,6 +327,14 @@ including things done from a phone or by another assistant.
 Input   { limit = 20 }        (max 50)
 Returns { entries: [{ at, kind, message }] }
 ```
+
+**Narrowed by the minting member's `activity.read`, exactly as the REST route
+is.** That permission never refuses the feed — a member without it still reads
+their own rows, which is what keeps a guest's Recent screen working — so an
+assistant sees precisely what the person who connected it sees, and no more. It
+is the only permission any tool consults, and the reason the whole
+`AccessService` is on `McpContext` rather than a resolved boolean: the next one
+should be a call, not another field threaded through the seam.
 
 ### Naming a device
 
@@ -458,9 +496,18 @@ A whole exchange:
   } }
 ```
 
-`GET /api/v1/mcp` answers **405**. The endpoint has to exist for both verbs, and
-this server never opens a server-initiated stream, so "method not allowed" is
-the honest answer rather than an empty SSE channel.
+`GET /api/v1/mcp` answers **405** while assistant access is on. The endpoint has
+to exist for both verbs, and this server never opens a server-initiated stream,
+so "method not allowed" is the honest answer rather than an empty SSE channel.
+
+**With assistant access switched off, both verbs answer 404** — there is no MCP
+endpoint on that hub, and 401 or 403 would say there is one and invite a client
+to go and find a credential that cannot exist yet. The GET used to answer 405
+either way, so a switched-off hub said "no such thing" to one verb and "wrong
+verb for the thing" to the other; whatever one hides, the other has to hide too.
+It hides less than it looks like it does, deliberately: the `mcp` block on the
+public `GET /hub` already says this *build* can run a server. What neither says
+is anything about who may reach it.
 
 **Batches are refused** with `-32600`. JSON-RPC batching was removed from MCP in
 the 2025-06-18 revision; accepting an array would mean a second path through

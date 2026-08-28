@@ -43,6 +43,23 @@ export function handleRpc(message: ParsedMessage, ctx: McpContext): Promise<RpcR
     });
 }
 
+/**
+ * Thrown by a handler to answer with a specific JSON-RPC error.
+ *
+ * Only for *protocol* faults — an unknown method, an unknown tool, a malformed
+ * argument. A tool that ran and failed is not this: it answers with
+ * `isError: true` and a sentence, because the model is supposed to read what
+ * went wrong and try something else, and a transport-level error is not shown
+ * to it.
+ *
+ * **There is one of these, and it is deliberately not exported.** `protocol.ts`
+ * carried an `RpcException` with this same job and this same doc comment, and
+ * nothing ever threw or caught it — `handleRpc` catches only this class. Two
+ * classes for one concept, one of them exported from the module a contributor
+ * reads first, is an even chance of throwing the one nothing catches, which
+ * surfaces as a generic `-32603` instead of the code that was meant. Anything
+ * that needs to raise a protocol fault belongs in this file.
+ */
 class RpcFault extends Error {
   constructor(
     readonly code: number,

@@ -100,25 +100,6 @@ export function rpcError(
 }
 
 /**
- * Thrown by a handler to answer with a specific JSON-RPC error.
- *
- * Only for *protocol* faults — an unknown tool, a malformed argument. A tool
- * that ran and failed is not this: it answers with `isError: true` and a
- * sentence, because the model is supposed to read what went wrong and try
- * something else, and a transport-level error is not shown to it.
- */
-export class RpcException extends Error {
-  constructor(
-    readonly code: number,
-    message: string,
-    readonly data?: unknown,
-  ) {
-    super(message);
-    this.name = 'RpcException';
-  }
-}
-
-/**
  * Agree a protocol version with the client.
  *
  * The rule is the spec's: answer with the client's own version when we speak

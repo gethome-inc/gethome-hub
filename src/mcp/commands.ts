@@ -140,20 +140,39 @@ export function toHubCommand(
         saturation: saturationFromPercent(action.saturationPercent),
       };
     case 'thermostat': {
-      // One ask at a time, most specific first: a mode change and a setpoint
-      // are two different commands on the wire and the caller gets whichever
-      // it named. Both named is answered by the setpoint, because that is the
-      // thing a person is usually adjusting when they mention a number.
+      // **Exactly one, and more than one is refused rather than ranked.**
+      // A setpoint and a mode are two different commands on the wire and this
+      // returns one, so a precedence rule ("the setpoint wins") means
+      // "set the thermostat to heat at 21" — one natural call carrying
+      // `heatingC` *and* `mode` — sends the setpoint, drops the mode with
+      // nothing recorded, and then answers "X is now …", so the assistant
+      // reports the whole instruction as done while the device stays in
+      // whatever mode it was in. Silently doing half of what was asked is the
+      // one outcome a model cannot recover from, because nothing tells it to.
+      // Refusing costs a second call and says exactly which one to make.
+      const named = [
+        action.heatingC !== undefined ? 'heatingC' : null,
+        action.coolingC !== undefined ? 'coolingC' : null,
+        action.mode !== undefined ? 'mode' : null,
+      ].filter((name): name is string => name !== null);
+
+      if (named.length === 0) {
+        throw new Error('A thermostat action needs one of heatingC, coolingC or mode.');
+      }
+      if (named.length > 1) {
+        throw new Error(
+          `A thermostat action takes one of heatingC, coolingC or mode — this named ${named.join(' and ')}. ` +
+            'They are separate commands on the device, so send one call each.',
+        );
+      }
+
       if (action.heatingC !== undefined) {
         return { type: 'setHeatingSetpoint', centi: centiFromCelsius(action.heatingC) };
       }
       if (action.coolingC !== undefined) {
         return { type: 'setCoolingSetpoint', centi: centiFromCelsius(action.coolingC) };
       }
-      if (action.mode !== undefined) {
-        return { type: 'setSystemMode', mode: thermostatModeValue(action.mode as ThermostatModeName) };
-      }
-      throw new Error('A thermostat action needs heatingC, coolingC or mode.');
+      return { type: 'setSystemMode', mode: thermostatModeValue(action.mode as ThermostatModeName) };
     }
     case 'lock':
       return { type: 'lock', engage: true };
