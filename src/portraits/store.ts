@@ -86,12 +86,21 @@ export interface DrawInput {
 export class PortraitService {
   private readonly root: string;
   private readonly limits: PortraitLimits;
-  /** One at a time, hub-wide: a Zero 2 W holds two of these in memory at once. */
-  private queue: Promise<unknown> = Promise.resolve();
+  /**
+   * One at a time, hub-wide: a Zero 2 W holds two of these in memory at once.
+   *
+   * A second asker is **refused, not queued**, and the reason is money before
+   * it is anything else: every drawing bills the home, so a queue turns four
+   * impatient taps into four charges while a refusal makes the second one
+   * free. The rest follows — one image in memory at a time on a 512 MB board,
+   * and a `409` that arrives at once and names the reason, which is what the
+   * apps show, rather than a connection held open behind somebody else's.
+   */
+  private drawing = false;
 
   constructor(
     private readonly db: Db,
-    events: HubEventBus,
+    private readonly events: HubEventBus,
     dataDir: string,
     private readonly log: Logger,
     limits: Partial<PortraitLimits> = {},
@@ -157,17 +166,18 @@ export class PortraitService {
   }
 
   /**
-   * Draw one. Serialised hub-wide, and the space check is inside the queue so
-   * two requests cannot both pass it and then both write.
+   * Draw one. Serialised hub-wide, and the flag is taken *before the first
+   * await* — which is what makes the space check below safe, since two
+   * requests can no longer both pass it and then both write.
    */
   async draw(input: DrawInput): Promise<PortraitRecord> {
-    const run = this.queue.then(() => this.drawNow(input));
-    // The queue must not stop on a failure, and must not carry the rejection.
-    this.queue = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    return run;
+    if (this.drawing) throw new PortraitBusyError();
+    this.drawing = true;
+    try {
+      return await this.drawNow(input);
+    } finally {
+      this.drawing = false;
+    }
   }
 
   private async drawNow(input: DrawInput): Promise<PortraitRecord> {
@@ -315,15 +325,27 @@ export class PortraitService {
       .from(devicePortraits)
       .where(eq(devicePortraits.selected, false))
       .orderBy(devicePortraits.at);
+    // The sweep is hub-wide, so it takes pictures off devices nobody asked
+    // about. The route announces the device being drawn and knows nothing of
+    // those, and a phone left holding a portrait id that no longer exists asks
+    // for bytes that answer 404 — so each one it touched is named here.
+    const swept = new Set<string>();
     for (const row of oldest) {
-      if (total <= this.limits.budgetBytes) return;
+      if (total <= this.limits.budgetBytes) break;
       await this.remove(row.id);
       total -= row.bytes;
+      if (row.deviceId !== deviceId) swept.add(row.deviceId);
     }
-    this.log.warn(
-      { usedBytes: total, budgetBytes: this.limits.budgetBytes },
-      'Device portraits are over their disk budget and every remaining one is in use.',
-    );
+    for (const id of swept) this.events.emit('portraitsChanged', id);
+    // Only when the sweep genuinely could not get there: reaching the end of
+    // the list having *just* come under budget is the sweep working, and
+    // warning about it would report a healthy hub as a full one.
+    if (total > this.limits.budgetBytes) {
+      this.log.warn(
+        { usedBytes: total, budgetBytes: this.limits.budgetBytes },
+        'Device portraits are over their disk budget and every remaining one is in use.',
+      );
+    }
   }
 
   // ── Plumbing ──────────────────────────────────────────────────────────────
@@ -338,6 +360,18 @@ export class PortraitService {
 
   private async unlink(deviceId: string, portraitId: string): Promise<void> {
     await rm(this.fileFor(deviceId, portraitId), { force: true }).catch(() => undefined);
+  }
+}
+
+/**
+ * Something else is already being drawn. Its own type because the way out is
+ * simply to try again in a moment, which is a different sentence from every
+ * other refusal this route can make.
+ */
+export class PortraitBusyError extends Error {
+  constructor() {
+    super('Your hub is already drawing a portrait. Try again in a moment.');
+    this.name = 'PortraitBusyError';
   }
 }
 

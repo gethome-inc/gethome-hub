@@ -25,14 +25,37 @@ export const PORTRAIT_MODEL = 'gpt-image-2';
 const SIZE = '1024x1024';
 const QUALITY = 'high';
 
+/**
+ * Asked for rather than assumed, because two things downstream depend on it and
+ * neither would say so if it changed. `background: transparent` is honoured
+ * only on an alpha-capable format — JPEG is refused outright — and the store
+ * writes these bytes to `<id>.png` while the route serves them as `image/png`.
+ * PNG is the current default, which is exactly the kind of fact that moves
+ * under a model pin without anybody noticing.
+ */
+const OUTPUT_FORMAT = 'png';
+
 const GENERATIONS_URL = 'https://api.openai.com/v1/images/generations';
 const EDITS_URL = 'https://api.openai.com/v1/images/edits';
 
 /**
- * Generous: an image is a single request that genuinely takes tens of seconds,
- * and the app is holding its own request open behind this one.
+ * Ten minutes, and the number comes from this hub rather than from the web.
+ *
+ * The published figures disagree wildly and both extremes are misleading.
+ * OpenAI's own latency guidance says 30–45 s with a complex prompt "close to
+ * two minutes"; blog posts measuring reseller proxies and small Azure quotas
+ * report three to five, which is mostly their queue. **What a real GetHome hub
+ * does is two to five minutes** — measured here, on this prompt, at
+ * `quality: high` with a transparent background and a photo to restyle, which
+ * is a heavier request than any benchmark runs.
+ *
+ * So the deadline is sized from the observation, not from either source: about
+ * twice the slowest run seen. Anything tighter kills a drawing the provider is
+ * still working on and has already billed — which is exactly what a four-minute
+ * deadline would have done, and why this note now records where the number
+ * came from.
  */
-const TIMEOUT_MS = 3 * 60 * 1000;
+const TIMEOUT_MS = 10 * 60 * 1000;
 
 /** Something the caller can put on screen, with the vendor's own words in it. */
 export class PortraitDrawError extends Error {
@@ -69,6 +92,7 @@ export async function drawPortrait(options: DrawOptions): Promise<Buffer> {
           size: SIZE,
           n: 1,
           background: 'transparent',
+          output_format: OUTPUT_FORMAT,
           quality: QUALITY,
         }),
       };
@@ -111,6 +135,7 @@ function editForm(prompt: string, photo: { bytes: Buffer; contentType: string })
   form.set('size', SIZE);
   form.set('n', '1');
   form.set('background', 'transparent');
+  form.set('output_format', OUTPUT_FORMAT);
   form.set('quality', QUALITY);
   form.set(
     'image',

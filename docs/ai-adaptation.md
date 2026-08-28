@@ -225,13 +225,18 @@ The secret is encrypted with the hub's local AES-256-GCM secret, stored in
 the hub's database, never returned by any API, and used only to run the
 mapping agent.
 
-**Model.** Default **`claude-opus-5`** on Anthropic and **`gpt-5.6`** on
-OpenAI. The choice is an allowlist, not a free string (`src/ai/models.ts`),
+**Model.** Default **`claude-opus-5`** on Anthropic and **`gpt-5.6-sol`** on
+OpenAI — the thorough tier on each, and both pinned as explicit ids rather than
+a floating alias, so neither vendor can re-point what a home runs without
+somebody here deciding to. The choice is an allowlist, not a free string (`src/ai/models.ts`),
 because the research tools have model floors — Anthropic's `_20260209` tools
 only exist on Opus 4.6+ and Sonnet 4.6+, so pointing the hub at Haiku or a
 4.5-era model would not degrade the run, it would 400 it. The allowlist is
 `claude-opus-5`, `claude-opus-4-8`, `claude-opus-4-7`, `claude-opus-4-6`,
-`claude-sonnet-5`, `claude-sonnet-4-6`, `gpt-5.6`, `gpt-5.6-terra`.
+`claude-sonnet-5`, `claude-sonnet-4-6`, `gpt-5.6-sol`, `gpt-5.6-terra`, and
+`gpt-5.6` — the bare OpenAI alias, priced and accepted because it routes to Sol
+and a hub that stored it must not be told its setting is invalid, but never
+offered as a choice.
 
 **The apps do not ship that list.** `GET /settings/ai` carries
 `providers.<name>.models` — id, label, one-line note, one `recommended` — and

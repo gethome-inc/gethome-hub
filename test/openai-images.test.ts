@@ -31,6 +31,7 @@ describe('OpenAI portrait generation', () => {
       size: '1024x1024',
       n: 1,
       background: 'transparent',
+      output_format: 'png',
       quality: 'high',
     });
     expect(PORTRAIT_MODEL).toBe('gpt-image-2');
@@ -49,6 +50,12 @@ describe('OpenAI portrait generation', () => {
     const form = init.body as FormData;
     expect(form.get('model')).toBe(PORTRAIT_MODEL);
     expect(form.get('background')).toBe('transparent');
+    // Transparency is only honoured on an alpha-capable format, and the store
+    // writes these bytes to a `.png` the route serves as `image/png`.
+    expect(form.get('output_format')).toBe('png');
     expect(form.get('image')).toBeInstanceOf(Blob);
+    // And no `content-type` of our own on the multipart path: setting one
+    // would omit the boundary `fetch` generates, and the upload would fail.
+    expect(init.headers).not.toHaveProperty('content-type');
   });
 });

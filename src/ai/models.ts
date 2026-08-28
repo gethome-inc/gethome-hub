@@ -64,6 +64,14 @@ const PRICING: Readonly<Record<AiProvider, Readonly<Record<string, ModelPricing>
     'claude-sonnet-4-6': { inputPerMTok: 3, outputPerMTok: 15 },
   },
   openai: {
+    // Sol's $4/$20 is a **promotional** rate OpenAI put in place on 22 August
+    // 2026 and has committed to only until 21 November; the standard price is
+    // $5/$30. Re-check it after that date — a promo that quietly reverts leaves
+    // every estimate a quarter low and the run cap tripping late, which is the
+    // one direction `mostExpensive()` is written to avoid.
+    'gpt-5.6-sol': { inputPerMTok: 4, outputPerMTok: 20 },
+    // The bare alias, kept priced rather than dropped: it routes to Sol, and a
+    // hub that already stored it must not be told its setting is invalid.
     'gpt-5.6': { inputPerMTok: 4, outputPerMTok: 20 },
     'gpt-5.6-terra': { inputPerMTok: 2, outputPerMTok: 12 },
   },
@@ -86,10 +94,19 @@ export const PROVIDER_MODELS: Readonly<
       { id: 'claude-sonnet-5', label: 'Sonnet 5', note: 'Cheaper per run, and good at this.' },
     ],
   },
+  // The pair mirrors Anthropic's exactly — the thorough tier and the cheaper
+  // one that is still good at this — and both are **explicit tier ids, never
+  // the bare `gpt-5.6` alias**. The alias routes to Sol today and is OpenAI's
+  // to re-point tomorrow, which would silently move which model a home runs,
+  // what a run costs and what `ai_runs.modelId` recorded, with nothing here
+  // changed to explain it. `claude-opus-5` is pinned for the same reason.
+  // Luna is deliberately not offered: this list is the models that are good at
+  // a reasoning-heavy job somebody runs a handful of times, and two options is
+  // the whole decision worth asking for.
   openai: {
-    default: 'gpt-5.6',
+    default: 'gpt-5.6-sol',
     choices: [
-      { id: 'gpt-5.6', label: 'GPT-5.6', note: 'The most thorough. Recommended.', recommended: true },
+      { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', note: 'The most thorough. Recommended.', recommended: true },
       { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', note: 'Cheaper per run, and good at this.' },
     ],
   },

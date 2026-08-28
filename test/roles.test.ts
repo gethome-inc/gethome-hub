@@ -342,6 +342,15 @@ describe.skipIf(!handle)('roles and permissions', () => {
         'device.edit',
         { selected: null } as object,
       ],
+      // The guard runs before the handler, so a portrait that does not exist
+      // still proves the refusal — and every guarded route belongs in this
+      // table, or a permission can be broken from one direction unnoticed.
+      [
+        'DELETE',
+        '/api/v1/portraits/11111111-1111-4111-a111-111111111111',
+        'device.edit',
+        undefined,
+      ],
       ['POST', '/api/v1/invites', 'member.invite', {}],
       ['GET', '/api/v1/roles', '', undefined],
     ];

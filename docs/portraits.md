@@ -122,10 +122,26 @@ column that would otherwise mean the same thing twice.
 
 One generation at a time, hub-wide (`409 portrait_busy`) — a Zero 2 W holds two
 of these in memory at once. The route is **synchronous**, holding the request
-for the tens of seconds an image takes, which is what lets an app run one
+for the minutes an image takes, which is what lets an app run one
 uninterrupted animation from "reading your photo" to the finished portrait. If
 the phone gives up, the hub finishes, stores and announces anyway: nothing is
 lost but the animation.
+
+**Budget two to five minutes, and take that from this hub rather than from the
+web.** The published figures disagree wildly: OpenAI's own latency guidance says
+30–45 s with a complex prompt "close to two minutes", while blog posts measuring
+reseller proxies and small Azure quotas report three to five, which is mostly
+their queue. What a real GetHome hub does, on this prompt, at `quality: high`
+with a transparent background and a photo to restyle, is **two to five minutes**
+— a heavier request than any of those benchmarks runs. The deadline is ten
+minutes, about twice the slowest run observed; a client should size its own from
+the same number, and neither should trust a figure it has not seen itself.
+
+**A second asker is refused rather than queued**, and the reason is money before
+it is time: every drawing bills the home, so a queue turns four impatient taps
+into four charges while a refusal makes the second one free. The rest follows —
+one image in memory at a time on a 512 MB board, and nobody waiting out a
+stranger's drawing before their own begins.
 
 `GET /portraits/:id` is the first route in this API that answers something other
 than JSON. A portrait's bytes never change — a new one gets a new id — so it

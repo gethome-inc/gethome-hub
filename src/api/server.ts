@@ -35,7 +35,7 @@ import {
 import type { MqttObserver } from '../core/mqtt-observer.js';
 import { isHistoryKind, type HistoryKind, type HistoryService } from '../core/history.js';
 // Files and rows, and `fetch` when it draws. No SDK, so no dynamic import.
-import { PortraitSpaceError, type PortraitService } from '../portraits/store.js';
+import { PortraitBusyError, PortraitSpaceError, type PortraitService } from '../portraits/store.js';
 import { PortraitDrawError } from '../portraits/openai-images.js';
 import { MAX_WINDOW_SECONDS, type PermitJoinService } from '../core/permit-join.js';
 import { createHubStatusReader } from '../core/hub-status.js';
@@ -980,11 +980,16 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * front of the kettle is the one who wants a picture of it, and on a hub
    * Studio claimed as *the Mac* that person is never the owner.
    *
-   * Deliberately synchronous. It holds the request for the tens of seconds an
-   * image takes, which is what lets the app show one uninterrupted animation
-   * from "reading your photo" to the finished portrait — and if the phone gives
-   * up or walks out of range, the hub finishes, stores, and announces it
-   * anyway, so nothing is lost but the animation.
+   * Deliberately synchronous. It holds the request for the minutes an image
+   * takes — two to five on a real hub — which is what lets the app show one
+   * uninterrupted animation from "reading your photo" to the finished portrait;
+   * and if the phone gives up or walks out of range, the hub finishes, stores
+   * and announces it anyway, so nothing is lost but the animation.
+   *
+   * A second asker gets `409 portrait_busy` rather than a place in a queue,
+   * and the reason is money before it is time: every drawing bills the home,
+   * so a queue turns four impatient taps into four charges while a refusal
+   * makes the second one free. See `PortraitService.draw`.
    */
   app.post(
     '/api/v1/devices/:id/portraits',
@@ -1040,6 +1045,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         announcePortraits(id);
         return portrait;
       } catch (error) {
+        if (error instanceof PortraitBusyError) {
+          return reply.code(409).send({ error: 'portrait_busy', detail: error.message });
+        }
         if (error instanceof PortraitSpaceError) {
           return reply.code(409).send({ error: 'no_space', detail: error.message });
         }
@@ -1624,7 +1632,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       .string()
       .min(8)
       .max(4000)
-      .refine((key) => !key.trim().startsWith('sk-ant-oat'), {
+      // Anthropic's field only. `detail` is `issues[0]`, and an `sk-ant-oat…`
+      // trips this *and* the OpenAI-field check below — so pasted into the
+      // OpenAI box it answered "the hub needs an Anthropic API key", which is
+      // advice about the other field. Gated here, the right sentence surfaces:
+      // an `sk-ant-` anything belongs in the Anthropic field, and once it is
+      // there this says what kind of Anthropic key it has to be.
+      .refine((key) => (provider === 'anthropic' ? !key.trim().startsWith('sk-ant-oat') : true), {
         message:
           'that is a Claude subscription token; the hub needs an Anthropic API key (sk-ant-api…) from platform.claude.com',
       })
