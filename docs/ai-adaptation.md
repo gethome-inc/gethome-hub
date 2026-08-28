@@ -251,12 +251,12 @@ the one nobody can judge.
 
 **Cost.** A typical adaptation run costs cents, bounded by the per-run cap.
 Neither API reports what a run cost, so the hub adds up its own token usage
-against list prices (input, output, cache reads at 0.1×, Anthropic's cache
-writes at 1.25×, web searches at $10/1000) and `status.lastRun.costUsd` is an
-**estimate**. An unknown model falls back to the most expensive supported tier,
-so the cap can only ever trip early. OpenAI reports cached input *inside* the
-input count rather than beside it, so the cached share is subtracted out before
-it is billed at its own rate — otherwise a cached prompt would be counted twice.
+against list prices (input, output, cache reads at 0.1×, cache writes at 1.25×,
+web searches at $10/1000) and `status.lastRun.costUsd` is an **estimate**. An
+unknown model falls back to the most expensive supported tier, so the cap can
+only ever trip early. OpenAI reports cached input and cache writes *inside* the
+input count, so both shares are subtracted out before each is billed at its own
+rate — otherwise a cache write would be counted twice.
 
 ## When the account fails: taxonomy & backoff
 
@@ -328,10 +328,11 @@ third-party sites, which is exactly what this paragraph says it does not do. So
 that provider is told to search for the page instead: slightly weaker on a
 genuinely obscure device, and honest about where the hub's traffic goes.
 
-**Nothing is left on OpenAI's servers.** That loop sets `store: false`, so the
-conversation is not retained; the model's reasoning comes back encrypted and is
-echoed on the next turn, which is what keeps its chain of thought across a tool
-call without anything being kept server-side.
+**The Responses API stores no application state for a mapping run.** The loop
+sets `store: false`, explicitly requests `reasoning.encrypted_content`, and
+echoes those opaque items on the next turn. That keeps reasoning context across
+a tool call without creating a retrievable Responses conversation; account data
+handling remains subject to the OpenAI API data controls.
 
 No home names, member names, tokens, or any other hub data ever leave the
 machine — and, since the hub gained a traffic inspector, it is worth saying

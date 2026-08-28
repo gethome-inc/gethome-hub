@@ -64,7 +64,7 @@ const PRICING: Readonly<Record<AiProvider, Readonly<Record<string, ModelPricing>
     'claude-sonnet-4-6': { inputPerMTok: 3, outputPerMTok: 15 },
   },
   openai: {
-    'gpt-5.6': { inputPerMTok: 5, outputPerMTok: 30 },
+    'gpt-5.6': { inputPerMTok: 4, outputPerMTok: 20 },
     'gpt-5.6-terra': { inputPerMTok: 2, outputPerMTok: 12 },
   },
 };

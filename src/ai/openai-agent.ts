@@ -56,7 +56,7 @@ const RESPONSES_URL = 'https://api.openai.com/v1/responses';
 interface ResponsesUsage {
   input_tokens?: number;
   output_tokens?: number;
-  input_tokens_details?: { cached_tokens?: number };
+  input_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
 }
 
 /**
@@ -71,13 +71,14 @@ interface ResponseItem {
   call_id?: string;
   name?: string;
   arguments?: string;
-  action?: { type?: string; query?: string };
+  action?: { type?: string; query?: string; queries?: unknown[] };
   content?: Array<{ type: string; refusal?: string }>;
   [key: string]: unknown;
 }
 
 interface ResponseBody {
   status?: string;
+  error?: { code?: string; message?: string };
   incomplete_details?: { reason?: string };
   output?: ResponseItem[];
   usage?: ResponsesUsage;
@@ -88,6 +89,7 @@ class RunUsage {
   private input = 0;
   private output = 0;
   private cacheRead = 0;
+  private cacheWrite = 0;
   private webSearches = 0;
 
   constructor(private readonly model: string) {}
@@ -95,12 +97,15 @@ class RunUsage {
   add(usage: ResponsesUsage | undefined, searches: number): void {
     this.webSearches += searches;
     if (!usage) return;
-    // OpenAI reports cached input inside the input count rather than beside it,
-    // so the cached share is subtracted out before it is billed at its own rate
-    // — otherwise a cached prompt would be counted twice.
+    // OpenAI reports cached input and cache writes inside the input count, so
+    // each share is subtracted before it is billed at its own rate. Otherwise a
+    // prompt cache write would be charged once as normal input and again at its
+    // documented 1.25x cache-write rate.
     const cached = usage.input_tokens_details?.cached_tokens ?? 0;
-    this.input += Math.max((usage.input_tokens ?? 0) - cached, 0);
+    const cacheWrite = usage.input_tokens_details?.cache_write_tokens ?? 0;
+    this.input += Math.max((usage.input_tokens ?? 0) - cached - cacheWrite, 0);
     this.cacheRead += cached;
+    this.cacheWrite += cacheWrite;
     this.output += usage.output_tokens ?? 0;
   }
 
@@ -109,6 +114,7 @@ class RunUsage {
       input_tokens: this.input,
       output_tokens: this.output,
       cache_read_input_tokens: this.cacheRead,
+      cache_creation_input_tokens: this.cacheWrite,
       webSearchRequests: this.webSearches,
     });
   }
@@ -153,6 +159,14 @@ export function createOpenAiMappingAgent(
           }
 
           const body = await askOpenAi(auth.secret, modelId, systemPrompt, input, controller.signal);
+          if (body.status === 'incomplete' && body.incomplete_details?.reason === 'max_output_tokens') {
+            throw new Error(`mapping agent turn hit max_output_tokens (${MAX_OUTPUT_TOKENS}) before answering`);
+          }
+          // A synchronous Responses request is final only when it completed.
+          // Treating a failed, cancelled, or otherwise incomplete response as
+          // prose would send pointless nudges (and spend two more turns).
+          if (body.status !== 'completed') throw responseNotCompleted(body);
+
           const output = body.output ?? [];
           usage.add(body.usage, output.filter((item) => item.type === 'web_search_call').length);
           reportResearch(output, run);
@@ -160,9 +174,6 @@ export function createOpenAiMappingAgent(
           // own chain of thought across the tool call it just made.
           input.push(...output);
 
-          if (body.status === 'incomplete' && body.incomplete_details?.reason === 'max_output_tokens') {
-            throw new Error(`mapping agent turn hit max_output_tokens (${MAX_OUTPUT_TOKENS}) before answering`);
-          }
           const refusal = refusalIn(output);
           if (refusal) throw new Error(`mapping agent run was refused by the model: ${refusal}`);
 
@@ -253,6 +264,10 @@ async function askOpenAi(
         model: modelId,
         instructions: systemPrompt,
         input,
+        // Required for a stateless multi-turn reasoning run: without this the
+        // API may omit the opaque reasoning content that must be replayed with
+        // the next turn.
+        include: ['reasoning.encrypted_content'],
         tools: [
           { type: 'web_search' },
           {
@@ -268,9 +283,9 @@ async function askOpenAi(
         ],
         reasoning: { effort: EFFORT },
         max_output_tokens: MAX_OUTPUT_TOKENS,
-        // Nothing about this home is kept on OpenAI's servers. The cost is that
-        // reasoning has to travel back and forth, which it does — see the note
-        // at the top of this file.
+        // Do not create retrievable Responses application state. The encrypted
+        // reasoning needed for a stateless continuation is requested above and
+        // replayed by the loop.
         store: false,
       }),
     });
@@ -311,13 +326,26 @@ function reportResearch(output: ResponseItem[], run: AgentRunContext | undefined
   if (!run?.onStep) return;
   for (const item of output) {
     if (item.type !== 'web_search_call') continue;
-    const query = item.action?.query;
+    // Responses returns `action.queries` for searches. Keep `query` as a
+    // fallback for historical responses so an upgrade does not erase a useful
+    // activity detail from a run in flight.
+    const queries = Array.isArray(item.action?.queries)
+      ? item.action.queries.filter((query): query is string => typeof query === 'string')
+      : [];
+    const query = queries.join(' · ') || item.action?.query;
     run.onStep(
       typeof query === 'string'
         ? agentStep('search', 'Searched the web.', query)
         : agentStep('search', 'Searched the web.'),
     );
   }
+}
+
+/** A non-completed response is not a normal assistant answer to continue from. */
+function responseNotCompleted(body: ResponseBody): Error {
+  const detail = body.error?.message ?? body.incomplete_details?.reason;
+  const status = body.status ?? 'without a final status';
+  return new Error(`OpenAI response ${status}${detail ? `: ${detail}` : ''}`);
 }
 
 function refusalIn(output: ResponseItem[]): string | null {
