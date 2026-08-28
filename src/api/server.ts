@@ -35,7 +35,7 @@ import {
 import type { MqttObserver } from '../core/mqtt-observer.js';
 import { isHistoryKind, type HistoryKind, type HistoryService } from '../core/history.js';
 // Files and rows, and `fetch` when it draws. No SDK, so no dynamic import.
-import { PortraitSpaceError, type PortraitService } from '../portraits/store.js';
+import { PortraitBusyError, PortraitSpaceError, type PortraitService } from '../portraits/store.js';
 import { PortraitDrawError } from '../portraits/openai-images.js';
 import { MAX_WINDOW_SECONDS, type PermitJoinService } from '../core/permit-join.js';
 import { createHubStatusReader } from '../core/hub-status.js';
@@ -985,6 +985,11 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * from "reading your photo" to the finished portrait — and if the phone gives
    * up or walks out of range, the hub finishes, stores, and announces it
    * anyway, so nothing is lost but the animation.
+   *
+   * Which is also why a second asker gets `409 portrait_busy` rather than a
+   * place in a queue: holding a synchronous request open behind somebody
+   * else's would be minutes of a connection with nothing on screen able to
+   * say why. See `PortraitService.draw`.
    */
   app.post(
     '/api/v1/devices/:id/portraits',
@@ -1040,6 +1045,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         announcePortraits(id);
         return portrait;
       } catch (error) {
+        if (error instanceof PortraitBusyError) {
+          return reply.code(409).send({ error: 'portrait_busy', detail: error.message });
+        }
         if (error instanceof PortraitSpaceError) {
           return reply.code(409).send({ error: 'no_space', detail: error.message });
         }

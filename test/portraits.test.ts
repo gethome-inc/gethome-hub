@@ -362,6 +362,39 @@ describe.skipIf(!handle)('device portraits', () => {
     expect(left[0]?.selected).toBe(true);
   });
 
+  /**
+   * One drawing at a time, hub-wide, and a second asker is refused rather than
+   * queued — `docs/api.md` and `docs/portraits.md` both promise the code, and
+   * an app that cannot tell "busy" from "broken" says the wrong thing. Queueing
+   * would hold a synchronous request open for however long the ones in front
+   * of it take, which on a Zero 2 W is minutes.
+   */
+  it('refuses a second drawing while one is in flight, rather than queueing it', async () => {
+    await settings.setAiKey('openai', 'sk-proj-1234567890');
+    let release: (() => void) | undefined;
+    drawMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve(png());
+        }),
+    );
+
+    const first = draw();
+    // Let the route reach the image call before the second one asks.
+    for (let i = 0; i < 50 && !release; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    const second = await draw();
+    expect(second.statusCode).toBe(409);
+    expect(second.json()).toMatchObject({ error: 'portrait_busy' });
+
+    release?.();
+    expect((await first).statusCode).toBe(200);
+    // And the flag is released, so the next one is not refused for ever.
+    expect((await draw()).statusCode).toBe(200);
+  });
+
   // ── Bounds ────────────────────────────────────────────────────────────────
 
   /**
