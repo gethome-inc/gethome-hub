@@ -7,23 +7,49 @@ import { classifyAgentFailure, classifyApiError, parseResetHint } from '../src/a
 import { buildMappingUserPrompt, zigbee2mqttDevicePage } from '../src/ai/prompts.js';
 import {
   DEFAULT_MODEL,
-  SUPPORTED_MODELS,
+  PROVIDER_MODELS,
+  defaultModelFor,
   estimateCostUsd,
   isSupportedModel,
+  supportedModelIds,
 } from '../src/ai/models.js';
 
 // The agent constructs its own Anthropic client, so the loop is exercised by
 // mocking the SDK rather than by threading a client through the signature.
-const { createMock } = vi.hoisted(() => ({ createMock: vi.fn() }));
+//
+// **The mock reproduces the SDK's own client-side guards, and that is the
+// point of it rather than a flourish.** This file used to stub `create` with a
+// bare `vi.fn()`, which is strictly more permissive than the real SDK — so the
+// whole suite passed over an agent that could not make a single request: the
+// SDK refuses a *non-streaming* call whose `max_tokens` could run past the
+// API's ten-minute ceiling, and MAX_OUTPUT_TOKENS is well over that line. A
+// mock that accepts what the real client refuses does not test the code, it
+// tests the mock. `create` therefore throws exactly as the SDK does, and every
+// reply goes through `stream`.
+const { createMock, nonStreamingCeiling } = vi.hoisted(() => ({
+  createMock: vi.fn(),
+  // The SDK's arithmetic: a request is refused when its expected generation
+  // time (an hour per 128K output tokens) exceeds the ten-minute default.
+  nonStreamingCeiling: Math.floor((600_000 * 128_000) / 3_600_000),
+}));
 vi.mock('@anthropic-ai/sdk', () => ({
   default: class MockAnthropic {
-    messages = { create: createMock };
+    messages = {
+      create: async (params: { max_tokens: number }) => {
+        if (params.max_tokens > nonStreamingCeiling) {
+          throw new Error('Streaming is required for operations that may take longer than 10 minutes.');
+        }
+        return createMock(params);
+      },
+      stream: (params: unknown) => ({ finalMessage: async () => createMock(params) }),
+    };
   },
 }));
 
 const { AGENT_MAX_TURNS, createMappingAgent, evaluateSubmission, submitMappingTool } = await import(
   '../src/ai/agent.js'
 );
+const { MAX_OUTPUT_TOKENS } = await import('../src/ai/agent-core.js');
 
 // ── Failure classification ────────────────────────────────────────────────
 
@@ -118,6 +144,29 @@ describe('parseResetHint', () => {
 
 // ── The model allowlist ───────────────────────────────────────────────────
 
+/**
+ * The loosest cap pattern is `limit reached`, and OpenAI's ordinary 429 says
+ * exactly that — "Rate limit reached for …". Reading it as an exhausted
+ * account cap would wait for a reset that is a minute away and tell the owner
+ * their month is spent.
+ */
+describe('a rate limit is not an account cap', () => {
+  it('reads OpenAI’s own 429 sentence as a rate limit', () => {
+    const failure = classifyApiError({
+      status: 429,
+      message: 'Rate limit reached for gpt-5.6 in organization org-1 on tokens per min.',
+    });
+    expect(failure?.kind).toBe('rate_limited');
+  });
+
+  it('still reads a real cap as one, however it is worded', () => {
+    expect(classifyApiError({ status: 429, message: 'You have hit your monthly limit.' })?.kind).toBe(
+      'usage_limit',
+    );
+    expect(classifyAgentFailure('Credit limit reached for this workspace.')?.kind).toBe('usage_limit');
+  });
+});
+
 describe('supported models', () => {
   it('only allows models that can drive the server-side research tools', () => {
     expect(isSupportedModel(DEFAULT_MODEL)).toBe(true);
@@ -129,7 +178,77 @@ describe('supported models', () => {
   });
 
   it('does not offer Claude Fable 5', () => {
-    expect(Object.keys(SUPPORTED_MODELS).some((id) => id.includes('fable') || id.includes('mythos'))).toBe(false);
+    const every = [...supportedModelIds('anthropic'), ...supportedModelIds('openai')];
+    expect(every.some((id) => id.includes('fable') || id.includes('mythos'))).toBe(false);
+  });
+
+  /**
+   * The allowlist is validation and `choices` is the picker, and they are
+   * deliberately different lengths: a hub already set to an older model has to
+   * keep working, while asking somebody to choose between six is asking them to
+   * research six.
+   */
+  it('offers two models per provider, one of them recommended, all of them allowed', () => {
+    for (const provider of ['anthropic', 'openai'] as const) {
+      const choices = PROVIDER_MODELS[provider].choices;
+      expect(choices).toHaveLength(2);
+      expect(choices.filter((choice) => choice.recommended)).toHaveLength(1);
+      expect(choices[0]?.recommended).toBe(true);
+      for (const choice of choices) expect(isSupportedModel(choice.id, provider)).toBe(true);
+      expect(isSupportedModel(defaultModelFor(provider), provider)).toBe(true);
+    }
+    // Each provider's default is the thorough one it offers first.
+    expect(defaultModelFor('anthropic')).toBe(PROVIDER_MODELS.anthropic.choices[0]?.id);
+    expect(defaultModelFor('openai')).toBe(PROVIDER_MODELS.openai.choices[0]?.id);
+  });
+
+  /**
+   * The two pairs are the same shape on purpose — the thorough tier and the
+   * cheaper one — and each is named by an **explicit** id. `gpt-5.6` routes to
+   * Sol today and is OpenAI's to re-point tomorrow, which would move which
+   * model a home runs and what a run costs with nothing in this repository
+   * changed to explain it; the alias stays priced so a hub that stored it
+   * keeps working, and stays out of `choices` so nothing new picks it up.
+   */
+  it('pins Opus 5 / Sonnet 5 and Sol / Terra by their explicit ids', () => {
+    expect(PROVIDER_MODELS.anthropic.choices.map((choice) => choice.id)).toEqual([
+      'claude-opus-5',
+      'claude-sonnet-5',
+    ]);
+    expect(PROVIDER_MODELS.openai.choices.map((choice) => choice.id)).toEqual([
+      'gpt-5.6-sol',
+      'gpt-5.6-terra',
+    ]);
+    expect(defaultModelFor('openai')).toBe('gpt-5.6-sol');
+
+    // Accepted, priced, and never offered.
+    expect(isSupportedModel('gpt-5.6', 'openai')).toBe(true);
+    expect(PROVIDER_MODELS.openai.choices.some((choice) => choice.id === 'gpt-5.6')).toBe(false);
+    expect(estimateCostUsd('gpt-5.6', { input_tokens: 1_000_000 })).toBe(
+      estimateCostUsd('gpt-5.6-sol', { input_tokens: 1_000_000 }),
+    );
+
+    // Luna is cheap and is not on the list: this job is reasoning-heavy and
+    // runs a handful of times in a hub's life.
+    expect(isSupportedModel('gpt-5.6-luna', 'openai')).toBe(false);
+  });
+
+  it('keeps the two allowlists apart, so a model cannot be sent to the wrong API', () => {
+    expect(isSupportedModel('claude-opus-5', 'openai')).toBe(false);
+    expect(isSupportedModel('gpt-5.6', 'anthropic')).toBe(false);
+    expect(isSupportedModel('gpt-5.6', 'openai')).toBe(true);
+  });
+
+  /**
+   * Sonnet 5 was priced at Sonnet 4.6's rate for a while, which is not a
+   * cosmetic error: `estimateCostUsd` feeds the per-run budget cap, so every
+   * run on it was billed 50% high against a $2 ceiling and stopped early.
+   */
+  it('prices Sonnet 5 at its own rate rather than Sonnet 4.6’s', () => {
+    const sonnet5 = estimateCostUsd('claude-sonnet-5', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
+    const sonnet46 = estimateCostUsd('claude-sonnet-4-6', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
+    expect(sonnet5).toBeCloseTo(12, 5);
+    expect(sonnet46).toBeCloseTo(18, 5);
   });
 
   it('prices a run from its token usage', () => {
@@ -345,6 +464,29 @@ describe('the mapping agent loop', () => {
     expect(toolTypes).toEqual(['web_search_20260209', 'web_fetch_20260209', 'submit_mapping']);
     expect(sent[0]!.system[0].cache_control).toEqual({ type: 'ephemeral' });
     expect(sent[0]!.model).toBe(DEFAULT_MODEL);
+  });
+
+  it('caches the conversation tail as well as the system prefix', async () => {
+    queue(reply({ stop_reason: 'tool_use', content: [submitCall(validDescriptor)] }));
+    await agent().generate('system prompt', 'user');
+
+    // Two breakpoints: the explicit one on the shared prefix, and the
+    // top-level field, which places a second on the last block of `messages`.
+    // Without it every turn re-sends the whole of the model's research at
+    // full input price, and this loop runs for up to AGENT_MAX_TURNS turns.
+    expect(sent[0]!.cache_control).toEqual({ type: 'ephemeral' });
+  });
+
+  it('streams, because MAX_OUTPUT_TOKENS is past what a plain request may ask for', async () => {
+    // The regression this file exists to stop coming back: at these token
+    // counts the SDK refuses a non-streaming call before it reaches the
+    // network, and the hub read that refusal as a transient *network* failure
+    // — so device recognition armed its backoff gate and retried for ever,
+    // with the real cause hidden behind the retry timer.
+    expect(MAX_OUTPUT_TOKENS).toBeGreaterThan(nonStreamingCeiling);
+
+    queue(reply({ stop_reason: 'tool_use', content: [submitCall(validDescriptor)] }));
+    await expect(agent().generate('system', 'user')).resolves.toMatchObject({ version: 1 });
   });
 
   it('resumes a paused turn without inserting a user message', async () => {

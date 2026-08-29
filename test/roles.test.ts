@@ -25,6 +25,7 @@ import {
   resetDb,
   startedHistory,
   testBroker,
+  testPortraits,
 } from './helpers/db.js';
 
 const handle = await openTestDb();
@@ -121,6 +122,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
       pairing,
       activity,
       history: await startedHistory(db, events),
+      portraits: testPortraits(db, events),
       settings,
       hubId: 'hub-roles-test',
       home: await bootedHome(db, 'Roles Hub'),
@@ -238,19 +240,26 @@ describe.skipIf(!handle)('roles and permissions', () => {
       'activity.read',
       'hub.radio',
       'hub.update',
+      // The one key in this row that `authed` never allowed, and it is here on
+      // the same argument `hub.update` is: the owner is Studio's Mac, so a
+      // member-only house could otherwise never add an AI key to its own hub.
+      // A migration adds it to hubs that already exist; the suite below proves
+      // that half.
+      'hub.ai',
     ]);
-    // The four the old `ownerOnly` guarded, plus the two roles added.
+    // What the old `ownerOnly` guarded, minus the one key deliberately moved.
     for (const ownerOnly of [
       'device.remove',
       'home.rename',
       'member.invite',
       'member.remove',
       'role.manage',
-      'hub.ai',
       // Not what `ownerOnly` guarded — the broker had no password then — but
       // owner-only for a reason the others do not have: a credential that
       // leaves the building cannot be revoked by removing a member, so
       // handing one out defaults to the owner's call. See `BUILTIN_ROLES`.
+      // (`hub.ai` used to be on this list and is a Member default now: it
+      // spends money, which is a reason for care rather than for owner-only.)
       'hub.mqtt',
       'hub.mqtt.admin',
     ]) {
@@ -330,6 +339,29 @@ describe.skipIf(!handle)('roles and permissions', () => {
       ['DELETE', `/api/v1/devices/${deviceId}`, 'device.remove', undefined],
       ['GET', '/api/v1/settings/ai', 'hub.ai', undefined],
       ['GET', '/api/v1/settings/mqtt', 'hub.mqtt', undefined],
+      // Drawing a portrait spends the home's money, so it sits with the key it
+      // spends; choosing which one everybody sees is an ordinary shared edit.
+      [
+        'POST',
+        `/api/v1/devices/${deviceId}/portraits`,
+        'hub.ai',
+        {} as object,
+      ],
+      [
+        'PATCH',
+        `/api/v1/devices/${deviceId}/portraits`,
+        'device.edit',
+        { selected: null } as object,
+      ],
+      // The guard runs before the handler, so a portrait that does not exist
+      // still proves the refusal — and every guarded route belongs in this
+      // table, or a permission can be broken from one direction unnoticed.
+      [
+        'DELETE',
+        '/api/v1/portraits/11111111-1111-4111-a111-111111111111',
+        'device.edit',
+        undefined,
+      ],
       ['POST', '/api/v1/invites', 'member.invite', {}],
       ['GET', '/api/v1/roles', '', undefined],
     ];
@@ -371,6 +403,39 @@ describe.skipIf(!handle)('roles and permissions', () => {
   });
 
   // ── The activity log ──────────────────────────────────────────────────────
+
+  /**
+   * The other half of every guard row above: a permission with only a refusal
+   * test can be broken by denying everybody. `hub.ai` is the one that moved in
+   * this release, so it is the one worth spelling out — the phone in somebody's
+   * hand has to be able to open the AI page it now has.
+   */
+  it('lets a member manage the home’s AI, and a guest neither read nor write it', async () => {
+    const read = await app.inject({
+      method: 'GET',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+    });
+    expect(read.statusCode).toBe(200);
+
+    const written = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { openaiApiKey: 'sk-proj-1234567890' },
+    });
+    expect(written.statusCode).toBe(200);
+    expect(written.json()).toMatchObject({ providers: { openai: { hasKey: true } } });
+
+    const refused = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(guestToken),
+      payload: { enabled: false },
+    });
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json()).toMatchObject({ error: 'forbidden', permission: 'hub.ai' });
+  });
 
   /**
    * `activity.read` narrows rather than refuses. A guest reading their own

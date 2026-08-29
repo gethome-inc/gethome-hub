@@ -43,6 +43,13 @@
       "when": 1787761805958,
       "tag": "0005_thankful_living_lightning",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1787870525221,
+      "tag": "0006_faulty_tyger_tiger",
+      "breakpoints": true
     }
   ]
 }

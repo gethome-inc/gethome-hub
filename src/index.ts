@@ -9,6 +9,7 @@ import { ensureHubSecret } from './core/crypto.js';
 import { HubEventBus } from './core/bus.js';
 import { ActivityService } from './core/activity.js';
 import { HistoryService } from './core/history.js';
+import { PortraitService } from './portraits/store.js';
 import { recordFinishedUpdate } from './core/update.js';
 import { HomeService } from './core/home.js';
 import { FavoritesService } from './core/favorites.js';
@@ -99,6 +100,10 @@ async function main(): Promise<void> {
   // per report and one wakeup every five minutes.
   const history = new HistoryService(db, events, log.child({ module: 'history' }));
   await history.start();
+  // The pictures a home has had drawn of its devices. Files under the data
+  // directory with a row each; constructed unconditionally, because reading
+  // them needs no credential and a hub with none simply has no rows.
+  const portraits = new PortraitService(db, events, config.DATA_DIR, log.child({ module: 'portraits' }));
   // Favorites are one member's pins rather than a property of the home, so they
   // live beside the registry instead of on the device row. Loaded once: this is
   // read for every device on every `GET /devices` and on every `deviceUpserted`
@@ -192,6 +197,7 @@ async function main(): Promise<void> {
     pairing,
     activity,
     history,
+    portraits,
     settings,
     home: homeService,
     hubId: secret.hubId,

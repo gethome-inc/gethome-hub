@@ -27,6 +27,17 @@ export interface HubEvents {
    * them to reconnect — which was the only thing that used to re-read them.
    */
   structureChanged: [structure: HomeStructure];
+  /**
+   * A device's portraits changed — one was drawn, chosen, or deleted.
+   *
+   * Carries the device id and nothing else: the list is a short read and the
+   * *bytes* are a megabyte or two, which is not something to push down a
+   * socket. Always-on, and to every socket rather than the member who asked,
+   * because a portrait is the house's — the phone in the next room is looking
+   * at the same kettle and would otherwise keep the old picture until it
+   * happened to reconnect. Same argument as `structure`.
+   */
+  portraitsChanged: [deviceId: string];
   activity: [entry: ActivityEvent];
   permitJoin: [active: boolean, remainingSeconds: number];
   /**

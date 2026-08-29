@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { integer, primaryKey, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { index, integer, primaryKey, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 /**
  * The hub's store is a single SQLite file (`<data>/hub.db`).
@@ -434,8 +434,10 @@ export const aiRuns = sqliteTable('ai_runs', {
   vendor: text('vendor'),
   model: text('model'),
   exposesHash: text('exposes_hash').notNull(),
-  /** Which Claude model ran it. */
+  /** Which model ran it — `claude-…` or `gpt-…`, depending on the provider. */
   modelId: text('model_id'),
+  /** anthropic | openai. Absent on rows written before the second provider. */
+  provider: text('provider'),
   /** Whether the run produced a mapping the hub accepted. */
   ok: integer('ok', { mode: 'boolean' }).notNull().default(false),
   costUsd: real('cost_usd'),
@@ -446,6 +448,42 @@ export const aiRuns = sqliteTable('ai_runs', {
   /** `AgentStep[]` as JSON. */
   steps: text('steps', { mode: 'json' }).notNull(),
 });
+
+/**
+ * A device's AI-drawn portraits — the picture the apps float on its page.
+ *
+ * A portrait is the *house's*, exactly like a room's icon: everybody in the
+ * home should see the same kettle, so it is a row here rather than a file on
+ * whoever generated it. The image itself is **not** in this table — a 1024²
+ * transparent PNG is a megabyte or two, and putting that through the WAL on
+ * every checkpoint is the write amplification the whole store is arranged to
+ * avoid. The bytes live at `<data>/portraits/<device>/<id>.png`; this row is
+ * the record of them, and the file is deleted with it.
+ *
+ * `selected` is which one the apps draw. **No row selected while portraits
+ * exist is a state, not an absence**: it means somebody chose the procedural
+ * sphere over every picture they have, which is a per-home preference the apps
+ * already had and would otherwise need a column of its own to express.
+ */
+export const devicePortraits = sqliteTable(
+  'device_portraits',
+  {
+    id: uuidPk(),
+    deviceId: text('device_id')
+      .notNull()
+      .references(() => devices.id, { onDelete: 'cascade' }),
+    at: createdAt('at'),
+    /** Size of the stored PNG, so the hub can bound its own disk without stat-ing every file. */
+    bytes: integer('bytes').notNull(),
+    /** Who drew it and with what — recorded because both will change. */
+    provider: text('provider').notNull(),
+    model: text('model').notNull(),
+    /** Whether a photo was the reference, which is the difference a person can see. */
+    fromPhoto: integer('from_photo', { mode: 'boolean' }).notNull().default(false),
+    selected: integer('selected', { mode: 'boolean' }).notNull().default(false),
+  },
+  (table) => [index('device_portraits_device').on(table.deviceId)],
+);
 
 /**
  * Key-value settings. AI provider keys are stored here encrypted with the

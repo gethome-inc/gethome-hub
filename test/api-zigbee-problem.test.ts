@@ -19,6 +19,7 @@ import {
   loadedAccess,
   startedHistory,
   testBroker,
+  testPortraits,
 } from './helpers/db.js';
 
 /**
@@ -81,6 +82,7 @@ describe.skipIf(!handle)('why Zigbee is down, over HTTP', () => {
       pairing,
       activity,
       history: await startedHistory(db, events),
+      portraits: testPortraits(db, events),
       settings,
       aiRuns: new AiRunLog(db, events),
       mappings: new MappingLibrary({ db, settings, registry, log }),

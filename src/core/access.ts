@@ -128,9 +128,9 @@ export const PERMISSIONS: readonly PermissionDescriptor[] = [
   {
     key: 'hub.ai',
     group: 'Hub',
-    title: 'AI adaptation',
+    title: 'AI keys and portraits',
     summary:
-      'The API key and its switch, what the agent has spent, and the device-mapping library.',
+      'The API keys and the adaptation switch, drawing a device portrait, what has been spent, and the device-mapping library.',
   },
   {
     key: 'hub.mqtt',
@@ -197,6 +197,15 @@ export const BUILTIN_ROLES = [
      * there did not mean "an update needs care", it meant the phone in the
      * owner's own hand could never update their own hub, ever.
      *
+     * `hub.ai` joined it later on exactly that argument. It spends money, which
+     * is a real reason for care and not a reason for owner-only: the person
+     * standing in the house is the one who wants a device recognised or a
+     * portrait drawn, and on a typical hub that person is never the owner.
+     * Guest is where the line actually falls. Adding a key to this list does
+     * not reach a hub that already exists — `ensureBuiltins()` inserts with
+     * `ON CONFLICT DO NOTHING` — so it travels with a migration that updates
+     * the stored row (`0006`).
+     *
      * **Neither MQTT key is here, and that is the one place the "bounded
      * cost" test comes out differently.** Every other permission is a request
      * this hub carries out and can stop carrying out: removing a member takes
@@ -217,6 +226,7 @@ export const BUILTIN_ROLES = [
       'activity.read',
       'hub.radio',
       'hub.update',
+      'hub.ai',
     ] as PermissionKey[],
   },
   {
