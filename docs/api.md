@@ -576,6 +576,16 @@ when a new one fails its health check) meets a schema it understands.
 }
 ```
 
+**`online` and each endpoint's `state.reachable` are one fact, and a client
+should read whichever it prefers rather than combining them.** The hub keeps
+them in step — the guard in `reachabilityChanged` asks whether *either* is
+behind, so a restart that loaded the two out of step from their separate
+tables is repaired the next time a radio reports, and the correction arrives
+as an ordinary `deviceUpserted` frame with no activity row behind it (nothing
+about the device changed; one of the two records of it was late). They drifted
+once, and an app ANDing them showed a device as offline while another app,
+reading `online` alone, showed the same device online at the same moment.
+
 `id` is a UUID this hub minted; **`externalId` is the device's address on its
 own protocol** — a Zigbee IEEE, an MQTT discovery id, a Matter node. It is the
 only handle an app has for tying a device row to something a *radio* said,

@@ -150,6 +150,28 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   to explain it. That is the moment somebody pulls a stick out of a Pi. It routes through
   the per-device path on purpose: already serialized, already quiet for a
   device in that state, already emitting `deviceUpserted`.
+  **Reachability is one fact in two rows, and the guard has to ask about
+  both.** It is written to `devices.online` *and* into every endpoint's
+  `state.reachable`, and the apps do not read the same one — Studio draws
+  `online`, the iOS app draws `(online ?? true) && state.reachable` — so the
+  two disagreeing shows up as one device reading offline on a phone and online
+  on a Mac, about the same hub, at the same moment. They drifted for two
+  reasons that compounded. The endpoint mutation was **in-memory only**: it
+  never marked the state dirty, so `reachable` reached the card solely by
+  riding along with the next state report that happened to flush, while the
+  device row was written immediately. And the guard read `cached.online`
+  alone, so once the pair had diverged on disk — they are loaded back from two
+  tables with nothing reconciling them — the radio coming up found `online`
+  already `true`, returned early, and left the endpoint stuck at `false`
+  **for ever**, because nothing else writes that field. Found on a hub whose
+  Zigbee2MQTT had `availability.enabled: false`, which is Z2M's default: with
+  no per-device availability message in existence, the early return was the
+  last word. So the guard now asks whether *either* place is behind, every
+  endpoint it corrects is marked dirty, and a repair emits `deviceUpserted`
+  but writes **no** activity row — the device's reachability did not change,
+  one of the two records of it was simply late. A new endpoint inherits
+  `device.online` rather than being born reachable, which is the same split
+  pointed the other way.
   **Endpoint state is written behind a debounce** (`STATE_FLUSH_MS`), because
   persisting on every report meant one whole-row JSON rewrite per sensor
   message, forever, onto an SD card — a power meter alone is a write every few
