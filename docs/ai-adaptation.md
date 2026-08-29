@@ -296,6 +296,25 @@ usually carries one), otherwise an escalating ladder
 (1 min → 5 min → 30 min → 2 h). Any *completed* run — even one whose
 descriptor was rejected — proves the account works and clears the gate.
 
+**The gate names the credential it was armed against**, and retires itself the
+moment that credential moves: provider, model, or the key itself. Without
+that, the judgement "this account is unavailable" outlived the account — an
+owner who met `auth_failed`, went and fixed their key and came back found a hub
+that would not run for up to two hours, at the one moment a gate meant to
+protect them is only in their way. It also made a failure on one provider
+silence the other, which is precisely the switch an app tells somebody to
+reach for. Keying it needs no channel from the settings routes to keep in step:
+the gate simply asks, when it is about to refuse, whether it is still about
+this hub's credential.
+
+**And an explicit run is never gated at all.** Pressing *Work it out again* is
+a person saying "try it now", and it is the whole of how somebody recovers:
+change the key or the model, come back, press the button. A gate that answered
+that with silence would be indistinguishable from a button that does nothing.
+The flag travels all the way to the check rather than being settled where the
+button is pressed, because runs are serialized hub-wide — one already queued
+can arm the gate in between.
+
 The current state is always visible on `GET /api/v1/settings/ai` as
 `status.lastError` / `status.lastRun`, so the apps can show "AI paused:
 usage limit — resets 23:00" instead of failing silently.
@@ -305,6 +324,23 @@ Distinct from all of the above: a run that *completes* but produces an
 model until an explicit remap), and a run where the agent gives up (out of
 turns/budget, no submission) is simply logged and retried on the next
 natural trigger. Only descriptors are ever cached — never account failures.
+
+**A failed run is recorded in words somebody can act on** — the *name a
+failure, don't just relay it* rule the Zigbee diagnosis holds, applied to the
+run log. An SDK error's `message` is the HTTP status with the whole response
+body glued to it, so a device row read
+`400 {"type":"error","error":{"type":"invalid_request_error","message":"…"}}`:
+three quarters punctuation, with the one sentence that says what to do buried
+in the middle. `describeRunFailure()` (`src/ai/errors.ts`) digs out the
+provider's own sentence, and for the refusals that are really *settings* it
+adds the fix and records the kind as `config` — an identity-linked Anthropic
+key, one created without a workspace, is refused on every request because such
+a key must name the workspace it acts in and the hub sends no such header. The
+three rules are the diagnosis module's: most-specific-first, an unrecognised
+failure is still reported (with its envelope stripped and nothing guessed
+about it), and nothing here throws — it runs inside the catch of a run that has
+already failed. `errorKind` is an open string, so an app that meets a new word
+falls back to showing the message.
 
 ## Privacy
 
@@ -415,7 +451,10 @@ the device's canonical schema (vendor + model + exposes; `exposesHash()` lives
 with the exposes mapper, because it is a property of the device's published
 schema rather than of AI). Every further device of the same model maps
 instantly and for free, across renames and re-pairings.
-`POST /devices/:id/remap` invalidates and regenerates.
+`POST /devices/:id/remap` invalidates and regenerates — and because it is
+explicit, it drops a `rejected` row too, which is what makes "the model was too
+weak, try a better one" a thing somebody can actually do. It answers as soon as
+the run has started rather than when it ends; `docs/api.md` has the shape.
 
 That cache is now a **library** with five routes over it
 (`src/ai/library.ts`, `docs/api.md`). Three things it makes possible that the
@@ -476,7 +515,8 @@ Everything lives in `src/ai/`; the module never imports the API or adapters
 | `models.ts` | Per provider: the model allowlist (what can drive the hosted research tools), the two-entry `choices` list the apps render, and the list prices the per-run cost cap and `costUsd` estimate are computed from. Dependency-free, so the API layer can validate a model without pulling in the AI stack. |
 | `errors.ts` | The failure taxonomy: `AiUnavailableError` kinds, HTTP-status classification (`classifyApiError`), error-text fallback, reset-time parsing. |
 | `prompts.ts` | The system prompt (canonical capabilities/paths/units/transforms + worked examples + research rules), the per-device task prompt carrying the whole research brief, and the zigbee2mqtt.io page URL. |
-| `mapper.ts` | Orchestration: cache lookups, one-run-at-a-time serialization, per-model in-flight dedupe, the backoff gate, validation, storage, and interpretation into an `AppliedAiMapping` for the adapter. |
+| `mapper.ts` | Orchestration: cache lookups, one-run-at-a-time serialization, per-model in-flight dedupe, the credential-keyed backoff gate, validation, storage, and interpretation into an `AppliedAiMapping` for the adapter. |
+| `errors.ts` | Two questions kept apart: is this the *account* failing (`classifyApiError` → a gate and a retry) or the *run* (`describeRunFailure` → a sentence in the log, and the fix where the refusal is really a setting). |
 
 Related pieces elsewhere: credential + status storage in
 `src/core/settings.ts` (AES-256-GCM via `src/core/crypto.ts`, one slot per
@@ -493,9 +533,13 @@ the turn and cost caps), `test/ai-agent-openai.test.ts` (the same loop on the
 other provider, over a mocked `fetch`: the request body, the stateless reasoning
 replay, the nudge, refusals, and a 429 that must read as a rate limit rather
 than an exhausted account cap), `test/ai-descriptor.test.ts` (DSL + mapper behavior
-incl. backoff and dedupe, against a temporary SQLite file), and
+incl. backoff and dedupe, against a temporary SQLite file),
+`test/ai-retry.test.ts` (trying again after changing something: the gate
+retiring on a new key, model or provider, an explicit run ignoring it — even
+queued behind a run that arms it — and what a failed run is recorded as), and
 `test/integration/zigbee-adapter.test.ts` (runtime adaptation end-to-end over
-a real broker).
+a real broker, including that an explicit remap answers while the agent is
+still working).
 
 ## The move off the Claude Agent SDK
 

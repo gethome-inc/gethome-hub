@@ -930,8 +930,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // keeps an app from drawing a button whose only outcome is silence.
     const refusal = await aiUnavailableReason();
     if (refusal) return reply.code(409).send({ error: refusal });
-    const ok = await deps.zigbee.remap(device.externalId);
-    return { requested: ok };
+    // Answers as soon as the run is under way, never when it ends — see
+    // `ZigbeeAdapter.remap`. What the agent then did arrives on the `ai`
+    // stream and in `GET /ai/runs`.
+    return { requested: deps.zigbee.remap(device.externalId) };
   });
 
   // ── Device portraits ──────────────────────────────────────────────────────

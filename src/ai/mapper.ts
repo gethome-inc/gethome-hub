@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import { aiMappings } from '../db/schema.js';
@@ -28,7 +29,7 @@ import {
 } from './descriptor.js';
 import { agentStep, type AgentRunStats, type MappingProvider } from './agent-core.js';
 import { defaultModelFor } from './models.js';
-import { AiUnavailableError } from './errors.js';
+import { AiUnavailableError, describeRunFailure, readableFailure } from './errors.js';
 import { MAPPING_SYSTEM_PROMPT, buildMappingUserPrompt, buildRepairUserPrompt } from './prompts.js';
 
 export { exposesHash };
@@ -61,9 +62,23 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
   private readonly inFlight = new Map<string, Promise<AppliedAiMapping | null>>();
   /** Serializes agent runs hub-wide. */
   private queue: Promise<unknown> = Promise.resolve();
-  /** Backoff gate: no runs until this timestamp. */
-  private unavailableUntil = 0;
-  private failureCount = 0;
+  /**
+   * Backoff gate: no *automatic* run until `until`, because the account this
+   * was armed against was not working.
+   *
+   * **It names the credential it is about, and that is what makes it
+   * survivable.** The gate used to be a bare timestamp, so the judgement
+   * "this account is unavailable" outlived the account: an owner who met
+   * `auth_failed`, went and fixed their key, and came back found a hub that
+   * refused to run for up to two hours while every route still answered
+   * cheerfully — the one moment where a gate meant to protect somebody is
+   * only in their way. Worse, the gate is hub-wide, so a failure on one
+   * provider silenced the other, which is precisely the switch an owner is
+   * told to reach for. Keyed on provider, model and a digest of the secret,
+   * it retires itself the moment any of the three moves, with no channel from
+   * the settings routes to keep in step.
+   */
+  private gate: { until: number; failures: number; credential: string } | null = null;
 
   constructor(
     private readonly db: Db,
@@ -85,6 +100,13 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
     const hash = exposesHash(device);
 
     if (options?.force) {
+      // An explicit ask is a person saying "try it now", and it is the whole
+      // of how somebody recovers from a failure: change the key or the model,
+      // press the button. So it clears the gate rather than being refused by
+      // it — the same stance `MappingLibrary.repair` has always taken by
+      // building its own mapper — and it drops a `rejected` row, which is the
+      // other thing a weaker model can leave behind.
+      this.gate = null;
       await this.invalidate(device);
     } else {
       const cached = await this.db.query.aiMappings.findFirst({
@@ -101,7 +123,13 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
     if (existing) return existing;
 
     const run = this.serialize(() =>
-      this.generateMapping(device, staticProfile, hash, options?.samples ?? []),
+      this.generateMapping(device, staticProfile, hash, {
+        samples: options?.samples ?? [],
+        // Carried all the way to the gate check rather than settled above,
+        // because `serialize` puts this run behind every run already queued —
+        // one of which can arm the gate after the button was pressed.
+        explicit: options?.force === true,
+      }),
     );
     this.inFlight.set(hash, run);
     try {
@@ -129,14 +157,9 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
     device: Z2mDevice,
     staticProfile: Z2mProfile,
     hash: string,
-    samples: Record<string, unknown>[],
+    options: { samples: Record<string, unknown>[]; explicit: boolean },
   ): Promise<AppliedAiMapping | null> {
-    if (Date.now() < this.unavailableUntil) {
-      this.log.debug(
-        `AI backoff active until ${new Date(this.unavailableUntil).toISOString()} — skipping mapping request.`,
-      );
-      return null;
-    }
+    if (!options.explicit && (await this.backoffActive())) return null;
 
     const provider = await this.resolveProvider();
     if (!provider) return null;
@@ -146,7 +169,7 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
       kind: 'map',
       device,
       hash,
-      prompt: buildMappingUserPrompt(device, staticProfile, samples),
+      prompt: buildMappingUserPrompt(device, staticProfile, options.samples),
       brief: `${staticProfile.uncovered.length + staticProfile.unmapped.length} property/ies the hub could not place`,
     });
   }
@@ -263,15 +286,18 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
     } catch (error) {
       if (error instanceof AiUnavailableError) {
         await this.recordUnavailable(error);
-        await run?.finish(this.outcome(false, stats, error.kind, error.message));
+        await run?.finish(this.outcome(false, stats, error.kind, readableFailure(error)));
         return null;
       }
       // The run failed on its own merits (gave up, never submitted…). The
       // account works, so nothing is cached and no backoff is armed — the
-      // next natural trigger simply tries again.
+      // next natural trigger simply tries again. What is *recorded* is the
+      // provider's own sentence rather than its whole response body, plus the
+      // fix where the refusal is really a setting — see `describeRunFailure`.
       this.log.warn({ err: error }, 'AI mapping request failed');
       await this.recordRun(false, stats);
-      await run?.finish(this.outcome(false, stats, 'run_failed', (error as Error).message));
+      const failure = describeRunFailure(error);
+      await run?.finish(this.outcome(false, stats, failure.kind, failure.message));
       return null;
     }
 
@@ -337,24 +363,64 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
     return createMappingAgent({ secret }, ai.anthropic.model, this.log);
   }
 
+  /**
+   * Which credential the gate is about: the provider, the model it would run,
+   * and a digest of the secret. Never the secret itself — this is compared and
+   * logged nowhere, but a key held in a field is a key that can be printed.
+   */
+  private async credentialId(): Promise<string> {
+    const ai = await this.settings.getAiSettings();
+    const provider = ai.provider;
+    if (!provider) return 'none';
+    const secret = (await this.settings.aiKey(provider)) ?? '';
+    const digest = createHash('sha256').update(secret).digest('hex').slice(0, 16);
+    return `${provider}:${ai[provider].model ?? defaultModelFor(provider)}:${digest}`;
+  }
+
+  /**
+   * Is an *automatic* run gated? Answers false — and forgets the gate — once
+   * it has expired or once it is about a credential this hub no longer uses.
+   */
+  private async backoffActive(): Promise<boolean> {
+    const gate = this.gate;
+    if (!gate) return false;
+    if (Date.now() >= gate.until) {
+      this.gate = null;
+      return false;
+    }
+    if ((await this.credentialId()) !== gate.credential) {
+      this.log.info('AI settings changed since the backoff was armed — trying again.');
+      this.gate = null;
+      return false;
+    }
+    this.log.debug(
+      `AI backoff active until ${new Date(gate.until).toISOString()} — skipping mapping request.`,
+    );
+    return true;
+  }
+
   /** Transient account/service failure: arm the backoff gate and surface it. */
   private async recordUnavailable(error: AiUnavailableError): Promise<void> {
-    this.failureCount += 1;
+    const failures = (this.gate?.failures ?? 0) + 1;
     const ladder = [60_000, 300_000, 1_800_000, 7_200_000] as const;
-    const backoffMs = ladder[Math.min(this.failureCount, ladder.length) - 1]!;
-    this.unavailableUntil = error.resetAt
+    const backoffMs = ladder[Math.min(failures, ladder.length) - 1]!;
+    const until = error.resetAt
       ? Math.max(error.resetAt.getTime(), Date.now() + 30_000)
       : Date.now() + backoffMs;
+    this.gate = { until, failures, credential: await this.credentialId() };
+    // The provider's own sentence, not its whole response body: this string
+    // is what both apps put on screen under "AI paused until…".
+    const said = readableFailure(error).slice(0, 200);
     this.log.warn(
-      { kind: error.kind, retryAt: new Date(this.unavailableUntil).toISOString() },
-      `AI unavailable (${error.kind}): ${error.message.slice(0, 200)}`,
+      { kind: error.kind, retryAt: new Date(until).toISOString() },
+      `AI unavailable (${error.kind}): ${said}`,
     );
     const current = await this.settings.getAiStatus();
     await this.settings.setAiStatus({
       ...(current.lastRun !== undefined ? { lastRun: current.lastRun } : {}),
       lastError: {
         kind: error.kind,
-        message: error.message.slice(0, 200),
+        message: said,
         at: new Date().toISOString(),
         ...(error.resetAt !== undefined ? { resetAt: error.resetAt.toISOString() } : {}),
       },
@@ -363,8 +429,7 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
 
   /** A run completed (well or badly) — the account works, so clear the gate. */
   private async recordRun(ok: boolean, stats: AgentRunStats | null): Promise<void> {
-    this.failureCount = 0;
-    this.unavailableUntil = 0;
+    this.gate = null;
     const ai = await this.settings.getAiSettings();
     const ranOn = ai.provider ?? 'anthropic';
     await this.settings.setAiStatus({

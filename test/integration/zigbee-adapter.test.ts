@@ -139,4 +139,44 @@ describe.skipIf(!enabled)('ZigbeeAdapter runtime AI adaptation', () => {
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(requestMapping).toHaveBeenCalledTimes(1);
   });
+
+  it('answers an explicit remap while the agent is still working', async () => {
+    // `POST /devices/:id/remap` hands its answer straight back to an app, and
+    // a run is minutes against a ten-second client timeout — so what is being
+    // pinned here is that the answer arrives *now*. A remap that awaited the
+    // run reported a failure on every retry that actually did any work.
+    let release!: () => void;
+    const working = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    requestMapping.mockImplementationOnce(async () => {
+      await working;
+      return null;
+    });
+
+    try {
+      // Not awaited, and not awaitable: a promise here would fail this.
+      expect(adapter.remap(probe.ieee_address)).toBe(true);
+      // The run really did start — an answer that came back because nothing
+      // happened would be the bug this replaced, wearing the same face.
+      await waitFor(() => requestMapping.mock.calls.length === 2);
+      // Same cast as above: the mock is declared with no parameters, so its
+      // recorded arguments need spelling out.
+      const [, , options] = requestMapping.mock.calls[1]! as unknown as [
+        unknown,
+        unknown,
+        { force?: boolean },
+      ];
+      expect(options).toMatchObject({ force: true });
+    } finally {
+      release();
+    }
+  });
+
+  it('answers false for a device the radio has no schema for', () => {
+    // A device row can outlive its `bridge/devices` entry, and that is a
+    // different answer from a run that failed — the only one that can be
+    // given without waiting.
+    expect(adapter.remap('0x0000000000000000')).toBe(false);
+  });
 });

@@ -427,6 +427,40 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   fixing. `exposesHash` lives with the exposes mapper, not with the AI: it is a
   property of the device's published schema, and the adapter records it in
   `DeviceRecognition` without importing the AI stack.
+- **Trying again is the whole recovery path, and three things used to break
+  it.** Recognition fails for reasons a person can fix — a key that is wrong, a
+  key that names no workspace, a model too weak to submit a valid descriptor —
+  and every one of those fixes ends the same way: come back and press *Work it
+  out again*. **First, `POST /devices/:id/remap` answers as soon as the run is
+  under way**, never when it ends. It used to await the whole run, against a
+  ten-minute watchdog and a Studio client whose HTTP timeout is ten seconds, so
+  the button reported a failure on every retry that actually did any work and
+  appeared to succeed only on runs that failed instantly. `ZigbeeAdapter.remap`
+  is fire-and-forget now, the shape `scheduleParameterRemap` beside it always
+  had; `false` still means the radio has no published schema for that device
+  *now*, which is the only answer available without waiting. **Second, the
+  backoff gate names the credential it was armed against** and retires itself
+  when the provider, the model or the key moves — otherwise the judgement "this
+  account is unavailable" outlived the account, and a hub-wide gate armed by one
+  provider silenced the other, which is exactly the switch an app tells somebody
+  to reach for. Keying it on `provider:model:sha256(secret)` means no channel
+  from the settings routes to keep in step. **Third, an explicit run ignores the
+  gate entirely**, the stance `MappingLibrary.repair` already took by building
+  its own mapper — and the flag travels to the check rather than being settled
+  where the button is pressed, because runs are serialized hub-wide and a run
+  already queued can arm the gate in between. `test/ai-retry.test.ts` pins all
+  of it.
+  **And a failed run is recorded in words, not in a response body.** This is
+  `diagnosis.ts`'s rule one module over: an SDK error's `message` is the status
+  with the whole JSON body glued to it, so a device row in Studio read
+  `400 {"type":"error","error":{…}}` with the one useful sentence in the middle
+  of it. `describeRunFailure` digs that sentence out and, for a refusal that is
+  really a *setting*, adds the fix and records `config` — today the one entry is
+  an identity-linked Anthropic key, which must name a workspace on every request
+  and which the hub deliberately does not choose for anybody. Same three rules
+  as the Zigbee diagnosis: most-specific-first, an unrecognised failure is still
+  reported with nothing guessed about it, and nothing throws — it runs inside
+  the catch of a run that has already failed.
 - **Nothing is unsupported by default — three layers, in order.** Devices are
   made usable by (1) **typed capabilities** (canonical schema), then (2)
   **generic custom fields** (`custom`) for every leftover parameter, generated

@@ -206,11 +206,32 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     );
   }
 
-  /** Re-run mapping (invalidating any cached AI descriptor) for one device. */
-  async remap(externalId: string): Promise<boolean> {
+  /**
+   * Re-run mapping (invalidating any cached AI descriptor) for one device.
+   *
+   * **It starts the run and answers, rather than awaiting it**, because an
+   * agent run is minutes and an HTTP request is not. This used to await
+   * `adoptDevice`, so `POST /devices/:id/remap` held its connection open for
+   * the whole run — against a watchdog of ten minutes and a Studio client
+   * whose timeout is ten seconds. The button therefore reported a failure on
+   * every run that actually did any work, while the hub carried on happily,
+   * and the only run it appeared to succeed on was one that failed instantly.
+   * The runtime path beside it (`scheduleParameterRemap`) has always been
+   * fire-and-forget; this is the same shape, and the same shape as
+   * `PUT /settings/radio` — the request is recorded, and what happened is read
+   * back from the `ai` stream and the run log.
+   *
+   * `false` means the radio has no published schema for this device *now* —
+   * a device row can outlive its `bridge/devices` entry — which is a different
+   * answer from a run that failed, and the only one that can be given
+   * synchronously.
+   */
+  remap(externalId: string): boolean {
     const raw = this.rawDefinitions.get(externalId);
     if (!raw) return false;
-    await this.adoptDevice(raw, { regenerate: true });
+    void this.adoptDevice(raw, { regenerate: true }).catch((error) => {
+      this.options.log.warn({ err: error }, `Remap failed for ${raw.friendly_name}`);
+    });
     return true;
   }
 
