@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { pino } from 'pino';
 import mqtt from 'mqtt';
 import { ZigbeeAdapter, type AppliedAiMapping } from '../../src/adapters/zigbee/adapter.js';
+import { exposesHash } from '../../src/adapters/zigbee/exposes-mapper.js';
 import type { AdapterBus, AdapterDeviceDescriptor } from '../../src/adapters/adapter.js';
 import type { EndpointState } from '../../src/schema/index.js';
 
@@ -243,6 +244,33 @@ describe.skipIf(!enabled)('ZigbeeAdapter runtime AI adaptation', () => {
    * online. Adding capabilities is the agent's job; demoting the one the
    * apps render is not.
    */
+  it('forgets a stored mapping without buying a replacement', async () => {
+    // Give the device a mapping first, the way an upload or a run would.
+    requestMapping.mockResolvedValueOnce(humidityMapping);
+    expect(adapter.remap(probe.ieee_address)).toBe(true);
+    await waitFor(() =>
+      upserts.some(
+        (entry) =>
+          entry.externalId === probe.ieee_address &&
+          (entry.endpoints[0]?.capabilities ?? []).includes('humidity'),
+      ),
+    );
+
+    const runsBefore = requestMapping.mock.calls.length;
+    upserts.length = 0;
+
+    // Pressing Forget. The library row is gone by the time this is called, so
+    // asking the agent here would find no cache and start a paid run — inside
+    // a request whose client gives up after ten seconds.
+    await adapter.forgetStoredMapping(exposesHash(probe as unknown as Parameters<typeof exposesHash>[0]));
+
+    expect(requestMapping.mock.calls.length).toBe(runsBefore);
+    const endpoint = upserts.at(-1)!.endpoints[0]!;
+    // Back to what the static mapper alone makes of it.
+    expect(endpoint.capabilities).not.toContain('humidity');
+    expect(endpoint.capabilities.length).toBeGreaterThan(0);
+  });
+
   it('lets the agent add capabilities but never demote the primary one', async () => {
     requestMapping.mockResolvedValueOnce({
       endpoints: [

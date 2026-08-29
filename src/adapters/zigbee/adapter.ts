@@ -92,6 +92,18 @@ interface AdoptOptions {
   regenerate?: boolean;
   /** Consult the library even for a device the static mapper placed fully. */
   consultMapping?: boolean;
+  /**
+   * Drop the AI overlay this device is carrying, and ask for nothing.
+   *
+   * The delete side of the library. Two things have to be suppressed at once,
+   * and missing either makes a forget do nothing: `adoptDevice` deliberately
+   * carries a previous mapping over (so a regeneration never leaves a device
+   * less usable while a run is in flight), and `needsHelp` is true for any
+   * device with an uncovered property — which is most devices an AI mapping
+   * was ever made for. So a plain re-adopt after a delete would keep the
+   * deleted overlay *and* immediately pay for a replacement.
+   */
+  forgetMapping?: boolean;
 }
 
 export interface ZigbeeAdapterOptions {
@@ -288,6 +300,34 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     return applied;
   }
 
+  /**
+   * Re-adopt every device of one model after its stored mapping was *deleted*.
+   *
+   * The other half of `applyStoredMapping`, and it cannot be the same call.
+   * `consultMapping: true` is right when there is something in the library to
+   * consult; run it against a hash that was just deleted and the cache lookup
+   * misses, so the mapper starts a **fresh paid run** — awaited, minutes long,
+   * inside an HTTP request whose client gives up after ten seconds. That is
+   * what "Studio couldn't remove that schema. The request timed out." was, and
+   * the timeout was the least of it: pressing *Forget* bought a replacement
+   * for the mapping you were forgetting, which is the opposite of what the
+   * button says and costs real money to find out.
+   *
+   * So this asks for nothing. The device falls back to its static mapping,
+   * which is the whole point of the three layers, and the next genuine
+   * trigger — a restart, a parameter nothing can place, or the owner pressing
+   * "Work it out again" — is what asks the agent. Deleting a bad import
+   * without a credential works for the same reason.
+   */
+  async forgetStoredMapping(hash: string): Promise<string[]> {
+    const forgotten: string[] = [];
+    for (const device of this.devicesOfModel(hash)) {
+      await this.adoptDevice(device, { forgetMapping: true });
+      forgotten.push(device.ieee_address);
+    }
+    return forgotten;
+  }
+
   // ── Internals ───────────────────────────────────────────────────────────
 
   /** Keep raw bridge entries so remap can re-run the full pipeline. */
@@ -463,7 +503,7 @@ export class ZigbeeAdapter implements ProtocolAdapter {
   }
 
   private async adoptDevice(device: Z2mDevice, options: AdoptOptions = {}): Promise<void> {
-    const { announce = false, regenerate = false, consultMapping = false } = options;
+    const { announce = false, regenerate = false, consultMapping = false, forgetMapping = false } = options;
     const raw = this.rawDefinitions.get(device.ieee_address) ?? device;
     const profile = mapExposes(raw);
     const previous = this.byIeee.get(raw.ieee_address);
@@ -479,7 +519,7 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     // Whatever this device was already understood as, kept while a new run
     // is under way: a regeneration must not leave it less usable than it was
     // for the minutes the agent takes.
-    if (previous?.aiMapping) tracked.aiMapping = previous.aiMapping;
+    if (previous?.aiMapping && !forgetMapping) tracked.aiMapping = previous.aiMapping;
 
     // **Registered before the agent is asked, never after.** These two maps
     // are how `handleMessage` finds a device, and a run takes tens of seconds
@@ -509,11 +549,12 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     // remap can still upgrade them to typed capabilities.
     const staticallyEmpty = profile.endpoints.every((endpoint) => endpoint.capabilities.length === 0);
     const needsHelp =
-      regenerate ||
-      consultMapping ||
-      raw.supported === false ||
-      staticallyEmpty ||
-      profile.uncovered.length > 0;
+      !forgetMapping &&
+      (regenerate ||
+        consultMapping ||
+        raw.supported === false ||
+        staticallyEmpty ||
+        profile.uncovered.length > 0);
     if (needsHelp && this.options.aiAssist) {
       try {
         const mapping = await this.options.aiAssist.requestMapping(raw, profile, {

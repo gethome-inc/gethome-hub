@@ -120,7 +120,7 @@ than no button.
 | `GET /device-mappings` | `hub.ai` | the mapping library: one entry per device model, `{adapter, exposesHash, vendor, model, status, source, problems, endpoints, deviceIds, createdAt, updatedAt}` |
 | `GET /device-mappings/:exposesHash` | `hub.ai` | the download — an envelope naming the device, see [below](#the-device-mapping-library) |
 | `PUT /device-mappings/:exposesHash` | `hub.ai` | the upload. Accepts the envelope or a bare descriptor. `422 {error:"invalid_mapping", problems, issues?}` when the hub can't use it — and it is **kept**, so `…/repair` can work from it |
-| `DELETE /device-mappings/:exposesHash` | `hub.ai` | forget it; devices of that model fall back to their static mapping |
+| `DELETE /device-mappings/:exposesHash` | `hub.ai` | forget it; devices of that model fall back to their static mapping, and **nothing is asked of the agent** — a delete that re-consulted the library would miss the row it had just removed and start a fresh paid run inside the request, so Forget cost a replacement for the mapping being forgotten. The next genuine trigger asks |
 | `POST /device-mappings/:exposesHash/repair` | `hub.ai` | hand a rejected descriptor to the agent with the complaints. `409 ai_not_configured` / `409 ai_disabled` / `409 nothing_to_repair`, `422 no_device` |
 | `PUT /settings/radio` | `hub.radio` | `{mode: "auto"\|"zigbee"\|"matter"}` → `{budget, mode, matter, canRunBoth, applying: true}`. Records a *request*; see below |
 | `GET /me` | floor | `{id, name, role: {id, key, name}, permissions, isOwner}` — who this token belongs to and what it may do. See [below](#roles-and-permissions-in-full) |

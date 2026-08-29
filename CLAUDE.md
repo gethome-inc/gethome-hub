@@ -465,6 +465,22 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   fixing. `exposesHash` lives with the exposes mapper, not with the AI: it is a
   property of the device's published schema, and the adapter records it in
   `DeviceRecognition` without importing the AI stack.
+  **Forgetting an entry is not applying one, and using the same call for both
+  bought a replacement for the mapping you were deleting.** `applyStoredMapping`
+  re-adopts with `consultMapping: true`, which is right after an upload or a
+  repair — there is something in the library to consult, the cache hits, no run
+  happens. `remove()` called it too, against a hash it had *just deleted*: the
+  lookup missed and the mapper started a fresh paid run, awaited, minutes long,
+  inside a request Studio abandons after ten seconds — surfacing as "Studio
+  couldn't remove that schema. The request timed out." The timeout was the
+  smaller half; pressing **Forget** spending money on a new mapping is the
+  opposite of what the button says. `forgetStoredMapping` asks for nothing, and
+  needs **two** suppressions rather than one, because either alone is a no-op:
+  `adoptDevice` deliberately carries a previous mapping over (so a regeneration
+  never leaves a device less usable mid-run), and `needsHelp` is true for any
+  device with an uncovered property — which is most devices an AI mapping was
+  ever made for. The device falls back to its static mapping, which is what the
+  three layers are for, and the next *genuine* trigger asks.
 - **Trying again is the whole recovery path, and three things used to break
   it.** Recognition fails for reasons a person can fix — a key that is wrong, a
   key that names no workspace, a model too weak to submit a valid descriptor —
