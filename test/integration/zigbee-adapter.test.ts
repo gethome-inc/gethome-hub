@@ -231,6 +231,42 @@ describe.skipIf(!enabled)('ZigbeeAdapter runtime AI adaptation', () => {
     }
   });
 
+  /**
+   * The one that made a working plug look dead.
+   *
+   * `primary` is the single field every app draws a tile from — a switch, a
+   * dimmer, a reading — and `custom` is layer 2's generic catch-all, which
+   * renders as no control at all. The merge took the agent's `primary`
+   * unconditionally, so a mapping that named `custom` turned a plug whose
+   * `onOff` was still right there in `capabilities` into a grey tile with
+   * nothing on it, on a hub that went on reporting the device perfectly
+   * online. Adding capabilities is the agent's job; demoting the one the
+   * apps render is not.
+   */
+  it('lets the agent add capabilities but never demote the primary one', async () => {
+    requestMapping.mockResolvedValueOnce({
+      endpoints: [
+        { endpointId: 1, deviceKind: 'outlet', capabilities: ['custom'], primary: 'custom' },
+      ],
+      properties: new Set(['voltage']),
+      typedProperties: new Set(),
+      extractState: () => new Map(),
+      buildCommandPayload: () => null,
+    } as AppliedAiMapping);
+
+    upserts.length = 0;
+    expect(adapter.remap(probe.ieee_address)).toBe(true);
+    await waitFor(() => upserts.some((entry) => entry.externalId === probe.ieee_address));
+
+    const endpoint = upserts.at(-1)!.endpoints[0]!;
+    // The generic field arrives…
+    expect(endpoint.capabilities).toContain('custom');
+    // …beside what the device already had, and the tile still has something
+    // to draw.
+    expect(endpoint.capabilities.length).toBeGreaterThan(1);
+    expect(endpoint.primary).not.toBe('custom');
+  });
+
   it('answers false for a device the radio has no schema for', () => {
     // A device row can outlive its `bridge/devices` entry, and that is a
     // different answer from a run that failed — the only one that can be

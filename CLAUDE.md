@@ -491,10 +491,11 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   days and a row cap, written once with the run rather than per round
   (`STATE_FLUSH_MS` again), with a pruned run taking its rounds with it.
   `docs/ai-adaptation.md` is canonical.
-- **A device is routable before the agent is asked, and a new parameter is not
-  a reason to pay again.** Three faults met on one Aqara plug, and they read as
-  one symptom — a device sitting offline while its model was recognised over
-  and over. **First, `adoptDevice` put the device into `byIeee`/`byFriendlyName`
+- **A device is routable before the agent is asked, a new parameter is not a
+  reason to pay again, and the overlay may not take a capability away.** Four
+  faults met on one Aqara plug, and they read as one symptom — a plug that had
+  worked until the AI mapped it, then sat dead while its model was recognised
+  over and over. **First, `adoptDevice` put the device into `byIeee`/`byFriendlyName`
   *after* awaiting the mapper.** Those two maps are how `handleMessage` finds a
   device, so for the tens of seconds a run takes every state report and every
   `<name>/availability` message was looked up, missed and dropped — and on the
@@ -516,6 +517,23 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   submit a good descriptor, be told `version: Invalid input: expected 1`, and
   resubmit — five, six, seven paid rounds of one run, on every run. It is a
   constant; the parse fills it in.
+  **Fourth, `mergedEndpoints` let the descriptor overwrite `primary`**, and
+  that is the one that actually looked like a broken device. Capabilities merge
+  as a union, so the overlay can only add — but `primary` is a single field,
+  it is what every app draws the tile from, and `custom` is layer 2's generic
+  catch-all, which renders as *no control at all*. A mapping that named
+  `custom` as its primary therefore turned a working switch into a dead grey
+  tile while the hub reported the device perfectly online and `onOff` sat in
+  `capabilities` untouched: nothing but that one word had moved, which is why
+  every reachability theory came back clean. The agent's `primary` is taken
+  only when it neither demotes a typed capability to `custom` nor names a
+  capability the merged endpoint does not have — a primary with no state behind
+  it is a tile bound to nothing. Promotion is untouched, because a `custom`
+  primary upgraded to `onOff` is the whole point of layer 3; it is only the
+  demotion that is refused. The general rule is worth more than the case:
+  **an AI overlay may add to what the static mapper found and may never
+  subtract from it**, so anything new that merges a descriptor into a static
+  mapping has to say what happens to the fields that cannot be unioned.
 - **Nothing is unsupported by default — three layers, in order.** Devices are
   made usable by (1) **typed capabilities** (canonical schema), then (2)
   **generic custom fields** (`custom`) for every leftover parameter, generated

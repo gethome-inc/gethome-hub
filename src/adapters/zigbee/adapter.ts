@@ -610,9 +610,23 @@ function mergedEndpoints(tracked: TrackedDevice): Array<{
       continue;
     }
     existing.deviceKind = endpoint.deviceKind;
-    existing.primary = endpoint.primary;
     for (const capability of endpoint.capabilities) {
       if (!existing.capabilities.includes(capability)) existing.capabilities.push(capability);
+    }
+    // **The AI may add capabilities; it may not demote the primary one.**
+    // `primary` is the single field every app draws the tile from — a switch,
+    // a dimmer, a reading — and `custom` is layer 2's generic catch-all, which
+    // renders as no control at all. So a mapping that named `custom` as
+    // primary turned a working plug into a dead grey tile in the phone app,
+    // while the hub went on reporting it perfectly online: the switch was
+    // still in `capabilities`, and nothing but `primary` had moved. That is
+    // what "it worked until the AI mapped it" looked like from the sofa.
+    // Two guards, and the second is not paranoia either: a primary the device
+    // does not have is a tile bound to a capability with no state behind it.
+    const hasTyped = existing.capabilities.some((capability) => capability !== 'custom');
+    const demotes = endpoint.primary === 'custom' && hasTyped;
+    if (!demotes && existing.capabilities.includes(endpoint.primary)) {
+      existing.primary = endpoint.primary;
     }
   }
   return [...merged.values()]

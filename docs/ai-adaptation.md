@@ -496,6 +496,25 @@ supersedes the static generic field for that property). The agent is asked to
 map what the static mapper left generic — upgrading fields to typed
 capabilities where one fits, and covering anything still `uncovered`.
 
+**The one thing the overlay may not do is take a capability away, and
+`primary` is where that bites.** Capabilities merge as a union, so a descriptor
+can only ever add to what the static mapper found — but `primary` is a single
+field, and it was overwritten with whatever the agent named. `primary` is what
+every app draws the device's tile from (a switch, a dimmer, a reading), and
+`custom` is layer 2's generic catch-all, which renders as *no control at all*.
+So a mapping that named `custom` as its primary turned a working smart plug
+into a dead grey tile in the phone app while the hub went on reporting the
+device perfectly online and `onOff` sat in `capabilities` untouched — nothing
+but that one word had moved. Observed on an Aqara SP-EUC01, and it is exactly
+what "everything worked until the AI mapped it" looks like from the sofa.
+`mergedEndpoints` therefore takes the agent's `primary` only when it neither
+demotes a typed capability to `custom` nor names a capability the merged
+endpoint does not have — the second guard is not paranoia either, since a
+primary with no state behind it is a tile bound to nothing. The agent is still
+free to *promote*: a `custom` primary upgraded to `onOff` is the whole point of
+layer 3, and only the demotion is refused.
+`test/integration/zigbee-adapter.test.ts` pins it.
+
 Validation is layered: the `submit_mapping` tool schema constrains generation
 → the tool handler zod-parses and sanity-checks (unique endpoints, primary ∈
 capabilities, every rule's target path belongs to a declared capability) and
