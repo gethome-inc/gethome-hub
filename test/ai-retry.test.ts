@@ -208,6 +208,59 @@ describe.skipIf(!handle)('trying again after the settings change', () => {
     expect(generate).toHaveBeenCalledTimes(1);
   });
 
+  it('backs off further each time, rather than restarting the ladder', async () => {
+    const realNow = Date.now();
+    const nowSpy = vi.spyOn(Date, 'now');
+    try {
+      const { mapper, generate } = failingMapper(
+        new AiUnavailableError('rate_limited', '429 too many requests'),
+      );
+
+      // First failure: the ladder's first step is a minute.
+      await mapper.requestMapping(lamp, mapExposes(lamp));
+      nowSpy.mockReturnValue(realNow + 61_000);
+
+      // Second failure, past that step. The next one has to be *five* minutes:
+      // the count behind the ladder must survive the gate expiring, or a hub
+      // whose account is dead retries every sixty seconds for ever.
+      await mapper.requestMapping(lamp, mapExposes(lamp));
+      expect(generate).toHaveBeenCalledTimes(2);
+
+      nowSpy.mockReturnValue(realNow + 61_000 + 61_000);
+      await mapper.requestMapping(lamp, mapExposes(lamp));
+      expect(generate).toHaveBeenCalledTimes(2);
+
+      nowSpy.mockReturnValue(realNow + 61_000 + 301_000);
+      await mapper.requestMapping(lamp, mapExposes(lamp));
+      expect(generate).toHaveBeenCalledTimes(3);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('starts the ladder again for a credential the failures were not about', async () => {
+    const realNow = Date.now();
+    const nowSpy = vi.spyOn(Date, 'now');
+    try {
+      const { mapper, generate } = failingMapper(
+        new AiUnavailableError('auth_failed', '401 invalid x-api-key'),
+      );
+      await mapper.requestMapping(lamp, mapExposes(lamp));
+      nowSpy.mockReturnValue(realNow + 61_000);
+      await mapper.requestMapping(lamp, mapExposes(lamp));
+      expect(generate).toHaveBeenCalledTimes(2);
+
+      // A different key has a different history, so the second failure above
+      // must not cost it the five-minute step.
+      await settings.setAiKey('anthropic', 'sk-ant-api-second-key-1111');
+      nowSpy.mockReturnValue(realNow + 61_000 + 61_000);
+      await mapper.requestMapping(lamp, mapExposes(lamp));
+      expect(generate).toHaveBeenCalledTimes(3);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
   it('forgets the gate as soon as a run gets through', async () => {
     const generate = vi
       .fn()

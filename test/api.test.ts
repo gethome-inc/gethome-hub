@@ -954,6 +954,41 @@ describe.skipIf(!handle)('hub API', () => {
    * they arrived in — with two secure fields on one screen, pasting into the
    * wrong one is the ordinary mistake.
    */
+  /**
+   * The switch that keeps what a run said, end to end.
+   *
+   * Studio *hides* the control on a hub whose settings never mention the
+   * field — a switch that cannot do anything is worse than no switch — so a
+   * field that never reached the wire would make the whole feature invisible
+   * rather than merely broken. That is the shape of gap this pins.
+   */
+  it('answers whether it keeps what a run said, and lets a member change it', async () => {
+    const before = await app.inject({
+      method: 'GET',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+    });
+    // Off, and *said* to be off: nil at the app would hide the control.
+    expect(before.json()).toMatchObject({ recordExchanges: false });
+
+    const on = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { recordExchanges: true },
+    });
+    expect(on.statusCode).toBe(200);
+    expect(on.json()).toMatchObject({ recordExchanges: true });
+
+    // And it is read back from the hub rather than assumed by the caller.
+    const after = await app.inject({
+      method: 'GET',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+    });
+    expect(after.json()).toMatchObject({ recordExchanges: true });
+  });
+
   it('holds an OpenAI key beside the Anthropic one, and refuses each in the other’s field', async () => {
     await app.inject({
       method: 'PUT',

@@ -389,15 +389,20 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
   private async backoffActive(): Promise<boolean> {
     const gate = this.gate;
     if (!gate) return false;
-    if (Date.now() >= gate.until) {
-      this.gate = null;
-      return false;
-    }
+    // A credential this hub no longer uses: the judgement is stale, and so is
+    // the count behind it — a new key starts the ladder again from the bottom.
     if ((await this.credentialId()) !== gate.credential) {
       this.log.info('AI settings changed since the backoff was armed — trying again.');
       this.gate = null;
       return false;
     }
+    // Expired, so this run may go ahead — but the gate is **kept**, because
+    // `failures` is what makes the next step of the ladder longer than the
+    // last. Clearing it here restarted the count on every expiry and pinned
+    // the backoff at its first step, so a hub whose account was dead retried
+    // every sixty seconds for ever instead of easing off to two hours. Only a
+    // completed run (`recordRun`) or a changed credential forgets it.
+    if (Date.now() >= gate.until) return false;
     this.log.debug(
       `AI backoff active until ${new Date(gate.until).toISOString()} — skipping mapping request.`,
     );

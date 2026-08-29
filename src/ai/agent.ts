@@ -79,7 +79,6 @@ export {
   type AgentRunContext,
   type AgentRunStats,
   type AgentStep,
-  type ExchangePart,
   type MappingProvider,
   type SubmissionOutcome,
   type SubmitCapture,

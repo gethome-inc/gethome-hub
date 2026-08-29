@@ -4,6 +4,7 @@ import type { MappingDescriptor } from '../src/ai/descriptor.js';
 import { AiUnavailableError } from '../src/ai/errors.js';
 import { createOpenAiMappingAgent } from '../src/ai/openai-agent.js';
 import { defaultModelFor } from '../src/ai/models.js';
+import type { AgentExchange } from '../src/ai/agent-core.js';
 
 /**
  * The mapping agent on OpenAI, exercised over a mocked `fetch`.
@@ -103,6 +104,74 @@ describe('the mapping agent on OpenAI', () => {
     const result = await agent().generate('system', 'user');
     expect(result).toMatchObject({ version: 1 });
     expect(sent).toHaveLength(1);
+  });
+
+  /**
+   * Recording is a convenience; recognising the device is the job. The proof
+   * that matters is that writing a round down changed *nothing* — the same
+   * request bodies on the wire, and the same descriptor out.
+   */
+  it('records rounds without changing a byte of what is sent or returned', async () => {
+    const twoRounds = () => [ok([reasoning(), prose()]), ok([reasoning('rs_2'), submitCall(validDescriptor)])];
+
+    queue(...twoRounds());
+    const quiet = await agent().generate('system prompt', 'user prompt');
+    const quietRequests = sent.map((request) => JSON.stringify(request));
+
+    sent.length = 0;
+    replies.length = 0;
+    queue(...twoRounds());
+    const rounds: AgentExchange[] = [];
+    const loud = await agent().generate('system prompt', 'user prompt', {
+      onExchange: (exchange) => rounds.push(exchange),
+    });
+
+    expect(loud).toEqual(quiet);
+    expect(sent.map((request) => JSON.stringify(request))).toEqual(quietRequests);
+    expect(rounds.map((round) => round.seq)).toEqual([1, 2]);
+    // Per round, and naming *this* vendor: the same run on Anthropic records
+    // the same shape with the other name, which is what lets one card draw
+    // both without knowing which ran.
+    expect(rounds.every((round) => round.provider === 'openai')).toBe(true);
+    expect(rounds.every((round) => round.modelId === defaultModelFor('openai'))).toBe(true);
+  });
+
+  /** The delta rule, exactly as the Anthropic loop holds it. */
+  it('carries the instructions once and then records only what each turn added', async () => {
+    queue(ok([prose()]), ok([submitCall(validDescriptor)]));
+    const rounds: AgentExchange[] = [];
+    await agent().generate('THE SYSTEM PROMPT', 'the device schema', {
+      onExchange: (exchange) => rounds.push(exchange),
+    });
+
+    const flat = (round: AgentExchange) => JSON.stringify(round.sent);
+    expect(flat(rounds[0]!)).toContain('THE SYSTEM PROMPT');
+    expect(flat(rounds[0]!)).toContain('the device schema');
+    expect(flat(rounds[1]!)).not.toContain('THE SYSTEM PROMPT');
+    expect(flat(rounds[1]!)).not.toContain('the device schema');
+    // Tool names, never the generated schema they carry.
+    expect(flat(rounds[0]!)).toContain('submit_mapping');
+    expect(flat(rounds[0]!)).not.toContain('parameters');
+  });
+
+  it('keeps a refused round’s status and the provider’s own body', async () => {
+    fetchMock.mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ error: { message: 'You exceeded your current quota.' } }), {
+          status: 429,
+        }),
+    );
+    const rounds: AgentExchange[] = [];
+    await expect(
+      agent().generate('system', 'user', { onExchange: (exchange) => rounds.push(exchange) }),
+    ).rejects.toThrow();
+
+    expect(rounds).toHaveLength(1);
+    expect(rounds[0]!.ok).toBe(false);
+    expect(rounds[0]!.status).toBe(429);
+    expect(JSON.stringify(rounds[0]!.received)).toContain('exceeded your current quota');
+    // Bodies only: the key rides in a header and is never walked.
+    expect(JSON.stringify(rounds[0])).not.toContain('sk-proj-test');
   });
 
   /**

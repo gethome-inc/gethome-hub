@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { asc, desc, eq, lt, sql } from 'drizzle-orm';
+import { asc, desc, eq, inArray, lt, sql } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import { aiRunExchanges, aiRuns } from '../db/schema.js';
 // Type-only, so the Anthropic SDK is not pulled into the core graph.
@@ -213,13 +213,15 @@ export class AiRunLog {
    *  whether there is anything to open without fetching any of it. */
   async exchangeCounts(runIds: string[]): Promise<Map<string, number>> {
     if (runIds.length === 0) return new Map();
+    // Narrowed in the query rather than after it: the runs asked about are one
+    // page of a list, and counting every row this table holds to answer for
+    // thirty of them is work nobody asked for.
     const rows = await this.db
       .select({ runId: aiRunExchanges.runId, n: sql<number>`count(*)` })
       .from(aiRunExchanges)
+      .where(inArray(aiRunExchanges.runId, runIds))
       .groupBy(aiRunExchanges.runId);
-    return new Map(
-      rows.filter((row) => runIds.includes(row.runId)).map((row) => [row.runId, Number(row.n)]),
-    );
+    return new Map(rows.map((row) => [row.runId, Number(row.n)]));
   }
 
   async list(limit = 30) {

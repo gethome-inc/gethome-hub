@@ -50,6 +50,7 @@ const { AGENT_MAX_TURNS, createMappingAgent, evaluateSubmission, submitMappingTo
   '../src/ai/agent.js'
 );
 const { MAX_OUTPUT_TOKENS } = await import('../src/ai/agent-core.js');
+type AgentExchange = import('../src/ai/agent-core.js').AgentExchange;
 
 // ── Failure classification ────────────────────────────────────────────────
 
@@ -454,6 +455,88 @@ describe('the mapping agent loop', () => {
     const result = await agent().generate('system', 'user');
     expect(result).toMatchObject({ version: 1 });
     expect(sent).toHaveLength(1);
+  });
+
+  /**
+   * Recording is a convenience; recognising the device is the job. So the
+   * proof that matters is not that a round was written down — it is that
+   * writing it down changed *nothing*: the same requests on the wire, byte
+   * for byte, and the same descriptor out.
+   */
+  it('records rounds without changing a byte of what is sent or returned', async () => {
+    const twoRounds = () => [
+      reply({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'I think it is a plug.' }] }),
+      reply({ stop_reason: 'tool_use', content: [submitCall(validDescriptor)] }),
+    ];
+
+    queue(...twoRounds());
+    const quiet = await agent().generate('system prompt', 'user prompt');
+    const quietRequests = sent.map((request) => JSON.stringify(request));
+
+    sent.length = 0;
+    replies.length = 0;
+    queue(...twoRounds());
+    const rounds: AgentExchange[] = [];
+    const loud = await agent().generate('system prompt', 'user prompt', {
+      onExchange: (exchange) => rounds.push(exchange),
+    });
+
+    expect(loud).toEqual(quiet);
+    expect(sent.map((request) => JSON.stringify(request))).toEqual(quietRequests);
+    expect(rounds.map((round) => round.seq)).toEqual([1, 2]);
+    // Per round, because a run can be retried against the other vendor.
+    expect(rounds.every((round) => round.provider === 'anthropic')).toBe(true);
+    expect(rounds.every((round) => round.modelId === DEFAULT_MODEL)).toBe(true);
+  });
+
+  /**
+   * The delta rule. The system prompt is 9.9 KB and the `submit_mapping`
+   * schema 6.7 KB, and an agent loop resends both on every turn — so a round
+   * that recorded its request whole would write them once per turn and make
+   * the last round the size of the run.
+   */
+  it('carries the prompt once and then records only what each turn added', async () => {
+    queue(
+      reply({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'prose' }] }),
+      reply({ stop_reason: 'tool_use', content: [submitCall(validDescriptor)] }),
+    );
+    const rounds: AgentExchange[] = [];
+    await agent().generate('THE SYSTEM PROMPT', 'the device schema', {
+      onExchange: (exchange) => rounds.push(exchange),
+    });
+
+    const flat = (round: AgentExchange) => JSON.stringify(round.sent);
+    expect(flat(rounds[0]!)).toContain('THE SYSTEM PROMPT');
+    expect(flat(rounds[0]!)).toContain('the device schema');
+    // Round two adds the assistant's prose and the nudge, and nothing else.
+    expect(flat(rounds[1]!)).not.toContain('THE SYSTEM PROMPT');
+    expect(flat(rounds[1]!)).not.toContain('the device schema');
+    expect(flat(rounds[1]!)).toContain('prose');
+
+    // Tool *names*, never the 6.7 KB generated schema they carry.
+    expect(flat(rounds[0]!)).toContain('submit_mapping');
+    expect(flat(rounds[0]!)).not.toContain('input_schema');
+  });
+
+  it('keeps a refused round’s status and the provider’s own words', async () => {
+    createMock.mockImplementation(async () => {
+      throw Object.assign(new Error('400 {"type":"error"}'), {
+        status: 400,
+        error: { type: 'invalid_request_error', message: 'anthropic-workspace-id is required' },
+        headers: { 'x-api-key': 'sk-ant-secret' },
+      });
+    });
+    const rounds: AgentExchange[] = [];
+    await expect(
+      agent().generate('system', 'user', { onExchange: (exchange) => rounds.push(exchange) }),
+    ).rejects.toThrow();
+
+    expect(rounds).toHaveLength(1);
+    expect(rounds[0]!.ok).toBe(false);
+    expect(rounds[0]!.status).toBe(400);
+    expect(JSON.stringify(rounds[0]!.received)).toContain('anthropic-workspace-id');
+    // Bodies only, never headers — that is where a credential would be.
+    expect(JSON.stringify(rounds[0])).not.toContain('sk-ant-secret');
   });
 
   it('sends the research tools and caches the system prompt', async () => {
