@@ -22,6 +22,7 @@ import {
   openTestDb,
   resetDb,
   startedHistory,
+  testBroker,
 } from './helpers/db.js';
 
 /**
@@ -108,6 +109,7 @@ describe.skipIf(!handle)('device portraits', () => {
       dataDir,
       radioBudget: 'both',
       z2mDataDir: path.join(dataDir, 'zigbee2mqtt'),
+      mqtt: testBroker(),
       permitJoin: new PermitJoinService(undefined, log, () => {}),
     });
     await app.ready();

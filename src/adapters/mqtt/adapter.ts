@@ -8,9 +8,18 @@ import {
 } from '../../schema/index.js';
 import { commandTopic, parseTopic, subscriptionPatterns } from './convention.js';
 import type { Logger } from '../../logging.js';
+import { brokerCredentials } from '../../mqtt-auth.js';
 
 export interface MqttAdapterOptions {
   mqttUrl: string;
+  /**
+   * Broker credentials, when the broker asks for them. Empty on a hub
+   * installed before `install.sh` started minting them — the drop-in it
+   * writes then still says `allow_anonymous true`, so an anonymous connect is
+   * the correct behaviour rather than a fallback.
+   */
+  username?: string;
+  password?: string;
   log: Logger;
 }
 
@@ -34,6 +43,7 @@ export class MqttAdapter implements ProtocolAdapter {
     const client = await mqtt.connectAsync(this.options.mqttUrl, {
       clientId: `gethome-hub-mqtt-${Math.random().toString(16).slice(2, 8)}`,
       reconnectPeriod: 2000,
+      ...brokerCredentials(this.options),
     });
     this.client = client;
     client.on('message', (topic, payload) => {

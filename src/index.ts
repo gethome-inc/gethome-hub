@@ -19,6 +19,7 @@ import { SettingsService } from './core/settings.js';
 import { DeviceRegistry } from './core/registry.js';
 import { AiRunLog } from './core/ai-runs.js';
 import { MqttObserver } from './core/mqtt-observer.js';
+import { brokerCredentials } from './mqtt-auth.js';
 import { PermitJoinService } from './core/permit-join.js';
 import { activityForLifecycleEvent, normalizeBridgeEvent } from './core/zigbee-events.js';
 import { buildServer } from './api/server.js';
@@ -114,6 +115,11 @@ async function main(): Promise<void> {
   // has to be able to answer "nothing has run".
   const aiRuns = new AiRunLog(db, events);
 
+  // How every client of this hub's own broker signs in — read once, so the
+  // three of them cannot drift. `loadConfig` has already lifted any credentials
+  // out of `MQTT_URL`, so this is the only shape the rest of the process sees.
+  const brokerAuth = { username: config.MQTT_USERNAME, password: config.MQTT_PASSWORD };
+
   // Adapters are *constructed* here and *started* after the API is listening.
   // The modules are imported dynamically for one reason that matters on a small
   // board: matter.js is by far the largest thing in the dependency graph, and a
@@ -134,6 +140,7 @@ async function main(): Promise<void> {
     const { ZigbeeAdapter } = await import('./adapters/zigbee/adapter.js');
     zigbee = new ZigbeeAdapter({
       mqttUrl: config.MQTT_URL,
+      ...brokerCredentials(brokerAuth),
       baseTopic: config.Z2M_BASE_TOPIC,
       log: log.child({ module: 'zigbee' }),
       aiAssist: lazyAiAssist({ db, settings, log: log.child({ module: 'ai' }), runs: aiRuns }),
@@ -151,7 +158,11 @@ async function main(): Promise<void> {
   }
   if (config.ADAPTER_MQTT) {
     const { MqttAdapter } = await import('./adapters/mqtt/adapter.js');
-    mqttAdapter = new MqttAdapter({ mqttUrl: config.MQTT_URL, log: log.child({ module: 'mqtt' }) });
+    mqttAdapter = new MqttAdapter({
+      mqttUrl: config.MQTT_URL,
+      ...brokerCredentials(brokerAuth),
+      log: log.child({ module: 'mqtt' }),
+    });
     registry.registerAdapter(mqttAdapter);
   }
   if (config.ADAPTER_MATTER) {
@@ -169,6 +180,7 @@ async function main(): Promise<void> {
     config.ADAPTER_ZIGBEE || config.ADAPTER_MQTT
       ? new MqttObserver({
           mqttUrl: config.MQTT_URL,
+          ...brokerCredentials(brokerAuth),
           z2mBaseTopic: config.Z2M_BASE_TOPIC,
           log: log.child({ module: 'mqtt-observer' }),
           onFrame: (frame) => events.emit('mqttFrame', frame),
@@ -193,6 +205,15 @@ async function main(): Promise<void> {
     dataDir: config.DATA_DIR,
     radioBudget: config.GETHOME_RADIO,
     z2mDataDir: config.Z2M_DATA_DIR,
+    mqtt: {
+      url: config.MQTT_URL,
+      username: config.MQTT_USERNAME,
+      password: config.MQTT_PASSWORD,
+      integrationUsername: config.MQTT_INTEGRATION_USERNAME,
+      integrationPassword: config.MQTT_INTEGRATION_PASSWORD,
+      publicHost: config.MQTT_PUBLIC_HOST,
+      baseTopic: config.Z2M_BASE_TOPIC,
+    },
     permitJoin,
     aiRuns,
     mappings: new MappingLibrary({

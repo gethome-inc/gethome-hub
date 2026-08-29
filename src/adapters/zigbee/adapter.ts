@@ -12,6 +12,7 @@ import {
 import { buildSetPayload } from './commands.js';
 import { parseWriteFailure } from './write-failures.js';
 import type { Logger } from '../../logging.js';
+import { brokerCredentials } from '../../mqtt-auth.js';
 
 /**
  * Hook the AI mapper implements (src/ai/mapper.ts). When the static exposes
@@ -96,6 +97,14 @@ interface AdoptOptions {
 
 export interface ZigbeeAdapterOptions {
   mqttUrl: string;
+  /**
+   * Broker credentials, when the broker asks for them. Empty on a hub
+   * installed before `install.sh` started minting them — the drop-in it
+   * writes then still says `allow_anonymous true`, so an anonymous connect is
+   * the correct behaviour rather than a fallback.
+   */
+  username?: string;
+  password?: string;
   baseTopic: string;
   log: Logger;
   aiAssist?: ZigbeeAiAssist;
@@ -151,6 +160,7 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     const client = await mqtt.connectAsync(this.options.mqttUrl, {
       clientId: `gethome-hub-zigbee-${Math.random().toString(16).slice(2, 8)}`,
       reconnectPeriod: 2000,
+      ...brokerCredentials(this.options),
     });
     this.client = client;
     client.on('message', (topic, payload) => {

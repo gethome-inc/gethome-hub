@@ -23,6 +23,7 @@ import {
   openTestDb,
   resetDb,
   startedHistory,
+  testBroker,
   testPortraits,
 } from './helpers/db.js';
 
@@ -97,6 +98,7 @@ describe.skipIf(!handle)('hub API', () => {
       // Nothing there to read, which is the ordinary state for a hub with no
       // coordinator — and must stay silent rather than becoming an error.
       z2mDataDir: path.join(dataDir, 'zigbee2mqtt'),
+      mqtt: testBroker(),
       // No radio, so it reports a closed window and publishes nothing.
       permitJoin: new PermitJoinService(undefined, log, () => {}),
       aiRuns: new AiRunLog(db, events),

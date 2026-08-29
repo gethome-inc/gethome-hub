@@ -11,6 +11,41 @@ const configSchema = z.object({
   /** Empty means "<DATA_DIR>/hub.db" — resolved below, once DATA_DIR is known. */
   DATABASE_FILE: z.string().default(''),
   MQTT_URL: z.string().default('mqtt://127.0.0.1:1883'),
+  /**
+   * What the hub signs in to its own broker as — full read/write, and the
+   * account Zigbee2MQTT uses too.
+   *
+   * Empty means an unauthenticated broker, which is what every hub installed
+   * before the broker had passwords still has: `install.sh` mints these,
+   * writes them to `/etc/gethome/mqtt.env`, and the unit reads that file
+   * *after* `hub.env` — so a hub that never got them simply carries on
+   * connecting anonymously rather than failing to start.
+   */
+  MQTT_USERNAME: z.string().default(''),
+  MQTT_PASSWORD: z.string().default(''),
+  /**
+   * The second account, and the one an owner is actually handed: it may
+   * publish only under `gethome/#` and may only *read* `zigbee2mqtt/#`, so a
+   * DIY board that is lost, resold or compromised cannot switch a light off,
+   * open the Zigbee network, or learn anything the hub's own API would not
+   * have told its owner anyway.
+   *
+   * The hub never connects with it. It exists to be given away, which is why
+   * it is in the environment at all — `GET /settings/mqtt` is the only reader.
+   */
+  MQTT_INTEGRATION_USERNAME: z.string().default(''),
+  MQTT_INTEGRATION_PASSWORD: z.string().default(''),
+  /**
+   * The address to hand an integrator, when it is not the one the hub dials.
+   *
+   * The hub reaches its broker over loopback and an ESP32 cannot, so the app
+   * has to print something else. `install.sh` leaves this empty and the API
+   * answers with the host the *request* arrived on, which is right far more
+   * often than anything this process could work out for itself — a Pi with
+   * Wi-Fi and Ethernet has two answers and no way to rank them. Set it when
+   * the broker is somewhere else entirely.
+   */
+  MQTT_PUBLIC_HOST: z.string().default(''),
   Z2M_BASE_TOPIC: z.string().default('zigbee2mqtt'),
   /**
    * Zigbee2MQTT's own data directory, which the hub reads for one purpose:
@@ -68,8 +103,39 @@ const configSchema = z.object({
 
 export type HubConfig = z.infer<typeof configSchema>;
 
+/**
+ * Move any credentials out of the broker URL and into the two fields beside it.
+ *
+ * `mqtt://user:pass@host:1883` is the form a hand-configured hub is most
+ * likely to be carrying, and it is also the form the installer used to write,
+ * so it has to keep working. Normalising here rather than at the three call
+ * sites buys two things: every client is constructed the same way, and the URL
+ * that ends up in a log line — `MqttObserver` logs it on a failed connection —
+ * no longer has a password in the middle of it.
+ *
+ * An explicit `MQTT_USERNAME` wins, so a URL somebody forgot to clean out
+ * cannot quietly outrank the file the installer maintains.
+ */
+function splitBrokerCredentials(config: HubConfig): void {
+  let url: URL;
+  try {
+    url = new URL(config.MQTT_URL);
+  } catch {
+    return; // Not our business to reject it — the client will say so.
+  }
+  if (!url.username && !url.password) return;
+  if (!config.MQTT_USERNAME) {
+    config.MQTT_USERNAME = decodeURIComponent(url.username);
+    config.MQTT_PASSWORD = decodeURIComponent(url.password);
+  }
+  url.username = '';
+  url.password = '';
+  config.MQTT_URL = url.toString();
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): HubConfig {
   const config = configSchema.parse(env);
+  splitBrokerCredentials(config);
   if (!config.DATABASE_FILE) {
     config.DATABASE_FILE = path.join(config.DATA_DIR, 'hub.db');
   }

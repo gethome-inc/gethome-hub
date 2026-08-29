@@ -7,6 +7,43 @@ custom bridges. If your thing can publish JSON over MQTT, it can be a GetHome
 device — with no hub-side code and no per-device mapping, because both
 directions speak the [canonical schema](device-schema.md) directly.
 
+## Connecting
+
+The broker asks for a username and password, and there are two accounts. **Use
+the one named for your own devices** — it is what this whole convention is for:
+
+```
+host:     your hub's address        (the same one the apps use)
+port:     1883
+username: gethome
+password: ...
+```
+
+Get them from **GetHome Studio → your hub → Zigbee & MQTT**, or on the hub
+itself with `sudo gethome-hubctl mqtt`. They are minted once when the hub is
+installed and kept across updates, so you set them in your device one time.
+
+That account can publish anything under `gethome/#` — the whole of what is
+described below — and can *watch* the home: your Zigbee devices' state topics,
+plus `zigbee2mqtt/bridge/state`, `bridge/event` and `bridge/devices`. So a
+board you build can react to a motion sensor.
+
+What it cannot do is write to `zigbee2mqtt/` at all. It cannot switch a Zigbee
+device on, and it cannot open the network for pairing. That is deliberate and
+it is in your favour: a devboard on your bench is the least protected thing in
+the house, and this one cannot be used to take the house over. If you genuinely
+need to drive Zigbee directly, the hub's own full-access account is on the same
+screen — but the supported way to switch a device is `POST /devices/:id/…` on
+the [REST API](api.md), which works for every protocol rather than just Zigbee.
+
+The connection is unencrypted. That is right for a home LAN and wrong for the
+internet: don't forward 1883 through your router.
+
+> **A hub installed before this** takes anonymous connections and needs no
+> credentials. Updating it closes the broker and prints a warning saying so —
+> at which point anything you had wired in needs the username and password
+> above. Nothing else about the convention changed.
+
 ## Topics
 
 `<deviceId>`: `[A-Za-z0-9_-]`, 1–64 chars.
@@ -132,4 +169,6 @@ Your device receives the intent and applies it. This lets a DIY device expose
   device after a restart without waiting for your next publish.
 - One physical device with several functions = one deviceId with several
   endpoints, not several devices.
-- The broker is LAN-internal; don't expose 1883 to the internet.
+- The broker is LAN-internal; don't expose 1883 to the internet. It asks for
+  the credentials in [Connecting](#connecting) — set your MQTT client's
+  username and password, not just its host.

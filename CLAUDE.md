@@ -914,14 +914,65 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   to roll back to. `gethome-hubctl update` re-runs the installer rather than
   reimplementing any of this; `rollback` flips to the previous release.
 - **Add nothing to a config file the distribution already writes.** The
-  mosquitto drop-in is `listener 1883` + `allow_anonymous true` and must stay
-  that way: `/etc/mosquitto/mosquitto.conf` already sets `persistence`,
+  mosquitto drop-in is four lines — `listener`, `allow_anonymous false`,
+  `password_file`, `acl_file` — and adding a fifth needs checking first:
+  `/etc/mosquitto/mosquitto.conf` already sets `persistence`,
   `persistence_location` and `log_dest`, and mosquitto treats a repeated string
   option as a **fatal** error rather than an override. Repeating
   `persistence_location` is what kept the broker down, port 1883 closed and
   Zigbee dead on a hub that installed perfectly otherwise.
   `test/deploy-config.test.ts` parses the drop-in against a copy of Debian's
   config to stop it coming back.
+- **The broker asks for a password, and there are two accounts.** It was
+  `allow_anonymous true`, and that was a hole the size of the product:
+  everything a member may do goes through a token and a role on 8420, while
+  anybody on the home Wi-Fi could open a broker connection on 1883 and publish
+  `zigbee2mqtt/<device>/set` to work every light and lock in the house, or
+  `bridge/request/permit_join` to open the Zigbee network, with no credential
+  at all. `gethome-hub` is full access and is what hubd and Z2M sign in as;
+  `gethome` is the one an owner is handed, and the ACL confines it to
+  publishing under `gethome/#` while reading only device state and three
+  `bridge/` topics — so a devboard cannot drive the home, and
+  `zigbee2mqtt/bridge/info` stays out of reach because we do not depend on
+  upstream redacting the network key from it. **The apps needed no change to
+  keep working**: Studio reads MQTT over the hub's own authenticated
+  WebSocket, never over 1883.
+  Six things to keep. **The ACL uses only `read`/`write`/`readwrite`** — the
+  one `deny` line that would express it more neatly is a config option an
+  older broker fails to parse, and a fatal parse error here is a hub with no
+  radios. **The passwords are minted once and reused**, because rotating on
+  every run breaks every integration the owner wired in, and
+  `gethome-hubctl update` is `install.sh` again. **Nothing turns authentication
+  on unless every part of it landed**: mosquitto opens `password_file` and
+  `acl_file` *after* dropping privileges, so a 0600 root file is
+  `Error: Unable to open pwfile` and a broker that will not start — an open
+  broker is a hole, but a dead broker is a hub with no Zigbee and no MQTT, and
+  the installer must never pick the second while fixing the first, so every
+  step that can fail clears `MQTT_SECURED` and falls back to the open drop-in
+  with a `@@WARN@@`. **The credentials live in `/etc/gethome/mqtt.env`, never
+  in `hub.env`**, which is written only when absent and so never reaches an
+  upgraded hub — the same trap as a `GETHOME_UPDATE=1` line there; both units
+  pull it in with `EnvironmentFile=-`, and it is listed **after** `hub.env`
+  so the `MQTT_URL` in it wins, which is the rollback story: a build older
+  than `MQTT_USERNAME` can only authenticate through the URL.
+  `loadConfig` lifts credentials out of whichever URL it is given, so the
+  current build is right either way and no password reaches a log line.
+  **`GET /settings/mqtt` writes to the activity log**, alone among the GETs
+  here, and that is what makes `hub.mqtt` safe to delegate: a token is revoked
+  by removing a member, a password is not, so the home has to be able to see
+  who was handed one. Which is also why both keys are owner-only by default —
+  the one place the "bounded cost" test comes out the other way from
+  `hub.update` and `hub.ai`, which both moved into **member**'s set on the
+  argument that the person standing in the house is the one who needs them.
+  That argument does not reach a broker password: it is a front-door key
+  rather than a spending decision, and it is the one thing here that outlives
+  the token it was read with. And **`test/deploy-mqtt-acl.test.ts` runs a real broker on the
+  config `install.sh` writes** and tries the attacks, because four `topic read`
+  lines prove nothing about what mosquitto does with them; it also adopts a
+  device published with the limited account, since an ACL tight enough to stop
+  an attack and too tight for the feature it protects would pass every static
+  check and ship a broken integrator story. `docs/mqtt-integrations.md` is
+  canonical for integrators, `docs/api.md` for the route.
 - **When a unit won't start, put the reason in the log.** `service_failure()`
   prints `systemctl status` and the last journal lines into the install output.
   The mosquitto bug above was invisible for a whole round because the installer
@@ -1095,7 +1146,8 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `test/deploy-config.test.ts` parses — and what the compose port mapping
   quietly contradicted, the reason port 1883 was invisible from the user's Mac.
   MQTT integrations run on other machines; the firewall boundary for a home hub
-  is the router.
+  is the router — which is why it is also the reason the broker now has a
+  password, see the two-accounts bullet above.
 - **Only install what is missing.** `install.sh` checks each apt package with
   `dpkg-query` first: Raspberry Pi OS Lite already ships avahi-daemon, curl,
   ca-certificates and xz-utils, so the step is "install mosquitto" and takes

@@ -135,6 +135,14 @@ describe('the roles migration', () => {
       'member.invite',
       'member.remove',
       'role.manage',
+      // Newer than the old guards — the broker took anonymous connections when
+      // they were written — and still withheld from Member by default, because
+      // a broker password is a secret that leaves the building and removing a
+      // member cannot take it back. Here for the same reason as the rest: a
+      // hub upgrading into this build must not quietly hand every phone in the
+      // home a credential nobody granted them.
+      'hub.mqtt',
+      'hub.mqtt.admin',
     ] as const) {
       expect(access.can(anna, wasOwnerOnly), wasOwnerOnly).toBe(false);
     }

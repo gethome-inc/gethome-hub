@@ -122,6 +122,7 @@ than no button.
 | `DELETE /device-mappings/:exposesHash` | `hub.ai` | forget it; devices of that model fall back to their static mapping |
 | `POST /device-mappings/:exposesHash/repair` | `hub.ai` | hand a rejected descriptor to the agent with the complaints. `409 ai_not_configured` / `409 ai_disabled` / `409 nothing_to_repair`, `422 no_device` |
 | `PUT /settings/radio` | `hub.radio` | `{mode: "auto"\|"zigbee"\|"matter"}` → `{budget, mode, matter, canRunBoth, applying: true}`. Records a *request*; see below |
+| `GET /settings/mqtt` | `hub.mqtt` | the broker's credentials: `{requiresPassword, host, port, baseTopic, accounts[]}`. Each account is `{id, username, password, recommended, title, summary, publish[], subscribe[]}`. `hub.mqtt.admin` **adds** the hub's own full-access account; without it only the limited one is returned. See [below](#the-mqtt-broker-asks-for-a-password) |
 | `GET /me` | floor | `{id, name, role: {id, key, name}, permissions, isOwner}` — who this token belongs to and what it may do. See [below](#roles-and-permissions-in-full) |
 | `GET /permissions` | floor | the catalog: `{key, group, title, summary}` per permission. The hub owns the wording |
 | `GET /roles` | floor | `[{id, key, name, builtin, permissions, memberCount, sortOrder}]` |
@@ -156,6 +157,8 @@ it gates its own screens on.
 | `hub.radio` | Hub |
 | `hub.update` | Hub |
 | `hub.ai` | Hub |
+| `hub.mqtt` | Hub |
+| `hub.mqtt.admin` | Hub |
 
 #### What the three built-in roles start with
 
@@ -169,12 +172,14 @@ it gates its own screens on.
 | `hub.update` | ✓ | ✓ | |
 | `hub.ai` | ✓ | ✓ | |
 | `home.rename` · `device.remove` · `member.invite` · `member.remove` · `role.manage` | ✓ | | |
+| `hub.mqtt` · `hub.mqtt.admin` | ✓ | | |
 
 **Member is the old behaviour written down, with two deliberate exceptions.**
 Those keys are, key for key, the routes that used to be open to any member; the
-five below them are the ones that used to be owner-only. A hub that updates into this changes nothing about what
-anybody can do — the migration backfills every existing member into Owner or
-Member accordingly, and only an explicit edit moves anything after that.
+five on the row below them are the ones that used to be owner-only. A hub that
+updates into this changes nothing about what anybody can do — the migration
+backfills every existing member into Owner or Member accordingly, and only an
+explicit edit moves anything after that.
 
 `hub.update` is the one that looks like an exception and is not.
 `POST /system/update` was owner-only for about a day, and what settled it was
@@ -197,6 +202,19 @@ this is a genuine change to what a member may do, so it travels with a migration
 that grants it to hubs that already exist — `ensureBuiltins()` inserts with
 `ON CONFLICT DO NOTHING` and would never reach a `member` row that is already
 there.
+
+**The two MQTT keys are neither exception, and they are the one place the
+"bounded cost" test comes out the other way.** They are newer than the rest of
+this table — the broker took anonymous connections when it was written — and
+they are owner-only because **a broker password is a secret that leaves the
+building.** Every other permission is a request the hub carries out and can stop
+carrying out, so removing a member ends it within the second; nothing can
+un-tell somebody a password, and taking one back means minting another and
+revisiting every board in the house that had it. That is a front-door key rather
+than a spending decision, which is why the argument that moved `hub.update` and
+`hub.ai` does not reach it. A home that wants it otherwise grants `hub.mqtt` in
+the matrix — the safe half, since the account it reveals cannot switch anything
+on — and leaves `hub.mqtt.admin` where it is.
 
 **Guest is somebody staying in the house** — and a role with **no keys at all**,
 which is its honest shape rather than an oversight. They work the lights and keep
@@ -348,6 +366,51 @@ for a disclosure.
 
 An unrecognised log yields **no** `problem` at all. A wrong diagnosis is worse
 than `connected: false`, which the caller already has.
+
+### The MQTT broker asks for a password
+
+The hub's broker used to take anonymous connections from anywhere on the home
+network. That was a hole the size of the product: everything a member may do
+over this API is behind a token and a role, while anybody on the Wi-Fi could
+open a broker connection and publish `zigbee2mqtt/<device>/set` to work every
+light and lock in the house — or `bridge/request/permit_join` to open the
+Zigbee network — with no credential at all.
+
+`install.sh` now writes two accounts and an ACL. **The apps do not need either
+of them to show MQTT traffic**: the `mqtt` WebSocket stream is served by the
+hub over the same token everything else uses, so nothing about the apps
+changed. These credentials exist for hardware *you* connect.
+
+| | `gethome` (`id: "integrations"`) | `gethome-hub` (`id: "hub"`) |
+|---|---|---|
+| Who uses it | anything you wire in yourself | hubd and Zigbee2MQTT |
+| Publish | `gethome/#` | everything |
+| Subscribe | `gethome/#`, `zigbee2mqtt/+`, and `bridge/state`, `bridge/event`, `bridge/devices` | everything |
+| Permission to see it | `hub.mqtt` | `hub.mqtt` **and** `hub.mqtt.admin` |
+
+`recommended: true` marks the first one, and an app should lead with it. It can
+watch what the home reports without being able to drive it, so a devboard built
+against it cannot take the home over if it is lost, resold, or reached by
+somebody else. `zigbee2mqtt/bridge/info` is deliberately not readable by it —
+that topic carries Zigbee2MQTT's own configuration, and nothing here depends on
+upstream redacting the network key from it.
+
+`host` is the address the request arrived on, because the hub reaches its own
+broker over loopback and an ESP32 cannot follow it there — a Pi with Wi-Fi and
+Ethernet has two addresses and no way to rank them, while the one the app just
+used reaches the machine by construction. `MQTT_PUBLIC_HOST` overrides it.
+
+`requiresPassword: false` is a hub whose installer predates all of this. It is
+the only way an app can tell "there are no credentials because none exist" from
+"you were not given any" — absence would read as the second.
+
+**Reading this writes to the activity log** (`hub.mqtt`), which no other `GET`
+here does. That is the point rather than an oversight, and it is what makes
+`hub.mqtt` safe to delegate in the matrix: a password cannot be revoked the way
+a token can, so the home should be able to see afterwards who was handed one.
+Rotating is `gethome-hubctl mqtt --rotate` on the machine itself — root work,
+like the radio and the update, and the only real answer to "somebody who had
+the password has left".
 
 ### Radio (`GET /hub` and `PUT /settings/radio`)
 
@@ -925,7 +988,8 @@ The kinds: `device.command`, `device.added`, `device.removed`,
 `room.added`, `room.renamed`, `room.removed`, `zone.added`, `zone.renamed`,
 `zone.removed`, `member.joined`, `member.left`, `member.removed`,
 `member.renamed`, `member.role-changed`, `role.added`, `role.renamed`,
-`role.changed`, `role.removed`, `home.renamed`, `hub.radio`, `adapter.error`,
+`role.changed`, `role.removed`, `home.renamed`, `hub.radio`, `hub.mqtt`,
+`adapter.error`,
 `zigbee.interview-failed`, `zigbee.left`, `zigbee.permit-join`,
 `zigbee.permit-join-closed`, `matter.commission`. Treat the list as open — a
 client must render an unknown kind from `message` rather than drop it.

@@ -298,6 +298,103 @@ json_string() {
     || printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"
 }
 
+mqtt_field() { $SUDO sed -n "s/^$1=//p" "$CONF_DIR/mqtt.env" 2>/dev/null | head -n1; }
+
+# ── The broker credentials, on the machine itself ──────────────────────────
+# The apps read these from `GET /settings/mqtt`, which is the route anybody
+# should be using. This exists for the two cases that route cannot serve:
+# a hub whose token has gone stale or whose build will not start, and the
+# rotation below, which needs root and a broker restart and so was never the
+# hub's to do — the same division as the radio and the update.
+#
+# `--rotate` is the answer to "somebody who had the password has left". Nothing
+# else can be: removing a member takes their tokens with the row, but a
+# password is a secret that left the building and only a new one takes it back.
+# It re-runs the installer rather than reimplementing any of this, which is the
+# same thing `update` does and for the same reason.
+cmd_mqtt() {
+  local rotate=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --rotate) rotate=1; shift ;;
+      *) die "unknown option $1" ;;
+    esac
+  done
+
+  if [[ -n "$rotate" ]]; then
+    [[ -f "$CONF_DIR/mqtt.env" ]] || die "this hub's broker has no password set. Re-run the installer."
+    echo "New passwords will be generated. Anything you wired into MQTT yourself"
+    echo "will stop working until you give it the new ones."
+    read -r -p "Type 'rotate' to confirm: " answer
+    [[ "$answer" == "rotate" ]] || { echo "Left alone."; return 1; }
+
+    # ── Set the old credentials aside; never delete them ────────────────────
+    # The installer mints a password when it finds none, writes the broker's
+    # password file and ACL from it, and restarts everything that needs to
+    # reconnect — so deleting this file is how the rotation is *asked for*.
+    # Doing any of that here would be a second copy of it.
+    #
+    # But deleting it outright is the "dead broker" trap reached from the one
+    # command meant to fix things. If the installer fails before it gets to
+    # the credential block — a dropped download, a full card — mosquitto is
+    # still enforcing the *old* password file while nothing on the machine can
+    # say what was in it, and the next restart of hubd or Zigbee2MQTT connects
+    # anonymously and is refused: Zigbee and MQTT down, with no way back short
+    # of running the installer again.
+    local kept="$CONF_DIR/mqtt.env.rotating"
+    $SUDO mv "$CONF_DIR/mqtt.env" "$kept" \
+      || die "could not set the current credentials aside; nothing was changed."
+    local update_failed=""
+    cmd_update || update_failed=1
+    # **The file being there is the authority, not the exit status.** The
+    # installer writes it in the same breath as the broker's password file, so
+    # a run that reached that point has rotated both — even if it failed later
+    # and rolled the build back. Putting the old file back then would leave
+    # the machine with credentials the broker no longer accepts.
+    if [[ -f "$CONF_DIR/mqtt.env" ]]; then
+      $SUDO rm -f "$kept"
+      # A plain `if`, not `[[ … ]] && echo`: a test-and-command as the last
+      # statement of a branch takes the branch's exit status with it, which is
+      # the shape that silently skipped a `mv` in install.sh once already.
+      if [[ -n "$update_failed" ]]; then
+        echo "Note: the installer reported a problem, but the new passwords are in force."
+      fi
+    else
+      $SUDO mv "$kept" "$CONF_DIR/mqtt.env" \
+        || die "the installer did not finish, and the old credentials could not be put back. They are in $kept."
+      die "the installer did not finish, so nothing was rotated — the old passwords are still in force."
+    fi
+    echo
+  fi
+
+  # An interrupted rotation — Ctrl-C between the two moves above, or a reboot —
+  # leaves the credentials beside their own name and the hub with none. Putting
+  # them back is always right: the broker is still enforcing them.
+  if [[ ! -f "$CONF_DIR/mqtt.env" && -f "$CONF_DIR/mqtt.env.rotating" ]]; then
+    $SUDO mv "$CONF_DIR/mqtt.env.rotating" "$CONF_DIR/mqtt.env" 2>/dev/null || true
+  fi
+
+  if [[ ! -f "$CONF_DIR/mqtt.env" ]]; then
+    echo "This hub's MQTT broker takes connections with no password."
+    echo "Anyone on this network can read the home and control its Zigbee devices."
+    echo "Re-run the installer to close it."
+    return 1
+  fi
+
+  echo "MQTT broker on this machine, port 1883."
+  echo
+  echo "For your own devices and integrations — use this one:"
+  echo "  username: $(mqtt_field MQTT_INTEGRATION_USERNAME)"
+  echo "  password: $(mqtt_field MQTT_INTEGRATION_PASSWORD)"
+  echo "  It can publish under gethome/ and watch what Zigbee devices report."
+  echo "  It cannot control them or open the network for pairing."
+  echo
+  echo "Full access — what the hub and Zigbee2MQTT use:"
+  echo "  username: $(mqtt_field MQTT_USERNAME)"
+  echo "  password: $(mqtt_field MQTT_PASSWORD)"
+  echo "  This one can control every Zigbee device. Don't leave it on a devboard."
+}
+
 cmd_uninstall() {
   echo "This removes the GetHome Hub, its services, and everything it stored."
   read -r -p "Type 'remove' to confirm: " answer
@@ -310,6 +407,9 @@ cmd_uninstall() {
   $SUDO rm -f /etc/systemd/system/gethome-*.service /etc/systemd/system/gethome-*.path
   $SUDO rm -f /etc/udev/rules.d/99-gethome-zigbee.rules
   $SUDO rm -f /etc/mosquitto/conf.d/gethome.conf
+  # The broker's accounts go too: leaving a password file behind would keep
+  # refusing anonymous clients on a machine with no hub left to authenticate.
+  $SUDO rm -f /etc/mosquitto/gethome.passwd /etc/mosquitto/gethome.acl
   $SUDO rm -f /etc/avahi/services/gethome-hub.service
   $SUDO rm -f /etc/sysctl.d/60-gethome.conf
   $SUDO rm -f /usr/local/lib/gethome-zigbee-detect.sh /usr/local/lib/gethome-zram.sh
@@ -327,6 +427,7 @@ case "${1:-}" in
   logs) shift; cmd_logs "$@" ;;
   zigbee) shift; cmd_zigbee "$@" ;;
   pairing-code) shift; cmd_pairing_code "$@" ;;
+  mqtt) shift; cmd_mqtt "$@" ;;
   claim) shift; cmd_claim "$@" ;;
   version) shift; cmd_version "$@" ;;
   update) shift; cmd_update "$@" ;;
@@ -341,6 +442,8 @@ gethome-hubctl — control the GetHome Hub
   logs [lines]                the hub's log
   zigbee                      the coordinator, and re-check what is attached
   pairing-code                print the code for another device
+  mqtt [--rotate]             the MQTT broker's two accounts; --rotate mints
+                              new passwords and restarts what needs them
   claim --name "Your name" [--device "This Mac"]
                               become the owner and print a token
   version                     which build is running, and what else is installed
