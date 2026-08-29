@@ -784,9 +784,8 @@ the second provider reads exactly what it read before — plus a per-provider ha
   "providers": {
     "anthropic": { "hasKey": true, "model": "claude-opus-5",
                    "models": [ { "id": "claude-opus-5", "label": "Opus 5",
-                                 "note": "The most thorough. Recommended.", "recommended": true },
-                               { "id": "claude-sonnet-5", "label": "Sonnet 5",
-                                 "note": "Cheaper per run, and good at this." } ] },
+                                 "note": "The most thorough. Every recognition run uses it.",
+                                 "recommended": true } ] },
     "openai":    { "hasKey": true, "model": "gpt-5.6-sol", "models": [ … ] }
   },
   "mapping":   { "provider": "anthropic", "choosable": true },
@@ -801,7 +800,19 @@ label a person reads, a one-line note and exactly one `recommended`. This is the
 `GET /permissions` rule applied to models: ids and tiers move, and an app that
 shipped its own list would offer one this hub refuses or miss one it accepts.
 The allowlist behind it is deliberately longer than `models` — a hub already set
-to an older model keeps working rather than being told its setting is invalid.
+to an older model keeps working rather than being told its setting is invalid,
+and a run recorded months ago still prices correctly when its log is read back.
+
+**`models` is one entry per provider, so draw it as a fact, not a picker.** The
+cheaper tier was retired after it produced descriptors the hub had to reject and
+one that named `custom` as an outlet's primary capability — a paid run whose
+result was a tile with no control on it. An app should show which model
+recognition runs on; keep the picker for the day the list is longer than one,
+and don't hide the row when it isn't, because which model spends the home's
+money is worth stating even when it isn't a question. **`model` is what will
+run, not what is stored**: a setting naming a model no longer offered resolves
+to the one that is, so an app never draws a model this hub will not use. Writing
+a retired id is still accepted — it just isn't what runs.
 
 **`provider` and `mapping.provider` are the same answer**: which provider would
 recognise a device right now. With one key there is no choice to make; with two,

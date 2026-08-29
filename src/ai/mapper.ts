@@ -28,7 +28,7 @@ import {
   type MappingDescriptor,
 } from './descriptor.js';
 import { agentStep, type AgentRunStats, type MappingProvider } from './agent-core.js';
-import { defaultModelFor } from './models.js';
+import { effectiveModel } from './models.js';
 import { AiUnavailableError, describeRunFailure, readableFailure } from './errors.js';
 import { MAPPING_SYSTEM_PROMPT, buildMappingUserPrompt, buildRepairUserPrompt } from './prompts.js';
 
@@ -242,7 +242,7 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
       vendor: input.device.definition?.vendor,
       model: input.device.definition?.model ?? input.device.friendly_name,
       provider: ranOn,
-      modelId: ai[ranOn].model ?? defaultModelFor(ranOn),
+      modelId: effectiveModel(ranOn, ai[ranOn].model),
     });
     run?.step(
       agentStep(
@@ -379,7 +379,7 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
     if (!provider) return 'none';
     const secret = (await this.settings.aiKey(provider)) ?? '';
     const digest = createHash('sha256').update(secret).digest('hex').slice(0, 16);
-    return `${provider}:${ai[provider].model ?? defaultModelFor(provider)}:${digest}`;
+    return `${provider}:${effectiveModel(provider, ai[provider].model)}:${digest}`;
   }
 
   /**
@@ -447,7 +447,7 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
         at: new Date().toISOString(),
         ok,
         ...(stats !== null ? { costUsd: stats.costUsd } : {}),
-        model: ai[ranOn].model ?? defaultModelFor(ranOn),
+        model: effectiveModel(ranOn, ai[ranOn].model),
       },
     });
   }

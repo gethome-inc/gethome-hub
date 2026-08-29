@@ -203,11 +203,27 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   no second SDK for a Pi to download — with hosted search and **no fetch tool**,
   because there is no hosted equivalent and giving the *hub* one would break the
   documented promise that it opens no connection to third-party sites.
-  Two rules for the pair. **Effort is `high` on both and is not exposed**: the
-  cost lever somebody can actually calibrate is the model, and two settings for
-  one decision is one too many. And **the hub owns the model list** — the apps
-  render `providers.<name>.models` rather than shipping ids of their own, the
-  `GET /permissions` rule applied to a vocabulary that moves.
+  Two rules for the pair. **Effort is `high` on both and is not exposed**: two
+  settings for one decision is one too many. And **the hub owns the model
+  list** — the apps render `providers.<name>.models` rather than shipping ids of
+  their own, the `GET /permissions` rule applied to a vocabulary that moves.
+  **That list is one model per provider now, so the apps *state* it rather than
+  ask.** It was two, the thorough tier and the cheaper one, until the cheaper
+  one was tried: Sonnet 5 kept submitting descriptors `submit_mapping` had to
+  bounce, and the run that finished named `custom` as an outlet's primary — the
+  one value that renders as no control at all, so a paid run produced a dead
+  tile on a working plug. The trade is lopsided because a descriptor is cached
+  per device *model* and shapes every unit of it the home ever meets until
+  somebody remaps; a few cents on a job that runs a handful of times in a hub's
+  life does not buy that risk. OpenAI's cheaper tier went on the same reasoning
+  rather than its own evidence. The half that is easy to miss is
+  **`effectiveModel`: a stored model counts only while it is still offered**,
+  or retiring one leaves the homes that had chosen it as the only homes still
+  running it — silently, since nothing on a screen would change. `GET
+  /settings/ai` answers what will *run*, never the column, so a hub set to
+  Sonnet moves to Opus by itself; a write naming a retired id is still accepted
+  rather than 400-ing an older app, it simply is not what runs, and `PRICING`
+  stays broad so a months-old `ai_runs.modelId` still prices correctly.
   **It used to run on the Claude Agent SDK, and moving off it was a memory
   decision like dropping Docker.** That SDK ships a 276 MB native binary — 74%
   of the hub's whole download — and spawned a ~315 MB subprocess per run, of

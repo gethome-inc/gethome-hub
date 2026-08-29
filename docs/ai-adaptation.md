@@ -248,13 +248,31 @@ offered as a choice.
 
 **The apps do not ship that list.** `GET /settings/ai` carries
 `providers.<name>.models` — id, label, one-line note, one `recommended` — and
-the apps render it, the same rule `GET /permissions` follows. What they offer is
-deliberately two per provider: the thorough one and the cheaper one, which is
-the whole decision worth asking somebody to make. The rest of the allowlist
-exists so a hub already set to an older model keeps working. The thorough tier
-is the default deliberately — a wrong mapping is cached per device model and
-quietly shapes what the apps show until somebody remaps it, which is worth more
-than the difference in per-run cost.
+the apps render it, the same rule `GET /permissions` follows.
+
+**It is one model per provider, so the apps state it rather than ask.** It was
+two — the thorough tier and the cheaper one — until the cheaper one was tried
+on a real device. Sonnet 5 repeatedly submitted descriptors the `submit_mapping`
+handler had to bounce, and the run that did finish named `custom` as an outlet's
+primary capability, which is the one value that renders as no control at all: a
+paid run whose result was a dead tile on a working smart plug. A wrong mapping
+is worse than an expensive one in a way that is easy to underestimate, because
+the descriptor is cached per device *model* — it silently shapes every unit of
+that device the home ever meets until somebody notices and remaps. Saving a few
+cents on a job that runs a handful of times in a hub's life is the wrong trade
+for that. OpenAI's cheaper tier is retired on the same reasoning rather than on
+its own evidence.
+
+**A stored model counts only while it is still offered** (`effectiveModel`).
+Retiring one otherwise leaves the homes that had chosen it as the only homes
+still running it — exactly the homes the retirement is for — and silently, since
+nothing on any screen would have changed. So `GET /settings/ai` answers the
+model that will *run*, never the string in the column, and a hub set to Sonnet
+moves to Opus on its next run with no migration and nothing for its owner to do.
+A write naming a retired model is still accepted rather than 400-ing an app that
+has not shipped an update; it simply is not what runs. The allowlist stays
+broader than `models` for a second reason too: `ai_runs.modelId` rows recorded
+months ago still have to price correctly when a run log is read back.
 
 **Effort is `high` on both providers and is not exposed.** Adaptation is
 reasoning-heavy and runs a handful of times in a hub's life, so that is the
@@ -590,7 +608,7 @@ Everything lives in `src/ai/`; the module never imports the API or adapters
 | `agent-core.ts` | Everything about a run that is not one vendor's API: the guardrails (turns, cost cap, watchdog, output ceiling, effort), the `AgentStep` vocabulary, the `submit_mapping` schema and description, `evaluateSubmission`, and the `MappingProvider` seam the mapper (and tests) use. **Imports no SDK** — which is what stops a hub configured with only an OpenAI key loading the Anthropic one to satisfy an import chain. |
 | `agent.ts` | The Anthropic loop, on the Messages API: the tool set (`web_search_20260209` + `web_fetch_20260209` + `submit_mapping`), prompt caching, `pause_turn` resumption, failure classification, run stats. Re-exports `agent-core.ts`, so callers did not move. |
 | `openai-agent.ts` | The same run on OpenAI's Responses API, over plain `fetch` — no second SDK for a Pi to download. Hosted `web_search` and `submit_mapping`; `store: false` with reasoning items echoed back; the same caps and step vocabulary. |
-| `models.ts` | Per provider: the model allowlist (what can drive the hosted research tools), the two-entry `choices` list the apps render, and the list prices the per-run cost cap and `costUsd` estimate are computed from. Dependency-free, so the API layer can validate a model without pulling in the AI stack. |
+| `models.ts` | Per provider: the model allowlist (what can drive the hosted research tools), the one-per-provider `choices` list the apps state, and the list prices the per-run cost cap and `costUsd` estimate are computed from. Dependency-free, so the API layer can validate a model without pulling in the AI stack. |
 | `errors.ts` | The failure taxonomy: `AiUnavailableError` kinds, HTTP-status classification (`classifyApiError`), error-text fallback, reset-time parsing. |
 | `prompts.ts` | The system prompt (canonical capabilities/paths/units/transforms + worked examples + research rules), the per-device task prompt carrying the whole research brief, and the zigbee2mqtt.io page URL. |
 | `mapper.ts` | Orchestration: cache lookups, one-run-at-a-time serialization, per-model in-flight dedupe, the credential-keyed backoff gate, validation, storage, and interpretation into an `AppliedAiMapping` for the adapter. |

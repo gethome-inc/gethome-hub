@@ -937,8 +937,10 @@ describe.skipIf(!handle)('hub API', () => {
       // One key, so there is nothing to choose between.
       mapping: { provider: 'anthropic', choosable: false },
     });
+    // One model per provider: the picker became a statement, so what an app
+    // draws from this list is "recognition runs on Opus 5", not a question.
     const providers = body.providers as { anthropic: { models: unknown[] } };
-    expect(providers.anthropic.models).toHaveLength(2);
+    expect(providers.anthropic.models).toHaveLength(1);
     expect(JSON.stringify(body)).not.toContain('sk-ant');
 
     // A member may read and write this now — see the `hub.ai` note in
@@ -1001,6 +1003,10 @@ describe.skipIf(!handle)('hub API', () => {
       method: 'PATCH',
       url: '/api/v1/settings/ai',
       headers: auth(memberToken),
+      // Terra is still priced, so the write is taken rather than 400-ing an
+      // app that has not shipped an update — the same stance `authType` takes
+      // one field over. What it must not do is come back as the model this
+      // hub runs, because it isn't: it is no longer offered.
       payload: { openaiApiKey: 'sk-proj-1234567890', openaiModel: 'gpt-5.6-terra' },
     });
     expect(saved.statusCode).toBe(200);
@@ -1008,7 +1014,7 @@ describe.skipIf(!handle)('hub API', () => {
       hasKey: true,
       providers: {
         anthropic: { hasKey: true, model: 'claude-opus-5' },
-        openai: { hasKey: true, model: 'gpt-5.6-terra' },
+        openai: { hasKey: true, model: 'gpt-5.6-sol' },
       },
       // Both keys, so which one recognises devices is now somebody's choice.
       mapping: { provider: 'anthropic', choosable: true },

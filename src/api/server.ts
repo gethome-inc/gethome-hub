@@ -18,7 +18,7 @@ import type { MatterAdapter } from '../adapters/matter/adapter.js';
 import type { ZigbeeAdapter } from '../adapters/zigbee/adapter.js';
 // Dependency-free model catalog (a price table and an allowlist) — importing
 // it here does not pull the AI stack into the API layer.
-import { defaultModelFor, isSupportedModel, PROVIDER_MODELS, supportedModelIds } from '../ai/models.js';
+import { effectiveModel, isSupportedModel, PROVIDER_MODELS, supportedModelIds } from '../ai/models.js';
 // Local operations on stored JSON — zod only, no Anthropic SDK in this graph.
 // `MappingLibrary.repair` loads the agent on demand.
 import type { MappingLibrary } from '../ai/library.js';
@@ -1606,7 +1606,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const [ai, status] = await Promise.all([deps.settings.getAiSettings(), deps.settings.getAiStatus()]);
     const forProvider = (provider: AiProvider) => ({
       hasKey: ai[provider].hasKey,
-      model: ai[provider].model ?? defaultModelFor(provider),
+      model: effectiveModel(provider, ai[provider].model),
       models: PROVIDER_MODELS[provider].choices,
     });
     return {

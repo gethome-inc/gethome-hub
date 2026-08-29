@@ -134,16 +134,29 @@ describe.skipIf(!handle)('trying again after the settings change', () => {
     expect(generate).toHaveBeenCalledTimes(2);
   });
 
-  it('tries again by itself once the model has changed', async () => {
+  /**
+   * The gate is keyed on `provider:model:sha256(secret)`, and the model half
+   * of that is no longer something anybody can move: each provider offers one
+   * model, so a stored setting naming a retired one resolves to what is
+   * actually offered (`effectiveModel`). The axis stays in the key for the day
+   * a second model is offered again; what has to hold *now* is that the gate
+   * is keyed on the model that will really run, not on the string in the
+   * column — otherwise a hub carrying a stale `claude-sonnet-5` would key its
+   * gate on a model no run will ever use, and the two would drift the moment
+   * anything compared them.
+   */
+  it('keys the gate on the model that will run, not on a retired stored one', async () => {
     const { mapper, generate } = failingMapper(
       new AiUnavailableError('rate_limited', '429 too many requests'),
     );
     await mapper.requestMapping(lamp, mapExposes(lamp));
 
+    // Sonnet is priced, so the setter takes it; it is not offered, so nothing
+    // about the run changes — and neither does the gate.
     await settings.setAiModel('claude-sonnet-5', 'anthropic');
     await mapper.requestMapping(lamp, mapExposes(lamp));
 
-    expect(generate).toHaveBeenCalledTimes(2);
+    expect(generate).toHaveBeenCalledTimes(1);
   });
 
   it('does not let one provider’s failure silence the other', async () => {

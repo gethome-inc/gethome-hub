@@ -9,6 +9,7 @@ import {
   DEFAULT_MODEL,
   PROVIDER_MODELS,
   defaultModelFor,
+  effectiveModel,
   estimateCostUsd,
   isSupportedModel,
   supportedModelIds,
@@ -189,38 +190,37 @@ describe('supported models', () => {
    * keep working, while asking somebody to choose between six is asking them to
    * research six.
    */
-  it('offers two models per provider, one of them recommended, all of them allowed', () => {
+  it('offers exactly one model per provider, and it is that provider’s default', () => {
     for (const provider of ['anthropic', 'openai'] as const) {
       const choices = PROVIDER_MODELS[provider].choices;
-      expect(choices).toHaveLength(2);
-      expect(choices.filter((choice) => choice.recommended)).toHaveLength(1);
+      // The model is a fact the apps state, not a decision they ask for: the
+      // cheaper tier was retired after Sonnet 5 submitted descriptors the tool
+      // handler kept bouncing and then named `custom` as an outlet's primary,
+      // which renders as no control at all.
+      expect(choices).toHaveLength(1);
       expect(choices[0]?.recommended).toBe(true);
-      for (const choice of choices) expect(isSupportedModel(choice.id, provider)).toBe(true);
+      expect(isSupportedModel(choices[0]!.id, provider)).toBe(true);
       expect(isSupportedModel(defaultModelFor(provider), provider)).toBe(true);
+      expect(defaultModelFor(provider)).toBe(choices[0]?.id);
     }
-    // Each provider's default is the thorough one it offers first.
-    expect(defaultModelFor('anthropic')).toBe(PROVIDER_MODELS.anthropic.choices[0]?.id);
-    expect(defaultModelFor('openai')).toBe(PROVIDER_MODELS.openai.choices[0]?.id);
   });
 
   /**
-   * The two pairs are the same shape on purpose — the thorough tier and the
-   * cheaper one — and each is named by an **explicit** id. `gpt-5.6` routes to
-   * Sol today and is OpenAI's to re-point tomorrow, which would move which
-   * model a home runs and what a run costs with nothing in this repository
-   * changed to explain it; the alias stays priced so a hub that stored it
-   * keeps working, and stays out of `choices` so nothing new picks it up.
+   * Each is named by an **explicit** id. `gpt-5.6` routes to Sol today and is
+   * OpenAI's to re-point tomorrow, which would move which model a home runs
+   * and what a run costs with nothing in this repository changed to explain
+   * it; the alias stays priced so a hub that stored it keeps working, and
+   * stays out of `choices` so nothing new picks it up.
    */
-  it('pins Opus 5 / Sonnet 5 and Sol / Terra by their explicit ids', () => {
-    expect(PROVIDER_MODELS.anthropic.choices.map((choice) => choice.id)).toEqual([
-      'claude-opus-5',
-      'claude-sonnet-5',
-    ]);
-    expect(PROVIDER_MODELS.openai.choices.map((choice) => choice.id)).toEqual([
-      'gpt-5.6-sol',
-      'gpt-5.6-terra',
-    ]);
+  it('pins Opus 5 and Sol by their explicit ids', () => {
+    expect(PROVIDER_MODELS.anthropic.choices.map((choice) => choice.id)).toEqual(['claude-opus-5']);
+    expect(PROVIDER_MODELS.openai.choices.map((choice) => choice.id)).toEqual(['gpt-5.6-sol']);
     expect(defaultModelFor('openai')).toBe('gpt-5.6-sol');
+
+    // Retired from the picker, still priced: a run recorded months ago names
+    // the model it ran on, and reading that log back has to cost it correctly.
+    expect(isSupportedModel('claude-sonnet-5', 'anthropic')).toBe(true);
+    expect(isSupportedModel('gpt-5.6-terra', 'openai')).toBe(true);
 
     // Accepted, priced, and never offered.
     expect(isSupportedModel('gpt-5.6', 'openai')).toBe(true);
@@ -232,6 +232,25 @@ describe('supported models', () => {
     // Luna is cheap and is not on the list: this job is reasoning-heavy and
     // runs a handful of times in a hub's life.
     expect(isSupportedModel('gpt-5.6-luna', 'openai')).toBe(false);
+  });
+
+  /**
+   * Retiring a model is only half a decision if the homes that had chosen it
+   * carry on running it — those are exactly the homes the retirement is for,
+   * and nothing on any screen would have changed to say so.
+   */
+  it('runs a stored model only while it is still offered', () => {
+    expect(effectiveModel('anthropic', 'claude-sonnet-5')).toBe('claude-opus-5');
+    expect(effectiveModel('openai', 'gpt-5.6-terra')).toBe('gpt-5.6-sol');
+    // The bare alias was never offered, so it was never a preference either.
+    expect(effectiveModel('openai', 'gpt-5.6')).toBe('gpt-5.6-sol');
+
+    // A model still on the list is still honoured, and so is silence.
+    expect(effectiveModel('anthropic', 'claude-opus-5')).toBe('claude-opus-5');
+    expect(effectiveModel('anthropic', null)).toBe('claude-opus-5');
+    expect(effectiveModel('anthropic', undefined)).toBe('claude-opus-5');
+    // Nothing a stranger could put in the column becomes a model either.
+    expect(effectiveModel('anthropic', 'gpt-5.6-sol')).toBe('claude-opus-5');
   });
 
   it('keeps the two allowlists apart, so a model cannot be sent to the wrong API', () => {
