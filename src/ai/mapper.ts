@@ -262,6 +262,11 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
           stats = s;
         },
         onStep: (step) => run?.step(step),
+        // Present only while the owner has asked for it — the callback's
+        // absence is what makes recording free, so this is a conditional
+        // spread rather than a handler that checks a flag. See
+        // `AgentRunContext.onExchange`.
+        ...(ai.recordExchanges ? { onExchange: (exchange) => run?.exchange(exchange) } : {}),
       });
       const parsed = mappingDescriptorSchema.safeParse(candidate);
       if (!parsed.success) {

@@ -11,11 +11,16 @@ import {
   NUDGE_TEXT,
   SUBMIT_MAPPING_DESCRIPTION,
   agentStep,
+  describeThrown,
+  exchangePart,
   evaluateSubmission,
+  record,
   submitMappingSchema,
   type AgentAuth,
+  type AgentExchange,
   type AgentRunContext,
   type AgentRunStats,
+  type ExchangePart,
   type MappingProvider,
   type SubmitCapture,
 } from './agent-core.js';
@@ -70,9 +75,11 @@ export {
   AGENT_TIMEOUT_MS,
   MAX_STEP_DETAIL,
   type AgentAuth,
+  type AgentExchange,
   type AgentRunContext,
   type AgentRunStats,
   type AgentStep,
+  type ExchangePart,
   type MappingProvider,
   type SubmissionOutcome,
   type SubmitCapture,
@@ -113,6 +120,101 @@ export function submitMappingTool(): Anthropic.Tool {
  * query and the URL out of it is what lets the apps say *what was looked up*
  * about a device rather than only that "something was".
  */
+/**
+ * The main data in what this turn added to the request.
+ *
+ * Not the request body: an agent loop resends everything every turn, and the
+ * system prompt and the tool schema alone are 9.9 KB and 6.7 KB of it. What a
+ * person wants is what is *new* — and, once, what the run was configured with.
+ * The tool **names** rather than their schemas for the same reason: the
+ * `submit_mapping` schema is generated from the descriptor and is identical in
+ * every run of a build.
+ *
+ * Only ever called from inside `record`, so a content shape this does not
+ * expect costs the run nothing.
+ */
+function sentParts(
+  firstRound: boolean,
+  modelId: string,
+  systemPrompt: string,
+  tools: Anthropic.ToolUnion[],
+  added: Anthropic.MessageParam[],
+): ExchangePart[] {
+  const parts: ExchangePart[] = [];
+  if (firstRound) {
+    parts.push(
+      exchangePart(
+        'config',
+        `${modelId} · effort ${EFFORT} · max_tokens ${MAX_OUTPUT_TOKENS}`,
+        `tools: ${tools.map((tool) => ('name' in tool ? tool.name : tool.type)).join(', ')}`,
+      ),
+      exchangePart('system', 'System prompt', systemPrompt),
+    );
+  }
+  for (const message of added) {
+    if (typeof message.content === 'string') {
+      parts.push(exchangePart('message', message.role, message.content));
+      continue;
+    }
+    for (const block of message.content) {
+      if (block.type === 'text') {
+        parts.push(exchangePart('message', message.role, block.text));
+      } else if (block.type === 'tool_result') {
+        parts.push(
+          exchangePart(
+            'tool_result',
+            block.is_error ? 'Tool result — refused' : 'Tool result',
+            block.content,
+          ),
+        );
+      } else if (block.type === 'tool_use') {
+        parts.push(exchangePart('tool_use', `Called ${block.name}`, block.input));
+      }
+      // Thinking blocks are replayed verbatim because the API requires it,
+      // and they are the model's own from the previous round — already in
+      // that round's `received`. Recording them again would double the log.
+    }
+  }
+  return parts;
+}
+
+/**
+ * The main data in what came back: why the turn stopped, and one part per
+ * content block. Server-side search and fetch appear here as the query and
+ * the URL, which is the same thing `reportResearch` puts in the run's steps —
+ * said twice on purpose, because a step is the run's story and this is the
+ * round's.
+ */
+function receivedParts(response: Anthropic.Message): ExchangePart[] {
+  const parts: ExchangePart[] = [
+    exchangePart('outcome', `Stopped: ${response.stop_reason ?? 'end_turn'}`),
+  ];
+  for (const block of response.content) {
+    switch (block.type) {
+      case 'thinking':
+        parts.push(exchangePart('thinking', 'Thinking', block.thinking));
+        break;
+      case 'text':
+        parts.push(exchangePart('text', 'Answered in prose', block.text));
+        break;
+      case 'tool_use':
+        parts.push(exchangePart('tool_use', `Called ${block.name}`, block.input));
+        break;
+      case 'server_tool_use': {
+        const input = block.input as { query?: unknown; url?: unknown } | null;
+        const detail = typeof input?.query === 'string' ? input.query : input?.url;
+        parts.push(exchangePart('research', `Ran ${block.name}`, detail));
+        break;
+      }
+      default:
+        // A block type this build has never met — named, not dropped, because
+        // "the reply had something in it we cannot show" is worth knowing.
+        parts.push(exchangePart(block.type, block.type));
+    }
+  }
+  return parts;
+}
+
 function reportResearch(content: Anthropic.ContentBlock[], run: AgentRunContext | undefined): void {
   if (!run?.onStep) return;
   for (const block of content) {
@@ -192,6 +294,11 @@ export function createMappingAgent(
       const startedAt = Date.now();
       const tools = buildTools();
       const messages: Anthropic.MessageParam[] = [{ role: 'user', content: userPrompt }];
+      // How much of `messages` the exchange log has already seen. An agent
+      // loop resends the whole conversation every turn, so recording each
+      // request whole would write the first prompt once per turn and make the
+      // last turn the size of the run — see `AgentExchange`.
+      let recordedUpTo = 0;
 
       let turns = 0;
       let nudges = 0;
@@ -206,6 +313,13 @@ export function createMappingAgent(
           }
 
           let response: Anthropic.Message;
+          const roundStartedAt = Date.now();
+          // Captured before the request because `messages` grows during it —
+          // but only sliced, never walked: turning these into parts is work,
+          // and it belongs inside `record`'s guard.
+          const added = run?.onExchange ? messages.slice(recordedUpTo) : [];
+          const firstRound = turns === 1;
+          recordedUpTo = messages.length;
           try {
             // `stream()`, not `create()`, and that is load-bearing rather
             // than a preference: the SDK refuses a non-streaming request
@@ -243,6 +357,22 @@ export function createMappingAgent(
             );
             response = await stream.finalMessage();
           } catch (error) {
+            // Recorded before it is classified: the whole point of keeping
+            // this is the refusal nobody could read, and by the time the
+            // classifier has finished with it the status and the body are
+            // behind an `AiUnavailableError`'s single message.
+            record(run, () => ({
+              seq: turns,
+              startedAt: roundStartedAt,
+              provider: 'anthropic',
+              modelId,
+              ok: false,
+              sent: sentParts(firstRound, modelId, systemPrompt, tools, added),
+              received: describeThrown(error),
+              ...(typeof (error as { status?: unknown }).status === 'number'
+                ? { status: (error as { status: number }).status }
+                : {}),
+            }));
             if (controller.signal.aborted) {
               throw new AiUnavailableError(
                 'aborted',
@@ -251,6 +381,19 @@ export function createMappingAgent(
             }
             throw classifyApiError(error) ?? error;
           }
+
+          record(run, () => ({
+            seq: turns,
+            startedAt: roundStartedAt,
+            provider: 'anthropic',
+            modelId,
+            status: 200,
+            ok: true,
+            sent: sentParts(firstRound, modelId, systemPrompt, tools, added),
+            received: receivedParts(response),
+            inputTokens: response.usage.input_tokens,
+            outputTokens: response.usage.output_tokens,
+          }));
 
           usage.add(response.usage);
           reportResearch(response.content, run);

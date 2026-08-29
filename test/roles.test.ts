@@ -353,6 +353,15 @@ describe.skipIf(!handle)('roles and permissions', () => {
       ],
       ['POST', '/api/v1/invites', 'member.invite', {}],
       ['GET', '/api/v1/roles', '', undefined],
+      // What a run said to a provider is the home's AI, so it sits behind the
+      // key it was spent with. The guard runs before the handler, so a run
+      // that does not exist still proves the refusal.
+      [
+        'GET',
+        '/api/v1/ai/runs/22222222-2222-4222-a222-222222222222/exchanges',
+        'hub.ai',
+        undefined,
+      ],
     ];
     for (const [method, url, permission, payload] of cases) {
       const response = await app.inject({
@@ -424,6 +433,16 @@ describe.skipIf(!handle)('roles and permissions', () => {
     });
     expect(refused.statusCode).toBe(403);
     expect(refused.json()).toMatchObject({ error: 'forbidden', permission: 'hub.ai' });
+
+    // The same key covers reading what a run actually said, and a member has
+    // to be able to open it — the refusal row above is only half the rule.
+    const rounds = await app.inject({
+      method: 'GET',
+      url: '/api/v1/ai/runs/22222222-2222-4222-a222-222222222222/exchanges',
+      headers: auth(memberToken),
+    });
+    expect(rounds.statusCode).toBe(200);
+    expect(rounds.json()).toEqual([]);
   });
 
   /**

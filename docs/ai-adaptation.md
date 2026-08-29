@@ -325,6 +325,57 @@ model until an explicit remap), and a run where the agent gives up (out of
 turns/budget, no submission) is simply logged and retried on the next
 natural trigger. Only descriptors are ever cached — never account failures.
 
+**A run is a loop, not a request, and the log is shaped like one.** One
+recognition is up to `AGENT_MAX_TURNS` (40) request/response **rounds** against
+the provider: the hub sends the conversation, the model answers — often by
+running a hosted web search, or by calling `submit_mapping` — the hub appends
+the result and sends again. Most runs are a handful of rounds; the forty is a
+ceiling so a confused run cannot spend all day. That is why a failed round
+followed by a successful one is the ordinary shape of a working run rather than
+an oddity, and why anything that records what was said has to record it per
+round.
+
+**What a run said can be kept, and it is off unless the owner asks.** The rule
+above — a summary, never a transcript — is what every run obeys forever, and it
+has one deliberate exception, because a refusal is often about the *request*: a
+model that will not take a parameter, a key that names no workspace. Switch
+`recordExchanges` on (`PATCH /settings/ai`) and each round is written to
+`ai_run_exchanges`, readable at `GET /ai/runs/:id/exchanges`.
+
+Five rules hold it up.
+
+- **Off costs nothing.** The switch is the presence of `AgentRunContext.onExchange`,
+  not a flag a handler checks, so a run nobody asked about never walks a
+  content block and never builds a string — the `MqttObserver` stance, where
+  watching costs nothing when nobody is watching.
+- **A round records what it *added*, never the conversation so far.** An agent
+  loop resends everything every turn, and the system prompt and the
+  `submit_mapping` schema alone are 9.9 KB and 6.7 KB of that — on *every*
+  round. Recording each request whole would write them forty times and make the
+  last round the size of the run. So the configuration and the system prompt
+  are carried once, on round 1, and each later round carries only the messages
+  it appended.
+- **It is main data, not bodies.** Each side is a list of labelled, excerpted
+  parts (`{kind, label, text?, bytes?}`) — a role, a tool call, a search query,
+  a stop reason, a refusal — which is both what a person can read and a
+  fraction of what the wire carried. `kind` is an open string: each provider
+  names the parts of its own protocol and an app that meets a new word renders
+  it rather than failing to draw the round. A cut part carries `bytes`, what it
+  weighed whole, so an app never asserts a constant from this repository.
+- **Nothing carries a credential.** Request *bodies* only, never headers, and
+  neither provider puts a key in a body.
+- **It can never end a run.** Recognising the device is the job; this is a
+  convenience. Building the parts means walking a vendor's content blocks, so
+  the distillation, the excerpting and the callback all sit under one `catch`
+  inside `record()` — which is why it takes a thunk rather than a value.
+
+Bounded at both ends like the activity log and the reading history: **seven
+days** and a row cap, whichever bites first. The age bound is the one that
+matters — somebody switches this on because something is wrong *now*, and a
+week later the answer is either found or no longer interesting. Rows are
+written once, with the run, rather than per round (the `STATE_FLUSH_MS` rule),
+and a pruned run takes its rounds with it.
+
 **A failed run is recorded in words somebody can act on** — the *name a
 failure, don't just relay it* rule the Zigbee diagnosis holds, applied to the
 run log. An SDK error's `message` is the HTTP status with the whole response
@@ -516,6 +567,7 @@ Everything lives in `src/ai/`; the module never imports the API or adapters
 | `errors.ts` | The failure taxonomy: `AiUnavailableError` kinds, HTTP-status classification (`classifyApiError`), error-text fallback, reset-time parsing. |
 | `prompts.ts` | The system prompt (canonical capabilities/paths/units/transforms + worked examples + research rules), the per-device task prompt carrying the whole research brief, and the zigbee2mqtt.io page URL. |
 | `mapper.ts` | Orchestration: cache lookups, one-run-at-a-time serialization, per-model in-flight dedupe, the credential-keyed backoff gate, validation, storage, and interpretation into an `AppliedAiMapping` for the adapter. |
+| `agent-core.ts` | Also the `AgentExchange` vocabulary: the parts, their bounds, and `record()` — the guard that keeps a bookkeeping failure from ending a run. |
 | `errors.ts` | Two questions kept apart: is this the *account* failing (`classifyApiError` → a gate and a retry) or the *run* (`describeRunFailure` → a sentence in the log, and the fix where the refusal is really a setting). |
 
 Related pieces elsewhere: credential + status storage in
@@ -534,6 +586,9 @@ other provider, over a mocked `fetch`: the request body, the stateless reasoning
 replay, the nudge, refusals, and a 429 that must read as a rate limit rather
 than an exhausted account cap), `test/ai-descriptor.test.ts` (DSL + mapper behavior
 incl. backoff and dedupe, against a temporary SQLite file),
+`test/ai-exchanges.test.ts` (what a run said: the bounds, the cut that
+reports its size, headers never walked, off costing nothing, and a failed
+round read beside the one after it),
 `test/ai-retry.test.ts` (trying again after changing something: the gate
 retiring on a new key, model or provider, an explicit run ignoring it — even
 queued behind a run that arms it — and what a failed run is recorded as), and

@@ -1663,6 +1663,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     mappingProvider: z.enum(AI_PROVIDERS).optional(),
     /** Forget one provider's key and model, leaving the other one alone. */
     clear: z.enum(AI_PROVIDERS).optional(),
+    /** Keep what each round of a run sent and received — see `GET /ai/runs`. */
+    recordExchanges: z.boolean().optional(),
   });
 
   app.get('/api/v1/settings/ai', needs('hub.ai'), aiSettingsResponse);
@@ -1739,6 +1741,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       await deps.settings.setMappingProvider(body.mappingProvider);
     }
     if (body.enabled !== undefined) await deps.settings.setAiEnabled(body.enabled);
+    if (body.recordExchanges !== undefined) {
+      await deps.settings.setAiRecordExchanges(body.recordExchanges);
+    }
     return aiSettingsResponse();
   });
 
@@ -1758,6 +1763,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       .object({ limit: z.coerce.number().int().min(1).max(100).default(30) })
       .parse(request.query);
     const rows = await deps.aiRuns.list(query.limit);
+    // How many rounds each run kept, so an app knows whether to offer the
+    // disclosure at all — one grouped read rather than a body per run, since
+    // the bodies are the expensive half and most runs have none.
+    const counts = await deps.aiRuns.exchangeCounts(rows.map((row) => row.id));
     return rows.map((row) => ({
       id: row.id,
       at: row.at.toISOString(),
@@ -1777,6 +1786,37 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       errorKind: row.errorKind,
       errorMessage: row.errorMessage,
       steps: row.steps,
+      /** Rounds kept for this run — 0 unless recording was on when it ran. */
+      exchanges: counts.get(row.id) ?? 0,
+    }));
+  });
+
+  /**
+   * What was said to the provider, round by round, for one run.
+   *
+   * Fetched rather than streamed, and only when somebody opens it: this is
+   * kilobytes per run and nobody reads it on a hub that is working — the same
+   * stance `HubLogsDisclosure` takes towards a Pi's install log. An empty list
+   * is the ordinary answer, because recording is off unless the owner asked
+   * for it; a run whose rounds have aged out answers the same way, which is
+   * why the list carries a count rather than a boolean somebody could read as
+   * a promise.
+   */
+  app.get('/api/v1/ai/runs/:id/exchanges', needs('hub.ai'), async (request) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const rows = await deps.aiRuns.exchangesOf(id);
+    return rows.map((row) => ({
+      seq: row.seq,
+      at: row.at.toISOString(),
+      durationMs: row.durationMs,
+      provider: row.provider,
+      modelId: row.modelId,
+      status: row.status,
+      ok: row.ok,
+      inputTokens: row.inputTokens,
+      outputTokens: row.outputTokens,
+      sent: row.sent,
+      received: row.received,
     }));
   });
 

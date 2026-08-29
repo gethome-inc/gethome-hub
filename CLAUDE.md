@@ -461,6 +461,36 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   as the Zigbee diagnosis: most-specific-first, an unrecognised failure is still
   reported with nothing guessed about it, and nothing throws — it runs inside
   the catch of a run that has already failed.
+- **What a run *said* can be kept, and the switch is the whole reason that is
+  affordable.** `ai_runs` is a summary by design — model prose on an SD card is
+  the write amplification the rest of the store is arranged to avoid — and
+  `ai_run_exchanges` is the one deliberate exception, because a refusal is
+  often about the *request*: a model that will not take a parameter, a key that
+  names no workspace, and the run log's one sentence cannot answer "what did we
+  actually send?". **A run is a loop, not a request** — up to `AGENT_MAX_TURNS`
+  (40) rounds against the provider — so a failed round followed by a successful
+  one is the ordinary shape of a working run, and anything recording what was
+  said has to record it per round, with the provider and the model on each
+  (a run can be retried against the other vendor entirely). Six rules.
+  **Off costs nothing**: the switch *is* the presence of
+  `AgentRunContext.onExchange`, not a flag a handler reads, so a run nobody
+  asked about never walks a content block — the `MqttObserver` stance.
+  **A round records what it added, never the conversation so far**: an agent
+  loop resends everything every turn, and the system prompt and the
+  `submit_mapping` schema alone are 9.9 KB and 6.7 KB *per round*, so recording
+  each request whole would write them forty times and make the last round the
+  size of the run; the configuration and the system prompt are carried once, on
+  round 1. **It is main data, not bodies** — labelled, excerpted parts
+  (`{kind, label, text?, bytes?}`), with `kind` an open string like
+  `commandFailed.kind`, and a cut part carrying what it weighed whole so no app
+  asserts a constant from here. **Nothing carries a credential**: request
+  bodies only, never headers. **It can never end a run** — recognising the
+  device is the job and this is a convenience, so the distillation, the
+  excerpting and the callback all sit under one `catch` inside `record()`,
+  which is why it takes a thunk rather than a value. And **two bounds**, seven
+  days and a row cap, written once with the run rather than per round
+  (`STATE_FLUSH_MS` again), with a pruned run taking its rounds with it.
+  `docs/ai-adaptation.md` is canonical.
 - **Nothing is unsupported by default — three layers, in order.** Devices are
   made usable by (1) **typed capabilities** (canonical schema), then (2)
   **generic custom fields** (`custom`) for every leftover parameter, generated
