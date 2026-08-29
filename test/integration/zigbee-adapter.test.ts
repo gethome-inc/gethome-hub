@@ -274,3 +274,70 @@ describe.skipIf(!enabled)('ZigbeeAdapter runtime AI adaptation', () => {
     expect(adapter.remap('0x0000000000000000')).toBe(false);
   });
 });
+
+/**
+ * The boot burst: a broker replays every retained message the instant we
+ * subscribe, so `bridge/devices` — the only thing that names a device — and
+ * the `<name>/availability` readings about those devices arrive together.
+ * Two devices, because the first is registered synchronously inside the
+ * `bridge/devices` handler and only the ones behind it are exposed to the
+ * gap: `syncDevices` suspends on device 1, so device 2 is still nameless
+ * when its own retained availability is dispatched.
+ */
+describe.skipIf(!enabled)('ZigbeeAdapter retained availability at start-up', () => {
+  const base = `z2m-avail-${Math.random().toString(16).slice(2, 8)}`;
+  let fake: mqtt.MqttClient;
+  let adapter: ZigbeeAdapter;
+
+  const first = { ...probe, ieee_address: '0xfeed0000000000a1', friendly_name: 'avail one' };
+  const second = { ...probe, ieee_address: '0xfeed0000000000a2', friendly_name: 'avail two' };
+
+  const upserts: AdapterDeviceDescriptor[] = [];
+  const reachability: Array<{ externalId: string; reachable: boolean }> = [];
+  const bus: AdapterBus = {
+    deviceUpserted: (descriptor) => upserts.push(descriptor),
+    deviceRemoved: () => {},
+    stateChanged: () => {},
+    reachabilityChanged: (_adapter, externalId, reachable) =>
+      reachability.push({ externalId, reachable }),
+    radioReachabilityChanged: () => {},
+    commandFailed: () => {},
+    activity: () => {},
+  };
+
+  beforeAll(async () => {
+    fake = await mqtt.connectAsync(MQTT_URL);
+    await fake.publishAsync(`${base}/bridge/devices`, JSON.stringify([first, second]), {
+      retain: true,
+    });
+    // Exactly what Zigbee2MQTT leaves behind for a device that is away: one
+    // retained message, and no further publish until it comes back. Drop it
+    // and the hub has nothing left to learn the absence from.
+    await fake.publishAsync(`${base}/${second.friendly_name}/availability`, '{"state":"offline"}', {
+      retain: true,
+    });
+
+    adapter = new ZigbeeAdapter({
+      mqttUrl: MQTT_URL,
+      baseTopic: base,
+      log: pino({ level: 'silent' }),
+      parameterRemapDelayMs: 50,
+    });
+    await adapter.start(bus);
+    await waitFor(() => upserts.length >= 2);
+  }, 30_000);
+
+  afterAll(async () => {
+    await fake?.publishAsync(`${base}/bridge/devices`, '', { retain: true }).catch(() => {});
+    await fake
+      ?.publishAsync(`${base}/${second.friendly_name}/availability`, '', { retain: true })
+      .catch(() => {});
+    await fake?.endAsync().catch(() => {});
+    await adapter?.stop();
+  });
+
+  it('keeps availability that arrived before the device it is about', async () => {
+    await waitFor(() => reachability.some((entry) => entry.externalId === second.ieee_address));
+    expect(reachability).toContainEqual({ externalId: second.ieee_address, reachable: false });
+  });
+});

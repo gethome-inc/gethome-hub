@@ -398,7 +398,26 @@ Subscribed topics (base topic `zigbee2mqtt`, configurable via
 | `zigbee2mqtt/bridge/event` | a device joining, being interviewed, or leaving — relayed, never acted on |
 | `zigbee2mqtt/bridge/info` | the live permit-join window (`permit_join`, `permit_join_end`) |
 | `zigbee2mqtt/<friendly_name>` | state payloads |
-| `zigbee2mqtt/<friendly_name>/availability` | online/offline |
+| `zigbee2mqtt/<friendly_name>/availability` | online/offline — **parked if it arrives before the device is named**, see below |
+
+**Retained availability outruns the registry that names the device.** All of
+those topics are retained, so the broker replays the lot the instant the
+adapter subscribes, and nothing orders `bridge/devices` ahead of the
+`<friendly_name>/availability` messages it is the key to. `bridge/devices` is
+dispatched as `void syncDevices(...)` and `syncDevices` awaits `adoptDevice`
+per device, so only the **first** device is registered synchronously — every
+device behind it is still nameless when its own availability is handled, and
+the `byFriendlyName` lookup misses. Those messages used to be dropped, which
+means Zigbee2MQTT's own account of which devices it can reach was discarded on
+every start, for every device but one. All that was left was `bridge/state`
+(the radio is up), which marks *everything* online — so a device that was
+genuinely away came back reading healthy and stayed that way, because for a
+device that is simply gone there is no later change to publish: the retained
+message was the whole statement. An unrecognised name is now parked and
+replayed the moment `adoptDevice` registers it. The buffer is bounded (one
+entry per name, oldest evicted past the cap) because it is fed by whatever sits
+on the broker's `zigbee2mqtt/` tree rather than by anything the hub knows. This
+failed towards **falsely online**, never falsely offline.
 
 `bridge/devices` lists a device only once its **interview has finished**, so
 without `bridge/event` the whole of pairing — the minute somebody is standing

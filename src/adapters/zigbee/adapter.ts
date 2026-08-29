@@ -115,6 +115,9 @@ export interface ZigbeeAdapterOptions {
 
 const SAMPLE_BUFFER_SIZE = 3;
 
+/** How many unclaimed `<name>/availability` readings to hold — see below. */
+const MAX_PENDING_AVAILABILITY = 200;
+
 /**
  * Zigbee support via Zigbee2MQTT: consumes the retained
  * `<base>/bridge/devices` registry (definitions + exposes), maps devices into
@@ -129,6 +132,32 @@ export class ZigbeeAdapter implements ProtocolAdapter {
   private bus: AdapterBus | null = null;
   private readonly byIeee = new Map<string, TrackedDevice>();
   private readonly byFriendlyName = new Map<string, TrackedDevice>();
+  /**
+   * Availability that arrived before the device it is about.
+   *
+   * The broker replays every retained message the instant we subscribe, and
+   * `<name>/availability` is retained — so a device's real reachability and
+   * the `bridge/devices` registry that first *names* that device land in the
+   * same burst, in whatever order the broker feels like. `bridge/devices` is
+   * handled with `void syncDevices(...)`, so the registry is still at its
+   * first `await` when the availability messages behind it are dispatched:
+   * `byFriendlyName` is empty, the lookup misses, and Zigbee2MQTT's own word
+   * on which devices are reachable is dropped on the floor on every single
+   * start. What the hub had left was `bridge/state` — "the radio is up" —
+   * which marks *everything* online, so a device that was genuinely away came
+   * back up healthy and stayed that way until Z2M happened to publish a
+   * change. For a device that is simply gone there is no change to publish:
+   * the retained message was the whole statement, and it had been thrown
+   * away.
+   *
+   * So an unrecognised name is parked rather than dropped, and `adoptDevice`
+   * drains it the moment that name is registered. Bounded, because this is a
+   * map fed by whatever is on the broker's `zigbee2mqtt/` tree rather than by
+   * anything this hub knows: one entry per name, and past the cap the oldest
+   * goes, since a name still unclaimed after that many others is not about to
+   * be adopted.
+   */
+  private readonly pendingAvailability = new Map<string, boolean>();
   private readonly base: string;
   private bridgeOnline = false;
 
@@ -322,10 +351,19 @@ export class ZigbeeAdapter implements ProtocolAdapter {
 
     if (suffix.endsWith('/availability')) {
       const friendlyName = suffix.slice(0, -'/availability'.length);
-      const device = this.byFriendlyName.get(friendlyName);
-      if (!device) return;
       const state = payload.startsWith('{') ? (JSON.parse(payload) as { state?: string }).state : payload;
-      this.bus?.reachabilityChanged('zigbee', device.ieee, state === 'online');
+      const reachable = state === 'online';
+      const device = this.byFriendlyName.get(friendlyName);
+      if (!device) {
+        // Not a device we know *yet* — see `pendingAvailability`.
+        if (this.pendingAvailability.size >= MAX_PENDING_AVAILABILITY) {
+          const oldest = this.pendingAvailability.keys().next();
+          if (!oldest.done) this.pendingAvailability.delete(oldest.value);
+        }
+        this.pendingAvailability.set(friendlyName, reachable);
+        return;
+      }
+      this.bus?.reachabilityChanged('zigbee', device.ieee, reachable);
       return;
     }
 
@@ -456,6 +494,13 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     if (previous) this.byFriendlyName.delete(previous.friendlyName);
     this.byIeee.set(raw.ieee_address, tracked);
     this.byFriendlyName.set(raw.friendly_name, tracked);
+
+    // Whatever the radio said about this device before we knew its name.
+    const parked = this.pendingAvailability.get(raw.friendly_name);
+    if (parked !== undefined) {
+      this.pendingAvailability.delete(raw.friendly_name);
+      this.bus?.reachabilityChanged('zigbee', raw.ieee_address, parked);
+    }
 
     // Ask the AI mapper when a property has NO representation at all
     // (uncovered — composites, or a device Z2M barely supports), when nothing

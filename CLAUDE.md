@@ -492,7 +492,7 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   (`STATE_FLUSH_MS` again), with a pruned run taking its rounds with it.
   `docs/ai-adaptation.md` is canonical.
 - **A device is routable before the agent is asked, a new parameter is not a
-  reason to pay again, and the overlay may not take a capability away.** Four
+  reason to pay again, and the overlay may not take a capability away.** Five
   faults met on one Aqara plug, and they read as one symptom — a plug that had
   worked until the AI mapped it, then sat dead while its model was recognised
   over and over. **First, `adoptDevice` put the device into `byIeee`/`byFriendlyName`
@@ -534,6 +534,27 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   **an AI overlay may add to what the static mapper found and may never
   subtract from it**, so anything new that merges a descriptor into a static
   mapping has to say what happens to the fields that cannot be unioned.
+  **Fifth, the radio's word on a device can arrive before the device has a
+  name** — found in the same hub's log, and the one that fails in the opposite
+  direction. The broker replays every retained message the instant the adapter
+  subscribes, so `bridge/devices` — the only thing that *names* a device — and
+  the `<name>/availability` readings about those devices land in one burst, in
+  whatever order the broker picks. `bridge/devices` is dispatched as
+  `void syncDevices(...)` and `syncDevices` awaits `adoptDevice` per device, so
+  only the **first** device is registered synchronously: every device behind it
+  is still nameless when its own retained availability is handled, the
+  `byFriendlyName` lookup misses, and Zigbee2MQTT's own account of what it can
+  reach is dropped on the floor — on every start, for every device but one.
+  What was left was `bridge/state`, which says only "the radio is up" and marks
+  *everything* online, so a device that was genuinely away came back reading
+  healthy and stayed that way; for a device that is simply gone there is no
+  later change to publish, because the retained message was the whole
+  statement. An unrecognised name is parked in `pendingAvailability` and
+  replayed the moment `adoptDevice` registers it, bounded (one entry per name,
+  oldest evicted past the cap) since it is fed by whatever sits on the broker's
+  tree rather than by anything the hub knows. Note the direction before
+  reaching for this to explain a device stuck offline: it made devices falsely
+  **online**, never falsely offline.
 - **Nothing is unsupported by default — three layers, in order.** Devices are
   made usable by (1) **typed capabilities** (canonical schema), then (2)
   **generic custom fields** (`custom`) for every leftover parameter, generated
