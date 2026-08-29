@@ -18,9 +18,17 @@ capabilities.
    supports — or the static mapping yields **no capabilities**.
 2. **At runtime**, a device publishes a payload key that neither the static
    profile nor an existing AI mapping declares — a new, uninterpretable
-   parameter. The adapter debounces (~5 s), then requests a fresh mapping
+   parameter. The adapter debounces (~5 s), then **consults** the library
    grounded in the device's recent payloads. Each unknown key is asked about
    at most once per run.
+   **Consulting, not regenerating, and that is a money rule.** This forced a
+   fresh run once, which meant a model the hub had already recognised was
+   recognised again every time one more property turned up — and the
+   already-asked set is in memory, so every restart started the sequence over.
+   Measured on one plug: four paid runs in an hour, each producing a mapping
+   that covered whichever properties were in that run's samples. A model this
+   hub knows now costs nothing to meet again; *upgrading* one is
+   `POST /devices/:id/remap`, which is the owner pressing a button.
 3. The owner explicitly requests `POST /api/v1/devices/:id/remap` — including
    to **upgrade** working generic fields into richer typed capabilities.
 

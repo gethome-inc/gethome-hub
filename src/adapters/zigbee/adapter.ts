@@ -380,7 +380,18 @@ export class ZigbeeAdapter implements ProtocolAdapter {
       device.remapTimer = undefined;
       const raw = this.rawDefinitions.get(device.ieee);
       if (!raw) return;
-      void this.adoptDevice(raw, { regenerate: true }).catch((error) => {
+      // **Consulted, never forced.** This used to `regenerate`, which drops
+      // the stored mapping and pays for a fresh run — so a model that had
+      // already been recognised was re-recognised every time one more
+      // property turned up, and `aiAskedKeys` is in-memory, so every hub
+      // restart started the whole sequence again. Observed on one plug: four
+      // runs in an hour, each costing real money, each producing a mapping
+      // that covered whichever properties happened to be in that run's
+      // samples. Consulting means a model this hub already knows costs
+      // nothing to meet again — and *upgrading* one is what the owner's
+      // "Work it out again" is for, which is the only thing that should
+      // spend money without being asked to.
+      void this.adoptDevice(raw, { consultMapping: true }).catch((error) => {
         this.options.log.warn({ err: error }, `Parameter remap failed for ${device.friendlyName}`);
       });
     }, this.options.parameterRemapDelayMs ?? 5000);
@@ -427,6 +438,24 @@ export class ZigbeeAdapter implements ProtocolAdapter {
       aiAskedKeys: previous?.aiAskedKeys ?? new Set(),
     };
     if (previous?.remapTimer) clearTimeout(previous.remapTimer);
+    // Whatever this device was already understood as, kept while a new run
+    // is under way: a regeneration must not leave it less usable than it was
+    // for the minutes the agent takes.
+    if (previous?.aiMapping) tracked.aiMapping = previous.aiMapping;
+
+    // **Registered before the agent is asked, never after.** These two maps
+    // are how `handleMessage` finds a device, and a run takes tens of seconds
+    // — so while one was in flight every state report and every
+    // `<name>/availability` message for this device was looked up, missed,
+    // and dropped on the floor. On the first adoption after a restart there
+    // is no previous entry at all, which is exactly when Zigbee2MQTT
+    // republishes its retained availability: the hub threw away the one
+    // message that said the device was back, and the row kept the `offline`
+    // it had been read out of SQLite with — a device stuck offline until it
+    // next changed state, on a hub whose radio was working perfectly.
+    if (previous) this.byFriendlyName.delete(previous.friendlyName);
+    this.byIeee.set(raw.ieee_address, tracked);
+    this.byFriendlyName.set(raw.friendly_name, tracked);
 
     // Ask the AI mapper when a property has NO representation at all
     // (uncovered — composites, or a device Z2M barely supports), when nothing
@@ -451,11 +480,6 @@ export class ZigbeeAdapter implements ProtocolAdapter {
         this.options.log.warn({ err: error }, `AI mapping failed for ${raw.friendly_name}`);
       }
     }
-
-    // Replace under both keys (friendly name may have changed).
-    if (previous) this.byFriendlyName.delete(previous.friendlyName);
-    this.byIeee.set(raw.ieee_address, tracked);
-    this.byFriendlyName.set(raw.friendly_name, tracked);
 
     this.bus?.deviceUpserted({
       adapter: 'zigbee',

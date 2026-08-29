@@ -196,7 +196,14 @@ export const endpointMappingSchema = z
 
 export const mappingDescriptorSchema = z
   .object({
-    version: z.literal(1),
+    // **Defaulted, not demanded.** It is a constant, and requiring the model
+    // to echo it bought nothing while costing real turns: a run would submit
+    // a perfectly good descriptor, be told
+    // `version: Invalid input: expected 1`, and resubmit — five, six, seven
+    // times in one run, each round a paid request. Observed on every run of
+    // one device. The parse fills it in; a model that does send it is
+    // unaffected.
+    version: z.literal(1).default(1),
     endpoints: z.array(endpointMappingSchema).min(1),
   })
   .strict();

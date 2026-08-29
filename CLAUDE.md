@@ -491,6 +491,31 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   days and a row cap, written once with the run rather than per round
   (`STATE_FLUSH_MS` again), with a pruned run taking its rounds with it.
   `docs/ai-adaptation.md` is canonical.
+- **A device is routable before the agent is asked, and a new parameter is not
+  a reason to pay again.** Three faults met on one Aqara plug, and they read as
+  one symptom — a device sitting offline while its model was recognised over
+  and over. **First, `adoptDevice` put the device into `byIeee`/`byFriendlyName`
+  *after* awaiting the mapper.** Those two maps are how `handleMessage` finds a
+  device, so for the tens of seconds a run takes every state report and every
+  `<name>/availability` message was looked up, missed and dropped — and on the
+  first adoption after a restart there is no earlier entry at all, which is
+  exactly when Z2M republishes its retained availability. The hub threw away
+  the one message saying the device was back and kept the `offline` it had read
+  out of SQLite. Registering first costs nothing and is what makes a run
+  invisible to the rest of the adapter; the previous mapping is carried over
+  too, so a regeneration never leaves a device less usable than it was.
+  **Second, the runtime unknown-key remap forced a regeneration**, which drops
+  the stored mapping and pays for a fresh run — so a model already recognised
+  was recognised again every time one more property appeared, and `aiAskedKeys`
+  is in-memory, so every restart began the sequence again. Four paid runs on
+  one plug in an hour, each mapping covering whichever properties were in that
+  run's samples. It consults the library now: a model this hub knows costs
+  nothing to meet again, and *upgrading* one is what the owner's "Work it out
+  again" is for — the only thing that should spend money unasked.
+  **Third, `version` was `z.literal(1)` rather than defaulted**, so a run would
+  submit a good descriptor, be told `version: Invalid input: expected 1`, and
+  resubmit — five, six, seven paid rounds of one run, on every run. It is a
+  constant; the parse fills it in.
 - **Nothing is unsupported by default — three layers, in order.** Devices are
   made usable by (1) **typed capabilities** (canonical schema), then (2)
   **generic custom fields** (`custom`) for every leftover parameter, generated
