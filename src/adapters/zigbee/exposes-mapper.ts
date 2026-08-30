@@ -387,30 +387,6 @@ class EndpointDraft {
  * endpoint draft (labeled exposes to their own endpoints, unlabeled to
  * endpoint 1), and compile the per-property extraction rules.
  */
-/**
- * Every payload property this device's published schema declares, nested
- * features included.
- *
- * Not the same question as `Z2mProfile.knownProperties`, which is the union of
- * what the profile *reads* and `IGNORED_PROPERTIES` in full — so it answers
- * yes for a diagnostic no device on this network has ever published. This one
- * is about one device: it is what the mapping prompt needs in order to say
- * which properties the hub is deliberately hiding *for this device*, rather
- * than reciting a list that mostly does not apply to it.
- */
-export function publishedProperties(device: Z2mDevice): Set<string> {
-  const found = new Set<string>();
-  const walk = (exposes: Z2mExpose[]) => {
-    for (const expose of exposes) {
-      const property = expose.property ?? expose.name;
-      if (property) found.add(property);
-      if (expose.features) walk(expose.features);
-    }
-  };
-  walk(device.definition?.exposes ?? []);
-  return found;
-}
-
 export function mapExposes(device: Z2mDevice): Z2mProfile {
   const exposes = device.definition?.exposes ?? [];
   const unmapped: string[] = [];

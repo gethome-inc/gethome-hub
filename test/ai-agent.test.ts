@@ -459,47 +459,14 @@ describe('buildMappingUserPrompt', () => {
     expect(profile.uncovered).toEqual([]);
 
     const prompt = buildMappingUserPrompt(plug, profile, []);
-    expect(prompt).toMatch(/nothing in `uncovered`/);
+    expect(prompt).toMatch(/Nothing is `uncovered`/);
     expect(prompt).toMatch(/submit the hub's own mapping back unchanged/);
     // Both upgrades stay on the table — this is the branch with the least
     // work in it, not the branch with none.
     expect(prompt).toMatch(/promoting a generic field to a typed capability/);
-    expect(prompt).toMatch(/surfacing one of the hidden-by-default properties/);
+    expect(prompt).toMatch(/none of the lists above mention/);
     // And that padding it is the wrong move, which is what both runs did.
     expect(prompt).toMatch(/must not become is padding/);
-  });
-
-  /**
-   * The hidden diagnostics are absent from every list in the message, so a
-   * model reading the exposes tree sees parameters with no representation and
-   * declares generic fields for them. Naming them turns an absence into a
-   * decision.
-   */
-  it('names the properties the hub hides for this device, and only those', () => {
-    const prompt = buildMappingUserPrompt(plug, mapExposes(plug), []);
-    const line = prompt.split('\n').find((entry) => entry.startsWith('- The hub hides these by default'))!;
-    expect(line).toBeDefined();
-    for (const hidden of ['voltage', 'current', 'device_temperature']) {
-      expect(line).toContain(hidden);
-    }
-    // Not a catalogue: a property this device does not publish has no business
-    // being recited at it.
-    expect(line).not.toContain('power_outage_count');
-    expect(line).not.toContain('color_mode');
-  });
-
-  /**
-   * **A default, not a verdict.** The hidden list is the same for every device,
-   * so it cannot know that mains voltage is noise on a battery sensor and a
-   * real reading on a metered plug. Surfacing one where it genuinely means
-   * something is what layer 3 is *for*; an earlier wording of this told the
-   * agent never to touch them, which would have refused the one useful thing
-   * either run did for that plug.
-   */
-  it('offers the hidden ones as a judgement, not as a prohibition', () => {
-    const prompt = buildMappingUserPrompt(plug, mapExposes(plug), []);
-    expect(prompt).toMatch(/only if it is a genuine, useful reading/);
-    expect(prompt).not.toMatch(/Do not give them customFields/);
   });
 
   /**
@@ -530,13 +497,25 @@ describe('buildMappingUserPrompt', () => {
     expect(profile.uncovered).toEqual([]);
     expect(profile.endpoints.every((endpoint) => endpoint.capabilities.length === 0)).toBe(true);
 
-    expect(buildMappingUserPrompt(opaque, profile, [])).not.toMatch(/nothing in `uncovered`/);
+    expect(buildMappingUserPrompt(opaque, profile, [])).not.toMatch(/Nothing is `uncovered`/);
   });
 
-  it('leaves the line out for a device that publishes nothing hidden', () => {
-    expect(buildMappingUserPrompt(probe, mapExposes(probe), [])).not.toContain(
-      'The hub hides these by default',
-    );
+  /**
+   * **One sentence, and no list.** An earlier version named the hidden
+   * properties per device and told the model what to do about each. That was
+   * the hub pre-chewing a judgement the model is better placed to make — and
+   * its first wording forbade the one useful thing a run had done. What is
+   * left is the fact the model cannot derive: those properties are absent
+   * from all three lists *on purpose*, which is what stops `uncovered: []`
+   * reading as "nothing here needs looking at".
+   */
+  it('says the absence is deliberate without reciting which properties', () => {
+    const prompt = buildMappingUserPrompt(plug, mapExposes(plug), []);
+    expect(prompt).toMatch(/telemetry the static mapper hides by default/);
+    expect(prompt).toMatch(/so judge it/);
+    // No per-device catalogue, and no verdict handed down about one.
+    expect(prompt).not.toMatch(/hides these by default/);
+    expect(prompt).not.toMatch(/- .*: voltage, current/);
   });
 });
 

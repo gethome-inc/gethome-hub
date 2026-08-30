@@ -2,12 +2,7 @@ import type { AiProvider } from '../core/settings.js';
 // The prompt names the hosts the tool will actually accept, so the two cannot
 // drift into telling a run to fetch something it will be refused.
 import { FETCHABLE_HOSTS } from './page-fetch.js';
-import {
-  IGNORED_PROPERTIES,
-  publishedProperties,
-  type Z2mDevice,
-  type Z2mProfile,
-} from '../adapters/zigbee/exposes-mapper.js';
+import type { Z2mDevice, Z2mProfile } from '../adapters/zigbee/exposes-mapper.js';
 
 /**
  * Prompt construction for AI device adaptation. The mapping agent sees the
@@ -207,14 +202,6 @@ field every app draws the device's tile from, and "custom" renders as no control
 working switch into a dead tile. Keep the hub's own primary unless you are *upgrading* it (a "custom" primary \
 becoming "onOff" is exactly right); the hub refuses the demotion either way.
 
-And one to judge rather than obey. Your task message lists the properties **the hub hides by default**. That list \
-is the same for every device, so it is a default and not a verdict: most of its entries are protocol plumbing \
-(link quality, OTA flags, transition times) or are already carried by a typed capability, and re-declaring one of \
-those adds nothing. But some are genuine readings that simply do not matter on most hardware — mains voltage and \
-current are noise on a battery sensor and real, useful readings on a metered plug. Surfacing one of those as a \
-read-only customField, for a device where it genuinely means something, is a legitimate upgrade and exactly the \
-kind of judgement you are here to make. Do not re-declare one merely because it appears in the list, and do not \
-skip one merely because it appears there either.
 
 How you work:
 - Everything the hub knows about this device is in your task message: vendor/model/description, the complete \
@@ -366,30 +353,20 @@ export function buildMappingUserPrompt(
       'when a capability genuinely fits it; leaving it as a field is not a failure.',
     '- `uncovered` properties have no representation at all. These are the ones that need you: give each a typed ' +
       'capability, or a customField when none fits.',
+    // **Without this the message is untrue**, which is a different thing from
+    // the model needing to be told what to map. The static mapper drops a
+    // fixed set of pure telemetry, and those properties are then absent from
+    // all three lists above — so a model reading the exposes tree meets
+    // parameters that appear nowhere, while `uncovered` says nothing needs
+    // it. Saying that the absence is deliberate is a fact only the hub has;
+    // deciding what to do about it is the model's, and deliberately not
+    // pre-chewed here — no list, no per-property verdict.
+    '- Anything in the exposes tree that appears in none of those lists is telemetry the static mapper hides by ' +
+      'default. That is a blanket rule applied without knowing the device, so judge it: mains voltage is noise on ' +
+      'a battery sensor and a real reading on a metered plug. Adding a read-only field for one that genuinely ' +
+      'means something here is a legitimate upgrade; re-declaring link quality or an OTA flag is not.',
   );
 
-  // **What the hub hides on purpose, named for this device rather than in
-  // general.** The static mapper drops a fixed set of pure telemetry
-  // (`IGNORED_PROPERTIES`), and because those properties are then simply
-  // absent from everything above, a model reading the exposes tree sees
-  // parameters with no representation and helpfully declares generic fields
-  // for them — observed on an Aqara plug, where a run added voltage, current
-  // and device temperature as controls the hub had deliberately left off the
-  // tile. The system prompt's "ignore diagnostics" is the general
-  // instruction; this is the list, for this device, so the absence reads as a
-  // decision rather than as a gap. Intersected with what the device actually
-  // publishes, because reciting a catalogue that mostly does not apply to it
-  // invites its own confusion.
-  const hidden = [...publishedProperties(device)].filter((property) =>
-    IGNORED_PROPERTIES.has(property),
-  );
-  if (hidden.length > 0) {
-    lines.push(
-      `- The hub hides these by default, so their absence above is a decision rather than a gap: ` +
-        `${hidden.join(', ')}. Most are plumbing or already carried by a typed capability. Give one a read-only ` +
-        'customField only if it is a genuine, useful reading *for this device*.',
-    );
-  }
 
   if (samplePayloads.length > 0) {
     lines.push('', '# Recent state payloads (newest last)');
@@ -421,11 +398,10 @@ export function buildMappingUserPrompt(
     // answer looks like is what makes "nothing to add" a thing that can be
     // said.
     lines.push(
-      `Every property of ${vendor} ${model} already has a representation: there is nothing in \`uncovered\`. So ` +
-        'the useful answer here is narrower than usual, and it is one of two **upgrades**: promoting a generic ' +
-        'field to a typed capability, where a capability from the list truly fits it and the unit is settled; or ' +
-        'surfacing one of the hidden-by-default properties above as a read-only customField, where it is a ' +
-        'genuine reading for this particular device.',
+      `Nothing is \`uncovered\` for ${vendor} ${model}: every property the hub places, it has placed. So the ` +
+        'useful answer here is narrower than usual, and it is an **upgrade** — promoting a generic field to a ' +
+        'typed capability where one truly fits and the unit is settled, or surfacing something the exposes tree ' +
+        'has and none of the lists above mention, where it genuinely means something on this device.',
       '',
       'If neither applies, say so and submit the hub\'s own mapping back unchanged: one endpoint per endpoint ' +
         'above, the same deviceKind, the same capabilities, the same primary, with empty stateRules, commandRules ' +
