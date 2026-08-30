@@ -9,6 +9,7 @@ import { ensureHubSecret } from './core/crypto.js';
 import { HubEventBus } from './core/bus.js';
 import { ActivityService } from './core/activity.js';
 import { HistoryService } from './core/history.js';
+import { PortraitService } from './portraits/store.js';
 import { recordFinishedUpdate } from './core/update.js';
 import { HomeService } from './core/home.js';
 import { FavoritesService } from './core/favorites.js';
@@ -19,6 +20,7 @@ import { DeviceRegistry } from './core/registry.js';
 import { AiRunLog } from './core/ai-runs.js';
 import { McpTokenService } from './mcp/tokens.js';
 import { MqttObserver } from './core/mqtt-observer.js';
+import { brokerCredentials } from './mqtt-auth.js';
 import { PermitJoinService } from './core/permit-join.js';
 import { activityForLifecycleEvent, normalizeBridgeEvent } from './core/zigbee-events.js';
 import { buildServer } from './api/server.js';
@@ -99,6 +101,10 @@ async function main(): Promise<void> {
   // per report and one wakeup every five minutes.
   const history = new HistoryService(db, events, log.child({ module: 'history' }));
   await history.start();
+  // The pictures a home has had drawn of its devices. Files under the data
+  // directory with a row each; constructed unconditionally, because reading
+  // them needs no credential and a hub with none simply has no rows.
+  const portraits = new PortraitService(db, events, config.DATA_DIR, log.child({ module: 'portraits' }));
   // Favorites are one member's pins rather than a property of the home, so they
   // live beside the registry instead of on the device row. Loaded once: this is
   // read for every device on every `GET /devices` and on every `deviceUpserted`
@@ -114,6 +120,11 @@ async function main(): Promise<void> {
   // been switched on, so a home that never uses this pays for nothing but this
   // one object.
   const mcpTokens = new McpTokenService(db);
+
+  // How every client of this hub's own broker signs in — read once, so the
+  // three of them cannot drift. `loadConfig` has already lifted any credentials
+  // out of `MQTT_URL`, so this is the only shape the rest of the process sees.
+  const brokerAuth = { username: config.MQTT_USERNAME, password: config.MQTT_PASSWORD };
 
   // Adapters are *constructed* here and *started* after the API is listening.
   // The modules are imported dynamically for one reason that matters on a small
@@ -135,6 +146,7 @@ async function main(): Promise<void> {
     const { ZigbeeAdapter } = await import('./adapters/zigbee/adapter.js');
     zigbee = new ZigbeeAdapter({
       mqttUrl: config.MQTT_URL,
+      ...brokerCredentials(brokerAuth),
       baseTopic: config.Z2M_BASE_TOPIC,
       log: log.child({ module: 'zigbee' }),
       aiAssist: lazyAiAssist({ db, settings, log: log.child({ module: 'ai' }), runs: aiRuns }),
@@ -152,7 +164,11 @@ async function main(): Promise<void> {
   }
   if (config.ADAPTER_MQTT) {
     const { MqttAdapter } = await import('./adapters/mqtt/adapter.js');
-    mqttAdapter = new MqttAdapter({ mqttUrl: config.MQTT_URL, log: log.child({ module: 'mqtt' }) });
+    mqttAdapter = new MqttAdapter({
+      mqttUrl: config.MQTT_URL,
+      ...brokerCredentials(brokerAuth),
+      log: log.child({ module: 'mqtt' }),
+    });
     registry.registerAdapter(mqttAdapter);
   }
   if (config.ADAPTER_MATTER) {
@@ -170,6 +186,7 @@ async function main(): Promise<void> {
     config.ADAPTER_ZIGBEE || config.ADAPTER_MQTT
       ? new MqttObserver({
           mqttUrl: config.MQTT_URL,
+          ...brokerCredentials(brokerAuth),
           z2mBaseTopic: config.Z2M_BASE_TOPIC,
           log: log.child({ module: 'mqtt-observer' }),
           onFrame: (frame) => events.emit('mqttFrame', frame),
@@ -187,6 +204,7 @@ async function main(): Promise<void> {
     mcpTokens,
     activity,
     history,
+    portraits,
     settings,
     home: homeService,
     hubId: secret.hubId,
@@ -194,6 +212,15 @@ async function main(): Promise<void> {
     dataDir: config.DATA_DIR,
     radioBudget: config.GETHOME_RADIO,
     z2mDataDir: config.Z2M_DATA_DIR,
+    mqtt: {
+      url: config.MQTT_URL,
+      username: config.MQTT_USERNAME,
+      password: config.MQTT_PASSWORD,
+      integrationUsername: config.MQTT_INTEGRATION_USERNAME,
+      integrationPassword: config.MQTT_INTEGRATION_PASSWORD,
+      publicHost: config.MQTT_PUBLIC_HOST,
+      baseTopic: config.Z2M_BASE_TOPIC,
+    },
     permitJoin,
     aiRuns,
     mappings: new MappingLibrary({

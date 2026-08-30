@@ -10,12 +10,15 @@ import { FavoritesService } from '../../src/core/favorites.js';
 import { AccessService } from '../../src/core/access.js';
 import { McpTokenService } from '../../src/mcp/tokens.js';
 import { HistoryService } from '../../src/core/history.js';
+import { PortraitService } from '../../src/portraits/store.js';
 import type { HubEventBus } from '../../src/core/bus.js';
+import type { MqttBrokerConfig } from '../../src/core/mqtt-access.js';
 import {
   activity,
   aiMappings,
   aiRuns,
   deviceFavorites,
+  devicePortraits,
   devices,
   endpoints,
   history,
@@ -69,6 +72,7 @@ export async function resetDb(db: Db): Promise<void> {
   await db.delete(history);
   await db.delete(historySeries);
   await db.delete(deviceFavorites);
+  await db.delete(devicePortraits);
   await db.delete(devices);
   await db.delete(members);
   // Built-in roles are seeded by the migration and are part of the schema a
@@ -138,4 +142,42 @@ export async function startedHistory(db: Db, events: HubEventBus): Promise<Histo
  */
 export function mcpTokenService(db: Db): McpTokenService {
   return new McpTokenService(db);
+}
+
+/**
+ * A portrait service writing into a temp directory. Nothing here draws — that
+ * needs an OpenAI key — so a suite gets the routes, the rows and the bounds
+ * without a network.
+ */
+export function testPortraits(db: Db, events: HubEventBus, dataDir?: string): PortraitService {
+  return new PortraitService(
+    db,
+    events,
+    dataDir ?? mkdtempSync(path.join(tmpdir(), 'gethome-portraits-')),
+    pino({ level: 'silent' }),
+  );
+}
+
+/**
+ * The broker facts `buildServer` needs, as a hub with a password-protected
+ * broker really carries them.
+ *
+ * A named fixture rather than a literal at four call sites: `ApiDeps.mqtt` is
+ * required precisely so a suite cannot forget it, and four hand-copied
+ * literals is the shape that goes stale one at a time. Pass overrides to test
+ * a hub whose installer never set a password up.
+ */
+export function testBroker(
+  overrides: Partial<MqttBrokerConfig> = {},
+): MqttBrokerConfig {
+  return {
+    url: 'mqtt://127.0.0.1:1883',
+    username: 'gethome-hub',
+    password: 'hub-secret',
+    integrationUsername: 'gethome',
+    integrationPassword: 'integration-secret',
+    publicHost: '',
+    baseTopic: 'zigbee2mqtt',
+    ...overrides,
+  };
 }

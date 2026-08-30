@@ -1,7 +1,7 @@
 import mqtt from 'mqtt';
 import type { AdapterBus, DeviceRecognition, ProtocolAdapter } from '../adapter.js';
 import type { CapabilityKind, DeviceKind, EndpointState, HubCommand } from '../../schema/index.js';
-import { UnsupportedCommandError } from '../../schema/index.js';
+import { mergeStatePatch, UnsupportedCommandError } from '../../schema/index.js';
 import {
   exposesHash,
   mapExposes,
@@ -12,6 +12,7 @@ import {
 import { buildSetPayload } from './commands.js';
 import { parseWriteFailure } from './write-failures.js';
 import type { Logger } from '../../logging.js';
+import { brokerCredentials } from '../../mqtt-auth.js';
 
 /**
  * Hook the AI mapper implements (src/ai/mapper.ts). When the static exposes
@@ -92,10 +93,30 @@ interface AdoptOptions {
   regenerate?: boolean;
   /** Consult the library even for a device the static mapper placed fully. */
   consultMapping?: boolean;
+  /**
+   * Drop the AI overlay this device is carrying, and ask for nothing.
+   *
+   * The delete side of the library. Two things have to be suppressed at once,
+   * and missing either makes a forget do nothing: `adoptDevice` deliberately
+   * carries a previous mapping over (so a regeneration never leaves a device
+   * less usable while a run is in flight), and `needsHelp` is true for any
+   * device with an uncovered property — which is most devices an AI mapping
+   * was ever made for. So a plain re-adopt after a delete would keep the
+   * deleted overlay *and* immediately pay for a replacement.
+   */
+  forgetMapping?: boolean;
 }
 
 export interface ZigbeeAdapterOptions {
   mqttUrl: string;
+  /**
+   * Broker credentials, when the broker asks for them. Empty on a hub
+   * installed before `install.sh` started minting them — the drop-in it
+   * writes then still says `allow_anonymous true`, so an anonymous connect is
+   * the correct behaviour rather than a fallback.
+   */
+  username?: string;
+  password?: string;
   baseTopic: string;
   log: Logger;
   aiAssist?: ZigbeeAiAssist;
@@ -115,6 +136,9 @@ export interface ZigbeeAdapterOptions {
 
 const SAMPLE_BUFFER_SIZE = 3;
 
+/** How many unclaimed `<name>/availability` readings to hold — see below. */
+const MAX_PENDING_AVAILABILITY = 200;
+
 /**
  * Zigbee support via Zigbee2MQTT: consumes the retained
  * `<base>/bridge/devices` registry (definitions + exposes), maps devices into
@@ -129,6 +153,32 @@ export class ZigbeeAdapter implements ProtocolAdapter {
   private bus: AdapterBus | null = null;
   private readonly byIeee = new Map<string, TrackedDevice>();
   private readonly byFriendlyName = new Map<string, TrackedDevice>();
+  /**
+   * Availability that arrived before the device it is about.
+   *
+   * The broker replays every retained message the instant we subscribe, and
+   * `<name>/availability` is retained — so a device's real reachability and
+   * the `bridge/devices` registry that first *names* that device land in the
+   * same burst, in whatever order the broker feels like. `bridge/devices` is
+   * handled with `void syncDevices(...)`, so the registry is still at its
+   * first `await` when the availability messages behind it are dispatched:
+   * `byFriendlyName` is empty, the lookup misses, and Zigbee2MQTT's own word
+   * on which devices are reachable is dropped on the floor on every single
+   * start. What the hub had left was `bridge/state` — "the radio is up" —
+   * which marks *everything* online, so a device that was genuinely away came
+   * back up healthy and stayed that way until Z2M happened to publish a
+   * change. For a device that is simply gone there is no change to publish:
+   * the retained message was the whole statement, and it had been thrown
+   * away.
+   *
+   * So an unrecognised name is parked rather than dropped, and `adoptDevice`
+   * drains it the moment that name is registered. Bounded, because this is a
+   * map fed by whatever is on the broker's `zigbee2mqtt/` tree rather than by
+   * anything this hub knows: one entry per name, and past the cap the oldest
+   * goes, since a name still unclaimed after that many others is not about to
+   * be adopted.
+   */
+  private readonly pendingAvailability = new Map<string, boolean>();
   private readonly base: string;
   private bridgeOnline = false;
 
@@ -151,6 +201,7 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     const client = await mqtt.connectAsync(this.options.mqttUrl, {
       clientId: `gethome-hub-zigbee-${Math.random().toString(16).slice(2, 8)}`,
       reconnectPeriod: 2000,
+      ...brokerCredentials(this.options),
     });
     this.client = client;
     client.on('message', (topic, payload) => {
@@ -206,11 +257,32 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     );
   }
 
-  /** Re-run mapping (invalidating any cached AI descriptor) for one device. */
-  async remap(externalId: string): Promise<boolean> {
+  /**
+   * Re-run mapping (invalidating any cached AI descriptor) for one device.
+   *
+   * **It starts the run and answers, rather than awaiting it**, because an
+   * agent run is minutes and an HTTP request is not. This used to await
+   * `adoptDevice`, so `POST /devices/:id/remap` held its connection open for
+   * the whole run — against a watchdog of ten minutes and a Studio client
+   * whose timeout is ten seconds. The button therefore reported a failure on
+   * every run that actually did any work, while the hub carried on happily,
+   * and the only run it appeared to succeed on was one that failed instantly.
+   * The runtime path beside it (`scheduleParameterRemap`) has always been
+   * fire-and-forget; this is the same shape, and the same shape as
+   * `PUT /settings/radio` — the request is recorded, and what happened is read
+   * back from the `ai` stream and the run log.
+   *
+   * `false` means the radio has no published schema for this device *now* —
+   * a device row can outlive its `bridge/devices` entry — which is a different
+   * answer from a run that failed, and the only one that can be given
+   * synchronously.
+   */
+  remap(externalId: string): boolean {
     const raw = this.rawDefinitions.get(externalId);
     if (!raw) return false;
-    await this.adoptDevice(raw, { regenerate: true });
+    void this.adoptDevice(raw, { regenerate: true }).catch((error) => {
+      this.options.log.warn({ err: error }, `Remap failed for ${raw.friendly_name}`);
+    });
     return true;
   }
 
@@ -236,6 +308,34 @@ export class ZigbeeAdapter implements ProtocolAdapter {
       applied.push(device.ieee_address);
     }
     return applied;
+  }
+
+  /**
+   * Re-adopt every device of one model after its stored mapping was *deleted*.
+   *
+   * The other half of `applyStoredMapping`, and it cannot be the same call.
+   * `consultMapping: true` is right when there is something in the library to
+   * consult; run it against a hash that was just deleted and the cache lookup
+   * misses, so the mapper starts a **fresh paid run** — awaited, minutes long,
+   * inside an HTTP request whose client gives up after ten seconds. That is
+   * what "Studio couldn't remove that schema. The request timed out." was, and
+   * the timeout was the least of it: pressing *Forget* bought a replacement
+   * for the mapping you were forgetting, which is the opposite of what the
+   * button says and costs real money to find out.
+   *
+   * So this asks for nothing. The device falls back to its static mapping,
+   * which is the whole point of the three layers, and the next genuine
+   * trigger — a restart, a parameter nothing can place, or the owner pressing
+   * "Work it out again" — is what asks the agent. Deleting a bad import
+   * without a credential works for the same reason.
+   */
+  async forgetStoredMapping(hash: string): Promise<string[]> {
+    const forgotten: string[] = [];
+    for (const device of this.devicesOfModel(hash)) {
+      await this.adoptDevice(device, { forgetMapping: true });
+      forgotten.push(device.ieee_address);
+    }
+    return forgotten;
   }
 
   // ── Internals ───────────────────────────────────────────────────────────
@@ -301,10 +401,19 @@ export class ZigbeeAdapter implements ProtocolAdapter {
 
     if (suffix.endsWith('/availability')) {
       const friendlyName = suffix.slice(0, -'/availability'.length);
-      const device = this.byFriendlyName.get(friendlyName);
-      if (!device) return;
       const state = payload.startsWith('{') ? (JSON.parse(payload) as { state?: string }).state : payload;
-      this.bus?.reachabilityChanged('zigbee', device.ieee, state === 'online');
+      const reachable = state === 'online';
+      const device = this.byFriendlyName.get(friendlyName);
+      if (!device) {
+        // Not a device we know *yet* — see `pendingAvailability`.
+        if (this.pendingAvailability.size >= MAX_PENDING_AVAILABILITY) {
+          const oldest = this.pendingAvailability.keys().next();
+          if (!oldest.done) this.pendingAvailability.delete(oldest.value);
+        }
+        this.pendingAvailability.set(friendlyName, reachable);
+        return;
+      }
+      this.bus?.reachabilityChanged('zigbee', device.ieee, reachable);
       return;
     }
 
@@ -323,7 +432,13 @@ export class ZigbeeAdapter implements ProtocolAdapter {
       for (const [endpointId, aiPatch] of device.aiMapping.extractState(parsed)) {
         if (Object.keys(aiPatch).length === 0) continue;
         const existing = patches.get(endpointId);
-        patches.set(endpointId, existing ? mergePatches(existing, aiPatch) : aiPatch);
+        // `mergeStatePatch`, not a local merge: the overlay must *add* to what
+        // the static rules read and never replace it, and the only shape in
+        // `EndpointState` that is two levels deep — `custom.values` — is
+        // precisely the one an overlay touches. A one-level merge silenced
+        // every static generic field the moment a mapping declared one of its
+        // own. See `schema/state.ts`.
+        patches.set(endpointId, existing ? mergeStatePatch(existing, aiPatch) : aiPatch);
       }
     }
     for (const [endpointId, patch] of patches) {
@@ -359,7 +474,18 @@ export class ZigbeeAdapter implements ProtocolAdapter {
       device.remapTimer = undefined;
       const raw = this.rawDefinitions.get(device.ieee);
       if (!raw) return;
-      void this.adoptDevice(raw, { regenerate: true }).catch((error) => {
+      // **Consulted, never forced.** This used to `regenerate`, which drops
+      // the stored mapping and pays for a fresh run — so a model that had
+      // already been recognised was re-recognised every time one more
+      // property turned up, and `aiAskedKeys` is in-memory, so every hub
+      // restart started the whole sequence again. Observed on one plug: four
+      // runs in an hour, each costing real money, each producing a mapping
+      // that covered whichever properties happened to be in that run's
+      // samples. Consulting means a model this hub already knows costs
+      // nothing to meet again — and *upgrading* one is what the owner's
+      // "Work it out again" is for, which is the only thing that should
+      // spend money without being asked to.
+      void this.adoptDevice(raw, { consultMapping: true }).catch((error) => {
         this.options.log.warn({ err: error }, `Parameter remap failed for ${device.friendlyName}`);
       });
     }, this.options.parameterRemapDelayMs ?? 5000);
@@ -393,7 +519,7 @@ export class ZigbeeAdapter implements ProtocolAdapter {
   }
 
   private async adoptDevice(device: Z2mDevice, options: AdoptOptions = {}): Promise<void> {
-    const { announce = false, regenerate = false, consultMapping = false } = options;
+    const { announce = false, regenerate = false, consultMapping = false, forgetMapping = false } = options;
     const raw = this.rawDefinitions.get(device.ieee_address) ?? device;
     const profile = mapExposes(raw);
     const previous = this.byIeee.get(raw.ieee_address);
@@ -406,6 +532,31 @@ export class ZigbeeAdapter implements ProtocolAdapter {
       aiAskedKeys: previous?.aiAskedKeys ?? new Set(),
     };
     if (previous?.remapTimer) clearTimeout(previous.remapTimer);
+    // Whatever this device was already understood as, kept while a new run
+    // is under way: a regeneration must not leave it less usable than it was
+    // for the minutes the agent takes.
+    if (previous?.aiMapping && !forgetMapping) tracked.aiMapping = previous.aiMapping;
+
+    // **Registered before the agent is asked, never after.** These two maps
+    // are how `handleMessage` finds a device, and a run takes tens of seconds
+    // — so while one was in flight every state report and every
+    // `<name>/availability` message for this device was looked up, missed,
+    // and dropped on the floor. On the first adoption after a restart there
+    // is no previous entry at all, which is exactly when Zigbee2MQTT
+    // republishes its retained availability: the hub threw away the one
+    // message that said the device was back, and the row kept the `offline`
+    // it had been read out of SQLite with — a device stuck offline until it
+    // next changed state, on a hub whose radio was working perfectly.
+    if (previous) this.byFriendlyName.delete(previous.friendlyName);
+    this.byIeee.set(raw.ieee_address, tracked);
+    this.byFriendlyName.set(raw.friendly_name, tracked);
+
+    // Whatever the radio said about this device before we knew its name.
+    const parked = this.pendingAvailability.get(raw.friendly_name);
+    if (parked !== undefined) {
+      this.pendingAvailability.delete(raw.friendly_name);
+      this.bus?.reachabilityChanged('zigbee', raw.ieee_address, parked);
+    }
 
     // Ask the AI mapper when a property has NO representation at all
     // (uncovered — composites, or a device Z2M barely supports), when nothing
@@ -414,11 +565,12 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     // remap can still upgrade them to typed capabilities.
     const staticallyEmpty = profile.endpoints.every((endpoint) => endpoint.capabilities.length === 0);
     const needsHelp =
-      regenerate ||
-      consultMapping ||
-      raw.supported === false ||
-      staticallyEmpty ||
-      profile.uncovered.length > 0;
+      !forgetMapping &&
+      (regenerate ||
+        consultMapping ||
+        raw.supported === false ||
+        staticallyEmpty ||
+        profile.uncovered.length > 0);
     if (needsHelp && this.options.aiAssist) {
       try {
         const mapping = await this.options.aiAssist.requestMapping(raw, profile, {
@@ -430,11 +582,6 @@ export class ZigbeeAdapter implements ProtocolAdapter {
         this.options.log.warn({ err: error }, `AI mapping failed for ${raw.friendly_name}`);
       }
     }
-
-    // Replace under both keys (friendly name may have changed).
-    if (previous) this.byFriendlyName.delete(previous.friendlyName);
-    this.byIeee.set(raw.ieee_address, tracked);
-    this.byFriendlyName.set(raw.friendly_name, tracked);
 
     this.bus?.deviceUpserted({
       adapter: 'zigbee',
@@ -565,40 +712,28 @@ function mergedEndpoints(tracked: TrackedDevice): Array<{
       continue;
     }
     existing.deviceKind = endpoint.deviceKind;
-    existing.primary = endpoint.primary;
     for (const capability of endpoint.capabilities) {
       if (!existing.capabilities.includes(capability)) existing.capabilities.push(capability);
+    }
+    // **The AI may add capabilities; it may not demote the primary one.**
+    // `primary` is the single field every app draws the tile from — a switch,
+    // a dimmer, a reading — and `custom` is layer 2's generic catch-all, which
+    // renders as no control at all. So a mapping that named `custom` as
+    // primary turned a working plug into a dead grey tile in the phone app,
+    // while the hub went on reporting it perfectly online: the switch was
+    // still in `capabilities`, and nothing but `primary` had moved. That is
+    // what "it worked until the AI mapped it" looked like from the sofa.
+    // Two guards, and the second is not paranoia either: a primary the device
+    // does not have is a tile bound to a capability with no state behind it.
+    const hasTyped = existing.capabilities.some((capability) => capability !== 'custom');
+    const demotes = endpoint.primary === 'custom' && hasTyped;
+    if (!demotes && existing.capabilities.includes(endpoint.primary)) {
+      existing.primary = endpoint.primary;
     }
   }
   return [...merged.values()]
     .sort((a, b) => a.endpointId - b.endpointId)
     .filter((endpoint) => endpoint.capabilities.length > 0);
-}
-
-/**
- * Merge two patches for the same endpoint, sub-object by sub-object, so an
- * AI patch writing `sensors.humidityCenti` doesn't clobber the static rule's
- * `sensors.temperatureCenti` from the same payload. The overlay wins on
- * conflicting scalars.
- */
-function mergePatches(base: Partial<EndpointState>, overlay: Partial<EndpointState>): Partial<EndpointState> {
-  const out = { ...base } as Record<string, unknown>;
-  for (const [key, value] of Object.entries(overlay)) {
-    const existing = out[key];
-    if (
-      value !== null &&
-      typeof value === 'object' &&
-      !Array.isArray(value) &&
-      existing !== null &&
-      typeof existing === 'object' &&
-      !Array.isArray(existing)
-    ) {
-      out[key] = { ...existing, ...value };
-    } else {
-      out[key] = value;
-    }
-  }
-  return out as Partial<EndpointState>;
 }
 
 /**

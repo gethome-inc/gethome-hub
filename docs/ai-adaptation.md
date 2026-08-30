@@ -18,9 +18,17 @@ capabilities.
    supports — or the static mapping yields **no capabilities**.
 2. **At runtime**, a device publishes a payload key that neither the static
    profile nor an existing AI mapping declares — a new, uninterpretable
-   parameter. The adapter debounces (~5 s), then requests a fresh mapping
+   parameter. The adapter debounces (~5 s), then **consults** the library
    grounded in the device's recent payloads. Each unknown key is asked about
    at most once per run.
+   **Consulting, not regenerating, and that is a money rule.** This forced a
+   fresh run once, which meant a model the hub had already recognised was
+   recognised again every time one more property turned up — and the
+   already-asked set is in memory, so every restart started the sequence over.
+   Measured on one plug: four paid runs in an hour, each producing a mapping
+   that covered whichever properties were in that run's samples. A model this
+   hub knows now costs nothing to meet again; *upgrading* one is
+   `POST /devices/:id/remap`, which is the owner pressing a button.
 3. The owner explicitly requests `POST /api/v1/devices/:id/remap` — including
    to **upgrade** working generic fields into richer typed capabilities.
 
@@ -64,11 +72,19 @@ because an app has to be able to say which of the two a person needs to change.
 ## The mapping agent
 
 Adaptation runs as a real agent, not a single model call: the hub drives a
-tool-use loop against the [Messages
+tool-use loop, giving the model tools to research the device and iterate until
+its mapping passes validation. Everything runs inside the hub process — no
+subprocess, no second runtime.
+
+There are two loops, one per provider, and they are the same run: the
+guardrails, the step vocabulary, the `submit_mapping` tool and the
+validate-and-resubmit rule live in `src/ai/agent-core.ts`, which imports no
+SDK. `src/ai/agent.ts` is the Anthropic half, on the [Messages
 API](https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview)
-(`@anthropic-ai/sdk`), giving the model tools to research the device and
-iterate until its mapping passes validation. Everything runs inside the hub
-process — no subprocess, no second runtime.
+(`@anthropic-ai/sdk`); `src/ai/openai-agent.ts` is the OpenAI half, on the
+Responses API over plain `fetch`. The description below is the Anthropic one,
+which is the default and the better-researched of the two; the differences are
+named where they fall.
 
 **What one run looks like** (`src/ai/agent.ts`):
 
@@ -82,7 +98,33 @@ process — no subprocess, no second runtime.
      string. This is load-bearing rather than a convenience: the server-side
      `web_fetch` tool will only fetch URLs that already appear in the
      conversation, so a page the hub does not name is unreachable however
-     well the model guesses it.
+     well the model guesses it. **The OpenAI loop has no fetch tool** — there
+     is no hosted equivalent, and giving the hub one would break the promise in
+     [Privacy](#privacy) — so it is told to search for that page instead.
+   - **one sentence saying that some absences are deliberate.** The static
+     mapper drops a fixed set of telemetry, and those properties are then
+     absent from all three lists above — so a model reading the exposes tree
+     meets parameters that appear nowhere while `uncovered` says nothing needs
+     it. That is the message being untrue, and it is the only part the hub has
+     to fix; *what to do about it* is the model's judgement and is deliberately
+     not pre-chewed.
+     **Two earlier versions of this were worse and are worth not repeating.**
+     The first listed the hidden properties per device and told the agent never
+     to touch them — which would have refused the one genuinely useful thing a
+     run had done for that plug, since the list is applied without knowing the
+     device and cannot tell mains voltage on a metered plug from battery
+     voltage on a door sensor. The second kept the list and softened it to a
+     judgement, which was correct and still more than the hub needs to say.
+   - **what an empty answer looks like, when there is nothing to add.** Layers
+     1–2 place most devices completely, and an owner pressing *Work it out
+     again* on one of those starts a run anyway; the schema needs at least one
+     endpoint and `submit_mapping` is the only answer channel, so a model with
+     nothing to add had to invent something — and both vendors did, in the two
+     ways available: restating fields that already existed, and declaring
+     fields for hidden diagnostics plus a property the device has not got.
+     With `uncovered` empty the task message now asks for a genuine *upgrade*
+     or the hub's own mapping back unchanged, and says that padding it is the
+     wrong move.
 2. The model researches with the **server-side** `web_search_20260209` and
    `web_fetch_20260209` tools. They execute on Anthropic's infrastructure, so
    the hub itself needs no egress beyond `api.anthropic.com`. The prompt sends
@@ -115,8 +157,31 @@ process — no subprocess, no second runtime.
 4. **Guardrails**: at most 40 turns, a per-run cost cap computed from token
    usage (`src/ai/models.ts`), a 10-minute wall-clock watchdog, one run at a
    time hub-wide, and concurrent requests for the same device model share a
-   single run. The system prompt carries a cache breakpoint, so every turn
-   after the first reads the large static prefix at cache rates.
+   single run.
+
+**The Anthropic turn is streamed, and that is a requirement rather than a
+preference.** The SDK refuses a *non-streaming* request whose `max_tokens`
+could take the generation past the API's ten-minute ceiling — the line falls at
+21,333 output tokens and `MAX_OUTPUT_TOKENS` is 32,000 — so `messages.create`
+threw `Streaming is required for operations that may take longer than 10
+minutes` before a single request reached the network. Worse than the outright
+failure was its shape: the refusal carries no HTTP status, so `classifyApiError`
+read it as a transport problem, and a run that could never work armed the
+backoff gate and retried for ever with the real cause behind a retry timer —
+exactly what `errors.ts` warns about arming a gate over the hub's own bug.
+`messages.stream(…)` + `finalMessage()` collects the same `Message`, so nothing
+else in the loop changes. `test/ai-agent.test.ts` pins it, and its SDK mock
+reproduces the guard: the old mock stubbed `create` with a bare `vi.fn()`, which
+is more permissive than the real client, which is why a whole suite passed over
+an agent that could not make a request.
+
+**Two cache breakpoints, which is what an agent loop asks for.** The explicit
+one sits on the system prompt and covers the tool definitions with it (tools
+sort ahead of system in the cached prefix) — the large, byte-identical prefix
+every turn of every run shares. The top-level `cache_control` field then places
+a second on the last block of `messages`, and that is the half that was missing:
+this conversation carries the whole of the model's research and grows for up to
+40 turns, so without it every turn re-sent all of it at full input price.
 
 The result is still **data, not code**: whatever the model submits is
 re-validated by the mapper and interpreted rule-by-rule exactly like any
@@ -140,10 +205,24 @@ installed-but-unusable on the smallest board the hub supports.
 
 ## Bring your own account
 
-The owner connects their own Anthropic account in the app
-(`PUT /api/v1/settings/ai`) with an **API key** (`sk-ant-api…`) from
-[platform.claude.com](https://platform.claude.com). Usage is billed per token
-to the owner's API account.
+A member connects the home's own account in the app
+(`PATCH /api/v1/settings/ai`) with an **API key**, and usage is billed per token
+to that account. Two providers are accepted and they do different jobs:
+
+| provider | key | what it does |
+|---|---|---|
+| Anthropic | `sk-ant-api…` from [platform.claude.com](https://platform.claude.com) | recognises unknown Zigbee devices — everything in this document |
+| OpenAI | `sk-proj…` from platform.openai.com | draws [device portraits](api.md#device-portraits), and can recognise devices too |
+
+A home may configure either, both, or neither. With both, which one recognises
+devices is a stored choice (`mappingProvider`); with one, there is nothing to
+choose. `docs/api.md` is canonical for the wire.
+
+**Any member may do this**, not only the owner. `hub.ai` was owner-only until
+a real hub showed what "owner" means here — Studio claims a hub as *the Mac*, so
+the owner is a laptop in a drawer and every phone joins by invite. Guest is where
+the line falls: a key is money, and somebody staying the weekend has no business
+spending it.
 
 > **Claude subscription tokens are no longer accepted.** The Agent SDK could
 > authenticate with an `sk-ant-oat…` token minted by `claude setup-token`;
@@ -153,43 +232,86 @@ to the owner's API account.
 > `legacySubscriptionToken: true` and skips runs with an `auth_failed` status
 > rather than failing with an unreadable 401.
 
-The wire format:
+The wire format — every field optional, absence meaning "leave this alone", so
+one route carries two credentials without either disturbing the other:
 
 ```
-PUT /api/v1/settings/ai
-{ "apiKey": "sk-ant-api…", "model"?: "claude-…" }
-
-GET /api/v1/settings/ai
-{ "provider": "anthropic", "model": null, "hasKey": true,
-  "legacySubscriptionToken": false,
-  "status": { "lastError"?: { "kind", "message", "at", "resetAt"? },
-              "lastRun"?:   { "at", "ok", "costUsd"?, "model"? } } }
+PATCH /api/v1/settings/ai
+{ "anthropicApiKey"?: "sk-ant-api…", "openaiApiKey"?: "sk-proj…",
+  "anthropicModel"?: "claude-…", "openaiModel"?: "gpt-…",
+  "mappingProvider"?: "anthropic" | "openai",
+  "clear"?: "anthropic" | "openai", "enabled"?: true }
 ```
 
-An `authType` field from an older app is accepted and ignored rather than
-rejected, so a Studio build mid-rollout keeps working.
+The answer's shape, and why each half is there, is in
+[api.md](api.md#the-ai-settings-answer). `PUT /settings/ai` is unchanged for
+apps that have not moved, and an `authType` field from an older one is accepted
+and ignored rather than rejected, so a Studio build mid-rollout keeps working.
+
+The keys are told apart **by their prefix** rather than trusted to the field
+they arrived in: with two secure fields on one screen, pasting into the wrong
+one is the ordinary mistake, and "that is an Anthropic key" is a far better
+answer than a 401 from the wrong vendor an hour later.
 
 The secret is encrypted with the hub's local AES-256-GCM secret, stored in
 the hub's database, never returned by any API, and used only to run the
 mapping agent.
 
-**Model.** Default **`claude-opus-5`**; override with `model`. The choice is
-an allowlist, not a free string (`src/ai/models.ts`), because the
-`_20260209` research tools only exist on Opus 4.6+ and Sonnet 4.6+ — pointing
-the hub at Haiku or a 4.5-era model would not degrade the run, it would 400
-it. `PUT /settings/ai` refuses an unsupported model and names the ones that
-work: `claude-opus-5`, `claude-opus-4-8`, `claude-opus-4-7`,
-`claude-opus-4-6`, `claude-sonnet-5`, `claude-sonnet-4-6`. Opus-tier is the
-default deliberately — a wrong mapping is cached per device model and quietly
-shapes what the apps show until somebody remaps it, which is worth more than
-the difference in per-run cost.
+**Model.** Default **`claude-opus-5`** on Anthropic and **`gpt-5.6-sol`** on
+OpenAI — the thorough tier on each, and both pinned as explicit ids rather than
+a floating alias, so neither vendor can re-point what a home runs without
+somebody here deciding to. The choice is an allowlist, not a free string (`src/ai/models.ts`),
+because the research tools have model floors — Anthropic's `_20260209` tools
+only exist on Opus 4.6+ and Sonnet 4.6+, so pointing the hub at Haiku or a
+4.5-era model would not degrade the run, it would 400 it. The allowlist is
+`claude-opus-5`, `claude-opus-4-8`, `claude-opus-4-7`, `claude-opus-4-6`,
+`claude-sonnet-5`, `claude-sonnet-4-6`, `gpt-5.6-sol`, `gpt-5.6-terra`, and
+`gpt-5.6` — the bare OpenAI alias, priced and accepted because it routes to Sol
+and a hub that stored it must not be told its setting is invalid, but never
+offered as a choice.
+
+**The apps do not ship that list.** `GET /settings/ai` carries
+`providers.<name>.models` — id, label, one-line note, one `recommended` — and
+the apps render it, the same rule `GET /permissions` follows.
+
+**It is one model per provider, so the apps state it rather than ask.** It was
+two — the thorough tier and the cheaper one — until the cheaper one was tried
+on a real device. Sonnet 5 repeatedly submitted descriptors the `submit_mapping`
+handler had to bounce, and the run that did finish named `custom` as an outlet's
+primary capability, which is the one value that renders as no control at all: a
+paid run whose result was a dead tile on a working smart plug. A wrong mapping
+is worse than an expensive one in a way that is easy to underestimate, because
+the descriptor is cached per device *model* — it silently shapes every unit of
+that device the home ever meets until somebody notices and remaps. Saving a few
+cents on a job that runs a handful of times in a hub's life is the wrong trade
+for that. OpenAI's cheaper tier is retired on the same reasoning rather than on
+its own evidence.
+
+**A stored model counts only while it is still offered** (`effectiveModel`).
+Retiring one otherwise leaves the homes that had chosen it as the only homes
+still running it — exactly the homes the retirement is for — and silently, since
+nothing on any screen would have changed. So `GET /settings/ai` answers the
+model that will *run*, never the string in the column, and a hub set to Sonnet
+moves to Opus on its next run with no migration and nothing for its owner to do.
+A write naming a retired model is still accepted rather than 400-ing an app that
+has not shipped an update; it simply is not what runs. The allowlist stays
+broader than `models` for a second reason too: `ai_runs.modelId` rows recorded
+months ago still have to price correctly when a run log is read back.
+
+**Effort is `high` on both providers and is not exposed.** Adaptation is
+reasoning-heavy and runs a handful of times in a hub's life, so that is the
+level worth paying for; the cost lever a person can actually calibrate is the
+model. Two settings for one decision would be one too many, and the second is
+the one nobody can judge.
 
 **Cost.** A typical adaptation run costs cents, bounded by the per-run cap.
-The Agent SDK used to report `total_cost_usd`; the hub now adds up its own
-token usage against list prices (input, output, cache reads at 0.1×, cache
-writes at 1.25×, web searches at $10/1000), so `status.lastRun.costUsd` is an
-**estimate**. An unknown model falls back to the most expensive supported
-tier, so the cap can only ever trip early.
+Neither API reports what a run cost, so the hub adds up its own token usage
+against list prices (input, output, cache reads at 0.1×, cache writes at 1.25×,
+web searches at $10/1000) and `status.lastRun.costUsd` is an **estimate**. An
+unknown model falls back to the most expensive supported tier, so the cap can
+only ever trip early. OpenAI reports cached input and cache writes *inside* the
+input count, so both shares are subtracted out before each is billed at its own
+rate — otherwise a cache write would be counted twice.
 
 ## When the account fails: taxonomy & backoff
 
@@ -205,8 +327,8 @@ cannot separate, but it is no longer the main path.
 | `status.lastError.kind` | Typical cause | Detected via |
 |---|---|---|
 | `rate_limited` | API 429 / too many requests | HTTP 429 (+ `retry-after` when present) |
-| `usage_limit` | an account usage or spend cap is exhausted | HTTP 429 whose body names a cap, reset time parsed when present |
-| `auth_failed` | invalid/revoked key, or a stored subscription token | HTTP 401/403; also raised before any request when the saved credential is a legacy subscription token |
+| `usage_limit` | an account usage or spend cap is exhausted | HTTP 429 whose body names a cap, reset time parsed when present. **Explicit rate-limit wording wins**: OpenAI's ordinary 429 says "Rate limit reached for …", and reading that as an exhausted cap would wait for a reset a minute away and tell the owner their month was spent |
+| `auth_failed` | invalid/revoked key, or a stored subscription token | HTTP 401/403; also raised before any request when the saved Anthropic credential is a legacy subscription token |
 | `billing` | API credit exhausted | HTTP 402, or a 400 whose body is really a credit problem |
 | `overloaded` | API 529 / capacity | HTTP 529 or any 5xx |
 | `network` | transport failures, unclassified errors | a throw that never reached HTTP |
@@ -224,6 +346,25 @@ usually carries one), otherwise an escalating ladder
 (1 min → 5 min → 30 min → 2 h). Any *completed* run — even one whose
 descriptor was rejected — proves the account works and clears the gate.
 
+**The gate names the credential it was armed against**, and retires itself the
+moment that credential moves: provider, model, or the key itself. Without
+that, the judgement "this account is unavailable" outlived the account — an
+owner who met `auth_failed`, went and fixed their key and came back found a hub
+that would not run for up to two hours, at the one moment a gate meant to
+protect them is only in their way. It also made a failure on one provider
+silence the other, which is precisely the switch an app tells somebody to
+reach for. Keying it needs no channel from the settings routes to keep in step:
+the gate simply asks, when it is about to refuse, whether it is still about
+this hub's credential.
+
+**And an explicit run is never gated at all.** Pressing *Work it out again* is
+a person saying "try it now", and it is the whole of how somebody recovers:
+change the key or the model, come back, press the button. A gate that answered
+that with silence would be indistinguishable from a button that does nothing.
+The flag travels all the way to the check rather than being settled where the
+button is pressed, because runs are serialized hub-wide — one already queued
+can arm the gate in between.
+
 The current state is always visible on `GET /api/v1/settings/ai` as
 `status.lastError` / `status.lastRun`, so the apps can show "AI paused:
 usage limit — resets 23:00" instead of failing silently.
@@ -234,21 +375,138 @@ model until an explicit remap), and a run where the agent gives up (out of
 turns/budget, no submission) is simply logged and retried on the next
 natural trigger. Only descriptors are ever cached — never account failures.
 
+**A run is a loop, not a request, and the log is shaped like one.** One
+recognition is up to `AGENT_MAX_TURNS` (40) request/response **rounds** against
+the provider: the hub sends the conversation, the model answers — often by
+running a hosted web search, or by calling `submit_mapping` — the hub appends
+the result and sends again. Most runs are a handful of rounds; the forty is a
+ceiling so a confused run cannot spend all day. That is why a failed round
+followed by a successful one is the ordinary shape of a working run rather than
+an oddity, and why anything that records what was said has to record it per
+round.
+
+**What a run said can be kept, and it is off unless the owner asks.** The rule
+above — a summary, never a transcript — is what every run obeys forever, and it
+has one deliberate exception, because a refusal is often about the *request*: a
+model that will not take a parameter, a key that names no workspace. Switch
+`recordExchanges` on (`PATCH /settings/ai`) and each round is written to
+`ai_run_exchanges`, readable at `GET /ai/runs/:id/exchanges`.
+
+Five rules hold it up.
+
+- **Off costs nothing.** The switch is the presence of `AgentRunContext.onExchange`,
+  not a flag a handler checks, so a run nobody asked about never walks a
+  content block and never builds a string — the `MqttObserver` stance, where
+  watching costs nothing when nobody is watching.
+- **A round records what it *added*, never the conversation so far.** An agent
+  loop resends everything every turn, and the system prompt and the
+  `submit_mapping` schema alone are 9.9 KB and 6.7 KB of that — on *every*
+  round. Recording each request whole would write them forty times and make the
+  last round the size of the run. So the configuration and the system prompt
+  are carried once, on round 1, and each later round carries only the messages
+  it appended.
+- **It is main data, not bodies.** Each side is a list of labelled, excerpted
+  parts (`{kind, label, text?, bytes?}`) — a role, a tool call, a search query,
+  a stop reason, a refusal — which is both what a person can read and a
+  fraction of what the wire carried. `kind` is an open string: each provider
+  names the parts of its own protocol and an app that meets a new word renders
+  it rather than failing to draw the round. A cut part carries `bytes`, what it
+  weighed whole, so an app never asserts a constant from this repository.
+- **Nothing carries a credential.** Request *bodies* only, never headers, and
+  neither provider puts a key in a body.
+- **It can never end a run.** Recognising the device is the job; this is a
+  convenience. Building the parts means walking a vendor's content blocks, so
+  the distillation, the excerpting and the callback all sit under one `catch`
+  inside `record()` — which is why it takes a thunk rather than a value.
+
+Bounded at both ends like the activity log and the reading history: **seven
+days** and a row cap, whichever bites first. The age bound is the one that
+matters — somebody switches this on because something is wrong *now*, and a
+week later the answer is either found or no longer interesting. Rows are
+written once, with the run, rather than per round (the `STATE_FLUSH_MS` rule),
+and a pruned run takes its rounds with it.
+
+**A failed run is recorded in words somebody can act on** — the *name a
+failure, don't just relay it* rule the Zigbee diagnosis holds, applied to the
+run log. An SDK error's `message` is the HTTP status with the whole response
+body glued to it, so a device row read
+`400 {"type":"error","error":{"type":"invalid_request_error","message":"…"}}`:
+three quarters punctuation, with the one sentence that says what to do buried
+in the middle. `describeRunFailure()` (`src/ai/errors.ts`) digs out the
+provider's own sentence, and for the refusals that are really *settings* it
+adds the fix and records the kind as `config` — an identity-linked Anthropic
+key, one created without a workspace, is refused on every request because such
+a key must name the workspace it acts in and the hub sends no such header. The
+three rules are the diagnosis module's: most-specific-first, an unrecognised
+failure is still reported (with its envelope stripped and nothing guessed
+about it), and nothing here throws — it runs inside the catch of a run that has
+already failed. `errorKind` is an open string, so an app that meets a new word
+falls back to showing the message.
+
 ## Privacy
 
 When a mapping is generated, the following leaves the machine:
 
 - the device's *published schema* — its Zigbee2MQTT exposes definition and
   vendor/model/description strings — plus up to the last 5 raw state payloads
-  of that device, sent to Anthropic as the agent's task;
+  of that device, sent to the configured provider as the agent's task;
 - **web searches and page fetches** the model chooses to run, containing the
   device's vendor/model/property names (it is instructed to include nothing
   else), which reach the search backend like any web search.
 
-Those searches and fetches execute **server-side, on Anthropic's
-infrastructure** — the hub opens no connection to zigbee2mqtt.io or anywhere
-else, and needs no outbound access beyond `api.anthropic.com`. A hub behind a
-restrictive firewall therefore still gets full device research.
+Searches execute **server-side, on the provider's infrastructure**, and on
+Anthropic so do page fetches — so a hub configured for Anthropic needs no
+outbound access beyond `api.anthropic.com` (drawing a portrait is
+`api.openai.com` too).
+
+**On OpenAI the hub makes one further kind of request, and this is the whole
+of it.** OpenAI's hosted tool set has search and no fetch equivalent, which
+left that provider reading search snippets at the one point in a run where a
+wrong unit gets cached against a device model for ever. So the OpenAI loop
+carries a `fetch_page` tool the **hub itself** performs (`src/ai/page-fetch.ts`),
+and the promise above narrows accordingly: during a recognition run, on a hub
+configured for OpenAI, the hub may also connect to **`zigbee2mqtt.io` and
+`raw.githubusercontent.com`, and to nothing else**. Outside a run, or with no
+key, or on Anthropic, it opens neither.
+
+Nothing about *what* leaves changed: a URL naming a public device model, no
+device data, no home data. What changed is who dials.
+
+**Two hosts rather than a fetch tool, because of where the hub sits.** The URL
+comes from model output and the machine performing the request is inside
+somebody's home network, with an unauthenticated health route of its own — a
+general fetch tool is a request-forgery primitive aimed at the LAN, dressed up
+as research. Five guards, each closing a different way past that: https only;
+the host matched exactly or as a subdomain *with the dot* (`endsWith` would
+accept `evil-zigbee2mqtt.io`); redirects followed by hand and re-checked every
+hop, since `fetch` follows them itself and an allowed host answering
+`302 http://10.0.0.1/` would walk straight past the list; the resolved address
+required to be public, because an allowlist on a *name* is only as good as the
+resolver behind it; and bounded bytes with one deadline. `test/ai-page-fetch.test.ts`
+pins each of them, asserting that a refused URL produces **no request at all**
+rather than a refusal after the fact.
+
+What comes back is untrusted text, and is treated as such: it is model input,
+never hub input, and the only thing a run can ultimately produce is a
+`MappingDescriptor` that zod validates and the interpreter *interprets* — the
+hub never executes model output.
+
+**The system prompt is built per provider so it can say all this.**
+`mappingSystemPrompt(provider)` differs in exactly one paragraph, the research
+instructions. The bug it was written for is worth keeping: one shared prompt
+told an OpenAI run to `web_fetch` the device's page first, called that page the
+source of truth, and then told it not to spend searches confirming what it had
+already read — three instructions about a tool it did not have, at the exact
+point in the run where research is decided. The paragraph still differs now
+that both providers fetch, because this tool has a different name and, unlike
+Anthropic's, a boundary the model has to be told about or it will try to read a
+search result and be refused.
+
+**The Responses API stores no application state for a mapping run.** The loop
+sets `store: false`, explicitly requests `reasoning.encrypted_content`, and
+echoes those opaque items on the next turn. That keeps reasoning context across
+a tool call without creating a retrievable Responses conversation; account data
+handling remains subject to the OpenAI API data controls.
 
 No home names, member names, tokens, or any other hub data ever leave the
 machine — and, since the hub gained a traffic inspector, it is worth saying
@@ -312,6 +570,25 @@ supersedes the static generic field for that property). The agent is asked to
 map what the static mapper left generic — upgrading fields to typed
 capabilities where one fits, and covering anything still `uncovered`.
 
+**The one thing the overlay may not do is take a capability away, and
+`primary` is where that bites.** Capabilities merge as a union, so a descriptor
+can only ever add to what the static mapper found — but `primary` is a single
+field, and it was overwritten with whatever the agent named. `primary` is what
+every app draws the device's tile from (a switch, a dimmer, a reading), and
+`custom` is layer 2's generic catch-all, which renders as *no control at all*.
+So a mapping that named `custom` as its primary turned a working smart plug
+into a dead grey tile in the phone app while the hub went on reporting the
+device perfectly online and `onOff` sat in `capabilities` untouched — nothing
+but that one word had moved. Observed on an Aqara SP-EUC01, and it is exactly
+what "everything worked until the AI mapped it" looks like from the sofa.
+`mergedEndpoints` therefore takes the agent's `primary` only when it neither
+demotes a typed capability to `custom` nor names a capability the merged
+endpoint does not have — the second guard is not paranoia either, since a
+primary with no state behind it is a tile bound to nothing. The agent is still
+free to *promote*: a `custom` primary upgraded to `onOff` is the whole point of
+layer 3, and only the demotion is refused.
+`test/integration/zigbee-adapter.test.ts` pins it.
+
 Validation is layered: the `submit_mapping` tool schema constrains generation
 → the tool handler zod-parses and sanity-checks (unique endpoints, primary ∈
 capabilities, every rule's target path belongs to a declared capability) and
@@ -326,7 +603,10 @@ the device's canonical schema (vendor + model + exposes; `exposesHash()` lives
 with the exposes mapper, because it is a property of the device's published
 schema rather than of AI). Every further device of the same model maps
 instantly and for free, across renames and re-pairings.
-`POST /devices/:id/remap` invalidates and regenerates.
+`POST /devices/:id/remap` invalidates and regenerates — and because it is
+explicit, it drops a `rejected` row too, which is what makes "the model was too
+weak, try a better one" a thing somebody can actually do. It answers as soon as
+the run has started rather than when it ends; `docs/api.md` has the shape.
 
 That cache is now a **library** with five routes over it
 (`src/ai/library.ts`, `docs/api.md`). Three things it makes possible that the
@@ -381,15 +661,20 @@ Everything lives in `src/ai/`; the module never imports the API or adapters
 | File | Role |
 |---|---|
 | `descriptor.ts` | The MappingDescriptor DSL: zod schema, sanity checks, and the interpreter (`applyStateRules` / `buildCommandPayload`). Dependency-free; unchanged by the agent — output is data, not code. |
-| `agent.ts` | The Messages API tool-use loop: builds the tool set + guardrails, validates `submit_mapping` submissions, resumes `pause_turn`, classifies failures, reports run stats. Exports the `MappingProvider` seam the mapper (and tests) use. |
-| `models.ts` | The model allowlist (what can drive the server-side research tools) and the list-price table the per-run cost cap and `costUsd` estimate are computed from. Dependency-free, so the API layer can validate `model` without pulling in the AI stack. |
+| `agent-core.ts` | Everything about a run that is not one vendor's API: the guardrails (turns, cost cap, watchdog, output ceiling, effort), the `AgentStep` vocabulary, the `submit_mapping` schema and description, `evaluateSubmission`, and the `MappingProvider` seam the mapper (and tests) use. **Imports no SDK** — which is what stops a hub configured with only an OpenAI key loading the Anthropic one to satisfy an import chain. |
+| `agent.ts` | The Anthropic loop, on the Messages API: the tool set (`web_search_20260209` + `web_fetch_20260209` + `submit_mapping`), prompt caching, `pause_turn` resumption, failure classification, run stats. Re-exports `agent-core.ts`, so callers did not move. |
+| `openai-agent.ts` | The same run on OpenAI's Responses API, over plain `fetch` — no second SDK for a Pi to download. Hosted `web_search` and `submit_mapping`; `store: false` with reasoning items echoed back; the same caps and step vocabulary. |
+| `models.ts` | Per provider: the model allowlist (what can drive the hosted research tools), the one-per-provider `choices` list the apps state, and the list prices the per-run cost cap and `costUsd` estimate are computed from. Dependency-free, so the API layer can validate a model without pulling in the AI stack. |
 | `errors.ts` | The failure taxonomy: `AiUnavailableError` kinds, HTTP-status classification (`classifyApiError`), error-text fallback, reset-time parsing. |
-| `prompts.ts` | The system prompt (canonical capabilities/paths/units/transforms + worked examples + research rules), the per-device task prompt carrying the whole research brief, and the zigbee2mqtt.io page URL. |
-| `mapper.ts` | Orchestration: cache lookups, one-run-at-a-time serialization, per-model in-flight dedupe, the backoff gate, validation, storage, and interpretation into an `AppliedAiMapping` for the adapter. |
+| `prompts.ts` | The system prompt (canonical capabilities/paths/units/transforms + worked examples + research rules) — built **per provider**, because the research paragraph names tools and the two loops do not have the same ones; the per-device task prompt carrying the whole research brief; and the zigbee2mqtt.io page URL. |
+| `mapper.ts` | Orchestration: cache lookups, one-run-at-a-time serialization, per-model in-flight dedupe, the credential-keyed backoff gate, validation, storage, and interpretation into an `AppliedAiMapping` for the adapter. |
+| `agent-core.ts` | Also the `AgentExchange` vocabulary: the parts, their bounds, and `record()` — the guard that keeps a bookkeeping failure from ending a run. |
+| `errors.ts` | Two questions kept apart: is this the *account* failing (`classifyApiError` → a gate and a retry) or the *run* (`describeRunFailure` → a sentence in the log, and the fix where the refusal is really a setting). |
 
 Related pieces elsewhere: credential + status storage in
-`src/core/settings.ts` (AES-256-GCM via `src/core/crypto.ts`), the owner-only
-REST endpoints in `src/api/server.ts`, and the trigger points in
+`src/core/settings.ts` (AES-256-GCM via `src/core/crypto.ts`, one slot per
+provider), the `hub.ai` REST endpoints in `src/api/server.ts`, and the trigger
+points in
 `src/adapters/zigbee/adapter.ts` (adoption, runtime unknown-key watch,
 explicit remap).
 
@@ -397,10 +682,20 @@ Tests: `test/ai-agent.test.ts` (failure classification, the model allowlist
 and cost estimate, the submit-tool validation loop, the research brief, and
 the agent loop itself against a mocked Messages API — tool set, prompt
 caching, `pause_turn` resumption, resubmission after validation errors, and
-the turn and cost caps), `test/ai-descriptor.test.ts` (DSL + mapper behavior
-incl. backoff and dedupe, against a temporary SQLite file), and
+the turn and cost caps), `test/ai-agent-openai.test.ts` (the same loop on the
+other provider, over a mocked `fetch`: the request body, the stateless reasoning
+replay, the nudge, refusals, and a 429 that must read as a rate limit rather
+than an exhausted account cap), `test/ai-descriptor.test.ts` (DSL + mapper behavior
+incl. backoff and dedupe, against a temporary SQLite file),
+`test/ai-exchanges.test.ts` (what a run said: the bounds, the cut that
+reports its size, headers never walked, off costing nothing, and a failed
+round read beside the one after it),
+`test/ai-retry.test.ts` (trying again after changing something: the gate
+retiring on a new key, model or provider, an explicit run ignoring it — even
+queued behind a run that arms it — and what a failed run is recorded as), and
 `test/integration/zigbee-adapter.test.ts` (runtime adaptation end-to-end over
-a real broker).
+a real broker, including that an explicit remap answers while the agent is
+still working).
 
 ## The move off the Claude Agent SDK
 

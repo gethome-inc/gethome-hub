@@ -7,23 +7,51 @@ import { classifyAgentFailure, classifyApiError, parseResetHint } from '../src/a
 import { buildMappingUserPrompt, zigbee2mqttDevicePage } from '../src/ai/prompts.js';
 import {
   DEFAULT_MODEL,
-  SUPPORTED_MODELS,
+  PROVIDER_MODELS,
+  defaultModelFor,
+  effectiveModel,
   estimateCostUsd,
   isSupportedModel,
+  supportedModelIds,
 } from '../src/ai/models.js';
 
 // The agent constructs its own Anthropic client, so the loop is exercised by
 // mocking the SDK rather than by threading a client through the signature.
-const { createMock } = vi.hoisted(() => ({ createMock: vi.fn() }));
+//
+// **The mock reproduces the SDK's own client-side guards, and that is the
+// point of it rather than a flourish.** This file used to stub `create` with a
+// bare `vi.fn()`, which is strictly more permissive than the real SDK — so the
+// whole suite passed over an agent that could not make a single request: the
+// SDK refuses a *non-streaming* call whose `max_tokens` could run past the
+// API's ten-minute ceiling, and MAX_OUTPUT_TOKENS is well over that line. A
+// mock that accepts what the real client refuses does not test the code, it
+// tests the mock. `create` therefore throws exactly as the SDK does, and every
+// reply goes through `stream`.
+const { createMock, nonStreamingCeiling } = vi.hoisted(() => ({
+  createMock: vi.fn(),
+  // The SDK's arithmetic: a request is refused when its expected generation
+  // time (an hour per 128K output tokens) exceeds the ten-minute default.
+  nonStreamingCeiling: Math.floor((600_000 * 128_000) / 3_600_000),
+}));
 vi.mock('@anthropic-ai/sdk', () => ({
   default: class MockAnthropic {
-    messages = { create: createMock };
+    messages = {
+      create: async (params: { max_tokens: number }) => {
+        if (params.max_tokens > nonStreamingCeiling) {
+          throw new Error('Streaming is required for operations that may take longer than 10 minutes.');
+        }
+        return createMock(params);
+      },
+      stream: (params: unknown) => ({ finalMessage: async () => createMock(params) }),
+    };
   },
 }));
 
 const { AGENT_MAX_TURNS, createMappingAgent, evaluateSubmission, submitMappingTool } = await import(
   '../src/ai/agent.js'
 );
+const { MAX_OUTPUT_TOKENS } = await import('../src/ai/agent-core.js');
+type AgentExchange = import('../src/ai/agent-core.js').AgentExchange;
 
 // ── Failure classification ────────────────────────────────────────────────
 
@@ -118,6 +146,29 @@ describe('parseResetHint', () => {
 
 // ── The model allowlist ───────────────────────────────────────────────────
 
+/**
+ * The loosest cap pattern is `limit reached`, and OpenAI's ordinary 429 says
+ * exactly that — "Rate limit reached for …". Reading it as an exhausted
+ * account cap would wait for a reset that is a minute away and tell the owner
+ * their month is spent.
+ */
+describe('a rate limit is not an account cap', () => {
+  it('reads OpenAI’s own 429 sentence as a rate limit', () => {
+    const failure = classifyApiError({
+      status: 429,
+      message: 'Rate limit reached for gpt-5.6 in organization org-1 on tokens per min.',
+    });
+    expect(failure?.kind).toBe('rate_limited');
+  });
+
+  it('still reads a real cap as one, however it is worded', () => {
+    expect(classifyApiError({ status: 429, message: 'You have hit your monthly limit.' })?.kind).toBe(
+      'usage_limit',
+    );
+    expect(classifyAgentFailure('Credit limit reached for this workspace.')?.kind).toBe('usage_limit');
+  });
+});
+
 describe('supported models', () => {
   it('only allows models that can drive the server-side research tools', () => {
     expect(isSupportedModel(DEFAULT_MODEL)).toBe(true);
@@ -129,7 +180,95 @@ describe('supported models', () => {
   });
 
   it('does not offer Claude Fable 5', () => {
-    expect(Object.keys(SUPPORTED_MODELS).some((id) => id.includes('fable') || id.includes('mythos'))).toBe(false);
+    const every = [...supportedModelIds('anthropic'), ...supportedModelIds('openai')];
+    expect(every.some((id) => id.includes('fable') || id.includes('mythos'))).toBe(false);
+  });
+
+  /**
+   * The allowlist is validation and `choices` is the picker, and they are
+   * deliberately different lengths: a hub already set to an older model has to
+   * keep working, while asking somebody to choose between six is asking them to
+   * research six.
+   */
+  it('offers exactly one model per provider, and it is that provider’s default', () => {
+    for (const provider of ['anthropic', 'openai'] as const) {
+      const choices = PROVIDER_MODELS[provider].choices;
+      // The model is a fact the apps state, not a decision they ask for: the
+      // cheaper tier was retired after Sonnet 5 submitted descriptors the tool
+      // handler kept bouncing and then named `custom` as an outlet's primary,
+      // which renders as no control at all.
+      expect(choices).toHaveLength(1);
+      expect(choices[0]?.recommended).toBe(true);
+      expect(isSupportedModel(choices[0]!.id, provider)).toBe(true);
+      expect(isSupportedModel(defaultModelFor(provider), provider)).toBe(true);
+      expect(defaultModelFor(provider)).toBe(choices[0]?.id);
+    }
+  });
+
+  /**
+   * Each is named by an **explicit** id. `gpt-5.6` routes to Sol today and is
+   * OpenAI's to re-point tomorrow, which would move which model a home runs
+   * and what a run costs with nothing in this repository changed to explain
+   * it; the alias stays priced so a hub that stored it keeps working, and
+   * stays out of `choices` so nothing new picks it up.
+   */
+  it('pins Opus 5 and Sol by their explicit ids', () => {
+    expect(PROVIDER_MODELS.anthropic.choices.map((choice) => choice.id)).toEqual(['claude-opus-5']);
+    expect(PROVIDER_MODELS.openai.choices.map((choice) => choice.id)).toEqual(['gpt-5.6-sol']);
+    expect(defaultModelFor('openai')).toBe('gpt-5.6-sol');
+
+    // Retired from the picker, still priced: a run recorded months ago names
+    // the model it ran on, and reading that log back has to cost it correctly.
+    expect(isSupportedModel('claude-sonnet-5', 'anthropic')).toBe(true);
+    expect(isSupportedModel('gpt-5.6-terra', 'openai')).toBe(true);
+
+    // Accepted, priced, and never offered.
+    expect(isSupportedModel('gpt-5.6', 'openai')).toBe(true);
+    expect(PROVIDER_MODELS.openai.choices.some((choice) => choice.id === 'gpt-5.6')).toBe(false);
+    expect(estimateCostUsd('gpt-5.6', { input_tokens: 1_000_000 })).toBe(
+      estimateCostUsd('gpt-5.6-sol', { input_tokens: 1_000_000 }),
+    );
+
+    // Luna is cheap and is not on the list: this job is reasoning-heavy and
+    // runs a handful of times in a hub's life.
+    expect(isSupportedModel('gpt-5.6-luna', 'openai')).toBe(false);
+  });
+
+  /**
+   * Retiring a model is only half a decision if the homes that had chosen it
+   * carry on running it — those are exactly the homes the retirement is for,
+   * and nothing on any screen would have changed to say so.
+   */
+  it('runs a stored model only while it is still offered', () => {
+    expect(effectiveModel('anthropic', 'claude-sonnet-5')).toBe('claude-opus-5');
+    expect(effectiveModel('openai', 'gpt-5.6-terra')).toBe('gpt-5.6-sol');
+    // The bare alias was never offered, so it was never a preference either.
+    expect(effectiveModel('openai', 'gpt-5.6')).toBe('gpt-5.6-sol');
+
+    // A model still on the list is still honoured, and so is silence.
+    expect(effectiveModel('anthropic', 'claude-opus-5')).toBe('claude-opus-5');
+    expect(effectiveModel('anthropic', null)).toBe('claude-opus-5');
+    expect(effectiveModel('anthropic', undefined)).toBe('claude-opus-5');
+    // Nothing a stranger could put in the column becomes a model either.
+    expect(effectiveModel('anthropic', 'gpt-5.6-sol')).toBe('claude-opus-5');
+  });
+
+  it('keeps the two allowlists apart, so a model cannot be sent to the wrong API', () => {
+    expect(isSupportedModel('claude-opus-5', 'openai')).toBe(false);
+    expect(isSupportedModel('gpt-5.6', 'anthropic')).toBe(false);
+    expect(isSupportedModel('gpt-5.6', 'openai')).toBe(true);
+  });
+
+  /**
+   * Sonnet 5 was priced at Sonnet 4.6's rate for a while, which is not a
+   * cosmetic error: `estimateCostUsd` feeds the per-run budget cap, so every
+   * run on it was billed 50% high against a $2 ceiling and stopped early.
+   */
+  it('prices Sonnet 5 at its own rate rather than Sonnet 4.6’s', () => {
+    const sonnet5 = estimateCostUsd('claude-sonnet-5', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
+    const sonnet46 = estimateCostUsd('claude-sonnet-4-6', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
+    expect(sonnet5).toBeCloseTo(12, 5);
+    expect(sonnet46).toBeCloseTo(18, 5);
   });
 
   it('prices a run from its token usage', () => {
@@ -277,6 +416,107 @@ describe('buildMappingUserPrompt', () => {
     expect(prompt).toContain('{"soil_moisture":11}');
     expect(prompt).not.toContain('{"soil_moisture":0}');
   });
+
+  /**
+   * A plug layers 1 and 2 place completely: a typed switch, typed power, and
+   * a generic field for every setting. `uncovered` is empty, so there is
+   * genuinely nothing for the agent to do — and an owner pressing "Work it
+   * out again" starts a run on it anyway.
+   */
+  const plug: Z2mDevice = {
+    ieee_address: '0x54ef44100047c1bf',
+    friendly_name: 'Light TV',
+    supported: true,
+    definition: {
+      vendor: 'Aqara',
+      model: 'SP-EUC01',
+      description: 'Smart plug EU',
+      exposes: [
+        {
+          type: 'switch',
+          features: [
+            { type: 'binary', name: 'state', property: 'state', access: 7, value_on: 'ON', value_off: 'OFF' },
+          ],
+        },
+        { type: 'numeric', name: 'power', property: 'power', access: 1, unit: 'W' },
+        { type: 'numeric', name: 'voltage', property: 'voltage', access: 1, unit: 'V' },
+        { type: 'numeric', name: 'current', property: 'current', access: 1, unit: 'A' },
+        { type: 'numeric', name: 'device_temperature', property: 'device_temperature', access: 1, unit: '°C' },
+        { type: 'binary', name: 'button_lock', property: 'button_lock', access: 7, value_on: 'ON', value_off: 'OFF' },
+      ],
+    },
+  };
+
+  /**
+   * The task message had no way to say "there is nothing to add", so a model
+   * with nothing to add invented something — both vendors did, in the two
+   * ways available: restating fields that already existed, and declaring
+   * fields for diagnostics the hub hides plus a property the device has not
+   * got. The empty answer has to be describable.
+   */
+  it('says what an empty answer looks like when nothing is uncovered', () => {
+    const profile = mapExposes(plug);
+    expect(profile.uncovered).toEqual([]);
+
+    const prompt = buildMappingUserPrompt(plug, profile, []);
+    expect(prompt).toMatch(/Nothing is `uncovered`/);
+    expect(prompt).toMatch(/submit the hub's own mapping back unchanged/);
+    // Both upgrades stay on the table — this is the branch with the least
+    // work in it, not the branch with none.
+    expect(prompt).toMatch(/promoting a generic field to a typed capability/);
+    expect(prompt).toMatch(/none of the lists above mention/);
+    // And that padding it is the wrong move, which is what both runs did.
+    expect(prompt).toMatch(/must not become is padding/);
+  });
+
+  /**
+   * The empty device gets it backwards. Everything this one publishes is on
+   * the hidden list, so layers 1–2 place *nothing* — one endpoint, no
+   * capabilities — and `uncovered` is still empty, because nothing was left
+   * over to be uncovered. That is the case with the most work in it, and
+   * `needsHelp`'s `staticallyEmpty` arm is what starts a run for it; being
+   * told to submit the hub's own mapping back unchanged would be a request
+   * for a descriptor the schema refuses.
+   */
+  it('does not offer the empty answer to a device with no static mapping', () => {
+    const opaque: Z2mDevice = {
+      ieee_address: '0x00124b0022000009',
+      friendly_name: 'Opaque',
+      supported: true,
+      definition: {
+        vendor: 'Acme',
+        model: 'AC-OPAQUE',
+        description: 'Publishes only what the hub hides',
+        exposes: [
+          { type: 'numeric', name: 'linkquality', property: 'linkquality', access: 1 },
+          { type: 'numeric', name: 'voltage', property: 'voltage', access: 1, unit: 'mV' },
+        ],
+      },
+    };
+    const profile = mapExposes(opaque);
+    expect(profile.uncovered).toEqual([]);
+    expect(profile.endpoints.every((endpoint) => endpoint.capabilities.length === 0)).toBe(true);
+
+    expect(buildMappingUserPrompt(opaque, profile, [])).not.toMatch(/Nothing is `uncovered`/);
+  });
+
+  /**
+   * **One sentence, and no list.** An earlier version named the hidden
+   * properties per device and told the model what to do about each. That was
+   * the hub pre-chewing a judgement the model is better placed to make — and
+   * its first wording forbade the one useful thing a run had done. What is
+   * left is the fact the model cannot derive: those properties are absent
+   * from all three lists *on purpose*, which is what stops `uncovered: []`
+   * reading as "nothing here needs looking at".
+   */
+  it('says the absence is deliberate without reciting which properties', () => {
+    const prompt = buildMappingUserPrompt(plug, mapExposes(plug), []);
+    expect(prompt).toMatch(/telemetry the static mapper hides by default/);
+    expect(prompt).toMatch(/so judge it/);
+    // No per-device catalogue, and no verdict handed down about one.
+    expect(prompt).not.toMatch(/hides these by default/);
+    expect(prompt).not.toMatch(/- .*: voltage, current/);
+  });
 });
 
 // ── The agent loop ────────────────────────────────────────────────────────
@@ -337,6 +577,88 @@ describe('the mapping agent loop', () => {
     expect(sent).toHaveLength(1);
   });
 
+  /**
+   * Recording is a convenience; recognising the device is the job. So the
+   * proof that matters is not that a round was written down — it is that
+   * writing it down changed *nothing*: the same requests on the wire, byte
+   * for byte, and the same descriptor out.
+   */
+  it('records rounds without changing a byte of what is sent or returned', async () => {
+    const twoRounds = () => [
+      reply({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'I think it is a plug.' }] }),
+      reply({ stop_reason: 'tool_use', content: [submitCall(validDescriptor)] }),
+    ];
+
+    queue(...twoRounds());
+    const quiet = await agent().generate('system prompt', 'user prompt');
+    const quietRequests = sent.map((request) => JSON.stringify(request));
+
+    sent.length = 0;
+    replies.length = 0;
+    queue(...twoRounds());
+    const rounds: AgentExchange[] = [];
+    const loud = await agent().generate('system prompt', 'user prompt', {
+      onExchange: (exchange) => rounds.push(exchange),
+    });
+
+    expect(loud).toEqual(quiet);
+    expect(sent.map((request) => JSON.stringify(request))).toEqual(quietRequests);
+    expect(rounds.map((round) => round.seq)).toEqual([1, 2]);
+    // Per round, because a run can be retried against the other vendor.
+    expect(rounds.every((round) => round.provider === 'anthropic')).toBe(true);
+    expect(rounds.every((round) => round.modelId === DEFAULT_MODEL)).toBe(true);
+  });
+
+  /**
+   * The delta rule. The system prompt is 9.9 KB and the `submit_mapping`
+   * schema 6.7 KB, and an agent loop resends both on every turn — so a round
+   * that recorded its request whole would write them once per turn and make
+   * the last round the size of the run.
+   */
+  it('carries the prompt once and then records only what each turn added', async () => {
+    queue(
+      reply({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'prose' }] }),
+      reply({ stop_reason: 'tool_use', content: [submitCall(validDescriptor)] }),
+    );
+    const rounds: AgentExchange[] = [];
+    await agent().generate('THE SYSTEM PROMPT', 'the device schema', {
+      onExchange: (exchange) => rounds.push(exchange),
+    });
+
+    const flat = (round: AgentExchange) => JSON.stringify(round.sent);
+    expect(flat(rounds[0]!)).toContain('THE SYSTEM PROMPT');
+    expect(flat(rounds[0]!)).toContain('the device schema');
+    // Round two adds the assistant's prose and the nudge, and nothing else.
+    expect(flat(rounds[1]!)).not.toContain('THE SYSTEM PROMPT');
+    expect(flat(rounds[1]!)).not.toContain('the device schema');
+    expect(flat(rounds[1]!)).toContain('prose');
+
+    // Tool *names*, never the 6.7 KB generated schema they carry.
+    expect(flat(rounds[0]!)).toContain('submit_mapping');
+    expect(flat(rounds[0]!)).not.toContain('input_schema');
+  });
+
+  it('keeps a refused round’s status and the provider’s own words', async () => {
+    createMock.mockImplementation(async () => {
+      throw Object.assign(new Error('400 {"type":"error"}'), {
+        status: 400,
+        error: { type: 'invalid_request_error', message: 'anthropic-workspace-id is required' },
+        headers: { 'x-api-key': 'sk-ant-secret' },
+      });
+    });
+    const rounds: AgentExchange[] = [];
+    await expect(
+      agent().generate('system', 'user', { onExchange: (exchange) => rounds.push(exchange) }),
+    ).rejects.toThrow();
+
+    expect(rounds).toHaveLength(1);
+    expect(rounds[0]!.ok).toBe(false);
+    expect(rounds[0]!.status).toBe(400);
+    expect(JSON.stringify(rounds[0]!.received)).toContain('anthropic-workspace-id');
+    // Bodies only, never headers — that is where a credential would be.
+    expect(JSON.stringify(rounds[0])).not.toContain('sk-ant-secret');
+  });
+
   it('sends the research tools and caches the system prompt', async () => {
     queue(reply({ stop_reason: 'tool_use', content: [submitCall(validDescriptor)] }));
     await agent().generate('system prompt', 'user');
@@ -345,6 +667,29 @@ describe('the mapping agent loop', () => {
     expect(toolTypes).toEqual(['web_search_20260209', 'web_fetch_20260209', 'submit_mapping']);
     expect(sent[0]!.system[0].cache_control).toEqual({ type: 'ephemeral' });
     expect(sent[0]!.model).toBe(DEFAULT_MODEL);
+  });
+
+  it('caches the conversation tail as well as the system prefix', async () => {
+    queue(reply({ stop_reason: 'tool_use', content: [submitCall(validDescriptor)] }));
+    await agent().generate('system prompt', 'user');
+
+    // Two breakpoints: the explicit one on the shared prefix, and the
+    // top-level field, which places a second on the last block of `messages`.
+    // Without it every turn re-sends the whole of the model's research at
+    // full input price, and this loop runs for up to AGENT_MAX_TURNS turns.
+    expect(sent[0]!.cache_control).toEqual({ type: 'ephemeral' });
+  });
+
+  it('streams, because MAX_OUTPUT_TOKENS is past what a plain request may ask for', async () => {
+    // The regression this file exists to stop coming back: at these token
+    // counts the SDK refuses a non-streaming call before it reaches the
+    // network, and the hub read that refusal as a transient *network* failure
+    // — so device recognition armed its backoff gate and retried for ever,
+    // with the real cause hidden behind the retry timer.
+    expect(MAX_OUTPUT_TOKENS).toBeGreaterThan(nonStreamingCeiling);
+
+    queue(reply({ stop_reason: 'tool_use', content: [submitCall(validDescriptor)] }));
+    await expect(agent().generate('system', 'user')).resolves.toMatchObject({ version: 1 });
   });
 
   it('resumes a paused turn without inserting a user message', async () => {

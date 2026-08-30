@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { desc, lt, sql } from 'drizzle-orm';
+import { asc, desc, eq, inArray, lt, sql } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
-import { aiRuns } from '../db/schema.js';
+import { aiRunExchanges, aiRuns } from '../db/schema.js';
 // Type-only, so the Anthropic SDK is not pulled into the core graph.
-import type { AgentStep } from '../ai/agent.js';
+import type { AgentExchange, AgentStep } from '../ai/agent.js';
 import type { HubEventBus } from './bus.js';
 
 /**
@@ -16,6 +16,19 @@ const RETAIN_RUNS = 60;
 /** Steps recorded per run. A run that searches more than this has gone wrong
  *  in a way the first forty lines will already show. */
 const MAX_STEPS = 40;
+
+/**
+ * How long a recorded round is kept, and how many are kept at all — two
+ * bounds, whichever bites first, the rule the activity log and the reading
+ * history both follow.
+ *
+ * The age bound is the one that matters here: somebody switches recording on
+ * because something is wrong *now*, and a week later the answer is either
+ * found or no longer interesting. The row cap is the disk's bound behind it,
+ * because "a week" says nothing about how many runs a home had in it.
+ */
+const RETAIN_EXCHANGE_DAYS = 7;
+const RETAIN_EXCHANGES = 1000;
 
 export type AiRunKind = 'map' | 'repair';
 
@@ -39,6 +52,8 @@ export interface AiRunStart {
   exposesHash: string;
   vendor?: string | undefined;
   model?: string | undefined;
+  /** anthropic | openai. Absent on rows written before the second provider. */
+  provider?: string | undefined;
   modelId?: string | undefined;
 }
 
@@ -57,6 +72,14 @@ export interface AiRunOutcome {
 export interface AiRunHandle {
   readonly id: string;
   step(step: AgentStep): void;
+  /**
+   * One request/response round, when the owner asked for them to be kept.
+   *
+   * Held in memory and written with the run in `finish()`, never per round:
+   * a round lands every few seconds during a run, and one write per round is
+   * the `STATE_FLUSH_MS` mistake with a different name.
+   */
+  exchange(exchange: AgentExchange): void;
   finish(outcome: AiRunOutcome): Promise<void>;
 }
 
@@ -90,6 +113,7 @@ export class AiRunLog {
     const id = randomUUID();
     const startedAt = Date.now();
     const steps: AgentStep[] = [];
+    const exchanges: AgentExchange[] = [];
     const identity = {
       id,
       kind: input.kind,
@@ -112,6 +136,9 @@ export class AiRunLog {
           step,
         });
       },
+      exchange(exchange) {
+        exchanges.push(exchange);
+      },
       async finish(outcome) {
         const at = new Date();
         log.events.emit('aiRun', {
@@ -132,6 +159,7 @@ export class AiRunLog {
             vendor: input.vendor ?? null,
             model: input.model ?? null,
             exposesHash: input.exposesHash,
+            provider: input.provider ?? null,
             modelId: input.modelId ?? null,
             ok: outcome.ok,
             costUsd: outcome.costUsd ?? null,
@@ -141,6 +169,27 @@ export class AiRunLog {
             errorMessage: outcome.errorMessage?.slice(0, 500) ?? null,
             steps,
           });
+          if (exchanges.length > 0) {
+            // After the run row, because the rows point at it — and in one
+            // insert, because a round is not worth a transaction of its own.
+            await log.db.insert(aiRunExchanges).values(
+              exchanges.map((entry) => ({
+                runId: id,
+                seq: entry.seq,
+                at: new Date(entry.at),
+                durationMs: entry.durationMs,
+                provider: entry.provider,
+                modelId: entry.modelId,
+                status: entry.status ?? null,
+                ok: entry.ok,
+                inputTokens: entry.inputTokens ?? null,
+                outputTokens: entry.outputTokens ?? null,
+                sent: entry.sent,
+                received: entry.received,
+              })),
+            );
+            await log.pruneExchanges();
+          }
         } catch {
           // A run that happened and could not be written down is still a run
           // that happened — never let bookkeeping fail the adoption it
@@ -150,12 +199,58 @@ export class AiRunLog {
     };
   }
 
+  /** The rounds of one run, oldest first — a failed attempt and the one that
+   *  followed it read in the order they happened. */
+  async exchangesOf(runId: string) {
+    return this.db
+      .select()
+      .from(aiRunExchanges)
+      .where(eq(aiRunExchanges.runId, runId))
+      .orderBy(asc(aiRunExchanges.seq));
+  }
+
+  /** How many rounds each of these runs has recorded, so a list can say
+   *  whether there is anything to open without fetching any of it. */
+  async exchangeCounts(runIds: string[]): Promise<Map<string, number>> {
+    if (runIds.length === 0) return new Map();
+    // Narrowed in the query rather than after it: the runs asked about are one
+    // page of a list, and counting every row this table holds to answer for
+    // thirty of them is work nobody asked for.
+    const rows = await this.db
+      .select({ runId: aiRunExchanges.runId, n: sql<number>`count(*)` })
+      .from(aiRunExchanges)
+      .where(inArray(aiRunExchanges.runId, runIds))
+      .groupBy(aiRunExchanges.runId);
+    return new Map(rows.map((row) => [row.runId, Number(row.n)]));
+  }
+
   async list(limit = 30) {
     return this.db
       .select()
       .from(aiRuns)
       .orderBy(desc(aiRuns.at))
       .limit(Math.min(Math.max(limit, 1), 100));
+  }
+
+  /**
+   * Two bounds, whichever bites first. Hung off a write like every other
+   * prune here, so a hub nobody is debugging never wakes to run it — and a
+   * failure is swallowed for the reason the run write's is: bookkeeping must
+   * not be what ends a run.
+   */
+  private async pruneExchanges(): Promise<void> {
+    try {
+      const oldest = new Date(Date.now() - RETAIN_EXCHANGE_DAYS * 24 * 60 * 60 * 1000);
+      await this.db.delete(aiRunExchanges).where(lt(aiRunExchanges.at, oldest));
+      await this.db.delete(aiRunExchanges).where(
+        lt(
+          aiRunExchanges.at,
+          sql`(select min(at) from (select at from ${aiRunExchanges} order by at desc limit ${RETAIN_EXCHANGES}))`,
+        ),
+      );
+    } catch {
+      // Same reason as `prune`.
+    }
   }
 
   private async prune(): Promise<void> {

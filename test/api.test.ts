@@ -17,7 +17,16 @@ import { AiRunLog } from '../src/core/ai-runs.js';
 import { MappingLibrary } from '../src/ai/library.js';
 import type { AdapterBus, ProtocolAdapter } from '../src/adapters/adapter.js';
 import type { HubCommand } from '../src/schema/index.js';
-import { bootedHome, loadedAccess, openTestDb, resetDb, startedHistory, mcpTokenService } from './helpers/db.js';
+import {
+  bootedHome,
+  loadedAccess,
+  openTestDb,
+  resetDb,
+  startedHistory,
+  mcpTokenService,
+  testBroker,
+  testPortraits,
+} from './helpers/db.js';
 
 const handle = await openTestDb();
 const log = pino({ level: 'silent' });
@@ -79,6 +88,7 @@ describe.skipIf(!handle)('hub API', () => {
       mcpTokens: mcpTokenService(db),
       activity,
       history,
+      portraits: testPortraits(db, events, dataDir),
       settings,
       hubId: 'hub-test-1234',
       home: await bootedHome(db, 'Test Hub'),
@@ -90,6 +100,7 @@ describe.skipIf(!handle)('hub API', () => {
       // Nothing there to read, which is the ordinary state for a hub with no
       // coordinator — and must stay silent rather than becoming an error.
       z2mDataDir: path.join(dataDir, 'zigbee2mqtt'),
+      mqtt: testBroker(),
       // No radio, so it reports a closed window and publishes nothing.
       permitJoin: new PermitJoinService(undefined, log, () => {}),
       aiRuns: new AiRunLog(db, events),
@@ -908,7 +919,9 @@ describe.skipIf(!handle)('hub API', () => {
     });
     expect(put.statusCode).toBe(200);
     const body = put.json() as Record<string, unknown>;
-    expect(body).toEqual({
+    // Every flat field the wire has always carried, unchanged: an app that
+    // predates the second provider reads exactly what it always did.
+    expect(body).toMatchObject({
       provider: 'anthropic',
       model: null,
       hasKey: true,
@@ -917,10 +930,176 @@ describe.skipIf(!handle)('hub API', () => {
       legacySubscriptionToken: false,
       status: {},
     });
+    // And the per-provider half beside them. The models list is the hub's own,
+    // so an app one version behind still draws a complete picker rather than
+    // offering an id this hub would refuse.
+    expect(body).toMatchObject({
+      providers: {
+        anthropic: { hasKey: true, model: 'claude-opus-5' },
+        openai: { hasKey: false },
+      },
+      // One key, so there is nothing to choose between.
+      mapping: { provider: 'anthropic', choosable: false },
+    });
+    // One model per provider: the picker became a statement, so what an app
+    // draws from this list is "recognition runs on Opus 5", not a question.
+    const providers = body.providers as { anthropic: { models: unknown[] } };
+    expect(providers.anthropic.models).toHaveLength(1);
     expect(JSON.stringify(body)).not.toContain('sk-ant');
 
-    const denied = await app.inject({ method: 'GET', url: '/api/v1/settings/ai', headers: auth(memberToken) });
-    expect(denied.statusCode).toBe(403);
+    // A member may read and write this now — see the `hub.ai` note in
+    // `core/access.ts`. A guest still may not, which `roles.test.ts` pins.
+    const allowed = await app.inject({ method: 'GET', url: '/api/v1/settings/ai', headers: auth(memberToken) });
+    expect(allowed.statusCode).toBe(200);
+  });
+
+  /**
+   * The second credential, and the two things about it that are not obvious:
+   * one route carries both keys without either disturbing the other, and the
+   * hub tells the keys apart by their prefix rather than trusting the field
+   * they arrived in — with two secure fields on one screen, pasting into the
+   * wrong one is the ordinary mistake.
+   */
+  /**
+   * The switch that keeps what a run said, end to end.
+   *
+   * Studio *hides* the control on a hub whose settings never mention the
+   * field — a switch that cannot do anything is worse than no switch — so a
+   * field that never reached the wire would make the whole feature invisible
+   * rather than merely broken. That is the shape of gap this pins.
+   */
+  it('answers whether it keeps what a run said, and lets a member change it', async () => {
+    const before = await app.inject({
+      method: 'GET',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+    });
+    // Off, and *said* to be off: nil at the app would hide the control.
+    expect(before.json()).toMatchObject({ recordExchanges: false });
+
+    const on = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { recordExchanges: true },
+    });
+    expect(on.statusCode).toBe(200);
+    expect(on.json()).toMatchObject({ recordExchanges: true });
+
+    // And it is read back from the hub rather than assumed by the caller.
+    const after = await app.inject({
+      method: 'GET',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+    });
+    expect(after.json()).toMatchObject({ recordExchanges: true });
+  });
+
+  it('holds an OpenAI key beside the Anthropic one, and refuses each in the other’s field', async () => {
+    await app.inject({
+      method: 'PUT',
+      url: '/api/v1/settings/ai',
+      headers: auth(ownerToken),
+      payload: { apiKey: 'sk-ant-api-1234567890' },
+    });
+
+    const saved = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      // Terra is still priced, so the write is taken rather than 400-ing an
+      // app that has not shipped an update — the same stance `authType` takes
+      // one field over. What it must not do is come back as the model this
+      // hub runs, because it isn't: it is no longer offered.
+      payload: { openaiApiKey: 'sk-proj-1234567890', openaiModel: 'gpt-5.6-terra' },
+    });
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json()).toMatchObject({
+      hasKey: true,
+      providers: {
+        anthropic: { hasKey: true, model: 'claude-opus-5' },
+        openai: { hasKey: true, model: 'gpt-5.6-sol' },
+      },
+      // Both keys, so which one recognises devices is now somebody's choice.
+      mapping: { provider: 'anthropic', choosable: true },
+    });
+    expect(JSON.stringify(saved.json())).not.toContain('sk-');
+
+    const swapped = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { openaiApiKey: 'sk-ant-api-1234567890' },
+    });
+    expect(swapped.statusCode).toBe(400);
+    // And the sentence reaches the app: a schema message written to be read is
+    // no use at all if every refusal arrives as a bare `invalid_body`.
+    expect(swapped.json()).toMatchObject({
+      error: 'invalid_body',
+      detail: expect.stringContaining('Anthropic key'),
+    });
+
+    // A *subscription* token in the OpenAI field is the same mistake, and the
+    // sentence has to be about the field it was pasted into: `detail` is the
+    // first issue, so an ungated `sk-ant-oat` check answered "the hub needs an
+    // Anthropic API key" — advice about the other box entirely.
+    const subscription = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { openaiApiKey: 'sk-ant-oat01-subscription-token-000000' },
+    });
+    expect(subscription.statusCode).toBe(400);
+    expect(subscription.json()).toMatchObject({
+      error: 'invalid_body',
+      detail: expect.stringContaining('belongs in the Anthropic field'),
+    });
+
+    // In the field it does belong in, it still says what kind of key is wanted.
+    const inItsOwnField = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { anthropicApiKey: 'sk-ant-oat01-subscription-token-000000' },
+    });
+    expect(inItsOwnField.statusCode).toBe(400);
+    expect(inItsOwnField.json()).toMatchObject({
+      error: 'invalid_body',
+      detail: expect.stringContaining('subscription token'),
+    });
+
+    const chosen = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { mappingProvider: 'openai' },
+    });
+    expect(chosen.json()).toMatchObject({ provider: 'openai', mapping: { provider: 'openai' } });
+
+    // Forgetting one leaves the other alone — and takes the stale choice with
+    // it, rather than pointing the agent at a provider it cannot authenticate.
+    const cleared = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { clear: 'openai' },
+    });
+    expect(cleared.json()).toMatchObject({
+      provider: 'anthropic',
+      providers: { anthropic: { hasKey: true }, openai: { hasKey: false } },
+      mapping: { provider: 'anthropic', choosable: false },
+    });
+  });
+
+  it('refuses to point the agent at a provider with no key', async () => {
+    const refused = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { mappingProvider: 'openai' },
+    });
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json()).toMatchObject({ error: 'provider_not_configured', provider: 'openai' });
   });
 
   it('switches adaptation off without asking for the key again', async () => {
@@ -1029,13 +1208,19 @@ describe.skipIf(!handle)('hub API', () => {
     expect((repair.json() as { error: string }).error).toBe('ai_not_configured');
   });
 
-  it('keeps the mapping library to the owner', async () => {
-    const denied = await app.inject({
+  /**
+   * `hub.ai` guards the library, and it moved into the member's set with the
+   * second credential — the `hub.update` argument again: Studio claims a hub as
+   * the Mac, so an owner-only key is one nobody in the house holds. Guest is
+   * where the line falls now, which `roles.test.ts` pins.
+   */
+  it('opens the mapping library to a member', async () => {
+    const allowed = await app.inject({
       method: 'GET',
       url: '/api/v1/device-mappings',
       headers: auth(memberToken),
     });
-    expect(denied.statusCode).toBe(403);
+    expect(allowed.statusCode).toBe(200);
   });
 
   it('still accepts an authType field from an app that has not been updated', async () => {

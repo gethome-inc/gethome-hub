@@ -573,6 +573,8 @@ An assistant gets the home and its devices. It does **not** get:
 | Rooms, zones, renames | Reorganising the house is not what "turn the light off" needs, and an assistant that quietly renames things makes the home harder for everyone else to use. |
 | Removing or pairing devices | Pairing is a person standing next to hardware; removal is not undone by anything here. |
 | The AI settings, the mapping library | The hub's own credential. Not an assistant's business. |
+| The MQTT broker's credentials (`GET /settings/mqtt`) | A password that leaves the building and cannot be un-told. `hub.mqtt` is owner-only for that reason, and a tool that reads a secret out loud is the one shape of tool this surface must not have. |
+| Device portraits | A picture of a plug says nothing a model can act on, and drawing one spends the home's money on an image nobody asked to see. |
 | IR learning (`irLearn` and friends) | Capturing a code is a person pointing a remote at a blaster. `ir_send` replays what is already stored. |
 
 `test/mcp-coverage.test.ts` pins this: every command type, capability kind and

@@ -18,7 +18,9 @@ import {
   openTestDb,
   loadedAccess,
   startedHistory,
-  mcpTokenService
+  mcpTokenService,
+  testBroker,
+  testPortraits,
 } from './helpers/db.js';
 
 /**
@@ -82,6 +84,7 @@ describe.skipIf(!handle)('why Zigbee is down, over HTTP', () => {
       mcpTokens: mcpTokenService(db),
       activity,
       history: await startedHistory(db, events),
+      portraits: testPortraits(db, events),
       settings,
       aiRuns: new AiRunLog(db, events),
       mappings: new MappingLibrary({ db, settings, registry, log }),
@@ -91,6 +94,7 @@ describe.skipIf(!handle)('why Zigbee is down, over HTTP', () => {
       dataDir: dir,
       radioBudget: 'one',
       z2mDataDir,
+      mqtt: testBroker(),
       zigbee: fakeZigbee(options.connected),
       permitJoin: new PermitJoinService(undefined, log, () => {}),
     });

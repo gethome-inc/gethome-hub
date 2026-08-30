@@ -24,7 +24,9 @@ import {
   resetDb,
   loadedAccess,
   startedHistory,
-  mcpTokenService
+  mcpTokenService,
+  testBroker,
+  testPortraits,
 } from '../helpers/db.js';
 
 /**
@@ -115,6 +117,7 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
       mcpTokens: mcpTokenService(db),
       activity,
       history: await startedHistory(db, events),
+      portraits: testPortraits(db, events),
       settings,
       hubId: 'hub-e2e',
       home: await bootedHome(db, 'E2E Hub'),
@@ -122,6 +125,7 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
       dataDir,
       radioBudget: 'both',
       z2mDataDir: path.join(dataDir, 'zigbee2mqtt'),
+      mqtt: testBroker(),
       zigbee,
       permitJoin: new PermitJoinService(zigbee, log, () => {}),
       aiRuns: new AiRunLog(db, events),

@@ -42,7 +42,17 @@ export class AiUnavailableError extends Error {
 // reads the HTTP status the Messages API actually returned, and only falls
 // through to here for the cases a status code cannot separate (a 400 that is
 // really an exhausted credit balance) or for errors that never reached HTTP.
-const USAGE_LIMIT = /usage limit|spend limit|monthly limit|weekly limit|limit reached|quota exceeded/i;
+//
+// **`limit reached` is the loosest alternative here, so it yields to anything
+// more specific.** OpenAI's ordinary per-minute 429 says "Rate limit reached
+// for <model> in organization …", which that alternative would otherwise claim
+// as an exhausted account cap — and the two are answered very differently: a
+// rate limit is a short retry, a cap waits for the provider's own reset and
+// tells the owner their month is spent. Most-specific-first, the same rule
+// `diagnosis.ts` and the Zigbee write failures follow.
+const USAGE_CAP = /usage limit|spend limit|monthly limit|weekly limit|quota exceeded/i;
+const LIMIT_REACHED = /limit reached/i;
+const SAYS_RATE_LIMIT = /rate.?limit/i;
 const RATE_LIMIT = /rate.?limit|\b429\b|too many requests|number of request/i;
 const AUTH = /\b401\b|\b403\b|authentication|unauthorized|forbidden|invalid (?:api.?key|bearer|token)|api.?key.*invalid|token.*(?:expired|revoked)|expired.*token/i;
 const BILLING = /\b402\b|billing|credit balance|insufficient credit|payment required|purchase credits/i;
@@ -50,12 +60,21 @@ const OVERLOADED = /\b529\b|overloaded|capacity constraints/i;
 const NETWORK = /\benotfound\b|\beconnrefused\b|\betimedout\b|\beconnreset\b|fetch failed|network error|socket hang up|connection error/i;
 
 /**
+ * An exhausted account cap rather than a speed bump — see the note above the
+ * patterns for why `limit reached` alone is not enough to say so.
+ */
+function isUsageCap(text: string): boolean {
+  if (USAGE_CAP.test(text)) return true;
+  return LIMIT_REACHED.test(text) && !SAYS_RATE_LIMIT.test(text);
+}
+
+/**
  * Classify an error/result text from an agent run into a transient
  * availability failure, or `null` when the text does not look like an
  * account/service problem (i.e. the run failed on its own merits).
  */
 export function classifyAgentFailure(text: string): AiUnavailableError | null {
-  if (USAGE_LIMIT.test(text)) {
+  if (isUsageCap(text)) {
     return new AiUnavailableError('usage_limit', text, parseResetHint(text));
   }
   if (RATE_LIMIT.test(text)) {
@@ -106,7 +125,7 @@ export function classifyApiError(error: unknown, now: Date = new Date()): AiUnav
   if (status === 429) {
     // A 429 is a rate limit unless the body says an account cap is exhausted
     // — those want the provider's own reset time, not a short retry.
-    const kind: AiFailureKind = USAGE_LIMIT.test(message) ? 'usage_limit' : 'rate_limited';
+    const kind: AiFailureKind = isUsageCap(message) ? 'usage_limit' : 'rate_limited';
     return new AiUnavailableError(kind, message, retryAfter ?? parseResetHint(message, now));
   }
   if (status === 401 || status === 403) return new AiUnavailableError('auth_failed', message);
@@ -186,4 +205,83 @@ export function parseResetHint(text: string, now: Date = new Date()): Date | und
     return candidate;
   }
   return undefined;
+}
+
+/**
+ * What to record about a run that failed on its own merits, in words somebody
+ * can act on.
+ *
+ * This is the `diagnosis.ts` rule — *name a failure, don't just relay it* —
+ * applied to the run log, and it exists because of what the apps were
+ * actually showing. An SDK error's `message` is the HTTP status with the whole
+ * response body glued to it, so a device row in GetHome Studio read
+ * `400 {"type":"error","error":{"type":"invalid_request_error","message":"…"}}`
+ * — three quarters punctuation, and the one sentence that says what to do
+ * buried in the middle of it. Worse, the actionable cases are invisible in
+ * there: an `anthropic-workspace-id` refusal is a *configuration* problem with
+ * a two-minute fix, and it looked exactly like a run that had simply gone
+ * wrong.
+ *
+ * Three rules, the same three the Zigbee diagnosis holds:
+ *
+ *  - **an unrecognised failure is still reported** — with the provider's own
+ *    sentence dug out of its envelope, never with a guess bolted on;
+ *  - **patterns are most-specific-first**, because a configuration refusal is
+ *    also, read loosely, an invalid request;
+ *  - **nothing here throws**: it runs inside the catch of a run that has
+ *    already failed, and the shape it is handed is whatever was thrown.
+ */
+export function describeRunFailure(error: unknown): { kind: string; message: string } {
+  const detail = readableFailure(error);
+  for (const rule of CONFIG_FAILURES) {
+    if (rule.match.test(detail)) return { kind: 'config', message: `${detail} ${rule.fix}` };
+  }
+  return { kind: 'run_failed', message: detail };
+}
+
+/**
+ * Provider refusals that are really settings, each with the fix beside it.
+ *
+ * A key belongs to a person here — it is the home's own, pasted in by whoever
+ * owns the hub — so the fix has to be something they can do from the app or
+ * the vendor's console, and it must not name a vendor the home may not even
+ * be using. Add a row only for a refusal whose remedy is genuinely known;
+ * a wrong instruction is worse than the provider's own words.
+ */
+const CONFIG_FAILURES: readonly { match: RegExp; fix: string }[] = [
+  {
+    // An identity-linked key (a personal or service-account key created
+    // without a workspace) works across several workspaces, so every request
+    // has to name the one it acts in. The hub sends no such header, by
+    // design — one home, one key, one place to spend it.
+    match: /anthropic-workspace-id/i,
+    fix:
+      'The saved key is not tied to a single workspace, and the hub does not choose one. ' +
+      'Create a key scoped to one workspace and save that instead.',
+  },
+];
+
+/**
+ * The sentence inside a provider's error, without the envelope.
+ *
+ * Both providers stringify a refusal as `<status> <body>`, and the body is
+ * JSON with the useful line at `error.message`. Anything that doesn't parse is
+ * returned unchanged — a message that is already prose must survive this
+ * untouched, and so must one whose shape nobody here has seen.
+ *
+ * Separate from `describeRunFailure` because the two are wanted apart: a
+ * transient failure keeps the kind the classifier gave it (`rate_limited`,
+ * `auth_failed`) and only wants its wording cleaned up.
+ */
+export function readableFailure(error: unknown): string {
+  const text = error instanceof Error ? error.message : String(error);
+  const start = text.indexOf('{');
+  if (start === -1) return text;
+  try {
+    const body: unknown = JSON.parse(text.slice(start));
+    const inner = (body as { error?: { message?: unknown } } | null)?.error?.message;
+    return typeof inner === 'string' && inner.length > 0 ? inner : text;
+  } catch {
+    return text;
+  }
 }

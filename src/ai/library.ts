@@ -167,7 +167,7 @@ export class MappingLibrary {
     await this.deps.db
       .delete(aiMappings)
       .where(and(eq(aiMappings.adapter, 'zigbee'), eq(aiMappings.exposesHash, exposesHash)));
-    await this.deps.zigbee?.applyStoredMapping(exposesHash);
+    await this.deps.zigbee?.forgetStoredMapping(exposesHash);
     return true;
   }
 

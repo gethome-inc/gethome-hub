@@ -287,13 +287,42 @@ export class DeviceRegistry implements AdapterBus {
   reachabilityChanged(adapter: AdapterId, externalId: string, reachable: boolean): void {
     this.enqueue(this.key(adapter, externalId), async () => {
       const cached = this.cache.get(this.key(adapter, externalId));
-      if (!cached || cached.online === reachable) return;
+      if (!cached) return;
+      // **One fact, two rows — so the guard has to ask about both.**
+      // Reachability is written to `devices.online` *and* into every
+      // endpoint's `state.reachable`, and the apps do not read the same one:
+      // GetHome Studio draws `online`, while the GetHome iOS app draws
+      // `(online ?? true) && state.reachable`. They are also persisted on
+      // different schedules — the row is written here and now, the state
+      // behind `STATE_FLUSH_MS` — and they are loaded back from two tables
+      // at boot with nothing reconciling them. So they can disagree on disk,
+      // and a guard reading `online` alone then *refuses to repair it*: the
+      // radio comes up, `online` already says true, the function returns, and
+      // an endpoint stuck at `reachable: false` stays that way for ever,
+      // because nothing else writes that field. Observed as one device
+      // reading offline on the phone and online in Studio, on a hub whose
+      // Zigbee2MQTT had per-device availability switched off entirely — so
+      // no per-device message could ever have corrected it either.
+      const flipped = cached.online !== reachable;
+      const stale = cached.endpoints.filter((endpoint) => endpoint.state.reachable !== reachable);
+      if (!flipped && stale.length === 0) return;
       cached.online = reachable;
-      for (const endpoint of cached.endpoints) {
+      for (const endpoint of stale) {
         endpoint.state = mergeState(endpoint.state, { reachable });
+        // Marked dirty, which it never used to be: the mutation above was
+        // in-memory only, so `reachable` reached the disk solely by riding
+        // along with the next *state report* that happened to flush. A quiet
+        // device therefore restarted with whatever was last written, and a
+        // chatty one persisted its `false` and then met the guard above.
+        this.markStateDirty(cached.id, endpoint.endpointId);
       }
-      await this.db.update(devices).set({ online: reachable }).where(eq(devices.id, cached.id));
+      if (flipped) {
+        await this.db.update(devices).set({ online: reachable }).where(eq(devices.id, cached.id));
+      }
       this.events.emit('deviceUpserted', cached.id);
+      // A repair is not a transition: the device's reachability did not
+      // change, one of the two places recording it was simply behind.
+      if (!flipped) return;
       // A device dropping off the network is one of the few things worth
       // remembering that nobody did: it answers "since when?" a week later.
       // Recording the *transition* is what keeps it affordable — this fires
@@ -670,7 +699,14 @@ export class DeviceRegistry implements AdapterBus {
     for (const incoming of descriptor.endpoints) {
       const existing = device.endpoints.find((candidate) => candidate.endpointId === incoming.endpointId);
       if (!existing) {
-        const state = freshEndpointState(incoming.capabilities);
+        // Born reachable only if the device is. An endpoint arriving on a
+        // device that is currently away — a remap widening the endpoint list,
+        // say — would otherwise read `reachable: true` beside a row saying
+        // `online: false`, which is the same two-rows-one-fact split
+        // `reachabilityChanged` repairs, pointed the other way.
+        const state = mergeState(freshEndpointState(incoming.capabilities), {
+          reachable: device.online,
+        });
         await this.db.insert(endpoints).values({
           deviceId: device.id,
           endpointId: incoming.endpointId,

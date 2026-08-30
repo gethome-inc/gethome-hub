@@ -14,7 +14,7 @@ import type { PairingService } from '../core/pairing.js';
 import type { ActivityService } from '../core/activity.js';
 import type { HomeService } from '../core/home.js';
 import type { FavoritesService } from '../core/favorites.js';
-import type { SettingsService } from '../core/settings.js';
+import { AI_PROVIDERS, type AiProvider, type SettingsService } from '../core/settings.js';
 import type { HomeStructure, HubEventBus } from '../core/bus.js';
 import type { Logger } from '../logging.js';
 import { commandSchema } from '../schema/index.js';
@@ -22,7 +22,7 @@ import type { MatterAdapter } from '../adapters/matter/adapter.js';
 import type { ZigbeeAdapter } from '../adapters/zigbee/adapter.js';
 // Dependency-free model catalog (a price table and an allowlist) — importing
 // it here does not pull the AI stack into the API layer.
-import { isSupportedModel, supportedModelIds } from '../ai/models.js';
+import { effectiveModel, isSupportedModel, PROVIDER_MODELS, supportedModelIds } from '../ai/models.js';
 // Local operations on stored JSON — zod only, no Anthropic SDK in this graph.
 // `MappingLibrary.repair` loads the agent on demand.
 import type { MappingLibrary } from '../ai/library.js';
@@ -37,7 +37,11 @@ import {
   requestUpdate,
 } from '../core/update.js';
 import type { MqttObserver } from '../core/mqtt-observer.js';
+import { hostFromRequest, mqttAccess, type MqttBrokerConfig } from '../core/mqtt-access.js';
 import { isHistoryKind, type HistoryKind, type HistoryService } from '../core/history.js';
+// Files and rows, and `fetch` when it draws. No SDK, so no dynamic import.
+import { PortraitBusyError, PortraitSpaceError, type PortraitService } from '../portraits/store.js';
+import { PortraitDrawError } from '../portraits/openai-images.js';
 import { MAX_WINDOW_SECONDS, type PermitJoinService } from '../core/permit-join.js';
 import { createHubStatusReader } from '../core/hub-status.js';
 import { deviceWire } from './dto.js';
@@ -65,6 +69,8 @@ export interface ApiDeps {
   activity: ActivityService;
   /** What the home's readings did over the last few days — `core/history.ts`. */
   history: HistoryService;
+  /** The pictures a home has had drawn of its devices — `portraits/store.ts`. */
+  portraits: PortraitService;
   settings: SettingsService;
   mcpTokens: McpTokenService;
   /**
@@ -85,6 +91,14 @@ export interface ApiDeps {
   radioBudget: RadioBudget;
   /** Zigbee2MQTT's data directory — read only to say *why* Zigbee is down. */
   z2mDataDir: string;
+  /**
+   * How to sign in to this hub's broker, for `GET /settings/mqtt`.
+   *
+   * Required rather than optional: an absent one would have to answer
+   * "no password" — indistinguishable from an open broker — which is the
+   * single most misleading thing this route could say.
+   */
+  mqtt: MqttBrokerConfig;
   /**
    * The broker tap behind the apps' traffic inspector. Absent when the MQTT
    * adapter is off, in which case the `mqtt` WebSocket stream is simply not
@@ -117,6 +131,13 @@ interface CommissionJob {
   nodeId?: string;
   error?: string;
 }
+
+/**
+ * A downscaled phone photo is a few hundred kilobytes and base64 inflates it by
+ * a third; this leaves room for a big one without letting the route become a
+ * way to hand a Raspberry Pi ten megabytes of anything.
+ */
+const PHOTO_BODY_LIMIT = 12 * 1024 * 1024;
 
 const COMMISSION_JOB_TTL_MS = 10 * 60 * 1000;
 const PAIR_MAX_FAILURES = 10;
@@ -193,6 +214,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     return null;
   };
 
+  /**
+   * A device's portraits moved, so tell every socket. The frame carries the id
+   * and nothing else — the list is one short read, and the pictures themselves
+   * are megabytes.
+   */
+  const announcePortraits = (deviceId: string) => deps.events.emit('portraitsChanged', deviceId);
+
   /** Forget finished commissioning jobs; the map used to grow for the uptime. */
   const forgetJobLater = (jobId: string) => {
     setTimeout(() => commissionJobs.delete(jobId), COMMISSION_JOB_TTL_MS).unref?.();
@@ -227,7 +255,16 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
 
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof z.ZodError) {
-      return reply.code(400).send({ error: 'invalid_body', issues: error.issues });
+      // `issues` is the whole of what was wrong, for a developer. `detail` is
+      // the first message, for a person: several of these schemas carry a
+      // sentence written to be read — "that is a Claude subscription token",
+      // "that looks like an OpenAI key — it belongs in the OpenAI field" — and
+      // without somewhere for an app to find one, every such refusal reads as
+      // a bare "the hub didn't accept that", which is the least useful true
+      // thing it could say.
+      return reply
+        .code(400)
+        .send({ error: 'invalid_body', detail: error.issues[0]?.message, issues: error.issues });
     }
     const err = error as Error & { statusCode?: number };
     request.log.error({ err }, 'request failed');
@@ -277,6 +314,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // public and a hub should not announce to the network that there is an
     // assistant door and whether it is open.
     mcp: { available: true },
+    // Additive, and presence is the capability again: an app that finds this
+    // block knows the hub can draw device portraits and how many it keeps, and
+    // one that doesn't simply never offers to. Whether a *key* has been saved
+    // is a different question, and it is answered by `GET /settings/ai` —
+    // which not every member of a home may read.
+    portraits: deps.portraits.describe(),
     // Additive: an app that doesn't know about this field ignores it, and one
     // that does can say "plug a coordinator in" instead of showing an empty
     // Zigbee section with no explanation.
@@ -909,8 +952,159 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // keeps an app from drawing a button whose only outcome is silence.
     const refusal = await aiUnavailableReason();
     if (refusal) return reply.code(409).send({ error: refusal });
-    const ok = await deps.zigbee.remap(device.externalId);
-    return { requested: ok };
+    // Answers as soon as the run is under way, never when it ends — see
+    // `ZigbeeAdapter.remap`. What the agent then did arrives on the `ai`
+    // stream and in `GET /ai/runs`.
+    return { requested: deps.zigbee.remap(device.externalId) };
+  });
+
+  // ── Device portraits ──────────────────────────────────────────────────────
+
+  /**
+   * The pictures this home has had drawn of a device.
+   *
+   * **Reading is the floor**, like the device list and its history: a portrait
+   * is what the device *looks like* in the apps, so a guest whose dashboard
+   * could not draw it would be looking at a different home from everybody else.
+   */
+  app.get('/api/v1/devices/:id/portraits', authed, async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    if (!deps.registry.getDevice(id)) return reply.code(404).send({ error: 'not_found' });
+    return deps.portraits.list(id);
+  });
+
+  /**
+   * The PNG itself — the first route in this API that answers something other
+   * than JSON.
+   *
+   * A portrait's bytes never change (a new one gets a new id), so it is
+   * `immutable` with a strong ETag and a phone downloads each one exactly once.
+   * That matters more than it looks: these are one to two megabytes each, and
+   * the alternative is every device grid re-fetching the whole set over a home
+   * Wi-Fi network on every launch.
+   */
+  app.get('/api/v1/portraits/:portraitId', authed, async (request, reply) => {
+    const { portraitId } = z.object({ portraitId: z.uuid() }).parse(request.params);
+    const portrait = await deps.portraits.read(portraitId);
+    if (!portrait) return reply.code(404).send({ error: 'not_found' });
+    if (request.headers['if-none-match'] === portrait.etag) return reply.code(304).send();
+    return reply
+      .header('content-type', 'image/png')
+      .header('cache-control', 'public, max-age=31536000, immutable')
+      .header('etag', portrait.etag)
+      .send(portrait.bytes);
+  });
+
+  /**
+   * Draw one.
+   *
+   * `hub.ai` rather than `device.edit`, because this is the route that spends
+   * the home's money — the same key that guards the credential it spends. It is
+   * a member's to press for the reason `hub.update` is: the person standing in
+   * front of the kettle is the one who wants a picture of it, and on a hub
+   * Studio claimed as *the Mac* that person is never the owner.
+   *
+   * Deliberately synchronous. It holds the request for the minutes an image
+   * takes — two to five on a real hub — which is what lets the app show one
+   * uninterrupted animation from "reading your photo" to the finished portrait;
+   * and if the phone gives up or walks out of range, the hub finishes, stores
+   * and announces it anyway, so nothing is lost but the animation.
+   *
+   * A second asker gets `409 portrait_busy` rather than a place in a queue,
+   * and the reason is money before it is time: every drawing bills the home,
+   * so a queue turns four impatient taps into four charges while a refusal
+   * makes the second one free. See `PortraitService.draw`.
+   */
+  app.post(
+    '/api/v1/devices/:id/portraits',
+    {
+      ...needs('hub.ai'),
+      // The default is 1 MiB, and a photo is several. Per route rather than on
+      // the server, so nothing else on this API grows a mouth that size.
+      bodyLimit: PHOTO_BODY_LIMIT,
+    },
+    async (request, reply) => {
+      const { id } = z.object({ id: z.uuid() }).parse(request.params);
+      const device = deps.registry.getDevice(id);
+      if (!device) return reply.code(404).send({ error: 'not_found' });
+      const body = z
+        .object({
+          /** A base64 photo to restyle. Absent draws from the device's kind alone. */
+          photo: z.string().min(64).max(PHOTO_BODY_LIMIT).optional(),
+          photoType: z.enum(['image/jpeg', 'image/png']).default('image/jpeg'),
+        })
+        .parse(request.body ?? {});
+
+      // Its own refusal code, not `ai_not_configured`: portraits are drawn by
+      // OpenAI and device recognition may be running on Anthropic, so a hub can
+      // be perfectly configured for one and not the other. And deliberately not
+      // gated on `ai_enabled`, which is the *adaptation* switch — nobody draws
+      // a portrait by accident, so there is nothing to switch off.
+      const apiKey = await deps.settings.aiKey('openai');
+      if (!apiKey) return reply.code(409).send({ error: 'openai_not_configured' });
+
+      const kind = device.endpoints[0]?.deviceKind;
+      if (!kind) return reply.code(409).send({ error: 'device_has_no_kind' });
+
+      try {
+        const portrait = await deps.portraits.draw({
+          deviceId: id,
+          kind,
+          apiKey,
+          ...(body.photo !== undefined
+            ? { photo: { bytes: Buffer.from(body.photo, 'base64'), contentType: body.photoType } }
+            : {}),
+        });
+        // Recorded because it spent money and everybody in the home now sees a
+        // different picture. Only the drawing: choosing between portraits and
+        // deleting one are restyles, and a restyle is not what somebody reads
+        // the log for a week later — the same line `rooms.icon` holds.
+        await deps.activity.record({
+          kind: 'device.portrait',
+          message: `${request.member!.name} had a new portrait drawn for ${device.name}.`,
+          memberId: request.member!.id,
+          deviceId: id,
+          data: { memberName: request.member!.name, deviceName: device.name },
+        });
+        announcePortraits(id);
+        return portrait;
+      } catch (error) {
+        if (error instanceof PortraitBusyError) {
+          return reply.code(409).send({ error: 'portrait_busy', detail: error.message });
+        }
+        if (error instanceof PortraitSpaceError) {
+          return reply.code(409).send({ error: 'no_space', detail: error.message });
+        }
+        if (error instanceof PortraitDrawError) {
+          return reply.code(502).send({ error: 'provider_failed', kind: error.kind, detail: error.message });
+        }
+        throw error;
+      }
+    },
+  );
+
+  /**
+   * Which portrait the home sees — `device.edit`, because that is the key for
+   * the things about a device everybody shares, and picking one costs nothing.
+   * `null` means the procedural sphere, which is a choice rather than an
+   * absence and is why it is a nullable field instead of a delete.
+   */
+  app.patch('/api/v1/devices/:id/portraits', needs('device.edit'), async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    if (!deps.registry.getDevice(id)) return reply.code(404).send({ error: 'not_found' });
+    const body = z.object({ selected: z.uuid().nullable() }).parse(request.body);
+    const ok = await deps.portraits.select(id, body.selected);
+    if (!ok) return reply.code(404).send({ error: 'not_found' });
+    announcePortraits(id);
+    return deps.portraits.list(id);
+  });
+
+  app.delete('/api/v1/portraits/:portraitId', needs('device.edit'), async (request, reply) => {
+    const { portraitId } = z.object({ portraitId: z.uuid() }).parse(request.params);
+    const deviceId = await deps.portraits.remove(portraitId);
+    if (!deviceId) return reply.code(404).send({ error: 'not_found' });
+    announcePortraits(deviceId);
+    return reply.code(204).send();
   });
 
   // ── Matter commissioning & Zigbee joining ────────────────────────────────
@@ -1419,10 +1613,81 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
 
   // ── AI settings ──────────────────────────────────────────────────────────
 
+  /**
+   * The AI settings, as an app draws them.
+   *
+   * Every field the flat shape has always carried is still here — `provider`,
+   * `model`, `hasKey`, `enabled`, `legacySubscriptionToken`, `status` — because
+   * the wire is a compatibility contract and an older app reads them. What is
+   * new is per-provider, plus the two things an app must not decide for itself:
+   * which models this hub will accept (with the hub's own labels, the
+   * `GET /permissions` rule) and whether the mapping provider is a choice at
+   * all.
+   */
   const aiSettingsResponse = async () => {
     const [ai, status] = await Promise.all([deps.settings.getAiSettings(), deps.settings.getAiStatus()]);
-    return { ...ai, status };
+    const forProvider = (provider: AiProvider) => ({
+      hasKey: ai[provider].hasKey,
+      model: effectiveModel(provider, ai[provider].model),
+      models: PROVIDER_MODELS[provider].choices,
+    });
+    return {
+      ...ai,
+      status,
+      providers: { anthropic: forProvider('anthropic'), openai: forProvider('openai') },
+      mapping: { provider: ai.provider, choosable: ai.mappingChoosable },
+      portraits: deps.portraits.describe(),
+    };
   };
+
+  const modelField = (provider: AiProvider) =>
+    z
+      .string()
+      .min(1)
+      .max(120)
+      .refine((model) => isSupportedModel(model, provider), {
+        message: `unsupported model — the mapping agent runs on: ${supportedModelIds(provider).join(', ')}`,
+      })
+      .nullable()
+      .optional();
+
+  const apiKeyField = (provider: AiProvider) =>
+    z
+      .string()
+      .min(8)
+      .max(4000)
+      // Anthropic's field only. `detail` is `issues[0]`, and an `sk-ant-oat…`
+      // trips this *and* the OpenAI-field check below — so pasted into the
+      // OpenAI box it answered "the hub needs an Anthropic API key", which is
+      // advice about the other field. Gated here, the right sentence surfaces:
+      // an `sk-ant-` anything belongs in the Anthropic field, and once it is
+      // there this says what kind of Anthropic key it has to be.
+      .refine((key) => (provider === 'anthropic' ? !key.trim().startsWith('sk-ant-oat') : true), {
+        message:
+          'that is a Claude subscription token; the hub needs an Anthropic API key (sk-ant-api…) from platform.claude.com',
+      })
+      .refine((key) => (provider === 'anthropic' ? !key.trim().startsWith('sk-proj-') : true), {
+        message: 'that looks like an OpenAI key — it belongs in the OpenAI field',
+      })
+      .refine((key) => (provider === 'openai' ? !key.trim().startsWith('sk-ant-') : true), {
+        message: 'that looks like an Anthropic key — it belongs in the Anthropic field',
+      })
+      .optional();
+
+  const aiPatchSchema = z.object({
+    enabled: z.boolean().optional(),
+    /** The Anthropic model, under the name this route has always used. */
+    model: modelField('anthropic'),
+    anthropicModel: modelField('anthropic'),
+    openaiModel: modelField('openai'),
+    anthropicApiKey: apiKeyField('anthropic'),
+    openaiApiKey: apiKeyField('openai'),
+    mappingProvider: z.enum(AI_PROVIDERS).optional(),
+    /** Forget one provider's key and model, leaving the other one alone. */
+    clear: z.enum(AI_PROVIDERS).optional(),
+    /** Keep what each round of a run sent and received — see `GET /ai/runs`. */
+    recordExchanges: z.boolean().optional(),
+  });
 
   app.get('/api/v1/settings/ai', needs('hub.ai'), aiSettingsResponse);
 
@@ -1464,31 +1729,43 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   });
 
   /**
-   * Turn AI adaptation on or off, or change the model, without re-entering the
-   * key.
+   * Change anything about the hub's AI without re-entering everything else.
    *
-   * `PUT` requires an `apiKey`, so the only way to stop the agent running used
-   * to be `DELETE` — which is a different request. "Stop spending my money on
-   * this for now" and "forget my credential" have very different costs to
-   * undo, and an owner who wanted the first had to pay the second.
+   * Every field is optional and absence means "leave this alone", which is what
+   * lets one route carry two credentials, two models, the mapping provider and
+   * the switch. `PUT` requires an `apiKey`, so the only way to stop the agent
+   * running used to be `DELETE` — which is a different request. "Stop spending
+   * my money on this for now" and "forget my credential" have very different
+   * costs to undo, and an owner who wanted the first had to pay the second.
+   *
+   * The two keys are told apart by their prefixes rather than trusted to the
+   * field they arrived in: with two secure fields on one screen, pasting into
+   * the wrong one is the ordinary mistake, and "that is an Anthropic key" is a
+   * far better answer than a 401 from the wrong vendor an hour later.
    */
-  app.patch('/api/v1/settings/ai', needs('hub.ai'), async (request) => {
-    const body = z
-      .object({
-        enabled: z.boolean().optional(),
-        model: z
-          .string()
-          .min(1)
-          .max(120)
-          .refine(isSupportedModel, {
-            message: `unsupported model — the mapping agent runs on: ${supportedModelIds().join(', ')}`,
-          })
-          .nullable()
-          .optional(),
-      })
-      .parse(request.body);
+  app.patch('/api/v1/settings/ai', needs('hub.ai'), async (request, reply) => {
+    const body = aiPatchSchema.parse(request.body);
+    if (body.clear !== undefined) await deps.settings.clearAiProvider(body.clear);
+    if (body.anthropicApiKey !== undefined) await deps.settings.setAiKey('anthropic', body.anthropicApiKey);
+    if (body.openaiApiKey !== undefined) await deps.settings.setAiKey('openai', body.openaiApiKey);
+    const anthropicModel = body.anthropicModel !== undefined ? body.anthropicModel : body.model;
+    if (anthropicModel !== undefined) await deps.settings.setAiModel(anthropicModel, 'anthropic');
+    if (body.openaiModel !== undefined) await deps.settings.setAiModel(body.openaiModel, 'openai');
+    if (body.mappingProvider !== undefined) {
+      // Asked after the key writes above, so one request can save a key and
+      // point the agent at it. A provider with no credential is refused rather
+      // than stored: the hub would answer with the *other* provider on the next
+      // read, and the app would show a picker that silently sprang back.
+      const ai = await deps.settings.getAiSettings();
+      if (!ai[body.mappingProvider].hasKey) {
+        return reply.code(400).send({ error: 'provider_not_configured', provider: body.mappingProvider });
+      }
+      await deps.settings.setMappingProvider(body.mappingProvider);
+    }
     if (body.enabled !== undefined) await deps.settings.setAiEnabled(body.enabled);
-    if (body.model !== undefined) await deps.settings.setAiModel(body.model);
+    if (body.recordExchanges !== undefined) {
+      await deps.settings.setAiRecordExchanges(body.recordExchanges);
+    }
     return aiSettingsResponse();
   });
 
@@ -1508,6 +1785,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       .object({ limit: z.coerce.number().int().min(1).max(100).default(30) })
       .parse(request.query);
     const rows = await deps.aiRuns.list(query.limit);
+    // How many rounds each run kept, so an app knows whether to offer the
+    // disclosure at all — one grouped read rather than a body per run, since
+    // the bodies are the expensive half and most runs have none.
+    const counts = await deps.aiRuns.exchangeCounts(rows.map((row) => row.id));
     return rows.map((row) => ({
       id: row.id,
       at: row.at.toISOString(),
@@ -1516,6 +1797,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       vendor: row.vendor,
       model: row.model,
       exposesHash: row.exposesHash,
+      // Which vendor ran it, beside which model. Absent on a row written
+      // before the hub could run on more than one.
+      provider: row.provider,
       modelId: row.modelId,
       ok: row.ok,
       costUsd: row.costUsd,
@@ -1524,6 +1808,37 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       errorKind: row.errorKind,
       errorMessage: row.errorMessage,
       steps: row.steps,
+      /** Rounds kept for this run — 0 unless recording was on when it ran. */
+      exchanges: counts.get(row.id) ?? 0,
+    }));
+  });
+
+  /**
+   * What was said to the provider, round by round, for one run.
+   *
+   * Fetched rather than streamed, and only when somebody opens it: this is
+   * kilobytes per run and nobody reads it on a hub that is working — the same
+   * stance `HubLogsDisclosure` takes towards a Pi's install log. An empty list
+   * is the ordinary answer, because recording is off unless the owner asked
+   * for it; a run whose rounds have aged out answers the same way, which is
+   * why the list carries a count rather than a boolean somebody could read as
+   * a promise.
+   */
+  app.get('/api/v1/ai/runs/:id/exchanges', needs('hub.ai'), async (request) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const rows = await deps.aiRuns.exchangesOf(id);
+    return rows.map((row) => ({
+      seq: row.seq,
+      at: row.at.toISOString(),
+      durationMs: row.durationMs,
+      provider: row.provider,
+      modelId: row.modelId,
+      status: row.status,
+      ok: row.ok,
+      inputTokens: row.inputTokens,
+      outputTokens: row.outputTokens,
+      sent: row.sent,
+      received: row.received,
     }));
   });
 
@@ -1587,6 +1902,41 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       });
     }
     return outcome;
+  });
+
+  /**
+   * The broker credentials, for somebody wiring their own device into this home.
+   *
+   * There are two accounts and this returns the ones the caller may use, never
+   * a list with the passwords blanked out — a row somebody cannot act on reads
+   * as broken. `hub.mqtt` is the base and gets the limited account;
+   * `hub.mqtt.admin` adds the hub's own full-access one, and is deliberately an
+   * *addition* rather than a second door, so there is still one guard per route.
+   *
+   * **It writes to the activity log, which no other GET here does.** That is
+   * the point rather than an oversight: everything else this API hands out is a
+   * request the hub carries out and can stop carrying out, while a broker
+   * password is a secret that leaves the building and cannot be taken back. The
+   * whole reason it is safe to delegate `hub.mqtt` in the matrix is that the
+   * home can see afterwards who was given one.
+   */
+  app.get('/api/v1/settings/mqtt', needs('hub.mqtt'), async (request) => {
+    const admin = deps.access.can(request.member!.id, 'hub.mqtt.admin');
+    const answer = mqttAccess({
+      config: deps.mqtt,
+      requestHost: hostFromRequest(request.headers.host),
+      canUseIntegrations: true,
+      canUseFullAccess: admin,
+    });
+    await deps.activity.record({
+      kind: 'hub.mqtt',
+      message: admin
+        ? `${request.member!.name} looked up the MQTT broker credentials, including full access.`
+        : `${request.member!.name} looked up the MQTT credentials for connecting a device.`,
+      memberId: request.member!.id,
+      data: { memberName: request.member!.name, full: admin },
+    });
+    return answer;
   });
 
   /**

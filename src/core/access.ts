@@ -128,9 +128,26 @@ export const PERMISSIONS: readonly PermissionDescriptor[] = [
   {
     key: 'hub.ai',
     group: 'Hub',
-    title: 'AI adaptation',
+    title: 'AI keys and portraits',
     summary:
-      'The API key and its switch, what the agent has spent, and the device-mapping library.',
+      'The API keys and the adaptation switch, drawing a device portrait, what has been spent, and the device-mapping library.',
+  },
+  {
+    key: 'hub.mqtt',
+    group: 'Hub',
+    title: 'Connect your own devices over MQTT',
+    summary:
+      'See the username and password for wiring a board or an integration into this home. ' +
+      'That account can publish your own devices and read what the home reports, but not ' +
+      'control Zigbee devices or open the network for pairing.',
+  },
+  {
+    key: 'hub.mqtt.admin',
+    group: 'Hub',
+    title: 'Full access to the MQTT broker',
+    summary:
+      'See the hub’s own broker password, which can control every Zigbee device directly ' +
+      'and open the network for pairing. Worth having for debugging; it is the keys to the home.',
   },
   {
     key: 'hub.mcp',
@@ -154,6 +171,8 @@ export type PermissionKey =
   | 'hub.radio'
   | 'hub.update'
   | 'hub.ai'
+  | 'hub.mqtt'
+  | 'hub.mqtt.admin'
   | 'hub.mcp';
 
 export const PERMISSION_KEYS: readonly PermissionKey[] = PERMISSIONS.map((entry) => entry.key);
@@ -186,14 +205,36 @@ export const BUILTIN_ROLES = [
      * there did not mean "an update needs care", it meant the phone in the
      * owner's own hand could never update their own hub, ever.
      *
-     * `hub.mcp` is deliberately **not** here, and it is the counter-example to
-     * the paragraph above. Updating is bounded: the installer rolls itself
-     * back, and the home is the same home afterwards. Handing an outside
-     * assistant a door into the house is neither bounded nor undone by
-     * anything the hub can do — the token lives in a config file on somebody
-     * else's laptop until a person revokes it. So it joins `member.invite`
-     * and `role.manage` on the owner's side of the line: grantable to a role
-     * a home decides to trust, never on by default.
+     * `hub.ai` joined it later on exactly that argument. It spends money, which
+     * is a real reason for care and not a reason for owner-only: the person
+     * standing in the house is the one who wants a device recognised or a
+     * portrait drawn, and on a typical hub that person is never the owner.
+     * Guest is where the line actually falls. Adding a key to this list does
+     * not reach a hub that already exists — `ensureBuiltins()` inserts with
+     * `ON CONFLICT DO NOTHING` — so it travels with a migration that updates
+     * the stored row (`0006`).
+     *
+     * **Neither MQTT key is here, and that is the one place the "bounded
+     * cost" test comes out differently.** Every other permission is a request
+     * this hub carries out and can stop carrying out: removing a member takes
+     * their tokens with the row and hangs up the socket they were holding, so
+     * whatever they could do, they cannot do a second later. A broker password
+     * is not like that — it is a secret that leaves the building. Nothing here
+     * can un-tell somebody a password, and the only way to take one back is to
+     * mint another and go round every board in the house that had it. Handing
+     * one out is therefore the owner's call by default, exactly as it would be
+     * for a front-door key. A home that wants it otherwise says so in the
+     * matrix, and `hub.mqtt` alone is the safe half of the answer: it is the
+     * account that cannot switch anything on.
+     *
+     * **`hub.mcp` is not here either**, and it is the counter-example to the
+     * `hub.update` paragraph rather than to the MQTT one. Updating is
+     * bounded: the installer rolls itself back, and the home is the same home
+     * afterwards. Handing an outside assistant a door into the house is
+     * neither bounded nor undone by anything the hub can do — the token lives
+     * in a config file on somebody else's laptop until a person revokes it. So
+     * it joins `member.invite` and `role.manage` on the owner's side of the
+     * line: grantable to a role a home decides to trust, never on by default.
      */
     permissions: [
       'device.edit',
@@ -202,6 +243,7 @@ export const BUILTIN_ROLES = [
       'activity.read',
       'hub.radio',
       'hub.update',
+      'hub.ai',
     ] as PermissionKey[],
   },
   {

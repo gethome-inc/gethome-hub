@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { integer, primaryKey, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { index, integer, primaryKey, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 /**
  * The hub's store is a single SQLite file (`<data>/hub.db`).
@@ -480,8 +480,10 @@ export const aiRuns = sqliteTable('ai_runs', {
   vendor: text('vendor'),
   model: text('model'),
   exposesHash: text('exposes_hash').notNull(),
-  /** Which Claude model ran it. */
+  /** Which model ran it — `claude-…` or `gpt-…`, depending on the provider. */
   modelId: text('model_id'),
+  /** anthropic | openai. Absent on rows written before the second provider. */
+  provider: text('provider'),
   /** Whether the run produced a mapping the hub accepted. */
   ok: integer('ok', { mode: 'boolean' }).notNull().default(false),
   costUsd: real('cost_usd'),
@@ -492,6 +494,89 @@ export const aiRuns = sqliteTable('ai_runs', {
   /** `AgentStep[]` as JSON. */
   steps: text('steps', { mode: 'json' }).notNull(),
 });
+
+/**
+ * What was actually said to a provider, round by round, for the runs somebody
+ * asked to have recorded.
+ *
+ * `ai_runs` is a **summary** — searches, pages, submissions — and that is what
+ * every run writes, forever, because model prose on an SD card is the write
+ * amplification the rest of this store is arranged to avoid. This table is the
+ * exception, and three things keep it affordable. It is written **only while
+ * `ai_record_exchanges` is on**, so a hub nobody is debugging holds nothing.
+ * It holds the round's **main data** rather than its bodies — a labelled,
+ * excerpted part per thing sent or received, never the request as it went out,
+ * which for a 40-turn loop would mean writing the same 9.9 KB system prompt
+ * forty times. And it is bounded at **both ends**, seven days and a row cap,
+ * whichever bites first — the two-bounds rule the activity log and the reading
+ * history both follow.
+ *
+ * `run_id` cascades: this table was created with the foreign key rather than
+ * gaining it by `ALTER TABLE`, so SQLite will accept the action and a pruned
+ * run takes its rounds with it. See `core/ai-runs.ts`.
+ */
+export const aiRunExchanges = sqliteTable('ai_run_exchanges', {
+  id: uuidPk(),
+  runId: text('run_id')
+    .notNull()
+    .references(() => aiRuns.id, { onDelete: 'cascade' }),
+  /** 1-based, in the order the rounds happened. */
+  seq: integer('seq').notNull(),
+  at: createdAt('at'),
+  durationMs: integer('duration_ms'),
+  /** anthropic | openai, and the model of theirs that answered — recorded per
+   *  round rather than per run, because a run can be retried against another. */
+  provider: text('provider').notNull(),
+  modelId: text('model_id').notNull(),
+  status: integer('status'),
+  ok: integer('ok', { mode: 'boolean' }).notNull().default(false),
+  inputTokens: integer('input_tokens'),
+  outputTokens: integer('output_tokens'),
+  /** `ExchangePart[]` as JSON — what this turn added to the request. */
+  sent: text('sent', { mode: 'json' }).notNull(),
+  /** `ExchangePart[]` as JSON — what came back, or the refusal. */
+  received: text('received', { mode: 'json' }).notNull(),
+}, (table) => ({
+  // Every read of this table is "the rounds of one run", and every prune is
+  // "the rounds of runs that are gone" — both a prefix of this key.
+  byRun: index('ai_run_exchanges_run_idx').on(table.runId, table.seq),
+}));
+
+/**
+ * A device's AI-drawn portraits — the picture the apps float on its page.
+ *
+ * A portrait is the *house's*, exactly like a room's icon: everybody in the
+ * home should see the same kettle, so it is a row here rather than a file on
+ * whoever generated it. The image itself is **not** in this table — a 1024²
+ * transparent PNG is a megabyte or two, and putting that through the WAL on
+ * every checkpoint is the write amplification the whole store is arranged to
+ * avoid. The bytes live at `<data>/portraits/<device>/<id>.png`; this row is
+ * the record of them, and the file is deleted with it.
+ *
+ * `selected` is which one the apps draw. **No row selected while portraits
+ * exist is a state, not an absence**: it means somebody chose the procedural
+ * sphere over every picture they have, which is a per-home preference the apps
+ * already had and would otherwise need a column of its own to express.
+ */
+export const devicePortraits = sqliteTable(
+  'device_portraits',
+  {
+    id: uuidPk(),
+    deviceId: text('device_id')
+      .notNull()
+      .references(() => devices.id, { onDelete: 'cascade' }),
+    at: createdAt('at'),
+    /** Size of the stored PNG, so the hub can bound its own disk without stat-ing every file. */
+    bytes: integer('bytes').notNull(),
+    /** Who drew it and with what — recorded because both will change. */
+    provider: text('provider').notNull(),
+    model: text('model').notNull(),
+    /** Whether a photo was the reference, which is the difference a person can see. */
+    fromPhoto: integer('from_photo', { mode: 'boolean' }).notNull().default(false),
+    selected: integer('selected', { mode: 'boolean' }).notNull().default(false),
+  },
+  (table) => [index('device_portraits_device').on(table.deviceId)],
+);
 
 /**
  * Key-value settings. AI provider keys are stored here encrypted with the

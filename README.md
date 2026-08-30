@@ -26,9 +26,10 @@ hub can control them.
   device starts publishing later, are mapped into the schema by an
   autonomous mapping agent: it reads the device's published schema,
   researches it on the web (starting from the device's own Zigbee2MQTT
-  page), and submits a validated mapping (bring your own Anthropic API key;
-  stored encrypted on the hub, used only for this). No credential → devices
-  still appear, flagged "needs review". It can be switched off without
+  page), and submits a validated mapping. **Bring your own account** — an
+  Anthropic or an OpenAI API key, stored encrypted on the hub and used only for
+  this; with both, you choose which one does the research. No credential →
+  devices still appear, flagged "needs review". It can be switched off without
   deleting the key, every run is recorded (what it searched for, what it read,
   what it cost), and the answers are a **library** you can download from one
   hub, upload to another, or write yourself — a schema the hub can't use comes
@@ -36,6 +37,13 @@ hub can control them.
   Only a device's own published description is ever sent; the hub's traffic is
   structurally incapable of reaching the agent.
   ([docs/ai-adaptation.md](docs/ai-adaptation.md))
+- **Device portraits** — an AI-drawn picture of each device, the floating object
+  the GetHome app shows on a device's page. Drawn on the hub with the home's
+  OpenAI key and **stored on the hub**, so everybody in the home sees the same
+  kettle rather than one person's phone holding the only copy. Bounded on
+  purpose — a few per device, a few hundred megabytes in total, and it refuses
+  to draw at all when the card is nearly full.
+  ([docs/portraits.md](docs/portraits.md))
 - **One schema for everything** — 27 capabilities (including button/remote
   events, learn-and-replay IR blasters, and a universal generic-control
   fallback so *any* device parameter is usable), 16 device kinds, exact unit
@@ -239,12 +247,18 @@ sudo gethome-hubctl status          # every service, and what the API says
 sudo gethome-hubctl logs 100
 sudo gethome-hubctl zigbee          # the coordinator, and re-check what's attached
 sudo gethome-hubctl pairing-code    # for another device
+sudo gethome-hubctl mqtt            # the broker's two accounts (--rotate to change them)
 ```
 
 The API answers at `http://<hub>:8420/api/v1/hub`, and the MQTT broker at
-`mqtt://<hub>:1883` for devices on the same network. The broker is anonymous
-and unencrypted, which is right for a home LAN and wrong for the internet —
-don't forward 1883 through your router.
+`mqtt://<hub>:1883` for devices on the same network. The broker asks for a
+username and password: `sudo gethome-hubctl mqtt` prints the two accounts, and
+the apps show them too. Use the one named for your own devices — it can publish
+under `gethome/` and watch what the home reports, but it cannot control Zigbee
+devices or open the network for pairing, so a devboard built against it cannot
+take the home over. The connection is still unencrypted, which is right for a
+home LAN and wrong for the internet — don't forward 1883 through your router.
+See [mqtt-integrations.md](docs/mqtt-integrations.md).
 
 ### There is no Docker, and no database server
 

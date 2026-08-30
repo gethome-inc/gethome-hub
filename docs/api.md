@@ -92,7 +92,7 @@ than no button.
 
 | Method & path | Needs | Notes |
 |---|---|---|
-| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `mcp: {available: true}` says this build can run an MCP server, and deliberately says nothing else: this route is public, so whether one is switched on and which assistants are connected live behind `GET /settings/mcp` — see [mcp.md](mcp.md) |
+| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `mcp: {available: true}` says this build can run an MCP server, and deliberately says nothing else: this route is public, so whether one is switched on and which assistants are connected live behind `GET /settings/mcp` — see [mcp.md](mcp.md) |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
 | `GET /home` · `PATCH /home` | floor · `home.rename` | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name) |
 | `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | floor · `home.structure` | `{id, name, zoneId, icon, accent, sortOrder}`. `POST` takes `{name, zoneId?, icon?, accent?, sortOrder?}` — the name is the only required field anywhere here — and `PATCH` takes the same set with every field optional; `zoneId: null` means "in no zone", and `icon: null` / `accent: null` mean "back to the look the app derives" — each different from leaving the field out. `icon`/`accent` are opaque app tokens (1–40 chars, see [below](#rooms-and-zones)). Names are trimmed before they are measured (1–80), an unknown `zoneId` is `404 unknown_zone`, and a new room goes to the *end* of the order. Deleting a room does not delete its devices — they are simply in no room. Every write broadcasts the [`structure` frame](#rooms-and-zones) |
@@ -102,25 +102,32 @@ than no button.
 | `DELETE /devices/:id` | `device.remove` | also unpairs at the protocol level |
 | `POST /devices/:id/endpoints/:endpointId/commands` | floor | body = canonical command; `202`. IR-remote intents (`irLearn`/`irSaveLearned`/`irSend`/`irDeleteCommand`/`irRenameCommand`) are resolved against the endpoint's stored code library (see [device-schema.md](device-schema.md)) |
 | `GET /devices/:id/history?from=&to=&points=&series=` | floor | what this device's readings did over a window, already thinned to a drawable size — see [below](#recorded-readings-get-devicesidhistory). `from`/`to` are epoch ms and default to the last day; `from >= to` is `400 invalid_range`; an unknown device is `404` |
-| `POST /devices/:id/remap` | `hub.ai` | force-regenerate the AI mapping (Zigbee devices); the hub also remaps automatically when a device publishes unknown parameters — see [ai-adaptation.md](ai-adaptation.md). `409 ai_not_configured` with no credential, `409 ai_disabled` when the owner has switched adaptation off |
+| `GET /devices/:id/portraits` | floor | the pictures this home has had drawn of a device, newest first: `{id, at, bytes, provider, model, fromPhoto, selected}`. Reading is the floor — a portrait is what the device *looks like*, so a guest whose dashboard could not draw it would be looking at a different home. See [below](#device-portraits) |
+| `GET /portraits/:portraitId` | floor | the PNG itself — `image/png`, a strong `ETag` and `Cache-Control: immutable`, because a portrait's bytes never change (a new one gets a new id) |
+| `POST /devices/:id/portraits` | `hub.ai` | draw one. `{photo?: base64, photoType?}` — absent draws from the device's kind alone. Synchronous, and it holds the request for the minutes an image takes. `409 openai_not_configured` (its own code: portraits are OpenAI's job, and a hub can be configured for recognition and not for this), `409 portrait_busy`, `409 no_space`, `502 {error:"provider_failed", kind, detail}` carrying OpenAI's own sentence |
+| `PATCH /devices/:id/portraits` | `device.edit` | `{selected: id\|null}` — which one the home sees. `null` is a *state*: the procedural sphere, chosen over every picture there is |
+| `DELETE /portraits/:portraitId` | `device.edit` | forget one, file and row |
+| `POST /devices/:id/remap` | `hub.ai` | force-regenerate the AI mapping (Zigbee devices) → `{requested}`. **It answers as soon as the run is under way, never when it ends**: a run is minutes and this is an HTTP request, so what the agent then did arrives on the `ai` stream and in `GET /ai/runs`. `requested: false` means the radio has no published schema for that device right now — a device row can outlive its `bridge/devices` entry — which is a different answer from a run that failed. Being explicit, it also drops a `rejected` mapping and **ignores the backoff gate**, because it is how somebody retries after fixing a key or changing the model. The hub also remaps automatically when a device publishes unknown parameters — see [ai-adaptation.md](ai-adaptation.md). `409 ai_not_configured` with no credential, `409 ai_disabled` when the owner has switched adaptation off |
 | `POST /matter/commission` | `device.add` | `{pairingCode}` → `202 {jobId}` (async) |
 | `GET /matter/commission/:jobId` | floor | `{status: running\|done\|failed, nodeId?, error?}` |
 | `POST /zigbee/permit-join` | `device.add` | `{seconds}`, 0–900 (0 = close the network) → `{permitJoin, seconds}` describing the **live** window, which is not always what was asked for. See [below](#the-zigbee-join-window) |
 | `GET /members` · `PATCH /members/me` · `DELETE /members/me` · `DELETE /members/:id` | floor · floor (itself) · floor (itself) · `member.remove` | rows carry `isSelf`, `roleId` and `roleName`; `PATCH` takes `{name}` and renames **the caller**; `DELETE` on either route answers `204` and revokes that member's tokens; the owner cannot be removed, by anyone or by itself. See [below](#which-member-you-are-isself-and-patch-membersme) |
 | `GET /invites` · `POST /invites` | `member.invite` | `POST {roleId?}` → `201 {code, expiresAt, roleId, roleName}`. Omitting `roleId` mints a **Member** invite, which is what every invite this hub has ever made was. An **owner** invite is allowed and needs the caller to be one (`403 not_owner`) |
 | `GET /activity?limit=&before=` | floor · `activity.read` | reverse-chronological, cursor = `before` id; rows carry `data` — see [below](#the-activity-log) |
-| `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | `hub.ai` | PUT `{apiKey, model?}` (an Anthropic API key, write-only; a `sk-ant-oat…` subscription token and a model outside the supported list are both refused with 400, an `authType` from an older app is ignored). **PATCH `{enabled?, model?}`** changes those without re-entering the key — the switch is deliberately not the credential. All three respond `{provider: "anthropic", model, hasKey, enabled, legacySubscriptionToken, status}`; `enabled` defaults to true and `status` carries `lastError`/`lastRun` health — see [ai-adaptation.md](ai-adaptation.md) |
+| `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | `hub.ai` | The home's AI: two credentials, two models, which provider recognises devices, and the switch. **PATCH is the write** — every field optional, absence means "leave this alone": `{enabled?, recordExchanges?, anthropicApiKey?, openaiApiKey?, anthropicModel?, openaiModel?, model?, mappingProvider?, clear?}`. `model` is `anthropicModel` under the name this route has always used; `clear: "anthropic"\|"openai"` forgets one credential and leaves the other; `recordExchanges` starts or stops keeping what each round said, and is off unless asked; `mappingProvider` naming a provider with no key is `400 provider_not_configured`. Keys are told apart by prefix, so one pasted in the other's field is a 400 rather than a 401 an hour later, and a `sk-ant-oat…` subscription token is still refused. **PUT is unchanged** (`{apiKey, model?}`, an Anthropic key, required) for apps that have not moved. See [the answer's shape](#the-ai-settings-answer) |
 | `GET /settings/mcp` · `PUT /settings/mcp` | `hub.mcp` | `{enabled, tokens: [{id, label, canControl, createdAt, lastUsedAt}]}` — the MCP server's switch and its connections. `PUT {enabled}`. A token's plaintext is never in this answer. See [mcp.md](mcp.md) |
 | `POST /settings/mcp/tokens` | `hub.mcp` | `{label, canControl}` → `201` with **the plaintext token, returned exactly once**. `canControl` decides whether that connection may work the home or only read it, and is fixed at mint time |
 | `DELETE /settings/mcp/tokens/:id` | `hub.mcp` | `204`; `404 unknown_token`. Revokes rather than deletes, so the list can still say what was turned off |
 | `POST /mcp` · `POST /mcp/t/:token` | an **MCP token** | the MCP endpoint — JSON-RPC 2.0, stateless Streamable HTTP. `404` on **both verbs** while MCP is switched off — a hub with it off has no MCP endpoint, and 401/403 would say it has one. Authenticated by `mcp_tokens`, never by a member's token, so an MCP credential cannot reach any other route here. `GET /mcp` answers `405` while it is on. Canonical: [mcp.md](mcp.md) |
-| `GET /ai/runs?limit=` | `hub.ai` | what the mapping agent did, newest first: `{id, at, kind, vendor, model, exposesHash, modelId, ok, costUsd, turns, durationMs, errorKind, errorMessage, steps}`. A summary, never a transcript — see [ai-adaptation.md](ai-adaptation.md) |
+| `GET /ai/runs?limit=` | `hub.ai` | what the mapping agent did, newest first: `{id, at, kind, vendor, model, exposesHash, provider, modelId, ok, costUsd, turns, durationMs, errorKind, errorMessage, steps, exchanges}`. A summary, never a transcript — see [ai-adaptation.md](ai-adaptation.md). `exchanges` is how many **rounds** this run kept, `0` unless recording was on when it ran |
+| `GET /ai/runs/:id/exchanges` | `hub.ai` | what that run actually said, round by round, oldest first: `[{seq, at, durationMs, provider, modelId, status, ok, inputTokens, outputTokens, sent, received}]`. `sent`/`received` are `[{kind, label, text?, bytes?}]` — the round's **main data**, not its bodies; `bytes` is present only on a part that was cut, and is what it weighed whole. A run is a *loop*, so one recognition is several rounds and a failed one is followed by the next in the same list. Empty is the ordinary answer — recording is off unless the owner asked, and rounds age out after a week. See [ai-adaptation.md](ai-adaptation.md) |
 | `GET /device-mappings` | `hub.ai` | the mapping library: one entry per device model, `{adapter, exposesHash, vendor, model, status, source, problems, endpoints, deviceIds, createdAt, updatedAt}` |
 | `GET /device-mappings/:exposesHash` | `hub.ai` | the download — an envelope naming the device, see [below](#the-device-mapping-library) |
 | `PUT /device-mappings/:exposesHash` | `hub.ai` | the upload. Accepts the envelope or a bare descriptor. `422 {error:"invalid_mapping", problems, issues?}` when the hub can't use it — and it is **kept**, so `…/repair` can work from it |
-| `DELETE /device-mappings/:exposesHash` | `hub.ai` | forget it; devices of that model fall back to their static mapping |
+| `DELETE /device-mappings/:exposesHash` | `hub.ai` | forget it; devices of that model fall back to their static mapping, and **nothing is asked of the agent** — a delete that re-consulted the library would miss the row it had just removed and start a fresh paid run inside the request, so Forget cost a replacement for the mapping being forgotten. The next genuine trigger asks |
 | `POST /device-mappings/:exposesHash/repair` | `hub.ai` | hand a rejected descriptor to the agent with the complaints. `409 ai_not_configured` / `409 ai_disabled` / `409 nothing_to_repair`, `422 no_device` |
 | `PUT /settings/radio` | `hub.radio` | `{mode: "auto"\|"zigbee"\|"matter"}` → `{budget, mode, matter, canRunBoth, applying: true}`. Records a *request*; see below |
+| `GET /settings/mqtt` | `hub.mqtt` | the broker's credentials: `{requiresPassword, host, port, baseTopic, accounts[]}`. Each account is `{id, username, password, recommended, title, summary, publish[], subscribe[]}`. `hub.mqtt.admin` **adds** the hub's own full-access account; without it only the limited one is returned. See [below](#the-mqtt-broker-asks-for-a-password) |
 | `GET /me` | floor | `{id, name, role: {id, key, name}, permissions, isOwner}` — who this token belongs to and what it may do. See [below](#roles-and-permissions-in-full) |
 | `GET /permissions` | floor | the catalog: `{key, group, title, summary}` per permission. The hub owns the wording |
 | `GET /roles` | floor | `[{id, key, name, builtin, permissions, memberCount, sortOrder}]` |
@@ -155,6 +162,8 @@ it gates its own screens on.
 | `hub.radio` | Hub |
 | `hub.update` | Hub |
 | `hub.ai` | Hub |
+| `hub.mqtt` | Hub |
+| `hub.mqtt.admin` | Hub |
 | `hub.mcp` | Hub |
 
 #### What the three built-in roles start with
@@ -167,13 +176,16 @@ it gates its own screens on.
 | `activity.read` | ✓ | ✓ | |
 | `hub.radio` | ✓ | ✓ | |
 | `hub.update` | ✓ | ✓ | |
-| `home.rename` · `device.remove` · `member.invite` · `member.remove` · `role.manage` · `hub.ai` · `hub.mcp` | ✓ | | |
+| `hub.ai` | ✓ | ✓ | |
+| `home.rename` · `device.remove` · `member.invite` · `member.remove` · `role.manage` | ✓ | | |
+| `hub.mqtt` · `hub.mqtt.admin` · `hub.mcp` | ✓ | | |
 
-**Member is the old behaviour written down.** Those seven are, key for key, the
-routes that used to be open to any member; the six below them are the ones that
-used to be owner-only. A hub that updates into this changes nothing about what
-anybody can do — the migration backfills every existing member into Owner or
-Member accordingly, and only an explicit edit moves anything after that.
+**Member is the old behaviour written down, with two deliberate exceptions.**
+Those keys are, key for key, the routes that used to be open to any member; the
+five on the row below them are the ones that used to be owner-only. A hub that
+updates into this changes nothing about what anybody can do — the migration
+backfills every existing member into Owner or Member accordingly, and only an
+explicit edit moves anything after that.
 
 `hub.update` is the one that looks like an exception and is not.
 `POST /system/update` was owner-only for about a day, and what settled it was
@@ -186,15 +198,40 @@ roles landed, so Member holding it takes nothing from anybody, and Guest is a
 role that did not exist. Being a key rather than either extreme is what lets a
 home that *does* want it kept from the spare room say so.
 
-**`hub.mcp` is the counter-example, and it is on the owner's side.** It looks
-like the same shape of key as `hub.update` and it is not: an update is bounded —
-the installer rolls itself back and the home is the same home afterwards —
-whereas letting an outside assistant in mints a token that lives in a config
-file on a machine this home does not control, until a person revokes it. That
-fails the "bounded cost, destroys nothing" test the paragraph above passes, so
-it starts where `member.invite` and `role.manage` start: grantable to a role a
-home decides to trust, never on by default. It is a *new* key besides, so no
-existing hub's members lose anything by its arriving. See [mcp.md](mcp.md).
+`hub.ai` is the second exception, and it moved on the same argument. It guards
+the AI keys, the adaptation switch, the mapping library and *drawing a device
+portrait* — all of which spend the home's money, which is a real reason for care
+and not a reason for owner-only: the person standing in front of the kettle is
+the one who wants a picture of it, and on a hub Studio claimed as the Mac that
+person is never the owner. Guest is where the line falls. Unlike `hub.update`
+this is a genuine change to what a member may do, so it travels with a migration
+that grants it to hubs that already exist — `ensureBuiltins()` inserts with
+`ON CONFLICT DO NOTHING` and would never reach a `member` row that is already
+there.
+
+**The two MQTT keys are neither exception, and they are the one place the
+"bounded cost" test comes out the other way.** They are newer than the rest of
+this table — the broker took anonymous connections when it was written — and
+they are owner-only because **a broker password is a secret that leaves the
+building.** Every other permission is a request the hub carries out and can stop
+carrying out, so removing a member ends it within the second; nothing can
+un-tell somebody a password, and taking one back means minting another and
+revisiting every board in the house that had it. That is a front-door key rather
+than a spending decision, which is why the argument that moved `hub.update` and
+`hub.ai` does not reach it. A home that wants it otherwise grants `hub.mqtt` in
+the matrix — the safe half, since the account it reveals cannot switch anything
+on — and leaves `hub.mqtt.admin` where it is.
+
+**`hub.mcp` is the counter-example to `hub.update`, and it is on the owner's
+side with the MQTT pair.** It looks like the same shape of key as `hub.update`
+and it is not: an update is bounded — the installer rolls itself back and the
+home is the same home afterwards — whereas letting an outside assistant in mints
+a token that lives in a config file on a machine this home does not control,
+until a person revokes it. That fails the "bounded cost, destroys nothing" test
+the `hub.update` paragraph passes, so it starts where `member.invite` and
+`role.manage` start: grantable to a role a home decides to trust, never on by
+default. It is a *new* key besides, so no existing hub's members lose anything
+by its arriving. See [mcp.md](mcp.md).
 
 **Guest is somebody staying in the house** — and a role with **no keys at all**,
 which is its honest shape rather than an oversight. They work the lights and keep
@@ -346,6 +383,51 @@ for a disclosure.
 
 An unrecognised log yields **no** `problem` at all. A wrong diagnosis is worse
 than `connected: false`, which the caller already has.
+
+### The MQTT broker asks for a password
+
+The hub's broker used to take anonymous connections from anywhere on the home
+network. That was a hole the size of the product: everything a member may do
+over this API is behind a token and a role, while anybody on the Wi-Fi could
+open a broker connection and publish `zigbee2mqtt/<device>/set` to work every
+light and lock in the house — or `bridge/request/permit_join` to open the
+Zigbee network — with no credential at all.
+
+`install.sh` now writes two accounts and an ACL. **The apps do not need either
+of them to show MQTT traffic**: the `mqtt` WebSocket stream is served by the
+hub over the same token everything else uses, so nothing about the apps
+changed. These credentials exist for hardware *you* connect.
+
+| | `gethome` (`id: "integrations"`) | `gethome-hub` (`id: "hub"`) |
+|---|---|---|
+| Who uses it | anything you wire in yourself | hubd and Zigbee2MQTT |
+| Publish | `gethome/#` | everything |
+| Subscribe | `gethome/#`, `zigbee2mqtt/+`, and `bridge/state`, `bridge/event`, `bridge/devices` | everything |
+| Permission to see it | `hub.mqtt` | `hub.mqtt` **and** `hub.mqtt.admin` |
+
+`recommended: true` marks the first one, and an app should lead with it. It can
+watch what the home reports without being able to drive it, so a devboard built
+against it cannot take the home over if it is lost, resold, or reached by
+somebody else. `zigbee2mqtt/bridge/info` is deliberately not readable by it —
+that topic carries Zigbee2MQTT's own configuration, and nothing here depends on
+upstream redacting the network key from it.
+
+`host` is the address the request arrived on, because the hub reaches its own
+broker over loopback and an ESP32 cannot follow it there — a Pi with Wi-Fi and
+Ethernet has two addresses and no way to rank them, while the one the app just
+used reaches the machine by construction. `MQTT_PUBLIC_HOST` overrides it.
+
+`requiresPassword: false` is a hub whose installer predates all of this. It is
+the only way an app can tell "there are no credentials because none exist" from
+"you were not given any" — absence would read as the second.
+
+**Reading this writes to the activity log** (`hub.mqtt`), which no other `GET`
+here does. That is the point rather than an oversight, and it is what makes
+`hub.mqtt` safe to delegate in the matrix: a password cannot be revoked the way
+a token can, so the home should be able to see afterwards who was handed one.
+Rotating is `gethome-hubctl mqtt --rotate` on the machine itself — root work,
+like the radio and the update, and the only real answer to "somebody who had
+the password has left".
 
 ### Radio (`GET /hub` and `PUT /settings/radio`)
 
@@ -573,6 +655,16 @@ when a new one fails its health check) meets a schema it understands.
 }
 ```
 
+**`online` and each endpoint's `state.reachable` are one fact, and a client
+should read whichever it prefers rather than combining them.** The hub keeps
+them in step — the guard in `reachabilityChanged` asks whether *either* is
+behind, so a restart that loaded the two out of step from their separate
+tables is repaired the next time a radio reports, and the correction arrives
+as an ordinary `deviceUpserted` frame with no activity row behind it (nothing
+about the device changed; one of the two records of it was late). They drifted
+once, and an app ANDing them showed a device as offline while another app,
+reading `online` alone, showed the same device online at the same moment.
+
 `id` is a UUID this hub minted; **`externalId` is the device's address on its
 own protocol** — a Zigbee IEEE, an MQTT discovery id, a Matter node. It is the
 only handle an app has for tying a device row to something a *radio* said,
@@ -753,6 +845,113 @@ two minutes earlier. `permitJoin` frames repeat every five seconds while the
 window is open, which is the right rate for a network message and the wrong one
 for a countdown; drive the seconds from a local clock and re-sync on each frame.
 
+### The AI settings answer
+
+`GET /settings/ai` carries every flat field it always did — an app that predates
+the second provider reads exactly what it read before — plus a per-provider half:
+
+```json
+{
+  "provider": "anthropic", "model": "claude-opus-5", "hasKey": true,
+  "enabled": true, "legacySubscriptionToken": false,
+  "status": { "lastRun": { "at": "…", "ok": true, "costUsd": 0.41, "model": "claude-opus-5" } },
+
+  "anthropic": { "hasKey": true,  "model": "claude-opus-5" },
+  "openai":    { "hasKey": true,  "model": null },
+  "mappingChoosable": true,
+
+  "providers": {
+    "anthropic": { "hasKey": true, "model": "claude-opus-5",
+                   "models": [ { "id": "claude-opus-5", "label": "Opus 5",
+                                 "note": "The most thorough. Every recognition run uses it.",
+                                 "recommended": true } ] },
+    "openai":    { "hasKey": true, "model": "gpt-5.6-sol", "models": [ … ] }
+  },
+  "mapping":   { "provider": "anthropic", "choosable": true },
+  "portraits": { "model": "gpt-image-2", "maxPerDevice": 6, "budgetBytes": 314572800 }
+}
+```
+
+Four things an app should not work out for itself.
+
+**The model list is the hub's.** `providers.<name>.models` carries the id, a
+label a person reads, a one-line note and exactly one `recommended`. This is the
+`GET /permissions` rule applied to models: ids and tiers move, and an app that
+shipped its own list would offer one this hub refuses or miss one it accepts.
+The allowlist behind it is deliberately longer than `models` — a hub already set
+to an older model keeps working rather than being told its setting is invalid,
+and a run recorded months ago still prices correctly when its log is read back.
+
+**`models` is one entry per provider, so draw it as a fact, not a picker.** The
+cheaper tier was retired after it produced descriptors the hub had to reject and
+one that named `custom` as an outlet's primary capability — a paid run whose
+result was a tile with no control on it. An app should show which model
+recognition runs on; keep the picker for the day the list is longer than one,
+and don't hide the row when it isn't, because which model spends the home's
+money is worth stating even when it isn't a question. **`model` is what will
+run, not what is stored**: a setting naming a model no longer offered resolves
+to the one that is, so an app never draws a model this hub will not use. Writing
+a retired id is still accepted — it just isn't what runs.
+
+**`provider` and `mapping.provider` are the same answer**: which provider would
+recognise a device right now. With one key there is no choice to make; with two,
+the home's stored choice decides, and `mapping.choosable` is what an app shows
+its picker on. A stored choice only counts while that provider still has a key,
+so clearing a credential moves the answer rather than leaving the hub pointed at
+something it cannot authenticate.
+
+**`hasKey` is "can the agent run at all"** — either credential — because that is
+the question `409 ai_not_configured` answers. Whether *Anthropic* is configured
+is `providers.anthropic.hasKey`.
+
+**`enabled` governs adaptation only.** It exists because the agent runs by
+itself when an unknown device turns up; nobody draws a portrait by accident, so
+portraits are not gated on it.
+
+Key material is never returned, by any route, in any field.
+
+### Device portraits
+
+A portrait is the picture the apps float on a device's page, and it is the
+**house's**: everybody in the home sees the same kettle, so it is drawn once on
+the hub and stored there rather than on whichever phone asked for it. The hub
+already knows the device's canonical `kind`, so a caller sends nothing but
+"draw this device", optionally with a photo to restyle — which is also what
+keeps two apps from producing two different-looking homes.
+
+Drawing needs an **OpenAI** key (`gpt-image-2`, which supports transparent
+backgrounds in preview and is used for a clean cut-out).
+Recognition may be running on Anthropic at the same time, which is why the
+refusal is `openai_not_configured` rather than `ai_not_configured`.
+
+The bytes are files under `<data>/portraits/`, not rows: a 1024² transparent PNG
+is a megabyte or two, and putting that through SQLite's WAL is the write
+amplification the whole store is arranged to avoid. The row is the record of
+one, and the file is deleted with it.
+
+**Two bounds and a floor**, the shape every other store here has. Six per
+device; 300 MB per hub, sweeping oldest-first; and a refusal to draw at all
+below 500 MB of free disk — filling the card the home runs on is a far worse
+outcome than not getting a picture. **A selected portrait is never evicted**: it
+is the one on screen. Drawing takes the selection, so the newest is always the
+one the home is looking at.
+
+`selected: null` while portraits exist is a **state, not an absence** — it means
+somebody chose the procedural sphere over every picture they have, which the
+apps have always offered and which would otherwise need a field of its own.
+
+Drawing is serialised hub-wide (`409 portrait_busy`) and synchronous: the
+request is held for the minutes an image takes, which is what lets an
+app run one uninterrupted animation from "reading your photo" to the finished
+portrait. If the phone gives up or walks out of range the hub finishes, stores
+and announces anyway — nothing is lost but the animation. Every change
+broadcasts `{"type":"portraits","deviceId"}` to every socket, because the phone
+in the next room is looking at the same device.
+
+Only the *drawing* is written to the activity log (`device.portrait`). Choosing
+between portraits and deleting one are restyles, and a restyle is not what
+somebody reads the log for a week later — the same line `rooms.icon` holds.
+
 ### The device-mapping library
 
 `GET /device-mappings/:exposesHash` returns an **envelope**, not a bare
@@ -823,10 +1022,12 @@ kinds with nothing to add.
 
 The kinds: `device.command`, `device.added`, `device.removed`,
 `device.online`, `device.offline`, `device.renamed`, `device.moved`,
+`device.portrait`,
 `room.added`, `room.renamed`, `room.removed`, `zone.added`, `zone.renamed`,
 `zone.removed`, `member.joined`, `member.left`, `member.removed`,
 `member.renamed`, `member.role-changed`, `role.added`, `role.renamed`,
-`role.changed`, `role.removed`, `home.renamed`, `hub.radio`, `adapter.error`,
+`role.changed`, `role.removed`, `home.renamed`, `hub.radio`, `hub.mqtt`,
+`adapter.error`,
 `zigbee.interview-failed`, `zigbee.left`, `zigbee.permit-join`,
 `zigbee.permit-join-closed`, `matter.commission`. Treat the list as open — a
 client must render an unknown kind from `message` rather than drop it.
@@ -1020,6 +1221,7 @@ message. These go to every authorized socket:
 {"type":"deviceRemoved","deviceId"}
 {"type":"commandFailed","deviceId","property","kind","detail"}   a write never reached the device
 {"type":"structure","rooms":[…],"zones":[…]}            rooms/zones changed — both lists in full
+{"type":"portraits","deviceId"}                         a device's portraits changed — go and re-read the list
 
 {"type":"activity","entry":{id,at,kind,message,deviceId?,memberId?,data?}}
 {"type":"permitJoin","active":true,"remainingSeconds":60}

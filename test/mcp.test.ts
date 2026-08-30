@@ -18,7 +18,15 @@ import { McpTokenService } from '../src/mcp/tokens.js';
 import { LATEST_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS } from '../src/mcp/protocol.js';
 import type { AdapterBus, ProtocolAdapter } from '../src/adapters/adapter.js';
 import type { HubCommand } from '../src/schema/index.js';
-import { bootedHome, loadedAccess, openTestDb, resetDb, startedHistory } from './helpers/db.js';
+import {
+  bootedHome,
+  loadedAccess,
+  openTestDb,
+  resetDb,
+  startedHistory,
+  testBroker,
+  testPortraits,
+} from './helpers/db.js';
 
 const handle = await openTestDb();
 const log = pino({ level: 'silent' });
@@ -127,6 +135,8 @@ describe.skipIf(!handle)('MCP server', () => {
       permitJoin: new PermitJoinService(undefined, log, () => {}),
       aiRuns: new AiRunLog(db, events),
       mappings: new MappingLibrary({ db, settings, registry, log }),
+      portraits: testPortraits(db, events, dataDir),
+      mqtt: testBroker(),
     });
     await app.ready();
 
