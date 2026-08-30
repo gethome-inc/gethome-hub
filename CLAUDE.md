@@ -200,9 +200,28 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   chain, so `resolveProvider()` imports whichever half it needs. `agent.ts` is
   the Anthropic loop (Messages API, server-side `web_search`/`web_fetch`);
   `openai-agent.ts` is the same run on the Responses API over plain `fetch` —
-  no second SDK for a Pi to download — with hosted search and **no fetch tool**,
-  because there is no hosted equivalent and giving the *hub* one would break the
-  documented promise that it opens no connection to third-party sites.
+  no second SDK for a Pi to download — with hosted search and a `fetch_page`
+  the **hub itself** performs, because OpenAI has no hosted equivalent and
+  reading the device's own zigbee2mqtt.io page rather than a search snippet is
+  the difference between settling a unit and guessing one, on a mapping cached
+  against a device model for ever.
+  **That is the one place this repository opens a connection to a site that is
+  not a provider's API, and an allowlist is the whole of why it is
+  acceptable.** `src/ai/page-fetch.ts` reads `zigbee2mqtt.io` and
+  `raw.githubusercontent.com` and nothing else: the URL comes from model output
+  and the machine dialling is inside somebody's home network with an
+  unauthenticated health route of its own, so a general fetch tool here is a
+  request-forgery primitive aimed at the LAN dressed up as research. Five
+  guards — https only; the host matched exactly or as a subdomain *with the
+  dot*, since `endsWith` would accept `evil-zigbee2mqtt.io`; redirects
+  followed by hand and re-checked every hop, because `fetch` follows them
+  itself and an allowed host answering `302 http://10.0.0.1/` would walk
+  straight past the list; the resolved address required to be public, because
+  an allowlist on a *name* is only as good as the resolver behind it; and
+  bounded bytes with one deadline. `test/ai-page-fetch.test.ts` asserts that a
+  refused URL produces **no request at all**, which is what proves the guard
+  runs before the fetch rather than after it. `docs/ai-adaptation.md`'s Privacy
+  section is canonical and says what the promise narrowed to.
   Three rules for the pair. **The system prompt is built per provider**
   (`mappingSystemPrompt`), because its research paragraph names tools and the
   two loops do not carry the same ones: one shared prompt told an OpenAI run

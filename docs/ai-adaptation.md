@@ -456,27 +456,53 @@ When a mapping is generated, the following leaves the machine:
   device's vendor/model/property names (it is instructed to include nothing
   else), which reach the search backend like any web search.
 
-Those searches and fetches execute **server-side, on the provider's
-infrastructure** — the hub opens no connection to zigbee2mqtt.io or anywhere
-else, and needs no outbound access beyond `api.anthropic.com` or
-`api.openai.com` (whichever it is configured for; drawing a portrait is
-`api.openai.com` too). A hub behind a restrictive firewall therefore still gets
-full device research.
+Searches execute **server-side, on the provider's infrastructure**, and on
+Anthropic so do page fetches — so a hub configured for Anthropic needs no
+outbound access beyond `api.anthropic.com` (drawing a portrait is
+`api.openai.com` too).
 
-**That promise is why the OpenAI provider searches rather than fetches, and
-the system prompt is built per provider so it can say so.** `mappingSystemPrompt(provider)`
-differs in exactly one paragraph — the research instructions — because a single
-shared prompt told an OpenAI run to `web_fetch` the device's page first, called
-that page the source of truth, and then told it not to spend searches confirming
-what it had already read: three instructions about a tool it has not got, at the
-one point in the run where research is decided.
-Anthropic's `web_fetch` only fetches URLs already in the conversation, which is
-what lets the prompt name a device's zigbee2mqtt.io page and have the model read
-it directly. OpenAI's hosted tool set has no equivalent, and the alternative — a
-fetch tool the *hub* executes — would mean the hub opening connections to
-third-party sites, which is exactly what this paragraph says it does not do. So
-that provider is told to search for the page instead: slightly weaker on a
-genuinely obscure device, and honest about where the hub's traffic goes.
+**On OpenAI the hub makes one further kind of request, and this is the whole
+of it.** OpenAI's hosted tool set has search and no fetch equivalent, which
+left that provider reading search snippets at the one point in a run where a
+wrong unit gets cached against a device model for ever. So the OpenAI loop
+carries a `fetch_page` tool the **hub itself** performs (`src/ai/page-fetch.ts`),
+and the promise above narrows accordingly: during a recognition run, on a hub
+configured for OpenAI, the hub may also connect to **`zigbee2mqtt.io` and
+`raw.githubusercontent.com`, and to nothing else**. Outside a run, or with no
+key, or on Anthropic, it opens neither.
+
+Nothing about *what* leaves changed: a URL naming a public device model, no
+device data, no home data. What changed is who dials.
+
+**Two hosts rather than a fetch tool, because of where the hub sits.** The URL
+comes from model output and the machine performing the request is inside
+somebody's home network, with an unauthenticated health route of its own — a
+general fetch tool is a request-forgery primitive aimed at the LAN, dressed up
+as research. Five guards, each closing a different way past that: https only;
+the host matched exactly or as a subdomain *with the dot* (`endsWith` would
+accept `evil-zigbee2mqtt.io`); redirects followed by hand and re-checked every
+hop, since `fetch` follows them itself and an allowed host answering
+`302 http://10.0.0.1/` would walk straight past the list; the resolved address
+required to be public, because an allowlist on a *name* is only as good as the
+resolver behind it; and bounded bytes with one deadline. `test/ai-page-fetch.test.ts`
+pins each of them, asserting that a refused URL produces **no request at all**
+rather than a refusal after the fact.
+
+What comes back is untrusted text, and is treated as such: it is model input,
+never hub input, and the only thing a run can ultimately produce is a
+`MappingDescriptor` that zod validates and the interpreter *interprets* — the
+hub never executes model output.
+
+**The system prompt is built per provider so it can say all this.**
+`mappingSystemPrompt(provider)` differs in exactly one paragraph, the research
+instructions. The bug it was written for is worth keeping: one shared prompt
+told an OpenAI run to `web_fetch` the device's page first, called that page the
+source of truth, and then told it not to spend searches confirming what it had
+already read — three instructions about a tool it did not have, at the exact
+point in the run where research is decided. The paragraph still differs now
+that both providers fetch, because this tool has a different name and, unlike
+Anthropic's, a boundary the model has to be told about or it will try to read a
+search result and be refused.
 
 **The Responses API stores no application state for a mapping run.** The loop
 sets `store: false`, explicitly requests `reasoning.encrypted_content`, and

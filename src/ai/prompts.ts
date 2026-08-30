@@ -1,4 +1,7 @@
 import type { AiProvider } from '../core/settings.js';
+// The prompt names the hosts the tool will actually accept, so the two cannot
+// drift into telling a run to fetch something it will be refused.
+import { FETCHABLE_HOSTS } from './page-fetch.js';
 import {
   IGNORED_PROPERTIES,
   publishedProperties,
@@ -35,12 +38,15 @@ import {
  * `zigbee2mqttDevicePage` exists to put the device's own page in the
  * conversation so that fetch can reach it — `web_fetch` will only fetch a URL
  * already mentioned. The OpenAI loop has hosted search and deliberately no
- * fetch (`openai-agent.ts` says why: there is no hosted equivalent, and a
- * fetch the *hub* performed would break the promise that it opens no
- * connection to third-party sites). One prompt for both told an OpenAI run to
+ * fetch: it reads the same page through `fetch_page`, which the *hub*
+ * performs against a two-host allowlist (`page-fetch.ts`). So both providers
+ * fetch, and the paragraph still has to differ — the tool has a different
+ * name and, unlike Anthropic's, a boundary the model must be told about, or
+ * it will try to read a search result and be refused. The bug this split was
+ * written for was sharper: one prompt for both told an OpenAI run to
  * `web_fetch` a page first, called that page the source of truth, and then
  * told it not to spend searches confirming what it had already read — three
- * instructions about a tool it does not have, at the exact point in the run
+ * instructions about a tool it did not have, at the exact point in the run
  * where research is decided.
  */
 export function mappingSystemPrompt(provider: AiProvider): string {
@@ -66,17 +72,24 @@ function researchInstructions(provider: AiProvider): string {
   if (provider === 'openai') {
     return (
       shared +
-      '- You have web_search and no fetch tool. The device\'s own zigbee2mqtt.io page is still the best answer ' +
-      'there is — it is generated from the same zigbee-herdsman-converters definition that produces the payloads ' +
-      'this hub receives, so its exposes, units, value ranges and enum values are exactly what the device will ' +
-      'publish and accept — so search for it rather than reading it directly: web_search for ' +
-      '"<vendor> <model> zigbee2mqtt". Your task message carries the page\'s likely URL; treat it as the thing to ' +
-      'find, not as something you can open. Once the search results tell you what the properties you are stuck on ' +
-      'mean, you are done researching. Write the descriptor and submit.\n' +
-      '- Escalate only when that search does not settle it: the model on its own, then the specific property or ' +
-      'enum value. Best references after that page are the zigbee-herdsman-converters definition for the device ' +
-      '(it names the exact converters, units and ranges), the vendor\'s own datasheet or manual, and Home ' +
-      'Assistant or ZHA discussions of the same model.\n'
+      '- Start at the device\'s own Zigbee2MQTT page. Your task message carries its URL, so fetch_page that ' +
+      'first. **That page is the source of truth for this job**, not a third-party opinion: it is generated from ' +
+      'the same zigbee-herdsman-converters definition that produces the payloads this hub receives, so its ' +
+      'exposes, units, value ranges and enum values are exactly what the device will publish and accept. If it ' +
+      'loads, is the device you were given, and covers the properties you need — you are done researching. Write ' +
+      'the descriptor and submit. Do not spend searches confirming what it has already told you.\n' +
+      `- fetch_page reads ${FETCHABLE_HOSTS.join(' and ')} and nothing else, because the hub performs those ` +
+      'requests itself. Everything else is web_search, which has the whole web. Do not try to read a search ' +
+      'result with fetch_page unless it is on one of those two hosts — and a GitHub blob URL has to be rewritten ' +
+      'to its raw.githubusercontent.com form first.\n' +
+      '- Search when that page genuinely fails you, which it does in three ways: it 404s (the hub derives the URL ' +
+      'from the model string, and the real page may be named differently), it is a page for a different device, ' +
+      'or it loads but says nothing about the property you are stuck on. Any of those, and you keep going — one ' +
+      'guessed URL is not a reason to give up on the device. Escalate: web_search for ' +
+      '"<vendor> <model> zigbee2mqtt", then the model on its own, then the specific property or enum value. Best ' +
+      'references after that page are the zigbee-herdsman-converters definition for the device, which you can ' +
+      'fetch_page from raw.githubusercontent.com (it names the exact converters, units and ranges), the ' +
+      'vendor\'s own datasheet or manual, and Home Assistant or ZHA discussions of the same model.\n'
     );
   }
 

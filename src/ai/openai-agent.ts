@@ -23,6 +23,7 @@ import {
   type ExchangePart,
 } from './agent-core.js';
 import { defaultModelFor, estimateCostUsd, isSupportedModel, supportedModelIds } from './models.js';
+import { FETCHABLE_HOSTS, fetchDocumentationPage } from './page-fetch.js';
 
 /**
  * The mapping agent on OpenAI's Responses API — the same run as `agent.ts`,
@@ -35,14 +36,19 @@ import { defaultModelFor, estimateCostUsd, isSupportedModel, supportedModelIds }
  * would be a second dependency subtree on a board with 415 MB of RAM, and
  * every vulnerable package this repo has ever shipped arrived transitively.
  *
- * **Search, and deliberately no fetch.** Anthropic's `web_fetch` will only
- * fetch URLs already in the conversation, which is what lets `prompts.ts` name
- * the device's likely zigbee2mqtt.io page and have the model read it directly.
- * OpenAI's hosted tool set has no equivalent, and the alternative — a fetch
- * tool the *hub* executes — would break the promise that the hub opens no
- * connection to third-party sites (`docs/ai-adaptation.md`, Privacy). So this
- * provider searches for that page instead of fetching it: slightly weaker on a
- * genuinely obscure device, and honest about where the hub's traffic goes.
+ * **Hosted search, and a fetch the hub performs itself.** Anthropic's
+ * `web_fetch` runs server-side and will only fetch URLs already in the
+ * conversation, which is what lets `prompts.ts` name the device's likely
+ * zigbee2mqtt.io page and have the model read it directly. OpenAI's hosted
+ * tool set has no equivalent, and reading that page rather than search
+ * snippets is the difference between settling a unit and guessing one — on a
+ * mapping cached against a device model for ever. So this provider gets
+ * `fetch_page`, which the hub executes against a **two-host allowlist**
+ * (`page-fetch.ts`), and `docs/ai-adaptation.md`'s Privacy section narrows
+ * from "the hub opens no third-party connection" to "…except, during a run on
+ * this provider, zigbee2mqtt.io and raw.githubusercontent.com". The allowlist
+ * is the whole of why that is acceptable: the URL comes from model output and
+ * the hub sits inside somebody's home network.
  *
  * **Stateless.** `store: false`, so OpenAI keeps no copy of the conversation;
  * reasoning items then come back carrying `encrypted_content` and are echoed
@@ -209,6 +215,24 @@ export function createOpenAiMappingAgent(
           }
 
           for (const call of calls) {
+            if (call.name === 'fetch_page') {
+              const asked = parseArguments(call.arguments) as { url?: unknown };
+              const target = typeof asked.url === 'string' ? asked.url : '';
+              const page = await fetchDocumentationPage(target, { signal: controller.signal });
+              run?.onStep?.(
+                agentStep(
+                  'fetch',
+                  page.ok ? `Read ${page.url ?? target}` : `Could not read ${target || '(no url)'}`,
+                  page.ok ? undefined : page.text,
+                ),
+              );
+              input.push({
+                type: 'function_call_output',
+                call_id: call.call_id,
+                output: page.truncated ? `${page.text}\n\n[cut here — the page continues]` : page.text,
+              });
+              continue;
+            }
             if (call.name !== 'submit_mapping') {
               input.push({
                 type: 'function_call_output',
@@ -318,6 +342,33 @@ async function askOpenAi(
         tools: [
           { type: 'web_search' },
           {
+            // The hub's own fetch, and the *only* thing in this repository
+            // that opens a connection to a site that is not the provider's
+            // API. It exists because OpenAI has no hosted fetch to match
+            // Anthropic's, which left this provider reading search snippets
+            // at the one point in a run where a wrong unit gets cached
+            // against a device model for ever. `page-fetch.ts` carries the
+            // guards, the allowlist and what the promise in
+            // `docs/ai-adaptation.md` now says.
+            type: 'function',
+            name: 'fetch_page',
+            description:
+              'Read a device documentation page as text. Restricted to ' +
+              `${FETCHABLE_HOSTS.join(' and ')} — the hub fetches these itself, so nothing else is reachable. ` +
+              'Use it on the zigbee2mqtt.io page your task message names, and on the ' +
+              'zigbee-herdsman-converters source when a page leaves a unit or an enum unsettled. Everything ' +
+              'else is web_search.',
+            parameters: {
+              type: 'object',
+              properties: {
+                url: { type: 'string', description: 'The https URL to read.' },
+              },
+              required: ['url'],
+              additionalProperties: false,
+            },
+            strict: false,
+          },
+          {
             type: 'function',
             name: 'submit_mapping',
             description: SUBMIT_MAPPING_DESCRIPTION,
@@ -386,7 +437,7 @@ function sentParts(
       exchangePart(
         'config',
         `${modelId} · effort ${EFFORT} · max_output_tokens ${MAX_OUTPUT_TOKENS}`,
-        'tools: web_search, submit_mapping',
+        'tools: web_search, fetch_page, submit_mapping',
       ),
       exchangePart('system', 'Instructions', systemPrompt),
     );

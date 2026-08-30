@@ -175,18 +175,25 @@ describe('the mapping agent on OpenAI', () => {
   });
 
   /**
-   * The request body is the contract. `web_search` is the research half —
-   * there is deliberately no fetch tool, because OpenAI has no hosted
-   * equivalent and a hub-side one would mean the hub opening connections to
-   * third-party sites.
+   * The request body is the contract. The research half is hosted `web_search`
+   * plus `fetch_page`, which the *hub* performs against a two-host allowlist —
+   * OpenAI has no hosted fetch, and reading the device's own page rather than
+   * a search snippet is what settles a unit instead of guessing one. The
+   * guards that make a hub-side fetch acceptable live in
+   * `test/ai-page-fetch.test.ts`.
    */
-  it('sends hosted search, the submit tool, high effort, and stores nothing', async () => {
+  it('sends hosted search, both tools, high effort, and stores nothing', async () => {
     queue(ok([submitCall(validDescriptor)]));
     await agent().generate('a system prompt', 'user');
 
     const request = sent[0]!;
-    expect(request.tools.map((tool) => tool.type ?? tool.name)).toEqual(['web_search', 'function']);
-    const submit = request.tools[1]!;
+    expect(request.tools.map((tool) => tool.type ?? tool.name)).toEqual([
+      'web_search',
+      'function',
+      'function',
+    ]);
+    expect(request.tools[1]!.name).toBe('fetch_page');
+    const submit = request.tools[2]!;
     expect(submit.name).toBe('submit_mapping');
     expect(submit.strict).toBe(false);
     expect((submit.parameters as { type: string }).type).toBe('object');
