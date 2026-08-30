@@ -17,8 +17,13 @@ import {
   type AgentRunStats,
   type MappingProvider,
   type SubmitCapture,
+  describeThrown,
+  exchangePart,
+  record,
+  type ExchangePart,
 } from './agent-core.js';
 import { defaultModelFor, estimateCostUsd, isSupportedModel, supportedModelIds } from './models.js';
+import { FETCHABLE_HOSTS, fetchDocumentationPage } from './page-fetch.js';
 
 /**
  * The mapping agent on OpenAI's Responses API — the same run as `agent.ts`,
@@ -31,14 +36,19 @@ import { defaultModelFor, estimateCostUsd, isSupportedModel, supportedModelIds }
  * would be a second dependency subtree on a board with 415 MB of RAM, and
  * every vulnerable package this repo has ever shipped arrived transitively.
  *
- * **Search, and deliberately no fetch.** Anthropic's `web_fetch` will only
- * fetch URLs already in the conversation, which is what lets `prompts.ts` name
- * the device's likely zigbee2mqtt.io page and have the model read it directly.
- * OpenAI's hosted tool set has no equivalent, and the alternative — a fetch
- * tool the *hub* executes — would break the promise that the hub opens no
- * connection to third-party sites (`docs/ai-adaptation.md`, Privacy). So this
- * provider searches for that page instead of fetching it: slightly weaker on a
- * genuinely obscure device, and honest about where the hub's traffic goes.
+ * **Hosted search, and a fetch the hub performs itself.** Anthropic's
+ * `web_fetch` runs server-side and will only fetch URLs already in the
+ * conversation, which is what lets `prompts.ts` name the device's likely
+ * zigbee2mqtt.io page and have the model read it directly. OpenAI's hosted
+ * tool set has no equivalent, and reading that page rather than search
+ * snippets is the difference between settling a unit and guessing one — on a
+ * mapping cached against a device model for ever. So this provider gets
+ * `fetch_page`, which the hub executes against a **two-host allowlist**
+ * (`page-fetch.ts`), and `docs/ai-adaptation.md`'s Privacy section narrows
+ * from "the hub opens no third-party connection" to "…except, during a run on
+ * this provider, zigbee2mqtt.io and raw.githubusercontent.com". The allowlist
+ * is the whole of why that is acceptable: the URL comes from model output and
+ * the hub sits inside somebody's home network.
  *
  * **Stateless.** `store: false`, so OpenAI keeps no copy of the conversation;
  * reasoning items then come back carrying `encrypted_content` and are echoed
@@ -72,7 +82,7 @@ interface ResponseItem {
   name?: string;
   arguments?: string;
   action?: { type?: string; query?: string; queries?: unknown[] };
-  content?: Array<{ type: string; refusal?: string }>;
+  content?: Array<{ type: string; refusal?: string; text?: string }>;
   [key: string]: unknown;
 }
 
@@ -145,6 +155,9 @@ export function createOpenAiMappingAgent(
       const usage = new RunUsage(modelId);
       const startedAt = Date.now();
       const input: unknown[] = [{ role: 'user', content: userPrompt }];
+      // See `AgentExchange`: a turn records what it added, never the whole
+      // conversation again.
+      let recordedUpTo = 0;
 
       let turns = 0;
       let nudges = 0;
@@ -158,7 +171,20 @@ export function createOpenAiMappingAgent(
             break;
           }
 
-          const body = await askOpenAi(auth.secret, modelId, systemPrompt, input, controller.signal);
+          // Built before the request and only when somebody is recording;
+          // `recordedUpTo` advances here rather than after the call, so a
+          // round that throws still leaves the next one recording a delta.
+          // Sliced, never walked: turning these into parts is work, and it
+          // belongs inside `record`'s guard.
+          const added = run?.onExchange ? input.slice(recordedUpTo) : [];
+          const firstRound = turns === 1;
+          recordedUpTo = input.length;
+          const body = await askOpenAi(auth.secret, modelId, systemPrompt, input, controller.signal, {
+            run,
+            seq: turns,
+            modelId,
+            sent: () => sentParts(firstRound, modelId, systemPrompt, added),
+          });
           if (body.status === 'incomplete' && body.incomplete_details?.reason === 'max_output_tokens') {
             throw new Error(`mapping agent turn hit max_output_tokens (${MAX_OUTPUT_TOKENS}) before answering`);
           }
@@ -189,6 +215,24 @@ export function createOpenAiMappingAgent(
           }
 
           for (const call of calls) {
+            if (call.name === 'fetch_page') {
+              const asked = parseArguments(call.arguments) as { url?: unknown };
+              const target = typeof asked.url === 'string' ? asked.url : '';
+              const page = await fetchDocumentationPage(target, { signal: controller.signal });
+              run?.onStep?.(
+                agentStep(
+                  'fetch',
+                  page.ok ? `Read ${page.url ?? target}` : `Could not read ${target || '(no url)'}`,
+                  page.ok ? undefined : page.text,
+                ),
+              );
+              input.push({
+                type: 'function_call_output',
+                call_id: call.call_id,
+                output: page.truncated ? `${page.text}\n\n[cut here — the page continues]` : page.text,
+              });
+              continue;
+            }
             if (call.name !== 'submit_mapping') {
               input.push({
                 type: 'function_call_output',
@@ -253,7 +297,34 @@ async function askOpenAi(
   systemPrompt: string,
   input: unknown[],
   signal: AbortSignal,
+  /** Where this round is written down, when anybody asked for it. */
+  recording: {
+    run: AgentRunContext | undefined;
+    seq: number;
+    modelId: string;
+    /** Deferred, so the walk happens inside `record`'s guard. */
+    sent: () => ExchangePart[];
+  },
 ): Promise<ResponseBody> {
+  const roundStartedAt = Date.now();
+  const write = (
+    received: () => ExchangePart[],
+    ok: boolean,
+    status?: number,
+    body?: ResponseBody,
+  ) =>
+    record(recording.run, () => ({
+      seq: recording.seq,
+      startedAt: roundStartedAt,
+      provider: 'openai',
+      modelId: recording.modelId,
+      ok,
+      sent: recording.sent(),
+      received: received(),
+      ...(status !== undefined ? { status } : {}),
+      ...(body?.usage?.input_tokens !== undefined ? { inputTokens: body.usage.input_tokens } : {}),
+      ...(body?.usage?.output_tokens !== undefined ? { outputTokens: body.usage.output_tokens } : {}),
+    }));
   let response: Response;
   try {
     response = await fetch(RESPONSES_URL, {
@@ -270,6 +341,33 @@ async function askOpenAi(
         include: ['reasoning.encrypted_content'],
         tools: [
           { type: 'web_search' },
+          {
+            // The hub's own fetch, and the *only* thing in this repository
+            // that opens a connection to a site that is not the provider's
+            // API. It exists because OpenAI has no hosted fetch to match
+            // Anthropic's, which left this provider reading search snippets
+            // at the one point in a run where a wrong unit gets cached
+            // against a device model for ever. `page-fetch.ts` carries the
+            // guards, the allowlist and what the promise in
+            // `docs/ai-adaptation.md` now says.
+            type: 'function',
+            name: 'fetch_page',
+            description:
+              'Read a device documentation page as text. Restricted to ' +
+              `${FETCHABLE_HOSTS.join(' and ')} — the hub fetches these itself, so nothing else is reachable. ` +
+              'Use it on the zigbee2mqtt.io page your task message names, and on the ' +
+              'zigbee-herdsman-converters source when a page leaves a unit or an enum unsettled. Everything ' +
+              'else is web_search.',
+            parameters: {
+              type: 'object',
+              properties: {
+                url: { type: 'string', description: 'The https URL to read.' },
+              },
+              required: ['url'],
+              additionalProperties: false,
+            },
+            strict: false,
+          },
           {
             type: 'function',
             name: 'submit_mapping',
@@ -290,6 +388,7 @@ async function askOpenAi(
       }),
     });
   } catch (error) {
+    write(() => describeThrown(error), false);
     if (signal.aborted) {
       throw new AiUnavailableError('aborted', `mapping agent timed out after ${AGENT_TIMEOUT_MS / 1000}s`);
     }
@@ -301,6 +400,9 @@ async function askOpenAi(
 
   const text = await response.text();
   if (!response.ok) {
+    // The body verbatim, because a refusal is exactly the thing somebody
+    // turned recording on to read.
+    write(() => [exchangePart('error', `Refused with ${response.status}`, text)], false, response.status);
     const message = messageIn(text) ?? `OpenAI answered ${response.status}.`;
     // The classifier branches on HTTP status rather than on any vendor's error
     // vocabulary, which is exactly why it is structural.
@@ -308,10 +410,102 @@ async function askOpenAi(
       new Error(message);
   }
   try {
-    return JSON.parse(text) as ResponseBody;
+    const body = JSON.parse(text) as ResponseBody;
+    write(() => receivedParts(body), true, response.status, body);
+    return body;
   } catch {
+    write(() => [exchangePart('error', 'Not JSON', text)], false, response.status);
     throw new Error('OpenAI answered with something that was not JSON');
   }
+}
+
+/**
+ * The main data in what this turn added to the request — the Responses
+ * equivalent of the Anthropic loop's `sentParts`, and the same rule: what is
+ * *new*, plus the configuration once, plus tool names rather than the
+ * 6.7 KB `submit_mapping` schema. Only ever called inside `record`'s guard.
+ */
+function sentParts(
+  firstRound: boolean,
+  modelId: string,
+  systemPrompt: string,
+  added: unknown[],
+): ExchangePart[] {
+  const parts: ExchangePart[] = [];
+  if (firstRound) {
+    parts.push(
+      exchangePart(
+        'config',
+        `${modelId} · effort ${EFFORT} · max_output_tokens ${MAX_OUTPUT_TOKENS}`,
+        'tools: web_search, fetch_page, submit_mapping',
+      ),
+      exchangePart('system', 'Instructions', systemPrompt),
+    );
+  }
+  for (const item of added) {
+    const entry = item as { type?: unknown; role?: unknown; content?: unknown; output?: unknown };
+    if (entry.type === 'function_call_output') {
+      parts.push(exchangePart('tool_result', 'Tool result', entry.output));
+    } else if (typeof entry.role === 'string') {
+      parts.push(exchangePart('message', entry.role, entry.content));
+    } else if (entry.type === 'reasoning') {
+      // Replayed verbatim because a stateless continuation needs it, and it is
+      // the model's own from the previous round — already in that round's
+      // `received`. Named, not repeated.
+      parts.push(exchangePart('reasoning', 'Reasoning replayed'));
+    } else if (typeof entry.type === 'string') {
+      parts.push(exchangePart(entry.type, entry.type));
+    }
+  }
+  return parts;
+}
+
+/** The main data in a Responses reply: why it stopped, then one part per item. */
+function receivedParts(body: ResponseBody): ExchangePart[] {
+  const parts: ExchangePart[] = [
+    exchangePart(
+      'outcome',
+      `Stopped: ${body.status ?? 'unknown'}${
+        body.incomplete_details?.reason ? ` (${body.incomplete_details.reason})` : ''
+      }`,
+    ),
+  ];
+  for (const item of body.output ?? []) {
+    switch (item.type) {
+      case 'message':
+        parts.push(
+          exchangePart(
+            'text',
+            'Answered in prose',
+            (item.content ?? [])
+              .map((block) => block.text ?? block.refusal)
+              .filter((text): text is string => typeof text === 'string')
+              .join('\n') || undefined,
+          ),
+        );
+        break;
+      case 'function_call':
+        parts.push(exchangePart('tool_use', `Called ${item.name ?? '(unnamed)'}`, item.arguments));
+        break;
+      case 'web_search_call': {
+        const queries = Array.isArray(item.action?.queries)
+          ? item.action.queries.filter((query): query is string => typeof query === 'string')
+          : [];
+        parts.push(
+          exchangePart('research', 'Searched the web', queries.join(' · ') || item.action?.query),
+        );
+        break;
+      }
+      case 'reasoning':
+        // The content is opaque and encrypted — its size is the only fact
+        // about it, and even that is not worth a row.
+        parts.push(exchangePart('reasoning', 'Reasoned'));
+        break;
+      default:
+        parts.push(exchangePart(String(item.type), String(item.type)));
+    }
+  }
+  return parts;
 }
 
 /**

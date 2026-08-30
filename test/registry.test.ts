@@ -5,7 +5,8 @@ import { HubEventBus } from '../src/core/bus.js';
 import { ActivityService } from '../src/core/activity.js';
 import type { AdapterBus, ProtocolAdapter } from '../src/adapters/adapter.js';
 import type { HubCommand } from '../src/schema/index.js';
-import { activity } from '../src/db/schema.js';
+import { eq } from 'drizzle-orm';
+import { activity, devices, endpoints } from '../src/db/schema.js';
 import { openTestDb, resetDb } from './helpers/db.js';
 
 const handle = await openTestDb();
@@ -186,6 +187,59 @@ describe.skipIf(!handle)('DeviceRegistry', () => {
     await registry.flush();
     expect(registry.getDevice(deviceId)!.online).toBe(false);
     expect(registry.getDevice(deviceId)!.endpoints[0]!.state.reachable).toBe(false);
+  });
+
+  it('writes the endpoints\u2019 own reachability to the disk, not only to the cache', async () => {
+    adapter.bus!.deviceUpserted(lampDescriptor);
+    await registry.flush();
+
+    adapter.bus!.reachabilityChanged('mqtt', 'lamp-1', false);
+    await registry.stop();
+
+    // `reachable` lives in two places — the device row and every endpoint's
+    // state — and the second used to be mutated in memory and never marked
+    // dirty, so it reached the card only if some later state report happened
+    // to flush. A reload is the whole test.
+    const reloaded = new DeviceRegistry(db, events, new ActivityService(db, events), log);
+    await reloaded.start();
+    expect(reloaded.listDevices()[0]!.online).toBe(false);
+    expect(reloaded.listDevices()[0]!.endpoints[0]!.state.reachable).toBe(false);
+  });
+
+  it('repairs an endpoint left behind by the row it agrees with', async () => {
+    adapter.bus!.deviceUpserted(lampDescriptor);
+    await registry.flush();
+    const deviceId = registry.listDevices()[0]!.id;
+
+    // The state a hub is actually found in: the row says the device is
+    // reachable, one endpoint still says it is not. The two are persisted on
+    // different schedules and loaded back from two tables, so a restart can
+    // land here — and the apps disagree about the same device, because Studio
+    // draws `online` while the iOS app draws `online && state.reachable`.
+    await db.update(devices).set({ online: true }).where(eq(devices.id, deviceId));
+    await db
+      .update(endpoints)
+      .set({ state: { ...registry.getDevice(deviceId)!.endpoints[0]!.state, reachable: false } })
+      .where(eq(endpoints.deviceId, deviceId));
+    await registry.stop();
+
+    const reloaded = new DeviceRegistry(db, events, new ActivityService(db, events), log);
+    reloaded.registerAdapter(adapter);
+    await reloaded.start();
+    expect(reloaded.getDevice(deviceId)!.online).toBe(true);
+    expect(reloaded.getDevice(deviceId)!.endpoints[0]!.state.reachable).toBe(false);
+
+    // The radio coming up says "reachable" about a device whose row already
+    // said so. Guarding on the row alone returned here and left the endpoint
+    // stuck at false for ever, because nothing else writes that field.
+    adapter.bus!.radioReachabilityChanged('mqtt', true);
+    await reloaded.flush();
+    expect(reloaded.getDevice(deviceId)!.endpoints[0]!.state.reachable).toBe(true);
+
+    // And a repair is not a transition: nothing about the device changed, so
+    // the feed must not claim it came back.
+    const rows = await db.select().from(activity);
+    expect(rows.some((row) => row.kind === 'device.online')).toBe(false);
   });
 
   it('takes every device on a radio offline when the radio goes', async () => {

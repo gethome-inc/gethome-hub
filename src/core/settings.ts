@@ -67,6 +67,19 @@ export interface AiSettings {
    */
   enabled: boolean;
   /**
+   * Whether each request/response round is kept, and **off unless somebody
+   * asked**.
+   *
+   * The run log is a summary by design, because model prose on an SD card is
+   * the write amplification the rest of this store avoids. This is the switch
+   * that suspends that rule while something is being worked out — a refusal
+   * that is really about the request, a model that answers differently than
+   * expected — and it is a *setting* rather than a build flag because the
+   * person who needs it is looking at a hub they cannot rebuild. Absent means
+   * off, so nothing starts recording on an upgrade.
+   */
+  recordExchanges: boolean;
+  /**
    * The stored Anthropic secret is a Claude subscription token from before the
    * move to the Messages API and can no longer be used. The owner has to save
    * an API key; until they do, mapping runs are skipped and
@@ -137,6 +150,7 @@ export class SettingsService {
       model: anthropic.model,
       hasKey: anthropic.hasKey || openai.hasKey,
       enabled: enabled !== false,
+      recordExchanges: (await this.get<boolean>('ai_record_exchanges')) === true,
       legacySubscriptionToken: anthropic.hasKey && authType === LEGACY_OAUTH_AUTH_TYPE,
       anthropic,
       openai,
@@ -172,6 +186,11 @@ export class SettingsService {
 
   async setAiEnabled(enabled: boolean): Promise<void> {
     await this.set('ai_enabled', enabled);
+  }
+
+  /** Start or stop keeping what each round of a run sent and received. */
+  async setAiRecordExchanges(record: boolean): Promise<void> {
+    await this.set('ai_record_exchanges', record);
   }
 
   /** Change which model runs the agent, leaving the credential alone. */

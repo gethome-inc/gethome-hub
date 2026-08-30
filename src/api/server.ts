@@ -18,7 +18,7 @@ import type { MatterAdapter } from '../adapters/matter/adapter.js';
 import type { ZigbeeAdapter } from '../adapters/zigbee/adapter.js';
 // Dependency-free model catalog (a price table and an allowlist) — importing
 // it here does not pull the AI stack into the API layer.
-import { defaultModelFor, isSupportedModel, PROVIDER_MODELS, supportedModelIds } from '../ai/models.js';
+import { effectiveModel, isSupportedModel, PROVIDER_MODELS, supportedModelIds } from '../ai/models.js';
 // Local operations on stored JSON — zod only, no Anthropic SDK in this graph.
 // `MappingLibrary.repair` loads the agent on demand.
 import type { MappingLibrary } from '../ai/library.js';
@@ -939,8 +939,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // keeps an app from drawing a button whose only outcome is silence.
     const refusal = await aiUnavailableReason();
     if (refusal) return reply.code(409).send({ error: refusal });
-    const ok = await deps.zigbee.remap(device.externalId);
-    return { requested: ok };
+    // Answers as soon as the run is under way, never when it ends — see
+    // `ZigbeeAdapter.remap`. What the agent then did arrives on the `ai`
+    // stream and in `GET /ai/runs`.
+    return { requested: deps.zigbee.remap(device.externalId) };
   });
 
   // ── Device portraits ──────────────────────────────────────────────────────
@@ -1613,7 +1615,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const [ai, status] = await Promise.all([deps.settings.getAiSettings(), deps.settings.getAiStatus()]);
     const forProvider = (provider: AiProvider) => ({
       hasKey: ai[provider].hasKey,
-      model: ai[provider].model ?? defaultModelFor(provider),
+      model: effectiveModel(provider, ai[provider].model),
       models: PROVIDER_MODELS[provider].choices,
     });
     return {
@@ -1670,6 +1672,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     mappingProvider: z.enum(AI_PROVIDERS).optional(),
     /** Forget one provider's key and model, leaving the other one alone. */
     clear: z.enum(AI_PROVIDERS).optional(),
+    /** Keep what each round of a run sent and received — see `GET /ai/runs`. */
+    recordExchanges: z.boolean().optional(),
   });
 
   app.get('/api/v1/settings/ai', needs('hub.ai'), aiSettingsResponse);
@@ -1746,6 +1750,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       await deps.settings.setMappingProvider(body.mappingProvider);
     }
     if (body.enabled !== undefined) await deps.settings.setAiEnabled(body.enabled);
+    if (body.recordExchanges !== undefined) {
+      await deps.settings.setAiRecordExchanges(body.recordExchanges);
+    }
     return aiSettingsResponse();
   });
 
@@ -1765,6 +1772,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       .object({ limit: z.coerce.number().int().min(1).max(100).default(30) })
       .parse(request.query);
     const rows = await deps.aiRuns.list(query.limit);
+    // How many rounds each run kept, so an app knows whether to offer the
+    // disclosure at all — one grouped read rather than a body per run, since
+    // the bodies are the expensive half and most runs have none.
+    const counts = await deps.aiRuns.exchangeCounts(rows.map((row) => row.id));
     return rows.map((row) => ({
       id: row.id,
       at: row.at.toISOString(),
@@ -1784,6 +1795,37 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       errorKind: row.errorKind,
       errorMessage: row.errorMessage,
       steps: row.steps,
+      /** Rounds kept for this run — 0 unless recording was on when it ran. */
+      exchanges: counts.get(row.id) ?? 0,
+    }));
+  });
+
+  /**
+   * What was said to the provider, round by round, for one run.
+   *
+   * Fetched rather than streamed, and only when somebody opens it: this is
+   * kilobytes per run and nobody reads it on a hub that is working — the same
+   * stance `HubLogsDisclosure` takes towards a Pi's install log. An empty list
+   * is the ordinary answer, because recording is off unless the owner asked
+   * for it; a run whose rounds have aged out answers the same way, which is
+   * why the list carries a count rather than a boolean somebody could read as
+   * a promise.
+   */
+  app.get('/api/v1/ai/runs/:id/exchanges', needs('hub.ai'), async (request) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const rows = await deps.aiRuns.exchangesOf(id);
+    return rows.map((row) => ({
+      seq: row.seq,
+      at: row.at.toISOString(),
+      durationMs: row.durationMs,
+      provider: row.provider,
+      modelId: row.modelId,
+      status: row.status,
+      ok: row.ok,
+      inputTokens: row.inputTokens,
+      outputTokens: row.outputTokens,
+      sent: row.sent,
+      received: row.received,
     }));
   });
 

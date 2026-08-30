@@ -9,6 +9,7 @@ import {
   DEFAULT_MODEL,
   PROVIDER_MODELS,
   defaultModelFor,
+  effectiveModel,
   estimateCostUsd,
   isSupportedModel,
   supportedModelIds,
@@ -50,6 +51,7 @@ const { AGENT_MAX_TURNS, createMappingAgent, evaluateSubmission, submitMappingTo
   '../src/ai/agent.js'
 );
 const { MAX_OUTPUT_TOKENS } = await import('../src/ai/agent-core.js');
+type AgentExchange = import('../src/ai/agent-core.js').AgentExchange;
 
 // ── Failure classification ────────────────────────────────────────────────
 
@@ -188,38 +190,37 @@ describe('supported models', () => {
    * keep working, while asking somebody to choose between six is asking them to
    * research six.
    */
-  it('offers two models per provider, one of them recommended, all of them allowed', () => {
+  it('offers exactly one model per provider, and it is that provider’s default', () => {
     for (const provider of ['anthropic', 'openai'] as const) {
       const choices = PROVIDER_MODELS[provider].choices;
-      expect(choices).toHaveLength(2);
-      expect(choices.filter((choice) => choice.recommended)).toHaveLength(1);
+      // The model is a fact the apps state, not a decision they ask for: the
+      // cheaper tier was retired after Sonnet 5 submitted descriptors the tool
+      // handler kept bouncing and then named `custom` as an outlet's primary,
+      // which renders as no control at all.
+      expect(choices).toHaveLength(1);
       expect(choices[0]?.recommended).toBe(true);
-      for (const choice of choices) expect(isSupportedModel(choice.id, provider)).toBe(true);
+      expect(isSupportedModel(choices[0]!.id, provider)).toBe(true);
       expect(isSupportedModel(defaultModelFor(provider), provider)).toBe(true);
+      expect(defaultModelFor(provider)).toBe(choices[0]?.id);
     }
-    // Each provider's default is the thorough one it offers first.
-    expect(defaultModelFor('anthropic')).toBe(PROVIDER_MODELS.anthropic.choices[0]?.id);
-    expect(defaultModelFor('openai')).toBe(PROVIDER_MODELS.openai.choices[0]?.id);
   });
 
   /**
-   * The two pairs are the same shape on purpose — the thorough tier and the
-   * cheaper one — and each is named by an **explicit** id. `gpt-5.6` routes to
-   * Sol today and is OpenAI's to re-point tomorrow, which would move which
-   * model a home runs and what a run costs with nothing in this repository
-   * changed to explain it; the alias stays priced so a hub that stored it
-   * keeps working, and stays out of `choices` so nothing new picks it up.
+   * Each is named by an **explicit** id. `gpt-5.6` routes to Sol today and is
+   * OpenAI's to re-point tomorrow, which would move which model a home runs
+   * and what a run costs with nothing in this repository changed to explain
+   * it; the alias stays priced so a hub that stored it keeps working, and
+   * stays out of `choices` so nothing new picks it up.
    */
-  it('pins Opus 5 / Sonnet 5 and Sol / Terra by their explicit ids', () => {
-    expect(PROVIDER_MODELS.anthropic.choices.map((choice) => choice.id)).toEqual([
-      'claude-opus-5',
-      'claude-sonnet-5',
-    ]);
-    expect(PROVIDER_MODELS.openai.choices.map((choice) => choice.id)).toEqual([
-      'gpt-5.6-sol',
-      'gpt-5.6-terra',
-    ]);
+  it('pins Opus 5 and Sol by their explicit ids', () => {
+    expect(PROVIDER_MODELS.anthropic.choices.map((choice) => choice.id)).toEqual(['claude-opus-5']);
+    expect(PROVIDER_MODELS.openai.choices.map((choice) => choice.id)).toEqual(['gpt-5.6-sol']);
     expect(defaultModelFor('openai')).toBe('gpt-5.6-sol');
+
+    // Retired from the picker, still priced: a run recorded months ago names
+    // the model it ran on, and reading that log back has to cost it correctly.
+    expect(isSupportedModel('claude-sonnet-5', 'anthropic')).toBe(true);
+    expect(isSupportedModel('gpt-5.6-terra', 'openai')).toBe(true);
 
     // Accepted, priced, and never offered.
     expect(isSupportedModel('gpt-5.6', 'openai')).toBe(true);
@@ -231,6 +232,25 @@ describe('supported models', () => {
     // Luna is cheap and is not on the list: this job is reasoning-heavy and
     // runs a handful of times in a hub's life.
     expect(isSupportedModel('gpt-5.6-luna', 'openai')).toBe(false);
+  });
+
+  /**
+   * Retiring a model is only half a decision if the homes that had chosen it
+   * carry on running it — those are exactly the homes the retirement is for,
+   * and nothing on any screen would have changed to say so.
+   */
+  it('runs a stored model only while it is still offered', () => {
+    expect(effectiveModel('anthropic', 'claude-sonnet-5')).toBe('claude-opus-5');
+    expect(effectiveModel('openai', 'gpt-5.6-terra')).toBe('gpt-5.6-sol');
+    // The bare alias was never offered, so it was never a preference either.
+    expect(effectiveModel('openai', 'gpt-5.6')).toBe('gpt-5.6-sol');
+
+    // A model still on the list is still honoured, and so is silence.
+    expect(effectiveModel('anthropic', 'claude-opus-5')).toBe('claude-opus-5');
+    expect(effectiveModel('anthropic', null)).toBe('claude-opus-5');
+    expect(effectiveModel('anthropic', undefined)).toBe('claude-opus-5');
+    // Nothing a stranger could put in the column becomes a model either.
+    expect(effectiveModel('anthropic', 'gpt-5.6-sol')).toBe('claude-opus-5');
   });
 
   it('keeps the two allowlists apart, so a model cannot be sent to the wrong API', () => {
@@ -396,6 +416,107 @@ describe('buildMappingUserPrompt', () => {
     expect(prompt).toContain('{"soil_moisture":11}');
     expect(prompt).not.toContain('{"soil_moisture":0}');
   });
+
+  /**
+   * A plug layers 1 and 2 place completely: a typed switch, typed power, and
+   * a generic field for every setting. `uncovered` is empty, so there is
+   * genuinely nothing for the agent to do — and an owner pressing "Work it
+   * out again" starts a run on it anyway.
+   */
+  const plug: Z2mDevice = {
+    ieee_address: '0x54ef44100047c1bf',
+    friendly_name: 'Light TV',
+    supported: true,
+    definition: {
+      vendor: 'Aqara',
+      model: 'SP-EUC01',
+      description: 'Smart plug EU',
+      exposes: [
+        {
+          type: 'switch',
+          features: [
+            { type: 'binary', name: 'state', property: 'state', access: 7, value_on: 'ON', value_off: 'OFF' },
+          ],
+        },
+        { type: 'numeric', name: 'power', property: 'power', access: 1, unit: 'W' },
+        { type: 'numeric', name: 'voltage', property: 'voltage', access: 1, unit: 'V' },
+        { type: 'numeric', name: 'current', property: 'current', access: 1, unit: 'A' },
+        { type: 'numeric', name: 'device_temperature', property: 'device_temperature', access: 1, unit: '°C' },
+        { type: 'binary', name: 'button_lock', property: 'button_lock', access: 7, value_on: 'ON', value_off: 'OFF' },
+      ],
+    },
+  };
+
+  /**
+   * The task message had no way to say "there is nothing to add", so a model
+   * with nothing to add invented something — both vendors did, in the two
+   * ways available: restating fields that already existed, and declaring
+   * fields for diagnostics the hub hides plus a property the device has not
+   * got. The empty answer has to be describable.
+   */
+  it('says what an empty answer looks like when nothing is uncovered', () => {
+    const profile = mapExposes(plug);
+    expect(profile.uncovered).toEqual([]);
+
+    const prompt = buildMappingUserPrompt(plug, profile, []);
+    expect(prompt).toMatch(/Nothing is `uncovered`/);
+    expect(prompt).toMatch(/submit the hub's own mapping back unchanged/);
+    // Both upgrades stay on the table — this is the branch with the least
+    // work in it, not the branch with none.
+    expect(prompt).toMatch(/promoting a generic field to a typed capability/);
+    expect(prompt).toMatch(/none of the lists above mention/);
+    // And that padding it is the wrong move, which is what both runs did.
+    expect(prompt).toMatch(/must not become is padding/);
+  });
+
+  /**
+   * The empty device gets it backwards. Everything this one publishes is on
+   * the hidden list, so layers 1–2 place *nothing* — one endpoint, no
+   * capabilities — and `uncovered` is still empty, because nothing was left
+   * over to be uncovered. That is the case with the most work in it, and
+   * `needsHelp`'s `staticallyEmpty` arm is what starts a run for it; being
+   * told to submit the hub's own mapping back unchanged would be a request
+   * for a descriptor the schema refuses.
+   */
+  it('does not offer the empty answer to a device with no static mapping', () => {
+    const opaque: Z2mDevice = {
+      ieee_address: '0x00124b0022000009',
+      friendly_name: 'Opaque',
+      supported: true,
+      definition: {
+        vendor: 'Acme',
+        model: 'AC-OPAQUE',
+        description: 'Publishes only what the hub hides',
+        exposes: [
+          { type: 'numeric', name: 'linkquality', property: 'linkquality', access: 1 },
+          { type: 'numeric', name: 'voltage', property: 'voltage', access: 1, unit: 'mV' },
+        ],
+      },
+    };
+    const profile = mapExposes(opaque);
+    expect(profile.uncovered).toEqual([]);
+    expect(profile.endpoints.every((endpoint) => endpoint.capabilities.length === 0)).toBe(true);
+
+    expect(buildMappingUserPrompt(opaque, profile, [])).not.toMatch(/Nothing is `uncovered`/);
+  });
+
+  /**
+   * **One sentence, and no list.** An earlier version named the hidden
+   * properties per device and told the model what to do about each. That was
+   * the hub pre-chewing a judgement the model is better placed to make — and
+   * its first wording forbade the one useful thing a run had done. What is
+   * left is the fact the model cannot derive: those properties are absent
+   * from all three lists *on purpose*, which is what stops `uncovered: []`
+   * reading as "nothing here needs looking at".
+   */
+  it('says the absence is deliberate without reciting which properties', () => {
+    const prompt = buildMappingUserPrompt(plug, mapExposes(plug), []);
+    expect(prompt).toMatch(/telemetry the static mapper hides by default/);
+    expect(prompt).toMatch(/so judge it/);
+    // No per-device catalogue, and no verdict handed down about one.
+    expect(prompt).not.toMatch(/hides these by default/);
+    expect(prompt).not.toMatch(/- .*: voltage, current/);
+  });
 });
 
 // ── The agent loop ────────────────────────────────────────────────────────
@@ -454,6 +575,88 @@ describe('the mapping agent loop', () => {
     const result = await agent().generate('system', 'user');
     expect(result).toMatchObject({ version: 1 });
     expect(sent).toHaveLength(1);
+  });
+
+  /**
+   * Recording is a convenience; recognising the device is the job. So the
+   * proof that matters is not that a round was written down — it is that
+   * writing it down changed *nothing*: the same requests on the wire, byte
+   * for byte, and the same descriptor out.
+   */
+  it('records rounds without changing a byte of what is sent or returned', async () => {
+    const twoRounds = () => [
+      reply({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'I think it is a plug.' }] }),
+      reply({ stop_reason: 'tool_use', content: [submitCall(validDescriptor)] }),
+    ];
+
+    queue(...twoRounds());
+    const quiet = await agent().generate('system prompt', 'user prompt');
+    const quietRequests = sent.map((request) => JSON.stringify(request));
+
+    sent.length = 0;
+    replies.length = 0;
+    queue(...twoRounds());
+    const rounds: AgentExchange[] = [];
+    const loud = await agent().generate('system prompt', 'user prompt', {
+      onExchange: (exchange) => rounds.push(exchange),
+    });
+
+    expect(loud).toEqual(quiet);
+    expect(sent.map((request) => JSON.stringify(request))).toEqual(quietRequests);
+    expect(rounds.map((round) => round.seq)).toEqual([1, 2]);
+    // Per round, because a run can be retried against the other vendor.
+    expect(rounds.every((round) => round.provider === 'anthropic')).toBe(true);
+    expect(rounds.every((round) => round.modelId === DEFAULT_MODEL)).toBe(true);
+  });
+
+  /**
+   * The delta rule. The system prompt is 9.9 KB and the `submit_mapping`
+   * schema 6.7 KB, and an agent loop resends both on every turn — so a round
+   * that recorded its request whole would write them once per turn and make
+   * the last round the size of the run.
+   */
+  it('carries the prompt once and then records only what each turn added', async () => {
+    queue(
+      reply({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'prose' }] }),
+      reply({ stop_reason: 'tool_use', content: [submitCall(validDescriptor)] }),
+    );
+    const rounds: AgentExchange[] = [];
+    await agent().generate('THE SYSTEM PROMPT', 'the device schema', {
+      onExchange: (exchange) => rounds.push(exchange),
+    });
+
+    const flat = (round: AgentExchange) => JSON.stringify(round.sent);
+    expect(flat(rounds[0]!)).toContain('THE SYSTEM PROMPT');
+    expect(flat(rounds[0]!)).toContain('the device schema');
+    // Round two adds the assistant's prose and the nudge, and nothing else.
+    expect(flat(rounds[1]!)).not.toContain('THE SYSTEM PROMPT');
+    expect(flat(rounds[1]!)).not.toContain('the device schema');
+    expect(flat(rounds[1]!)).toContain('prose');
+
+    // Tool *names*, never the 6.7 KB generated schema they carry.
+    expect(flat(rounds[0]!)).toContain('submit_mapping');
+    expect(flat(rounds[0]!)).not.toContain('input_schema');
+  });
+
+  it('keeps a refused round’s status and the provider’s own words', async () => {
+    createMock.mockImplementation(async () => {
+      throw Object.assign(new Error('400 {"type":"error"}'), {
+        status: 400,
+        error: { type: 'invalid_request_error', message: 'anthropic-workspace-id is required' },
+        headers: { 'x-api-key': 'sk-ant-secret' },
+      });
+    });
+    const rounds: AgentExchange[] = [];
+    await expect(
+      agent().generate('system', 'user', { onExchange: (exchange) => rounds.push(exchange) }),
+    ).rejects.toThrow();
+
+    expect(rounds).toHaveLength(1);
+    expect(rounds[0]!.ok).toBe(false);
+    expect(rounds[0]!.status).toBe(400);
+    expect(JSON.stringify(rounds[0]!.received)).toContain('anthropic-workspace-id');
+    // Bodies only, never headers — that is where a credential would be.
+    expect(JSON.stringify(rounds[0])).not.toContain('sk-ant-secret');
   });
 
   it('sends the research tools and caches the system prompt', async () => {

@@ -939,8 +939,10 @@ describe.skipIf(!handle)('hub API', () => {
       // One key, so there is nothing to choose between.
       mapping: { provider: 'anthropic', choosable: false },
     });
+    // One model per provider: the picker became a statement, so what an app
+    // draws from this list is "recognition runs on Opus 5", not a question.
     const providers = body.providers as { anthropic: { models: unknown[] } };
-    expect(providers.anthropic.models).toHaveLength(2);
+    expect(providers.anthropic.models).toHaveLength(1);
     expect(JSON.stringify(body)).not.toContain('sk-ant');
 
     // A member may read and write this now — see the `hub.ai` note in
@@ -956,6 +958,41 @@ describe.skipIf(!handle)('hub API', () => {
    * they arrived in — with two secure fields on one screen, pasting into the
    * wrong one is the ordinary mistake.
    */
+  /**
+   * The switch that keeps what a run said, end to end.
+   *
+   * Studio *hides* the control on a hub whose settings never mention the
+   * field — a switch that cannot do anything is worse than no switch — so a
+   * field that never reached the wire would make the whole feature invisible
+   * rather than merely broken. That is the shape of gap this pins.
+   */
+  it('answers whether it keeps what a run said, and lets a member change it', async () => {
+    const before = await app.inject({
+      method: 'GET',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+    });
+    // Off, and *said* to be off: nil at the app would hide the control.
+    expect(before.json()).toMatchObject({ recordExchanges: false });
+
+    const on = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { recordExchanges: true },
+    });
+    expect(on.statusCode).toBe(200);
+    expect(on.json()).toMatchObject({ recordExchanges: true });
+
+    // And it is read back from the hub rather than assumed by the caller.
+    const after = await app.inject({
+      method: 'GET',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+    });
+    expect(after.json()).toMatchObject({ recordExchanges: true });
+  });
+
   it('holds an OpenAI key beside the Anthropic one, and refuses each in the other’s field', async () => {
     await app.inject({
       method: 'PUT',
@@ -968,6 +1005,10 @@ describe.skipIf(!handle)('hub API', () => {
       method: 'PATCH',
       url: '/api/v1/settings/ai',
       headers: auth(memberToken),
+      // Terra is still priced, so the write is taken rather than 400-ing an
+      // app that has not shipped an update — the same stance `authType` takes
+      // one field over. What it must not do is come back as the model this
+      // hub runs, because it isn't: it is no longer offered.
       payload: { openaiApiKey: 'sk-proj-1234567890', openaiModel: 'gpt-5.6-terra' },
     });
     expect(saved.statusCode).toBe(200);
@@ -975,7 +1016,7 @@ describe.skipIf(!handle)('hub API', () => {
       hasKey: true,
       providers: {
         anthropic: { hasKey: true, model: 'claude-opus-5' },
-        openai: { hasKey: true, model: 'gpt-5.6-terra' },
+        openai: { hasKey: true, model: 'gpt-5.6-sol' },
       },
       // Both keys, so which one recognises devices is now somebody's choice.
       mapping: { provider: 'anthropic', choosable: true },

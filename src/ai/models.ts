@@ -18,10 +18,26 @@
  *    refuses, or miss one it accepts. Same rule as `GET /permissions`: the hub
  *    owns the vocabulary, the apps render it.
  *
- * `choices` is deliberately shorter than the allowlist. Two options — the
- * thorough one and the cheaper one — is the whole decision worth asking
- * somebody to make; the rest of the allowlist exists so a hub already set to an
- * older model keeps working rather than being told its setting is invalid.
+ * **`choices` is one model per provider, and that is deliberate.** It was two
+ * — the thorough tier and the cheaper one — on the reasoning that the cheaper
+ * one is "good at this". It is not good enough at *this*. Sonnet 5 repeatedly
+ * submitted descriptors the tool handler had to bounce, and the run that did
+ * finish named `custom` as an outlet's primary capability, which is the one
+ * value that renders as no control at all — so the home paid for a run whose
+ * result was a dead tile. A wrong mapping is worse than an expensive one in a
+ * way that is easy to underestimate: the descriptor is cached per device
+ * *model*, so it silently shapes every unit of that device this home ever
+ * meets, until somebody notices and explicitly remaps. The cheaper tier saved
+ * a few cents on a job that runs a handful of times in a hub's life and cost a
+ * plug that looked broken. OpenAI's cheaper tier is retired on the same
+ * reasoning rather than on its own evidence; re-add it as one line if it earns
+ * a place.
+ *
+ * So the model stops being a decision and becomes a fact the apps *state*.
+ * `PRICING` stays broad, for two reasons that outlive the choice: a stored
+ * setting naming a retired model must not make a hub's settings route start
+ * refusing, and `ai_runs.modelId` rows recorded months ago still have to price
+ * correctly when a run log is read back.
  *
  * Prices are list prices in USD per million tokens, from each vendor's public
  * pricing. They move rarely, and the cap they feed is a safety rail rather than
@@ -90,24 +106,28 @@ export const PROVIDER_MODELS: Readonly<
   anthropic: {
     default: 'claude-opus-5',
     choices: [
-      { id: 'claude-opus-5', label: 'Opus 5', note: 'The most thorough. Recommended.', recommended: true },
-      { id: 'claude-sonnet-5', label: 'Sonnet 5', note: 'Cheaper per run, and good at this.' },
+      {
+        id: 'claude-opus-5',
+        label: 'Opus 5',
+        note: 'The most thorough. Every recognition run uses it.',
+        recommended: true,
+      },
     ],
   },
-  // The pair mirrors Anthropic's exactly — the thorough tier and the cheaper
-  // one that is still good at this — and both are **explicit tier ids, never
-  // the bare `gpt-5.6` alias**. The alias routes to Sol today and is OpenAI's
-  // to re-point tomorrow, which would silently move which model a home runs,
-  // what a run costs and what `ai_runs.modelId` recorded, with nothing here
-  // changed to explain it. `claude-opus-5` is pinned for the same reason.
-  // Luna is deliberately not offered: this list is the models that are good at
-  // a reasoning-heavy job somebody runs a handful of times, and two options is
-  // the whole decision worth asking for.
+  // Mirrors Anthropic's: the thorough tier, alone, and as an **explicit tier
+  // id, never the bare `gpt-5.6` alias**. The alias routes to Sol today and is
+  // OpenAI's to re-point tomorrow, which would silently move which model a home
+  // runs, what a run costs and what `ai_runs.modelId` recorded, with nothing
+  // here changed to explain it. `claude-opus-5` is pinned for the same reason.
   openai: {
     default: 'gpt-5.6-sol',
     choices: [
-      { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', note: 'The most thorough. Recommended.', recommended: true },
-      { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', note: 'Cheaper per run, and good at this.' },
+      {
+        id: 'gpt-5.6-sol',
+        label: 'GPT-5.6 Sol',
+        note: 'The most thorough. Every recognition run uses it.',
+        recommended: true,
+      },
     ],
   },
 };
@@ -117,6 +137,25 @@ export const DEFAULT_MODEL = PROVIDER_MODELS.anthropic.default;
 
 export function defaultModelFor(provider: AiProvider): string {
   return PROVIDER_MODELS[provider].default;
+}
+
+/**
+ * The model a run will actually use.
+ *
+ * A stored setting counts only while the model it names is still *offered*.
+ * Retiring one otherwise leaves the homes that had chosen it as the only homes
+ * still running it — precisely the homes the retirement is for. Silently, too:
+ * nothing on any screen would have changed. So the stored value is read as a
+ * preference among what is on offer rather than as an instruction, and a hub
+ * that had picked Sonnet moves to Opus the next time it is asked, with no
+ * migration and nothing for its owner to do.
+ *
+ * `GET /settings/ai` reports *this*, never the stored string, so an app never
+ * draws a model the hub will not run.
+ */
+export function effectiveModel(provider: AiProvider, stored: string | null | undefined): string {
+  const offered = PROVIDER_MODELS[provider].choices.some((choice) => choice.id === stored);
+  return offered && stored ? stored : PROVIDER_MODELS[provider].default;
 }
 
 /** Server-side web search, billed per request rather than per token. */

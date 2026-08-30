@@ -107,19 +107,20 @@ than no button.
 | `POST /devices/:id/portraits` | `hub.ai` | draw one. `{photo?: base64, photoType?}` — absent draws from the device's kind alone. Synchronous, and it holds the request for the minutes an image takes. `409 openai_not_configured` (its own code: portraits are OpenAI's job, and a hub can be configured for recognition and not for this), `409 portrait_busy`, `409 no_space`, `502 {error:"provider_failed", kind, detail}` carrying OpenAI's own sentence |
 | `PATCH /devices/:id/portraits` | `device.edit` | `{selected: id\|null}` — which one the home sees. `null` is a *state*: the procedural sphere, chosen over every picture there is |
 | `DELETE /portraits/:portraitId` | `device.edit` | forget one, file and row |
-| `POST /devices/:id/remap` | `hub.ai` | force-regenerate the AI mapping (Zigbee devices); the hub also remaps automatically when a device publishes unknown parameters — see [ai-adaptation.md](ai-adaptation.md). `409 ai_not_configured` with no credential, `409 ai_disabled` when the owner has switched adaptation off |
+| `POST /devices/:id/remap` | `hub.ai` | force-regenerate the AI mapping (Zigbee devices) → `{requested}`. **It answers as soon as the run is under way, never when it ends**: a run is minutes and this is an HTTP request, so what the agent then did arrives on the `ai` stream and in `GET /ai/runs`. `requested: false` means the radio has no published schema for that device right now — a device row can outlive its `bridge/devices` entry — which is a different answer from a run that failed. Being explicit, it also drops a `rejected` mapping and **ignores the backoff gate**, because it is how somebody retries after fixing a key or changing the model. The hub also remaps automatically when a device publishes unknown parameters — see [ai-adaptation.md](ai-adaptation.md). `409 ai_not_configured` with no credential, `409 ai_disabled` when the owner has switched adaptation off |
 | `POST /matter/commission` | `device.add` | `{pairingCode}` → `202 {jobId}` (async) |
 | `GET /matter/commission/:jobId` | floor | `{status: running\|done\|failed, nodeId?, error?}` |
 | `POST /zigbee/permit-join` | `device.add` | `{seconds}`, 0–900 (0 = close the network) → `{permitJoin, seconds}` describing the **live** window, which is not always what was asked for. See [below](#the-zigbee-join-window) |
 | `GET /members` · `PATCH /members/me` · `DELETE /members/me` · `DELETE /members/:id` | floor · floor (itself) · floor (itself) · `member.remove` | rows carry `isSelf`, `roleId` and `roleName`; `PATCH` takes `{name}` and renames **the caller**; `DELETE` on either route answers `204` and revokes that member's tokens; the owner cannot be removed, by anyone or by itself. See [below](#which-member-you-are-isself-and-patch-membersme) |
 | `GET /invites` · `POST /invites` | `member.invite` | `POST {roleId?}` → `201 {code, expiresAt, roleId, roleName}`. Omitting `roleId` mints a **Member** invite, which is what every invite this hub has ever made was. An **owner** invite is allowed and needs the caller to be one (`403 not_owner`) |
 | `GET /activity?limit=&before=` | floor · `activity.read` | reverse-chronological, cursor = `before` id; rows carry `data` — see [below](#the-activity-log) |
-| `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | `hub.ai` | The home's AI: two credentials, two models, which provider recognises devices, and the switch. **PATCH is the write** — every field optional, absence means "leave this alone": `{enabled?, anthropicApiKey?, openaiApiKey?, anthropicModel?, openaiModel?, model?, mappingProvider?, clear?}`. `model` is `anthropicModel` under the name this route has always used; `clear: "anthropic"\|"openai"` forgets one credential and leaves the other; `mappingProvider` naming a provider with no key is `400 provider_not_configured`. Keys are told apart by prefix, so one pasted in the other's field is a 400 rather than a 401 an hour later, and a `sk-ant-oat…` subscription token is still refused. **PUT is unchanged** (`{apiKey, model?}`, an Anthropic key, required) for apps that have not moved. See [the answer's shape](#the-ai-settings-answer) |
-| `GET /ai/runs?limit=` | `hub.ai` | what the mapping agent did, newest first: `{id, at, kind, vendor, model, exposesHash, provider, modelId, ok, costUsd, turns, durationMs, errorKind, errorMessage, steps}`. A summary, never a transcript — see [ai-adaptation.md](ai-adaptation.md) |
+| `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | `hub.ai` | The home's AI: two credentials, two models, which provider recognises devices, and the switch. **PATCH is the write** — every field optional, absence means "leave this alone": `{enabled?, recordExchanges?, anthropicApiKey?, openaiApiKey?, anthropicModel?, openaiModel?, model?, mappingProvider?, clear?}`. `model` is `anthropicModel` under the name this route has always used; `clear: "anthropic"\|"openai"` forgets one credential and leaves the other; `recordExchanges` starts or stops keeping what each round said, and is off unless asked; `mappingProvider` naming a provider with no key is `400 provider_not_configured`. Keys are told apart by prefix, so one pasted in the other's field is a 400 rather than a 401 an hour later, and a `sk-ant-oat…` subscription token is still refused. **PUT is unchanged** (`{apiKey, model?}`, an Anthropic key, required) for apps that have not moved. See [the answer's shape](#the-ai-settings-answer) |
+| `GET /ai/runs?limit=` | `hub.ai` | what the mapping agent did, newest first: `{id, at, kind, vendor, model, exposesHash, provider, modelId, ok, costUsd, turns, durationMs, errorKind, errorMessage, steps, exchanges}`. A summary, never a transcript — see [ai-adaptation.md](ai-adaptation.md). `exchanges` is how many **rounds** this run kept, `0` unless recording was on when it ran |
+| `GET /ai/runs/:id/exchanges` | `hub.ai` | what that run actually said, round by round, oldest first: `[{seq, at, durationMs, provider, modelId, status, ok, inputTokens, outputTokens, sent, received}]`. `sent`/`received` are `[{kind, label, text?, bytes?}]` — the round's **main data**, not its bodies; `bytes` is present only on a part that was cut, and is what it weighed whole. A run is a *loop*, so one recognition is several rounds and a failed one is followed by the next in the same list. Empty is the ordinary answer — recording is off unless the owner asked, and rounds age out after a week. See [ai-adaptation.md](ai-adaptation.md) |
 | `GET /device-mappings` | `hub.ai` | the mapping library: one entry per device model, `{adapter, exposesHash, vendor, model, status, source, problems, endpoints, deviceIds, createdAt, updatedAt}` |
 | `GET /device-mappings/:exposesHash` | `hub.ai` | the download — an envelope naming the device, see [below](#the-device-mapping-library) |
 | `PUT /device-mappings/:exposesHash` | `hub.ai` | the upload. Accepts the envelope or a bare descriptor. `422 {error:"invalid_mapping", problems, issues?}` when the hub can't use it — and it is **kept**, so `…/repair` can work from it |
-| `DELETE /device-mappings/:exposesHash` | `hub.ai` | forget it; devices of that model fall back to their static mapping |
+| `DELETE /device-mappings/:exposesHash` | `hub.ai` | forget it; devices of that model fall back to their static mapping, and **nothing is asked of the agent** — a delete that re-consulted the library would miss the row it had just removed and start a fresh paid run inside the request, so Forget cost a replacement for the mapping being forgotten. The next genuine trigger asks |
 | `POST /device-mappings/:exposesHash/repair` | `hub.ai` | hand a rejected descriptor to the agent with the complaints. `409 ai_not_configured` / `409 ai_disabled` / `409 nothing_to_repair`, `422 no_device` |
 | `PUT /settings/radio` | `hub.radio` | `{mode: "auto"\|"zigbee"\|"matter"}` → `{budget, mode, matter, canRunBoth, applying: true}`. Records a *request*; see below |
 | `GET /settings/mqtt` | `hub.mqtt` | the broker's credentials: `{requiresPassword, host, port, baseTopic, accounts[]}`. Each account is `{id, username, password, recommended, title, summary, publish[], subscribe[]}`. `hub.mqtt.admin` **adds** the hub's own full-access account; without it only the limited one is returned. See [below](#the-mqtt-broker-asks-for-a-password) |
@@ -638,6 +639,16 @@ when a new one fails its health check) meets a schema it understands.
 }
 ```
 
+**`online` and each endpoint's `state.reachable` are one fact, and a client
+should read whichever it prefers rather than combining them.** The hub keeps
+them in step — the guard in `reachabilityChanged` asks whether *either* is
+behind, so a restart that loaded the two out of step from their separate
+tables is repaired the next time a radio reports, and the correction arrives
+as an ordinary `deviceUpserted` frame with no activity row behind it (nothing
+about the device changed; one of the two records of it was late). They drifted
+once, and an app ANDing them showed a device as offline while another app,
+reading `online` alone, showed the same device online at the same moment.
+
 `id` is a UUID this hub minted; **`externalId` is the device's address on its
 own protocol** — a Zigbee IEEE, an MQTT discovery id, a Matter node. It is the
 only handle an app has for tying a device row to something a *radio* said,
@@ -836,9 +847,8 @@ the second provider reads exactly what it read before — plus a per-provider ha
   "providers": {
     "anthropic": { "hasKey": true, "model": "claude-opus-5",
                    "models": [ { "id": "claude-opus-5", "label": "Opus 5",
-                                 "note": "The most thorough. Recommended.", "recommended": true },
-                               { "id": "claude-sonnet-5", "label": "Sonnet 5",
-                                 "note": "Cheaper per run, and good at this." } ] },
+                                 "note": "The most thorough. Every recognition run uses it.",
+                                 "recommended": true } ] },
     "openai":    { "hasKey": true, "model": "gpt-5.6-sol", "models": [ … ] }
   },
   "mapping":   { "provider": "anthropic", "choosable": true },
@@ -853,7 +863,19 @@ label a person reads, a one-line note and exactly one `recommended`. This is the
 `GET /permissions` rule applied to models: ids and tiers move, and an app that
 shipped its own list would offer one this hub refuses or miss one it accepts.
 The allowlist behind it is deliberately longer than `models` — a hub already set
-to an older model keeps working rather than being told its setting is invalid.
+to an older model keeps working rather than being told its setting is invalid,
+and a run recorded months ago still prices correctly when its log is read back.
+
+**`models` is one entry per provider, so draw it as a fact, not a picker.** The
+cheaper tier was retired after it produced descriptors the hub had to reject and
+one that named `custom` as an outlet's primary capability — a paid run whose
+result was a tile with no control on it. An app should show which model
+recognition runs on; keep the picker for the day the list is longer than one,
+and don't hide the row when it isn't, because which model spends the home's
+money is worth stating even when it isn't a question. **`model` is what will
+run, not what is stored**: a setting naming a model no longer offered resolves
+to the one that is, so an app never draws a model this hub will not use. Writing
+a retired id is still accepted — it just isn't what runs.
 
 **`provider` and `mapping.provider` are the same answer**: which provider would
 recognise a device right now. With one key there is no choice to make; with two,

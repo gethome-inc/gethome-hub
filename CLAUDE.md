@@ -150,6 +150,28 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   to explain it. That is the moment somebody pulls a stick out of a Pi. It routes through
   the per-device path on purpose: already serialized, already quiet for a
   device in that state, already emitting `deviceUpserted`.
+  **Reachability is one fact in two rows, and the guard has to ask about
+  both.** It is written to `devices.online` *and* into every endpoint's
+  `state.reachable`, and the apps do not read the same one — Studio draws
+  `online`, the iOS app draws `(online ?? true) && state.reachable` — so the
+  two disagreeing shows up as one device reading offline on a phone and online
+  on a Mac, about the same hub, at the same moment. They drifted for two
+  reasons that compounded. The endpoint mutation was **in-memory only**: it
+  never marked the state dirty, so `reachable` reached the card solely by
+  riding along with the next state report that happened to flush, while the
+  device row was written immediately. And the guard read `cached.online`
+  alone, so once the pair had diverged on disk — they are loaded back from two
+  tables with nothing reconciling them — the radio coming up found `online`
+  already `true`, returned early, and left the endpoint stuck at `false`
+  **for ever**, because nothing else writes that field. Found on a hub whose
+  Zigbee2MQTT had `availability.enabled: false`, which is Z2M's default: with
+  no per-device availability message in existence, the early return was the
+  last word. So the guard now asks whether *either* place is behind, every
+  endpoint it corrects is marked dirty, and a repair emits `deviceUpserted`
+  but writes **no** activity row — the device's reachability did not change,
+  one of the two records of it was simply late. A new endpoint inherits
+  `device.online` rather than being born reachable, which is the same split
+  pointed the other way.
   **Endpoint state is written behind a debounce** (`STATE_FLUSH_MS`), because
   persisting on every report meant one whole-row JSON rewrite per sensor
   message, forever, onto an SD card — a power meter alone is a write every few
@@ -178,14 +200,68 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   chain, so `resolveProvider()` imports whichever half it needs. `agent.ts` is
   the Anthropic loop (Messages API, server-side `web_search`/`web_fetch`);
   `openai-agent.ts` is the same run on the Responses API over plain `fetch` —
-  no second SDK for a Pi to download — with hosted search and **no fetch tool**,
-  because there is no hosted equivalent and giving the *hub* one would break the
-  documented promise that it opens no connection to third-party sites.
-  Two rules for the pair. **Effort is `high` on both and is not exposed**: the
-  cost lever somebody can actually calibrate is the model, and two settings for
-  one decision is one too many. And **the hub owns the model list** — the apps
-  render `providers.<name>.models` rather than shipping ids of their own, the
-  `GET /permissions` rule applied to a vocabulary that moves.
+  no second SDK for a Pi to download — with hosted search and a `fetch_page`
+  the **hub itself** performs, because OpenAI has no hosted equivalent and
+  reading the device's own zigbee2mqtt.io page rather than a search snippet is
+  the difference between settling a unit and guessing one, on a mapping cached
+  against a device model for ever.
+  **That is the one place this repository opens a connection to a site that is
+  not a provider's API, and an allowlist is the whole of why it is
+  acceptable.** `src/ai/page-fetch.ts` reads `zigbee2mqtt.io` and
+  `raw.githubusercontent.com` and nothing else: the URL comes from model output
+  and the machine dialling is inside somebody's home network with an
+  unauthenticated health route of its own, so a general fetch tool here is a
+  request-forgery primitive aimed at the LAN dressed up as research. Five
+  guards — https only; the host matched exactly or as a subdomain *with the
+  dot*, since `endsWith` would accept `evil-zigbee2mqtt.io`; redirects
+  followed by hand and re-checked every hop, because `fetch` follows them
+  itself and an allowed host answering `302 http://10.0.0.1/` would walk
+  straight past the list; the resolved address required to be public, because
+  an allowlist on a *name* is only as good as the resolver behind it; and
+  bounded bytes with one deadline. `test/ai-page-fetch.test.ts` asserts that a
+  refused URL produces **no request at all**, which is what proves the guard
+  runs before the fetch rather than after it. `docs/ai-adaptation.md`'s Privacy
+  section is canonical and says what the promise narrowed to.
+  Three rules for the pair. **The system prompt is built per provider**
+  (`mappingSystemPrompt`), because its research paragraph names tools and the
+  two loops do not carry the same ones: one shared prompt told an OpenAI run
+  to `web_fetch` the device's zigbee2mqtt.io page first, called that page the
+  source of truth, and then told it not to spend searches confirming what it
+  had already read — three instructions about a tool it has not got, at the
+  one point in the run where research is decided. Everything else in it is
+  shared, so a rule added for one vendor cannot go missing for the other, and
+  `test/ai-boundary.test.ts` asserts the wall for both.
+  **Effort is `high` on both and is not exposed**: two
+  settings for one decision is one too many. And **the hub owns the model
+  list** — the apps render `providers.<name>.models` rather than shipping ids of
+  their own, the `GET /permissions` rule applied to a vocabulary that moves.
+  **That list is one model per provider now, so the apps *state* it rather than
+  ask.** It was two, the thorough tier and the cheaper one, until the cheaper
+  one was tried: Sonnet 5 kept submitting descriptors `submit_mapping` had to
+  bounce, and the run that finished named `custom` as an outlet's primary — the
+  one value that renders as no control at all, so a paid run produced a dead
+  tile on a working plug. The trade is lopsided because a descriptor is cached
+  per device *model* and shapes every unit of it the home ever meets until
+  somebody remaps; a few cents on a job that runs a handful of times in a hub's
+  life does not buy that risk. OpenAI's cheaper tier went on the same reasoning
+  rather than its own evidence. The half that is easy to miss is
+  **`effectiveModel`: a stored model counts only while it is still offered**,
+  or retiring one leaves the homes that had chosen it as the only homes still
+  running it — silently, since nothing on a screen would change. `GET
+  /settings/ai` answers what will *run*, never the column, so a hub set to
+  Sonnet moves to Opus by itself; a write naming a retired id is still accepted
+  rather than 400-ing an older app, it simply is not what runs, and `PRICING`
+  stays broad so a months-old `ai_runs.modelId` still prices correctly.
+  **`resolveProvider()` has to use it too, and that is the half that was
+  missed.** Every surface that *reports* which model answered went through
+  `effectiveModel` — the settings route, `ai_runs.modelId`,
+  `status.lastRun.model`, the backoff gate's credential id — while the one
+  call that picks the model to actually run read the column, so a hub set to
+  Sonnet went on running Sonnet with every screen and every recorded row
+  saying Opus. It passed unnoticed because `isSupportedModel` is deliberately
+  the broad `PRICING` allowlist and let it straight through, and because the
+  homes it was wrong for are exactly the ones nobody was looking at.
+  `test/ai-model-choice.test.ts` pins it.
   **It used to run on the Claude Agent SDK, and moving off it was a memory
   decision like dropping Docker.** That SDK ships a 276 MB native binary — 74%
   of the hub's whole download — and spawned a ~315 MB subprocess per run, of
@@ -427,6 +503,197 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   fixing. `exposesHash` lives with the exposes mapper, not with the AI: it is a
   property of the device's published schema, and the adapter records it in
   `DeviceRecognition` without importing the AI stack.
+  **Forgetting an entry is not applying one, and using the same call for both
+  bought a replacement for the mapping you were deleting.** `applyStoredMapping`
+  re-adopts with `consultMapping: true`, which is right after an upload or a
+  repair — there is something in the library to consult, the cache hits, no run
+  happens. `remove()` called it too, against a hash it had *just deleted*: the
+  lookup missed and the mapper started a fresh paid run, awaited, minutes long,
+  inside a request Studio abandons after ten seconds — surfacing as "Studio
+  couldn't remove that schema. The request timed out." The timeout was the
+  smaller half; pressing **Forget** spending money on a new mapping is the
+  opposite of what the button says. `forgetStoredMapping` asks for nothing, and
+  needs **two** suppressions rather than one, because either alone is a no-op:
+  `adoptDevice` deliberately carries a previous mapping over (so a regeneration
+  never leaves a device less usable mid-run), and `needsHelp` is true for any
+  device with an uncovered property — which is most devices an AI mapping was
+  ever made for. The device falls back to its static mapping, which is what the
+  three layers are for, and the next *genuine* trigger asks.
+- **Trying again is the whole recovery path, and three things used to break
+  it.** Recognition fails for reasons a person can fix — a key that is wrong, a
+  key that names no workspace, a model too weak to submit a valid descriptor —
+  and every one of those fixes ends the same way: come back and press *Work it
+  out again*. **First, `POST /devices/:id/remap` answers as soon as the run is
+  under way**, never when it ends. It used to await the whole run, against a
+  ten-minute watchdog and a Studio client whose HTTP timeout is ten seconds, so
+  the button reported a failure on every retry that actually did any work and
+  appeared to succeed only on runs that failed instantly. `ZigbeeAdapter.remap`
+  is fire-and-forget now, the shape `scheduleParameterRemap` beside it always
+  had; `false` still means the radio has no published schema for that device
+  *now*, which is the only answer available without waiting. **Second, the
+  backoff gate names the credential it was armed against** and retires itself
+  when the provider, the model or the key moves — otherwise the judgement "this
+  account is unavailable" outlived the account, and a hub-wide gate armed by one
+  provider silenced the other, which is exactly the switch an app tells somebody
+  to reach for. Keying it on `provider:model:sha256(secret)` means no channel
+  from the settings routes to keep in step. **Third, an explicit run ignores the
+  gate entirely**, the stance `MappingLibrary.repair` already took by building
+  its own mapper — and the flag travels to the check rather than being settled
+  where the button is pressed, because runs are serialized hub-wide and a run
+  already queued can arm the gate in between. `test/ai-retry.test.ts` pins all
+  of it.
+  **And a failed run is recorded in words, not in a response body.** This is
+  `diagnosis.ts`'s rule one module over: an SDK error's `message` is the status
+  with the whole JSON body glued to it, so a device row in Studio read
+  `400 {"type":"error","error":{…}}` with the one useful sentence in the middle
+  of it. `describeRunFailure` digs that sentence out and, for a refusal that is
+  really a *setting*, adds the fix and records `config` — today the one entry is
+  an identity-linked Anthropic key, which must name a workspace on every request
+  and which the hub deliberately does not choose for anybody. Same three rules
+  as the Zigbee diagnosis: most-specific-first, an unrecognised failure is still
+  reported with nothing guessed about it, and nothing throws — it runs inside
+  the catch of a run that has already failed.
+- **What a run *said* can be kept, and the switch is the whole reason that is
+  affordable.** `ai_runs` is a summary by design — model prose on an SD card is
+  the write amplification the rest of the store is arranged to avoid — and
+  `ai_run_exchanges` is the one deliberate exception, because a refusal is
+  often about the *request*: a model that will not take a parameter, a key that
+  names no workspace, and the run log's one sentence cannot answer "what did we
+  actually send?". **A run is a loop, not a request** — up to `AGENT_MAX_TURNS`
+  (40) rounds against the provider — so a failed round followed by a successful
+  one is the ordinary shape of a working run, and anything recording what was
+  said has to record it per round, with the provider and the model on each
+  (a run can be retried against the other vendor entirely). Six rules.
+  **Off costs nothing**: the switch *is* the presence of
+  `AgentRunContext.onExchange`, not a flag a handler reads, so a run nobody
+  asked about never walks a content block — the `MqttObserver` stance.
+  **A round records what it added, never the conversation so far**: an agent
+  loop resends everything every turn, and the system prompt and the
+  `submit_mapping` schema alone are 9.9 KB and 6.7 KB *per round*, so recording
+  each request whole would write them forty times and make the last round the
+  size of the run; the configuration and the system prompt are carried once, on
+  round 1. **It is main data, not bodies** — labelled, excerpted parts
+  (`{kind, label, text?, bytes?}`), with `kind` an open string like
+  `commandFailed.kind`, and a cut part carrying what it weighed whole so no app
+  asserts a constant from here. **Nothing carries a credential**: request
+  bodies only, never headers. **It can never end a run** — recognising the
+  device is the job and this is a convenience, so the distillation, the
+  excerpting and the callback all sit under one `catch` inside `record()`,
+  which is why it takes a thunk rather than a value. And **two bounds**, seven
+  days and a row cap, written once with the run rather than per round
+  (`STATE_FLUSH_MS` again), with a pruned run taking its rounds with it.
+  `docs/ai-adaptation.md` is canonical.
+- **A device is routable before the agent is asked, a new parameter is not a
+  reason to pay again, and the overlay may not take a capability away.** Five
+  faults met on one Aqara plug, and they read as one symptom — a plug that had
+  worked until the AI mapped it, then sat dead while its model was recognised
+  over and over. **First, `adoptDevice` put the device into `byIeee`/`byFriendlyName`
+  *after* awaiting the mapper.** Those two maps are how `handleMessage` finds a
+  device, so for the tens of seconds a run takes every state report and every
+  `<name>/availability` message was looked up, missed and dropped — and on the
+  first adoption after a restart there is no earlier entry at all, which is
+  exactly when Z2M republishes its retained availability. The hub threw away
+  the one message saying the device was back and kept the `offline` it had read
+  out of SQLite. Registering first costs nothing and is what makes a run
+  invisible to the rest of the adapter; the previous mapping is carried over
+  too, so a regeneration never leaves a device less usable than it was.
+  **Second, the runtime unknown-key remap forced a regeneration**, which drops
+  the stored mapping and pays for a fresh run — so a model already recognised
+  was recognised again every time one more property appeared, and `aiAskedKeys`
+  is in-memory, so every restart began the sequence again. Four paid runs on
+  one plug in an hour, each mapping covering whichever properties were in that
+  run's samples. It consults the library now: a model this hub knows costs
+  nothing to meet again, and *upgrading* one is what the owner's "Work it out
+  again" is for — the only thing that should spend money unasked.
+  **Third, `version` was `z.literal(1)` rather than defaulted**, so a run would
+  submit a good descriptor, be told `version: Invalid input: expected 1`, and
+  resubmit — five, six, seven paid rounds of one run, on every run. It is a
+  constant; the parse fills it in.
+  **Fourth, `mergedEndpoints` let the descriptor overwrite `primary`**, and
+  that is the one that actually looked like a broken device. Capabilities merge
+  as a union, so the overlay can only add — but `primary` is a single field,
+  it is what every app draws the tile from, and `custom` is layer 2's generic
+  catch-all, which renders as *no control at all*. A mapping that named
+  `custom` as its primary therefore turned a working switch into a dead grey
+  tile while the hub reported the device perfectly online and `onOff` sat in
+  `capabilities` untouched: nothing but that one word had moved, which is why
+  every reachability theory came back clean. The agent's `primary` is taken
+  only when it neither demotes a typed capability to `custom` nor names a
+  capability the merged endpoint does not have — a primary with no state behind
+  it is a tile bound to nothing. Promotion is untouched, because a `custom`
+  primary upgraded to `onOff` is the whole point of layer 3; it is only the
+  demotion that is refused. The general rule is worth more than the case:
+  **an AI overlay may add to what the static mapper found and may never
+  subtract from it**, so anything new that merges a descriptor into a static
+  mapping has to say what happens to the fields that cannot be unioned.
+  **And the merge that combines the two *reports* was breaking that rule too,
+  one recursion short.** `handleMessage` runs the static rules and the
+  overlay's rules over the same payload and merges the patches, and the
+  adapter had a private one-level-deep merge for it — right for every shape in
+  `EndpointState` except the one that is two levels deep, `custom.values`. So
+  the moment an overlay declared a generic field of its own, its `values`
+  object replaced the static mapper's wholesale: the inventory went on
+  advertising every static field and not one of them received another value.
+  Seen on an Aqara plug whose six settings went blank behind an uploaded
+  schema naming three fields, which reads as controls the plug had stopped
+  answering. `schema/state.ts` already had the recursive version, with a
+  comment naming `custom.values` as the case to get right — which is exactly
+  why there should only ever have been one of them, and there is now:
+  `mergeStatePatch`, beside `mergeState`.
+  **The whole of this bullet is about a device layers 1–2 place completely,
+  and the prompt had no way to say so.** `uncovered` is empty for that plug,
+  so the agent has genuinely nothing to do — but `submit_mapping` is the only
+  answer channel and the schema needs an endpoint, so a model with nothing to
+  add invents something. Both vendors did, in the two ways available:
+  restating the generic fields that already existed (a harmless no-op), and
+  declaring fields for properties `IGNORED_PROPERTIES` hides plus one the
+  device does not publish at all. Two additions to `prompts.ts` close it, and both are
+  about the message being **true** rather than about steering the model. One
+  sentence says that a property appearing in none of the three lists is
+  telemetry the static mapper hides on purpose — without that, `uncovered: []`
+  reads as "nothing here needs looking at" while the exposes tree plainly
+  carries properties nothing has placed. And when `uncovered` is empty **and
+  layers 1–2 placed something**, it asks for a genuine *upgrade* or for the
+  hub's own mapping back unchanged. That second condition is load-bearing and was missed
+  once: a device whose exposes are all on the hidden list places into
+  *nothing* — one endpoint, no capabilities — with `uncovered` still empty
+  because nothing was left over to be uncovered, which is the case with the
+  **most** work in it and the one `needsHelp`'s `staticallyEmpty` arm exists
+  for.
+  **What that sentence must not become is a list**, and it took two goes to
+  land. The first version named the hidden properties per device and said
+  never to re-declare them — which would have refused the one genuinely useful
+  thing either run did for that plug, since the list is applied without
+  knowing the device and cannot tell mains voltage on a metered plug from
+  battery voltage on a door sensor. The second kept the list and softened it
+  to a judgement, which was right and still more than the hub has any business
+  saying: the fact only the hub holds is that the absence is deliberate, and
+  the decision belongs to the layer that can see the device. Neither addition
+  is a filter in code —
+  dropping a field for an unpublished property would break
+  `detectUnknownParameters`, which exists precisely because devices publish
+  keys their exposes tree never declared.
+  **Fifth, the radio's word on a device can arrive before the device has a
+  name** — found in the same hub's log, and the one that fails in the opposite
+  direction. The broker replays every retained message the instant the adapter
+  subscribes, so `bridge/devices` — the only thing that *names* a device — and
+  the `<name>/availability` readings about those devices land in one burst, in
+  whatever order the broker picks. `bridge/devices` is dispatched as
+  `void syncDevices(...)` and `syncDevices` awaits `adoptDevice` per device, so
+  only the **first** device is registered synchronously: every device behind it
+  is still nameless when its own retained availability is handled, the
+  `byFriendlyName` lookup misses, and Zigbee2MQTT's own account of what it can
+  reach is dropped on the floor — on every start, for every device but one.
+  What was left was `bridge/state`, which says only "the radio is up" and marks
+  *everything* online, so a device that was genuinely away came back reading
+  healthy and stayed that way; for a device that is simply gone there is no
+  later change to publish, because the retained message was the whole
+  statement. An unrecognised name is parked in `pendingAvailability` and
+  replayed the moment `adoptDevice` registers it, bounded (one entry per name,
+  oldest evicted past the cap) since it is fed by whatever sits on the broker's
+  tree rather than by anything the hub knows. Note the direction before
+  reaching for this to explain a device stuck offline: it made devices falsely
+  **online**, never falsely offline.
 - **Nothing is unsupported by default — three layers, in order.** Devices are
   made usable by (1) **typed capabilities** (canonical schema), then (2)
   **generic custom fields** (`custom`) for every leftover parameter, generated
