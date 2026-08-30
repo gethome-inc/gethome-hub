@@ -369,3 +369,132 @@ describe.skipIf(!enabled)('ZigbeeAdapter retained availability at start-up', () 
     expect(reachability).toContainEqual({ externalId: second.ieee_address, reachable: false });
   });
 });
+
+/**
+ * An overlay adds to the static mapping; it must never take anything away —
+ * and the merge that combines the two reports had been quietly taking things
+ * away for as long as generic fields have existed.
+ *
+ * `custom.values` is the one shape in `EndpointState` that is two levels
+ * deep, and the adapter combined the two patches with a merge that recursed
+ * once. So the moment a mapping declared a generic field of its own, its
+ * `values` object replaced the static mapper's wholesale: the inventory went
+ * on advertising every static field and not one of them ever received another
+ * value. Seen on a real Aqara SP-EUC01 whose six settings — the power-outage
+ * memory, the night LED, auto-off among them — went blank behind an uploaded
+ * schema that named three fields, and read as controls the plug had stopped
+ * answering.
+ */
+describe.skipIf(!enabled)('ZigbeeAdapter overlay merge', () => {
+  const base = `z2m-merge-${Math.random().toString(16).slice(2, 8)}`;
+  let fake: mqtt.MqttClient;
+  let adapter: ZigbeeAdapter;
+
+  /** A plug with a typed control and two settings the static mapper fields. */
+  const plug = {
+    ieee_address: '0xfeed0000000000b1',
+    friendly_name: 'merge plug',
+    type: 'Router',
+    supported: true,
+    interview_completed: true,
+    definition: {
+      vendor: 'Acme',
+      model: 'PLUG-M1',
+      description: 'Metered plug',
+      exposes: [
+        {
+          type: 'switch',
+          features: [
+            { type: 'binary', name: 'state', property: 'state', access: 7, value_on: 'ON', value_off: 'OFF' },
+          ],
+        },
+        { type: 'binary', name: 'auto_off', property: 'auto_off', access: 7, value_on: true, value_off: false },
+        {
+          type: 'binary',
+          name: 'led_disabled_night',
+          property: 'led_disabled_night',
+          access: 7,
+          value_on: true,
+          value_off: false,
+        },
+      ],
+    },
+  };
+
+  /** What an uploaded or agent-written mapping looks like when it declares a
+   *  generic field of its own — here for a property the static mapper
+   *  deliberately ignores. */
+  const overlay: AppliedAiMapping = {
+    source: 'imported',
+    endpoints: [
+      {
+        endpointId: 1,
+        deviceKind: 'outlet',
+        capabilities: ['custom'],
+        primary: 'custom',
+        customFields: [{ id: 'voltage', label: 'Voltage', control: 'value', unit: 'V', settable: false }],
+      },
+    ],
+    properties: new Set(['voltage']),
+    typedProperties: new Set(),
+    extractState: (payload) =>
+      typeof payload.voltage === 'number'
+        ? new Map([[1, { custom: { values: { voltage: payload.voltage } } }]])
+        : new Map(),
+    buildCommandPayload: () => null,
+  };
+
+  const patches: Array<{ endpointId: number; patch: Partial<EndpointState> }> = [];
+  const upserts: AdapterDeviceDescriptor[] = [];
+  const bus: AdapterBus = {
+    deviceUpserted: (descriptor) => upserts.push(descriptor),
+    deviceRemoved: () => {},
+    stateChanged: (_adapter, _externalId, endpointId, patch) => patches.push({ endpointId, patch }),
+    reachabilityChanged: () => {},
+    radioReachabilityChanged: () => {},
+    commandFailed: () => {},
+    activity: () => {},
+  };
+
+  beforeAll(async () => {
+    fake = await mqtt.connectAsync(MQTT_URL);
+    await fake.publishAsync(`${base}/bridge/devices`, JSON.stringify([plug]), { retain: true });
+    adapter = new ZigbeeAdapter({
+      mqttUrl: MQTT_URL,
+      baseTopic: base,
+      log: pino({ level: 'silent' }),
+      aiAssist: { requestMapping: async () => overlay },
+    });
+    await adapter.start(bus);
+    await waitFor(() => upserts.length >= 1);
+    // The library-apply path: what an upload or a repair has just written.
+    await adapter.applyStoredMapping(
+      exposesHash(plug as unknown as Parameters<typeof exposesHash>[0]),
+    );
+  }, 30_000);
+
+  afterAll(async () => {
+    await fake?.publishAsync(`${base}/bridge/devices`, '', { retain: true }).catch(() => {});
+    await fake?.endAsync().catch(() => {});
+    await adapter?.stop();
+  });
+
+  it('keeps the static generic fields reporting beside the overlay\'s own', async () => {
+    patches.length = 0;
+    await fake.publishAsync(
+      `${base}/${plug.friendly_name}`,
+      JSON.stringify({ state: 'ON', auto_off: true, led_disabled_night: false, voltage: 231 }),
+    );
+    await waitFor(() => patches.some((entry) => entry.patch.custom?.values !== undefined));
+
+    const values = patches.at(-1)!.patch.custom!.values!;
+    // The overlay's own field arrives…
+    expect(values.voltage).toBe(231);
+    // …and so does every field the static mapper reads, which is the half
+    // that used to vanish.
+    expect(values.auto_off).toBe(true);
+    expect(values.led_disabled_night).toBe(false);
+    // Nothing else was lost either: the typed capability still reports.
+    expect(patches.at(-1)!.patch.onOff).toBe(true);
+  });
+});

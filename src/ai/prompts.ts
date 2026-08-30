@@ -1,4 +1,10 @@
-import type { Z2mDevice, Z2mProfile } from '../adapters/zigbee/exposes-mapper.js';
+import type { AiProvider } from '../core/settings.js';
+import {
+  IGNORED_PROPERTIES,
+  publishedProperties,
+  type Z2mDevice,
+  type Z2mProfile,
+} from '../adapters/zigbee/exposes-mapper.js';
 
 /**
  * Prompt construction for AI device adaptation. The mapping agent sees the
@@ -21,7 +27,79 @@ import type { Z2mDevice, Z2mProfile } from '../adapters/zigbee/exposes-mapper.js
  * is asked to map only what the static mapper left over.
  */
 
-export const MAPPING_SYSTEM_PROMPT = `You adapt smart-home devices into the GetHome canonical device schema by \
+/**
+ * The system prompt, which differs between providers in exactly one paragraph.
+ *
+ * **It has to, because the two runs do not have the same tools.** The
+ * Anthropic loop carries server-side `web_search` *and* `web_fetch`, and
+ * `zigbee2mqttDevicePage` exists to put the device's own page in the
+ * conversation so that fetch can reach it — `web_fetch` will only fetch a URL
+ * already mentioned. The OpenAI loop has hosted search and deliberately no
+ * fetch (`openai-agent.ts` says why: there is no hosted equivalent, and a
+ * fetch the *hub* performed would break the promise that it opens no
+ * connection to third-party sites). One prompt for both told an OpenAI run to
+ * `web_fetch` a page first, called that page the source of truth, and then
+ * told it not to spend searches confirming what it had already read — three
+ * instructions about a tool it does not have, at the exact point in the run
+ * where research is decided.
+ */
+export function mappingSystemPrompt(provider: AiProvider): string {
+  return MAPPING_PROMPT_HEAD + researchInstructions(provider) + MAPPING_PROMPT_TAIL;
+}
+
+/**
+ * How to research, in the terms of the tools this provider's run actually has.
+ *
+ * Both halves say the same three things — research only what the exposes and
+ * payloads leave ambiguous, treat zigbee2mqtt.io as authoritative because it
+ * is generated from the very converter that produces these payloads, and
+ * escalate rather than give up — and differ only in whether the device's page
+ * is *fetched* or *searched for*.
+ */
+function researchInstructions(provider: AiProvider): string {
+  const shared =
+    '- Research the device when, and only when, the exposes and payloads leave something genuinely ambiguous: an ' +
+    'undocumented enum, a unit you cannot infer, a property whose direction or scale is unclear, vendor-specific ' +
+    'behavior. Guessing a unit is the single most damaging thing you can do here, because the mapping is cached and ' +
+    'silently shapes what the apps show for every device of this model.\n';
+
+  if (provider === 'openai') {
+    return (
+      shared +
+      '- You have web_search and no fetch tool. The device\'s own zigbee2mqtt.io page is still the best answer ' +
+      'there is — it is generated from the same zigbee-herdsman-converters definition that produces the payloads ' +
+      'this hub receives, so its exposes, units, value ranges and enum values are exactly what the device will ' +
+      'publish and accept — so search for it rather than reading it directly: web_search for ' +
+      '"<vendor> <model> zigbee2mqtt". Your task message carries the page\'s likely URL; treat it as the thing to ' +
+      'find, not as something you can open. Once the search results tell you what the properties you are stuck on ' +
+      'mean, you are done researching. Write the descriptor and submit.\n' +
+      '- Escalate only when that search does not settle it: the model on its own, then the specific property or ' +
+      'enum value. Best references after that page are the zigbee-herdsman-converters definition for the device ' +
+      '(it names the exact converters, units and ranges), the vendor\'s own datasheet or manual, and Home ' +
+      'Assistant or ZHA discussions of the same model.\n'
+    );
+  }
+
+  return (
+    shared +
+    '- Start at the device\'s own Zigbee2MQTT page. Your task message carries its URL, so web_fetch that first. ' +
+    '**That page is the source of truth for this job**, not a third-party opinion: it is generated from the same ' +
+    'zigbee-herdsman-converters definition that produces the payloads this hub receives, so its exposes, units, ' +
+    'value ranges and enum values are exactly what the device will publish and accept. If it loads, is the device ' +
+    'you were given, and covers the properties you need — you are done researching. Write the descriptor and ' +
+    'submit. Do not spend searches confirming what it has already told you.\n' +
+    '- Search further only when that page genuinely fails you, which it does in three ways: the URL 404s (the hub ' +
+    'derives it from the model string, and the real page may be named differently), it is a page for a different ' +
+    'device, or it loads but says nothing about the property you are stuck on. Any of those, and you keep going — ' +
+    'one guessed URL is not a reason to give up on the device. Escalate: web_search for ' +
+    '"<vendor> <model> zigbee2mqtt", then the model on its own, then the specific property or enum value. Best ' +
+    'references after that page are the zigbee-herdsman-converters definition for the device (it names the exact ' +
+    'converters, units and ranges), the vendor\'s own datasheet or manual, and Home Assistant or ZHA discussions ' +
+    'of the same model.\n'
+  );
+}
+
+const MAPPING_PROMPT_HEAD = `You adapt smart-home devices into the GetHome canonical device schema by \
 emitting a MappingDescriptor JSON document. You receive a Zigbee2MQTT device definition ("exposes"), the properties \
 the hub already handles, and sample MQTT payloads. Map the genuine device capabilities the hub does NOT already \
 handle; ignore diagnostics (linkquality, voltage of the radio, firmware fields) and device settings (sensitivities, \
@@ -106,28 +184,25 @@ Rules of thumb: declare a capability only if you map at least one state rule for
 with the hub's static endpoints when extending them (the whole device is endpoint 1); pick deviceKind from what the \
 device physically is; be conservative — an unmapped extra is better than a wrong mapping.
 
+Three things a descriptor must never do, each of which produces a control bound to nothing:
+- **Never name a property the device does not publish.** Every "property" and every customField "id" has to appear \
+in the exposes tree or in the sample payloads you were given. A field for a property that will never arrive is a \
+control that is blank for ever, and the mapping is cached per device model, so every unit of it in the home gets \
+that blank control.
+- **Never re-declare a property the hub lists as deliberately hidden.** Your task message names them for this \
+device. They are pure telemetry the hub hides on purpose, not an oversight for you to correct.
+- **Never set "primary" to "custom" on an endpoint that already has a typed capability.** "primary" is the single \
+field every app draws the device's tile from, and "custom" renders as no control at all — so demoting it turns a \
+working switch into a dead tile. Keep the hub's own primary unless you are *upgrading* it (a "custom" primary \
+becoming "onOff" is exactly right); the hub refuses the demotion either way.
+
 How you work:
 - Everything the hub knows about this device is in your task message: vendor/model/description, the complete \
 exposes tree, recent raw payloads, and exactly what the hub's static mapper already produced. Start there — most \
 devices are fully mappable from the exposes tree alone.
-- Research the device when, and only when, the exposes and payloads leave something genuinely ambiguous: an \
-undocumented enum, a unit you cannot infer, a property whose direction or scale is unclear, vendor-specific \
-behavior. Guessing a unit is the single most damaging thing you can do here, because the mapping is cached and \
-silently shapes what the apps show for every device of this model.
-- Start at the device's own Zigbee2MQTT page. Your task message carries its URL, so web_fetch that first. **That \
-page is the source of truth for this job**, not a third-party opinion: it is generated from the same \
-zigbee-herdsman-converters definition that produces the payloads this hub receives, so its exposes, units, value \
-ranges and enum values are exactly what the device will publish and accept. If it loads, is the device you were \
-given, and covers the properties you need — you are done researching. Write the descriptor and submit. Do not \
-spend searches confirming what it has already told you.
-- Search further only when that page genuinely fails you, which it does in three ways: the URL 404s (the hub \
-derives it from the model string, and the real page may be named differently), it is a page for a different \
-device, or it loads but says nothing about the property you are stuck on. Any of those, and you keep going — one \
-guessed URL is not a reason to give up on the device. Escalate: web_search for "<vendor> <model> zigbee2mqtt", \
-then the model on its own, then the specific property or enum value. Best references after that page are the \
-zigbee-herdsman-converters definition for the device (it names the exact converters, units and ranges), the \
-vendor's own datasheet or manual, and Home Assistant or ZHA discussions of the same model.
-- Say so rather than guess. If nothing settles a property, leave it out of the descriptor or give it a \
+`;
+
+const MAPPING_PROMPT_TAIL = `- Say so rather than guess. If nothing settles a property, leave it out of the descriptor or give it a \
 customField, which stays controllable and honest, instead of inventing a unit or an enum.
 - Keep every query about this device: its vendor, model and property names. Nothing else from this hub belongs in \
 a search.
@@ -273,6 +348,28 @@ export function buildMappingUserPrompt(
       'capability, or a customField when none fits.',
   );
 
+  // **What the hub hides on purpose, named for this device rather than in
+  // general.** The static mapper drops a fixed set of pure telemetry
+  // (`IGNORED_PROPERTIES`), and because those properties are then simply
+  // absent from everything above, a model reading the exposes tree sees
+  // parameters with no representation and helpfully declares generic fields
+  // for them — observed on an Aqara plug, where a run added voltage, current
+  // and device temperature as controls the hub had deliberately left off the
+  // tile. The system prompt's "ignore diagnostics" is the general
+  // instruction; this is the list, for this device, so the absence reads as a
+  // decision rather than as a gap. Intersected with what the device actually
+  // publishes, because reciting a catalogue that mostly does not apply to it
+  // invites its own confusion.
+  const hidden = [...publishedProperties(device)].filter((property) =>
+    IGNORED_PROPERTIES.has(property),
+  );
+  if (hidden.length > 0) {
+    lines.push(
+      `- The hub deliberately hides these, and they are not gaps: ${hidden.join(', ')}. Do not give them ` +
+        'customFields or state rules.',
+    );
+  }
+
   if (samplePayloads.length > 0) {
     lines.push('', '# Recent state payloads (newest last)');
     for (const sample of samplePayloads.slice(-MAX_SAMPLES)) {
@@ -280,12 +377,35 @@ export function buildMappingUserPrompt(
     }
   }
 
-  lines.push(
-    '',
-    '# Your task',
-    `Produce the MappingDescriptor for ${vendor} ${model}, covering the properties above that the hub does not ` +
-      'already handle, and submit it with the submit_mapping tool. Where the exposes tree and the payloads do not ' +
-      'settle a unit, an enum or a direction, look the device up before deciding.',
-  );
+  lines.push('', '# Your task');
+  if (staticProfile.uncovered.length === 0) {
+    // **The case with no work in it, which the prompt used to have no answer
+    // for.** Layers 1 and 2 place most devices completely, and an owner
+    // pressing "Work it out again" on one of those starts a run anyway. The
+    // schema needs at least one endpoint and `submit_mapping` is the only way
+    // to answer, so a model with nothing to add had to invent something — and
+    // both vendors did, in the two ways that are available: restating fields
+    // that already existed, and declaring fields for diagnostics the hub
+    // hides plus one property the device does not have. Saying what the empty
+    // answer looks like is what makes "nothing to add" a thing that can be
+    // said.
+    lines.push(
+      `Every property of ${vendor} ${model} already has a representation: there is nothing in \`uncovered\`. So ` +
+        'the useful answer here is narrow — only a genuine **upgrade** of a generic field to a typed capability, ' +
+        'where a capability from the list truly fits the parameter and the unit is settled.',
+      '',
+      'If there is no such upgrade, say so and submit the hub\'s own mapping back unchanged: one endpoint per ' +
+        'endpoint above, the same deviceKind, the same capabilities, the same primary, with empty stateRules, ' +
+        'commandRules and customFields. That is a complete and correct answer, and it is the right one far more ' +
+        'often than not. Do not pad it — restating a generic field the hub already has changes nothing, and ' +
+        'inventing one changes something for the worse.',
+    );
+  } else {
+    lines.push(
+      `Produce the MappingDescriptor for ${vendor} ${model}, covering the properties above that the hub does not ` +
+        'already handle, and submit it with the submit_mapping tool. Where the exposes tree and the payloads do ' +
+        'not settle a unit, an enum or a direction, look the device up before deciding.',
+    );
+  }
   return lines.join('\n');
 }

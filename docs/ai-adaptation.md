@@ -101,6 +101,24 @@ named where they fall.
      well the model guesses it. **The OpenAI loop has no fetch tool** — there
      is no hosted equivalent, and giving the hub one would break the promise in
      [Privacy](#privacy) — so it is told to search for that page instead.
+   - **the properties the hub deliberately hides for this device.** The static
+     mapper drops a fixed set of pure telemetry, and they are then simply
+     absent from every list above — so a model reading the exposes tree sees
+     parameters with no representation and helpfully declares generic fields
+     for them. Observed on an Aqara plug: a run added voltage, current and
+     device temperature as controls the hub had left off the tile on purpose.
+     Naming them, intersected with what this device actually publishes, turns
+     an absence into a decision.
+   - **what an empty answer looks like, when there is nothing to add.** Layers
+     1–2 place most devices completely, and an owner pressing *Work it out
+     again* on one of those starts a run anyway; the schema needs at least one
+     endpoint and `submit_mapping` is the only answer channel, so a model with
+     nothing to add had to invent something — and both vendors did, in the two
+     ways available: restating fields that already existed, and declaring
+     fields for hidden diagnostics plus a property the device has not got.
+     With `uncovered` empty the task message now asks for a genuine *upgrade*
+     or the hub's own mapping back unchanged, and says that padding it is the
+     wrong move.
 2. The model researches with the **server-side** `web_search_20260209` and
    `web_fetch_20260209` tools. They execute on Anthropic's infrastructure, so
    the hub itself needs no egress beyond `api.anthropic.com`. The prompt sends
@@ -437,7 +455,13 @@ else, and needs no outbound access beyond `api.anthropic.com` or
 `api.openai.com` too). A hub behind a restrictive firewall therefore still gets
 full device research.
 
-**That promise is why the OpenAI provider searches rather than fetches.**
+**That promise is why the OpenAI provider searches rather than fetches, and
+the system prompt is built per provider so it can say so.** `mappingSystemPrompt(provider)`
+differs in exactly one paragraph — the research instructions — because a single
+shared prompt told an OpenAI run to `web_fetch` the device's page first, called
+that page the source of truth, and then told it not to spend searches confirming
+what it had already read: three instructions about a tool it has not got, at the
+one point in the run where research is decided.
 Anthropic's `web_fetch` only fetches URLs already in the conversation, which is
 what lets the prompt name a device's zigbee2mqtt.io page and have the model read
 it directly. OpenAI's hosted tool set has no equivalent, and the alternative — a
@@ -610,7 +634,7 @@ Everything lives in `src/ai/`; the module never imports the API or adapters
 | `openai-agent.ts` | The same run on OpenAI's Responses API, over plain `fetch` — no second SDK for a Pi to download. Hosted `web_search` and `submit_mapping`; `store: false` with reasoning items echoed back; the same caps and step vocabulary. |
 | `models.ts` | Per provider: the model allowlist (what can drive the hosted research tools), the one-per-provider `choices` list the apps state, and the list prices the per-run cost cap and `costUsd` estimate are computed from. Dependency-free, so the API layer can validate a model without pulling in the AI stack. |
 | `errors.ts` | The failure taxonomy: `AiUnavailableError` kinds, HTTP-status classification (`classifyApiError`), error-text fallback, reset-time parsing. |
-| `prompts.ts` | The system prompt (canonical capabilities/paths/units/transforms + worked examples + research rules), the per-device task prompt carrying the whole research brief, and the zigbee2mqtt.io page URL. |
+| `prompts.ts` | The system prompt (canonical capabilities/paths/units/transforms + worked examples + research rules) — built **per provider**, because the research paragraph names tools and the two loops do not have the same ones; the per-device task prompt carrying the whole research brief; and the zigbee2mqtt.io page URL. |
 | `mapper.ts` | Orchestration: cache lookups, one-run-at-a-time serialization, per-model in-flight dedupe, the credential-keyed backoff gate, validation, storage, and interpretation into an `AppliedAiMapping` for the adapter. |
 | `agent-core.ts` | Also the `AgentExchange` vocabulary: the parts, their bounds, and `record()` — the guard that keeps a bookkeeping failure from ending a run. |
 | `errors.ts` | Two questions kept apart: is this the *account* failing (`classifyApiError` → a gate and a retry) or the *run* (`describeRunFailure` → a sentence in the log, and the fix where the refusal is really a setting). |

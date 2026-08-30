@@ -3,7 +3,7 @@ import { pino } from 'pino';
 import { SettingsService } from '../src/core/settings.js';
 import { AiDeviceMapper, notDeviceShaped } from '../src/ai/mapper.js';
 import { lazyAiAssist } from '../src/ai/lazy.js';
-import { MAPPING_SYSTEM_PROMPT } from '../src/ai/prompts.js';
+import { mappingSystemPrompt } from '../src/ai/prompts.js';
 import { mapExposes, type Z2mDevice } from '../src/adapters/zigbee/exposes-mapper.js';
 import { openTestDb, resetDb } from './helpers/db.js';
 
@@ -104,11 +104,32 @@ describe.skipIf(!handle)('the boundary around the mapping agent', () => {
     expect(generate).not.toHaveBeenCalled();
   });
 
-  it('tells the agent, in the prompt, that its input is only ever a device', () => {
-    // The guard above is the wall; this is the instruction, and a run that
-    // somehow receives something else must refuse rather than invent.
-    expect(MAPPING_SYSTEM_PROMPT).toMatch(/one physical device's published schema/i);
-    expect(MAPPING_SYSTEM_PROMPT).toMatch(/never a bridge message/i);
+  // Both providers, because the prompt is built per provider now — the
+  // research paragraph differs, and a wall that only one vendor's run is told
+  // about is a wall with a door in it.
+  it.each(['anthropic', 'openai'] as const)(
+    'tells a %s run, in the prompt, that its input is only ever a device',
+    (provider) => {
+      // The guard above is the wall; this is the instruction, and a run that
+      // somehow receives something else must refuse rather than invent.
+      expect(mappingSystemPrompt(provider)).toMatch(/one physical device's published schema/i);
+      expect(mappingSystemPrompt(provider)).toMatch(/never a bridge message/i);
+    },
+  );
+
+  /**
+   * The research paragraph names tools, and the two runs do not have the same
+   * ones: Anthropic carries `web_fetch`, OpenAI deliberately does not. One
+   * shared prompt told an OpenAI run to fetch the device's page first and then
+   * not to spend searches confirming it — three instructions about a tool it
+   * hasn't got, at the point in the run where research is decided.
+   */
+  it('never tells a run to use a tool that provider’s loop does not carry', () => {
+    expect(mappingSystemPrompt('anthropic')).toMatch(/web_fetch/);
+    expect(mappingSystemPrompt('openai')).not.toMatch(/web_fetch/);
+    // Both still have search, and both are still pointed at the same page.
+    expect(mappingSystemPrompt('openai')).toMatch(/web_search/);
+    expect(mappingSystemPrompt('openai')).toMatch(/zigbee2mqtt\.io/i);
   });
 
   describe('the owner’s switch', () => {

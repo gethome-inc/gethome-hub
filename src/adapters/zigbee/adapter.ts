@@ -1,7 +1,7 @@
 import mqtt from 'mqtt';
 import type { AdapterBus, DeviceRecognition, ProtocolAdapter } from '../adapter.js';
 import type { CapabilityKind, DeviceKind, EndpointState, HubCommand } from '../../schema/index.js';
-import { UnsupportedCommandError } from '../../schema/index.js';
+import { mergeStatePatch, UnsupportedCommandError } from '../../schema/index.js';
 import {
   exposesHash,
   mapExposes,
@@ -422,7 +422,13 @@ export class ZigbeeAdapter implements ProtocolAdapter {
       for (const [endpointId, aiPatch] of device.aiMapping.extractState(parsed)) {
         if (Object.keys(aiPatch).length === 0) continue;
         const existing = patches.get(endpointId);
-        patches.set(endpointId, existing ? mergePatches(existing, aiPatch) : aiPatch);
+        // `mergeStatePatch`, not a local merge: the overlay must *add* to what
+        // the static rules read and never replace it, and the only shape in
+        // `EndpointState` that is two levels deep — `custom.values` — is
+        // precisely the one an overlay touches. A one-level merge silenced
+        // every static generic field the moment a mapping declared one of its
+        // own. See `schema/state.ts`.
+        patches.set(endpointId, existing ? mergeStatePatch(existing, aiPatch) : aiPatch);
       }
     }
     for (const [endpointId, patch] of patches) {
@@ -718,32 +724,6 @@ function mergedEndpoints(tracked: TrackedDevice): Array<{
   return [...merged.values()]
     .sort((a, b) => a.endpointId - b.endpointId)
     .filter((endpoint) => endpoint.capabilities.length > 0);
-}
-
-/**
- * Merge two patches for the same endpoint, sub-object by sub-object, so an
- * AI patch writing `sensors.humidityCenti` doesn't clobber the static rule's
- * `sensors.temperatureCenti` from the same payload. The overlay wins on
- * conflicting scalars.
- */
-function mergePatches(base: Partial<EndpointState>, overlay: Partial<EndpointState>): Partial<EndpointState> {
-  const out = { ...base } as Record<string, unknown>;
-  for (const [key, value] of Object.entries(overlay)) {
-    const existing = out[key];
-    if (
-      value !== null &&
-      typeof value === 'object' &&
-      !Array.isArray(value) &&
-      existing !== null &&
-      typeof existing === 'object' &&
-      !Array.isArray(existing)
-    ) {
-      out[key] = { ...existing, ...value };
-    } else {
-      out[key] = value;
-    }
-  }
-  return out as Partial<EndpointState>;
 }
 
 /**
