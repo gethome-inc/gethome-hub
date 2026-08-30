@@ -101,14 +101,22 @@ named where they fall.
      well the model guesses it. **The OpenAI loop has no fetch tool** — there
      is no hosted equivalent, and giving the hub one would break the promise in
      [Privacy](#privacy) — so it is told to search for that page instead.
-   - **the properties the hub deliberately hides for this device.** The static
-     mapper drops a fixed set of pure telemetry, and they are then simply
-     absent from every list above — so a model reading the exposes tree sees
-     parameters with no representation and helpfully declares generic fields
-     for them. Observed on an Aqara plug: a run added voltage, current and
-     device temperature as controls the hub had left off the tile on purpose.
-     Naming them, intersected with what this device actually publishes, turns
-     an absence into a decision.
+   - **the properties the hub hides by default for this device.** The static
+     mapper drops a fixed set of telemetry, and those properties are then
+     simply absent from every list above — so a model reading the exposes tree
+     sees parameters with no representation and helpfully declares generic
+     fields for them. Naming them, intersected with what this device actually
+     publishes, turns an absence into a decision.
+     **It is offered as a judgement, not a prohibition, and that distinction
+     is the point.** The list is the same for every device, so it cannot know
+     that mains voltage is noise on a battery sensor and a real reading on a
+     metered plug. Most of its entries are protocol plumbing (link quality,
+     OTA flags, transition times) or are already carried by a typed
+     capability, and re-declaring one of those adds nothing; surfacing one
+     that genuinely means something *for this device* is a legitimate upgrade
+     and exactly what layer 3 is for. An earlier wording of this told the
+     agent never to touch them, which would have refused the one useful thing
+     a run had done for that plug.
    - **what an empty answer looks like, when there is nothing to add.** Layers
      1–2 place most devices completely, and an owner pressing *Work it out
      again* on one of those starts a run anyway; the schema needs at least one

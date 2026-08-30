@@ -184,17 +184,24 @@ Rules of thumb: declare a capability only if you map at least one state rule for
 with the hub's static endpoints when extending them (the whole device is endpoint 1); pick deviceKind from what the \
 device physically is; be conservative — an unmapped extra is better than a wrong mapping.
 
-Three things a descriptor must never do, each of which produces a control bound to nothing:
+Two things a descriptor must never do, each of which produces a control bound to nothing:
 - **Never name a property the device does not publish.** Every "property" and every customField "id" has to appear \
 in the exposes tree or in the sample payloads you were given. A field for a property that will never arrive is a \
 control that is blank for ever, and the mapping is cached per device model, so every unit of it in the home gets \
 that blank control.
-- **Never re-declare a property the hub lists as deliberately hidden.** Your task message names them for this \
-device. They are pure telemetry the hub hides on purpose, not an oversight for you to correct.
 - **Never set "primary" to "custom" on an endpoint that already has a typed capability.** "primary" is the single \
 field every app draws the device's tile from, and "custom" renders as no control at all — so demoting it turns a \
 working switch into a dead tile. Keep the hub's own primary unless you are *upgrading* it (a "custom" primary \
 becoming "onOff" is exactly right); the hub refuses the demotion either way.
+
+And one to judge rather than obey. Your task message lists the properties **the hub hides by default**. That list \
+is the same for every device, so it is a default and not a verdict: most of its entries are protocol plumbing \
+(link quality, OTA flags, transition times) or are already carried by a typed capability, and re-declaring one of \
+those adds nothing. But some are genuine readings that simply do not matter on most hardware — mains voltage and \
+current are noise on a battery sensor and real, useful readings on a metered plug. Surfacing one of those as a \
+read-only customField, for a device where it genuinely means something, is a legitimate upgrade and exactly the \
+kind of judgement you are here to make. Do not re-declare one merely because it appears in the list, and do not \
+skip one merely because it appears there either.
 
 How you work:
 - Everything the hub knows about this device is in your task message: vendor/model/description, the complete \
@@ -365,8 +372,9 @@ export function buildMappingUserPrompt(
   );
   if (hidden.length > 0) {
     lines.push(
-      `- The hub deliberately hides these, and they are not gaps: ${hidden.join(', ')}. Do not give them ` +
-        'customFields or state rules.',
+      `- The hub hides these by default, so their absence above is a decision rather than a gap: ` +
+        `${hidden.join(', ')}. Most are plumbing or already carried by a typed capability. Give one a read-only ` +
+        'customField only if it is a genuine, useful reading *for this device*.',
     );
   }
 
@@ -378,7 +386,17 @@ export function buildMappingUserPrompt(
   }
 
   lines.push('', '# Your task');
-  if (staticProfile.uncovered.length === 0) {
+  // **Both halves of the question, because `uncovered` alone gets the empty
+  // device exactly backwards.** A device whose exposes are all on the hidden
+  // list — or that publishes only shapes a generic field cannot represent —
+  // places into *nothing*: one endpoint, no capabilities, and `uncovered`
+  // still empty, because nothing was left over to be uncovered. That is the
+  // case with the most work in it, not the least, and it is the case
+  // `needsHelp`'s `staticallyEmpty` arm exists for. Telling it to submit the
+  // hub's own mapping back unchanged would be asking for a descriptor the
+  // schema refuses.
+  const placedSomething = staticProfile.endpoints.some((endpoint) => endpoint.capabilities.length > 0);
+  if (staticProfile.uncovered.length === 0 && placedSomething) {
     // **The case with no work in it, which the prompt used to have no answer
     // for.** Layers 1 and 2 place most devices completely, and an owner
     // pressing "Work it out again" on one of those starts a run anyway. The
@@ -391,14 +409,16 @@ export function buildMappingUserPrompt(
     // said.
     lines.push(
       `Every property of ${vendor} ${model} already has a representation: there is nothing in \`uncovered\`. So ` +
-        'the useful answer here is narrow — only a genuine **upgrade** of a generic field to a typed capability, ' +
-        'where a capability from the list truly fits the parameter and the unit is settled.',
+        'the useful answer here is narrower than usual, and it is one of two **upgrades**: promoting a generic ' +
+        'field to a typed capability, where a capability from the list truly fits it and the unit is settled; or ' +
+        'surfacing one of the hidden-by-default properties above as a read-only customField, where it is a ' +
+        'genuine reading for this particular device.',
       '',
-      'If there is no such upgrade, say so and submit the hub\'s own mapping back unchanged: one endpoint per ' +
-        'endpoint above, the same deviceKind, the same capabilities, the same primary, with empty stateRules, ' +
-        'commandRules and customFields. That is a complete and correct answer, and it is the right one far more ' +
-        'often than not. Do not pad it — restating a generic field the hub already has changes nothing, and ' +
-        'inventing one changes something for the worse.',
+      'If neither applies, say so and submit the hub\'s own mapping back unchanged: one endpoint per endpoint ' +
+        'above, the same deviceKind, the same capabilities, the same primary, with empty stateRules, commandRules ' +
+        'and customFields. That is a complete and correct answer, and it is the right one far more often than ' +
+        'not. What it must not become is padding — restating a generic field the hub already has changes nothing, ' +
+        'and inventing a property the device does not publish changes something for the worse.',
     );
   } else {
     lines.push(

@@ -461,8 +461,12 @@ describe('buildMappingUserPrompt', () => {
     const prompt = buildMappingUserPrompt(plug, profile, []);
     expect(prompt).toMatch(/nothing in `uncovered`/);
     expect(prompt).toMatch(/submit the hub's own mapping back unchanged/);
+    // Both upgrades stay on the table — this is the branch with the least
+    // work in it, not the branch with none.
+    expect(prompt).toMatch(/promoting a generic field to a typed capability/);
+    expect(prompt).toMatch(/surfacing one of the hidden-by-default properties/);
     // And that padding it is the wrong move, which is what both runs did.
-    expect(prompt).toMatch(/Do not pad it/);
+    expect(prompt).toMatch(/must not become is padding/);
   });
 
   /**
@@ -473,7 +477,7 @@ describe('buildMappingUserPrompt', () => {
    */
   it('names the properties the hub hides for this device, and only those', () => {
     const prompt = buildMappingUserPrompt(plug, mapExposes(plug), []);
-    const line = prompt.split('\n').find((entry) => entry.startsWith('- The hub deliberately hides'))!;
+    const line = prompt.split('\n').find((entry) => entry.startsWith('- The hub hides these by default'))!;
     expect(line).toBeDefined();
     for (const hidden of ['voltage', 'current', 'device_temperature']) {
       expect(line).toContain(hidden);
@@ -484,9 +488,54 @@ describe('buildMappingUserPrompt', () => {
     expect(line).not.toContain('color_mode');
   });
 
+  /**
+   * **A default, not a verdict.** The hidden list is the same for every device,
+   * so it cannot know that mains voltage is noise on a battery sensor and a
+   * real reading on a metered plug. Surfacing one where it genuinely means
+   * something is what layer 3 is *for*; an earlier wording of this told the
+   * agent never to touch them, which would have refused the one useful thing
+   * either run did for that plug.
+   */
+  it('offers the hidden ones as a judgement, not as a prohibition', () => {
+    const prompt = buildMappingUserPrompt(plug, mapExposes(plug), []);
+    expect(prompt).toMatch(/only if it is a genuine, useful reading/);
+    expect(prompt).not.toMatch(/Do not give them customFields/);
+  });
+
+  /**
+   * The empty device gets it backwards. Everything this one publishes is on
+   * the hidden list, so layers 1–2 place *nothing* — one endpoint, no
+   * capabilities — and `uncovered` is still empty, because nothing was left
+   * over to be uncovered. That is the case with the most work in it, and
+   * `needsHelp`'s `staticallyEmpty` arm is what starts a run for it; being
+   * told to submit the hub's own mapping back unchanged would be a request
+   * for a descriptor the schema refuses.
+   */
+  it('does not offer the empty answer to a device with no static mapping', () => {
+    const opaque: Z2mDevice = {
+      ieee_address: '0x00124b0022000009',
+      friendly_name: 'Opaque',
+      supported: true,
+      definition: {
+        vendor: 'Acme',
+        model: 'AC-OPAQUE',
+        description: 'Publishes only what the hub hides',
+        exposes: [
+          { type: 'numeric', name: 'linkquality', property: 'linkquality', access: 1 },
+          { type: 'numeric', name: 'voltage', property: 'voltage', access: 1, unit: 'mV' },
+        ],
+      },
+    };
+    const profile = mapExposes(opaque);
+    expect(profile.uncovered).toEqual([]);
+    expect(profile.endpoints.every((endpoint) => endpoint.capabilities.length === 0)).toBe(true);
+
+    expect(buildMappingUserPrompt(opaque, profile, [])).not.toMatch(/nothing in `uncovered`/);
+  });
+
   it('leaves the line out for a device that publishes nothing hidden', () => {
     expect(buildMappingUserPrompt(probe, mapExposes(probe), [])).not.toContain(
-      'The hub deliberately hides',
+      'The hub hides these by default',
     );
   });
 });

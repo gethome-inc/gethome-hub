@@ -627,16 +627,29 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   answer channel and the schema needs an endpoint, so a model with nothing to
   add invents something. Both vendors did, in the two ways available:
   restating the generic fields that already existed (a harmless no-op), and
-  declaring fields for the diagnostics `IGNORED_PROPERTIES` hides plus one
-  property the device does not publish at all (four junk controls, one of them
-  blank for ever). Two additions to `prompts.ts` close it: the task message
-  **names the properties the hub hides for this device**, intersected with
-  what it actually publishes, so the absence reads as a decision rather than a
-  gap; and when `uncovered` is empty it asks for a genuine *upgrade* or for
-  the hub's own mapping back unchanged, saying that padding it is the wrong
-  move. Neither is a filter in code — dropping a field for an unpublished
-  property would break `detectUnknownParameters`, which exists precisely
-  because devices publish keys their exposes tree never declared.
+  declaring fields for properties `IGNORED_PROPERTIES` hides plus one the
+  device does not publish at all. Two additions to `prompts.ts` close it: the
+  task message **names the properties the hub hides for this device**,
+  intersected with what it actually publishes, so the absence reads as a
+  decision rather than a gap; and when `uncovered` is empty **and layers 1–2
+  placed something**, it asks for a genuine *upgrade* or for the hub's own
+  mapping back unchanged. That second condition is load-bearing and was missed
+  once: a device whose exposes are all on the hidden list places into
+  *nothing* — one endpoint, no capabilities — with `uncovered` still empty
+  because nothing was left over to be uncovered, which is the case with the
+  **most** work in it and the one `needsHelp`'s `staticallyEmpty` arm exists
+  for.
+  **The hidden list is offered as a judgement, not a prohibition**, and that
+  is the correction worth keeping. It is the same list for every device, so it
+  cannot know that mains voltage is noise on a battery sensor and a real
+  reading on a metered plug; most entries are plumbing or are already carried
+  by a typed capability, but surfacing one that genuinely means something for
+  *this* device is a legitimate upgrade and precisely what layer 3 is for. The
+  first wording said never, which would have refused the one useful thing
+  either run did for that plug. Neither addition is a filter in code —
+  dropping a field for an unpublished property would break
+  `detectUnknownParameters`, which exists precisely because devices publish
+  keys their exposes tree never declared.
   **Fifth, the radio's word on a device can arrive before the device has a
   name** — found in the same hub's log, and the one that fails in the opposite
   direction. The broker replays every retained message the instant the adapter
