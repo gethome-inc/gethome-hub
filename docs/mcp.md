@@ -17,7 +17,7 @@ v1 — which decides who can use it, so read
 ## Switching it on
 
 1. Turn the server on. Any of the three apps will do it — GetHome on iOS under
-   **Home Settings → Hub → Assistants**, GetHome Studio's **Assistants** tab, or
+   **Home Settings → Hub → MCP**, GetHome Studio's **MCP** tab, or
    the route directly. It needs `hub.mcp`, which is owner-only by default.
 2. Mint a connection. The response carries the token **once**; the hub stores
    only its hash and no route reads it back.
@@ -496,11 +496,11 @@ A whole exchange:
   } }
 ```
 
-`GET /api/v1/mcp` answers **405** while assistant access is on. The endpoint has
+`GET /api/v1/mcp` answers **405** while MCP is switched on. The endpoint has
 to exist for both verbs, and this server never opens a server-initiated stream,
 so "method not allowed" is the honest answer rather than an empty SSE channel.
 
-**With assistant access switched off, both verbs answer 404** — there is no MCP
+**With MCP switched off, both verbs answer 404** — there is no MCP
 endpoint on that hub, and 401 or 403 would say there is one and invite a client
 to go and find a credential that cannot exist yet. The GET used to answer 405
 either way, so a switched-off hub said "no such thing" to one verb and "wrong
@@ -597,7 +597,7 @@ implements it by hand and adds **no dependency at all** — the JSON Schema in
 a separate Node process would have been 50–80 MB on a board with about 89 MB
 free. The module is **dynamically imported on the first request to an enabled
 hub** and cached, the argument `src/index.ts` already makes for `@matter/main`,
-so a home that has never switched assistant access on never parses the tool
+so a home that has never switched MCP on never parses the tool
 catalog at all.
 
 Measured against the Zero 2 W baseline in [zigbee.md](zigbee.md) — 139 MB

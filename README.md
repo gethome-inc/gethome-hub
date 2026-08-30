@@ -64,16 +64,18 @@ hub can control them.
   home's names, its network or anybody else's activity. The defaults reproduce
   exactly what the hub did before roles existed, so updating changes nothing
   until somebody edits the matrix. See [docs/api.md](docs/api.md#roles-and-permissions-in-full).
-- **Control it from an AI assistant (MCP)** — the hub speaks the
+- **MCP** — the hub speaks the
   [Model Context Protocol](https://modelcontextprotocol.io), so Claude Code,
   Claude Desktop or Codex can see the home and work it: "is the back door
-  locked?", "turn the kitchen light down to 30%". Off until you switch it on,
+  locked?", "turn the kitchen light down to 30%". Not only assistants —
+  anything that speaks the protocol, which is why the switch is named after it
+  rather than after them. Off until you switch it on,
   and every connection is a token you mint and can revoke, each one either
   read-only or allowed to control. Tools speak ordinary units — percentages,
   °C, kelvin — never the wire's, and a command reports whether the device
-  actually confirmed it rather than merely that it was sent. Everything an
-  assistant does appears in the home's activity by name. It is LAN-only like
-  the rest of v1, which matters when choosing a client: assistants that run on
+  actually confirmed it rather than merely that it was sent. Everything a
+  client does appears in the home's activity by name. It is LAN-only like
+  the rest of v1, which matters when choosing one: clients that run on
   your own machine reach it directly, while ChatGPT and claude.ai in a browser
   call connectors from *their* servers and need a tunnel.
   ([docs/mcp.md](docs/mcp.md))
@@ -382,7 +384,7 @@ suite needs no radios and keeps its database in a temp file.
 ```
 Zigbee2MQTT ─┐                       ┌─ REST /api/v1 ── GetHome apps
 MQTT devices ─┼─ protocol adapters ──┼─ WebSocket events
-Matter fabric┘        │              └─ MCP ─────────── AI assistants
+Matter fabric┘        │              └─ MCP ─────────── AI clients
                 DeviceRegistry
             (canonical schema, SQLite)
 ```

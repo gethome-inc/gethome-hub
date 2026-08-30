@@ -1986,8 +1986,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       await deps.activity.record({
         kind: body.enabled ? 'mcp.enabled' : 'mcp.disabled',
         message: body.enabled
-          ? 'Assistant access was switched on'
-          : 'Assistant access was switched off',
+          ? 'MCP access was switched on'
+          : 'MCP access was switched off',
         memberId: request.member!.id,
         data: { memberName: request.member!.name },
       });
@@ -2050,7 +2050,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
 
     await deps.activity.record({
       kind: 'mcp.token-revoked',
-      message: `${existing?.label ?? 'An assistant'} no longer has access to this home`,
+      message: `${existing?.label ?? 'An MCP connection'} no longer has access to this home`,
       memberId: request.member!.id,
       data: { memberName: request.member!.name, client: existing?.label },
     });

@@ -152,9 +152,10 @@ export const PERMISSIONS: readonly PermissionDescriptor[] = [
   {
     key: 'hub.mcp',
     group: 'Hub',
-    title: 'Assistant access',
+    title: 'MCP access',
     summary:
-      'Let an outside assistant see and work this home, and mint or revoke the tokens it connects with.',
+      'Let outside AI apps see and work this home over MCP, and mint or revoke the tokens ' +
+      'they connect with. Not only assistants — anything that speaks the protocol.',
   },
 ] as const;
 
