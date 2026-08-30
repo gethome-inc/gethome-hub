@@ -13,6 +13,7 @@ import {
   levelFromPercent,
   luxFromMeasuredIlluminance,
   mergeState,
+  mergeStatePatch,
   miredsFromKelvin,
   percent100thsFromZ2mPosition,
   percentFromHalfPercent,
@@ -101,6 +102,30 @@ describe('endpoint state', () => {
     expect(state.onOff).toBe(true);
     expect(state.level).toEqual({ current: 100, min: 1, max: 254 });
     expect(state.sensors.temperatureCenti).toBe(2150);
+  });
+
+  /**
+   * `custom.values` is the one shape here that is two levels deep, and the
+   * Zigbee adapter merges a static patch with an AI overlay's patch for the
+   * same report. It used to do that with a local merge that recursed once, so
+   * an overlay declaring any generic field replaced the whole values object
+   * and every static field went blank. One merge, so there is one rule.
+   */
+  it('merges two patches without either losing a generic field', () => {
+    const merged = mergeStatePatch(
+      { onOff: true, custom: { values: { auto_off: true, night_led: false } } },
+      { custom: { values: { voltage: 231 } } },
+    );
+    expect(merged.custom?.values).toEqual({ auto_off: true, night_led: false, voltage: 231 });
+    expect(merged.onOff).toBe(true);
+  });
+
+  it('lets the overlay win on the same generic field', () => {
+    const merged = mergeStatePatch(
+      { custom: { values: { button_lock: false } } },
+      { custom: { values: { button_lock: true } } },
+    );
+    expect(merged.custom?.values).toEqual({ button_lock: true });
   });
 
   it('derives present capabilities in the app display order', () => {

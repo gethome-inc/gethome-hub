@@ -30,7 +30,7 @@ import {
 import { agentStep, type AgentRunStats, type MappingProvider } from './agent-core.js';
 import { effectiveModel } from './models.js';
 import { AiUnavailableError, describeRunFailure, readableFailure } from './errors.js';
-import { MAPPING_SYSTEM_PROMPT, buildMappingUserPrompt, buildRepairUserPrompt } from './prompts.js';
+import { mappingSystemPrompt, buildMappingUserPrompt, buildRepairUserPrompt } from './prompts.js';
 
 export { exposesHash };
 
@@ -257,7 +257,11 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
     let stats: AgentRunStats | null = null;
     let descriptor: MappingDescriptor;
     try {
-      const candidate = await provider.generate(MAPPING_SYSTEM_PROMPT, input.prompt, {
+      // The system prompt is the provider's, because the two runs do not have
+      // the same research tools — see `mappingSystemPrompt`. `ranOn` is
+      // already the resolved provider, so this cannot disagree with the
+      // agent that was built above.
+      const candidate = await provider.generate(mappingSystemPrompt(ranOn), input.prompt, {
         onStats: (s) => {
           stats = s;
         },
@@ -360,12 +364,23 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
     // never loads the other's client — which for Anthropic means not loading
     // its SDK at all. The provider-neutral half both share is `agent-core.ts`,
     // which is what makes that possible.
+    // **`effectiveModel`, not the stored string — this is the one place the
+    // model is chosen to *run*, and it was the one place still reading the
+    // column.** Everything that reports which model answered already went
+    // through `effectiveModel`: `GET /settings/ai`, `ai_runs.modelId`,
+    // `status.lastRun.model`, the backoff gate's credential id. Only this
+    // call did not, so a home that had picked a model since retired went on
+    // running it for ever while every screen and every recorded row said
+    // otherwise — silently, because `isSupportedModel` is deliberately the
+    // broad allowlist (a stored setting must not start 400-ing) and happily
+    // let it through. Those homes are exactly the ones a retirement is for.
+    const modelId = effectiveModel(provider, ai[provider].model);
     if (provider === 'openai') {
       const { createOpenAiMappingAgent } = await import('./openai-agent.js');
-      return createOpenAiMappingAgent({ secret }, ai.openai.model, this.log);
+      return createOpenAiMappingAgent({ secret }, modelId, this.log);
     }
     const { createMappingAgent } = await import('./agent.js');
-    return createMappingAgent({ secret }, ai.anthropic.model, this.log);
+    return createMappingAgent({ secret }, modelId, this.log);
   }
 
   /**

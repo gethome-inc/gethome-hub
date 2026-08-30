@@ -200,10 +200,38 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   chain, so `resolveProvider()` imports whichever half it needs. `agent.ts` is
   the Anthropic loop (Messages API, server-side `web_search`/`web_fetch`);
   `openai-agent.ts` is the same run on the Responses API over plain `fetch` —
-  no second SDK for a Pi to download — with hosted search and **no fetch tool**,
-  because there is no hosted equivalent and giving the *hub* one would break the
-  documented promise that it opens no connection to third-party sites.
-  Two rules for the pair. **Effort is `high` on both and is not exposed**: two
+  no second SDK for a Pi to download — with hosted search and a `fetch_page`
+  the **hub itself** performs, because OpenAI has no hosted equivalent and
+  reading the device's own zigbee2mqtt.io page rather than a search snippet is
+  the difference between settling a unit and guessing one, on a mapping cached
+  against a device model for ever.
+  **That is the one place this repository opens a connection to a site that is
+  not a provider's API, and an allowlist is the whole of why it is
+  acceptable.** `src/ai/page-fetch.ts` reads `zigbee2mqtt.io` and
+  `raw.githubusercontent.com` and nothing else: the URL comes from model output
+  and the machine dialling is inside somebody's home network with an
+  unauthenticated health route of its own, so a general fetch tool here is a
+  request-forgery primitive aimed at the LAN dressed up as research. Five
+  guards — https only; the host matched exactly or as a subdomain *with the
+  dot*, since `endsWith` would accept `evil-zigbee2mqtt.io`; redirects
+  followed by hand and re-checked every hop, because `fetch` follows them
+  itself and an allowed host answering `302 http://10.0.0.1/` would walk
+  straight past the list; the resolved address required to be public, because
+  an allowlist on a *name* is only as good as the resolver behind it; and
+  bounded bytes with one deadline. `test/ai-page-fetch.test.ts` asserts that a
+  refused URL produces **no request at all**, which is what proves the guard
+  runs before the fetch rather than after it. `docs/ai-adaptation.md`'s Privacy
+  section is canonical and says what the promise narrowed to.
+  Three rules for the pair. **The system prompt is built per provider**
+  (`mappingSystemPrompt`), because its research paragraph names tools and the
+  two loops do not carry the same ones: one shared prompt told an OpenAI run
+  to `web_fetch` the device's zigbee2mqtt.io page first, called that page the
+  source of truth, and then told it not to spend searches confirming what it
+  had already read — three instructions about a tool it has not got, at the
+  one point in the run where research is decided. Everything else in it is
+  shared, so a rule added for one vendor cannot go missing for the other, and
+  `test/ai-boundary.test.ts` asserts the wall for both.
+  **Effort is `high` on both and is not exposed**: two
   settings for one decision is one too many. And **the hub owns the model
   list** — the apps render `providers.<name>.models` rather than shipping ids of
   their own, the `GET /permissions` rule applied to a vocabulary that moves.
@@ -224,6 +252,16 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   Sonnet moves to Opus by itself; a write naming a retired id is still accepted
   rather than 400-ing an older app, it simply is not what runs, and `PRICING`
   stays broad so a months-old `ai_runs.modelId` still prices correctly.
+  **`resolveProvider()` has to use it too, and that is the half that was
+  missed.** Every surface that *reports* which model answered went through
+  `effectiveModel` — the settings route, `ai_runs.modelId`,
+  `status.lastRun.model`, the backoff gate's credential id — while the one
+  call that picks the model to actually run read the column, so a hub set to
+  Sonnet went on running Sonnet with every screen and every recorded row
+  saying Opus. It passed unnoticed because `isSupportedModel` is deliberately
+  the broad `PRICING` allowlist and let it straight through, and because the
+  homes it was wrong for are exactly the ones nobody was looking at.
+  `test/ai-model-choice.test.ts` pins it.
   **It used to run on the Claude Agent SDK, and moving off it was a memory
   decision like dropping Docker.** That SDK ships a 276 MB native binary — 74%
   of the hub's whole download — and spawned a ~315 MB subprocess per run, of
@@ -588,6 +626,53 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   **an AI overlay may add to what the static mapper found and may never
   subtract from it**, so anything new that merges a descriptor into a static
   mapping has to say what happens to the fields that cannot be unioned.
+  **And the merge that combines the two *reports* was breaking that rule too,
+  one recursion short.** `handleMessage` runs the static rules and the
+  overlay's rules over the same payload and merges the patches, and the
+  adapter had a private one-level-deep merge for it — right for every shape in
+  `EndpointState` except the one that is two levels deep, `custom.values`. So
+  the moment an overlay declared a generic field of its own, its `values`
+  object replaced the static mapper's wholesale: the inventory went on
+  advertising every static field and not one of them received another value.
+  Seen on an Aqara plug whose six settings went blank behind an uploaded
+  schema naming three fields, which reads as controls the plug had stopped
+  answering. `schema/state.ts` already had the recursive version, with a
+  comment naming `custom.values` as the case to get right — which is exactly
+  why there should only ever have been one of them, and there is now:
+  `mergeStatePatch`, beside `mergeState`.
+  **The whole of this bullet is about a device layers 1–2 place completely,
+  and the prompt had no way to say so.** `uncovered` is empty for that plug,
+  so the agent has genuinely nothing to do — but `submit_mapping` is the only
+  answer channel and the schema needs an endpoint, so a model with nothing to
+  add invents something. Both vendors did, in the two ways available:
+  restating the generic fields that already existed (a harmless no-op), and
+  declaring fields for properties `IGNORED_PROPERTIES` hides plus one the
+  device does not publish at all. Two additions to `prompts.ts` close it, and both are
+  about the message being **true** rather than about steering the model. One
+  sentence says that a property appearing in none of the three lists is
+  telemetry the static mapper hides on purpose — without that, `uncovered: []`
+  reads as "nothing here needs looking at" while the exposes tree plainly
+  carries properties nothing has placed. And when `uncovered` is empty **and
+  layers 1–2 placed something**, it asks for a genuine *upgrade* or for the
+  hub's own mapping back unchanged. That second condition is load-bearing and was missed
+  once: a device whose exposes are all on the hidden list places into
+  *nothing* — one endpoint, no capabilities — with `uncovered` still empty
+  because nothing was left over to be uncovered, which is the case with the
+  **most** work in it and the one `needsHelp`'s `staticallyEmpty` arm exists
+  for.
+  **What that sentence must not become is a list**, and it took two goes to
+  land. The first version named the hidden properties per device and said
+  never to re-declare them — which would have refused the one genuinely useful
+  thing either run did for that plug, since the list is applied without
+  knowing the device and cannot tell mains voltage on a metered plug from
+  battery voltage on a door sensor. The second kept the list and softened it
+  to a judgement, which was right and still more than the hub has any business
+  saying: the fact only the hub holds is that the absence is deliberate, and
+  the decision belongs to the layer that can see the device. Neither addition
+  is a filter in code —
+  dropping a field for an unpublished property would break
+  `detectUnknownParameters`, which exists precisely because devices publish
+  keys their exposes tree never declared.
   **Fifth, the radio's word on a device can arrive before the device has a
   name** — found in the same hub's log, and the one that fails in the opposite
   direction. The broker replays every retained message the instant the adapter

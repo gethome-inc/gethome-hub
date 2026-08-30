@@ -198,6 +198,32 @@ export function mergeState(base: EndpointState, patch: Partial<EndpointState>): 
   return next;
 }
 
+/**
+ * The same merge between two *patches*, neither of which is a whole state.
+ *
+ * This exists because there was a second implementation of it. The Zigbee
+ * adapter combines a static patch with an AI overlay's patch for the same
+ * report, and it had its own one-level-deep version — right for every shape in
+ * `EndpointState` except the one that is two levels deep, `custom.values`. So
+ * an overlay declaring any generic field replaced the *whole* values object,
+ * and every field the static mapper had read went blank: the inventory still
+ * advertised six controls on an Aqara plug and three of them never received a
+ * value again. That is the rule "an AI overlay may add to what the static
+ * mapper found and may never subtract from it", broken by a merge that was
+ * one recursion short — and the comment on `mergeState` above already named
+ * `custom.values` as the case to get right, which is exactly why there should
+ * only ever have been one of these.
+ */
+export function mergeStatePatch(
+  base: Partial<EndpointState>,
+  patch: Partial<EndpointState>,
+): Partial<EndpointState> {
+  return mergeRecords(
+    base as unknown as Record<string, unknown>,
+    patch as unknown as Record<string, unknown>,
+  ) as unknown as Partial<EndpointState>;
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }

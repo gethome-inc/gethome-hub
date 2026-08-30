@@ -416,6 +416,107 @@ describe('buildMappingUserPrompt', () => {
     expect(prompt).toContain('{"soil_moisture":11}');
     expect(prompt).not.toContain('{"soil_moisture":0}');
   });
+
+  /**
+   * A plug layers 1 and 2 place completely: a typed switch, typed power, and
+   * a generic field for every setting. `uncovered` is empty, so there is
+   * genuinely nothing for the agent to do — and an owner pressing "Work it
+   * out again" starts a run on it anyway.
+   */
+  const plug: Z2mDevice = {
+    ieee_address: '0x54ef44100047c1bf',
+    friendly_name: 'Light TV',
+    supported: true,
+    definition: {
+      vendor: 'Aqara',
+      model: 'SP-EUC01',
+      description: 'Smart plug EU',
+      exposes: [
+        {
+          type: 'switch',
+          features: [
+            { type: 'binary', name: 'state', property: 'state', access: 7, value_on: 'ON', value_off: 'OFF' },
+          ],
+        },
+        { type: 'numeric', name: 'power', property: 'power', access: 1, unit: 'W' },
+        { type: 'numeric', name: 'voltage', property: 'voltage', access: 1, unit: 'V' },
+        { type: 'numeric', name: 'current', property: 'current', access: 1, unit: 'A' },
+        { type: 'numeric', name: 'device_temperature', property: 'device_temperature', access: 1, unit: '°C' },
+        { type: 'binary', name: 'button_lock', property: 'button_lock', access: 7, value_on: 'ON', value_off: 'OFF' },
+      ],
+    },
+  };
+
+  /**
+   * The task message had no way to say "there is nothing to add", so a model
+   * with nothing to add invented something — both vendors did, in the two
+   * ways available: restating fields that already existed, and declaring
+   * fields for diagnostics the hub hides plus a property the device has not
+   * got. The empty answer has to be describable.
+   */
+  it('says what an empty answer looks like when nothing is uncovered', () => {
+    const profile = mapExposes(plug);
+    expect(profile.uncovered).toEqual([]);
+
+    const prompt = buildMappingUserPrompt(plug, profile, []);
+    expect(prompt).toMatch(/Nothing is `uncovered`/);
+    expect(prompt).toMatch(/submit the hub's own mapping back unchanged/);
+    // Both upgrades stay on the table — this is the branch with the least
+    // work in it, not the branch with none.
+    expect(prompt).toMatch(/promoting a generic field to a typed capability/);
+    expect(prompt).toMatch(/none of the lists above mention/);
+    // And that padding it is the wrong move, which is what both runs did.
+    expect(prompt).toMatch(/must not become is padding/);
+  });
+
+  /**
+   * The empty device gets it backwards. Everything this one publishes is on
+   * the hidden list, so layers 1–2 place *nothing* — one endpoint, no
+   * capabilities — and `uncovered` is still empty, because nothing was left
+   * over to be uncovered. That is the case with the most work in it, and
+   * `needsHelp`'s `staticallyEmpty` arm is what starts a run for it; being
+   * told to submit the hub's own mapping back unchanged would be a request
+   * for a descriptor the schema refuses.
+   */
+  it('does not offer the empty answer to a device with no static mapping', () => {
+    const opaque: Z2mDevice = {
+      ieee_address: '0x00124b0022000009',
+      friendly_name: 'Opaque',
+      supported: true,
+      definition: {
+        vendor: 'Acme',
+        model: 'AC-OPAQUE',
+        description: 'Publishes only what the hub hides',
+        exposes: [
+          { type: 'numeric', name: 'linkquality', property: 'linkquality', access: 1 },
+          { type: 'numeric', name: 'voltage', property: 'voltage', access: 1, unit: 'mV' },
+        ],
+      },
+    };
+    const profile = mapExposes(opaque);
+    expect(profile.uncovered).toEqual([]);
+    expect(profile.endpoints.every((endpoint) => endpoint.capabilities.length === 0)).toBe(true);
+
+    expect(buildMappingUserPrompt(opaque, profile, [])).not.toMatch(/Nothing is `uncovered`/);
+  });
+
+  /**
+   * **One sentence, and no list.** An earlier version named the hidden
+   * properties per device and told the model what to do about each. That was
+   * the hub pre-chewing a judgement the model is better placed to make — and
+   * its first wording forbade the one useful thing a run had done. What is
+   * left is the fact the model cannot derive: those properties are absent
+   * from all three lists *on purpose*, which is what stops `uncovered: []`
+   * reading as "nothing here needs looking at".
+   */
+  it('says the absence is deliberate without reciting which properties', () => {
+    const prompt = buildMappingUserPrompt(plug, mapExposes(plug), []);
+    expect(prompt).toMatch(/telemetry the static mapper hides by default/);
+    expect(prompt).toMatch(/so judge it/);
+    // No per-device catalogue, and no verdict handed down about one.
+    expect(prompt).not.toMatch(/hides these by default/);
+    expect(prompt).not.toMatch(/- .*: voltage, current/);
+  });
 });
 
 // ── The agent loop ────────────────────────────────────────────────────────
