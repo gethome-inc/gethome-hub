@@ -540,3 +540,114 @@ export const settings = sqliteTable('settings', {
   key: text('key').primaryKey(),
   value: text('value', { mode: 'json' }).notNull(),
 });
+
+/**
+ * A rule the home runs by itself — and, with a `manual` trigger, the thing
+ * the apps draw as a scene. There is deliberately no separate scenes table:
+ * "press this and the house does that" is this object with one trigger kind,
+ * and a second store would be a second vocabulary to keep in step.
+ *
+ * `document` is the whole `AutomationDocument` as JSON, validated by
+ * `src/automations/schema.ts` on the way in and interpreted — never executed —
+ * on the way out. `src/automations/` is canonical.
+ */
+export const automations = sqliteTable(
+  'automations',
+  {
+    id: uuidPk(),
+    name: text('name').notNull(),
+    /**
+     * Whether the rule exists and is listening. Changing this is an edit and
+     * needs `automation.manage`.
+     */
+    enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
+    /**
+     * Whether a *manual toggle* is currently switched on — "Security is on".
+     * Deliberately a different column from `enabled` and a different
+     * permission: switching a mode on is working the home, which is the
+     * floor, while enabling a rule is editing it.
+     */
+    active: integer('active', { mode: 'boolean' }).notNull().default(false),
+    /**
+     * Why the hub switched this off by itself — today, only the runaway
+     * circuit breaker in `src/automations/guards.ts`. Null when a person did
+     * it, so an app can tell "I turned this off" from "the hub stopped it and
+     * here is the sentence".
+     */
+    disabledReason: text('disabled_reason'),
+    /** `AutomationDocument` as JSON. */
+    document: text('document', { mode: 'json' }).notNull(),
+    /**
+     * Who wrote it. `ON DELETE SET NULL` like every other member reference
+     * here: a rule outlives the person who added it, and the home keeps
+     * running it.
+     */
+    createdBy: text('created_by').references(() => members.id, { onDelete: 'set null' }),
+    sortOrder: integer('sort_order').notNull().default(0),
+    createdAt: createdAt(),
+    updatedAt: createdAt('updated_at'),
+  },
+  (table) => [index('automations_enabled').on(table.enabled)],
+);
+
+/**
+ * What a rule said before the last edit.
+ *
+ * An agent rewrites a document and the home behaves oddly at three in the
+ * morning; without this the only way back is remembering what it used to say.
+ * A document is a couple of kilobytes of JSON, so a handful of versions per
+ * rule is nothing beside one portrait — this is a bound on *bulk*, like
+ * `device_portraits`, not on write frequency.
+ */
+export const automationVersions = sqliteTable(
+  'automation_versions',
+  {
+    id: uuidPk(),
+    automationId: text('automation_id')
+      .notNull()
+      .references(() => automations.id, { onDelete: 'cascade' }),
+    at: createdAt('at'),
+    document: text('document', { mode: 'json' }).notNull(),
+    /** Who made the edit this version replaced. */
+    memberId: text('member_id').references(() => members.id, { onDelete: 'set null' }),
+    /** One line: "created", "edited in chat", "reverted to an earlier version". */
+    note: text('note'),
+  },
+  (table) => [index('automation_versions_automation').on(table.automationId, table.at)],
+);
+
+/**
+ * One firing, and what happened in it — the answer to "why did the light come
+ * on at three in the morning".
+ *
+ * **A row per firing, never a row per state report**, which is the line
+ * `device.command` and the reading history both hold. A rule that fires twice
+ * a day writes two rows; a rule that fires every few seconds is one the
+ * circuit breaker switches off, so this table cannot become the SD card
+ * problem by itself.
+ *
+ * `steps` carries what was evaluated and what was sent — including the
+ * commands a guard refused, which is the half that would otherwise be
+ * invisible: "nothing happened" and "the hub declined to switch that relay for
+ * the fortieth time this hour" look identical from outside.
+ */
+export const automationRuns = sqliteTable(
+  'automation_runs',
+  {
+    id: uuidPk(),
+    automationId: text('automation_id')
+      .notNull()
+      .references(() => automations.id, { onDelete: 'cascade' }),
+    at: createdAt('at'),
+    /** manual | deviceState | deviceEvent | schedule | interval | action */
+    trigger: text('trigger').notNull(),
+    /** One sentence naming what set it off. */
+    cause: text('cause').notNull(),
+    /** ran | skipped | refused | failed | interrupted */
+    outcome: text('outcome').notNull(),
+    durationMs: integer('duration_ms'),
+    /** `AutomationRunStep[]` as JSON — bounded when it is written. */
+    steps: text('steps', { mode: 'json' }).notNull(),
+  },
+  (table) => [index('automation_runs_automation').on(table.automationId, table.at)],
+);

@@ -57,6 +57,13 @@
       "when": 1787964316630,
       "tag": "0007_lovely_doorman",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1788218740221,
+      "tag": "0008_rare_iron_fist",
+      "breakpoints": true
     }
   ]
 }

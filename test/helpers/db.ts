@@ -16,6 +16,9 @@ import {
   activity,
   aiMappings,
   aiRuns,
+  automationRuns,
+  automationVersions,
+  automations,
   deviceFavorites,
   devicePortraits,
   devices,
@@ -65,6 +68,9 @@ export async function openTestDb(): Promise<TestDb | null> {
  */
 export async function resetDb(db: Db): Promise<void> {
   await db.delete(activity);
+  await db.delete(automationRuns);
+  await db.delete(automationVersions);
+  await db.delete(automations);
   await db.delete(tokens);
   await db.delete(invites);
   await db.delete(endpoints);

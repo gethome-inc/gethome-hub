@@ -103,6 +103,42 @@ export interface HubEvents {
   mqttFrame: [frame: MqttFrame];
   zigbeeEvent: [event: ZigbeeLifecycleEvent];
   aiRun: [event: AiRunEvent];
+  /**
+   * An automation was created, edited, enabled, switched on, or removed.
+   *
+   * Always-on and to every socket, like `structure` and `portraits`: a rule is
+   * the *house's*, so somebody switching "Night" on from the kitchen has to
+   * reach the phone in the bedroom that is drawing the same card. It carries
+   * the id and nothing else — the list is a short read, and a payload here
+   * would be a second shape for a fact `GET /automations` already has.
+   */
+  automationChanged: [automationId: string];
+  /**
+   * A rule fired, or declined to.
+   *
+   * An **opt-in** stream, unlike the change above: this is the trace a person
+   * watches while working out why the light came on, and a home with a motion
+   * rule in it produces one of these every time somebody walks through the
+   * hall. A phone drawing a dashboard must not pay for that.
+   */
+  automationRun: [event: AutomationRunEvent];
+}
+
+/** One firing, as it happens. The stored trace is `automation_runs`. */
+export interface AutomationRunEvent {
+  automationId: string;
+  name: string;
+  at: string;
+  /** manual | deviceState | deviceEvent | schedule | interval | action */
+  trigger: string;
+  /** One sentence naming what set it off. */
+  cause: string;
+  outcome: 'ran' | 'skipped' | 'refused' | 'failed' | 'interrupted';
+  /** How many commands actually reached a device. */
+  commands: number;
+  /** How many a guard declined to send, and why the first one was declined. */
+  refused: number;
+  detail?: string;
 }
 
 /**

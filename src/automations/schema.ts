@@ -244,9 +244,14 @@ export const triggerSchema = z.discriminatedUnion('kind', [
    * quiet disaster: a battery at 12% reports every hour and would fire "low
    * battery" every hour for a month; a plug drawing 3 W would fire "the
    * washing machine finished" every few seconds, for ever. The engine keeps
-   * the previous answer per rule, per trigger, per device to make this true,
-   * and a device it has never evaluated starts from "false" so a hub restart
-   * does not re-announce a condition that was already holding.
+   * the previous answer per rule, per trigger, per device to make this true.
+   *
+   * The **first** evaluation of a pair adopts whatever the answer is and
+   * fires nothing, which is the same judgement `REACHABILITY_QUIET_MS` makes
+   * about start-up: a rule fires on a transition it *watched*, and a
+   * condition that was already holding when the hub came back is not one.
+   * Without that, every restart would re-announce every flat battery in the
+   * house.
    *
    * `for` and `hysteresis` sit on top of that, and both are still worth
    * having because an edge on a noisy reading is still a lot of edges. `for`

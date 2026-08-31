@@ -117,11 +117,69 @@ export interface AiStatus {
  * stored AES-256-GCM-encrypted with the hub secret and only ever decrypted
  * in-process to run the mapping agent or draw a portrait.
  */
+/**
+ * Where the home's timezone is stored, and why it is a setting rather than a
+ * fact read from the machine.
+ *
+ * A schedule says "at ten in the evening" and means the evening of the house
+ * the hub is standing in. `Intl` gives the operating system's answer, which is
+ * right for a Pi somebody set up at home and wrong for one imaged on a laptop
+ * in another country or left on UTC by a headless install — and the person who
+ * notices is the one whose heating came on at three in the morning. So the
+ * system's answer **seeds** it and the database owns it afterwards, which is
+ * the same split `HUB_NAME` has with the home's name.
+ */
+const TIMEZONE_KEY = 'home_timezone';
+
+function systemTimezone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  } catch {
+    return 'UTC';
+  }
+}
+
 export class SettingsService {
+  /**
+   * Held in memory, for the reason `HomeService` holds the home's name: the
+   * automation engine asks for this on every scheduler tick and inside every
+   * time condition, and neither may become a database read.
+   */
+  private cachedTimezone = systemTimezone();
+
   constructor(
     private readonly db: Db,
     private readonly aesKey: string,
   ) {}
+
+  /** Read the stored timezone into memory. Called once, at boot. */
+  async loadTimezone(): Promise<void> {
+    const stored = await this.get<string>(TIMEZONE_KEY);
+    if (typeof stored === 'string' && stored.length > 0) this.cachedTimezone = stored;
+  }
+
+  /** The home's timezone, synchronously. */
+  get timezone(): string {
+    return this.cachedTimezone;
+  }
+
+  /**
+   * Set it, refusing one `Intl` cannot use.
+   *
+   * An unusable zone would take every schedule in the home down with it, on
+   * every tick, silently — so it is checked here, once, where somebody is
+   * still holding the request that can be told no.
+   */
+  async setTimezone(timezone: string): Promise<boolean> {
+    try {
+      new Intl.DateTimeFormat('en-GB', { timeZone: timezone }).format(0);
+    } catch {
+      return false;
+    }
+    await this.set(TIMEZONE_KEY, timezone);
+    this.cachedTimezone = timezone;
+    return true;
+  }
 
   async get<T>(key: string): Promise<T | null> {
     const row = await this.db.query.settings.findFirst({ where: eq(settings.key, key) });

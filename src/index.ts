@@ -26,6 +26,8 @@ import { buildServer } from './api/server.js';
 import { MdnsAdvertiser } from './mdns/advertiser.js';
 import { lazyAiAssist } from './ai/lazy.js';
 import { MappingLibrary } from './ai/library.js';
+import { AutomationStore } from './automations/store.js';
+import { AutomationEngine } from './automations/engine.js';
 import type { ZigbeeAdapter } from './adapters/zigbee/adapter.js';
 import type { MqttAdapter } from './adapters/mqtt/adapter.js';
 import type { MatterAdapter } from './adapters/matter/adapter.js';
@@ -78,6 +80,9 @@ async function main(): Promise<void> {
   const events = new HubEventBus();
   const activity = new ActivityService(db, events);
   const settings = new SettingsService(db, secret.aesKey);
+  // The home's timezone, read into memory once: the automation scheduler asks
+  // for it on every tick and it must never become a database read.
+  await settings.loadTimezone();
   // Who may do what. Loaded before the pairing service, which writes a
   // `role_id` on every claim and has to be able to ask for one — and before
   // anything can serve a request, since every authenticated route asks this.
@@ -114,6 +119,31 @@ async function main(): Promise<void> {
   // unconditionally: a hub with no key never writes a row, and the API still
   // has to be able to answer "nothing has run".
   const aiRuns = new AiRunLog(db, events);
+
+  // The rules the home runs by itself — and, with a manual trigger, the things
+  // the apps draw as scenes. Constructed here and *started* after the registry
+  // has loaded, because `registry.start()` reads devices into its cache
+  // without announcing them: an engine started first would prime every trigger
+  // against an empty home and then watch nothing.
+  const automationStore = new AutomationStore(db);
+  const automations = new AutomationEngine({
+    store: automationStore,
+    registry,
+    events,
+    activity,
+    log: log.child({ module: 'automations' }),
+    readStructure: async () => {
+      const [roomRows, zoneRows] = await Promise.all([
+        db.query.rooms.findMany({ orderBy: (table, { asc }) => [asc(table.sortOrder)] }),
+        db.query.zones.findMany({ orderBy: (table, { asc }) => [asc(table.sortOrder)] }),
+      ]);
+      return {
+        rooms: roomRows.map((row) => ({ id: row.id, name: row.name, zoneId: row.zoneId })),
+        zones: zoneRows.map((row) => ({ id: row.id, name: row.name })),
+      };
+    },
+    timezone: () => settings.timezone,
+  });
 
   // How every client of this hub's own broker signs in — read once, so the
   // three of them cannot drift. `loadConfig` has already lifted any credentials
@@ -268,9 +298,15 @@ async function main(): Promise<void> {
     void mdns?.updateName(name);
   };
 
-  void registry.start().catch((error) => {
-    log.error({ err: error }, 'Device registry failed to start.');
-  });
+  void registry
+    .start()
+    // Automations begin once the home is loaded and the radios have had their
+    // turn — never before, or the first thing a rule would react to is the
+    // hub finding out what it owns.
+    .then(() => automations.start())
+    .catch((error) => {
+      log.error({ err: error }, 'Device registry failed to start.');
+    });
 
   const stopping = { value: false };
   const shutdown = async (signal: string) => {
@@ -278,6 +314,7 @@ async function main(): Promise<void> {
     stopping.value = true;
     log.info(`${signal} received, shutting down…`);
     permitJoin.stop();
+    await automations.stop().catch(() => {});
     await mdns?.stop().catch(() => {});
     await app.close().catch(() => {});
     await mqttObserver?.stop().catch(() => {});
