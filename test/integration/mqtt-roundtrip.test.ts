@@ -18,6 +18,7 @@ import { AiRunLog } from '../../src/core/ai-runs.js';
 import { MappingLibrary } from '../../src/ai/library.js';
 import type { HubCommand } from '../../src/schema/index.js';
 import {
+  startedAutomations,
   bootedHome,
   loadedFavorites,
   openTestDb,
@@ -105,6 +106,12 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
     await registry.start();
 
     const settings = new SettingsService(db, Buffer.alloc(32).toString('base64'));
+    const { engine: automations, store: automationStore } = await startedAutomations(
+      db,
+      events,
+      registry,
+      activity,
+    );
     app = await buildServer({
       db,
       log,
@@ -114,6 +121,8 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
       access,
       pairing,
       activity,
+      automations,
+      automationStore,
       history: await startedHistory(db, events),
       portraits: testPortraits(db, events),
       settings,

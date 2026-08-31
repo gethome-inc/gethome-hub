@@ -117,6 +117,19 @@ than no button.
 | `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | `hub.ai` | The home's AI: two credentials, two models, which provider recognises devices, and the switch. **PATCH is the write** — every field optional, absence means "leave this alone": `{enabled?, recordExchanges?, anthropicApiKey?, openaiApiKey?, anthropicModel?, openaiModel?, model?, mappingProvider?, clear?}`. `model` is `anthropicModel` under the name this route has always used; `clear: "anthropic"\|"openai"` forgets one credential and leaves the other; `recordExchanges` starts or stops keeping what each round said, and is off unless asked; `mappingProvider` naming a provider with no key is `400 provider_not_configured`. Keys are told apart by prefix, so one pasted in the other's field is a 400 rather than a 401 an hour later, and a `sk-ant-oat…` subscription token is still refused. **PUT is unchanged** (`{apiKey, model?}`, an Anthropic key, required) for apps that have not moved. See [the answer's shape](#the-ai-settings-answer) |
 | `GET /ai/runs?limit=` | `hub.ai` | what the mapping agent did, newest first: `{id, at, kind, vendor, model, exposesHash, provider, modelId, ok, costUsd, turns, durationMs, errorKind, errorMessage, steps, exchanges}`. A summary, never a transcript — see [ai-adaptation.md](ai-adaptation.md). `exchanges` is how many **rounds** this run kept, `0` unless recording was on when it ran |
 | `GET /ai/runs/:id/exchanges` | `hub.ai` | what that run actually said, round by round, oldest first: `[{seq, at, durationMs, provider, modelId, status, ok, inputTokens, outputTokens, sent, received}]`. `sent`/`received` are `[{kind, label, text?, bytes?}]` — the round's **main data**, not its bodies; `bytes` is present only on a part that was cut, and is what it weighed whole. A run is a *loop*, so one recognition is several rounds and a failed one is followed by the next in the same list. Empty is the ordinary answer — recording is off unless the owner asked, and rounds age out after a week. See [ai-adaptation.md](ai-adaptation.md) |
+| `GET /automations` | floor | every rule in the home, plus `unreadable` — rules a **newer** build wrote that this one cannot parse. They are kept and not run; listing them is what stops a rule silently vanishing after `install.sh` rolls a build back. Each carries `summary` (a whole sentence — the contract) beside `document` (the structure — the convenience), the `activity.message` rule applied to rules |
+| `GET /automations/:id` · `GET /automations/:id/runs` | floor | one rule, and why it fired. The trace names the commands a guard **refused** as well as the ones it sent: "nothing happened" and "the hub declined to switch that relay for the fortieth time this hour" look identical from outside |
+| `GET /automations/capabilities` | floor | what a rule can be made of, **generated from the live zod schema**. Render this rather than shipping a copy — the `GET /permissions` rule applied to a vocabulary that will keep growing |
+| `GET /automations/templates` | floor | the shipped presets, with the inputs each needs |
+| `POST /automations/:id/run` | floor | press a button automation → `202`. **The floor, deliberately**: pressing "I'm leaving" switches lights, and working the home is what being a member means. `409 automation_disabled`, `409 not_pressable` for a rule that watches the home and has nothing to press |
+| `PUT /automations/:id/active` | floor | `{active}` — switch a *mode* on or off. Also the floor, and a different thing from `enabled` below: turning a mode on is working the home, enabling a rule is editing it. `409 not_a_toggle` |
+| `POST /automations` | `automation.manage` | the document as the body → `201`, **always switched off**, with `warnings`. `422 {error:"invalid_automation", issues}` for a shape the schema refuses, `422 {…, problems, warnings}` for one it accepts and the home cannot use — a threshold on a continuously-varying reading with no `for` or `hysteresis` is the commonest |
+| `PATCH /automations/:id` | `automation.manage` | `{document?, enabled?}`. Switching it back on clears whatever the circuit breaker wrote |
+| `DELETE /automations/:id` | `automation.manage` | forget it, and its versions and traces with it |
+| `GET /automations/:id/versions` · `POST /automations/:id/revert` | `automation.manage` | what it used to say, and going back to it. `{versionId}` |
+| `POST /automations/dry-run` | `automation.manage` | check a document without saving: `{problems, warnings, shape, summary}` |
+| `POST /automations/templates/:key` | `automation.manage` | install a preset. A template may install **more than one** rule — "light on movement" is genuinely two — so this answers with a list |
+| `GET /settings/timezone` · `PUT /settings/timezone` | floor · `automation.manage` | what "at ten in the evening" means. The system's zone seeds it and the database owns it; `400 unknown_timezone` for one `Intl` cannot use, refused here rather than taking every schedule down on every tick |
 | `GET /device-mappings` | `hub.ai` | the mapping library: one entry per device model, `{adapter, exposesHash, vendor, model, status, source, problems, endpoints, deviceIds, createdAt, updatedAt}` |
 | `GET /device-mappings/:exposesHash` | `hub.ai` | the download — an envelope naming the device, see [below](#the-device-mapping-library) |
 | `PUT /device-mappings/:exposesHash` | `hub.ai` | the upload. Accepts the envelope or a bare descriptor. `422 {error:"invalid_mapping", problems, issues?}` when the hub can't use it — and it is **kept**, so `…/repair` can work from it |
@@ -135,7 +148,7 @@ than no button.
 
 ### Roles and permissions in full
 
-#### The twelve permissions
+#### The fifteen permissions
 
 `GET /permissions` is the authority and carries a `title` and a `summary` for
 each. **Render those rather than shipping copy of your own** — it is the
@@ -152,6 +165,7 @@ it gates its own screens on.
 | `home.structure` | Home |
 | `home.rename` | Home |
 | `activity.read` | Home |
+| `automation.manage` | Home |
 | `member.invite` | People |
 | `member.remove` | People |
 | `role.manage` | People |
@@ -169,6 +183,7 @@ it gates its own screens on.
 | `device.add` | ✓ | ✓ | |
 | `home.structure` | ✓ | ✓ | |
 | `activity.read` | ✓ | ✓ | |
+| `automation.manage` | ✓ | ✓ | |
 | `hub.radio` | ✓ | ✓ | |
 | `hub.update` | ✓ | ✓ | |
 | `hub.ai` | ✓ | ✓ | |
@@ -1355,14 +1370,14 @@ ambiguous, so the board stays put and a person decides with
 
 ### Opt-in streams
 
-`hello` advertises which of the three optional streams this hub can serve, so a
+`hello` advertises which of the four optional streams this hub can serve, so a
 client never has to infer it from a version number — a hub with the MQTT
 adapter off simply lists fewer. Ask for the ones you need:
 
 ```
-→ {"type":"subscribe","streams":["mqtt","zigbee","ai"]}
+→ {"type":"subscribe","streams":["mqtt","zigbee","ai","automations"]}
 → {"type":"unsubscribe","streams":["mqtt"]}
-← {"type":"subscribed","streams":["zigbee","ai"],"unavailable":["mqtt"]}
+← {"type":"subscribed","streams":["zigbee","ai","automations"],"unavailable":["mqtt"]}
 ```
 
 and then:
@@ -1373,7 +1388,23 @@ and then:
 {"type":"mqtt","dropped":N}                             rate limit hit; N frames skipped
 {"type":"zigbeeEvent","event":{at,type,ieee,name?}}     joined|announced|interviewing|interviewed|interview-failed|left
 {"type":"aiRun","event":{phase,id,at,kind,exposesHash,vendor?,model?,step?,ok?,costUsd?,error?}}
+{"type":"automationRun","event":{automationId,name,at,trigger,cause,outcome,commands,refused,detail?}}
 ```
+
+**`automationRun` is opt-in for the same reason the others are.** It is the
+trace somebody watches while working out why the light came on, and a home with
+a motion rule produces one every time anybody walks through the hall. The
+*change* frame is not opt-in and arrives on every socket:
+
+```
+{"type":"automation","automationId":"…"}   created, edited, enabled, switched on, removed
+```
+
+because a rule is the **house's** — somebody switching "Night" on in the
+kitchen has to reach the phone in the bedroom drawing the same card, which is
+exactly why `structure` and `portraits` are always-on too. It carries the id and
+nothing else: `GET /automations` is a short read, and a payload here would be a
+second shape for a fact that already has one.
 
 **They are opt-in because they are not free.** The MQTT tap is a wildcard
 subscription on the broker and can be thousands of messages a minute; attaching

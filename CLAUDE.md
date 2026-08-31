@@ -15,7 +15,8 @@ The `docs/` files are canonical for their domains; read the relevant one before
 touching that code: `architecture.md` (module boundaries, data flow),
 `device-schema.md` (**the** capability/unit/wire contract), `api.md`,
 `zigbee.md`, `matter.md`, `mqtt-integrations.md` (public integrator
-convention), `ai-adaptation.md`, `portraits.md`, `ecosystem.md`.
+convention), `ai-adaptation.md`, `automations.md`, `portraits.md`,
+`ecosystem.md`.
 
 **There is no Docker and no database server anywhere any more.** The hub runs as
 systemd units (`deploy/install.sh`, `deploy/gethome-hubctl`) and the store is a
@@ -694,6 +695,90 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   tree rather than by anything the hub knows. Note the direction before
   reaching for this to explain a device stuck offline: it made devices falsely
   **online**, never falsely offline.
+- **Automations are data the hub interprets, and the guards are not
+  negotiable.** `src/automations/` is the rules a home runs by itself, and a
+  **scene is an automation with a `manual` trigger** — one object, one store,
+  one vocabulary, because "press this and the house does that" is not a second
+  system. `docs/automations.md` is canonical.
+  **The document is `MappingDescriptor`'s rule again**, and for five reasons
+  rather than one: the service account can read `hub-secret.json`, the token
+  hashes and `<data>/update/` (a write there starts a root unit); there is no
+  compiler in the bundle; a rule has to be rendered to a person in their own
+  language; a rule has to be checkable before it runs; and a rule outlives the
+  build that wrote it, so `version` is **defaulted** (the `z.literal(1)` bill
+  came due once already) and a document this build cannot parse is kept,
+  reported and **not run** rather than silently missing a step.
+  **A target is a selector, not only a list of ids** — "every light in the
+  Kitchen". It is the request people actually make, it survives a lamp being
+  paired next month, and it is the only way a template authored before it meets
+  a home can install into one. The resolver also picks the endpoint carrying
+  the capability the command needs, so a two-gang switch does the obvious thing
+  without the author knowing it has two endpoints. Reachability is deliberately
+  **not** a filter: a command to a sleeping battery device is queued by the
+  protocol, and dropping unreachable devices would un-target half a home of
+  sensors and make a rule mean different things at different times.
+  **A `deviceState` trigger fires on the crossing**, never on every report
+  while the test still holds — a battery at 12% reports hourly and would
+  announce itself hourly for a month. The first evaluation of a pair *adopts*
+  the answer and says nothing, which is `REACHABILITY_QUIET_MS`'s judgement
+  applied to rules; and because the engine only sees a device when it
+  **changes**, triggers have to be **primed against the home as it is** on
+  every load, or the first change ever observed is mistaken for first sight and
+  swallowed. That one cost a motion rule the first person to walk past it, on
+  every boot.
+  **A threshold on a continuously-varying reading is refused without `for` or
+  `hysteresis`.** This is `STATE_FLUSH_MS` pointed at a relay instead of an SD
+  card, and it is the rule the schema cannot express, so `sanity.ts` holds it.
+  The two are not interchangeable: `for` suppresses a spike, `hysteresis`
+  suppresses a value resting *on* the threshold and dithering across it, which
+  an edge does nothing about because every wobble is a real edge. Actuator
+  positions are deliberately not continuous — `level.current` moves because
+  somebody moved it.
+  **Five guards, and they apply to automation-driven commands only.** A person
+  tapping a card quickly is a person; software tapping quickly is a bug, and
+  that distinction is the whole reason the limits can be this tight.
+  Idempotence first (one comparison against the registry's cache, and it
+  absorbs most flapping); a two-second floor per endpoint, because a relay
+  rated for 100 000 operations switched once a second is dead in a day and a
+  half; hourly and daily budgets per device; causation with a depth cap; and a
+  circuit breaker that switches a runaway rule off, writes `disabled_reason`
+  and puts one line in the activity log. **Attribution is recorded *before* the
+  write**: Zigbee2MQTT publishes optimistically, so a mains device can report
+  its new state before `execute` resolves, and with the record afterwards
+  `causeOf` answered "nobody" for exactly the reports our own commands caused —
+  every link of a loop restarted at depth 0 and no chain could be cut. Three
+  commands are never idempotent (`toggle` is defined by what it does,
+  `stopCovering` is an interrupt, `irSend` has no state behind it), and a value
+  never reported always sends: silence is not evidence.
+  **The clock is injected and nothing is made up.** The tick fires for the
+  minute it is *in*, so a schedule missed while the hub was down does not fire
+  late; everything is held while the clock is implausible, because a Pi has no
+  RTC and boots into a fictional time NTP corrects seconds later; an `interval`
+  arms on the first tick rather than firing, since a restart is not an interval
+  elapsing. A `wait` does not survive a restart and is capped at fifteen
+  minutes to say so. `tick()` is public for the reason `HistoryService.flush()`
+  is — a scheduler that reads `Date.now()` can only be tested by waiting.
+  **Only a manual run reaches the activity log**, which is the log's own rule
+  (what was *asked*, never what was reported): a motion rule's forty daily
+  firings would drown a feed bounded at 5 000 rows. Traces live in
+  `automation_runs`, bounded **per rule** — a global cap lets one chatty rule
+  evict every trace of a quiet one — and they record the commands a guard
+  *refused*, since "nothing happened" and "the hub declined to switch that
+  relay for the fortieth time this hour" look identical from outside. The one
+  automatic firing that does get a row is the breaker switching a rule off,
+  because somebody has to find that a week later.
+  **`enabled` and `active` are two words with two permissions.** `enabled` is
+  whether the rule exists and is listening → `automation.manage`; `active` is
+  whether a mode is switched on right now → **the floor**, because pressing
+  "Night" switches lights and working the home is what being a member means.
+  And a new rule is created **switched off** whatever the caller asks, because
+  the moment between "here is what I wrote for you" and "your house is now
+  doing it" is the only one in which somebody can still look.
+  **The catalog is generated** from the live zod schema and is the one source
+  the agent, the apps and the docs all read — the `GET /permissions` rule
+  applied to a vocabulary that will keep growing. Units are written out in
+  words at every path and command, because a model that writes 22 for 22 °C
+  produces a rule wrong by two orders of magnitude that reads perfectly.
 - **Nothing is unsupported by default — three layers, in order.** Devices are
   made usable by (1) **typed capabilities** (canonical schema), then (2)
   **generic custom fields** (`custom`) for every leftover parameter, generated

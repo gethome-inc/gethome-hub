@@ -18,6 +18,7 @@ import { MappingLibrary } from '../src/ai/library.js';
 import type { AdapterBus, ProtocolAdapter } from '../src/adapters/adapter.js';
 import type { HubCommand } from '../src/schema/index.js';
 import {
+  startedAutomations,
   bootedHome,
   loadedAccess,
   openTestDb,
@@ -76,6 +77,12 @@ describe.skipIf(!handle)('hub API', () => {
     favorites = new FavoritesService(db, events);
     await favorites.load();
     history = await startedHistory(db, events);
+    const { engine: automations, store: automationStore } = await startedAutomations(
+      db,
+      events,
+      registry,
+      activity,
+    );
     app = await buildServer({
       db,
       log,
@@ -85,6 +92,8 @@ describe.skipIf(!handle)('hub API', () => {
       access,
       pairing,
       activity,
+      automations,
+      automationStore,
       history,
       portraits: testPortraits(db, events, dataDir),
       settings,
@@ -1586,7 +1595,7 @@ describe.skipIf(!handle)('hub API', () => {
     // This server is built without an MQTT observer, so the traffic inspector
     // is not on offer — and the socket says so rather than leaving a client to
     // infer it from the hub's version.
-    expect(hello.streams).toEqual(['zigbee', 'ai']);
+    expect(hello.streams).toEqual(['zigbee', 'ai', 'automations']);
     socket.close();
   });
 

@@ -13,6 +13,7 @@ import { PermitJoinService } from '../src/core/permit-join.js';
 import { AiRunLog } from '../src/core/ai-runs.js';
 import { MappingLibrary } from '../src/ai/library.js';
 import {
+  startedAutomations,
   bootedHome,
   loadedFavorites,
   openTestDb,
@@ -72,6 +73,12 @@ describe.skipIf(!handle)('why Zigbee is down, over HTTP', () => {
     const activity = new ActivityService(db, events);
     const registry = new DeviceRegistry(db, events, activity, log);
     const settings = new SettingsService(db, Buffer.alloc(32).toString('base64'));
+    const { engine: automations, store: automationStore } = await startedAutomations(
+      db,
+      events,
+      registry,
+      activity,
+    );
     const server = await buildServer({
       db,
       log,
@@ -81,6 +88,8 @@ describe.skipIf(!handle)('why Zigbee is down, over HTTP', () => {
       access,
       pairing,
       activity,
+      automations,
+      automationStore,
       history: await startedHistory(db, events),
       portraits: testPortraits(db, events),
       settings,

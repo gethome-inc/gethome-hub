@@ -246,6 +246,8 @@ async function main(): Promise<void> {
     },
     permitJoin,
     aiRuns,
+    automations,
+    automationStore,
     mappings: new MappingLibrary({
       db,
       settings,

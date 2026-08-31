@@ -37,4 +37,23 @@ CREATE TABLE `automations` (
 	FOREIGN KEY (`created_by`) REFERENCES `members`(`id`) ON UPDATE no action ON DELETE set null
 );
 --> statement-breakpoint
-CREATE INDEX `automations_enabled` ON `automations` (`enabled`);
+CREATE INDEX `automations_enabled` ON `automations` (`enabled`);--> statement-breakpoint
+-- `automation.manage` joins the member's set, for the third time on the
+-- `hub.update` argument. A rule is bounded (the engine's guards hold whatever
+-- it says, whoever wrote it), reversible (switch it off, or revert the
+-- document) and named in the activity log — which is the three-part test for
+-- what belongs in a default. And the person who notices that the hall light
+-- should come on when somebody walks past is the person standing in the hall,
+-- not the laptop in the drawer that happens to hold Owner.
+--
+-- Guest is untouched, and the line is exactly where it should be: anybody may
+-- *press* "I'm leaving", because working the home is the floor and no role
+-- takes it away — this is only about who may change what pressing it does.
+--
+-- The default alone reaches no hub that already exists (`ensureBuiltins()`
+-- inserts with `ON CONFLICT DO NOTHING`), which is why the update is here as
+-- well as in `access.ts`. Idempotent, and it cannot contradict a decision a
+-- home has made: the key has never existed, so nobody has ever removed it.
+UPDATE `roles`
+SET `permissions` = json_insert(`permissions`, '$[#]', 'automation.manage')
+WHERE `key` = 'member' AND `builtin` = 1 AND `permissions` NOT LIKE '%automation.manage%';
