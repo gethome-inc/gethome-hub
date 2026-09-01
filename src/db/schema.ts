@@ -445,6 +445,17 @@ export const aiRuns = sqliteTable('ai_runs', {
   durationMs: integer('duration_ms'),
   errorKind: text('error_kind'),
   errorMessage: text('error_message'),
+  /**
+   * The rule an `automate` run produced, when it produced one.
+   *
+   * Additive and nullable so the AI spend page stays **one** list: a device
+   * recognition and a conversation that wrote an automation are both "what the
+   * home spent on AI", and splitting them into two tables would mean two
+   * screens answering one question. A mapping run leaves it null and an
+   * `automate` run leaves `exposes_hash` empty, which is the honest reading of
+   * a column that is about a device model.
+   */
+  automationId: text('automation_id'),
   /** `AgentStep[]` as JSON. */
   steps: text('steps', { mode: 'json' }).notNull(),
 });
@@ -650,4 +661,34 @@ export const automationRuns = sqliteTable(
     steps: text('steps', { mode: 'json' }).notNull(),
   },
   (table) => [index('automation_runs_automation').on(table.automationId, table.at)],
+);
+
+/**
+ * What was said while a rule was being written.
+ *
+ * **The display transcript, not the conversation.** The provider's own message
+ * history — thinking blocks, tool calls, tool results, the home inventory —
+ * lives in memory inside the running conversation and dies with the process,
+ * because it is tens of kilobytes per round and it is the write amplification
+ * the rest of this store is arranged to avoid. What is written here is what an
+ * app draws: a few hundred bytes a message.
+ *
+ * The cost of that split is honest and small: after a restart a chat is
+ * readable history and continuing means starting a new one. The rule it
+ * produced is a row in `automations` and is not lost.
+ */
+export const automationChatMessages = sqliteTable(
+  'automation_chat_messages',
+  {
+    id: uuidPk(),
+    sessionId: text('session_id').notNull(),
+    at: createdAt('at'),
+    /** user | agent | question | preview | note */
+    role: text('role').notNull(),
+    text: text('text').notNull(),
+    /** Options for a question, the automation id for a preview. */
+    data: text('data', { mode: 'json' }),
+    memberId: text('member_id').references(() => members.id, { onDelete: 'set null' }),
+  },
+  (table) => [index('automation_chat_session').on(table.sessionId, table.at)],
 );

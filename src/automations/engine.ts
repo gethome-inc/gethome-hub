@@ -869,6 +869,18 @@ export class AutomationEngine {
     }));
   }
 
+  /**
+   * What a device is reporting right now.
+   *
+   * Public because the automation agent's `get_device` tool needs it and the
+   * engine is the one place that knows how to read the registry's cache —
+   * going through here keeps `src/ai/` out of the registry entirely, which is
+   * the same boundary the adapters keep.
+   */
+  stateFor(deviceId: string, endpointId: number): EndpointState | undefined {
+    return this.stateOf(deviceId, endpointId);
+  }
+
   private stateOf(deviceId: string, endpointId: number): EndpointState | undefined {
     return this.options.registry
       .listDevices()

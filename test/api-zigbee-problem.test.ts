@@ -73,7 +73,11 @@ describe.skipIf(!handle)('why Zigbee is down, over HTTP', () => {
     const activity = new ActivityService(db, events);
     const registry = new DeviceRegistry(db, events, activity, log);
     const settings = new SettingsService(db, Buffer.alloc(32).toString('base64'));
-    const { engine: automations, store: automationStore } = await startedAutomations(
+    const {
+    engine: automations,
+    store: automationStore,
+    chat: automationChat,
+  } = await startedAutomations(
       db,
       events,
       registry,
@@ -90,6 +94,7 @@ describe.skipIf(!handle)('why Zigbee is down, over HTTP', () => {
       activity,
       automations,
       automationStore,
+      automationChat,
       history: await startedHistory(db, events),
       portraits: testPortraits(db, events),
       settings,

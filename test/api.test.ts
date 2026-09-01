@@ -77,7 +77,11 @@ describe.skipIf(!handle)('hub API', () => {
     favorites = new FavoritesService(db, events);
     await favorites.load();
     history = await startedHistory(db, events);
-    const { engine: automations, store: automationStore } = await startedAutomations(
+    const {
+    engine: automations,
+    store: automationStore,
+    chat: automationChat,
+  } = await startedAutomations(
       db,
       events,
       registry,
@@ -94,6 +98,7 @@ describe.skipIf(!handle)('hub API', () => {
       activity,
       automations,
       automationStore,
+      automationChat,
       history,
       portraits: testPortraits(db, events, dataDir),
       settings,

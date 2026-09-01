@@ -267,3 +267,94 @@ permission.
 New rules are created **switched off**, whatever the caller asks for. The
 moment between "here is what I wrote for you" and "your house is now doing it"
 is the only one in which somebody can still look.
+
+---
+
+## Writing one in conversation
+
+`src/ai/automation-*.ts`. The agent is **authoring only**: the runtime above
+does not know it exists, runs without a key, and keeps running when the key is
+taken away. `ai_enabled: false` stops rules being written and touches nothing
+that is already running.
+
+On the hub, as a plain Messages API loop. Not the Claude Agent SDK, for the
+reason `agent.ts` is not — a 276 MB binary and a ~315 MB subprocess per run is
+unusable on the smallest board this hub supports — and **not a cloud agent**,
+for a reason of its own: this agent's tools are the home, the home is on a
+local network, and a provider's container cannot reach it. Every tool call
+would have to be relayed back through a tunnel that does not exist.
+
+### Seven tools, and no web
+
+`list_devices`, `get_device`, `list_rooms_zones`, `get_automation`, `dry_run`,
+`ask_user`, `submit_automation`. There is no search and no fetch: an agent
+writing a rule for somebody's house has nothing to look up, and leaving the
+tools out is a plainer promise than any prompt about not using them. This is
+the one AI surface in the hub that talks to the provider's API and to nothing
+else at all.
+
+**`ask_user` is what makes this usable by somebody who does not write
+software.** It carries two to four options, because a person taps one and will
+not compose an answer to "what should the hysteresis be?". Answering closes the
+tool call it opened — a plain user message after a pending call is a
+conversation the API refuses — which is why `answer()` exists beside `send()`,
+and why a *typed* reply to a question is routed to `answer` anyway.
+
+**`dry_run` is the agent checking its own work.** It runs the same checks
+`submit_automation` runs and hands back the sentence the apps will show, which
+is the best available test of whether a rule says what somebody meant.
+
+**`submit_automation` is the only answer channel**, and a refusal is a
+`tool_result` rather than the end of the conversation: the model fixes the
+document and resubmits without the person ever seeing that it got it wrong
+once. Deliberately not a `strict` tool, the `submit_mapping` reasoning — strict
+mode guarantees the shape and cannot express "the target must have that
+capability".
+
+### A conversation suspends, twice over
+
+Unlike a mapping run, which is one call that either produces a descriptor or
+does not, this loop hands control back on `ask_user` **and** on a prose ending,
+and both suspensions outlive the request that started them. So a conversation
+is an object with a lifetime, and the provider — not the caller — owns the
+message history, because that history is the vendor's own shape.
+
+### Two stores
+
+- **In memory**: the provider's message history. Tens of kilobytes a round,
+  needed only to continue, dies with the process.
+- **On disk**: the transcript an app draws. A few hundred bytes a message,
+  kept 14 days.
+
+A restart therefore costs the *continuation* and not the record. The chat stays
+readable, continuing means starting a new one (`410 conversation_ended`), and
+the rule it produced is a row in `automations` either way. Sessions also expire
+after two hours idle, and at most eight are held at once.
+
+### What it costs, and where that is written
+
+One `ai_runs` row per conversation, `kind: 'automate'`, with `automation_id`
+filled and `exposes_hash` empty. One list, because "what did this home spend on
+AI" is one question and two tables would make it two screens.
+
+Guardrails: 12 provider rounds per user message, **$1 per conversation** (on
+the conversation rather than the turn — twenty rounds of clarification are
+twenty requests, and a ceiling that resets every message is not one), and a
+three-minute watchdog per turn rather than the mapper's ten, because somebody
+is sitting in front of this.
+
+### The prompt
+
+Built from `catalogAsPrompt()`, so what the agent is told a rule can contain
+is generated from the same schema that validates one. It names the refusals
+rather than steering around them — the engine's guards hold whatever a document
+says, so a prompt that begged the model to be careful would be duplicating an
+enforced rule and reading as the only thing between somebody and a burnt-out
+relay. And it is honest about what the hub cannot do: **there are no
+notifications**, and a model that does not know that invents a notify action
+and spends a round finding out while somebody watches.
+
+The system prompt is byte-identical for the life of a build and sits behind a
+cache breakpoint; the home inventory goes in the first user message, behind the
+conversation's own. The OpenAI half is not written yet, and a home configured
+for OpenAI is told so plainly rather than being failed with a 500.

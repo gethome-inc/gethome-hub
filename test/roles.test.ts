@@ -113,7 +113,11 @@ describe.skipIf(!handle)('roles and permissions', () => {
     registry.registerAdapter(adapter);
     await registry.start();
     const settings = new SettingsService(db, Buffer.alloc(32).toString('base64'));
-    const { engine: automations, store: automationStore } = await startedAutomations(
+    const {
+    engine: automations,
+    store: automationStore,
+    chat: automationChat,
+  } = await startedAutomations(
       db,
       events,
       registry,
@@ -130,6 +134,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
       activity,
       automations,
       automationStore,
+      automationChat,
       history: await startedHistory(db, events),
       portraits: testPortraits(db, events),
       settings,
@@ -392,6 +397,16 @@ describe.skipIf(!handle)('roles and permissions', () => {
         undefined,
       ],
       ['POST', '/api/v1/automations/dry-run', 'automation.manage', { name: 'x' } as object],
+      // Writing a rule in conversation needs `automation.manage` *and*
+      // `hub.ai`, because it ends in a saved rule and spends the home's money.
+      // The guard the route names first is the one a refusal reports.
+      ['POST', '/api/v1/automations/chat', 'automation.manage', { message: 'hi' } as object],
+      [
+        'GET',
+        '/api/v1/automations/chat/44444444-4444-4444-a444-444444444444',
+        'automation.manage',
+        undefined,
+      ],
       ['POST', '/api/v1/automations/templates/away', 'automation.manage', {} as object],
       ['PUT', '/api/v1/settings/timezone', 'automation.manage', { timezone: 'UTC' } as object],
       // Reading the home is the floor, and the rules are the home — including

@@ -1,4 +1,9 @@
-import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
+import Fastify, {
+  type FastifyBaseLogger,
+  type FastifyInstance,
+  type FastifyReply,
+  type FastifyRequest,
+} from 'fastify';
 import websocket from '@fastify/websocket';
 import { randomUUID } from 'node:crypto';
 import { eq, max } from 'drizzle-orm';
@@ -24,6 +29,10 @@ import { effectiveModel, isSupportedModel, PROVIDER_MODELS, supportedModelIds } 
 import type { MappingLibrary } from '../ai/library.js';
 import type { AiRunLog } from '../core/ai-runs.js';
 import type { AutomationEngine } from '../automations/engine.js';
+import {
+  AutomationNotConfiguredError,
+  type AutomationChat,
+} from '../ai/automation-chat.js';
 import type { AutomationStore } from '../automations/store.js';
 import { automationDocumentSchema } from '../automations/schema.js';
 import { sanityCheckAutomation } from '../automations/sanity.js';
@@ -116,6 +125,13 @@ export interface ApiDeps {
   /** The rules the home runs by itself, and the scenes the apps draw. */
   automations: AutomationEngine;
   automationStore: AutomationStore;
+  /**
+   * The conversations rules get written in. Constructed unconditionally — a
+   * hub with no key never builds a provider client and the routes answer
+   * `409 ai_not_configured`, which is the answer an app needs rather than a
+   * missing route it cannot tell from an old hub.
+   */
+  automationChat: AutomationChat;
 }
 
 /**
@@ -2476,6 +2492,98 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       return reply.code(400).send({ error: 'unknown_timezone' });
     }
     return { timezone: deps.settings.timezone };
+  });
+
+  // ── Writing a rule in conversation ───────────────────────────────────────
+
+  /**
+   * Two permissions, and the route asks for both.
+   *
+   * `automation.manage` because a conversation ends in a saved rule, and
+   * `hub.ai` because it spends the home's money — the same key that guards
+   * recognising a device and drawing a portrait. `needs()` takes one, so the
+   * second is checked here and refused in the same shape, since an app turns
+   * `{error, permission}` into a sentence and has no way to read a bare 403.
+   */
+  const chatGuard = async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!deps.access.can(request.member!.id, 'hub.ai')) {
+      await reply.code(403).send({ error: 'forbidden', permission: 'hub.ai' });
+      return reply;
+    }
+    return undefined;
+  };
+
+  /** Turn a configuration refusal into the two codes an app has to tell apart:
+   *  "there is no key" and "the owner switched this off" need different
+   *  sentences and lead to different screens. */
+  const chatRefusal = (error: unknown, reply: FastifyReply) => {
+    if (error instanceof AutomationNotConfiguredError) {
+      return reply.code(409).send({ error: error.code });
+    }
+    throw error;
+  };
+
+  app.post('/api/v1/automations/chat', needs('automation.manage'), async (request, reply) => {
+    const refused = await chatGuard(request, reply);
+    if (refused) return refused;
+    const body = z
+      .object({ message: z.string().trim().min(1).max(2_000), automationId: z.uuid().optional() })
+      .parse(request.body);
+    if (body.automationId !== undefined && !deps.automations.get(body.automationId)) {
+      return reply.code(404).send({ error: 'not_found' });
+    }
+    try {
+      const reply_ = await deps.automationChat.start({
+        memberId: request.member!.id,
+        message: body.message,
+        ...(body.automationId !== undefined ? { automationId: body.automationId } : {}),
+      });
+      return reply.code(201).send(reply_);
+    } catch (error) {
+      return chatRefusal(error, reply);
+    }
+  });
+
+  app.post(
+    '/api/v1/automations/chat/:id/messages',
+    needs('automation.manage'),
+    async (request, reply) => {
+      const refused = await chatGuard(request, reply);
+      if (refused) return refused;
+      const { id } = z.object({ id: z.uuid() }).parse(request.params);
+      const { message } = z
+        .object({ message: z.string().trim().min(1).max(2_000) })
+        .parse(request.body);
+      const answered = await deps.automationChat.reply(id, request.member!.id, message);
+      /**
+       * `410` rather than `404`, and the difference matters: the conversation
+       * existed and its transcript is still readable — what is gone is the
+       * ability to *continue* it, because the model's own history lives in
+       * memory and the hub restarted. An app tells somebody to start a new one
+       * rather than that nothing was ever there.
+       */
+      if (!answered) return reply.code(410).send({ error: 'conversation_ended' });
+      return answered;
+    },
+  );
+
+  app.get('/api/v1/automations/chat/:id', needs('automation.manage'), async (request, reply) => {
+    const refused = await chatGuard(request, reply);
+    if (refused) return refused;
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    return {
+      sessionId: id,
+      live: deps.automationChat.isLive(id),
+      messages: await deps.automationChat.transcript(id),
+    };
+  });
+
+  app.delete('/api/v1/automations/chat/:id', needs('automation.manage'), async (request, reply) => {
+    const refused = await chatGuard(request, reply);
+    if (refused) return refused;
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    await deps.automationChat.close(id);
+    return reply.code(204).send();
   });
 
   // ── WebSocket event stream ───────────────────────────────────────────────

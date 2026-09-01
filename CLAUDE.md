@@ -779,6 +779,50 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   applied to a vocabulary that will keep growing. Units are written out in
   words at every path and command, because a model that writes 22 for 22 °C
   produces a rule wrong by two orders of magnitude that reads perfectly.
+- **The automation agent is authoring, never runtime, and it lives on the
+  hub.** `src/ai/automation-*.ts` writes rules in conversation;
+  `src/automations/` runs them, with no key, no network and no idea the agent
+  exists. So `ai_enabled: false` stops rules being *written* and touches
+  nothing already running — "stop spending my money on this for now" must not
+  put the lights out on a schedule. `docs/automations.md` is canonical.
+  On the hub for the same reason the mapper is (the Agent SDK's 276 MB binary
+  and per-run subprocess), and **not in the cloud** for a reason of its own:
+  this agent's tools *are* the home, the home is on a local network, and a
+  provider's container cannot reach it — every tool call would need a tunnel
+  that does not exist.
+  **A conversation suspends, which is what makes it different from a mapping
+  run.** That run is one call that either submits a descriptor or does not;
+  this one hands control back on `ask_user` **and** on a prose ending, both of
+  which outlive the request. So the provider owns the message history (it is
+  the vendor's own shape) and the conversation is an object with a lifetime.
+  Answering closes the tool call `ask_user` opened — a plain user message after
+  a pending call is a conversation the API refuses — which is why `answer()`
+  sits beside `send()` and why a *typed* reply is routed to `answer` anyway.
+  **Two stores, and the split is what makes keeping a chat affordable.** The
+  message history is in memory, tens of kilobytes a round, and dies with the
+  process; the transcript an app draws is on disk, a few hundred bytes a
+  message. A restart costs the *continuation*, not the record — `410
+  conversation_ended`, the chat still readable, the rule it produced still a
+  row. **`ask_user` carries two to four options** because somebody who does
+  not write software taps one and will not compose an answer, and that is the
+  single thing that makes this usable by the people it is for.
+  **Seven tools and no web.** An agent writing a rule for a house has nothing
+  to look up, and leaving search out is a plainer promise than a paragraph
+  telling it not to search — the one AI surface here that reaches the
+  provider's API and nothing else. `submit_automation` is the only answer
+  channel and a refusal is a `tool_result` rather than the end of the
+  conversation, so the model fixes its document and resubmits without the
+  person seeing it got it wrong; `dry_run` is the agent checking its own work
+  against the same rules, and it hands back the sentence the apps will show.
+  The prompt is built from `catalogAsPrompt()`, names the refusals rather than
+  begging for care (the guards are enforced, and a prompt implying otherwise
+  reads as the only thing between somebody and a burnt-out relay), and says
+  plainly that **there are no notifications** — a model that does not know
+  that invents a notify action and spends a round finding out while somebody
+  watches. One `ai_runs` row per conversation, `kind: 'automate'`, because
+  what a home spent on AI is one question and two tables would make it two
+  screens. The OpenAI half is not written; a home configured for it is told
+  so rather than failed with a 500.
 - **Nothing is unsupported by default — three layers, in order.** Devices are
   made usable by (1) **typed capabilities** (canonical schema), then (2)
   **generic custom fields** (`custom`) for every leftover parameter, generated

@@ -8,7 +8,7 @@ import type {
   ZigbeeLifecycleEvent,
 } from '../core/bus.js';
 import type { AiRunEvent } from '../core/ai-runs.js';
-import type { AutomationRunEvent } from '../core/bus.js';
+import type { AutomationChatEvent, AutomationRunEvent } from '../core/bus.js';
 import { deviceWire } from './dto.js';
 import type { HubStatusReader } from '../core/hub-status.js';
 
@@ -347,6 +347,10 @@ export function attachWebSocket(
    * listener attached.
    */
   const onAutomationRun = (event: AutomationRunEvent) => send({ type: 'automationRun', event });
+  /** The model's text as it arrives, and one line per thing a turn did. On the
+   *  same opt-in stream: it is the highest-rate frame the hub can emit and it
+   *  matters only to the one client with the chat open. */
+  const onAutomationChat = (event: AutomationChatEvent) => send({ type: 'automationChat', event });
 
   const available = (stream: OptionalStream): boolean =>
     stream === 'mqtt' ? deps.mqttObserver !== undefined : true;
@@ -369,7 +373,10 @@ export function attachWebSocket(
       }
       if (stream === 'zigbee') deps.events.on('zigbeeEvent', onZigbeeEvent);
       if (stream === 'ai') deps.events.on('aiRun', onAiRun);
-      if (stream === 'automations') deps.events.on('automationRun', onAutomationRun);
+      if (stream === 'automations') {
+        deps.events.on('automationRun', onAutomationRun);
+        deps.events.on('automationChat', onAutomationChat);
+      }
     }
     send({
       type: 'subscribed',
@@ -387,7 +394,10 @@ export function attachWebSocket(
       }
       if (stream === 'zigbee') deps.events.off('zigbeeEvent', onZigbeeEvent);
       if (stream === 'ai') deps.events.off('aiRun', onAiRun);
-      if (stream === 'automations') deps.events.off('automationRun', onAutomationRun);
+      if (stream === 'automations') {
+        deps.events.off('automationRun', onAutomationRun);
+        deps.events.off('automationChat', onAutomationChat);
+      }
     }
     send({ type: 'subscribed', streams: [...subscribed] });
   };
@@ -472,7 +482,10 @@ export function attachWebSocket(
     }
     if (subscribed.has('zigbee')) deps.events.off('zigbeeEvent', onZigbeeEvent);
     if (subscribed.has('ai')) deps.events.off('aiRun', onAiRun);
-    if (subscribed.has('automations')) deps.events.off('automationRun', onAutomationRun);
+    if (subscribed.has('automations')) {
+      deps.events.off('automationRun', onAutomationRun);
+      deps.events.off('automationChat', onAutomationChat);
+    }
     subscribed.clear();
   };
   socket.on('close', detach);

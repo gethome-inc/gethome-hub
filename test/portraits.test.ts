@@ -90,7 +90,11 @@ describe.skipIf(!handle)('device portraits', () => {
     await registry.start();
     settings = new SettingsService(db, Buffer.alloc(32).toString('base64'));
     portraits = new PortraitService(db, events, dataDir, log);
-    const { engine: automations, store: automationStore } = await startedAutomations(
+    const {
+    engine: automations,
+    store: automationStore,
+    chat: automationChat,
+  } = await startedAutomations(
       db,
       events,
       registry,
@@ -107,6 +111,7 @@ describe.skipIf(!handle)('device portraits', () => {
       activity,
       automations,
       automationStore,
+      automationChat,
       history: await startedHistory(db, events),
       portraits,
       settings,

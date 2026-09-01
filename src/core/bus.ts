@@ -122,6 +122,33 @@ export interface HubEvents {
    * hall. A phone drawing a dashboard must not pay for that.
    */
   automationRun: [event: AutomationRunEvent];
+  /**
+   * Something happened inside a conversation in which a rule is being written.
+   *
+   * On the same opt-in stream as `automationRun`, and for a sharper version of
+   * the same reason: this carries the model's text **as it arrives**, so it is
+   * the highest-rate thing the socket can emit, and it is of interest only to
+   * the one client with the chat open. A phone drawing a dashboard must never
+   * be attached to it.
+   */
+  automationChat: [event: AutomationChatEvent];
+}
+
+/**
+ * One thing a conversation did, live.
+ *
+ * `delta` is text as the model produces it — a chat that shows nothing for
+ * ninety seconds has failed whatever the model is doing. `step` is one line
+ * per tool call or submission, which is what lets an app say "looking at your
+ * devices" instead of spinning. `turn` says the exchange is over and the
+ * stored messages are what to draw.
+ */
+export interface AutomationChatEvent {
+  sessionId: string;
+  phase: 'delta' | 'step' | 'turn';
+  at: string;
+  text: string;
+  detail?: string;
 }
 
 /** One firing, as it happens. The stored trace is `automation_runs`. */

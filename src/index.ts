@@ -28,6 +28,7 @@ import { lazyAiAssist } from './ai/lazy.js';
 import { MappingLibrary } from './ai/library.js';
 import { AutomationStore } from './automations/store.js';
 import { AutomationEngine } from './automations/engine.js';
+import { AutomationChat } from './ai/automation-chat.js';
 import type { ZigbeeAdapter } from './adapters/zigbee/adapter.js';
 import type { MqttAdapter } from './adapters/mqtt/adapter.js';
 import type { MatterAdapter } from './adapters/matter/adapter.js';
@@ -248,6 +249,18 @@ async function main(): Promise<void> {
     aiRuns,
     automations,
     automationStore,
+    // Constructed unconditionally and costing nothing until somebody opens a
+    // chat: no client, no prompt and no vendor SDK is loaded until the first
+    // message, which is `lazy.ts`'s seam one module over.
+    automationChat: new AutomationChat({
+      db,
+      settings,
+      engine: automations,
+      store: automationStore,
+      events,
+      runs: aiRuns,
+      log: log.child({ module: 'ai' }),
+    }),
     mappings: new MappingLibrary({
       db,
       settings,

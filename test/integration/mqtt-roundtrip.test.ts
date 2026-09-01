@@ -106,7 +106,11 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
     await registry.start();
 
     const settings = new SettingsService(db, Buffer.alloc(32).toString('base64'));
-    const { engine: automations, store: automationStore } = await startedAutomations(
+    const {
+    engine: automations,
+    store: automationStore,
+    chat: automationChat,
+  } = await startedAutomations(
       db,
       events,
       registry,
@@ -123,6 +127,7 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
       activity,
       automations,
       automationStore,
+      automationChat,
       history: await startedHistory(db, events),
       portraits: testPortraits(db, events),
       settings,

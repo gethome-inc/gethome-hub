@@ -30,7 +30,13 @@ const MAX_STEPS = 40;
 const RETAIN_EXCHANGE_DAYS = 7;
 const RETAIN_EXCHANGES = 1000;
 
-export type AiRunKind = 'map' | 'repair';
+/**
+ * `automate` is a *conversation* rather than a one-shot run, and it is in this
+ * list on purpose: what a home spent on AI is one question, and splitting
+ * device recognition from rule-writing into two tables would make it two
+ * screens. Such a row leaves `exposesHash` empty and fills `automationId`.
+ */
+export type AiRunKind = 'map' | 'repair' | 'automate';
 
 export interface AiRunEvent {
   phase: 'started' | 'step' | 'finished';

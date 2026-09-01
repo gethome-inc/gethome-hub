@@ -13,6 +13,9 @@ import { PortraitService } from '../../src/portraits/store.js';
 import { ActivityService } from '../../src/core/activity.js';
 import { AutomationEngine, type EngineRegistry } from '../../src/automations/engine.js';
 import { AutomationStore } from '../../src/automations/store.js';
+import { AutomationChat, type AutomationChatOptions } from '../../src/ai/automation-chat.js';
+import { AiRunLog } from '../../src/core/ai-runs.js';
+import { SettingsService } from '../../src/core/settings.js';
 import type { HubEventBus } from '../../src/core/bus.js';
 import type { MqttBrokerConfig } from '../../src/core/mqtt-access.js';
 import {
@@ -194,8 +197,17 @@ export async function startedAutomations(
   events: HubEventBus,
   registry: EngineRegistry,
   activity: ActivityService,
-  options: { now?: () => number; timezone?: () => string } = {},
-): Promise<{ engine: AutomationEngine; store: AutomationStore }> {
+  options: {
+    now?: () => number;
+    timezone?: () => string;
+    /** The suite's own, when it has one — otherwise a throwaway with no key,
+     *  which is what a hub that has never been given one looks like. */
+    settings?: SettingsService;
+    runs?: AiRunLog;
+    /** Stands in for a provider, so a suite never reaches one. */
+    createConversation?: AutomationChatOptions['createConversation'];
+  } = {},
+): Promise<{ engine: AutomationEngine; store: AutomationStore; chat: AutomationChat }> {
   const store = new AutomationStore(db);
   const engine = new AutomationEngine({
     store,
@@ -217,5 +229,19 @@ export async function startedAutomations(
     ...(options.now !== undefined ? { now: options.now } : {}),
   });
   await engine.start();
-  return { engine, store };
+  const settings =
+    options.settings ?? new SettingsService(db, Buffer.alloc(32).toString('base64'));
+  const chat = new AutomationChat({
+    db,
+    settings,
+    engine,
+    store,
+    events,
+    runs: options.runs ?? new AiRunLog(db, events),
+    log: pino({ level: 'silent' }),
+    ...(options.createConversation !== undefined
+      ? { createConversation: options.createConversation }
+      : {}),
+  });
+  return { engine, store, chat };
 }

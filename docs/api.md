@@ -129,6 +129,10 @@ than no button.
 | `GET /automations/:id/versions` · `POST /automations/:id/revert` | `automation.manage` | what it used to say, and going back to it. `{versionId}` |
 | `POST /automations/dry-run` | `automation.manage` | check a document without saving: `{problems, warnings, shape, summary}` |
 | `POST /automations/templates/:key` | `automation.manage` | install a preset. A template may install **more than one** rule — "light on movement" is genuinely two — so this answers with a list |
+| `POST /automations/chat` | `automation.manage` **+** `hub.ai` | start a conversation: `{message, automationId?}` → `{sessionId, turn, messages}`. `409 ai_not_configured` with no key, `409 ai_disabled` when the owner switched AI off — two codes because they lead to different screens. The route names `automation.manage` in a refusal; the second key is checked in the handler and refused in the same `{error, permission}` shape |
+| `POST /automations/chat/:id/messages` | `automation.manage` **+** `hub.ai` | `{message}`. A typed reply to a question is treated as the *answer* to it, since only the conversation knows whether a tool call is outstanding. **`410 conversation_ended`** when the hub has restarted: the transcript is still readable and what is gone is the ability to continue, which is a different sentence from "no such thing" |
+| `GET /automations/chat/:id` | `automation.manage` **+** `hub.ai` | `{sessionId, live, messages}` — the transcript, oldest first. `live: false` is history |
+| `DELETE /automations/chat/:id` | `automation.manage` **+** `hub.ai` | end it and write down what it spent |
 | `GET /settings/timezone` · `PUT /settings/timezone` | floor · `automation.manage` | what "at ten in the evening" means. The system's zone seeds it and the database owns it; `400 unknown_timezone` for one `Intl` cannot use, refused here rather than taking every schedule down on every tick |
 | `GET /device-mappings` | `hub.ai` | the mapping library: one entry per device model, `{adapter, exposesHash, vendor, model, status, source, problems, endpoints, deviceIds, createdAt, updatedAt}` |
 | `GET /device-mappings/:exposesHash` | `hub.ai` | the download — an envelope naming the device, see [below](#the-device-mapping-library) |
@@ -1389,7 +1393,15 @@ and then:
 {"type":"zigbeeEvent","event":{at,type,ieee,name?}}     joined|announced|interviewing|interviewed|interview-failed|left
 {"type":"aiRun","event":{phase,id,at,kind,exposesHash,vendor?,model?,step?,ok?,costUsd?,error?}}
 {"type":"automationRun","event":{automationId,name,at,trigger,cause,outcome,commands,refused,detail?}}
+{"type":"automationChat","event":{sessionId,phase,at,text,detail?}}   phase: delta | step | turn
 ```
+
+`automationChat` carries the model's text **as it arrives** (`delta`), one line
+per tool call or submission (`step`), and the end of an exchange (`turn`) —
+after which the messages the REST call returned are what to draw. A chat that
+shows nothing for ninety seconds has failed whatever the model is doing, which
+is why the deltas exist; being the highest-rate frame the hub can emit and of
+interest only to the one client with the chat open is why they are opt-in.
 
 **`automationRun` is opt-in for the same reason the others are.** It is the
 trace somebody watches while working out why the light came on, and a home with

@@ -53,7 +53,11 @@ beforeAll(async () => {
   const activity = new ActivityService(db, events);
   const registry = new DeviceRegistry(db, events, activity, log);
   const settings = new SettingsService(db, Buffer.alloc(32).toString('base64'));
-  const { engine: automations, store: automationStore } = await startedAutomations(
+  const {
+    engine: automations,
+    store: automationStore,
+    chat: automationChat,
+  } = await startedAutomations(
     db,
     events,
     registry,
@@ -72,6 +76,7 @@ beforeAll(async () => {
     activity,
     automations,
     automationStore,
+    automationChat,
     history: await startedHistory(db, events),
     portraits: testPortraits(db, events),
     settings,
