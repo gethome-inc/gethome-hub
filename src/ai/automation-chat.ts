@@ -52,6 +52,15 @@ export interface ChatSession {
   automationId?: string | undefined;
   conversation: AutomationConversation;
   lastAt: number;
+  /**
+   * The turn currently running, if one is.
+   *
+   * A conversation is answered **off** the request that asked for it (see
+   * `exchange`), so this is both the queue that keeps two messages from
+   * running at once and the handle `idle()` waits on. It never rejects: the
+   * exchange catches everything into a `note` row.
+   */
+  inFlight: Promise<void>;
   /** Whether this conversation's spend has been written down yet. */
   recorded: boolean;
   submissions: number;
@@ -65,11 +74,18 @@ export interface ChatMessageWire {
   data?: unknown;
 }
 
+/**
+ * What a request to say something gets back — **an acknowledgement, not an
+ * outcome.**
+ *
+ * `messages` is what exists the moment the hub takes the message, which is the
+ * person's own row and nothing else. Everything the agent then does arrives on
+ * the socket: its text as it is produced, a line per tool call, and a `turn`
+ * frame saying the stored transcript is now what to draw.
+ */
 export interface ChatReply {
   sessionId: string;
-  /** What the agent did with this message. */
-  turn: AutomationTurn;
-  /** The message rows this exchange produced, in order. */
+  /** The message rows this exchange has produced so far — the user's own. */
   messages: ChatMessageWire[];
 }
 
@@ -142,18 +158,23 @@ export class AutomationChat {
       if (oldest) await this.close(oldest.id);
     }
 
+    // Everything that can refuse is awaited: a home with no key, or the wrong
+    // kind of key, has to be told so as a refusal rather than discovering it
+    // through a conversation that never says anything. None of it touches the
+    // network — a settings read and two prompt strings.
     const conversation = await this.resolveConversation(input.automationId);
     const session: ChatSession = {
       id: randomUUID(),
       memberId: input.memberId,
       conversation,
       lastAt: Date.now(),
+      inFlight: Promise.resolve(),
       recorded: false,
       submissions: 0,
       ...(input.automationId !== undefined ? { automationId: input.automationId } : {}),
     };
     this.sessions.set(session.id, session);
-    return this.exchange(session, input.message, 'send');
+    return this.say(session, input.message, 'send');
   }
 
   /** Continue one. A typed reply to a question is an answer, not a new
@@ -162,7 +183,57 @@ export class AutomationChat {
   async reply(sessionId: string, memberId: string, text: string): Promise<ChatReply | null> {
     const session = this.sessions.get(sessionId);
     if (!session || session.memberId !== memberId) return null;
-    return this.exchange(session, text, session.conversation.awaitingAnswer() ? 'answer' : 'send');
+    return this.say(session, text, 'auto');
+  }
+
+  /**
+   * Take a message, and answer the moment it is taken.
+   *
+   * **The `POST /devices/:id/remap` lesson, and this route had the same bug
+   * it was written to avoid.** A turn is a loop against a provider — up to
+   * twelve rounds, with a three-minute watchdog — and the request that started
+   * it was held open for the whole thing, against a client that gives a hub
+   * ten seconds. So a conversation that was working perfectly reported "the
+   * request timed out" every time, and the reply it had gone on to produce
+   * arrived on a socket nobody was still listening for an answer on.
+   *
+   * The user's own row is written **synchronously**, so the app draws what was
+   * typed the instant it is acknowledged. Everything the agent does then
+   * arrives on the stream, and the `turn` frame is what says the transcript is
+   * ready to re-read.
+   *
+   * Turns are **chained per session** rather than run in parallel. A second
+   * message while one is running is an ordinary thing for somebody to do, and
+   * two exchanges against one provider history at once would interleave the
+   * messages array into nonsense. Chaining also means `awaitingAnswer()` is
+   * asked when the turn actually begins, not when it was queued — by which
+   * time a question may have opened or closed.
+   */
+  private async say(
+    session: ChatSession,
+    text: string,
+    how: 'send' | 'answer' | 'auto',
+  ): Promise<ChatReply> {
+    const written = await this.write(session, 'user', text, undefined, session.memberId);
+    session.lastAt = Date.now();
+    session.inFlight = session.inFlight.then(async () => {
+      const mode = how === 'auto' ? (session.conversation.awaitingAnswer() ? 'answer' : 'send') : how;
+      await this.exchange(session, text, mode);
+    });
+    return { sessionId: session.id, messages: [written] };
+  }
+
+  /**
+   * Wait for every conversation to be between turns.
+   *
+   * For tests, and it is what makes the fire-and-forget above testable at all:
+   * a suite that asserted on `start()`'s return value would be asserting on an
+   * acknowledgement, which is exactly the thing that used to hide this bug.
+   * The assertion belongs on the stored transcript — what the app actually
+   * draws — and this is how a test gets to the point where there is one.
+   */
+  async idle(): Promise<void> {
+    await Promise.all([...this.sessions.values()].map((session) => session.inFlight));
   }
 
   /** The transcript, oldest first. Readable long after the conversation that
@@ -191,19 +262,28 @@ export class AutomationChat {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     this.sessions.delete(sessionId);
+    // Let a turn that is mid-flight finish first: it may still be about to
+    // submit a rule, and `submissions` is what decides whether this
+    // conversation goes in the ledger as one that produced something. It
+    // cannot reject — the exchange catches everything into a `note`.
+    await session.inFlight;
     await this.record(session, session.submissions > 0);
   }
 
   // ── One exchange ───────────────────────────────────────────────────────────
 
+  /**
+   * One round with the provider, off the request that asked for it.
+   *
+   * The person's own row is already written — `say` does that synchronously,
+   * so the app draws what was typed at once — and everything here reaches the
+   * app over the socket instead of being returned.
+   */
   private async exchange(
     session: ChatSession,
     text: string,
     how: 'send' | 'answer',
-  ): Promise<ChatReply> {
-    const written: ChatMessageWire[] = [];
-    written.push(await this.write(session, 'user', text, undefined, session.memberId));
-
+  ): Promise<void> {
     let turn: AutomationTurn;
     try {
       turn = await session.conversation[how](text, {
@@ -239,22 +319,30 @@ export class AutomationChat {
           ? error.message
           : `Something went wrong talking to the model: ${(error as Error).message}`;
       this.options.log.warn({ err: error }, 'automation chat turn failed');
-      written.push(await this.write(session, 'note', message));
+      await this.write(session, 'note', message);
       session.lastAt = Date.now();
-      return { sessionId: session.id, turn: { kind: 'stopped', reason: message }, messages: written };
+      // **The `turn` frame goes out on this path too.** It is what tells an
+      // app the stored transcript is ready to re-read — and what takes its
+      // "thinking" indicator down. Returning without one left a failed round
+      // showing three animated dots for ever, over a note explaining the
+      // failure that nothing had gone back for.
+      this.settle(session, 'stopped');
+      return;
     }
 
     session.lastAt = Date.now();
-    written.push(...(await this.recordTurn(session, turn)));
+    await this.recordTurn(session, turn);
+    this.settle(session, turn.kind);
+  }
 
+  /** Say the exchange is over and the stored messages are what to draw. */
+  private settle(session: ChatSession, kind: string): void {
     this.options.events.emit('automationChat', {
       sessionId: session.id,
       phase: 'turn',
       at: new Date().toISOString(),
-      text: turn.kind,
+      text: kind,
     });
-
-    return { sessionId: session.id, turn, messages: written };
   }
 
   private async recordTurn(session: ChatSession, turn: AutomationTurn): Promise<ChatMessageWire[]> {

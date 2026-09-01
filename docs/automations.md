@@ -401,6 +401,34 @@ The system prompt is byte-identical for the life of a build and sits behind a
 cache breakpoint; the home inventory goes in the first user message, behind the
 conversation's own.
 
+### A message is acknowledged, never awaited
+
+`POST /automations/chat` and `…/messages` answer the moment the hub takes the
+message: `{sessionId, messages}` where `messages` is the person's own row and
+nothing else. **This is the `POST /devices/:id/remap` lesson, and this route
+shipped with the very bug that one was written to avoid** — a turn is a loop
+against a provider with a three-minute watchdog, the request was held open for
+all of it, and the iOS client gives a hub ten seconds. A conversation that was
+working perfectly reported "the request timed out" every time, while the reply
+it went on to produce arrived on a socket nobody was waiting on any more.
+
+Three consequences worth keeping.
+
+**The user's row is written synchronously**, so an app draws what was typed the
+instant it is acknowledged rather than a beat later.
+
+**Turns are chained per conversation.** A second message while one is running is
+an ordinary thing for somebody to do, and two exchanges against one provider
+history at once would interleave the messages array into nonsense. Chaining also
+means `awaitingAnswer()` is asked when a turn *begins* rather than when it was
+queued, by which time a question may have opened or closed.
+
+**Every turn emits a `turn` frame, the failed ones included.** That frame is
+what tells an app the stored transcript is ready to re-read *and* what takes its
+"thinking" indicator down — the provider-failure path returned without one, so a
+round that failed left three animated dots running for ever over a note
+explaining the failure that nothing had gone back for.
+
 ### Which provider it runs on, and it is not the mapper's
 
 **This agent picks its own, deliberately.** `ai.provider` answers "which model

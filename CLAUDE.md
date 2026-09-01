@@ -839,6 +839,21 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   Three codes, because they lead to three different screens — no key, AI
   switched off, a key of the wrong kind — with `detail` riding along so an app
   that has never met a code a later build adds still shows something true.
+  **A message is acknowledged, never awaited.** `POST /automations/chat` and
+  `…/messages` answer the moment the hub takes the message — the person's own
+  row and nothing else — because a turn is a provider loop with a three-minute
+  watchdog and the iOS client gives a hub ten seconds. This is the
+  `POST /devices/:id/remap` lesson, and this route shipped with the very bug
+  that one was written to avoid: a conversation working perfectly reported
+  "the request timed out" every time, while the reply it went on to produce
+  arrived on a socket nobody was waiting on. Turns are **chained per
+  conversation** (two exchanges against one provider history would interleave
+  the messages array, and chaining is also what makes `awaitingAnswer()` get
+  asked when a turn *begins* rather than when it was queued), and **every turn
+  emits a `turn` frame, the failed ones included** — that frame is what says
+  the transcript is ready to re-read and what takes an app's "thinking"
+  indicator down, so the provider-failure path returning without one left a
+  failed round spinning for ever over a note nothing had gone back for.
   **The test seam (`createConversation`) therefore sits *after* every
   configuration check.** It stands in for the network, not for the rules: above
   them it was a bypass, letting the suite reach a conversation the real hub

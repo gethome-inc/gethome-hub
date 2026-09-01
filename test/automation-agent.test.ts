@@ -316,7 +316,9 @@ describe('the chat service', () => {
   let events: HubEventBus;
   let settings: SettingsService;
   let memberId: string;
-  let chatFor: (turns: AutomationTurn[]) => Promise<{
+  /** `gate`, when given, is what the scripted turn waits on before answering —
+   *  a provider that is taking its time, which is the ordinary case. */
+  let chatFor: (turns: AutomationTurn[], gate?: Promise<void>) => Promise<{
     chat: InstanceType<typeof AutomationChat>;
     engine: Awaited<ReturnType<typeof startedAutomations>>['engine'];
   }>;
@@ -334,7 +336,7 @@ describe('the chat service', () => {
     memberId = randomUUID();
     await handle.db.insert(membersTable).values({ id: memberId, name: 'Anna', role: 'member' });
 
-    chatFor = async (turns) => {
+    chatFor = async (turns, gate) => {
       const activity = new ActivityService(handle.db, events);
       const registry = { listDevices: () => [], execute: async () => {} };
       const { engine, store } = await startedAutomations(handle.db, events, registry, activity);
@@ -345,8 +347,14 @@ describe('the chat service', () => {
         modelId: 'claude-opus-5',
         awaitingAnswer: () => false,
         costUsd: () => 0.12,
-        send: async () => turns[index++] ?? { kind: 'said', text: 'nothing left to say' },
-        answer: async () => turns[index++] ?? { kind: 'said', text: 'nothing left to say' },
+        send: async () => {
+          await gate;
+          return turns[index++] ?? { kind: 'said', text: 'nothing left to say' };
+        },
+        answer: async () => {
+          await gate;
+          return turns[index++] ?? { kind: 'said', text: 'nothing left to say' };
+        },
       };
       const chat = new AutomationChat({
         db: handle.db,
@@ -367,10 +375,15 @@ describe('the chat service', () => {
       { kind: 'submitted', document: goodDocument, accepted: true, text: 'Here you go.' },
     ]);
 
+    // `start` answers the moment the message is taken — an acknowledgement,
+    // not an outcome — so the assertion belongs on the stored transcript,
+    // which is what the app actually draws.
     const reply = await chat.start({ memberId: memberId, message: 'evening lights please' });
-    expect(reply.turn.kind).toBe('submitted');
+    expect(reply.messages.map((message) => message.role)).toEqual(['user']);
+    await chat.idle();
 
-    const preview = reply.messages.find((message) => message.role === 'preview');
+    const transcript = await chat.transcript(reply.sessionId);
+    const preview = transcript.find((message) => message.role === 'preview');
     expect(preview).toBeDefined();
     const data = preview?.data as { automationId: string; enabled: boolean };
     expect(data.enabled).toBe(false);
@@ -389,7 +402,9 @@ describe('the chat service', () => {
     ]);
 
     const started = await chat.start({ memberId: memberId, message: 'lights' });
+    await chat.idle();
     await chat.reply(started.sessionId, memberId, 'the bedside one');
+    await chat.idle();
 
     const transcript = await chat.transcript(started.sessionId);
     expect(transcript.map((message) => message.role)).toEqual([
@@ -413,6 +428,9 @@ describe('the chat service', () => {
       { kind: 'submitted', document: goodDocument, accepted: true, text: '' },
     ]);
     await chat.start({ memberId: memberId, message: 'go' });
+    // The spend is written by the *turn*, not by the request that started it —
+    // which is the whole point of answering as soon as the message is taken.
+    await chat.idle();
 
     const rows = await handle.db.select().from(aiRunsTable);
     expect(rows).toHaveLength(1);
@@ -445,6 +463,34 @@ describe('the chat service', () => {
     // What the route turns into a 410: the transcript is still readable, and
     // what is gone is the ability to continue.
     expect(await chat.reply(randomUUID(), memberId, 'still there?')).toBeNull();
+  });
+
+  it('answers as soon as the message is taken, not when the turn ends', async () => {
+    // **The bug this exists to stop coming back.** A turn is a loop against a
+    // provider with a three-minute watchdog, and the request that started it
+    // was held open for the whole thing — against a client that gives a hub
+    // ten seconds. A conversation that was working perfectly reported "the
+    // request timed out" every time, and the reply it went on to produce
+    // arrived on a socket nobody was still waiting on.
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { chat } = await chatFor([{ kind: 'said', text: 'took a while' }], held);
+
+    // The turn cannot finish yet, so anything that waited on it would hang
+    // here — the whole assertion is that this line returns at all.
+    const started = await chat.start({ memberId, message: 'go' });
+
+    // And what comes back is an acknowledgement: the person's own row, so the
+    // app draws what was typed straight away. The agent's answer arrives on
+    // the socket.
+    expect(started.messages.map((message) => message.role)).toEqual(['user']);
+    expect(await chat.transcript(started.sessionId)).toHaveLength(1);
+
+    release();
+    await chat.idle();
+    expect((await chat.transcript(started.sessionId)).map((m) => m.role)).toEqual(['user', 'agent']);
   });
 
   it('will not let one member continue another member’s conversation', async () => {
@@ -538,9 +584,9 @@ describe('AutomationChat provider selection', () => {
     await settings.setMappingProvider('openai');
 
     const { chat, handed } = await chatFor();
-    const reply = await chat.start({ memberId, message: 'lights at ten please' });
+    await chat.start({ memberId, message: 'lights at ten please' });
+    await chat.idle();
 
-    expect(reply.turn.kind).toBe('said');
     expect(handed.secret).toBe('sk-ant-api03-the-right-one');
   });
 
