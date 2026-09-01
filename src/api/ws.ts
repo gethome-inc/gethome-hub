@@ -346,11 +346,21 @@ export function attachWebSocket(
    * is the `MqttObserver` stance: a socket that never subscribes never has the
    * listener attached.
    */
-  const onAutomationRun = (event: AutomationRunEvent) => send({ type: 'automationRun', event });
+  /**
+   * `run` rather than `event`, and the key matters.
+   *
+   * `zigbeeEvent` and `aiRun` both carry theirs under `event`, with different
+   * shapes — which is fine for a JavaScript client and fatal for a typed one:
+   * the iOS app decodes one envelope struct for every frame, so a second type
+   * under a key it already has means every automation frame fails to decode
+   * and takes the whole socket message with it. A distinct key costs nothing
+   * and names the thing.
+   */
+  const onAutomationRun = (event: AutomationRunEvent) => send({ type: 'automationRun', run: event });
   /** The model's text as it arrives, and one line per thing a turn did. On the
    *  same opt-in stream: it is the highest-rate frame the hub can emit and it
    *  matters only to the one client with the chat open. */
-  const onAutomationChat = (event: AutomationChatEvent) => send({ type: 'automationChat', event });
+  const onAutomationChat = (event: AutomationChatEvent) => send({ type: 'automationChat', chat: event });
 
   const available = (stream: OptionalStream): boolean =>
     stream === 'mqtt' ? deps.mqttObserver !== undefined : true;

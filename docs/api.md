@@ -1392,9 +1392,14 @@ and then:
 {"type":"mqtt","dropped":N}                             rate limit hit; N frames skipped
 {"type":"zigbeeEvent","event":{at,type,ieee,name?}}     joined|announced|interviewing|interviewed|interview-failed|left
 {"type":"aiRun","event":{phase,id,at,kind,exposesHash,vendor?,model?,step?,ok?,costUsd?,error?}}
-{"type":"automationRun","event":{automationId,name,at,trigger,cause,outcome,commands,refused,detail?}}
-{"type":"automationChat","event":{sessionId,phase,at,text,detail?}}   phase: delta | step | turn
+{"type":"automationRun","run":{automationId,name,at,trigger,cause,outcome,commands,refused,detail?}}
+{"type":"automationChat","chat":{sessionId,phase,at,text,detail?}}   phase: delta | step | turn
 ```
+
+Both carry their payload under their **own key** rather than the `event` that
+`zigbeeEvent` and `aiRun` use. That is not tidiness: a typed client decodes one
+envelope for every frame, so a second shape under a key it already has makes
+every automation frame fail to decode and takes the socket message with it.
 
 `automationChat` carries the model's text **as it arrives** (`delta`), one line
 per tool call or submission (`step`), and the end of an exchange (`turn`) —
