@@ -839,6 +839,21 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   Three codes, because they lead to three different screens — no key, AI
   switched off, a key of the wrong kind — with `detail` riding along so an app
   that has never met a code a later build adds still shows something true.
+  **A spinner is not an answer to "what is happening", so the socket carries
+  four phases.** `step` is one line per thing the agent did, `thinking` is its
+  own summarized reasoning as it arrives, `delta` is the reply, `turn` says the
+  transcript is ready. Steps used to be reported only once something had
+  *happened* — and the first thing that happens in a round is none of it, so the
+  longest wait in every round was three animated dots. A step now goes up
+  **before** the request, and the reasoning is streamed, which only works
+  because the loop asks for `display: 'summarized'` (this model's default
+  streams thinking blocks empty). `kind` is what an app draws a mark from and is
+  about the *shape of the act* rather than the tool — three tools all mean
+  "reading your home" — so a new tool needs no app release; it is an open
+  string, the `commandFailed.kind` rule. The sentences live in
+  `automation-tools.ts` beside the tools: `Looked up list_rooms_zones.` is a
+  function signature read out loud, on the one screen whose whole job is telling
+  somebody who does not write software what their house is doing.
   **A message is acknowledged, never awaited.** `POST /automations/chat` and
   `…/messages` answer the moment the hub takes the message — the person's own
   row and nothing else — because a turn is a provider loop with a three-minute

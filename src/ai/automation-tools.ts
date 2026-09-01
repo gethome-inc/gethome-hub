@@ -4,6 +4,7 @@ import { automationDocumentSchema } from '../automations/schema.js';
 import { sanityCheckAutomation } from '../automations/sanity.js';
 import { automationShape, describeAutomation } from '../automations/summarize.js';
 import type { AutomationHomeView } from '../automations/targets.js';
+import type { AutomationStepKind } from './automation-conversation.js';
 
 /**
  * The automation agent's tools, and **no SDK is imported here**.
@@ -124,6 +125,37 @@ function submitSchema(): Record<string, unknown> {
       note: { type: 'string', maxLength: 200, description: 'One line for the version history.' },
     },
   };
+}
+
+/**
+ * What each tool is called *to a person*, and what kind of act it is.
+ *
+ * The vocabulary lives here rather than in the loop because this is where the
+ * tools are, so adding one puts its sentence in the same edit. And it is a
+ * sentence rather than the tool's name: "Looked up list_rooms_zones." is a
+ * function signature read out loud, on the one screen in the app whose whole
+ * job is telling somebody who does not write software what their house is
+ * doing.
+ *
+ * Present tense and unfinished on purpose — a step goes up *while* it is
+ * happening, and reads as a caption under a spinner rather than a log line.
+ */
+export const AUTOMATION_TOOL_STEPS: Readonly<
+  Record<string, { summary: string; kind: AutomationStepKind }>
+> = {
+  list_devices: { summary: 'Looking at your devices', kind: 'reading' },
+  get_device: { summary: 'Looking at one device closely', kind: 'reading' },
+  list_rooms_zones: { summary: 'Looking at your rooms', kind: 'reading' },
+  get_automation: { summary: 'Reading a rule you already have', kind: 'reading' },
+  dry_run: { summary: 'Checking the rule would work', kind: 'checking' },
+  ask_user: { summary: 'Asking you something', kind: 'asking' },
+  submit_automation: { summary: 'Writing the rule', kind: 'writing' },
+};
+
+/** The step for a tool, falling back to something true for one this build's
+ *  table has not got — a new tool must never produce a blank line. */
+export function toolStep(name: string): { summary: string; kind: AutomationStepKind } {
+  return AUTOMATION_TOOL_STEPS[name] ?? { summary: 'Working on it', kind: 'thinking' };
 }
 
 export const AUTOMATION_TOOLS: readonly AutomationToolDefinition[] = [

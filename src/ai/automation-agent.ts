@@ -18,6 +18,7 @@ import {
   askUserInput,
   runAutomationTool,
   submitAutomationInput,
+  toolStep,
   type AutomationToolContext,
 } from './automation-tools.js';
 import { automationShape, describeAutomation } from '../automations/summarize.js';
@@ -131,6 +132,22 @@ export function createAutomationConversation(
 
     try {
       for (let turn = 1; turn <= AUTOMATION_MAX_TURNS; turn += 1) {
+        /**
+         * **Say something before the request, not after it.**
+         *
+         * Every other step here is reported once something has happened, and
+         * the first thing that happens in a round is tens of seconds of the
+         * model reading the home and deciding — no tool called, no word of the
+         * reply written. That was the whole of what somebody saw: a spinner.
+         * The wording splits on the round because it is a different wait: the
+         * first is reading a home it has just been handed, and every one after
+         * is working with what the tools came back with.
+         */
+        context?.onStep?.(
+          turn === 1 ? 'Reading your home' : 'Working it out',
+          'thinking',
+        );
+
         if (usage.costUsd() >= AUTOMATION_MAX_BUDGET_USD) {
           return {
             kind: 'stopped',
@@ -161,6 +178,11 @@ export function createAutomationConversation(
             { signal: controller.signal },
           );
           if (context?.onDelta) stream.on('text', (delta) => context.onDelta?.(delta));
+          // The reasoning, as it arrives. Only ever non-empty because the
+          // request asks for `display: 'summarized'` — with the default on this
+          // model the thinking blocks stream empty and this never fires, which
+          // is exactly the silence it exists to fill.
+          if (context?.onThinking) stream.on('thinking', (delta) => context.onThinking?.(delta));
           response = await stream.finalMessage();
         } catch (error) {
           if (controller.signal.aborted) {
@@ -224,7 +246,7 @@ export function createAutomationConversation(
             // The conversation stops here and the answer closes this call —
             // which is why `answer()` exists separately from `send()`.
             pendingQuestion = call.id;
-            context?.onStep?.('Asked a question.', parsed.data.question);
+            context?.onStep?.(toolStep('ask_user').summary, 'asking', parsed.data.question);
             handedBack = { kind: 'question', question: parsed.data };
             break;
           }
@@ -238,7 +260,11 @@ export function createAutomationConversation(
               ...(outcome.accepted ? {} : { is_error: true }),
             });
             context?.onStep?.(
-              outcome.accepted ? 'Submitted a rule.' : 'Submitted a rule — it was refused.',
+              // The refusal is worth naming: a resubmission is the ordinary
+              // shape of a working run, and a trail that showed "Writing the
+              // rule" twice with nothing between them reads as a stutter.
+              outcome.accepted ? 'Wrote the rule' : 'Fixing the rule',
+              'writing',
               outcome.accepted ? undefined : outcome.text,
             );
             if (outcome.accepted) {
@@ -254,7 +280,8 @@ export function createAutomationConversation(
           }
 
           const result = runAutomationTool(call.name, call.input, tools);
-          context?.onStep?.(`Looked up ${call.name}.`);
+          const step = toolStep(call.name);
+          context?.onStep?.(step.summary, step.kind);
           results.push({
             type: 'tool_result',
             tool_use_id: call.id,

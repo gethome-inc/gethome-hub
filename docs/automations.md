@@ -429,6 +429,41 @@ what tells an app the stored transcript is ready to re-read *and* what takes its
 round that failed left three animated dots running for ever over a note
 explaining the failure that nothing had gone back for.
 
+### What a person sees while it works
+
+A round is tens of seconds of the model reading the home and deciding before a
+word of the reply exists, so the socket carries **four phases**, not one:
+
+| phase | what it is |
+|---|---|
+| `step` | one line per thing the agent *did*, with a `kind` beside it |
+| `thinking` | the model's own summarized reasoning, as it arrives |
+| `delta` | the reply itself, as it is produced |
+| `turn` | the exchange is over; the stored transcript is what to draw |
+
+**A spinner is not an answer to "what is happening".** Steps used to be reported
+only once something had *happened*, and the first thing that happens in a round
+is none of it — no tool called, no word written — so the whole of the longest
+wait was three animated dots. Two things fill it now: a step goes up **before**
+the request ("Reading your home", and "Working it out" on later rounds), and the
+reasoning is streamed as it arrives. That second one exists only because the
+loop asks for `display: 'summarized'`; with this model's default the thinking
+blocks stream empty and there is nothing to show.
+
+**`kind` is what an app draws a mark from** — `reading` · `checking` · `writing`
+· `asking` · `thinking` — and it is about the *shape of the act* rather than the
+tool that did it: three tools all mean "reading your home", and an app that had
+to map seven tool names would need updating every time the agent learns an
+eighth. It is an open string, so a word a client has never met falls back to a
+neutral mark and still shows the sentence.
+
+**The sentences live in `automation-tools.ts`**, beside the tools, so adding one
+puts its wording in the same edit. They are sentences rather than tool names:
+`Looked up list_rooms_zones.` is a function signature read out loud, on the one
+screen whose whole job is telling somebody who does not write software what
+their house is doing. Present tense and unfinished, because a step goes up while
+it is happening.
+
 ### Which provider it runs on, and it is not the mapper's
 
 **This agent picks its own, deliberately.** `ai.provider` answers "which model

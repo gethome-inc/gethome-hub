@@ -287,13 +287,22 @@ export class AutomationChat {
     let turn: AutomationTurn;
     try {
       turn = await session.conversation[how](text, {
-        onStep: (summary, detail) => {
+        onStep: (summary, kind, detail) => {
           this.options.events.emit('automationChat', {
             sessionId: session.id,
             phase: 'step',
             at: new Date().toISOString(),
             text: summary,
+            kind,
             ...(detail !== undefined ? { detail } : {}),
+          });
+        },
+        onThinking: (delta) => {
+          this.options.events.emit('automationChat', {
+            sessionId: session.id,
+            phase: 'thinking',
+            at: new Date().toISOString(),
+            text: delta,
           });
         },
         onDelta: (delta) => {

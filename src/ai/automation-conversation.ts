@@ -77,9 +77,43 @@ export type AutomationTurn =
 export interface AutomationTurnContext {
   /** Text as it arrives, so a chat is not three minutes of nothing. */
   onDelta?: (text: string) => void;
-  /** One line per notable thing the turn did — a tool call, a submission. */
-  onStep?: (summary: string, detail?: string) => void;
+  /**
+   * The model's own summarized reasoning, as it arrives.
+   *
+   * **This is what fills the longest silence in a round.** A step is reported
+   * when something has *happened*, and the first thing that happens in a round
+   * is tens of seconds of the model reading the home and deciding — before a
+   * tool has been called or a word of the reply written. Without this the
+   * whole of that is a spinner.
+   *
+   * Only useful because the loop asks for `display: 'summarized'`; with the
+   * default the thinking blocks stream empty and this never fires.
+   */
+  onThinking?: (text: string) => void;
+  /**
+   * One line per notable thing the turn did — a tool call, a submission.
+   *
+   * `kind` is what an app draws a mark from without reading the sentence, and
+   * is an open string: a client that meets a new one falls back and still
+   * shows the words.
+   */
+  onStep?: (summary: string, kind: AutomationStepKind, detail?: string) => void;
 }
+
+/**
+ * What a step *is*, in the vocabulary an app draws marks from.
+ *
+ * Deliberately about the shape of the act rather than the tool that did it:
+ * three different tools all mean "the agent is reading your home", and an app
+ * that had to map seven tool names would need updating every time the agent
+ * learns an eighth.
+ */
+export type AutomationStepKind =
+  | 'thinking'
+  | 'reading'
+  | 'checking'
+  | 'writing'
+  | 'asking';
 
 /**
  * One conversation, owned by whichever vendor's loop is running it.

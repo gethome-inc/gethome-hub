@@ -1393,7 +1393,7 @@ and then:
 {"type":"zigbeeEvent","event":{at,type,ieee,name?}}     joined|announced|interviewing|interviewed|interview-failed|left
 {"type":"aiRun","event":{phase,id,at,kind,exposesHash,vendor?,model?,step?,ok?,costUsd?,error?}}
 {"type":"automationRun","run":{automationId,name,at,trigger,cause,outcome,commands,refused,detail?}}
-{"type":"automationChat","chat":{sessionId,phase,at,text,detail?}}   phase: delta | step | turn
+{"type":"automationChat","chat":{sessionId,phase,at,text,kind?,detail?}}  phase: thinking | delta | step | turn
 ```
 
 Both carry their payload under their **own key** rather than the `event` that
@@ -1401,12 +1401,22 @@ Both carry their payload under their **own key** rather than the `event` that
 envelope for every frame, so a second shape under a key it already has makes
 every automation frame fail to decode and takes the socket message with it.
 
-`automationChat` carries the model's text **as it arrives** (`delta`), one line
-per tool call or submission (`step`), and the end of an exchange (`turn`) —
-after which the messages the REST call returned are what to draw. A chat that
-shows nothing for ninety seconds has failed whatever the model is doing, which
-is why the deltas exist; being the highest-rate frame the hub can emit and of
+`automationChat` has **four phases, because a spinner is not an answer to "what
+is happening"**: one line per thing the agent did (`step`), its own summarized
+reasoning as it arrives (`thinking`), the reply as it is produced (`delta`), and
+the end of an exchange (`turn`) — after which the stored transcript is what to
+draw. A round is tens of seconds of the model reading the home and deciding
+before a word of the reply exists, so a client with only `delta` had a spinner
+for the longest part of every one; a step goes up *before* each request, and the
+reasoning fills the rest. Being the highest-rate frames the hub can emit and of
 interest only to the one client with the chat open is why they are opt-in.
+
+On a `step`, **`kind` is what an app draws a mark from** — `reading` ·
+`checking` · `writing` · `asking` · `thinking` — and it names the *shape of the
+act* rather than the tool, so a client draws seven tools with five marks and the
+hub can grow an eighth without an app release. Open string, the
+`commandFailed.kind` rule: an unknown word gets a neutral mark and keeps its
+sentence. See [`docs/automations.md`](automations.md) for the vocabulary.
 
 **`automationRun` is opt-in for the same reason the others are.** It is the
 trace somebody watches while working out why the light came on, and a home with

@@ -43,12 +43,21 @@ vi.mock('@anthropic-ai/sdk', () => ({
       stream: (params: unknown) => {
         const message = streamMock(params);
         return {
-          // The agent subscribes to text deltas so a chat is not a silent
-          // minute; a mock without `on` would let that be deleted unnoticed.
+          // The agent subscribes to **both** delta streams, so a chat is not a
+          // silent minute; a mock without `on` would let either be deleted
+          // unnoticed. `thinking` is the one that matters most here — with the
+          // default `display` the real API streams thinking blocks empty, so a
+          // mock that ignored the subscription would hide a run that shows
+          // nothing for the longest part of every round.
           on: (event: string, handler: (delta: string) => void) => {
-            if (event !== 'text') return;
-            for (const block of (message as { content: { type: string; text?: string }[] }).content) {
-              if (block.type === 'text' && block.text) handler(block.text);
+            const blocks = (message as {
+              content: { type: string; text?: string; thinking?: string }[];
+            }).content;
+            for (const block of blocks) {
+              if (event === 'text' && block.type === 'text' && block.text) handler(block.text);
+              if (event === 'thinking' && block.type === 'thinking' && block.thinking) {
+                handler(block.thinking);
+              }
             }
           },
           finalMessage: async () => message,
@@ -83,6 +92,9 @@ function assistant(content: unknown[], stopReason = 'tool_use') {
 }
 
 const text = (value: string) => ({ type: 'text', text: value });
+/** A summarized reasoning block, which is what `display: 'summarized'` returns
+ *  and what the chat streams while nothing else is happening yet. */
+const thinking = (value: string) => ({ type: 'thinking', thinking: value });
 const toolUse = (name: string, input: unknown, id: string = randomUUID()) => ({
   type: 'tool_use',
   id,
@@ -273,14 +285,57 @@ describe('the automation conversation', () => {
       .mockReturnValueOnce(assistant([toolUse('list_devices', {})]))
       .mockReturnValueOnce(assistant([toolUse('submit_automation', { document: goodDocument })]));
 
-    const steps: string[] = [];
+    const steps: { summary: string; kind: string }[] = [];
     const turn = await conversationFor([{ id: deviceId, name: 'Kitchen lamp' }]).send('what have I got', {
-      onStep: (summary) => steps.push(summary),
+      onStep: (summary, kind) => steps.push({ summary, kind }),
     });
     expect(turn.kind).toBe('submitted');
-    expect(steps.join(' ')).toContain('list_devices');
+
+    // **The trail is what somebody reads while they wait, so it is written for
+    // them.** It used to be `Looked up list_devices.` — a function signature
+    // read out loud, on the one screen whose whole job is telling somebody who
+    // does not write software what their house is doing.
+    expect(steps.map((step) => step.summary)).toEqual([
+      'Reading your home',
+      'Looking at your devices',
+      'Working it out',
+      'Wrote the rule',
+    ]);
+    // And a mark comes off `kind` rather than off the sentence, so an app does
+    // not have to map seven tool names to draw one.
+    expect(steps.map((step) => step.kind)).toEqual([
+      'thinking',
+      'reading',
+      'thinking',
+      'writing',
+    ]);
+
     const second = streamMock.mock.calls[1]?.[0] as { messages: unknown[] };
     expect(JSON.stringify(second.messages)).toContain('Kitchen lamp');
+  });
+
+  it('says something before the request, not only after it', async () => {
+    // The longest silence in a round is *before* anything happens — the model
+    // reading the home and deciding, with no tool called and no word written.
+    // A step went up only once something had happened, so the whole of that
+    // wait was a spinner.
+    streamMock.mockReturnValueOnce(
+      assistant([thinking('Weighing it up.'), text('Right you are.')], 'end_turn'),
+    );
+
+    const steps: string[] = [];
+    let thought = '';
+    await conversationFor().send('lights at ten', {
+      onStep: (summary) => steps.push(summary),
+      onThinking: (delta) => {
+        thought += delta;
+      },
+    });
+
+    expect(steps[0]).toBe('Reading your home');
+    // And the reasoning is streamed as it arrives, which is what fills that
+    // wait with words rather than with a dot.
+    expect(thought).toBe('Weighing it up.');
   });
 
   it('stops rather than looping for ever', async () => {

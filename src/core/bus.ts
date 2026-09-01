@@ -137,17 +137,35 @@ export interface HubEvents {
 /**
  * One thing a conversation did, live.
  *
- * `delta` is text as the model produces it — a chat that shows nothing for
- * ninety seconds has failed whatever the model is doing. `step` is one line
- * per tool call or submission, which is what lets an app say "looking at your
- * devices" instead of spinning. `turn` says the exchange is over and the
- * stored messages are what to draw.
+ * **Four phases, because a spinner is not an answer to "what is happening".**
+ * A round of this agent is tens of seconds of the model reading the home and
+ * thinking before a word of the reply exists, and a chat that shows nothing
+ * for that long has failed whatever it is doing. Each phase fills a different
+ * part of the wait:
+ *
+ *  - `step` — one line per thing the agent *did*: read the devices, checked
+ *    the rule, wrote it. These accumulate into a trail an app can draw.
+ *  - `thinking` — the model's own summarized reasoning, as it arrives. This is
+ *    what fills the longest silence in a round, before any tool has been
+ *    called or any reply written.
+ *  - `delta` — the reply itself, as it is produced.
+ *  - `turn` — the exchange is over and the stored transcript is what to draw.
  */
 export interface AutomationChatEvent {
   sessionId: string;
-  phase: 'delta' | 'step' | 'turn';
+  phase: 'thinking' | 'delta' | 'step' | 'turn';
   at: string;
   text: string;
+  /**
+   * On a `step`, what kind of thing it was, so an app can pick a mark for it
+   * without reading the sentence: `reading` · `checking` · `writing` ·
+   * `asking` · `thinking`.
+   *
+   * An **open** string, the `commandFailed.kind` rule: a client that meets a
+   * word it does not know falls back to a neutral mark and still shows `text`,
+   * so the hub can learn a new one without every app being updated first.
+   */
+  kind?: string;
   detail?: string;
 }
 
