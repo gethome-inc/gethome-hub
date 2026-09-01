@@ -5,7 +5,11 @@ import { HubEventBus } from '../src/core/bus.js';
 import { ActivityService } from '../src/core/activity.js';
 import { AiRunLog } from '../src/core/ai-runs.js';
 import { SettingsService } from '../src/core/settings.js';
-import { aiRuns as aiRunsTable, members as membersTable } from '../src/db/schema.js';
+import {
+  aiRuns as aiRunsTable,
+  members as membersTable,
+  settings as settingsTable,
+} from '../src/db/schema.js';
 import { openTestDb, resetDb, startedAutomations, type TestDb } from './helpers/db.js';
 import type { AutomationConversation, AutomationTurn } from '../src/ai/automation-conversation.js';
 
@@ -447,5 +451,157 @@ describe('the chat service', () => {
     const { chat } = await chatFor([{ kind: 'said', text: 'hello' }]);
     const started = await chat.start({ memberId: memberId, message: 'go' });
     expect(await chat.reply(started.sessionId, randomUUID(), 'and me')).toBeNull();
+  });
+});
+
+/**
+ * Which provider a conversation runs on, and what it says when it cannot run.
+ *
+ * **These are the only tests here that do not stub the provider seam**, and
+ * that is the whole point: every other test in this file hands
+ * `createConversation` a scripted conversation, so the code that decides
+ * *whether there is a conversation to have* had no coverage at all — and it
+ * shipped refusing a home for the wrong reason and answering 500 when it did.
+ */
+describe('AutomationChat provider selection', () => {
+  // `TestDb`, not the helper's optional return: `openTestDb()` answers `null`
+  // where the suite is skipped, and every use below would otherwise need a
+  // non-null assertion. The `beforeEach` asserts it once, as the suite above
+  // does.
+  let handle: TestDb;
+  let events: HubEventBus;
+  let settings: SettingsService;
+  let memberId: string;
+
+  /** A chat with the seam recording what it was handed, so a test can see
+   *  which key a conversation would have run on without making a request. */
+  let chatFor: () => Promise<{
+    chat: InstanceType<typeof AutomationChat>;
+    handed: { secret?: string; modelId?: string };
+  }>;
+
+  beforeEach(async () => {
+    handle ??= (await openTestDb())!;
+    await resetDb(handle.db);
+    events = new HubEventBus();
+    settings = new SettingsService(handle.db, Buffer.alloc(32).toString('base64'));
+    memberId = randomUUID();
+    await handle.db.insert(membersTable).values({ id: memberId, name: 'Anna', role: 'member' });
+
+    chatFor = async () => {
+      const activity = new ActivityService(handle.db, events);
+      const registry = { listDevices: () => [], execute: async () => {} };
+      const { engine, store } = await startedAutomations(handle.db, events, registry, activity);
+      startedEngines.push(engine);
+      const handed: { secret?: string; modelId?: string } = {};
+      const chat = new AutomationChat({
+        db: handle.db,
+        settings,
+        engine,
+        store,
+        events,
+        runs: new AiRunLog(handle.db, events),
+        log,
+        createConversation: ({ secret, modelId }) => {
+          handed.secret = secret;
+          handed.modelId = modelId;
+          return {
+            provider: 'anthropic',
+            modelId,
+            awaitingAnswer: () => false,
+            costUsd: () => 0,
+            send: async () => ({ kind: 'said', text: 'hello' }) as AutomationTurn,
+            answer: async () => ({ kind: 'said', text: 'hello' }) as AutomationTurn,
+          };
+        },
+      });
+      return { chat, handed };
+    };
+  });
+
+  const refusal = async (chat: InstanceType<typeof AutomationChat>) => {
+    try {
+      await chat.start({ memberId, message: 'lights at ten please' });
+      return null;
+    } catch (error) {
+      return error;
+    }
+  };
+
+  it('runs on Anthropic even when the home recognises devices with OpenAI', async () => {
+    // The bug this file exists to stop coming back. `ai.provider` answers
+    // "which model reads a device's exposes tree" — an unrelated preference —
+    // and reading it here refused a home that had the very key this agent
+    // needs, then reported the refusal as a 500.
+    await settings.setAiKey('anthropic', 'sk-ant-api03-the-right-one');
+    await settings.setAiKey('openai', 'sk-openai-the-wrong-one');
+    await settings.setMappingProvider('openai');
+
+    const { chat, handed } = await chatFor();
+    const reply = await chat.start({ memberId, message: 'lights at ten please' });
+
+    expect(reply.turn.kind).toBe('said');
+    expect(handed.secret).toBe('sk-ant-api03-the-right-one');
+  });
+
+  it('refuses a home whose only key is OpenAI’s, in words and with a code', async () => {
+    await settings.setAiKey('openai', 'sk-openai-only');
+
+    const { chat } = await chatFor();
+    const error = await refusal(chat);
+
+    // A *refusal*, not a failure: the home is configured, just not for this.
+    // The route turns this into a 409 an app can branch on; anything else
+    // reaches a phone as "The hub answered 500."
+    expect(error).toBeInstanceOf(AutomationNotConfiguredError);
+    expect((error as InstanceType<typeof AutomationNotConfiguredError>).code).toBe(
+      'automation_needs_anthropic',
+    );
+    // And it carries a sentence, so an app that has never met the code still
+    // has something true to print.
+    expect((error as Error).message).toMatch(/Anthropic key/);
+  });
+
+  it('treats a legacy subscription token as no Anthropic key at all', async () => {
+    // The loop authenticates with `x-api-key`, so the subscription token a
+    // hub configured before the Agent SDK was removed still holds cannot run
+    // it — and a home in that state needs to be told which *kind* of key to
+    // add, not that it has none. The state only exists on an upgraded hub, so
+    // the test writes the stored setting the way that hub carries it.
+    await settings.setAiKey('openai', 'sk-openai-only');
+    await settings.setAiKey('anthropic', 'legacy-subscription-token');
+    await handle.db
+      .insert(settingsTable)
+      .values({ key: 'ai_auth_type', value: 'oauth_token' })
+      .onConflictDoUpdate({ target: settingsTable.key, set: { value: 'oauth_token' } });
+    expect((await settings.getAiSettings()).legacySubscriptionToken).toBe(true);
+
+    const { chat } = await chatFor();
+    const error = await refusal(chat);
+
+    expect((error as InstanceType<typeof AutomationNotConfiguredError>).code).toBe(
+      'automation_needs_anthropic',
+    );
+  });
+
+  it('says nothing is configured when the home has no key at all', async () => {
+    const { chat } = await chatFor();
+    const error = await refusal(chat);
+
+    expect((error as InstanceType<typeof AutomationNotConfiguredError>).code).toBe(
+      'ai_not_configured',
+    );
+  });
+
+  it('says AI is switched off rather than unconfigured when the owner turned it off', async () => {
+    // Two codes because they lead to two different screens, and this one must
+    // not send somebody looking for a key they already have.
+    await settings.setAiKey('anthropic', 'sk-ant-api03-test');
+    await settings.setAiEnabled(false);
+
+    const { chat } = await chatFor();
+    const error = await refusal(chat);
+
+    expect((error as InstanceType<typeof AutomationNotConfiguredError>).code).toBe('ai_disabled');
   });
 });

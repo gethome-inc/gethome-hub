@@ -3,7 +3,7 @@ import { asc, eq, lt } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import { automationChatMessages } from '../db/schema.js';
 import type { HubEventBus } from '../core/bus.js';
-import type { SettingsService } from '../core/settings.js';
+import type { AiProvider, SettingsService } from '../core/settings.js';
 import type { AiRunLog } from '../core/ai-runs.js';
 import type { Logger } from '../logging.js';
 import type { AutomationEngine } from '../automations/engine.js';
@@ -73,9 +73,26 @@ export interface ChatReply {
   messages: ChatMessageWire[];
 }
 
+/**
+ * The conversation cannot start, for a reason somebody can fix.
+ *
+ * Three codes rather than one, because they lead to three different screens:
+ * add a key, switch AI back on, add a key *of the other kind*. Each carries a
+ * sentence as well, so an app that meets a code a later build added still has
+ * something true to show — the `activity.message` rule applied to a refusal.
+ *
+ * **Everything that can refuse a conversation has to end up here.** It used to
+ * be only these two, and the third case — a home whose only key is OpenAI's —
+ * threw an `AiUnavailableError` instead, which the route rethrew into a bare
+ * 500. The app drew "The hub answered 500." over a home that was configured
+ * perfectly well, just not for this.
+ */
 export class AutomationNotConfiguredError extends Error {
-  constructor(readonly code: 'ai_not_configured' | 'ai_disabled') {
-    super(code);
+  constructor(
+    readonly code: 'ai_not_configured' | 'ai_disabled' | 'automation_needs_anthropic',
+    message?: string,
+  ) {
+    super(message ?? code);
     this.name = 'AutomationNotConfiguredError';
   }
 }
@@ -339,11 +356,31 @@ export class AutomationChat {
   private async resolveConversation(automationId: string | undefined): Promise<AutomationConversation> {
     const ai = await this.options.settings.getAiSettings();
     if (!ai.enabled) throw new AutomationNotConfiguredError('ai_disabled');
-    const provider = ai.provider;
-    if (!provider || !ai.hasKey) throw new AutomationNotConfiguredError('ai_not_configured');
-    if (provider === 'anthropic' && ai.legacySubscriptionToken) {
-      throw new AutomationNotConfiguredError('ai_not_configured');
-    }
+    if (!ai.hasKey) throw new AutomationNotConfiguredError('ai_not_configured');
+
+    /**
+     * **This agent picks its own provider, and it is deliberately not the
+     * mapper's.**
+     *
+     * `ai.provider` answers "which model reads a device's exposes tree" — a
+     * real choice, because both halves of *that* are written. Only one half of
+     * this one is, so reading the same field turned an unrelated preference
+     * into a refusal: a home with both keys that recognises devices with
+     * OpenAI could not write a rule at all, with a perfectly good Anthropic
+     * key sitting beside it. Worse, the refusal was an `AiUnavailableError`
+     * the route rethrew as a 500.
+     *
+     * So: run on Anthropic whenever the home has a key that can, and refuse
+     * only when it genuinely has none. Switching the *mapping* provider must
+     * not change whether rules can be written, in either direction.
+     *
+     * A subscription token is not an API key — the loop authenticates with
+     * `x-api-key` — so a home holding only that has, for this purpose, no
+     * Anthropic key at all.
+     */
+    const provider: AiProvider = ai.anthropic.hasKey && !ai.legacySubscriptionToken
+      ? 'anthropic'
+      : 'openai';
     const secret = await this.options.settings.aiKey(provider);
     if (!secret) throw new AutomationNotConfiguredError('ai_not_configured');
 
@@ -371,18 +408,32 @@ export class AutomationChat {
         : {}),
     });
 
+    if (provider !== 'anthropic') {
+      // The OpenAI half of this agent is not written yet. It is a *refusal*
+      // rather than a failure — the home is configured, just not for this — so
+      // it carries a code an app can branch on and a sentence naming the one
+      // thing to do about it.
+      throw new AutomationNotConfiguredError(
+        'automation_needs_anthropic',
+        'Writing automations needs an Anthropic key at the moment. Add one in the home’s AI ' +
+          'settings; device portraits and recognition carry on using OpenAI.',
+      );
+    }
+
+    /**
+     * The test seam, and it sits **after** every configuration check on
+     * purpose.
+     *
+     * It stands in for the network, not for the rules. Above the checks it was
+     * a bypass: a suite could reach a conversation on a home the real hub
+     * would have refused, which is the "a mock laxer than the thing it stands
+     * in for tests the mock" trap — and it is why the refusal below shipped
+     * with no test at all and reached a phone as a 500.
+     */
     if (this.options.createConversation) {
       return this.options.createConversation({ modelId, secret, systemPrompt, taskPrompt });
     }
-    if (provider === 'openai') {
-      // The OpenAI half of this agent is not written yet, and saying so beats
-      // a 500 or a silent fall back to a provider the home did not choose.
-      throw new AiUnavailableError(
-        'auth_failed',
-        'Writing automations needs an Anthropic key at the moment. Add one in the home’s AI ' +
-          'settings, or switch which provider this home uses.',
-      );
-    }
+
     const { createAutomationConversation } = await import('./automation-agent.js');
     return createAutomationConversation({
       auth: { secret },

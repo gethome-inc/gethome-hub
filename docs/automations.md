@@ -399,5 +399,29 @@ and spends a round finding out while somebody watches.
 
 The system prompt is byte-identical for the life of a build and sits behind a
 cache breakpoint; the home inventory goes in the first user message, behind the
-conversation's own. The OpenAI half is not written yet, and a home configured
-for OpenAI is told so plainly rather than being failed with a 500.
+conversation's own.
+
+### Which provider it runs on, and it is not the mapper's
+
+**This agent picks its own, deliberately.** `ai.provider` answers "which model
+reads a device's exposes tree" — a real choice, because both halves of *that*
+are written. Only one half of this one is, so reading the same field turned an
+unrelated preference into a refusal: a home with both keys that recognised
+devices with OpenAI could not write a rule at all, with a perfectly good
+Anthropic key sitting beside it. So it runs on Anthropic whenever the home has
+a key that can, and switching the *mapping* provider changes nothing about
+whether rules can be written, in either direction. A legacy subscription token
+is not such a key — the loop authenticates with `x-api-key` — so a home holding
+only that counts as having none.
+
+**And every way this can be refused is an `AutomationNotConfiguredError`**,
+which the route turns into a `409` with a code *and a sentence*. That is the
+whole of the fix for a real bug: the OpenAI case used to throw an
+`AiUnavailableError` past the refusal handler, Fastify answered
+`{"statusCode":500,…}`, and the app printed "The hub answered 500." over a hub
+that was working perfectly and had just said exactly what was wrong.
+
+The **test seam** (`createConversation`) therefore sits *after* every one of
+these checks. It stands in for the network, not for the rules — above them it
+was a bypass that let the suite reach a conversation the real hub would have
+refused, which is why the refusal shipped with no coverage at all.

@@ -2513,12 +2513,19 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     return undefined;
   };
 
-  /** Turn a configuration refusal into the two codes an app has to tell apart:
-   *  "there is no key" and "the owner switched this off" need different
-   *  sentences and lead to different screens. */
+  /**
+   * Turn a configuration refusal into a code an app can branch on **and a
+   * sentence it can show**.
+   *
+   * The codes lead to different screens — "there is no key", "the owner
+   * switched this off", "this needs the other vendor's key" — and `detail`
+   * rides along so an app that has never met a code a later build added still
+   * has something true to print. Without it, one of these reached a phone as
+   * "The hub answered 500." over a home that was configured perfectly well.
+   */
   const chatRefusal = (error: unknown, reply: FastifyReply) => {
     if (error instanceof AutomationNotConfiguredError) {
-      return reply.code(409).send({ error: error.code });
+      return reply.code(409).send({ error: error.code, detail: error.message });
     }
     throw error;
   };

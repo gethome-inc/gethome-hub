@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { pino } from 'pino';
 import type { FastifyInstance } from 'fastify';
 import { buildServer } from '../src/api/server.js';
@@ -57,12 +57,7 @@ beforeAll(async () => {
     engine: automations,
     store: automationStore,
     chat: automationChat,
-  } = await startedAutomations(
-    db,
-    events,
-    registry,
-    activity,
-  );
+  } = await startedAutomations(db, events, registry, activity, { settings });
   engine = automations;
 
   app = await buildServer({
@@ -434,5 +429,62 @@ describe('a rule this build cannot read', () => {
     // after `install.sh` rolled a build back.
     expect(body.unreadable).toHaveLength(1);
     expect(body.unreadable[0]?.name).toBe('From the future');
+  });
+});
+
+/**
+ * Starting a conversation, and the two ways it can be refused.
+ *
+ * **The route must never answer 500 for a home that is merely configured for
+ * something else.** It did: a home whose only key is OpenAI's threw an
+ * `AiUnavailableError` past the refusal handler, Fastify turned it into
+ * `{"statusCode":500,…}`, and the app — which reads `error`/`detail` — printed
+ * "The hub answered 500." over a hub that was working perfectly.
+ */
+describe('starting a conversation', () => {
+  const settings = new SettingsService(handle!.db, Buffer.alloc(32).toString('base64'));
+
+  const start = () =>
+    app.inject({
+      method: 'POST',
+      url: '/api/v1/automations/chat',
+      headers: auth(token),
+      payload: { message: 'turn the hall light on when someone walks past after dark' },
+    });
+
+  afterEach(async () => {
+    await settings.clearAiProvider('anthropic');
+    await settings.clearAiProvider('openai');
+    await settings.setAiEnabled(true);
+  });
+
+  it('refuses a home with no key at all, in the shape an app can read', async () => {
+    const response = await start();
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({ error: 'ai_not_configured' });
+  });
+
+  it('refuses a home whose only key is OpenAI’s with a code and a sentence', async () => {
+    await settings.setAiKey('openai', 'sk-openai-only');
+
+    const response = await start();
+
+    // 409 and not 500: the home is configured, just not for this.
+    expect(response.statusCode).toBe(409);
+    const body = response.json() as { error: string; detail?: string };
+    expect(body.error).toBe('automation_needs_anthropic');
+    // The sentence rides along, so an app that has never met the code still
+    // shows something true rather than a status number.
+    expect(body.detail).toMatch(/Anthropic key/);
+  });
+
+  it('says AI is switched off rather than unconfigured', async () => {
+    await settings.setAiKey('anthropic', 'sk-ant-api03-test');
+    await settings.setAiEnabled(false);
+
+    const response = await start();
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({ error: 'ai_disabled' });
   });
 });
