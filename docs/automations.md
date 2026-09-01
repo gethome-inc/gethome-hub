@@ -326,6 +326,30 @@ message history, because that history is the vendor's own shape.
 - **On disk**: the transcript an app draws. A few hundred bytes a message,
   kept 14 days.
 
+### The rows an app draws
+
+A transcript row is `{id, at, role, text, data?}` and `role` is an **open**
+vocabulary — the `activity.message` rule again, so a word a client has never met
+falls through to prose rather than being dropped. `text` is always the sentence;
+`data` is what lets an app draw more than one.
+
+| `role` | `text` | `data` |
+|---|---|---|
+| `user` | what was typed | — |
+| `agent` | what the model said | — |
+| `question` | the question | `{options: [{id, label, hint?}], allowFreeText}` |
+| `preview` | the rule's **summary**, from `describeAutomation` | `{automationId, name, shape, enabled, edited}` |
+| `note` | something the hub is saying on its own behalf — a provider that failed, a rule that could not be saved | — |
+
+Two fields on `preview` are there because leaving them out was wrong in a way
+only a real app finds. **`name`**, because `text` is the summary rather than a
+title, and a client without it would have to look the id up in a list it may not
+have refetched yet — drawing an untitled card for the second that takes.
+**`enabled` read back from the store rather than assumed `false`**: a rule
+written from scratch really is switched off, but an *edit* lands on one somebody
+already chose to have running, and the hardcoded value said "saved, switched
+off" about a rule that was at that moment switched on.
+
 A restart therefore costs the *continuation* and not the record. The chat stays
 readable, continuing means starting a new one (`410 conversation_ended`), and
 the rule it produced is a row in `automations` either way. Sessions also expire

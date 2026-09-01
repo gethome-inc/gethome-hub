@@ -274,11 +274,25 @@ export class AutomationChat {
         if (turn.text.trim().length > 0) {
           messages.push(await this.write(session, 'agent', turn.text));
         }
+        /**
+         * The card an app draws, and it carries the rule's **name** and its
+         * real `enabled` rather than assuming either.
+         *
+         * The name because the row's `text` is the rule's *summary* — an app
+         * that wanted a title would otherwise have to look the id up in a list
+         * it may not have refetched yet, and would draw an untitled card for
+         * the second it took. And `enabled` read back from the store because
+         * an *edit* lands on a rule somebody already chose to have running:
+         * hardcoding `false` here said "saved, switched off" about a rule that
+         * was, at that moment, switched on.
+         */
+        const savedRecord = this.options.engine.get(saved);
         messages.push(
           await this.write(session, 'preview', describeAutomation(parsed.data, this.options.engine.homeView()), {
             automationId: saved,
+            name: parsed.data.name,
             shape: automationShape(parsed.data),
-            enabled: false,
+            enabled: savedRecord?.enabled ?? false,
             edited: session.automationId !== undefined,
           }),
         );
