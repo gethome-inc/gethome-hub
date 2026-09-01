@@ -821,8 +821,29 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   that invents a notify action and spends a round finding out while somebody
   watches. One `ai_runs` row per conversation, `kind: 'automate'`, because
   what a home spent on AI is one question and two tables would make it two
-  screens. The OpenAI half is not written; a home configured for it is told
-  so rather than failed with a 500.
+  screens.
+  **The agent picks its own provider, and it is deliberately not the
+  mapper's.** `ai.provider` answers "which model reads a device's exposes
+  tree" — a real choice, because both halves of *that* are written. Only one
+  half of this one is, so reading the same field turned an unrelated preference
+  into a refusal: a home with both keys that recognised devices with OpenAI
+  could not write a rule at all, with a perfectly good Anthropic key sitting
+  beside it. It runs on Anthropic whenever the home has a key that can, and a
+  legacy subscription token is not one, since the loop authenticates with
+  `x-api-key`.
+  **Every way this can be refused is an `AutomationNotConfiguredError` with a
+  code *and* a sentence**, and that is the whole of a real bug: the OpenAI case
+  threw an `AiUnavailableError` past the route's refusal handler, Fastify
+  answered `{"statusCode":500,…}`, and the app drew "The hub answered 500."
+  over a hub that was working perfectly and had just said what was wrong.
+  Three codes, because they lead to three different screens — no key, AI
+  switched off, a key of the wrong kind — with `detail` riding along so an app
+  that has never met a code a later build adds still shows something true.
+  **The test seam (`createConversation`) therefore sits *after* every
+  configuration check.** It stands in for the network, not for the rules: above
+  them it was a bypass, letting the suite reach a conversation the real hub
+  would have refused — the "a mock laxer than the thing it stands in for tests
+  the mock" trap, and exactly why the refusal shipped untested.
 - **Nothing is unsupported by default — three layers, in order.** Devices are
   made usable by (1) **typed capabilities** (canonical schema), then (2)
   **generic custom fields** (`custom`) for every leftover parameter, generated
