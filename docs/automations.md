@@ -311,6 +311,25 @@ once. Deliberately not a `strict` tool, the `submit_mapping` reasoning — stric
 mode guarantees the shape and cannot express "the target must have that
 capability".
 
+**Where a wider world would attach, when there is one.** The obvious next thing
+somebody wants is a rule that reaches beyond the house — a web API, an MCP
+server, a service that knows something the hub does not. That lands in exactly
+two places and nowhere else: a row in `automation-tools.ts` for what the
+*agent* may look up while it writes, and a new action kind in `schema.ts` for
+what a *rule* may do when it runs. Both halves are needed and they are separate
+decisions: an agent that can read a forecast while deciding what to write is a
+research tool, and a rule that calls out on every firing is a network request
+from inside somebody's home on a schedule — with the request-forgery problem
+`page-fetch.ts` already had to solve for the mapper, and the same answer waiting
+(an allowlist, checked per redirect hop, against a resolved public address).
+
+Nothing here is shaped to prevent it: the tool table is a list, the action union
+is a union, and the catalog that feeds the prompt, the apps and these docs is
+generated from the schema — so a new action kind is described everywhere the
+moment it parses. What is *not* wanted is the shortcut: a general "call this
+URL" action would be that forgery primitive with none of the guards, and it is
+the one thing this design deliberately does not have.
+
 ### A conversation suspends, twice over
 
 Unlike a mapping run, which is one call that either produces a descriptor or
