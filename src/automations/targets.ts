@@ -168,7 +168,58 @@ function pickEndpoint(
  * the apps render their own from the structured document, exactly as they do
  * with the activity log's `message`.
  */
-export function describeTarget(target: AutomationTarget, home: AutomationHomeView): string {
+/**
+ * What a set of devices chosen by capability is *called*.
+ *
+ * A capability is a schema token and this is a sentence somebody reads, so the
+ * two need a table between them. Anything absent falls back to "devices",
+ * which is ugly and true — the same two properties `PATHS` is built on.
+ */
+const CAPABILITY_NOUNS: Record<string, string> = {
+  onOff: 'devices that switch on and off',
+  level: 'dimmable devices',
+  colorTemperature: 'lights',
+  color: 'colour lights',
+  thermostat: 'thermostats',
+  fan: 'fans',
+  doorLock: 'locks',
+  windowCovering: 'blinds and curtains',
+  temperature: 'temperature sensors',
+  humidity: 'humidity sensors',
+  occupancy: 'motion sensors',
+  contact: 'door and window sensors',
+  illuminance: 'light sensors',
+  airQuality: 'air quality sensors',
+  co2: 'CO₂ sensors',
+  smokeCOAlarm: 'smoke and CO alarms',
+  battery: 'devices with a battery',
+  electricalPower: 'devices that measure power',
+  mediaPlayback: 'players',
+  event: 'buttons and remotes',
+  irRemote: 'IR blasters',
+};
+
+/** Device kinds are single words; none of them is irregular. */
+function plural(kind: string): string {
+  return kind.endsWith('s') ? kind : `${kind}s`;
+}
+
+/**
+ * How many of a selected set the sentence is about.
+ *
+ * Not decoration: it is the difference between what the engine does and what
+ * the sentence claims. A `deviceState` trigger is evaluated **per device**, so
+ * it fires the moment *any* matching device crosses — while an action is sent
+ * to every one of them. Describing both as "all the temperature sensors" said
+ * that a rule waits for the whole house to reach 25 °C.
+ */
+export type TargetQuantifier = 'all' | 'any';
+
+export function describeTarget(
+  target: AutomationTarget,
+  home: AutomationHomeView,
+  quantifier: TargetQuantifier = 'all',
+): string {
   if ('deviceIds' in target) {
     const names = target.deviceIds
       .map((id) => home.devices.find((device) => device.id === id)?.name)
@@ -178,11 +229,23 @@ export function describeTarget(target: AutomationTarget, home: AutomationHomeVie
     return `${names[0]}, ${names[1]} and ${names.length - 2} more`;
   }
   const parts: string[] = [];
-  parts.push(target.select.kind !== undefined ? `${target.select.kind}s` : 'devices');
-  if (target.select.capability !== undefined) parts.push(`with ${target.select.capability}`);
+  // **A kind or a capability, never both, and never the raw token.** This read
+  // `every ${kind}s with ${capability}` — so a rule about the lights described
+  // itself as "every lights with onOff", which is a schema field read out loud
+  // in the one sentence both apps put in front of a person. A `kind` already
+  // says what a `capability` beside it would: the capability is what names the
+  // set when there is no kind, and it is named in words.
+  parts.push(
+    target.select.kind !== undefined
+      ? plural(target.select.kind)
+      : (CAPABILITY_NOUNS[target.select.capability ?? ''] ?? 'devices'),
+  );
   const room = home.rooms.find((entry) => entry.id === target.select.roomId);
   if (room) parts.push(`in ${room.name}`);
   const zone = home.zones.find((entry) => entry.id === target.select.zoneId);
   if (zone) parts.push(`in ${zone.name}`);
-  return `every ${parts.join(' ')}`;
+  // "all the", not "every": what follows is plural in every case — a kind is
+  // pluralised and a capability names a group ("smoke and CO alarms") — and
+  // "every lights" was the reading that came out.
+  return `${quantifier === 'any' ? 'any of the' : 'all the'} ${parts.join(' ')}`;
 }

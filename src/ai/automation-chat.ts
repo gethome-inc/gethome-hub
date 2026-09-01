@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { asc, eq, lt } from 'drizzle-orm';
+import { asc, count, eq, lt, max, min } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import { automationChatMessages } from '../db/schema.js';
 import type { HubEventBus } from '../core/bus.js';
@@ -53,12 +53,23 @@ export interface ChatSession {
   conversation: AutomationConversation;
   lastAt: number;
   /**
+   * When the conversation opened.
+   *
+   * Separate from `lastAt`, which every message and every finished turn moves
+   * — so the ledger's `durationMs` was `now - lastAt` measured moments after
+   * the last thing that set it, and a conversation that ran for four minutes
+   * was recorded as having taken twelve milliseconds. A swept one was worse:
+   * it recorded the two-hour idle TTL.
+   */
+  startedAt: number;
+  /**
    * The turn currently running, if one is.
    *
    * A conversation is answered **off** the request that asked for it (see
    * `exchange`), so this is both the queue that keeps two messages from
-   * running at once and the handle `idle()` waits on. It never rejects: the
-   * exchange catches everything into a `note` row.
+   * running at once and the handle `idle()` waits on. It never rejects, and
+   * that is `exchange`'s outer catch rather than an assumption: an
+   * unhandled rejection here would end the process.
    */
   inFlight: Promise<void>;
   /** Whether this conversation's spend has been written down yet. */
@@ -84,6 +95,22 @@ export interface ChatMessageWire {
  * frame saying the stored transcript is now what to draw.
  */
 /** One past conversation, as a list of them is drawn. */
+/**
+ * An aggregate's timestamp, back as ISO.
+ *
+ * `min()`/`max()` lose the column's `timestamp_ms` mapping on the way out —
+ * drizzle only applies it to a plain column read — so what comes back is the
+ * stored integer. Every shape SQLite could hand over is accepted rather than
+ * one being assumed, because the cost of being wrong here is a date nobody
+ * can read on a list somebody opened to find a conversation.
+ */
+function isoFrom(value: number | string | Date | null): string {
+  if (value === null) return new Date(0).toISOString();
+  if (value instanceof Date) return value.toISOString();
+  const ms = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : new Date(0).toISOString();
+}
+
 export interface ChatSummaryWire {
   sessionId: string;
   startedAt: string;
@@ -180,6 +207,7 @@ export class AutomationChat {
       memberId: input.memberId,
       conversation,
       lastAt: Date.now(),
+      startedAt: Date.now(),
       inFlight: Promise.resolve(),
       recorded: false,
       submissions: 0,
@@ -265,42 +293,48 @@ export class AutomationChat {
    * different things and an app has to say which one it is offering.
    */
   async list(): Promise<ChatSummaryWire[]> {
-    const rows = await this.options.db
+    // **Counted in SQLite, and the model's prose never leaves it.** Every
+    // screen that draws automations asks for this, so reading the whole table
+    // — fourteen days of every conversation, `text` and all, up to 4 000
+    // characters a row — to derive a count and one title was the wrong shape
+    // on a board this size. The aggregate carries no text at all; the titles
+    // come from the person's own messages, which are the short ones and a
+    // fraction of the rows.
+    const totals = await this.options.db
       .select({
         sessionId: automationChatMessages.sessionId,
-        at: automationChatMessages.at,
-        role: automationChatMessages.role,
+        startedAt: min(automationChatMessages.at),
+        updatedAt: max(automationChatMessages.at),
+        messageCount: count(),
+      })
+      .from(automationChatMessages)
+      .groupBy(automationChatMessages.sessionId);
+
+    const said = await this.options.db
+      .select({
+        sessionId: automationChatMessages.sessionId,
         text: automationChatMessages.text,
       })
       .from(automationChatMessages)
+      .where(eq(automationChatMessages.role, 'user'))
       .orderBy(asc(automationChatMessages.at));
 
-    const sessions = new Map<string, ChatSummaryWire>();
-    for (const row of rows) {
-      const existing = sessions.get(row.sessionId);
-      if (!existing) {
-        sessions.set(row.sessionId, {
-          sessionId: row.sessionId,
-          startedAt: row.at.toISOString(),
-          updatedAt: row.at.toISOString(),
-          messageCount: 1,
-          // A conversation whose first row is somehow not the person's still
-          // gets a title rather than an empty one — the transcript is written
-          // row by row and a crash between them is possible.
-          title: row.role === 'user' ? row.text : '',
-          live: this.sessions.has(row.sessionId),
-        });
-        continue;
-      }
-      existing.updatedAt = row.at.toISOString();
-      existing.messageCount += 1;
-      if (existing.title === '' && row.role === 'user') existing.title = row.text;
+    const titles = new Map<string, string>();
+    for (const row of said) {
+      if (!titles.has(row.sessionId)) titles.set(row.sessionId, row.text);
     }
 
-    return [...sessions.values()]
+    return totals
       .map((session) => ({
-        ...session,
-        title: session.title.slice(0, 120) || 'Untitled conversation',
+        sessionId: session.sessionId,
+        startedAt: isoFrom(session.startedAt),
+        updatedAt: isoFrom(session.updatedAt),
+        messageCount: session.messageCount,
+        // A conversation with no message from the person at all still gets a
+        // title rather than an empty one: the transcript is written row by
+        // row and a crash between two of them is possible.
+        title: (titles.get(session.sessionId) ?? '').slice(0, 120) || 'Untitled conversation',
+        live: this.sessions.has(session.sessionId),
       }))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
@@ -334,7 +368,7 @@ export class AutomationChat {
     // Let a turn that is mid-flight finish first: it may still be about to
     // submit a rule, and `submissions` is what decides whether this
     // conversation goes in the ledger as one that produced something. It
-    // cannot reject — the exchange catches everything into a `note`.
+    // cannot reject — `exchange` wraps every path, the failing ones included.
     await session.inFlight;
     await this.record(session, session.submissions > 0);
   }
@@ -349,6 +383,38 @@ export class AutomationChat {
    * app over the socket instead of being returned.
    */
   private async exchange(
+    session: ChatSession,
+    text: string,
+    how: 'send' | 'answer',
+  ): Promise<void> {
+    try {
+      await this.runExchange(session, text, how);
+    } catch (error) {
+      /**
+       * **The promise `say()` stores must never reject**, and the inner catch
+       * below is not enough for that: it covers the provider call and nothing
+       * after it, while everything after it touches the disk — the transcript
+       * row, saving a submitted rule, `engine.reload()`. A SQLite failure
+       * there rejected `inFlight` with no handler attached in that tick,
+       * which on Node ≥15 takes the whole hub down; it also made `close()`'s
+       * `await session.inFlight` throw, so tidying a conversation away
+       * answered 500 and its spend was never written.
+       *
+       * Nothing here is allowed to be the second failure: the note is
+       * attempted and its own refusal swallowed, and `settle` is an event
+       * emit, which is what takes the app's spinner down either way.
+       */
+      this.options.log.error({ err: error }, 'automation chat turn could not be recorded');
+      await this.write(
+        session,
+        'note',
+        'Your hub could not save the rest of that turn. Everything above is still here.',
+      ).catch(() => undefined);
+      this.settle(session, 'stopped');
+    }
+  }
+
+  private async runExchange(
     session: ChatSession,
     text: string,
     how: 'send' | 'answer',
@@ -506,6 +572,12 @@ export class AutomationChat {
     const record = await this.options.store.create(document, session.memberId, 'written in chat');
     await this.options.engine.reload();
     this.options.events.emit('automationChanged', record.id);
+    // **The conversation is now about this rule**, which is what makes a
+    // second submission an *edit* rather than a second rule — the model
+    // resubmitting after "make it half past seven instead" would otherwise
+    // leave two rules in the home, one of them the draft nobody wanted — and
+    // it is what the `ai_runs` row records as what the spend bought.
+    session.automationId = record.id;
     return record.id;
   }
 
@@ -668,11 +740,15 @@ export class AutomationChat {
       exposesHash: '',
       provider: session.conversation.provider,
       modelId: session.conversation.modelId,
+      // What the conversation produced, when it produced one — the link the
+      // column was added for and nothing had ever written. A chat that
+      // submitted nothing leaves it null, which is the honest answer.
+      ...(session.automationId !== undefined ? { automationId: session.automationId } : {}),
     });
     await handle.finish({
       ok,
       costUsd: session.conversation.costUsd(),
-      durationMs: Date.now() - session.lastAt,
+      durationMs: Date.now() - session.startedAt,
     });
   }
 

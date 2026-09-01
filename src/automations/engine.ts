@@ -134,6 +134,8 @@ export class AutomationEngine {
   /** Which devices any enabled rule is watching — the report path's whole cost. */
   private watched = new Set<string>();
   private readonly running = new Map<string, RunHandle>();
+  /** Runs nobody is awaiting — see `detach`. */
+  private readonly detached = new Set<Promise<void>>();
 
   private timer: ReturnType<typeof setInterval> | null = null;
   private started = false;
@@ -188,6 +190,7 @@ export class AutomationEngine {
     for (const handle of this.running.values()) handle.cancelled = true;
     await Promise.allSettled([...this.running.values()].map((handle) => handle.promise));
     this.running.clear();
+    await this.settled();
   }
 
   /** Re-read everything from the store. Called after any write. */
@@ -432,7 +435,13 @@ export class AutomationEngine {
   async runManually(id: string, memberName: string): Promise<boolean> {
     const record = this.get(id);
     if (!record) return false;
-    await this.fire(record, 'manual', `${memberName} pressed ${record.name}`, 0, { manual: true });
+    // **Started, not finished** — the `POST /devices/:id/remap` lesson, and
+    // this engine is exactly where it bites: an action list may hold a `wait`
+    // of up to fifteen minutes, while the phone that pressed the button gives
+    // the hub ten seconds. Awaiting the run reported a failure on every
+    // press that actually did something slow, over a house doing precisely
+    // what it was asked. `settled()` is how a test waits for the rest.
+    this.detach(this.fire(record, 'manual', `${memberName} pressed ${record.name}`, 0, { manual: true }));
     return true;
   }
 
@@ -450,15 +459,48 @@ export class AutomationEngine {
     await this.reload();
     const updated = this.get(id);
     if (!updated) return false;
-    await this.fire(
-      updated,
-      'manual',
-      `${memberName} switched ${record.name} ${active ? 'on' : 'off'}`,
-      0,
-      { manual: true, useOffActions: !active },
-    );
+    // **The switch moves, then the actions follow.** The stored word is what
+    // the caller asked for and what every other phone draws, so it is written
+    // and announced before this returns; the actions are the part that can
+    // hold a `wait` and are detached with `runManually`'s reasoning. Emitting
+    // *after* the run meant a mode switched in the kitchen reached the phone
+    // in the bedroom only once the last lamp had answered.
     this.options.events.emit('automationChanged', id);
+    this.detach(
+      this.fire(
+        updated,
+        'manual',
+        `${memberName} switched ${record.name} ${active ? 'on' : 'off'}`,
+        0,
+        { manual: true, useOffActions: !active },
+      ),
+    );
     return true;
+  }
+
+  /**
+   * Start a run and stop waiting for it, without losing it.
+   *
+   * Two things this owes. A detached promise that rejects is an unhandled
+   * rejection, which on Node ≥15 ends the process — so the failure is caught
+   * and logged here rather than at four call sites. And it stays *findable*:
+   * `settled()` is what a test waits on, and what `stop()` drains, because a
+   * run nobody holds is a run that outlives the hub shutting down.
+   */
+  private detach(run: Promise<void>): void {
+    const tracked = run.catch((error: unknown) => {
+      this.options.log.error({ err: error }, 'automation run failed');
+    });
+    this.detached.add(tracked);
+    void tracked.finally(() => {
+      this.detached.delete(tracked);
+    });
+  }
+
+  /** Wait for every detached run to finish. For tests, and for `stop()` —
+   *  the reason `HistoryService.flush()` and `AutomationChat.idle()` exist. */
+  async settled(): Promise<void> {
+    await Promise.allSettled([...this.detached]);
   }
 
   private async fire(
@@ -485,8 +527,39 @@ export class AutomationEngine {
           return;
         }
         existing.queued += 1;
-        await existing.promise.catch(() => undefined);
-        existing.queued -= 1;
+        try {
+          // **Re-checked after every wait, because one await does not
+          // serialize two waiters.** Both would resume in the same microtask
+          // drain, both build a handle, both call `execute` — running side by
+          // side, which is the one thing `queued` promises not to do — and the
+          // loser's handle then replaced the winner's in `this.running`, so a
+          // third firing queued behind a run that had already been forgotten.
+          // Looking the map up again is what puts each waiter behind whoever
+          // actually took the slot.
+          let ahead: RunHandle | undefined = existing;
+          while (ahead !== undefined) {
+            await ahead.promise.catch(() => undefined);
+            ahead = this.running.get(record.id);
+          }
+        } finally {
+          existing.queued -= 1;
+        }
+      }
+    }
+
+    /**
+     * The author's own limits, before the engine's — and **automatic firings
+     * only**, which is the five-guards rule applied one level up: a person
+     * pressing a button is a person, and being silently ignored because the
+     * rule ran twenty minutes ago is the one outcome nobody could explain.
+     * The command-level floor still protects the relay either way.
+     */
+    const declared = record.document.guards;
+    if (declared !== undefined && options.manual !== true) {
+      const refusal = this.guards.declaredRefusal(record.id, declared);
+      if (refusal !== null) {
+        this.report(record, trigger, cause, 'skipped', [], 0, 0, refusal);
+        return;
       }
     }
 

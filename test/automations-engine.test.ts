@@ -55,6 +55,16 @@ class FakeRegistry implements EngineRegistry {
    * report is what sets the next rule off.
    */
   echo = false;
+  /**
+   * Something to hold a command open on — a slow radio, a write queued for a
+   * sleeping device, an action list with a `wait` in it. Called per command,
+   * so a test can hold one and let the next through.
+   */
+  hold: (() => Promise<void>) | undefined;
+  /** How many commands are in `execute` at once, and the most there have
+   *  ever been — which is how "one at a time" is checked at all. */
+  inFlight = 0;
+  peakInFlight = 0;
   private readonly devices: FakeDevice[] = [];
 
   constructor(private readonly events: HubEventBus) {}
@@ -68,11 +78,24 @@ class FakeRegistry implements EngineRegistry {
   }
 
   async execute(deviceId: string, endpointId: number, command: HubCommand): Promise<void> {
+    this.inFlight += 1;
+    this.peakInFlight = Math.max(this.peakInFlight, this.inFlight);
+    try {
+      await this.run(deviceId, endpointId, command);
+    } finally {
+      this.inFlight -= 1;
+    }
+  }
+
+  private async run(deviceId: string, endpointId: number, command: HubCommand): Promise<void> {
     if (this.failNext) {
       this.failNext = false;
       throw new Error('the radio refused');
     }
+    // Recorded before the hold, so a test can see a command that has been
+    // handed to the radio and not yet answered.
     this.sent.push({ deviceId, endpointId, command });
+    if (this.hold) await this.hold();
     if (!this.echo) return;
     const endpoint = this.devices
       .find((entry) => entry.id === deviceId)
@@ -540,6 +563,148 @@ describe('what a person presses', () => {
     const entries = await activity.list(10);
     expect(entries[0]?.kind).toBe('automation.ran');
     expect(entries[0]?.message).toContain('Anna');
+  });
+
+  it('answers a press as soon as the run is under way, never when it ends', async () => {
+    /**
+     * The `POST /devices/:id/remap` lesson, in the module where it costs the
+     * most: an action list can hold a `wait` of up to fifteen minutes, and the
+     * phone that pressed the button gives the hub ten seconds. Awaiting the
+     * run reported a failure on every press that did something slow, over a
+     * house doing exactly what it was asked — and this call resolving at all
+     * while the radio still has the first command is the whole assertion.
+     */
+    const id = await install({
+      name: 'Slow one',
+      triggers: [{ kind: 'manual' }],
+      actions: [
+        { kind: 'deviceCommand', target: { deviceIds: [lampId] }, command: { type: 'power', on: true } },
+        { kind: 'deviceCommand', target: { deviceIds: [otherLampId] }, command: { type: 'power', on: true } },
+      ],
+    });
+
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    registry.hold = () => held;
+
+    expect(await engine.runManually(id, 'Anna')).toBe(true);
+    await settle();
+    // The first command is with the radio and the second has not been reached,
+    // so the run is plainly still going — and the press has already answered.
+    expect(registry.sent).toHaveLength(1);
+
+    registry.hold = undefined;
+    release();
+    await engine.settled();
+    expect(registry.sent).toHaveLength(2);
+  });
+
+  it('runs a queued rule one at a time, however many are waiting', async () => {
+    /**
+     * Two firings that arrive while a third is in flight both awaited the
+     * *same* handle and then resumed in the same microtask drain — so they
+     * ran side by side, which is the one thing `queued` promises not to do,
+     * and the loser's handle replaced the winner's in the running map so a
+     * fourth firing queued behind a run that had already been forgotten.
+     *
+     * Two holds, because the fault only shows when the *first* run finishes:
+     * that is the moment both waiters wake.
+     */
+    const id = await install({
+      name: 'Queued',
+      mode: 'queued',
+      triggers: [{ kind: 'manual' }],
+      actions: [
+        { kind: 'deviceCommand', target: { deviceIds: [lampId] }, command: { type: 'toggle' } },
+      ],
+    });
+
+    let releaseFirst!: () => void;
+    let releaseRest!: () => void;
+    const first = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const rest = new Promise<void>((resolve) => {
+      releaseRest = resolve;
+    });
+    let commands = 0;
+    registry.hold = () => {
+      commands += 1;
+      // Past the two-second floor between commands to one endpoint, or the
+      // second and third runs are refused for a reason that has nothing to do
+      // with what this is testing.
+      now += 5_000;
+      return commands === 1 ? first : rest;
+    };
+
+    await engine.runManually(id, 'Anna');
+    await settle();
+    await engine.runManually(id, 'Anna');
+    await engine.runManually(id, 'Anna');
+    await settle();
+    expect(registry.sent).toHaveLength(1);
+
+    // The first finishes, and both waiters wake in the same drain.
+    releaseFirst();
+    await settle();
+    expect(registry.peakInFlight).toBe(1);
+
+    releaseRest();
+    registry.hold = undefined;
+    await engine.settled();
+    expect(registry.sent).toHaveLength(3);
+  });
+
+  it('holds a rule to the limits its own author declared', async () => {
+    /**
+     * `guards: { minIntervalMs, maxRunsPerHour }` is validated, stored, and
+     * set by a shipped template — and was read by nothing, so the "second
+     * belt" the `low_battery` preset promises against a battery dithering
+     * across 15% did not exist. Only ever *stricter*: everything in `admit`
+     * still applies underneath.
+     */
+    const id = await install({
+      name: 'Boiler',
+      triggers: [
+        {
+          kind: 'deviceState',
+          target: { deviceIds: [motionId] },
+          path: 'sensors.occupied',
+          op: 'eq',
+          value: true,
+        },
+      ],
+      actions: [
+        { kind: 'deviceCommand', target: { deviceIds: [lampId] }, command: { type: 'toggle' } },
+      ],
+      guards: { minIntervalMs: 10 * 60_000 },
+    });
+    expect(id).toBeTruthy();
+
+    registry.report(motionId, 1, { sensors: { occupied: true } });
+    await settle();
+    expect(registry.sent).toHaveLength(1);
+
+    // Five minutes later — past the engine's own two-second floor, and well
+    // inside the ten this rule asked for.
+    now += 5 * 60_000;
+    registry.report(motionId, 1, { sensors: { occupied: false } });
+    await settle();
+    registry.report(motionId, 1, { sensors: { occupied: true } });
+    await settle();
+    expect(registry.sent).toHaveLength(1);
+    // And it says why, in the trace, rather than looking like nothing
+    // happened.
+    expect(runs.at(-1)?.outcome).toBe('skipped');
+
+    now += 10 * 60_000;
+    registry.report(motionId, 1, { sensors: { occupied: false } });
+    await settle();
+    registry.report(motionId, 1, { sensors: { occupied: true } });
+    await settle();
+    expect(registry.sent).toHaveLength(2);
   });
 
   it('runs offActions when a mode is switched off, and skips its conditions', async () => {

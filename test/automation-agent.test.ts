@@ -399,6 +399,59 @@ describe('the automation conversation', () => {
     expect(new Set(closedToolIds(1))).toEqual(new Set(['toolu_one', 'toolu_two']));
   });
 
+  it('keeps the rule and retracts the question when one response does both', async () => {
+    /**
+     * **The same 400 by a third route, and the one that also loses a rule.**
+     * `handedBack` is a single slot, so a response carrying `ask_user` *and*
+     * an accepted `submit_automation` used to overwrite one with the other —
+     * whichever came second. With the question first, the submission won the
+     * slot, the guard that stashes results never ran, and the next request
+     * carried an assistant turn whose `ask_user` had no result: the
+     * conversation refused outright, unrecoverably, since `pendingQuestion`
+     * then routed the reply into a second orphaned result.
+     *
+     * A submission ends the turn, so the rule wins and the question is
+     * retracted **inside** the turn, where the model can see it happen and
+     * both calls are answered.
+     */
+    streamMock
+      .mockReturnValueOnce(
+        assistant([
+          toolUse('ask_user', { question: 'Which lamp?', options: [{ id: 'a', label: 'Bedside' }] }, 'toolu_ask'),
+          toolUse('submit_automation', { document: goodDocument }, 'toolu_submit'),
+        ]),
+      )
+      .mockReturnValueOnce(assistant([text('unused')], 'end_turn'));
+
+    const conversation = conversationFor();
+    const turn = await conversation.send('evening lights');
+
+    expect(turn.kind).toBe('submitted');
+    // Both calls answered in the message the turn appended, so the next
+    // request — whenever it comes — carries a whole assistant turn.
+    expect(new Set(closedToolIds(0))).toEqual(new Set(['toolu_ask', 'toolu_submit']));
+  });
+
+  it('refuses a question asked after a rule was submitted in the same response', async () => {
+    // The other order of the same collision. Here the question would have
+    // taken the slot and the accepted rule would have been dropped silently —
+    // the model told "Accepted" over a rule nothing ever wrote down.
+    streamMock
+      .mockReturnValueOnce(
+        assistant([
+          toolUse('submit_automation', { document: goodDocument }, 'toolu_submit'),
+          toolUse('ask_user', { question: 'Anything else?', options: [{ id: 'a', label: 'No' }] }, 'toolu_ask'),
+        ]),
+      )
+      .mockReturnValueOnce(assistant([text('unused')], 'end_turn'));
+
+    const conversation = conversationFor();
+    const turn = await conversation.send('evening lights');
+
+    expect(turn.kind).toBe('submitted');
+    expect(new Set(closedToolIds(0))).toEqual(new Set(['toolu_submit', 'toolu_ask']));
+  });
+
   it('says something before the request, not only after it', async () => {
     // The longest silence in a round is *before* anything happens — the model
     // reading the home and deciding, with no tool called and no word written.
@@ -458,7 +511,13 @@ describe('the chat service', () => {
   let memberId: string;
   /** `gate`, when given, is what the scripted turn waits on before answering —
    *  a provider that is taking its time, which is the ordinary case. */
-  let chatFor: (turns: AutomationTurn[], gate?: Promise<void>) => Promise<{
+  let chatFor: (
+    turns: AutomationTurn[],
+    gate?: Promise<void>,
+    /** Make the disk refuse *after* the model has answered — the half of a
+     *  turn that sits outside the provider call's own catch. */
+    breakStore?: boolean,
+  ) => Promise<{
     chat: InstanceType<typeof AutomationChat>;
     engine: Awaited<ReturnType<typeof startedAutomations>>['engine'];
   }>;
@@ -476,11 +535,16 @@ describe('the chat service', () => {
     memberId = randomUUID();
     await handle.db.insert(membersTable).values({ id: memberId, name: 'Anna', role: 'member' });
 
-    chatFor = async (turns, gate) => {
+    chatFor = async (turns, gate, breakStore) => {
       const activity = new ActivityService(handle.db, events);
       const registry = { listDevices: () => [], execute: async () => {} };
       const { engine, store } = await startedAutomations(handle.db, events, registry, activity);
       startedEngines.push(engine);
+      if (breakStore) {
+        store.create = async () => {
+          throw new Error('database is locked');
+        };
+      }
       let index = 0;
       const scripted: AutomationConversation = {
         provider: 'anthropic',
@@ -533,6 +597,59 @@ describe('the chat service', () => {
     const saved = engine.get(data.automationId);
     expect(saved?.name).toBe('Evening lights');
     expect(saved?.enabled).toBe(false);
+  });
+
+  it('survives a store that refuses after the model has already answered', async () => {
+    /**
+     * **The turn's promise must never reject.** Only the provider call was
+     * inside a `try`, while everything after it touches the disk — the
+     * transcript row, saving the rule, `engine.reload()`. A SQLite failure
+     * there rejected the stored `inFlight` with nothing attached in that tick,
+     * which on Node ≥15 takes the hub down, and made `close()` throw so the
+     * conversation's spend was never written either.
+     */
+    const { chat } = await chatFor(
+      [{ kind: 'submitted', document: goodDocument, accepted: true, text: 'Here you go.' }],
+      undefined,
+      true,
+    );
+
+    const started = await chat.start({ memberId: memberId, message: 'evening lights' });
+    // `idle()` awaits the very promise that used to reject.
+    await expect(chat.idle()).resolves.toBeUndefined();
+    await expect(chat.close(started.sessionId)).resolves.toBeUndefined();
+
+    // And the person is told, rather than left under a spinner.
+    const transcript = await chat.transcript(started.sessionId);
+    expect(transcript.some((message) => message.role === 'note')).toBe(true);
+  });
+
+  it('edits the rule it just wrote rather than writing a second one', async () => {
+    /**
+     * "Actually, make it half past seven" is the ordinary shape of this
+     * conversation, and the model answers it by submitting a whole document
+     * again — `submit_automation` is the only answer channel and it never
+     * patches. The session only ever learned an id when the chat was *opened*
+     * on an existing rule, so a second submission created a second rule and
+     * left the draft nobody wanted sitting in the home.
+     */
+    const { chat, engine } = await chatFor([
+      { kind: 'submitted', document: goodDocument, accepted: true, text: 'Here you go.' },
+      {
+        kind: 'submitted',
+        document: { ...goodDocument, name: 'Evening lights, later' },
+        accepted: true,
+        text: 'Moved it.',
+      },
+    ]);
+
+    const started = await chat.start({ memberId: memberId, message: 'evening lights' });
+    await chat.idle();
+    await chat.reply(started.sessionId, memberId, 'make it later');
+    await chat.idle();
+
+    expect(engine.list()).toHaveLength(1);
+    expect(engine.list()[0]?.name).toBe('Evening lights, later');
   });
 
   it('writes the transcript, and it outlives the conversation', async () => {
@@ -663,6 +780,16 @@ describe('the chat service', () => {
     // say which one it is offering.
     expect(hall?.live).toBe(true);
     expect(listed.find((entry) => entry.sessionId === second.sessionId)?.live).toBe(false);
+
+    // **Real dates, because the counting is done in SQLite now.** `min()` and
+    // `max()` lose the column's `timestamp_ms` mapping on the way out, so the
+    // aggregate hands back the stored integer — and a row whose date reads as
+    // 1970, or as `Invalid Date`, is the whole of what this list is for.
+    for (const entry of listed) {
+      expect(Number.isNaN(Date.parse(entry.startedAt))).toBe(false);
+      expect(Date.parse(entry.startedAt)).toBeGreaterThan(Date.parse('2020-01-01T00:00:00Z'));
+      expect(Date.parse(entry.updatedAt)).toBeGreaterThanOrEqual(Date.parse(entry.startedAt));
+    }
   });
 
   it('will not let one member continue another member’s conversation', async () => {

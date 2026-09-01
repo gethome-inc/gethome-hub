@@ -105,7 +105,7 @@ describe('device guards', () => {
     expect(guards.admit('d', 2, { type: 'toggle' }, undefined, origin)).toBeNull();
   });
 
-  it('stops at an hourly budget and again at a daily one', () => {
+  it('stops at an hourly budget, and lets the hour roll', () => {
     let now = 0;
     const guards = new AutomationGuards(() => now);
     for (let index = 0; index < DEFAULT_GUARD_LIMITS.maxCommandsPerHour; index += 1) {
@@ -118,6 +118,30 @@ describe('device guards', () => {
 
     // An hour later the window has rolled and the device is workable again.
     now += 60 * 60_000;
+    expect(guards.admit('d', 1, { type: 'toggle' }, undefined, origin)).toBeNull();
+  });
+
+  it('lets a device work again the day after it spent its daily budget', () => {
+    let now = 0;
+    const guards = new AutomationGuards(() => now);
+    // Spread over half a day so the *hourly* budget never bites — the daily
+    // one is the subject here, and a test that trips the other guard first
+    // proves nothing about this one.
+    const spacing = Math.floor((12 * 60 * 60_000) / DEFAULT_GUARD_LIMITS.maxCommandsPerDay);
+    for (let index = 0; index < DEFAULT_GUARD_LIMITS.maxCommandsPerDay; index += 1) {
+      now += spacing;
+      expect(guards.admit('d', 1, { type: 'toggle' }, undefined, origin)).toBeNull();
+      guards.record('d', 1, origin);
+    }
+    now += spacing;
+    expect(guards.admit('d', 1, { type: 'toggle' }, undefined, origin)?.kind).toBe('daily_budget');
+
+    // **The window has to roll, and a refusal is exactly what used to stop
+    // it.** The count was read off the raw array while the only thing that
+    // prunes it is `record()` — which a refusal never reaches — so the first
+    // endpoint in a home to spend its day was refused for ever, with the
+    // sentence still saying "today" about commands sent last week.
+    now += 24 * 60 * 60_000;
     expect(guards.admit('d', 1, { type: 'toggle' }, undefined, origin)).toBeNull();
   });
 

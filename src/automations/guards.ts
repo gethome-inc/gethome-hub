@@ -219,10 +219,20 @@ export class AutomationGuards {
           detail: `${lastHour} automation commands to this device in the last hour is the limit`,
         };
       }
-      if (record.sent.length >= this.limits.maxCommandsPerDay) {
+      // **Counted over the window, exactly as the hour above is**, and that is
+      // the whole of a bug rather than a tidiness: this read `record.sent.length`
+      // — the raw array — while the only thing that prunes it is `record()`,
+      // which a refusal never reaches. So the first endpoint to spend its day
+      // was refused for ever: the count could not fall, nothing else writes
+      // that array, and the sentence went on saying "today" about commands
+      // sent last week. One shape for both budgets is also one rule to be
+      // wrong about; `record()`'s pruning is what bounds the array, not what
+      // makes the answer right.
+      const lastDay = record.sent.filter((at) => now - at < 24 * 60 * 60_000).length;
+      if (lastDay >= this.limits.maxCommandsPerDay) {
         return {
           kind: 'daily_budget',
-          detail: `${record.sent.length} automation commands to this device today is the limit`,
+          detail: `${lastDay} automation commands to this device today is the limit`,
         };
       }
     }
@@ -292,6 +302,50 @@ export class AutomationGuards {
         `it ran ${times.length} times in ${Math.round(this.limits.runawayWindowMs / 60_000)} ` +
         `minutes, which is far more than anything in a home should, so it has been switched off`,
     };
+  }
+
+  /**
+   * The author's *own* limits, which the schema lets a rule declare and which
+   * nothing used to read.
+   *
+   * A document can say `guards: { minIntervalMs, maxRunsPerHour }` — for the
+   * author who knows their boiler wants five minutes between starts — and it
+   * was validated, stored, and even set by a shipped template (`low_battery`
+   * asks for two runs an hour, with a comment calling it "a second belt"
+   * against a battery dithering across 15%). It was a promise nothing kept.
+   *
+   * **Only ever stricter.** Everything in `admit` still applies underneath;
+   * this can refuse a firing the engine's own limits would have allowed and
+   * can never permit one they refuse.
+   *
+   * Asked **before** `noteRun`, which pushes the current firing — reading the
+   * list afterwards would compare this run against itself.
+   */
+  declaredRefusal(
+    automationId: string,
+    declared: { minIntervalMs?: number | undefined; maxRunsPerHour?: number | undefined },
+  ): string | null {
+    const now = this.now();
+    const times = this.firings.get(automationId) ?? [];
+
+    if (declared.minIntervalMs !== undefined) {
+      const last = times.at(-1);
+      if (last !== undefined && now - last < declared.minIntervalMs) {
+        return (
+          `only ${Math.round((now - last) / 1000)}s since it last ran, and this rule asks for ` +
+          `at least ${Math.round(declared.minIntervalMs / 1000)}s between runs`
+        );
+      }
+    }
+
+    if (declared.maxRunsPerHour !== undefined) {
+      const lastHour = times.filter((at) => now - at < 60 * 60_000).length;
+      if (lastHour >= declared.maxRunsPerHour) {
+        return `it has run ${lastHour} times in the last hour, which is the limit this rule asks for`;
+      }
+    }
+
+    return null;
   }
 
   /** Forget a rule's history — after it is deleted, or deliberately re-enabled. */

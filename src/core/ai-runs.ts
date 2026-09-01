@@ -61,6 +61,15 @@ export interface AiRunStart {
   /** anthropic | openai. Absent on rows written before the second provider. */
   provider?: string | undefined;
   modelId?: string | undefined;
+  /**
+   * The rule a conversation produced or edited, on an `automate` row.
+   *
+   * The column and the sentence above it both existed and nothing ever wrote
+   * it, so the one link from a spend row back to what it bought was NULL on
+   * every hub. Absent on a mapping run, which is about a device model rather
+   * than a rule, and absent on a conversation that never submitted one.
+   */
+  automationId?: string | undefined;
 }
 
 export interface AiRunOutcome {
@@ -167,6 +176,7 @@ export class AiRunLog {
             exposesHash: input.exposesHash,
             provider: input.provider ?? null,
             modelId: input.modelId ?? null,
+            automationId: input.automationId ?? null,
             ok: outcome.ok,
             costUsd: outcome.costUsd ?? null,
             turns: outcome.turns ?? null,

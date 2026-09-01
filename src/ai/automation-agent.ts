@@ -271,6 +271,24 @@ export function createAutomationConversation(
               });
               continue;
             }
+            if (handedBack?.kind === 'submitted') {
+              // A rule was accepted earlier in this same response, and that
+              // ends the turn: the person is handed a preview to look at. A
+              // question asked beside it has nothing to attach to — the turn
+              // is over before it could be answered — and the loop can only
+              // hand one thing back, so leaving both set was how one of them
+              // got silently dropped. Refused inside the turn, which the
+              // model can act on, rather than after it, which nobody can.
+              results.push({
+                type: 'tool_result',
+                tool_use_id: call.id,
+                content:
+                  'A rule has already been submitted in this response, which ends the turn. ' +
+                  'Ask this once they have replied.',
+                is_error: true,
+              });
+              continue;
+            }
             // The conversation stops here and the answer closes this call —
             // which is why `answer()` exists separately from `send()`.
             //
@@ -301,6 +319,30 @@ export function createAutomationConversation(
               outcome.accepted ? undefined : outcome.text,
             );
             if (outcome.accepted) {
+              // **The other order of the same collision**, and the more
+              // expensive one: with a question already open, overwriting it
+              // here left `ask_user`'s call with no result and the next
+              // request carrying a half-answered assistant turn — `400
+              // tool_use ids were found without tool_result blocks`, the
+              // conversation refused outright and unrecoverable, since
+              // `pendingQuestion` then routed the person's reply into a
+              // second orphaned result. Returning the question instead would
+              // be worse in a quieter way: the model was told "Accepted" and
+              // the rule would never be written.
+              //
+              // So the submission wins and the question is retracted, in the
+              // turn, where the model can see it happen.
+              if (pendingQuestion !== null) {
+                results.push({
+                  type: 'tool_result',
+                  tool_use_id: pendingQuestion,
+                  content:
+                    'That question was not asked: a rule was submitted in the same response, ' +
+                    'which ends the turn. Ask it once they have replied.',
+                  is_error: true,
+                });
+                pendingQuestion = null;
+              }
               handedBack = {
                 kind: 'submitted',
                 document: outcome.document,

@@ -13,6 +13,7 @@ import { sanityCheckAutomation } from '../src/automations/sanity.js';
 import { automationCatalog, catalogAsPrompt } from '../src/automations/catalog.js';
 import { AUTOMATION_TEMPLATES, findTemplate } from '../src/automations/templates.js';
 import { describeTarget, resolveTarget, type AutomationHomeView } from '../src/automations/targets.js';
+import { describeAutomation } from '../src/automations/summarize.js';
 
 // ── A small home to check documents against ──────────────────────────────────
 
@@ -243,7 +244,142 @@ describe('resolving a target', () => {
       'Ceiling light and Bedside lamp',
     );
     expect(describeTarget({ select: { kind: 'light', roomId: bedroomId } }, home())).toBe(
-      'every lights in Bedroom',
+      'all the lights in Bedroom',
+    );
+  });
+
+  it('names a set by its kind or its capability, in words, and never both', () => {
+    // A `capability` is a schema token and this is a sentence somebody reads.
+    // It used to be printed raw and *beside* the kind — "every lights with
+    // onOff" — which is a field name read out loud on the one line both apps
+    // put under a rule.
+    expect(describeTarget({ select: { kind: 'light', capability: 'onOff' } }, home())).toBe(
+      'all the lights',
+    );
+    expect(describeTarget({ select: { capability: 'doorLock' } }, home())).toBe('all the locks');
+    expect(describeTarget({ select: { capability: 'battery' } }, home())).toBe(
+      'all the devices with a battery',
+    );
+  });
+
+  it('says "any" where the engine means any', () => {
+    // Not a nicety: a `deviceState` trigger is evaluated per device and fires
+    // the moment one of them crosses, so describing it as "all the temperature
+    // sensors" claimed a rule waits for the whole house to reach 25 °C.
+    expect(describeTarget({ select: { capability: 'temperature' } }, home(), 'any')).toBe(
+      'any of the temperature sensors',
+    );
+  });
+});
+
+// ── The sentence both apps draw ──────────────────────────────────────────────
+
+/**
+ * `describeAutomation` is the **contract**: `HubAutomationDTO.summary` is
+ * every rule row's subtitle and the whole body of its page, and it is what an
+ * app a version behind draws instead of a blank card. It had no test, which is
+ * how it came to print stored units at a person.
+ */
+describe('a rule in a sentence', () => {
+  function summarize(document: unknown): string {
+    return describeAutomation(automationDocumentSchema.parse(document), home());
+  }
+
+  it('says a stored number in the unit a person means by it', () => {
+    // **Wrong by two orders of magnitude and reading perfectly** — the exact
+    // failure the catalog warns the *agent* about, on the way back out.
+    expect(
+      summarize({
+        name: 'Too warm',
+        triggers: [
+          {
+            kind: 'deviceState',
+            target: { select: { capability: 'temperature' } },
+            path: 'sensors.temperatureCenti',
+            op: 'gt',
+            value: 2500,
+            for: 60_000,
+          },
+        ],
+        actions: [{ kind: 'logActivity', message: 'warm' }],
+      }),
+    ).toBe(
+      'When the temperature on any of the temperature sensors goes above 25 °C for 1 minute: ' +
+        'write a line in the history.',
+    );
+  });
+
+  it('names the days rather than counting them', () => {
+    expect(
+      summarize({
+        name: 'Morning',
+        triggers: [{ kind: 'schedule', at: '07:00', days: [1, 2, 3, 4, 5] }],
+        actions: [{ kind: 'logActivity', message: 'up' }],
+      }),
+    ).toBe('When it is 07:00 on weekdays: write a line in the history.');
+
+    expect(
+      summarize({
+        name: 'Weekend',
+        triggers: [{ kind: 'schedule', at: '09:30', days: [0, 6] }],
+        actions: [{ kind: 'logActivity', message: 'lie in' }],
+      }),
+    ).toBe('When it is 09:30 on weekends: write a line in the history.');
+
+    expect(
+      summarize({
+        name: 'Bins',
+        triggers: [{ kind: 'schedule', at: '20:00', days: [2] }],
+        actions: [{ kind: 'logActivity', message: 'bins' }],
+      }),
+    ).toBe('When it is 20:00 on Tuesday: write a line in the history.');
+  });
+
+  it('spells a duration out in the unit it was written in', () => {
+    expect(
+      summarize({
+        name: 'Hall',
+        triggers: [
+          {
+            kind: 'deviceState',
+            target: { select: { capability: 'occupancy' } },
+            path: 'sensors.occupied',
+            op: 'eq',
+            value: true,
+          },
+        ],
+        actions: [
+          { kind: 'wait', ms: 300_000 },
+          { kind: 'logActivity', message: 'late' },
+        ],
+      }),
+    ).toBe(
+      'When any of the motion sensors sees somebody: wait 5 minutes, then write a line in the history.',
+    );
+  });
+
+  it('puts a reading before its devices, and a state after them', () => {
+    // Two shapes of path with opposite word orders: "the battery on any of …"
+    // against "any of the motion sensors sees somebody". One order for both
+    // named the subject twice.
+    expect(
+      summarize({
+        name: 'Low battery',
+        triggers: [
+          {
+            kind: 'deviceState',
+            target: { select: { capability: 'battery' } },
+            path: 'battery.percent',
+            op: 'lt',
+            value: 15,
+            hysteresis: 5,
+          },
+        ],
+        actions: [{ kind: 'logActivity', message: 'flat' }],
+      }),
+    ).toBe(
+      'When the battery on any of the devices with a battery goes below 15%: ' +
+        'write a line in the history.',
     );
   });
 });
