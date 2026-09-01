@@ -374,6 +374,25 @@ readable, continuing means starting a new one (`410 conversation_ended`), and
 the rule it produced is a row in `automations` either way. Sessions also expire
 after two hours idle, and at most eight are held at once.
 
+**And `GET /automations/chats` is what makes that split worth anything.** A
+transcript kept for a fortnight that nothing can find again is a transcript
+thrown away: closing the page lost the conversation as surely as never having
+stored it, because the only way back was a session id nobody writes down. The
+list carries the first thing the *person* said as its title, and `live` beside
+it — readable and continuable are two different states, and an app has to say
+which one it is offering rather than discovering it on the next message.
+
+**One question is outstanding at a time, and every other call in its response
+is still closed.** `ask_user` hands control back mid-response, and the API's
+rule is per *response*: every `tool_use` in an assistant turn needs a
+`tool_result` in the very next message. Handing back used to abandon the rest —
+the calls before the question were collected and dropped, the ones after it
+never ran — so the next request carried a half-answered turn and the whole
+conversation was refused with `400 tool_use ids were found without tool_result
+blocks`, which reached the chat as a wall of JSON where the answer belonged. The
+others are run and stashed, `answer()` sends them with the answer, and a second
+question in one response is refused inside the turn rather than left open.
+
 ### What it costs, and where that is written
 
 One `ai_runs` row per conversation, `kind: 'automate'`, with `automation_id`

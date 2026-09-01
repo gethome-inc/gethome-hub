@@ -854,6 +854,24 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `automation-tools.ts` beside the tools: `Looked up list_rooms_zones.` is a
   function signature read out loud, on the one screen whose whole job is telling
   somebody who does not write software what their house is doing.
+  **`ask_user` hands back mid-response, and every *other* call in that response
+  still has to be closed.** The API's rule is per response — each `tool_use` in
+  an assistant turn needs a `tool_result` in the very next message — and handing
+  the question back used to abandon the rest (calls before it collected and
+  dropped, calls after it never run), so the next request carried a
+  half-answered turn and the conversation was refused outright with `400
+  tool_use ids were found without tool_result blocks`, reaching the chat as a
+  wall of JSON where the answer belonged. They are stashed and sent with the
+  answer; a second question in one response is refused inside the turn rather
+  than left open, since only one call id can be closed by an answer.
+  **A transcript nothing can find again is a transcript thrown away**, which is
+  what `GET /automations/chats` exists for: the fourteen-day record was
+  unreachable the moment a page closed, because the only way back was a session
+  id nobody writes down. Its `title` is the first thing the *person* said (the
+  agent's opening line is about the home, not about the ask) and `live` says
+  whether it can be *continued* as against merely read — two different states,
+  and an app has to offer the right one rather than find out on the next
+  message.
   **A message is acknowledged, never awaited.** `POST /automations/chat` and
   `…/messages` answer the moment the hub takes the message — the person's own
   row and nothing else — because a turn is a provider loop with a three-minute

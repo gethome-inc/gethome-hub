@@ -83,6 +83,18 @@ export interface ChatMessageWire {
  * the socket: its text as it is produced, a line per tool call, and a `turn`
  * frame saying the stored transcript is now what to draw.
  */
+/** One past conversation, as a list of them is drawn. */
+export interface ChatSummaryWire {
+  sessionId: string;
+  startedAt: string;
+  updatedAt: string;
+  messageCount: number;
+  /** The first thing the person said — what they will recognise it by. */
+  title: string;
+  /** Whether it can still be *continued*, as against merely read. */
+  live: boolean;
+}
+
 export interface ChatReply {
   sessionId: string;
   /** The message rows this exchange has produced so far — the user's own. */
@@ -234,6 +246,63 @@ export class AutomationChat {
    */
   async idle(): Promise<void> {
     await Promise.all([...this.sessions.values()].map((session) => session.inFlight));
+  }
+
+  /**
+   * Every conversation this home has had, newest first.
+   *
+   * **Because a chat you cannot go back to is a chat you have lost.** The
+   * transcript outlives the conversation by fourteen days — that split is the
+   * whole reason keeping one is affordable — and without a list of them the
+   * only way back was a session id nobody has written down. Closing the page
+   * threw the conversation away as surely as if it had never been stored.
+   *
+   * `title` is the **first thing the person said**, which is what they will
+   * recognise it by; the agent's own opening line is about the home rather
+   * than about what was asked. `live` is whether it can still be *continued* —
+   * the model's message history is in memory and dies with the process — and
+   * is deliberately separate from being readable, because they are two
+   * different things and an app has to say which one it is offering.
+   */
+  async list(): Promise<ChatSummaryWire[]> {
+    const rows = await this.options.db
+      .select({
+        sessionId: automationChatMessages.sessionId,
+        at: automationChatMessages.at,
+        role: automationChatMessages.role,
+        text: automationChatMessages.text,
+      })
+      .from(automationChatMessages)
+      .orderBy(asc(automationChatMessages.at));
+
+    const sessions = new Map<string, ChatSummaryWire>();
+    for (const row of rows) {
+      const existing = sessions.get(row.sessionId);
+      if (!existing) {
+        sessions.set(row.sessionId, {
+          sessionId: row.sessionId,
+          startedAt: row.at.toISOString(),
+          updatedAt: row.at.toISOString(),
+          messageCount: 1,
+          // A conversation whose first row is somehow not the person's still
+          // gets a title rather than an empty one — the transcript is written
+          // row by row and a crash between them is possible.
+          title: row.role === 'user' ? row.text : '',
+          live: this.sessions.has(row.sessionId),
+        });
+        continue;
+      }
+      existing.updatedAt = row.at.toISOString();
+      existing.messageCount += 1;
+      if (existing.title === '' && row.role === 'user') existing.title = row.text;
+    }
+
+    return [...sessions.values()]
+      .map((session) => ({
+        ...session,
+        title: session.title.slice(0, 120) || 'Untitled conversation',
+      }))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
   /** The transcript, oldest first. Readable long after the conversation that

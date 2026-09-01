@@ -116,6 +116,19 @@ export function createAutomationConversation(
   const messages: Anthropic.MessageParam[] = [];
   /** The `ask_user` call the conversation is waiting on, if any. */
   let pendingQuestion: string | null = null;
+  /**
+   * Results for the **other** tool calls in the same response as that
+   * question, waiting to go back with the answer.
+   *
+   * A model may call two things at once — look at the devices *and* ask which
+   * lamp — and the API's rule is per response, not per call: every `tool_use`
+   * in an assistant message must be answered by a `tool_result` in the very
+   * next message. Handing the question back used to abandon the rest, so the
+   * next request carried an assistant turn with an unanswered call in it and
+   * the whole conversation was refused with `400 tool_use ids were found
+   * without tool_result blocks`.
+   */
+  let pendingResults: Anthropic.ToolResultBlockParam[] = [];
   let opened = false;
 
   /**
@@ -243,12 +256,32 @@ export function createAutomationConversation(
               });
               continue;
             }
+            if (pendingQuestion !== null) {
+              // Two questions in one response. Only one can be outstanding —
+              // an answer closes one call id — so the second is refused here
+              // rather than left open, which would be the same 400 by another
+              // route.
+              results.push({
+                type: 'tool_result',
+                tool_use_id: call.id,
+                content:
+                  'Only one question can be outstanding at a time. Ask this one after the ' +
+                  'first is answered.',
+                is_error: true,
+              });
+              continue;
+            }
             // The conversation stops here and the answer closes this call —
             // which is why `answer()` exists separately from `send()`.
+            //
+            // **`continue`, never `break`.** Every other call in this same
+            // response still needs its result, and skipping them left the
+            // assistant turn half-answered and the API refusing the whole
+            // conversation on the next request.
             pendingQuestion = call.id;
             context?.onStep?.(toolStep('ask_user').summary, 'asking', parsed.data.question);
             handedBack = { kind: 'question', question: parsed.data };
-            break;
+            continue;
           }
 
           if (call.name === 'submit_automation') {
@@ -291,9 +324,12 @@ export function createAutomationConversation(
         }
 
         if (handedBack?.kind === 'question') {
-          // Nothing is appended: the pending call stays open and `answer()`
-          // closes it. Appending a partial result set here would leave the
-          // conversation with a tool call the API expects a result for.
+          // Nothing is appended *yet*: the API wants one user message carrying
+          // a result for every call in the assistant turn, and the question's
+          // own result is the person's answer, which does not exist until they
+          // give it. So the rest are stashed and `answer()` sends them all
+          // together.
+          pendingResults = results;
           return handedBack;
         }
 
@@ -392,10 +428,19 @@ export function createAutomationConversation(
     async answer(text, context) {
       if (pendingQuestion === null) return this.send(text, context);
       const toolUseId = pendingQuestion;
+      const alsoOutstanding = pendingResults;
       pendingQuestion = null;
+      pendingResults = [];
       messages.push({
         role: 'user',
-        content: [{ type: 'tool_result', tool_use_id: toolUseId, content: text }],
+        // The answer **and** every other call the same response made. One
+        // message, every `tool_use` in the assistant turn accounted for —
+        // which is the API's actual rule, and sending only the answer is what
+        // used to refuse the conversation outright.
+        content: [
+          ...alsoOutstanding,
+          { type: 'tool_result', tool_use_id: toolUseId, content: text },
+        ],
       });
       return pump(context);
     },

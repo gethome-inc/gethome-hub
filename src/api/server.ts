@@ -2574,6 +2574,20 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     },
   );
 
+  /**
+   * Every conversation this home has had.
+   *
+   * Listed **before** the `:id` route below, or Fastify would try to parse
+   * `chats` as a session uuid. Reading is guarded like the rest of the chat
+   * surface: a transcript names the home's devices and what somebody asked
+   * for, which is the same shape of thing the rules themselves are.
+   */
+  app.get('/api/v1/automations/chats', needs('automation.manage'), async (request, reply) => {
+    const refused = await chatGuard(request, reply);
+    if (refused) return refused;
+    return deps.automationChat.list();
+  });
+
   app.get('/api/v1/automations/chat/:id', needs('automation.manage'), async (request, reply) => {
     const refused = await chatGuard(request, reply);
     if (refused) return refused;

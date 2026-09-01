@@ -95,6 +95,29 @@ const text = (value: string) => ({ type: 'text', text: value });
 /** A summarized reasoning block, which is what `display: 'summarized'` returns
  *  and what the chat streams while nothing else is happening yet. */
 const thinking = (value: string) => ({ type: 'thinking', thinking: value });
+
+/**
+ * Every `tool_use` id the conversation had answered by the time request `index`
+ * went out.
+ *
+ * **Searched, not read off the tail.** The loop hands the *same* `messages`
+ * array to every request and keeps pushing to it, so a mock call's `messages`
+ * is the live array rather than a snapshot — asserting on `at(-1)` reads
+ * whatever was appended last, which is usually the wrong message entirely.
+ */
+function closedToolIds(index: number): string[] {
+  const request = streamMock.mock.calls[index]?.[0] as
+    | { messages: { role: string; content: unknown }[] }
+    | undefined;
+  const ids: string[] = [];
+  for (const message of request?.messages ?? []) {
+    if (!Array.isArray(message.content)) continue;
+    for (const block of message.content as { type: string; tool_use_id?: string }[]) {
+      if (block.type === 'tool_result' && block.tool_use_id) ids.push(block.tool_use_id);
+    }
+  }
+  return ids;
+}
 const toolUse = (name: string, input: unknown, id: string = randomUUID()) => ({
   type: 'tool_use',
   id,
@@ -312,6 +335,68 @@ describe('the automation conversation', () => {
 
     const second = streamMock.mock.calls[1]?.[0] as { messages: unknown[] };
     expect(JSON.stringify(second.messages)).toContain('Kitchen lamp');
+  });
+
+  it('closes every call in a response that also asked a question', async () => {
+    /**
+     * **The 400 this exists to stop coming back.** A model may look something
+     * up *and* ask which lamp in one response, and the API's rule is per
+     * response: every `tool_use` in an assistant turn must be answered by a
+     * `tool_result` in the very next message. Handing the question back used
+     * to `break` out of the call loop, so the other call was abandoned — and
+     * the next request was refused outright with `messages.N: tool_use ids
+     * were found without tool_result blocks`, which reached the chat as a
+     * wall of JSON where the answer should have been.
+     */
+    // A call on **each side** of the question, because the two sides broke for
+    // different reasons: the one before it was collected and then thrown away,
+    // and the one after it was never run at all.
+    streamMock
+      .mockReturnValueOnce(
+        assistant([
+          toolUse('list_devices', {}, 'toolu_look'),
+          toolUse('ask_user', { question: 'Which lamp?', options: [{ id: 'a', label: 'Bedside' }] }, 'toolu_ask'),
+          toolUse('list_rooms_zones', {}, 'toolu_rooms'),
+        ]),
+      )
+      .mockReturnValueOnce(assistant([text('Right you are.')], 'end_turn'));
+
+    const conversation = conversationFor([{ id: deviceId, name: 'Bedside' }]);
+    const asked = await conversation.send('lights');
+    expect(asked.kind).toBe('question');
+
+    await conversation.answer('the bedside one');
+
+    // The message the answer produced has to account for **both** calls.
+    //
+    // Searched rather than read off the tail: the loop hands the *same*
+    // `messages` array to every request and goes on pushing to it, so by the
+    // time this runs the last entry is the final assistant turn. Asserting on
+    // `at(-1)` here would be reading the wrong message.
+    expect(new Set(closedToolIds(1))).toEqual(new Set(['toolu_look', 'toolu_ask', 'toolu_rooms']));
+  });
+
+  it('refuses a second question in one response rather than leaving it open', async () => {
+    // Only one call id can be closed by an answer, so a second question is
+    // answered here — leaving it open is the same 400 by another route.
+    streamMock
+      .mockReturnValueOnce(
+        assistant([
+          toolUse('ask_user', { question: 'Which lamp?', options: [{ id: 'a', label: 'Bedside' }] }, 'toolu_one'),
+          toolUse('ask_user', { question: 'And when?', options: [{ id: 'b', label: 'At dusk' }] }, 'toolu_two'),
+        ]),
+      )
+      .mockReturnValueOnce(assistant([text('Right you are.')], 'end_turn'));
+
+    const conversation = conversationFor();
+    const asked = await conversation.send('lights');
+    expect(asked.kind).toBe('question');
+    // The first is the one being waited on.
+    if (asked.kind === 'question') expect(asked.question.question).toBe('Which lamp?');
+
+    await conversation.answer('the bedside one');
+
+    expect(new Set(closedToolIds(1))).toEqual(new Set(['toolu_one', 'toolu_two']));
   });
 
   it('says something before the request, not only after it', async () => {
@@ -546,6 +631,38 @@ describe('the chat service', () => {
     release();
     await chat.idle();
     expect((await chat.transcript(started.sessionId)).map((m) => m.role)).toEqual(['user', 'agent']);
+  });
+
+  it('lists past conversations, newest first, and says which can go on', async () => {
+    // **A chat you cannot get back to is a chat you have lost.** The
+    // transcript outlives the conversation by a fortnight — the split that
+    // makes keeping one affordable — and without this the only way back was a
+    // session id nobody has written down.
+    const { chat } = await chatFor([{ kind: 'said', text: 'hello' }]);
+    const first = await chat.start({ memberId, message: 'lights in the hall' });
+    await chat.idle();
+
+    const { chat: other } = await chatFor([{ kind: 'said', text: 'hello' }]);
+    const second = await other.start({ memberId, message: 'lock up at midnight' });
+    await other.idle();
+    // Ended as a conversation, still there as history.
+    await other.close(second.sessionId);
+
+    const listed = await chat.list();
+    const ids = listed.map((entry) => entry.sessionId);
+    expect(ids).toContain(first.sessionId);
+    expect(ids).toContain(second.sessionId);
+
+    // The title is the first thing the *person* said — the agent's own opening
+    // is about the home rather than about what was asked.
+    const hall = listed.find((entry) => entry.sessionId === first.sessionId);
+    expect(hall?.title).toBe('lights in the hall');
+    expect(hall?.messageCount).toBeGreaterThan(1);
+
+    // Readable and continuable are two different things, and an app has to
+    // say which one it is offering.
+    expect(hall?.live).toBe(true);
+    expect(listed.find((entry) => entry.sessionId === second.sessionId)?.live).toBe(false);
   });
 
   it('will not let one member continue another member’s conversation', async () => {
