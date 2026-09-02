@@ -94,6 +94,35 @@ export interface ChatSession {
    * into itself as a message. Consumed on the first exchange and cleared.
    */
   priming?: string | undefined;
+  /**
+   * What the agent has done **this round**, waiting for the row it produced.
+   *
+   * Filled by `onStep` as the round runs and taken by the first row the round
+   * writes — see `write`. Reset when a round begins rather than when it ends,
+   * so a turn that threw between the two cannot hand its working to the next
+   * one's answer.
+   */
+  steps: ChatStepWire[];
+}
+
+/**
+ * One thing the agent did, kept with the message it produced.
+ *
+ * **The same three fields the `step` frame already carries.** An app draws the
+ * live trail from those frames and the stored one from these, so a round read
+ * back a week later looks like the round somebody watched — one shape rather
+ * than two that would drift.
+ *
+ * `kind` stays an **open** string, the `commandFailed.kind` rule: a word a
+ * later build adds draws the neutral mark and keeps its sentence.
+ */
+export interface ChatStepWire {
+  /** The hub's own sentence, present tense, written for a person. */
+  text: string;
+  /** `reading` · `checking` · `writing` · `asking` · `thinking`, and open. */
+  kind: string;
+  /** What exactly — the question about to be asked, why a rule came back. */
+  detail?: string;
 }
 
 export interface ChatMessageWire {
@@ -103,6 +132,28 @@ export interface ChatMessageWire {
   text: string;
   data?: unknown;
 }
+
+/**
+ * How much of a round's working is kept, and it is a *bound* rather than a
+ * capacity.
+ *
+ * A transcript row is a few hundred bytes by design — that is what makes
+ * keeping a fortnight of them affordable on an SD card — and steps are the one
+ * thing here that could quietly turn one into kilobytes. Twelve covers every
+ * round this agent actually runs (seven tools, and the prompt makes it
+ * converge); a round that did more than twelve things went wrong in a way
+ * these twelve show.
+ *
+ * The **last** twelve, which is the direction an app's live trail drops from
+ * too — so what somebody watched is a suffix of what they read back rather
+ * than a different set — and the row nearest the answer is the one most about
+ * it.
+ */
+const TURN_STEP_LIMIT = 12;
+/** A sentence, and a short paragraph. Cut rather than dropped: a step whose
+ *  detail ran long still says what it was. */
+const STEP_TEXT_LIMIT = 200;
+const STEP_DETAIL_LIMIT = 400;
 
 /**
  * What a request to say something gets back — **an acknowledgement, not an
@@ -305,6 +356,7 @@ export class AutomationChat {
       startedAt: Date.now(),
       inFlight: Promise.resolve(),
       recordedUsd: 0,
+      steps: [],
       submissions: 0,
       ...(input.automationId !== undefined ? { automationId: input.automationId } : {}),
     };
@@ -378,6 +430,7 @@ export class AutomationChat {
       startedAt: Date.now(),
       inFlight: Promise.resolve(),
       recordedUsd: 0,
+      steps: [],
       submissions: 0,
       priming: recapOf(rows),
       ...(automationId !== undefined ? { automationId } : {}),
@@ -647,6 +700,10 @@ export class AutomationChat {
     text: string,
     how: 'send' | 'answer',
   ): Promise<void> {
+    // A round's working belongs to that round. Cleared here rather than after
+    // the rows are written, so a turn that throws between the two cannot hand
+    // its steps to the next answer.
+    session.steps = [];
     let turn: AutomationTurn;
     try {
       // **Consumed once, and it goes to the model rather than to the row.**
@@ -658,6 +715,16 @@ export class AutomationChat {
 
       turn = await session.conversation[how](primed, {
         onStep: (summary, kind, detail) => {
+          // Kept as well as sent. The frame fills the wait; the copy is what
+          // the row the round is about to write carries, so re-reading the
+          // conversation next week shows the working rather than only the
+          // answer it produced.
+          session.steps.push({
+            text: summary.slice(0, STEP_TEXT_LIMIT),
+            kind,
+            ...(detail !== undefined ? { detail: detail.slice(0, STEP_DETAIL_LIMIT) } : {}),
+          });
+          if (session.steps.length > TURN_STEP_LIMIT) session.steps.shift();
           this.options.events.emit('automationChat', {
             sessionId: session.id,
             phase: 'step',
@@ -924,6 +991,20 @@ export class AutomationChat {
 
   // ── Bookkeeping ────────────────────────────────────────────────────────────
 
+  /**
+   * One row of the transcript, and the round's working with the first of them.
+   *
+   * **The steps go on the first row the round writes, whichever kind it is.**
+   * A round can end as prose, as a question, as a line plus a rule card, or as
+   * a note saying the model failed — and the working is worth the same in all
+   * four, so the rule is a position rather than a list of cases. It is also
+   * what puts them *above* the whole group: one round's prose and the card for
+   * the rule it wrote belong under one account of how it got there, not with a
+   * copy between them.
+   *
+   * A `user` row never takes them: it is written before the round starts, and
+   * it is the one row here that is not the agent's answer to anything.
+   */
   private async write(
     session: ChatSession,
     role: ChatMessageWire['role'],
@@ -931,11 +1012,18 @@ export class AutomationChat {
     data?: unknown,
     memberId?: string,
   ): Promise<ChatMessageWire> {
+    const steps = role === 'user' ? [] : session.steps;
+    if (steps.length > 0) session.steps = [];
+    const payload =
+      steps.length > 0
+        ? { ...(typeof data === 'object' && data !== null ? data : {}), steps }
+        : data;
+
     const row = {
       sessionId: session.id,
       role,
       text: text.slice(0, 4_000),
-      data: data ?? null,
+      data: payload ?? null,
       memberId: memberId ?? null,
     };
     try {
@@ -946,7 +1034,7 @@ export class AutomationChat {
           at: written.at.toISOString(),
           role,
           text: written.text,
-          ...(data !== undefined ? { data } : {}),
+          ...(payload !== undefined ? { data: payload } : {}),
         };
       }
     } catch {
@@ -958,7 +1046,7 @@ export class AutomationChat {
       at: new Date().toISOString(),
       role,
       text: row.text,
-      ...(data !== undefined ? { data } : {}),
+      ...(payload !== undefined ? { data: payload } : {}),
     };
   }
 

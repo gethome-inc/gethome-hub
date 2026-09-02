@@ -567,6 +567,46 @@ screen whose whole job is telling somebody who does not write software what
 their house is doing. Present tense and unfinished, because a step goes up while
 it is happening.
 
+**And the working outlives the wait.** The steps used to be a stream and
+nothing else: they filled the seconds before a word of the reply existed and
+were gone the moment the turn landed, on the reasoning that the answer is the
+content. That holds for a dozen open rows above every answer somebody ever got,
+and it does not hold for the *fact* that there were a dozen — a rule arrives out
+of a handful of tool calls, and discarding all of them leaves the one page whose
+job is explaining a house to somebody who does not write software with nothing
+but the conclusion. So the round's steps are written into the **first row that
+round records** (`data.steps`, `[{text, kind, detail?}]`), whichever kind of row
+it is, and an app draws them folded above the answer.
+
+Five rules hold that to the size of a transcript row.
+
+**The first row of the round, not each row.** A submission writes the model's
+line and then the rule's card; the working is one account of how the round got
+there, so a copy between the two would read as two rounds.
+
+**Every kind of ending, including the ones that failed.** Prose, a question, a
+line plus a card, or a note saying the model could not be reached — the working
+is worth the same in all four, and most in the last. So the rule is a *position*
+rather than a list of cases, which is also what keeps a row shape added later
+carrying it without knowing it exists.
+
+**The person's own row never takes them**, and the round's buffer is cleared
+when a round **begins** rather than when it ends — so a turn that throws between
+the two cannot hand its working to the next round's answer.
+
+**Twelve, and the last twelve.** A transcript row is a few hundred bytes by
+design, and this is the one field that could quietly make it kilobytes; twelve
+covers every round this agent actually runs, and a round that did more than
+twelve things went wrong in a way those twelve show. The *last* twelve, which is
+the direction an app's live trail drops from as well, so what somebody watched
+is a suffix of what they read back rather than a different set. A long sentence
+or detail is **cut rather than dropped**: a step that ran over still says what
+it was.
+
+**And it is the `step` frame's own three fields.** An app draws the live trail
+from the frames and the stored one from these, so one shape rather than two that
+would drift; `kind` stays open there too.
+
 ### Which provider it runs on, and it is not the mapper's
 
 **This agent picks its own, deliberately.** `ai.provider` answers "which model

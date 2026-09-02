@@ -899,7 +899,23 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   streams thinking blocks empty). `kind` is what an app draws a mark from and is
   about the *shape of the act* rather than the tool — three tools all mean
   "reading your home" — so a new tool needs no app release; it is an open
-  string, the `commandFailed.kind` rule. The sentences live in
+  string, the `commandFailed.kind` rule.
+  **And the working outlives the wait**: the round's steps are written into the
+  **first row that round records** (`data.steps`, the frame's own three fields
+  so the live trail and the stored one cannot drift), whichever kind of row it
+  is — prose, a question, a card, or the note saying the model could not be
+  reached, which is the ending with the most to explain. They were a stream and
+  nothing else, gone the moment the turn landed, which is right about a dozen
+  open rows above every answer and wrong about the *fact* that there were a
+  dozen: a rule arrives out of a handful of tool calls and the page whose job
+  is explaining a house to somebody who does not write software was left with
+  the conclusion alone. Five bounds hold it to the size of a transcript row —
+  the round's first row rather than each of them, the buffer cleared when a
+  round **begins** so a throw cannot hand its working to the next answer, the
+  person's own row never taking them, and **the last twelve** steps with text
+  and detail **cut rather than dropped** (twelve covers every round this agent
+  runs; the *last* twelve is the direction an app's live trail drops from, so
+  what was watched is a suffix of what is read back). The sentences live in
   `automation-tools.ts` beside the tools: `Looked up list_rooms_zones.` is a
   function signature read out loud, on the one screen whose whole job is telling
   somebody who does not write software what their house is doing.

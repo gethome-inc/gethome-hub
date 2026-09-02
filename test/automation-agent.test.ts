@@ -11,7 +11,11 @@ import {
   settings as settingsTable,
 } from '../src/db/schema.js';
 import { openTestDb, resetDb, startedAutomations, type TestDb } from './helpers/db.js';
-import type { AutomationConversation, AutomationTurn } from '../src/ai/automation-conversation.js';
+import type {
+  AutomationConversation,
+  AutomationTurn,
+  AutomationTurnContext,
+} from '../src/ai/automation-conversation.js';
 import { automationSystemPrompt } from '../src/ai/automation-prompts.js';
 
 /**
@@ -70,6 +74,7 @@ vi.mock('@anthropic-ai/sdk', () => ({
 
 const { createAutomationConversation } = await import('../src/ai/automation-agent.js');
 const { AutomationChat, AutomationNotConfiguredError } = await import('../src/ai/automation-chat.js');
+type ChatStepWire = import('../src/ai/automation-chat.js').ChatStepWire;
 
 const log = pino({ level: 'silent' });
 const deviceId = randomUUID();
@@ -580,6 +585,13 @@ describe('the chat service', () => {
     /** What the conversation has spent *so far* — a running total, which is
      *  what a real one reports and what makes the delta rule testable. */
     cost?: () => number,
+    /** What the scripted round *does* before it answers: one list of
+     *  `[text, kind, detail?]` steps per round, and `throws` for a provider
+     *  that fails after having done some of them. */
+    extras?: {
+      steps?: [string, string, string?][][];
+      throws?: boolean;
+    },
   ) => Promise<{
     chat: InstanceType<typeof AutomationChat>;
     engine: Awaited<ReturnType<typeof startedAutomations>>['engine'];
@@ -598,7 +610,7 @@ describe('the chat service', () => {
     memberId = randomUUID();
     await handle.db.insert(membersTable).values({ id: memberId, name: 'Anna', role: 'member' });
 
-    chatFor = async (turns, gate, breakStore, cost) => {
+    chatFor = async (turns, gate, breakStore, cost, extras) => {
       const activity = new ActivityService(handle.db, events);
       const registry = { listDevices: () => [], execute: async () => {} };
       const { engine, store } = await startedAutomations(handle.db, events, registry, activity);
@@ -609,19 +621,26 @@ describe('the chat service', () => {
         };
       }
       let index = 0;
+      /** One round: report whatever this round was scripted to do, then
+       *  answer — or fail, which is the path where the working still has to
+       *  be kept. */
+      const round = async (_text: string, context?: AutomationTurnContext): Promise<AutomationTurn> => {
+        const at = index;
+        for (const [text, kind, detail] of extras?.steps?.[at] ?? []) {
+          context?.onStep?.(text, kind as never, detail);
+        }
+        await gate;
+        index += 1;
+        if (extras?.throws) throw new Error('the provider hung up');
+        return turns[at] ?? { kind: 'said', text: 'nothing left to say' };
+      };
       const scripted: AutomationConversation = {
         provider: 'anthropic',
         modelId: 'claude-opus-5',
         awaitingAnswer: () => false,
         costUsd: cost ?? (() => 0.12),
-        send: async () => {
-          await gate;
-          return turns[index++] ?? { kind: 'said', text: 'nothing left to say' };
-        },
-        answer: async () => {
-          await gate;
-          return turns[index++] ?? { kind: 'said', text: 'nothing left to say' };
-        },
+        send: round,
+        answer: round,
       };
       const chat = new AutomationChat({
         db: handle.db,
@@ -788,6 +807,157 @@ describe('the chat service', () => {
     // A conversation is not about a device model, and says so rather than
     // inventing a hash.
     expect(rows[0]?.exposesHash).toBe('');
+  });
+
+  it('keeps what it did with the answer it produced', async () => {
+    /**
+     * **The working used to go with the wait.** The steps filled the seconds
+     * before a word of the reply existed and were discarded the moment the
+     * turn landed — so a rule that arrived out of four tool calls kept none of
+     * them, on the one page whose whole job is telling somebody who does not
+     * write software what their house is about to start doing.
+     */
+    const { chat } = await chatFor(
+      [{ kind: 'said', text: 'Done.' }],
+      undefined,
+      undefined,
+      undefined,
+      {
+        steps: [[
+          ['Reading your home', 'reading'],
+          ['Checking the rule would work', 'checking', 'Nothing would fire twice.'],
+        ]],
+      },
+    );
+
+    const started = await chat.start({ memberId: memberId, message: 'go' });
+    await chat.idle();
+
+    const transcript = await chat.transcript(started.sessionId);
+    const agent = transcript.find((message) => message.role === 'agent');
+    expect((agent?.data as { steps: ChatStepWire[] }).steps).toEqual([
+      { text: 'Reading your home', kind: 'reading' },
+      {
+        text: 'Checking the rule would work',
+        kind: 'checking',
+        detail: 'Nothing would fire twice.',
+      },
+    ]);
+  });
+
+  it('puts them on the first row of the round rather than on every row', async () => {
+    /**
+     * A submission writes the model's line and then the card. The working is
+     * one account of how the round got there, so it belongs above the pair —
+     * a copy between them would read as two rounds.
+     */
+    const { chat } = await chatFor(
+      [{ kind: 'submitted', document: goodDocument, accepted: true, text: 'Here you go.' }],
+      undefined,
+      undefined,
+      undefined,
+      { steps: [[['Writing the rule', 'writing']]] },
+    );
+
+    const started = await chat.start({ memberId: memberId, message: 'go' });
+    await chat.idle();
+
+    const transcript = await chat.transcript(started.sessionId);
+    const carrying = transcript.filter(
+      (message) => (message.data as { steps?: unknown[] } | undefined)?.steps !== undefined,
+    );
+    expect(carrying).toHaveLength(1);
+    expect(carrying[0]?.role).toBe('agent');
+    // And the preview's own fields are untouched by sharing the column.
+    const preview = transcript.find((message) => message.role === 'preview');
+    expect((preview?.data as { automationId: string }).automationId).toBeDefined();
+  });
+
+  it('keeps the working of a round that failed, which is the round with most to explain', async () => {
+    const { chat } = await chatFor([], undefined, undefined, undefined, {
+      throws: true,
+      steps: [[['Reading your home', 'reading']]],
+    });
+
+    const started = await chat.start({ memberId: memberId, message: 'go' });
+    await chat.idle();
+
+    const note = (await chat.transcript(started.sessionId)).find(
+      (message) => message.role === 'note',
+    );
+    expect((note?.data as { steps: ChatStepWire[] }).steps).toEqual([
+      { text: 'Reading your home', kind: 'reading' },
+    ]);
+  });
+
+  it("never gives the person's own row the agent's working, or one round's to the next", async () => {
+    const { chat } = await chatFor(
+      [
+        { kind: 'said', text: 'first' },
+        { kind: 'said', text: 'second' },
+      ],
+      undefined,
+      undefined,
+      undefined,
+      // The second round does nothing but answer — so its row must carry no
+      // steps rather than inheriting the first round's.
+      { steps: [[['Reading your home', 'reading']], []] },
+    );
+
+    const started = await chat.start({ memberId: memberId, message: 'go' });
+    await chat.idle();
+    await chat.reply(started.sessionId, memberId, 'and again');
+    await chat.idle();
+
+    const transcript = await chat.transcript(started.sessionId);
+    const steps = transcript.map(
+      (message) => (message.data as { steps?: unknown[] } | undefined)?.steps,
+    );
+    // user, agent(first), user, agent(second)
+    expect(transcript.map((message) => message.role)).toEqual(['user', 'agent', 'user', 'agent']);
+    expect(steps[0]).toBeUndefined();
+    expect(steps[1]).toHaveLength(1);
+    expect(steps[2]).toBeUndefined();
+    expect(steps[3]).toBeUndefined();
+  });
+
+  it('keeps the last twelve, so one long round cannot make a row into kilobytes', async () => {
+    const many: [string, string, string?][] = Array.from({ length: 20 }, (_, index) => [
+      `Step ${index}`,
+      'thinking',
+    ]);
+    const { chat } = await chatFor([{ kind: 'said', text: 'Done.' }], undefined, undefined, undefined, {
+      steps: [many],
+    });
+
+    const started = await chat.start({ memberId: memberId, message: 'go' });
+    await chat.idle();
+
+    const agent = (await chat.transcript(started.sessionId)).find(
+      (message) => message.role === 'agent',
+    );
+    const kept = (agent?.data as { steps: ChatStepWire[] }).steps;
+    expect(kept).toHaveLength(12);
+    // The *last* twelve — the direction a live trail drops from too, so what
+    // was watched is a suffix of what is read back.
+    expect(kept[0]?.text).toBe('Step 8');
+    expect(kept.at(-1)?.text).toBe('Step 19');
+  });
+
+  it('cuts a step that ran long rather than dropping it', async () => {
+    const { chat } = await chatFor([{ kind: 'said', text: 'Done.' }], undefined, undefined, undefined, {
+      steps: [[['x'.repeat(400), 'reading', 'y'.repeat(900)]]],
+    });
+
+    const started = await chat.start({ memberId: memberId, message: 'go' });
+    await chat.idle();
+
+    const agent = (await chat.transcript(started.sessionId)).find(
+      (message) => message.role === 'agent',
+    );
+    const [step] = (agent?.data as { steps: ChatStepWire[] }).steps;
+    expect(step?.text).toHaveLength(200);
+    expect(step?.detail).toHaveLength(400);
   });
 
   it('names what answered, so a conversation says what it cost and on what', async () => {
