@@ -2592,9 +2592,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const refused = await chatGuard(request, reply);
     if (refused) return refused;
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    // The same `spend` block the list carries, so a chat opened straight from
+    // a link says what it cost without the list having been read first.
+    const spend = await deps.automationChat.spend(id);
     return {
       sessionId: id,
       live: deps.automationChat.isLive(id),
+      ...(spend !== undefined ? { spend } : {}),
       messages: await deps.automationChat.transcript(id),
     };
   });

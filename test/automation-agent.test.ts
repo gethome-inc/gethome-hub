@@ -577,6 +577,9 @@ describe('the chat service', () => {
     /** Make the disk refuse *after* the model has answered — the half of a
      *  turn that sits outside the provider call's own catch. */
     breakStore?: boolean,
+    /** What the conversation has spent *so far* — a running total, which is
+     *  what a real one reports and what makes the delta rule testable. */
+    cost?: () => number,
   ) => Promise<{
     chat: InstanceType<typeof AutomationChat>;
     engine: Awaited<ReturnType<typeof startedAutomations>>['engine'];
@@ -595,7 +598,7 @@ describe('the chat service', () => {
     memberId = randomUUID();
     await handle.db.insert(membersTable).values({ id: memberId, name: 'Anna', role: 'member' });
 
-    chatFor = async (turns, gate, breakStore) => {
+    chatFor = async (turns, gate, breakStore, cost) => {
       const activity = new ActivityService(handle.db, events);
       const registry = { listDevices: () => [], execute: async () => {} };
       const { engine, store } = await startedAutomations(handle.db, events, registry, activity);
@@ -610,7 +613,7 @@ describe('the chat service', () => {
         provider: 'anthropic',
         modelId: 'claude-opus-5',
         awaitingAnswer: () => false,
-        costUsd: () => 0.12,
+        costUsd: cost ?? (() => 0.12),
         send: async () => {
           await gate;
           return turns[index++] ?? { kind: 'said', text: 'nothing left to say' };
@@ -785,6 +788,103 @@ describe('the chat service', () => {
     // A conversation is not about a device model, and says so rather than
     // inventing a hash.
     expect(rows[0]?.exposesHash).toBe('');
+  });
+
+  it('names what answered, so a conversation says what it cost and on what', async () => {
+    const { chat } = await chatFor([
+      { kind: 'submitted', document: goodDocument, accepted: true, text: '' },
+    ]);
+    const started = await chat.start({ memberId: memberId, message: 'go' });
+    await chat.idle();
+    await chat.close(started.sessionId);
+
+    const [summary] = await chat.list();
+    expect(summary?.spend?.usd).toBeCloseTo(0.12);
+    // Read back as recorded — the provider and the id are facts about a run
+    // that happened, and only the *label* is looked up.
+    expect(summary?.spend?.provider).toBe('anthropic');
+    expect(summary?.spend?.modelId).toBe('claude-opus-5');
+    expect(summary?.spend?.model).toBe('Opus 5');
+  });
+
+  it('counts what a live conversation has spent but not yet written down', async () => {
+    /**
+     * **A chat in progress is exactly the one on screen**, and its rows are
+     * written when it submits and again when it closes — so reading the
+     * ledger alone would draw a paid conversation as free while somebody
+     * watched it work, and jump to the real figure minutes after they had
+     * stopped looking.
+     */
+    const { chat } = await chatFor([{ kind: 'said', text: 'thinking about it' }]);
+    const started = await chat.start({ memberId: memberId, message: 'go' });
+    await chat.idle();
+
+    // Nothing in the ledger yet: it neither submitted nor closed.
+    expect(await handle.db.select().from(aiRunsTable)).toHaveLength(0);
+    expect(chat.isLive(started.sessionId)).toBe(true);
+
+    const [summary] = await chat.list();
+    expect(summary?.spend?.usd).toBeCloseTo(0.12);
+    expect(summary?.spend?.model).toBe('Opus 5');
+  });
+
+  it('records the delta on a second submission rather than the total twice', async () => {
+    /**
+     * `record` runs at every submission and again at the end, and each row
+     * carries what happened *since the last one*. Writing the running total
+     * each time would make a two-rule conversation read as having cost half
+     * as much again as it did, once the rows were summed.
+     */
+    let spent = 0.12;
+    const { chat } = await chatFor(
+      [
+        { kind: 'submitted', document: goodDocument, accepted: true, text: 'one' },
+        { kind: 'submitted', document: goodDocument, accepted: true, text: 'two' },
+      ],
+      undefined,
+      undefined,
+      () => spent,
+    );
+
+    const started = await chat.start({ memberId: memberId, message: 'go' });
+    await chat.idle();
+    spent = 0.3;
+    await chat.reply(started.sessionId, memberId, 'and again');
+    await chat.idle();
+    await chat.close(started.sessionId);
+
+    const rows = await handle.db.select().from(aiRunsTable);
+    const total = rows.reduce((sum, row) => sum + (row.costUsd ?? 0), 0);
+    expect(total).toBeCloseTo(0.3);
+    // Every row names the conversation, which is what makes the sum
+    // answerable per chat rather than only per rule.
+    expect(rows.every((row) => row.sessionId === started.sessionId)).toBe(true);
+
+    const [summary] = await chat.list();
+    expect(summary?.spend?.usd).toBeCloseTo(0.3);
+  });
+
+  it('says nothing rather than nothing-spent when the ledger has lost the run', async () => {
+    /**
+     * `ai_runs` keeps the last sixty runs of every kind and a transcript
+     * lives a fortnight, so a home that has recognised a few devices since
+     * can open a perfectly readable conversation whose spend row is gone.
+     * "$0.00" would be a claim about a chat that plainly cost something; the
+     * absence is the truth — the rule `GET /system/update`'s `available`
+     * already follows.
+     */
+    const { chat } = await chatFor([
+      { kind: 'submitted', document: goodDocument, accepted: true, text: '' },
+    ]);
+    const started = await chat.start({ memberId: memberId, message: 'go' });
+    await chat.idle();
+    await chat.close(started.sessionId);
+    await handle.db.delete(aiRunsTable);
+
+    const [summary] = await chat.list();
+    // The conversation is still entirely readable.
+    expect(summary?.sessionId).toBe(started.sessionId);
+    expect(summary?.spend).toBeUndefined();
   });
 
   it('refuses when the owner has switched AI off, and says which of the two it is', async () => {

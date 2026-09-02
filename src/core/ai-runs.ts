@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { asc, desc, eq, inArray, lt, sql } from 'drizzle-orm';
+import { asc, desc, eq, inArray, isNotNull, lt, sql } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import { aiRunExchanges, aiRuns } from '../db/schema.js';
 // Type-only, so the Anthropic SDK is not pulled into the core graph.
@@ -52,6 +52,17 @@ export interface AiRunEvent {
   error?: string;
 }
 
+/** What one conversation has cost so far, and what was answering by the end
+ *  of it. Summed across the rows a conversation wrote; see `spendBySession`. */
+export interface SessionSpend {
+  /** US dollars, estimated from token usage at the price of the day. */
+  usd: number;
+  /** anthropic | openai, as recorded. */
+  provider: string;
+  /** The model id as recorded — read back, never re-derived. */
+  modelId: string;
+}
+
 export interface AiRunStart {
   kind: AiRunKind;
   adapter: string;
@@ -70,6 +81,14 @@ export interface AiRunStart {
    * than a rule, and absent on a conversation that never submitted one.
    */
   automationId?: string | undefined;
+  /**
+   * The conversation an `automate` row belongs to.
+   *
+   * What makes a conversation's own spend answerable: `automationId` is null
+   * for a chat that submitted nothing, and a revived one writes a row per
+   * incarnation, so nothing else could total them.
+   */
+  sessionId?: string | undefined;
 }
 
 export interface AiRunOutcome {
@@ -177,6 +196,7 @@ export class AiRunLog {
             provider: input.provider ?? null,
             modelId: input.modelId ?? null,
             automationId: input.automationId ?? null,
+            sessionId: input.sessionId ?? null,
             ok: outcome.ok,
             costUsd: outcome.costUsd ?? null,
             turns: outcome.turns ?? null,
@@ -238,6 +258,59 @@ export class AiRunLog {
       .where(inArray(aiRunExchanges.runId, runIds))
       .groupBy(aiRunExchanges.runId);
     return new Map(rows.map((row) => [row.runId, Number(row.n)]));
+  }
+
+  /**
+   * What each conversation has cost, and what answered it.
+   *
+   * **The ledger is bounded and the transcript is not**, so this is a `Map`
+   * with holes in it rather than a number per chat: `ai_runs` keeps the last
+   * `RETAIN_RUNS` runs of every kind while `automation_chat_messages` keeps a
+   * fortnight, and a home that has recognised a few devices since can easily
+   * have a readable conversation whose spend row is gone. A caller reports
+   * that as *absent* — the `GET /system/update` rule, where `available` is
+   * missing rather than false when the hub cannot tell — never as $0.00,
+   * which is a claim.
+   *
+   * **A conversation is several rows.** One is written when it submits a rule
+   * and another when it ends, and a revived one writes a row per incarnation,
+   * each carrying the delta rather than a running total — so the cost is a sum
+   * and the model is the *newest* row's, since a home that switched providers
+   * between two of them ran the later half somewhere else.
+   *
+   * Both names are read back exactly as they were stored and never
+   * re-derived: `effectiveModel` answers "what will run" and moves with the
+   * offered list, which is the opposite of what a record of a run that already
+   * happened may do.
+   */
+  async spendBySession(): Promise<Map<string, SessionSpend>> {
+    const rows = await this.db
+      .select({
+        sessionId: aiRuns.sessionId,
+        costUsd: aiRuns.costUsd,
+        provider: aiRuns.provider,
+        modelId: aiRuns.modelId,
+      })
+      .from(aiRuns)
+      .where(isNotNull(aiRuns.sessionId))
+      .orderBy(asc(aiRuns.at));
+
+    const spend = new Map<string, SessionSpend>();
+    for (const row of rows) {
+      if (row.sessionId === null) continue;
+      // `session_id`, `provider` and `model_id` arrived in one change, so a
+      // row carrying the first carries the other two. Skipping one that
+      // somehow does not is deliberate: a figure with no model beside it
+      // answers half the question it was asked.
+      if (row.provider === null || row.modelId === null) continue;
+      const running = spend.get(row.sessionId);
+      spend.set(row.sessionId, {
+        usd: (running?.usd ?? 0) + (row.costUsd ?? 0),
+        provider: row.provider,
+        modelId: row.modelId,
+      });
+    }
+    return spend;
   }
 
   async list(limit = 30) {

@@ -4,13 +4,13 @@ import type { Db } from '../db/client.js';
 import { automationChatMessages } from '../db/schema.js';
 import type { HubEventBus } from '../core/bus.js';
 import type { AiProvider, SettingsService } from '../core/settings.js';
-import type { AiRunLog } from '../core/ai-runs.js';
+import type { AiRunLog, SessionSpend } from '../core/ai-runs.js';
 import type { Logger } from '../logging.js';
 import type { AutomationEngine } from '../automations/engine.js';
 import type { AutomationStore } from '../automations/store.js';
 import { automationDocumentSchema, type AutomationDocument } from '../automations/schema.js';
 import { automationShape, describeAutomation } from '../automations/summarize.js';
-import { effectiveModel } from './models.js';
+import { effectiveModel, modelLabel } from './models.js';
 import { AiUnavailableError } from './errors.js';
 import {
   AUTOMATION_MAX_SESSIONS,
@@ -72,8 +72,17 @@ export interface ChatSession {
    * unhandled rejection here would end the process.
    */
   inFlight: Promise<void>;
-  /** Whether this conversation's spend has been written down yet. */
-  recorded: boolean;
+  /**
+   * How much of this conversation's spend is already in `ai_runs`.
+   *
+   * **A number rather than a flag**, and that is a bug fixed rather than a
+   * refinement: recording used to be once-only, and a submission records
+   * *immediately* (so an abandoned tab does not hold the row for the two-hour
+   * TTL). So every dollar spent after the first rule was written — which is
+   * the whole of an edit conversation, the commonest kind — was dropped on the
+   * floor. Each `record` now writes the delta since the last one.
+   */
+  recordedUsd: number;
   submissions: number;
   /**
    * What was said before this session existed, for one that was rebuilt from
@@ -161,6 +170,37 @@ function recapOf(rows: ChatMessageWire[]): string {
   ].join('\n');
 }
 
+/**
+ * What a conversation cost and what answered it.
+ *
+ * **Absent, never zero, when the hub cannot say.** `ai_runs` keeps the last
+ * sixty runs of every kind and a transcript lives a fortnight, so a home that
+ * has recognised a few devices since can open a readable chat whose spend row
+ * has been pruned — and "$0.00" about a conversation that plainly cost
+ * something is a claim, where nothing at all is the truth. Same shape as
+ * `GET /system/update`'s `available`.
+ *
+ * The three fields move together and are one fact: what this cost, on what.
+ */
+export interface ChatSpendWire {
+  /** US dollars. An estimate from token usage, as everything here is. */
+  usd: number;
+  /** anthropic | openai, as it was recorded. */
+  provider: string;
+  /** The model id as it was recorded — a fact, so it is never re-derived. */
+  modelId: string;
+  /**
+   * What to call that model.
+   *
+   * The offered list's label while the model is still on it, and the raw id
+   * once it is retired — ugly and true, which beats a second table of names
+   * for models nobody offers any more. It is the hub's answer rather than an
+   * app's for the reason the model *picker* is: the apps render the hub's
+   * vocabulary instead of shipping ids of their own.
+   */
+  model: string;
+}
+
 export interface ChatSummaryWire {
   sessionId: string;
   startedAt: string;
@@ -170,6 +210,8 @@ export interface ChatSummaryWire {
   title: string;
   /** Whether it can still be *continued*, as against merely read. */
   live: boolean;
+  /** What it cost and what wrote it. Absent when the ledger no longer has it. */
+  spend?: ChatSpendWire;
 }
 
 export interface ChatReply {
@@ -262,7 +304,7 @@ export class AutomationChat {
       lastAt: Date.now(),
       startedAt: Date.now(),
       inFlight: Promise.resolve(),
-      recorded: false,
+      recordedUsd: 0,
       submissions: 0,
       ...(input.automationId !== undefined ? { automationId: input.automationId } : {}),
     };
@@ -335,7 +377,7 @@ export class AutomationChat {
       lastAt: Date.now(),
       startedAt: Date.now(),
       inFlight: Promise.resolve(),
-      recorded: false,
+      recordedUsd: 0,
       submissions: 0,
       priming: recapOf(rows),
       ...(automationId !== undefined ? { automationId } : {}),
@@ -443,19 +485,74 @@ export class AutomationChat {
       if (!titles.has(row.sessionId)) titles.set(row.sessionId, row.text);
     }
 
+    const ledger = await this.options.runs.spendBySession();
+
     return totals
-      .map((session) => ({
-        sessionId: session.sessionId,
-        startedAt: isoFrom(session.startedAt),
-        updatedAt: isoFrom(session.updatedAt),
-        messageCount: session.messageCount,
-        // A conversation with no message from the person at all still gets a
-        // title rather than an empty one: the transcript is written row by
-        // row and a crash between two of them is possible.
-        title: (titles.get(session.sessionId) ?? '').slice(0, 120) || 'Untitled conversation',
-        live: this.sessions.has(session.sessionId),
-      }))
+      .map((session) => {
+        const spend = this.spendOf(session.sessionId, ledger);
+        return {
+          sessionId: session.sessionId,
+          startedAt: isoFrom(session.startedAt),
+          updatedAt: isoFrom(session.updatedAt),
+          messageCount: session.messageCount,
+          // A conversation with no message from the person at all still gets a
+          // title rather than an empty one: the transcript is written row by
+          // row and a crash between two of them is possible.
+          title: (titles.get(session.sessionId) ?? '').slice(0, 120) || 'Untitled conversation',
+          live: this.sessions.has(session.sessionId),
+          ...(spend !== undefined ? { spend } : {}),
+        };
+      })
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  /** What one conversation cost, ledger plus whatever a live one has spent
+   *  since its last row. */
+  async spend(sessionId: string): Promise<ChatSpendWire | undefined> {
+    return this.spendOf(sessionId, await this.options.runs.spendBySession());
+  }
+
+  /**
+   * The ledger's total for a conversation, plus what a live one has run up
+   * since its last row.
+   *
+   * **A conversation in progress has spent money the ledger has not heard
+   * about.** Rows are written when a rule is submitted and again when the
+   * session closes, so a chat somebody is in the middle of — which is exactly
+   * the one on screen — would otherwise read as costing nothing while it ran,
+   * and jump to its real figure minutes after they had stopped looking. The
+   * remainder comes off the conversation itself, which is where `record`
+   * reads it too.
+   *
+   * A live session also names its *own* model rather than the last recorded
+   * one: it is the more current answer to the same question, and a revived
+   * conversation can be running on a provider the earlier rows never saw.
+   */
+  private spendOf(
+    sessionId: string,
+    ledger: Map<string, SessionSpend>,
+  ): ChatSpendWire | undefined {
+    const recorded = ledger.get(sessionId);
+    const live = this.sessions.get(sessionId);
+    if (live === undefined) {
+      if (recorded === undefined) return undefined;
+      return {
+        usd: recorded.usd,
+        provider: recorded.provider,
+        modelId: recorded.modelId,
+        model: modelLabel(recorded.provider, recorded.modelId),
+      };
+    }
+    // `Math.max` because the two halves are read at different moments: a turn
+    // that lands between the ledger read and this one records its delta and
+    // moves `recordedUsd` past the total we are subtracting from.
+    const pending = Math.max(0, live.conversation.costUsd() - live.recordedUsd);
+    return {
+      usd: (recorded?.usd ?? 0) + pending,
+      provider: live.conversation.provider,
+      modelId: live.conversation.modelId,
+      model: modelLabel(live.conversation.provider, live.conversation.modelId),
+    };
   }
 
   /** The transcript, oldest first. Readable long after the conversation that
@@ -868,8 +965,12 @@ export class AutomationChat {
   /** One `ai_runs` row per conversation, so the home's AI spend stays one
    *  list rather than two screens answering one question. */
   private async record(session: ChatSession, ok: boolean): Promise<void> {
-    if (session.recorded) return;
-    session.recorded = true;
+    const spent = session.conversation.costUsd() - session.recordedUsd;
+    // Nothing new to say. A conversation is recorded when it submits and again
+    // when it ends, and the second of those is usually zero.
+    if (spent <= 0 && session.recordedUsd > 0) return;
+    session.recordedUsd = session.conversation.costUsd();
+
     const handle = this.options.runs.begin({
       kind: 'automate',
       adapter: 'automations',
@@ -882,10 +983,16 @@ export class AutomationChat {
       // column was added for and nothing had ever written. A chat that
       // submitted nothing leaves it null, which is the honest answer.
       ...(session.automationId !== undefined ? { automationId: session.automationId } : {}),
+      // And which conversation it was, which is what makes the spend
+      // answerable per chat rather than only per rule.
+      sessionId: session.id,
     });
     await handle.finish({
       ok,
-      costUsd: session.conversation.costUsd(),
+      // The delta, not the total: several rows can belong to one conversation
+      // — a submission, the tail after it, and one per revival — and each has
+      // to be a real amount or the ledger double-counts when they are summed.
+      costUsd: spent,
       durationMs: Date.now() - session.startedAt,
     });
   }

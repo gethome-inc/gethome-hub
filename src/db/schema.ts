@@ -456,6 +456,21 @@ export const aiRuns = sqliteTable('ai_runs', {
    * a column that is about a device model.
    */
   automationId: text('automation_id'),
+  /**
+   * The conversation this run belongs to, for an `automate` row.
+   *
+   * **Without it a conversation's own spend was unattributable.** The model,
+   * the provider and the cost were all recorded — and linked to nothing a
+   * person could point at: `automation_id` is null for a chat that never
+   * submitted, and a conversation the hub *revived* writes a row per
+   * incarnation, so even a successful one could not be totalled. Reading
+   * "what did this cost, and what wrote it" back for one chat is a `where`
+   * on this column and a `sum`.
+   *
+   * Nullable and additive, like `automation_id`: a mapping run has no session,
+   * and rows written before this column stay readable.
+   */
+  sessionId: text('session_id'),
   /** `AgentStep[]` as JSON. */
   steps: text('steps', { mode: 'json' }).notNull(),
 });

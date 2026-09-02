@@ -71,6 +71,13 @@
       "when": 1788220392489,
       "tag": "0009_rich_thena",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1788323593382,
+      "tag": "0010_greedy_luckman",
+      "breakpoints": true
     }
   ]
 }

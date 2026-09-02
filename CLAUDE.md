@@ -849,9 +849,28 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   reads as the only thing between somebody and a burnt-out relay), and says
   plainly that **there are no notifications** — a model that does not know
   that invents a notify action and spends a round finding out while somebody
-  watches. One `ai_runs` row per conversation, `kind: 'automate'`, because
-  what a home spent on AI is one question and two tables would make it two
-  screens.
+  watches. `ai_runs` rows with `kind: 'automate'`, because what a home spent on
+  AI is one question and two tables would make it two screens.
+  **What a conversation cost is answerable, and three rules make it so.**
+  `ai_runs.session_id` is the link: `automation_id` is null for a chat that
+  submitted nothing and a revived one writes a row per incarnation, so nothing
+  else could total them. **Each row is a delta, never a running total** — one
+  is written at every submission (a conversation that has done its job should
+  not wait on an abandoned tab) and another when the session closes, so a
+  two-rule chat writes several and summing totals would report half as much
+  again as it cost; `record` was once-only for a while, which simply dropped
+  everything after the first rule. **A live conversation's unwritten
+  remainder is added** where `GET /automations/chats` answers, because the
+  chat somebody is watching is exactly the one with no row yet, and drawing it
+  as free until minutes after they stop looking is the worst possible moment
+  to be right. And **the model is read back, never re-derived**:
+  `effectiveModel` answers "what will *run*" and is meant to move with the
+  offered list, which is precisely wrong for a record of a run that already
+  happened — so `provider`/`modelId` are the columns verbatim and only the
+  label goes through `modelLabel`, which falls back to the raw id once a model
+  is retired. Absent rather than zero when the ledger no longer has it: sixty
+  runs against a fortnight of transcript means a readable chat can outlive its
+  own spend row, and `$0.00` is a claim where nothing is the truth.
   **The agent picks its own provider, and it is deliberately not the
   mapper's.** `ai.provider` answers "which model reads a device's exposes
   tree" — a real choice, because both halves of *that* are written. Only one

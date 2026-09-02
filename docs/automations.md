@@ -438,9 +438,50 @@ question in one response is refused inside the turn rather than left open.
 
 ### What it costs, and where that is written
 
-One `ai_runs` row per conversation, `kind: 'automate'`, with `automation_id`
-filled and `exposes_hash` empty. One list, because "what did this home spend on
-AI" is one question and two tables would make it two screens.
+`ai_runs` rows with `kind: 'automate'`, `automation_id` filled when the
+conversation produced a rule and `exposes_hash` empty. One list, because "what
+did this home spend on AI" is one question and two tables would make it two
+screens. `session_id` is what makes the *conversation's* own spend answerable:
+`automation_id` is null for a chat that submitted nothing, and a revived one
+writes a row per incarnation, so nothing else could total them.
+
+**A row carries the delta, never the running total.** One is written when a rule
+is submitted — a conversation that has done its job should not wait on an
+abandoned tab — and another when the session closes or the idle sweep takes it,
+so a chat that wrote two rules writes several. Each records what has been spent
+*since the last one*, or summing them would report a two-rule conversation as
+having cost half as much again as it did. That is the whole of a bug this had:
+`record` was once-only, so everything after the first submitted rule was simply
+dropped.
+
+**`GET /automations/chats` and the transcript route both answer with `spend`**
+— `{usd, provider, modelId, model}` — and three rules hold it up.
+
+*It is absent rather than zero when the hub cannot say.* The ledger keeps the
+last sixty runs of every kind while a transcript lives a fortnight, so a home
+that has recognised a few devices since can open a perfectly readable
+conversation whose spend row has been pruned. `$0.00` about a chat that plainly
+cost something is a claim; nothing at all is the truth — the rule
+`GET /system/update`'s `available` already follows.
+
+*A conversation still running has spent money the ledger has not heard about,*
+and that is exactly the one on screen. The figure adds whatever the live
+session has run up since its last row, read off the conversation itself —
+without it a paid chat draws as free while somebody watches it work, then jumps
+to its real number minutes after they have stopped looking. A live session also
+names its **own** model rather than the last recorded one, which is the more
+current answer to the same question and covers a revival running on a provider
+the earlier rows never saw.
+
+*And the model is read back, never re-derived.* `effectiveModel` answers "what
+will run" and deliberately moves with the offered list; this answers "what did
+run", which is a fact about a run that already happened and must not move at
+all. So `provider` and `modelId` are the columns verbatim, and only `model` —
+the label an app draws — is looked up: `PROVIDER_MODELS` while the model is
+still offered, the raw id once it is retired. Ugly and true beats a second
+table of names for models nobody offers any more, and it is the hub's answer
+rather than an app's for the reason the model *picker* is. `PRICING` stays
+broad for the same reason, so a months-old row still prices correctly.
 
 Guardrails: 12 provider rounds per user message, **$1 per conversation** (on
 the conversation rather than the turn — twenty rounds of clarification are

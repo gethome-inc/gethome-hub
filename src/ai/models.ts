@@ -158,6 +158,35 @@ export function effectiveModel(provider: AiProvider, stored: string | null | und
   return offered && stored ? stored : PROVIDER_MODELS[provider].default;
 }
 
+/**
+ * What to *call* a model that has already run.
+ *
+ * **Read back, never re-derived.** `effectiveModel` above answers "what will
+ * run", which is a question about the offered list and moves when that list
+ * moves. This answers "what did run", which is a fact and must not: a
+ * conversation from last month names the model it was actually billed for,
+ * even after that model has been retired from `choices`.
+ *
+ * So the label comes from the offered list when the model is still on it, and
+ * otherwise the id itself. A raw `claude-sonnet-5` on an old row is ugly and
+ * true, which are the two properties that matter here — the alternative is a
+ * second table of names for retired models, which is a list to keep in step
+ * with nothing to keep it honest.
+ *
+ * It is the hub's job rather than an app's for the reason the model *list* is:
+ * the apps render what the hub tells them instead of shipping ids of their own.
+ *
+ * `provider` is a plain `string` rather than `AiProvider` on purpose: this is
+ * fed by a recorded column, and a provider a later build retires is exactly
+ * the case the lookup below has to survive.
+ */
+export function modelLabel(provider: string, model: string): string {
+  const known = PROVIDER_MODELS[provider as AiProvider] as
+    | (typeof PROVIDER_MODELS)[AiProvider]
+    | undefined;
+  return known?.choices.find((choice) => choice.id === model)?.label ?? model;
+}
+
 /** Server-side web search, billed per request rather than per token. */
 export const WEB_SEARCH_USD_PER_REQUEST = 10 / 1000;
 
