@@ -228,7 +228,7 @@ describe('the automation conversation', () => {
       .mockReturnValueOnce(
         assistant([
           text('Done — the bedside lamp it is.'),
-          toolUse('submit_automation', { document: goodDocument }),
+          toolUse('submit_automation', { document: goodDocument, replaces: null }),
         ]),
       );
 
@@ -283,13 +283,14 @@ describe('the automation conversation', () => {
         assistant([
           toolUse('submit_automation', {
             document: { ...goodDocument, triggers: [], actions: [] },
+            replaces: null,
           }),
         ]),
       )
       .mockReturnValueOnce(
         assistant([
           text('Done — evening lights are saved.'),
-          toolUse('submit_automation', { document: goodDocument }),
+          toolUse('submit_automation', { document: goodDocument, replaces: null }),
         ]),
       );
 
@@ -318,6 +319,7 @@ describe('the automation conversation', () => {
                 },
               ],
             },
+            replaces: null,
           }),
         ]),
       )
@@ -335,7 +337,7 @@ describe('the automation conversation', () => {
       .mockReturnValueOnce(
         assistant([
           text('Done — that lamp goes on in the evening.'),
-          toolUse('submit_automation', { document: goodDocument }),
+          toolUse('submit_automation', { document: goodDocument, replaces: null }),
         ]),
       );
 
@@ -383,7 +385,7 @@ describe('the automation conversation', () => {
      * sentence.
      */
     streamMock
-      .mockReturnValueOnce(assistant([toolUse('submit_automation', { document: goodDocument })]))
+      .mockReturnValueOnce(assistant([toolUse('submit_automation', { document: goodDocument, replaces: null })]))
       .mockReturnValueOnce(assistant([text('Готово — свет включится вечером.')], 'end_turn'));
 
     const steps: string[] = [];
@@ -393,7 +395,10 @@ describe('the automation conversation', () => {
 
     expect(turn.kind).toBe('submitted');
     expect((turn as { text: string }).text).toBe('Готово — свет включится вечером.');
-    expect((turn as { document: unknown }).document).toMatchObject({ name: 'Evening lights' });
+    expect((turn as { rules: { document: { name: string } }[] }).rules).toHaveLength(1);
+    expect((turn as { rules: { document: unknown }[] }).rules[0]?.document).toMatchObject({
+      name: 'Evening lights',
+    });
     // The wait is accounted for rather than silent — the round it costs is one
     // the person is watching.
     expect(steps).toContain('Writing it up for you');
@@ -405,7 +410,7 @@ describe('the automation conversation', () => {
     // is handed over with whatever that round said — usually nothing, which is
     // no worse than before and is bounded.
     streamMock
-      .mockReturnValueOnce(assistant([toolUse('submit_automation', { document: goodDocument })]))
+      .mockReturnValueOnce(assistant([toolUse('submit_automation', { document: goodDocument, replaces: null })]))
       .mockReturnValueOnce(assistant([text('Saved it.'), toolUse('list_devices', {})]))
       .mockReturnValueOnce(assistant([text('never reached')], 'end_turn'));
 
@@ -497,7 +502,7 @@ describe('the automation conversation', () => {
       .mockReturnValueOnce(
         assistant([
           toolUse('ask_user', { question: 'Which lamp?', options: [{ id: 'a', label: 'Bedside' }] }, 'toolu_ask'),
-          toolUse('submit_automation', { document: goodDocument }, 'toolu_submit'),
+          toolUse('submit_automation', { document: goodDocument, replaces: null }, 'toolu_submit'),
         ]),
       )
       .mockReturnValueOnce(assistant([text('unused')], 'end_turn'));
@@ -518,7 +523,7 @@ describe('the automation conversation', () => {
     streamMock
       .mockReturnValueOnce(
         assistant([
-          toolUse('submit_automation', { document: goodDocument }, 'toolu_submit'),
+          toolUse('submit_automation', { document: goodDocument, replaces: null }, 'toolu_submit'),
           toolUse('ask_user', { question: 'Anything else?', options: [{ id: 'a', label: 'No' }] }, 'toolu_ask'),
         ]),
       )
@@ -549,7 +554,7 @@ describe('the automation conversation', () => {
 
     streamMock
       .mockReturnValueOnce(
-        assistant([toolUse('submit_automation', { document: goodDocument }, 'toolu_broken')]),
+        assistant([toolUse('submit_automation', { document: goodDocument, replaces: null }, 'toolu_broken')]),
       )
       .mockReturnValueOnce(assistant([text('Right you are.')], 'end_turn'));
 
@@ -722,7 +727,7 @@ describe('the chat service', () => {
 
   it('saves a submitted rule switched off, and shows it as a preview', async () => {
     const { chat, engine } = await chatFor([
-      { kind: 'submitted', document: goodDocument, accepted: true, text: 'Here you go.' },
+      { kind: 'submitted', rules: [{ document: goodDocument, replaces: null }], text: 'Here you go.' },
     ]);
 
     // `start` answers the moment the message is taken — an acknowledgement,
@@ -800,7 +805,7 @@ describe('the chat service', () => {
      * conversation's spend was never written either.
      */
     const { chat } = await chatFor(
-      [{ kind: 'submitted', document: goodDocument, accepted: true, text: 'Here you go.' }],
+      [{ kind: 'submitted', rules: [{ document: goodDocument, replaces: null }], text: 'Here you go.' }],
       undefined,
       true,
     );
@@ -815,32 +820,95 @@ describe('the chat service', () => {
     expect(transcript.some((message) => message.role === 'note')).toBe(true);
   });
 
-  it('edits the rule it just wrote rather than writing a second one', async () => {
+  it('replaces the rule the model names, so a fix leaves no draft behind', async () => {
     /**
-     * "Actually, make it half past seven" is the ordinary shape of this
-     * conversation, and the model answers it by submitting a whole document
-     * again — `submit_automation` is the only answer channel and it never
-     * patches. The session only ever learned an id when the chat was *opened*
-     * on an existing rule, so a second submission created a second rule and
-     * left the draft nobody wanted sitting in the home.
+     * **The model says which rule a submission is**, because nothing here can
+     * tell "that rule again, fixed" from "a second rule". It was positional
+     * for a while — the first submission created, every one after it replaced
+     * — which was right about a fix and silently wrong about a conversation
+     * that produces two rules.
      */
-    const { chat, engine } = await chatFor([
-      { kind: 'submitted', document: goodDocument, accepted: true, text: 'Here you go.' },
-      {
-        kind: 'submitted',
-        document: { ...goodDocument, name: 'Evening lights, later' },
-        accepted: true,
-        text: 'Moved it.',
-      },
-    ]);
+    const turns: AutomationTurn[] = [
+      { kind: 'submitted', rules: [{ document: goodDocument, replaces: null }], text: 'Here you go.' },
+    ];
+    const { chat, engine } = await chatFor(turns);
 
     const started = await chat.start({ memberId: memberId, message: 'evening lights' });
     await chat.idle();
+
+    // The id the model learns from `rememberSaved`, which primes its next turn.
+    const written = engine.list()[0]!.id;
+    turns.push({
+      kind: 'submitted',
+      rules: [{ document: { ...goodDocument, name: 'Evening lights, later' }, replaces: written }],
+      text: 'Moved it.',
+    });
     await chat.reply(started.sessionId, memberId, 'make it later');
     await chat.idle();
 
     expect(engine.list()).toHaveLength(1);
     expect(engine.list()[0]?.name).toBe('Evening lights, later');
+  });
+
+  it('leaves two rules behind when the conversation asked for two', async () => {
+    /**
+     * The case the old positional rule made impossible: "and also switch
+     * everything off at midnight" used to *overwrite* the rule written a
+     * minute earlier, so a chat could only ever leave one rule in the home.
+     */
+    const { chat, engine } = await chatFor([
+      { kind: 'submitted', rules: [{ document: goodDocument, replaces: null }], text: 'Here you go.' },
+      {
+        kind: 'submitted',
+        rules: [{ document: { ...goodDocument, name: 'Everything off' }, replaces: null }],
+        text: 'And that one too.',
+      },
+    ]);
+
+    const started = await chat.start({ memberId: memberId, message: 'evening lights' });
+    await chat.idle();
+    await chat.reply(started.sessionId, memberId, 'and everything off at midnight');
+    await chat.idle();
+
+    expect(engine.list().map((rule) => rule.name).sort()).toEqual([
+      'Evening lights',
+      'Everything off',
+    ]);
+  });
+
+  it('carries two rules in one reply, as one line and two cards', async () => {
+    // "Lights on when I come in and off when I leave" is two rules, which the
+    // prompt has said since the day it shipped — so one response can submit
+    // twice, and each is its own card under one sentence.
+    const { chat, engine } = await chatFor([
+      {
+        kind: 'submitted',
+        rules: [
+          { document: goodDocument, replaces: null },
+          { document: { ...goodDocument, name: 'Evening lights off' }, replaces: null },
+        ],
+        text: 'Two rules — one cannot both switch on and switch off.',
+      },
+    ]);
+
+    const started = await chat.start({ memberId: memberId, message: 'lights on and off' });
+    await chat.idle();
+
+    const transcript = await chat.transcript(started.sessionId);
+    // One line, then a card each — in the order they were submitted.
+    expect(transcript.map((message) => message.role)).toEqual([
+      'user',
+      'agent',
+      'preview',
+      'preview',
+    ]);
+    expect(transcript.slice(2).map((message) => (message.data as { name: string }).name)).toEqual([
+      'Evening lights',
+      'Evening lights off',
+    ]);
+    expect(engine.list()).toHaveLength(2);
+    // Both switched off: two rules is not a reason to start doing either.
+    expect(engine.list().every((rule) => !rule.enabled)).toBe(true);
   });
 
   it('writes the transcript, and it outlives the conversation', async () => {
@@ -873,7 +941,7 @@ describe('the chat service', () => {
 
   it('records what the conversation spent, in the one AI list', async () => {
     const { chat } = await chatFor([
-      { kind: 'submitted', document: goodDocument, accepted: true, text: '' },
+      { kind: 'submitted', rules: [{ document: goodDocument, replaces: null }], text: '' },
     ]);
     await chat.start({ memberId: memberId, message: 'go' });
     // The spend is written by the *turn*, not by the request that started it —
@@ -932,7 +1000,7 @@ describe('the chat service', () => {
      * a copy between them would read as two rounds.
      */
     const { chat } = await chatFor(
-      [{ kind: 'submitted', document: goodDocument, accepted: true, text: 'Here you go.' }],
+      [{ kind: 'submitted', rules: [{ document: goodDocument, replaces: null }], text: 'Here you go.' }],
       undefined,
       undefined,
       undefined,
@@ -1042,7 +1110,7 @@ describe('the chat service', () => {
 
   it('names what answered, so a conversation says what it cost and on what', async () => {
     const { chat } = await chatFor([
-      { kind: 'submitted', document: goodDocument, accepted: true, text: '' },
+      { kind: 'submitted', rules: [{ document: goodDocument, replaces: null }], text: '' },
     ]);
     const started = await chat.start({ memberId: memberId, message: 'go' });
     await chat.idle();
@@ -1088,8 +1156,8 @@ describe('the chat service', () => {
     let spent = 0.12;
     const { chat } = await chatFor(
       [
-        { kind: 'submitted', document: goodDocument, accepted: true, text: 'one' },
-        { kind: 'submitted', document: goodDocument, accepted: true, text: 'two' },
+        { kind: 'submitted', rules: [{ document: goodDocument, replaces: null }], text: 'one' },
+        { kind: 'submitted', rules: [{ document: goodDocument, replaces: null }], text: 'two' },
       ],
       undefined,
       undefined,
@@ -1124,7 +1192,7 @@ describe('the chat service', () => {
      * already follows.
      */
     const { chat } = await chatFor([
-      { kind: 'submitted', document: goodDocument, accepted: true, text: '' },
+      { kind: 'submitted', rules: [{ document: goodDocument, replaces: null }], text: '' },
     ]);
     const started = await chat.start({ memberId: memberId, message: 'go' });
     await chat.idle();

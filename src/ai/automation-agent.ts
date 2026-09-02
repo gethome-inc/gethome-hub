@@ -12,6 +12,7 @@ import {
   type AutomationConversation,
   type AutomationTurn,
   type AutomationTurnContext,
+  type SubmittedRule,
   type SubmittedTurn,
 } from './automation-conversation.js';
 import {
@@ -314,6 +315,16 @@ export function createAutomationConversation(
 
         const results: Anthropic.ToolResultBlockParam[] = [];
         let handedBack: AutomationTurn | null = null;
+        /**
+         * Every rule accepted in *this* response, in the order they were
+         * submitted.
+         *
+         * One reply can legitimately carry two — "lights on when I come in and
+         * off when I leave" is two rules, which the prompt has always said —
+         * and a single `handedBack` meant the second overwrote the first: both
+         * were told "Accepted" and only one was ever saved.
+         */
+        const submitted: SubmittedRule[] = [];
 
         for (const call of calls) {
           if (call.name === 'ask_user') {
@@ -392,6 +403,11 @@ export function createAutomationConversation(
               outcome.accepted ? undefined : outcome.text,
             );
             if (outcome.accepted) {
+              submitted.push({
+                document: outcome.document,
+                replaces: outcome.replaces ?? null,
+                ...(outcome.note !== undefined ? { note: outcome.note } : {}),
+              });
               // **The other order of the same collision**, and the more
               // expensive one: with a question already open, overwriting it
               // here left `ask_user`'s call with no result and the next
@@ -416,13 +432,7 @@ export function createAutomationConversation(
                 });
                 pendingQuestion = null;
               }
-              handedBack = {
-                kind: 'submitted',
-                document: outcome.document,
-                accepted: true,
-                text: said,
-                ...(outcome.note !== undefined ? { note: outcome.note } : {}),
-              };
+              handedBack = { kind: 'submitted', rules: submitted, text: said };
             }
             continue;
           }
@@ -496,7 +506,13 @@ export function createAutomationConversation(
   function evaluateSubmission(
     input: unknown,
     context: AutomationToolContext,
-  ): { accepted: boolean; text: string; document?: unknown; note?: string | undefined } {
+  ): {
+    accepted: boolean;
+    text: string;
+    document?: unknown;
+    note?: string | undefined;
+    replaces?: string | null;
+  } {
     const outer = submitAutomationInput.safeParse(input);
     if (!outer.success) {
       return {
@@ -535,6 +551,7 @@ export function createAutomationConversation(
       accepted: true,
       document: parsed.data,
       note: outer.data.note,
+      replaces: outer.data.replaces,
       // **An outcome, not an instruction.** This used to end "Tell them what it
       // will do, briefly, and stop" — advice the model can never take, since
       // accepting a submission ends the turn and this result is only read on
@@ -543,7 +560,10 @@ export function createAutomationConversation(
       // prompt, where it is read before the response is composed.
       text:
         `Accepted, as a ${automationShape(parsed.data)}: ${describeAutomation(parsed.data, home)}` +
-        `${warnings}\nIt is saved switched off, and they have been shown a card for it.`,
+        `${warnings}\n` +
+        (outer.data.replaces === null
+          ? 'It is saved as a new rule, switched off, and they have been shown a card for it.'
+          : 'It replaces the rule you named, and they have been shown a card for it.'),
     };
   }
 

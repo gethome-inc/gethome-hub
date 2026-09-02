@@ -416,6 +416,37 @@ falls through to prose rather than being dropped. `text` is always the sentence;
 | `preview` | the rule's **summary**, from `describeAutomation` | `{automationId, name, shape, enabled, edited}` |
 | `note` | something the hub is saying on its own behalf — a provider that failed, a rule that could not be saved | — |
 
+**One conversation, any number of rules — and one reply can carry more than one
+card.** Two things had to change for that. The loop kept a *single*
+`handedBack`, so a second `submit_automation` in one response overwrote the
+first: both were told "Accepted" and only one was ever saved. And the save was
+positional — the first submission created a rule, the session remembered it,
+and every submission after that *replaced* it — which was right about a model
+fixing the rule it had just written and silently wrong about the case people
+actually ask for, where "and also switch everything off at midnight" overwrote
+what had been written a minute earlier.
+
+So a turn hands back a **list** of rules, and each submission says which rule
+it is: `replaces` is the id of the rule being changed, or `null` for a new one.
+Required and nullable rather than optional, because an omitted id is exactly
+the ambiguity that caused the bug, and the model is the only thing that can
+resolve it. Three consequences.
+
+**The ids reach the model on `ChatSession.priming`** — the channel `revive()`
+already uses for context that belongs to the conversation rather than to the
+transcript. A rule the model wrote a minute ago has an id it has never seen
+(the ids in the first user message are from before this chat wrote anything),
+so every save primes the next turn with "the rule X is saved with id …", and a
+revived conversation's recap carries a preview row's id for the same reason.
+Neither is ever written down as a message.
+
+**One row per rule**, in submission order, so an app draws a card per rule with
+its own switch and has nothing to unpack — and `edited` is per rule, since one
+reply can change one rule and add another.
+
+**And the sentence covers the lot**: the prompt asks for one line above the
+cards rather than a paragraph per card.
+
 **A submission writes two rows: the model's line, then the card.** They say
 different things and the card cannot do both jobs — it carries
 `describeAutomation`'s sentence, which is the *rule*, worded the same for

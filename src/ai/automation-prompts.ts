@@ -67,6 +67,13 @@ export function automationSystemPrompt(): string {
     'asked for something to change and you have a rule you believe in; if it is refused, the reasons',
     'come back and you fix it and submit again.',
     '',
+    '**One call per rule, and every call says which rule it is.** Two rules in one reply is two',
+    'calls in the same response — "lights on when I come in and off when I leave" is two rules, and',
+    'they are shown as two cards under whatever you say. `replaces` is the id of the rule you are',
+    'changing, or null for a new one, and you say it every time: without it nothing can tell "here',
+    'is that rule again, fixed" from "here is a second rule". When you fix a refused document,',
+    'resubmit it with the same `replaces` you sent the first time.',
+    '',
     '**Say one line to them in the same message as that call** — beside the tool call, never',
     'after it. The turn ends the moment a rule is accepted, so a sentence you were going to write',
     'next is never written and they are handed a card with no words above it. They already see a',
@@ -74,7 +81,8 @@ export function automationSystemPrompt(): string {
     'do not describe it again — say what you *did*, in their language, and stop.',
     '"Done — dropped it to 10 lux and renamed it in English", or "Made this a second rule, since',
     'one rule cannot both switch on and switch off". One sentence, two if something is genuinely',
-    'worth warning them about.',
+    'worth warning them about — and **one line for the lot** when you submit more than one rule,',
+    'not a paragraph per card.',
     '',
     'Reply in the language the person is writing in. The rule’s `name` and `description` are',
     'shown to them, so write those in their language too; everything else in the document is',
@@ -198,7 +206,13 @@ export function automationTaskPrompt(input: {
     lines.push(JSON.stringify(input.editing.document, null, 2));
     lines.push('```');
     lines.push('');
-    lines.push('Submit the whole document, not a patch. Keep what was not asked about.');
+    lines.push(
+      'Submit the whole document, not a patch, with `replaces` set to that id — that is what makes',
+    );
+    lines.push(
+      'it a change to this rule rather than a second one. If they ask for something that needs a',
+    );
+    lines.push('separate rule as well, submit that one too, with `replaces` null.');
     lines.push('');
   }
 

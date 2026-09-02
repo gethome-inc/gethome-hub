@@ -201,8 +201,15 @@ function recapOf(rows: ChatMessageWire[]): string {
         return `They said: ${row.text}`;
       case 'question':
         return `You asked: ${row.text}`;
-      case 'preview':
-        return `You wrote a rule: ${row.text}`;
+      case 'preview': {
+        // With its id, because `replaces` needs one: a conversation picked up
+        // next week is asked to change the rule it wrote, and the only place
+        // that id survives is the row that carried the card.
+        const id = (row.data as { automationId?: string } | undefined)?.automationId;
+        return id === undefined
+          ? `You wrote a rule: ${row.text}`
+          : `You wrote a rule (id ${id}): ${row.text}`;
+      }
       case 'note':
         return `(the hub noted: ${row.text})`;
       default:
@@ -810,18 +817,31 @@ export class AutomationChat {
         return [await this.write(session, 'note', turn.reason)];
 
       case 'submitted': {
-        const parsed = automationDocumentSchema.safeParse(turn.document);
-        if (!parsed.success) {
-          // The loop already validated this, so reaching here means the two
-          // disagree — worth saying rather than writing a broken preview.
-          return [await this.write(session, 'note', 'The rule could not be saved.')];
+        /**
+         * **One reply, one line, and a card per rule.** The prose comes first
+         * because it is the answer to what was asked; each rule follows as its
+         * own row, so an app draws one card per rule with its own switch and
+         * has nothing to unpack.
+         */
+        const messages: ChatMessageWire[] = [];
+        const saved: { id: string; document: AutomationDocument; edited: boolean }[] = [];
+        for (const rule of turn.rules) {
+          const parsed = automationDocumentSchema.safeParse(rule.document);
+          if (!parsed.success) {
+            // The loop already validated this, so reaching here means the two
+            // disagree — worth saying rather than writing a broken preview.
+            messages.push(
+              await this.write(session, 'note', 'One of those rules could not be saved.'),
+            );
+            continue;
+          }
+          saved.push(await this.save(session, parsed.data, rule.replaces));
+          session.submissions += 1;
         }
-        const saved = await this.save(session, parsed.data);
-        session.submissions += 1;
+        if (saved.length === 0) return messages;
         // A conversation that produced a rule has done its job; recording the
         // spend now means an abandoned tab does not delay the row for hours.
         await this.record(session, true);
-        const messages: ChatMessageWire[] = [];
         if (turn.text.trim().length > 0) {
           messages.push(await this.write(session, 'agent', turn.text));
         }
@@ -835,18 +855,26 @@ export class AutomationChat {
          * the second it took. And `enabled` read back from the store because
          * an *edit* lands on a rule somebody already chose to have running:
          * hardcoding `false` here said "saved, switched off" about a rule that
-         * was, at that moment, switched on.
+         * was, at that moment, switched on. `edited` is per rule too — one
+         * reply can change one rule and add another.
          */
-        const savedRecord = this.options.engine.get(saved);
-        messages.push(
-          await this.write(session, 'preview', describeAutomation(parsed.data, this.options.engine.homeView()), {
-            automationId: saved,
-            name: parsed.data.name,
-            shape: automationShape(parsed.data),
-            enabled: savedRecord?.enabled ?? false,
-            edited: session.automationId !== undefined,
-          }),
-        );
+        for (const rule of saved) {
+          const record = this.options.engine.get(rule.id);
+          messages.push(
+            await this.write(
+              session,
+              'preview',
+              describeAutomation(rule.document, this.options.engine.homeView()),
+              {
+                automationId: rule.id,
+                name: rule.document.name,
+                shape: automationShape(rule.document),
+                enabled: record?.enabled ?? false,
+                edited: rule.edited,
+              },
+            ),
+          );
+        }
         return messages;
       }
     }
@@ -858,29 +886,59 @@ export class AutomationChat {
    * An edit takes effect on a rule the person already chose to have running,
    * which is why it is versioned: `POST /automations/:id/revert` is the way
    * back, and the version note says the chat did it.
+   *
+   * **Which of the two it is comes from the model, not from this session.**
+   * It used to be positional: the first submission created a rule, the
+   * conversation remembered it, and every submission after that *replaced* it.
+   * That was right about one case — the model fixing the rule it had just
+   * written — and silently wrong about the other, which is a conversation that
+   * produces two rules: "and also switch everything off at midnight"
+   * overwrote what had been written a minute earlier, so a chat could only
+   * ever leave one rule behind. Nothing here can tell the two apart; the model
+   * can, and `replaces` is where it says so.
+   *
+   * A `replaces` naming a rule that is gone (deleted from another phone while
+   * the conversation was open) falls back to creating one, which is what the
+   * person asked for and what the card will then say.
    */
-  private async save(session: ChatSession, document: AutomationDocument): Promise<string> {
-    if (session.automationId !== undefined && this.options.engine.get(session.automationId)) {
-      await this.options.store.update(
-        session.automationId,
-        document,
-        session.memberId,
-        'edited in chat',
-      );
+  private async save(
+    session: ChatSession,
+    document: AutomationDocument,
+    replaces: string | null,
+  ): Promise<{ id: string; document: AutomationDocument; edited: boolean }> {
+    if (replaces !== null && this.options.engine.get(replaces)) {
+      await this.options.store.update(replaces, document, session.memberId, 'edited in chat');
       await this.options.engine.reload();
-      this.options.events.emit('automationChanged', session.automationId);
-      return session.automationId;
+      this.options.events.emit('automationChanged', replaces);
+      this.rememberSaved(session, replaces, document.name);
+      return { id: replaces, document, edited: true };
     }
     const record = await this.options.store.create(document, session.memberId, 'written in chat');
     await this.options.engine.reload();
     this.options.events.emit('automationChanged', record.id);
-    // **The conversation is now about this rule**, which is what makes a
-    // second submission an *edit* rather than a second rule — the model
-    // resubmitting after "make it half past seven instead" would otherwise
-    // leave two rules in the home, one of them the draft nobody wanted — and
-    // it is what the `ai_runs` row records as what the spend bought.
-    session.automationId = record.id;
-    return record.id;
+    // What the `ai_runs` row records as what the spend bought. The *first*
+    // rule a conversation writes, since the column holds one id and a chat can
+    // now leave several behind; it no longer decides anything about editing.
+    session.automationId ??= record.id;
+    this.rememberSaved(session, record.id, document.name);
+    return { id: record.id, document, edited: false };
+  }
+
+  /**
+   * Tell the model, on its next turn, what the rule it just wrote is called.
+   *
+   * **Without this a conversation cannot revise its own work.** `replaces`
+   * needs an id, and a rule the model wrote a minute ago has one the model has
+   * never seen: the ids it knows are the ones listed in the first user
+   * message, from before this conversation wrote anything. So the id rides on
+   * `ChatSession.priming`, the channel `revive()` already uses to hand the
+   * model context that belongs to it rather than to the transcript — it
+   * reaches the model and is never written down as a message, because it is a
+   * fact about the conversation rather than something anybody said.
+   */
+  private rememberSaved(session: ChatSession, id: string, name: string): void {
+    const line = `The rule "${name}" is saved with id ${id}. To change that same rule later, submit with replaces set to "${id}"; to add a different rule, submit with replaces null.`;
+    session.priming = session.priming === undefined ? line : `${session.priming}\n${line}`;
   }
 
   // ── Provider ───────────────────────────────────────────────────────────────

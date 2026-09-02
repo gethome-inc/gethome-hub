@@ -854,6 +854,23 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   reason it would be refused), and it rides the same `step` frame `ask_user`'s
   question does — `dry_run`'s is the most useful line in the trail, the rule read
   out while the agent is still deciding rather than only on the card afterwards.
+  **One conversation, any number of rules — and one reply can carry more than
+  one card.** Two faults, and they read as one: the loop kept a single
+  `handedBack`, so a second `submit_automation` in one response overwrote the
+  first (both told "Accepted", one ever saved); and the save was positional —
+  first submission creates, every one after it *replaces* — which was right
+  about a model fixing the rule it had just written and silently wrong about
+  "and also switch everything off at midnight", which overwrote what had been
+  written a minute earlier. So a turn hands back a **list**, and each
+  submission says which rule it is: `replaces` is an id or `null`, **required
+  and nullable** rather than optional, because an omitted id is exactly the
+  ambiguity that caused the bug and only the model can resolve it. The ids
+  reach it on `ChatSession.priming` — the `revive()` channel, model-only,
+  never a transcript row — since a rule written a minute ago has an id the
+  model has never seen; a revived conversation's recap carries a preview row's
+  id for the same reason. One row per rule (so an app draws a card each, with
+  `edited` per rule), and the prompt asks for **one line for the lot** rather
+  than a paragraph per card.
   **A submission writes the model's line and then the card, and asking for
   that line one round too late is why it was blank.** The card carries
   `describeAutomation`'s sentence — the *rule*, the same words for everybody —

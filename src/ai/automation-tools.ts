@@ -109,6 +109,19 @@ export const submitAutomationInput = z
     document: z.unknown(),
     /** One line for the version history: what changed and why. */
     note: z.string().max(200).optional(),
+    /**
+     * The rule this replaces, or `null` for a new one.
+     *
+     * **Required and nullable rather than optional**, because an omitted id is
+     * genuinely ambiguous between the two things a submission can mean — "here
+     * is the rule again, fixed" and "here is a second rule" — and the hub
+     * guessed for a while: every submission after the first in a conversation
+     * silently *overwrote* the first, so a chat could only ever produce one
+     * rule and "and also switch everything off at midnight" quietly replaced
+     * what had just been written. Nothing here can tell those apart, and the
+     * model can, so it says every time.
+     */
+    replaces: z.string().nullable(),
   })
   .strict();
 
@@ -135,10 +148,16 @@ function submitSchema(): Record<string, unknown> {
   return {
     type: 'object',
     additionalProperties: false,
-    required: ['document'],
+    required: ['document', 'replaces'],
     properties: {
       document: json(automationDocumentSchema),
       note: { type: 'string', maxLength: 200, description: 'One line for the version history.' },
+      replaces: {
+        type: ['string', 'null'],
+        description:
+          'The id of the rule this replaces — including one you wrote earlier in this same ' +
+          'conversation — or null to save it as a new rule. Always say which.',
+      },
     },
   };
 }
@@ -221,10 +240,13 @@ export const AUTOMATION_TOOLS: readonly AutomationToolDefinition[] = [
   {
     name: 'submit_automation',
     description:
-      'Deliver the finished rule. This is the only way to *save* one — nothing in the home ' +
+      'Deliver one finished rule. This is the only way to *save* one — nothing in the home ' +
       'changes until you call it — but it is not how you answer: prose reaches the person on ' +
-      'its own, so a question is answered by writing back and nothing else. If the document is ' +
-      'refused the reasons come back — fix them and submit again.',
+      'its own, so a question is answered by writing back and nothing else. **One call per ' +
+      'rule**: two rules in one reply is two calls in the same response, and each is shown as ' +
+      'its own card. Set `replaces` to the id of the rule you are changing, or to null for a ' +
+      'new one. If the document is refused the reasons come back — fix them and submit again ' +
+      'with the same `replaces`.',
     schema: submitSchema,
   },
 ];
