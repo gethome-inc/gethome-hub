@@ -894,6 +894,16 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   watching it). Exactly one, because the rule is already saved and a third round
   spent on a sentence the model will not write is worse than handing the card
   over without one.
+  **The prompt says what the prose is written *into*.** A model writes Markdown,
+  and both halves of that were missing: the apps drew it as characters and the
+  prompt never described the surface, so an answer listing four rules arrived
+  with `**a bolded heading:**` over a column of literal hyphens. The app renders
+  it now (`AgentProse`), and the prompt names the column — three inches wide,
+  short paragraphs, a list where something is genuinely listed, bold for a name
+  worth picking out — with headings, tables, nested lists and code fences called
+  out as not what it is for. Either half alone is worth little: rendering
+  Markdown nobody was told to keep simple gives a typeset document in a chat
+  bubble, and asking for restraint without rendering still shows the asterisks.
   **Seven tools and no web.** An agent writing a rule for a house has nothing
   to look up, and leaving search out is a plainer promise than a paragraph
   telling it not to search — the one AI surface here that reaches the

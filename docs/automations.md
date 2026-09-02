@@ -358,6 +358,22 @@ it, and handed back a card with nothing said above it. Both now say the true
 thing: prose reaches the person exactly as it is written, a question is answered
 by writing back and by nothing else, and a rule is never resubmitted unchanged.
 
+**And the prompt says what the prose is being written *into*.** A model writes
+Markdown, and until both halves of this were fixed the apps drew it as
+characters — an answer listing four rules arrived with `**Напрямую по имени
+устройства:**` over a column of literal hyphens, on the one screen whose whole
+job is explaining a house to somebody who does not write software. The app now
+renders it (`AgentProse` in the iOS repo: paragraphs, `- ` lists and `**bold**`
+laid out rather than shown), and the prompt describes the column — three inches
+wide, short paragraphs, a list where something is genuinely being listed, bold
+for a name worth picking out of a sentence. Headings, tables, nested lists,
+numbered outlines and code fences are named as not being what it is for, because
+a bolded line ending in a colon is a heading pretending not to be one and four
+of them turn an answer into a document nobody asked for. Neither half is worth
+much alone: rendering Markdown nobody was told to keep simple gives a
+well-typeset document in a chat bubble, and asking for restraint without
+rendering it still shows the asterisks.
+
 **A step says what it did, not only what it was.** `AutomationToolResult` carries
 an optional `detail` beside the `text` the model reads — the device that was
 looked at, how many matched, the sentence a draft would carry, the first reason
