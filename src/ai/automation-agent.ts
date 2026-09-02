@@ -12,6 +12,7 @@ import {
   type AutomationConversation,
   type AutomationTurn,
   type AutomationTurnContext,
+  type SubmittedTurn,
 } from './automation-conversation.js';
 import {
   AUTOMATION_TOOLS,
@@ -179,6 +180,31 @@ export function createAutomationConversation(
     const watchdog = setTimeout(() => controller.abort(), AUTOMATION_TIMEOUT_MS);
     watchdog.unref?.();
 
+    /**
+     * A rule that was accepted with nothing said about it, held back for one
+     * more round so the model can say its line.
+     *
+     * **A card with no words above it is the worst answer this agent gives.**
+     * The prompt asks for the sentence in the same message as the call — the
+     * turn ends the moment a rule is accepted, so anything planned for
+     * "afterwards" is never written — and a model that forgets leaves somebody
+     * who asked for a change staring at a rule card with no idea what was
+     * decided or why. The rule is already saved by then, so there is nothing
+     * to undo; what is missing is only the sentence, and the one thing that
+     * can supply it is the model.
+     *
+     * So the accepted submission is *kept* rather than returned, the results
+     * (which already say "Accepted") go back, and the loop runs once more.
+     * Exactly once: the flag is what ends it, so a model that answers with
+     * more tool calls hands the card over with whatever it did say rather than
+     * spending another round. It costs a round trip only in the case where the
+     * words are missing, which the prompt is written to make rare.
+     */
+    // A holder rather than a bare `let`: read before the assignment that fills
+    // it, a `let` is flow-narrowed to `null` for the whole first pass, and the
+    // read below is exactly there — one round earlier in the same loop.
+    const silence: { submission: SubmittedTurn | null } = { submission: null };
+
     try {
       for (let turn = 1; turn <= AUTOMATION_MAX_TURNS; turn += 1) {
         /**
@@ -276,8 +302,13 @@ export function createAutomationConversation(
 
         // Prose and nothing else: the model has handed back. That is a
         // perfectly good end to a turn here, unlike in the mapping run where
-        // it means the answer channel went unused.
+        // it means the answer channel went unused — a question about the home
+        // is answered by writing back and by nothing else.
         if (calls.length === 0) {
+          // The words a silent submission was sent back for. The rule is
+          // already saved; this is the sentence that goes above its card.
+          const submitted = silence.submission;
+          if (submitted !== null) return { ...submitted, text: said };
           return { kind: 'said', text: said || 'Ready when you are.' };
         }
 
@@ -398,7 +429,10 @@ export function createAutomationConversation(
 
           const result = runAutomationTool(call.name, call.input, tools);
           const step = toolStep(call.name);
-          context?.onStep?.(step.summary, step.kind);
+          // The tool's own line about what it actually did — which device, how
+          // many matched, the sentence a draft would carry. Absent for a tool
+          // that has nothing worth reading under its name.
+          context?.onStep?.(step.summary, step.kind, result.detail);
           results.push({
             type: 'tool_result',
             tool_use_id: call.id,
@@ -419,7 +453,25 @@ export function createAutomationConversation(
 
         messages.push({ role: 'user', content: results });
 
+        // A rule accepted with nothing said about it: keep it, and give the
+        // model one round to say what it did. Anything it says next comes back
+        // through the no-calls branch above, carrying this submission with it.
+        if (handedBack?.kind === 'submitted' && handedBack.text.trim().length === 0) {
+          if (silence.submission !== null) return handedBack;
+          silence.submission = handedBack;
+          context?.onStep?.('Writing it up for you', 'thinking');
+          continue;
+        }
+
         if (handedBack) return handedBack;
+
+        // **Exactly one round, whatever that round turns out to be.** The rule
+        // is already saved and the person is waiting in front of it, so a model
+        // that answered the ask with more tool calls does not get to spend a
+        // third round on a sentence: it is handed over with whatever it did
+        // say, which is usually nothing and is no worse than before.
+        const held = silence.submission;
+        if (held !== null) return { ...held, text: said };
       }
 
       return {

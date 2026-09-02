@@ -839,6 +839,21 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   with no rows at all — one that never existed, or whose fortnight is up. **`ask_user` carries two to four options** because somebody who does
   not write software taps one and will not compose an answer, and that is the
   single thing that makes this usable by the people it is for.
+  **Prose *is* an answer, and saying otherwise cost a rule.** The prompt read
+  "a run that ends without submitting has produced nothing" and
+  `submit_automation`'s description said the same, so asked "how does this
+  work?" the model reasoned — visibly, in the trail — that "the framework seems
+  to require submitting something to produce output" and resubmitted the rule
+  unchanged: it rewrote what the home was running to answer a question about it,
+  and handed back a card with nothing said. Both now say the true thing —
+  submitting is the only way to *deliver a rule*, prose reaches the person
+  exactly as written, and a rule is never resubmitted unchanged.
+  **A step says what it did, not only what it was**: `AutomationToolResult`
+  carries an optional `detail` beside the `text` the model reads (the device
+  looked at, how many matched, the sentence a draft would carry, the first
+  reason it would be refused), and it rides the same `step` frame `ask_user`'s
+  question does — `dry_run`'s is the most useful line in the trail, the rule read
+  out while the agent is still deciding rather than only on the card afterwards.
   **A submission writes the model's line and then the card, and asking for
   that line one round too late is why it was blank.** The card carries
   `describeAutomation`'s sentence — the *rule*, the same words for everybody —
@@ -851,7 +866,13 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   prompt paragraph above it read "prose is not an answer", true about
   delivering a rule and read as "do not write any". The prompt asks for it in
   the **same message as the call** now. Neither the hub nor an app writes that
-  line: a canned "All done" is words in the model's mouth.
+  line: a canned "All done" is words in the model's mouth. **And when the model
+  forgets anyway the loop sends the submission back for it — once**: an accepted
+  rule with no prose is held rather than returned, the results go back, and one
+  more round runs purely for the sentence (its own step, since the person is
+  watching it). Exactly one, because the rule is already saved and a third round
+  spent on a sentence the model will not write is worse than handing the card
+  over without one.
   **Seven tools and no web.** An agent writing a rule for a house has nothing
   to look up, and leaving search out is a plainer promise than a paragraph
   telling it not to search — the one AI surface here that reaches the

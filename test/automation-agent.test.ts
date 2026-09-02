@@ -17,6 +17,7 @@ import type {
   AutomationTurnContext,
 } from '../src/ai/automation-conversation.js';
 import { automationSystemPrompt } from '../src/ai/automation-prompts.js';
+import { AUTOMATION_TOOLS } from '../src/ai/automation-tools.js';
 
 /**
  * The automation agent: the loop over a mocked SDK, and the conversation
@@ -224,7 +225,12 @@ describe('the automation conversation', () => {
           toolUse('ask_user', { question: 'Which lamp?', options: [{ id: 'a', label: 'Bedside' }] }, callId),
         ]),
       )
-      .mockReturnValueOnce(assistant([toolUse('submit_automation', { document: goodDocument })]));
+      .mockReturnValueOnce(
+        assistant([
+          text('Done — the bedside lamp it is.'),
+          toolUse('submit_automation', { document: goodDocument }),
+        ]),
+      );
 
     const conversation = conversationFor();
     const first = await conversation.send('lights please');
@@ -280,7 +286,12 @@ describe('the automation conversation', () => {
           }),
         ]),
       )
-      .mockReturnValueOnce(assistant([toolUse('submit_automation', { document: goodDocument })]));
+      .mockReturnValueOnce(
+        assistant([
+          text('Done — evening lights are saved.'),
+          toolUse('submit_automation', { document: goodDocument }),
+        ]),
+      );
 
     const turn = await conversationFor().send('write me a rule');
     expect(turn.kind).toBe('submitted');
@@ -321,11 +332,16 @@ describe('the automation conversation', () => {
   it('answers an ordinary tool call and carries on', async () => {
     streamMock
       .mockReturnValueOnce(assistant([toolUse('list_devices', {})]))
-      .mockReturnValueOnce(assistant([toolUse('submit_automation', { document: goodDocument })]));
+      .mockReturnValueOnce(
+        assistant([
+          text('Done — that lamp goes on in the evening.'),
+          toolUse('submit_automation', { document: goodDocument }),
+        ]),
+      );
 
-    const steps: { summary: string; kind: string }[] = [];
+    const steps: { summary: string; kind: string; detail?: string | undefined }[] = [];
     const turn = await conversationFor([{ id: deviceId, name: 'Kitchen lamp' }]).send('what have I got', {
-      onStep: (summary, kind) => steps.push({ summary, kind }),
+      onStep: (summary, kind, detail) => steps.push({ summary, kind, detail }),
     });
     expect(turn.kind).toBe('submitted');
 
@@ -347,9 +363,57 @@ describe('the automation conversation', () => {
       'thinking',
       'writing',
     ]);
+    // **A step says what exactly, where the tool knows.** "Looking at your
+    // devices" is the act; the line under it is what came back, which is the
+    // difference between a trail that reassures and one that informs.
+    expect(steps[1]?.detail).toBe('1 device');
 
     const second = streamMock.mock.calls[1]?.[0] as { messages: unknown[] };
     expect(JSON.stringify(second.messages)).toContain('Kitchen lamp');
+  });
+
+  it('sends a silent submission back once, so a card never arrives with no words', async () => {
+    /**
+     * **The prompt asks; this is what happens when the model forgets.** A rule
+     * accepted with nothing said about it is a card and no explanation, on the
+     * one screen whose job is telling somebody what their house is about to
+     * start doing — and the turn is over by then, so there is no later round
+     * to say it in. The rule is already saved, so nothing is undone: the
+     * submission is held back and the loop runs once more purely for the
+     * sentence.
+     */
+    streamMock
+      .mockReturnValueOnce(assistant([toolUse('submit_automation', { document: goodDocument })]))
+      .mockReturnValueOnce(assistant([text('Готово — свет включится вечером.')], 'end_turn'));
+
+    const steps: string[] = [];
+    const turn = await conversationFor().send('сделай правило', {
+      onStep: (summary) => steps.push(summary),
+    });
+
+    expect(turn.kind).toBe('submitted');
+    expect((turn as { text: string }).text).toBe('Готово — свет включится вечером.');
+    expect((turn as { document: unknown }).document).toMatchObject({ name: 'Evening lights' });
+    // The wait is accounted for rather than silent — the round it costs is one
+    // the person is watching.
+    expect(steps).toContain('Writing it up for you');
+  });
+
+  it('asks only once, and hands the rule over with whatever was said', async () => {
+    // A model that answers the ask with more tool calls does not get a third
+    // round: the rule is saved and the person is waiting in front of it, so it
+    // is handed over with whatever that round said — usually nothing, which is
+    // no worse than before and is bounded.
+    streamMock
+      .mockReturnValueOnce(assistant([toolUse('submit_automation', { document: goodDocument })]))
+      .mockReturnValueOnce(assistant([text('Saved it.'), toolUse('list_devices', {})]))
+      .mockReturnValueOnce(assistant([text('never reached')], 'end_turn'));
+
+    const turn = await conversationFor().send('write me a rule');
+
+    expect(turn.kind).toBe('submitted');
+    expect((turn as { text: string }).text).toBe('Saved it.');
+    expect(streamMock).toHaveBeenCalledTimes(2);
   });
 
   it('closes every call in a response that also asked a question', async () => {
@@ -708,6 +772,22 @@ describe('the chat service', () => {
     // And it says what the line is for: not the rule again, which the card
     // already carries.
     expect(prompt).toContain('do not describe it again');
+  });
+
+  it('says prose is a complete answer, so a question is not answered with a rule', async () => {
+    /**
+     * A real conversation went wrong here: asked "how does this work?" about a
+     * rule, the model reasoned that "the framework seems to require submitting
+     * something to produce output" — the prompt's own words — and resubmitted
+     * the rule unchanged, which rewrote what the home was running to answer a
+     * question about it, and handed back a card with nothing said.
+     */
+    const prompt = automationSystemPrompt();
+    expect(prompt).toContain('Not every message asks for a rule');
+    expect(prompt).toContain('never resubmit a rule');
+    // And the tool that told it the same thing says the opposite now.
+    const submit = AUTOMATION_TOOLS.find((tool) => tool.name === 'submit_automation');
+    expect(submit?.description).toContain('prose reaches the person on its own');
   });
 
   it('survives a store that refuses after the model has already answered', async () => {

@@ -340,12 +340,32 @@ and why a *typed* reply to a question is routed to `answer` anyway.
 `submit_automation` runs and hands back the sentence the apps will show, which
 is the best available test of whether a rule says what somebody meant.
 
-**`submit_automation` is the only answer channel**, and a refusal is a
-`tool_result` rather than the end of the conversation: the model fixes the
-document and resubmits without the person ever seeing that it got it wrong
-once. Deliberately not a `strict` tool, the `submit_mapping` reasoning — strict
-mode guarantees the shape and cannot express "the target must have that
-capability".
+**`submit_automation` is the only way to *deliver a rule*, and deliberately not
+the only way to answer.** A refusal is a `tool_result` rather than the end of
+the conversation: the model fixes the document and resubmits without the person
+ever seeing that it got it wrong once. Deliberately not a `strict` tool, the
+`submit_mapping` reasoning — strict mode guarantees the shape and cannot express
+"the target must have that capability".
+
+The distinction cost a real conversation. Asked "how does this work?" about a
+rule, the model reasoned — in words the person could read on their own screen —
+that *"the framework seems to require submitting something to produce output"*,
+and resubmitted the rule unchanged. That was the prompt's own sentence ("a run
+that ends without submitting has produced nothing") and the tool's own
+description read the same way, so the model was right about what it had been
+told. It rewrote what the home was running in order to answer a question about
+it, and handed back a card with nothing said above it. Both now say the true
+thing: prose reaches the person exactly as it is written, a question is answered
+by writing back and by nothing else, and a rule is never resubmitted unchanged.
+
+**A step says what it did, not only what it was.** `AutomationToolResult` carries
+an optional `detail` beside the `text` the model reads — the device that was
+looked at, how many matched, the sentence a draft would carry, the first reason
+one would be refused — and it rides the same `step` frame `ask_user`'s question
+does. The `text` is JSON for a model; this is one line for a person, drawn
+clamped under the step's own sentence and opened on a tap. `dry_run`'s is the
+most useful line the trail carries: the rule read out while the agent is still
+deciding, rather than only on the card afterwards.
 
 **Where a wider world would attach, when there is one.** The obvious next thing
 somebody wants is a rule that reaches beyond the house — a web API, an MCP
@@ -416,6 +436,20 @@ line **in the same message as the call**, and says what it is for — not the
 rule again, which is the card. It is never written by the hub or the apps: a
 canned "All done" is words in the model's mouth, and the same reason both chats
 give an empty page a stage rather than a fake greeting.
+
+**And when the model forgets anyway, the loop sends the submission back for
+it — once.** A prompt is a request, not a guarantee, and the failure it does not
+cover is the worst answer this agent gives: a card with nothing above it, on the
+one screen whose job is telling somebody what their house is about to start
+doing, with the turn already over so there is no later round to say it in. The
+rule is saved by then, so nothing is undone; what is missing is only the
+sentence, and the one thing that can supply it is the model. So an accepted
+submission with no prose is *held* rather than returned, the tool results (which
+already say "Accepted") go back, and the loop runs one more round purely for the
+line — reported as its own step, because it is a round the person is watching.
+**Exactly one**: a model that answers with more tool calls hands the card over
+with whatever it did say, since spending a third round on a sentence it will not
+write is worse than handing over without one.
 
 Two fields on `preview` are there because leaving them out was wrong in a way
 only a real app finds. **`name`**, because `text` is the summary rather than a

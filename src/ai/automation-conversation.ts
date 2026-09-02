@@ -73,6 +73,10 @@ export type AutomationTurn =
   | { kind: 'said'; text: string }
   | { kind: 'stopped'; reason: string };
 
+/** The accepted-rule arm on its own, for the loop that holds one back while it
+ *  asks the model for the sentence that goes above its card. */
+export type SubmittedTurn = Extract<AutomationTurn, { kind: 'submitted' }>;
+
 /** What a running turn reports as it happens, for the socket. */
 export interface AutomationTurnContext {
   /** Text as it arrives, so a chat is not three minutes of nothing. */
