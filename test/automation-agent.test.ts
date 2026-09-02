@@ -125,6 +125,9 @@ const toolUse = (name: string, input: unknown, id: string = randomUUID()) => ({
   input,
 });
 
+/** Set to make the home lookup throw — the "a tool blew up mid-round" path. */
+let homeThrows = false;
+
 function conversationFor(homeDevices: { id: string; name: string }[] = []) {
   return createAutomationConversation({
     auth: { secret: 'sk-ant-test' },
@@ -134,6 +137,11 @@ function conversationFor(homeDevices: { id: string; name: string }[] = []) {
     log,
     tools: {
       home: () => ({
+        ...(homeThrows
+          ? (() => {
+              throw new Error('the registry fell over');
+            })()
+          : {}),
         devices: homeDevices.map((device) => ({
           id: device.id,
           name: device.name,
@@ -158,6 +166,7 @@ function conversationFor(homeDevices: { id: string; name: string }[] = []) {
 describe('the automation conversation', () => {
   beforeEach(() => {
     streamMock.mockReset();
+    homeThrows = false;
   });
 
   it('streams what the model says and hands back when it stops with prose', async () => {
@@ -450,6 +459,56 @@ describe('the automation conversation', () => {
 
     expect(turn.kind).toBe('submitted');
     expect(new Set(closedToolIds(0))).toEqual(new Set(['toolu_submit', 'toolu_ask']));
+  });
+
+  it('closes a tool call a failed round left open, instead of poisoning the chat', async () => {
+    /**
+     * **The 400 that never goes away.** The assistant turn is pushed the
+     * moment it arrives, and anything that throws between that push and the
+     * results leaves its `tool_use` unanswered. `exchange` catches the throw,
+     * writes a note and leaves the conversation open — so the *next* message
+     * is refused with `messages.N: tool_use ids were found without
+     * tool_result blocks`, and so is every message after it. Seen on a real
+     * hub, on a conversation whose question had just been answered.
+     *
+     * `evaluateSubmission` reading the home is a real one of those — it sits
+     * outside `runAutomationTool`'s own catch, so a registry that falls over
+     * while a rule is being checked throws straight out of the round.
+     */
+    homeThrows = true;
+
+    streamMock
+      .mockReturnValueOnce(
+        assistant([toolUse('submit_automation', { document: goodDocument }, 'toolu_broken')]),
+      )
+      .mockReturnValueOnce(assistant([text('Right you are.')], 'end_turn'));
+
+    const conversation = conversationFor();
+    await expect(conversation.send('lights')).rejects.toThrow();
+
+    // The conversation is still open, and saying something else has to work.
+    homeThrows = false;
+    const again = await conversation.send('try that again');
+    expect(again.kind).toBe('said');
+
+    // Every call the broken round made is accounted for in the request that
+    // followed it — which is the whole of the API's rule.
+    expect(closedToolIds(1)).toContain('toolu_broken');
+  });
+
+  it('answers the calls a paused turn made rather than skipping past them', async () => {
+    // `pause_turn` asks to be called again with the same conversation. It was
+    // read as "start the next round", which walked straight past any call the
+    // paused response had made and left the turn half-answered.
+    streamMock
+      .mockReturnValueOnce(
+        assistant([toolUse('list_rooms_zones', {}, 'toolu_paused')], 'pause_turn'),
+      )
+      .mockReturnValueOnce(assistant([text('Right you are.')], 'end_turn'));
+
+    const turn = await conversationFor().send('lights');
+    expect(turn.kind).toBe('said');
+    expect(closedToolIds(1)).toContain('toolu_paused');
   });
 
   it('says something before the request, not only after it', async () => {
@@ -792,10 +851,72 @@ describe('the chat service', () => {
     }
   });
 
+  it('picks a conversation back up after the hub has forgotten it', async () => {
+    /**
+     * **The two halves of a chat have very different lifetimes, and the
+     * shorter one was deciding.** The model's history is in memory — two hours
+     * or one restart — while the transcript keeps for a fortnight, so almost
+     * everything in the conversations list answered `410` and the app drew a
+     * closed composer over it. On a real hub that included a conversation that
+     * had worked perfectly and written a rule: "ask it to try again" was not a
+     * thing anybody could do.
+     */
+    const { chat } = await chatFor([
+      { kind: 'said', text: 'Done.' },
+      { kind: 'said', text: 'Changed it.' },
+    ]);
+
+    const started = await chat.start({ memberId: memberId, message: 'lights in the hall' });
+    await chat.idle();
+
+    // The hub forgets how to continue it — a restart, or the idle sweep.
+    await chat.close(started.sessionId);
+    expect(chat.isLive(started.sessionId)).toBe(false);
+
+    // Saying something else works anyway, and lands in the *same* transcript.
+    const again = await chat.reply(started.sessionId, memberId, 'try that again');
+    expect(again).not.toBeNull();
+    await chat.idle();
+
+    const transcript = await chat.transcript(started.sessionId);
+    expect(transcript.map((message) => message.role)).toEqual([
+      'user',
+      'agent',
+      'user',
+      'agent',
+    ]);
+    expect(transcript.at(-1)?.text).toBe('Changed it.');
+
+    // **The recap goes to the model, never into the transcript** — it is a
+    // read-back of rows that are already there, and writing it down would put
+    // the conversation inside itself as a message.
+    expect(transcript[2]?.text).toBe('try that again');
+  });
+
+  it('refuses only a conversation with nothing left to read', async () => {
+    // The honest `410`: rows aged out, or a session id that never existed.
+    const { chat } = await chatFor([{ kind: 'said', text: 'hello' }]);
+    expect(await chat.reply(randomUUID(), memberId, 'anyone there?')).toBeNull();
+  });
+
   it('will not let one member continue another member’s conversation', async () => {
     const { chat } = await chatFor([{ kind: 'said', text: 'hello' }]);
     const started = await chat.start({ memberId: memberId, message: 'go' });
     expect(await chat.reply(started.sessionId, randomUUID(), 'and me')).toBeNull();
+  });
+
+  it('will not let one member revive another member’s conversation either', async () => {
+    // A live session carries its member and is compared against it; a revived
+    // one is built from the *caller's* id, so without reading the owner back
+    // out of the rows, reopening anybody's chat by its id would take it over.
+    const { chat } = await chatFor([{ kind: 'said', text: 'hello' }]);
+    const started = await chat.start({ memberId: memberId, message: 'go' });
+    await chat.idle();
+    await chat.close(started.sessionId);
+
+    expect(await chat.reply(started.sessionId, randomUUID(), 'and me')).toBeNull();
+    // And the person whose conversation it is still gets it back.
+    expect(await chat.reply(started.sessionId, memberId, 'carry on')).not.toBeNull();
   });
 });
 

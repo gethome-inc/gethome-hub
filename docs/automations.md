@@ -369,10 +369,32 @@ written from scratch really is switched off, but an *edit* lands on one somebody
 already chose to have running, and the hardcoded value said "saved, switched
 off" about a rule that was at that moment switched on.
 
-A restart therefore costs the *continuation* and not the record. The chat stays
-readable, continuing means starting a new one (`410 conversation_ended`), and
-the rule it produced is a row in `automations` either way. Sessions also expire
-after two hours idle, and at most eight are held at once.
+A restart therefore costs the *continuation* and not the record — and the
+continuation is rebuilt from the record, because the two lifetimes are two
+hours and a fortnight. Sessions expire after two hours idle (at most eight held
+at once), while the transcript keeps for fourteen days, so "the hub has
+forgotten how to go on" was the ordinary state of everything in the
+conversations list rather than an edge: both apps drew a closed composer over
+conversations that had worked perfectly, and nobody could ask one to try again.
+
+`revive()` builds a fresh provider conversation under the **same session id**
+and primes it with a recap of the stored rows, so the person sees one
+continuous chat and only the model's memory was rebuilt. Three rules. The recap
+reaches the **model and never the transcript** — it is a read-back of rows that
+are already there, and writing it down would put the conversation inside itself
+as a message — so it rides on `ChatSession.priming` and is consumed by the
+first exchange. It is worded as **history rather than memory**, because a model
+told it remembers a decision it is only reading will defend that decision. And
+**ownership is read back out of the rows** (`automation_chat_messages.member_id`):
+a live session carries its member and `reply` compares against it, while a
+revived one is built from the caller's own id — without that check any member
+could reopen anybody else's conversation by its id and carry it on.
+
+What is genuinely lost is the model's reasoning and any tool call that was
+outstanding: a question it had asked is answered as ordinary prose, which is
+what somebody typing into a reopened chat means anyway. `410
+conversation_ended` survives for the one case that is really gone — a session
+with no rows at all, never having existed or past the fortnight.
 
 **And `GET /automations/chats` is what makes that split worth anything.** A
 transcript kept for a fortnight that nothing can find again is a transcript

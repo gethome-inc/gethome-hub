@@ -801,9 +801,26 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   **Two stores, and the split is what makes keeping a chat affordable.** The
   message history is in memory, tens of kilobytes a round, and dies with the
   process; the transcript an app draws is on disk, a few hundred bytes a
-  message. A restart costs the *continuation*, not the record — `410
-  conversation_ended`, the chat still readable, the rule it produced still a
-  row. **`ask_user` carries two to four options** because somebody who does
+  message.
+  **The memory is rebuilt from the record, and it has to be, because the two
+  lifetimes are two hours and a fortnight.** A restart or the idle sweep used
+  to cost the *continuation* — `410 conversation_ended`, the chat readable and
+  nothing more — which sounded like an edge and was the ordinary case: for
+  thirteen of every fourteen days everything in the conversations list answered
+  410, both apps drew a closed composer over it, and "ask it to try again" was
+  not a thing anybody could do about a conversation that had worked perfectly.
+  `revive()` builds a fresh provider conversation under the same session id and
+  primes it with a recap of the stored rows. Three rules. The recap reaches the
+  **model and never the transcript** — it is a read-back of rows that are
+  already there, and writing it down would put the chat inside itself as a
+  message — so it rides on `ChatSession.priming`, consumed by the first
+  exchange. It is worded as *history rather than memory*, because a model told
+  it remembers a decision it is only reading will defend it. And **ownership is
+  read back out of the rows** (`automation_chat_messages.member_id`): a live
+  session carries its member and `reply` compares against it, while a revived
+  one is built from the caller's own id, so without that any member could
+  reopen anybody's conversation by its id. The only `410` left is a session
+  with no rows at all — one that never existed, or whose fortnight is up. **`ask_user` carries two to four options** because somebody who does
   not write software taps one and will not compose an answer, and that is the
   single thing that makes this usable by the people it is for.
   **Seven tools and no web.** An agent writing a rule for a house has nothing
@@ -854,6 +871,21 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `automation-tools.ts` beside the tools: `Looked up list_rooms_zones.` is a
   function signature read out loud, on the one screen whose whole job is telling
   somebody who does not write software what their house is doing.
+  **Nothing is ever sent with a `tool_use` left unanswered, and the repair
+  belongs before the next *user* turn.** Every call in an assistant turn needs
+  a result in the very next message, and a conversation that breaks that rule
+  is refused outright and for ever — `messages.N: tool_use ids were found
+  without tool_result blocks`. The assistant turn is pushed the moment it
+  arrives, so any exit between that push and the results leaves a dangling
+  call: a `refusal`, a `pause_turn` carrying calls (now answered rather than
+  skipped past), and above all *anything that throws* — `evaluateSubmission`
+  reads the home outside `runAutomationTool`'s own catch, and `exchange`
+  swallows the throw, writes a note and leaves the conversation open, so the
+  damage is invisible until the next message is refused along with every one
+  after it. `settleDanglingCalls()` closes them with `is_error` results, and it
+  sits in `send()` before the user turn is pushed rather than beside the
+  request, which is where it was first put and where it can never fire: mid-loop
+  the last message is always the results of the round before.
   **`ask_user` hands back mid-response, and every *other* call in that response
   still has to be closed.** The API's rule is per response — each `tool_use` in
   an assistant turn needs a `tool_result` in the very next message — and handing

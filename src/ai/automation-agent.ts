@@ -129,6 +129,42 @@ export function createAutomationConversation(
    * without tool_result blocks`.
    */
   let pendingResults: Anthropic.ToolResultBlockParam[] = [];
+
+  /**
+   * Answer anything the last assistant turn left open, so the next request is
+   * a conversation the API will accept. See the call site for why.
+   *
+   * The results say the step did not finish, which is true and is the only
+   * thing that can be said — whatever threw did so before the tool ran, or
+   * while it did. `is_error` so the model treats it as a step to retry rather
+   * than as an outcome.
+   */
+  function settleDanglingCalls(): void {
+    const last = messages.at(-1);
+    if (last === undefined || last.role !== 'assistant' || !Array.isArray(last.content)) return;
+
+    const open = last.content
+      .filter((block): block is Anthropic.ToolUseBlock => block.type === 'tool_use')
+      .map((block) => block.id)
+      // The question the person is being asked is outstanding on purpose, and
+      // `answer()` is what closes it.
+      .filter((id) => id !== pendingQuestion);
+    if (open.length === 0) return;
+
+    log.warn(
+      { count: open.length },
+      'automation agent: closing tool calls a failed round left open',
+    );
+    messages.push({
+      role: 'user',
+      content: open.map((id) => ({
+        type: 'tool_result' as const,
+        tool_use_id: id,
+        content: 'That step did not finish. Try it again if you still need it.',
+        is_error: true,
+      })),
+    });
+  }
   let opened = false;
 
   /**
@@ -212,9 +248,6 @@ export function createAutomationConversation(
         // thinking conversation continues.
         messages.push({ role: 'assistant', content: response.content });
 
-        if (response.stop_reason === 'pause_turn') {
-          continue;
-        }
         if (response.stop_reason === 'refusal') {
           return {
             kind: 'stopped',
@@ -231,6 +264,15 @@ export function createAutomationConversation(
         const calls = response.content.filter(
           (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use',
         );
+
+        // A pause is the API asking to be called again with the same
+        // conversation — but only once anything it *did* call has been
+        // answered, so this is asked after the calls are in hand rather than
+        // before, which used to skip straight past them and leave the turn
+        // half-answered.
+        if (calls.length === 0 && response.stop_reason === 'pause_turn') {
+          continue;
+        }
 
         // Prose and nothing else: the model has handed back. That is a
         // perfectly good end to a turn here, unlike in the mapping run where
@@ -458,6 +500,26 @@ export function createAutomationConversation(
         // unclosed and the API refusing the conversation.
         return this.answer(text, context);
       }
+      /**
+       * **Nothing is ever sent with a `tool_use` left unanswered**, which is
+       * the API's one structural rule about this loop: every call in an
+       * assistant turn needs a result in the very next message, and a
+       * conversation that breaks it is refused *outright*, for ever, with
+       * `messages.N: tool_use ids were found without tool_result blocks`.
+       *
+       * Here rather than beside the request, which is where it was first put
+       * and where it can never fire: mid-loop the last message is always the
+       * results of the round before. A round that *ended* badly is what leaves
+       * a dangling turn, and this is the next thing that happens after one —
+       * `exchange` catches the throw, writes a note and leaves the
+       * conversation open, so the damage is invisible until somebody says
+       * something else and is then refused, along with everything after it.
+       *
+       * `answer()` deliberately does not do this: a pending question's turn is
+       * outstanding by design and `pendingResults` already accounts for every
+       * other call in it.
+       */
+      settleDanglingCalls();
       messages.push({
         role: 'user',
         content: opened ? text : `${taskPrompt}\n\n${text}`.trim(),

@@ -75,6 +75,16 @@ export interface ChatSession {
   /** Whether this conversation's spend has been written down yet. */
   recorded: boolean;
   submissions: number;
+  /**
+   * What was said before this session existed, for one that was rebuilt from
+   * its own transcript — see `revive`.
+   *
+   * Carried here rather than written into the conversation, because it must
+   * reach the *model* and not the transcript: it is a recap of rows that are
+   * already in the transcript, and writing it back would put the whole chat
+   * into itself as a message. Consumed on the first exchange and cleared.
+   */
+  priming?: string | undefined;
 }
 
 export interface ChatMessageWire {
@@ -109,6 +119,46 @@ function isoFrom(value: number | string | Date | null): string {
   if (value instanceof Date) return value.toISOString();
   const ms = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(ms) ? new Date(ms).toISOString() : new Date(0).toISOString();
+}
+
+/**
+ * The conversation so far, for a model meeting it again from scratch.
+ *
+ * Written as a recap rather than replayed as messages: the stored rows are not
+ * a provider history — there are no tool calls in them, the assistant's own
+ * reasoning is gone, and a `question` row was a tool call rather than prose.
+ * One user-turn prefix is the honest shape, and it says plainly that this is a
+ * record of what was said rather than something the model remembers, so it
+ * does not claim to recall a decision it is only reading.
+ *
+ * Bounded: a fortnight of one conversation can be long, and the tail is the
+ * part that matters — what was being discussed when it stopped.
+ */
+function recapOf(rows: ChatMessageWire[]): string {
+  const lines = rows.slice(-RECAP_MAX_ROWS).map((row) => {
+    switch (row.role) {
+      case 'user':
+        return `They said: ${row.text}`;
+      case 'question':
+        return `You asked: ${row.text}`;
+      case 'preview':
+        return `You wrote a rule: ${row.text}`;
+      case 'note':
+        return `(the hub noted: ${row.text})`;
+      default:
+        return `You said: ${row.text}`;
+    }
+  });
+
+  return [
+    'This conversation is being picked up again. You do not remember it — what',
+    'follows is the record of what was said, so read it as history rather than',
+    'as your own memory, and carry on from the end of it.',
+    '',
+    ...lines,
+    '',
+    'That is the whole of it. Their next message follows.',
+  ].join('\n');
 }
 
 export interface ChatSummaryWire {
@@ -172,6 +222,9 @@ export interface AutomationChatOptions {
 /** How long a stored transcript is kept. A chat is read while it is happening
  *  and, occasionally, the next day. */
 const RETAIN_TRANSCRIPT_DAYS = 14;
+/** How much of a reopened conversation is read back to the model. The tail,
+ *  because what was being discussed when it stopped is what it is about. */
+const RECAP_MAX_ROWS = 40;
 
 export class AutomationChat {
   private readonly sessions = new Map<string, ChatSession>();
@@ -221,9 +274,75 @@ export class AutomationChat {
    *  message — the conversation itself decides which, since only it knows
    *  whether a tool call is outstanding. */
   async reply(sessionId: string, memberId: string, text: string): Promise<ChatReply | null> {
-    const session = this.sessions.get(sessionId);
+    const session = this.sessions.get(sessionId) ?? (await this.revive(sessionId, memberId));
     if (!session || session.memberId !== memberId) return null;
     return this.say(session, text, 'auto');
+  }
+
+  /**
+   * Pick a conversation back up after the hub has forgotten how to continue it.
+   *
+   * **The two halves of a chat have very different lifetimes, and the shorter
+   * one was deciding.** The model's own message history is in memory, dropped
+   * after `AUTOMATION_SESSION_TTL_MS` (two hours) or with the process; the
+   * transcript keeps for a fortnight. So for thirteen of every fourteen days
+   * everything in the conversations list answered `410`, the app drew a closed
+   * composer, and "ask it to try again" was not a thing anybody could do — on
+   * a conversation that had worked perfectly as much as on one that had
+   * failed. A record you cannot add to is a record, not a conversation.
+   *
+   * So the memory is rebuilt from the record: same session id, same transcript
+   * rows, a fresh provider conversation primed with what was said. What is
+   * genuinely lost is the model's *reasoning* and any tool call that was
+   * outstanding — a question it had asked is answered as ordinary prose now,
+   * which is what a person typing into a reopened chat means anyway.
+   *
+   * Returns null only for a conversation with no transcript at all, which is
+   * one that never existed or whose rows have aged out — a real `410`.
+   */
+  private async revive(sessionId: string, memberId: string): Promise<ChatSession | null> {
+    const rows = await this.transcript(sessionId);
+    if (rows.length === 0) return null;
+
+    /**
+     * **Whose conversation this is, read back rather than taken on trust.**
+     * A live session carries its member and `reply` compares against it; a
+     * revived one is built from the caller's own id, so without this any
+     * member could reopen anybody's chat by its id and carry it on. The rows
+     * remember: `automation_chat_messages.member_id` is written with every
+     * message the person sent.
+     *
+     * A null owner is refused rather than treated as unowned — that column is
+     * `ON DELETE SET NULL`, so null means the member who had this conversation
+     * has left the home.
+     */
+    const owner = await this.ownerOf(sessionId);
+    if (owner === null || owner !== memberId) return null;
+
+    // The rule it was about, recovered from the transcript rather than
+    // remembered: a preview row carries the id, and an edit conversation that
+    // produced one is still an edit conversation.
+    const automationId = rows
+      .map((row) => (row.data as { automationId?: string } | undefined)?.automationId)
+      .filter((id): id is string => typeof id === 'string')
+      .at(-1);
+
+    const conversation = await this.resolveConversation(automationId);
+    const session: ChatSession = {
+      id: sessionId,
+      memberId,
+      conversation,
+      lastAt: Date.now(),
+      startedAt: Date.now(),
+      inFlight: Promise.resolve(),
+      recorded: false,
+      submissions: 0,
+      priming: recapOf(rows),
+      ...(automationId !== undefined ? { automationId } : {}),
+    };
+    this.sessions.set(sessionId, session);
+    this.options.log.info({ sessionId }, 'automation chat: revived from its transcript');
+    return session;
   }
 
   /**
@@ -356,6 +475,18 @@ export class AutomationChat {
     }));
   }
 
+  /** Who sent the messages in a stored conversation, or null when nobody
+   *  still in the home did. */
+  private async ownerOf(sessionId: string): Promise<string | null> {
+    const [row] = await this.options.db
+      .select({ memberId: automationChatMessages.memberId })
+      .from(automationChatMessages)
+      .where(eq(automationChatMessages.sessionId, sessionId))
+      .orderBy(asc(automationChatMessages.at))
+      .limit(1);
+    return row?.memberId ?? null;
+  }
+
   /** Whether this conversation can still be continued, or is history. */
   isLive(sessionId: string): boolean {
     return this.sessions.has(sessionId);
@@ -421,7 +552,14 @@ export class AutomationChat {
   ): Promise<void> {
     let turn: AutomationTurn;
     try {
-      turn = await session.conversation[how](text, {
+      // **Consumed once, and it goes to the model rather than to the row.**
+      // `say` has already written what the person typed; this is the recap of
+      // a conversation the model is meeting again (see `revive`), and writing
+      // it down would put the whole chat inside itself as a message.
+      const primed = session.priming !== undefined ? `${session.priming}\n\n${text}` : text;
+      session.priming = undefined;
+
+      turn = await session.conversation[how](primed, {
         onStep: (summary, kind, detail) => {
           this.options.events.emit('automationChat', {
             sessionId: session.id,
