@@ -870,7 +870,11 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   model has never seen; a revived conversation's recap carries a preview row's
   id for the same reason. One row per rule (so an app draws a card each, with
   `edited` per rule), and the prompt asks for **one line for the lot** rather
-  than a paragraph per card.
+  than a paragraph per card. Bounded at four rules a response
+  (`AUTOMATION_MAX_RULES_PER_TURN`): two is the case this exists for, and past
+  four it is a model that has misread the room writing a page of rules into
+  somebody's home — the accepted ones are saved and the rest refused inside the
+  turn, to be offered once the person has replied.
   **A submission writes the model's line and then the card, and asking for
   that line one round too late is why it was blank.** The card carries
   `describeAutomation`'s sentence — the *rule*, the same words for everybody —

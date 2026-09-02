@@ -52,6 +52,19 @@ export const AUTOMATION_SESSION_TTL_MS = 2 * 60 * 60_000;
 export const AUTOMATION_MAX_SESSIONS = 8;
 
 /**
+ * Rules one response may deliver.
+ *
+ * A reply carrying two is the case this exists for — "lights on when I come in
+ * and off when I leave" — and three or four is a large ask answered in one go.
+ * Past that it is a model that has misread the room, and the cost lands in
+ * somebody's home as a page of rules they did not ask for, so the rest are
+ * refused *inside* the turn with a sentence saying to send them after the
+ * person has replied. Every other unbounded thing here has a bound; this is
+ * that rule applied to the one tool that writes to the home.
+ */
+export const AUTOMATION_MAX_RULES_PER_TURN = 4;
+
+/**
  * What a turn ended with.
  *
  * `said` and `question` are both suspensions and both perfectly ordinary;

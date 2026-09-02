@@ -7,6 +7,7 @@ import { EFFORT, MAX_OUTPUT_TOKENS, type AgentAuth } from './agent-core.js';
 import { estimateCostUsd, isSupportedModel, supportedModelIds } from './models.js';
 import {
   AUTOMATION_MAX_BUDGET_USD,
+  AUTOMATION_MAX_RULES_PER_TURN,
   AUTOMATION_MAX_TURNS,
   AUTOMATION_TIMEOUT_MS,
   type AutomationConversation,
@@ -387,6 +388,22 @@ export function createAutomationConversation(
           }
 
           if (call.name === 'submit_automation') {
+            if (submitted.length >= AUTOMATION_MAX_RULES_PER_TURN) {
+              // Bounded rather than refused outright: what is already accepted
+              // is saved and shown, and the rest are asked for again once the
+              // person has seen these — a reply that writes a page of rules
+              // into somebody's home is a misread, not an answer.
+              results.push({
+                type: 'tool_result',
+                tool_use_id: call.id,
+                content:
+                  `That is more than ${AUTOMATION_MAX_RULES_PER_TURN} rules in one reply. The ` +
+                  'ones already accepted are saved; tell them what those do and offer the rest ' +
+                  'once they have replied.',
+                is_error: true,
+              });
+              continue;
+            }
             const outcome = evaluateSubmission(call.input, tools);
             results.push({
               type: 'tool_result',

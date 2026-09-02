@@ -421,6 +421,30 @@ describe('the automation conversation', () => {
     expect(streamMock).toHaveBeenCalledTimes(2);
   });
 
+  it('takes two rules from one response, and stops at the bound', async () => {
+    // Two is the case this exists for. Past the bound the rest are refused
+    // *inside* the turn — what was accepted is saved and shown, and the model
+    // is told to offer the others once the person has replied.
+    const rule = (name: string) => ({ ...goodDocument, name });
+    streamMock.mockReturnValueOnce(
+      assistant([
+        text('Two rules — one cannot both switch on and switch off.'),
+        toolUse('submit_automation', { document: rule('On'), replaces: null }, 'a'),
+        toolUse('submit_automation', { document: rule('Off'), replaces: null }, 'b'),
+        toolUse('submit_automation', { document: rule('Three'), replaces: null }, 'c'),
+        toolUse('submit_automation', { document: rule('Four'), replaces: null }, 'd'),
+        toolUse('submit_automation', { document: rule('Five'), replaces: null }, 'e'),
+      ]),
+    );
+
+    const turn = await conversationFor().send('lights on and off');
+
+    expect(turn.kind).toBe('submitted');
+    const rules = (turn as { rules: { document: { name: string } }[] }).rules;
+    expect(rules.map((entry) => entry.document.name)).toEqual(['On', 'Off', 'Three', 'Four']);
+    expect((turn as { text: string }).text).toContain('Two rules');
+  });
+
   it('closes every call in a response that also asked a question', async () => {
     /**
      * **The 400 this exists to stop coming back.** A model may look something

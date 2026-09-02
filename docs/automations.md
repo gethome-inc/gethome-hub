@@ -447,6 +447,15 @@ reply can change one rule and add another.
 **And the sentence covers the lot**: the prompt asks for one line above the
 cards rather than a paragraph per card.
 
+The number of rules one response may deliver is bounded
+(`AUTOMATION_MAX_RULES_PER_TURN`, four). Two is the case this exists for and
+four is a large ask answered in one go; past that it is a model that has
+misread the room, and the cost lands in somebody's home as a page of rules
+nobody asked for. The ones already accepted are saved and shown, and the rest
+are refused *inside* the turn with a sentence telling it to offer them once the
+person has replied — the `submit_mapping` stance, where a refusal is a
+`tool_result` rather than the end of a conversation.
+
 **A submission writes two rows: the model's line, then the card.** They say
 different things and the card cannot do both jobs — it carries
 `describeAutomation`'s sentence, which is the *rule*, worded the same for
