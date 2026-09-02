@@ -39,6 +39,8 @@ import { sanityCheckAutomation } from '../automations/sanity.js';
 import { automationCatalog } from '../automations/catalog.js';
 import { AUTOMATION_TEMPLATES, findTemplate } from '../automations/templates.js';
 import { automationShape, describeAutomation } from '../automations/summarize.js';
+import { automationRoom } from '../automations/scope.js';
+import type { AutomationHomeView } from '../automations/targets.js';
 import { RADIO_MODES, writeRadioMode, type RadioBudget, type RadioMode } from '../core/radio.js';
 import {
   canApplyUpdate,
@@ -2148,7 +2150,18 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * a card that says something true. `shape` is what it draws: a button, a
    * toggle (a mode), or a rule that watches the home and has nothing to press.
    */
-  const automationWire = (record: ReturnType<AutomationEngine['list']>[number]) => ({
+  const automationWire = (
+    record: ReturnType<AutomationEngine['list']>[number],
+    /**
+     * The home to read the rule against, so a route drawing a list builds it
+     * once rather than once per rule. `homeView()` walks every device and every
+     * record, and both the sentence and the room below are read out of it —
+     * per rule that is two rebuilds of the whole home for each line of the
+     * list. Defaulted, so a route answering with a single rule stays a
+     * one-liner.
+     */
+    home: AutomationHomeView = deps.automations.homeView(),
+  ) => ({
     id: record.id,
     name: record.name,
     /**
@@ -2163,7 +2176,16 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     active: record.active,
     disabledReason: record.disabledReason,
     shape: automationShape(record.document),
-    summary: describeAutomation(record.document, deps.automations.homeView()),
+    summary: describeAutomation(record.document, home),
+    /**
+     * The room this rule is *one room's*, or null for a rule about the whole
+     * house — derived from the document and the home as it is right now
+     * (`automationRoom`), never stored. A selector naming a room declares one
+     * before anything is paired into it; a device moved to another room
+     * changes the answer with the rule untouched, which is why this is
+     * computed on every read rather than written down anywhere.
+     */
+    roomId: automationRoom(record.document, home),
     document: record.document,
     createdAt: record.createdAt.toISOString(),
     updatedAt: record.updatedAt.toISOString(),
@@ -2177,10 +2199,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * that simply did not list it would show a rule silently vanishing after a
    * rollback.
    */
-  app.get('/api/v1/automations', authed, async () => ({
-    automations: deps.automations.list().map(automationWire),
-    unreadable: deps.automations.unreadableRules(),
-  }));
+  app.get('/api/v1/automations', authed, async () => {
+    const home = deps.automations.homeView();
+    return {
+      automations: deps.automations.list().map((record) => automationWire(record, home)),
+      unreadable: deps.automations.unreadableRules(),
+    };
+  });
 
   /**
    * What an automation can be made of — generated from the live zod schema, so
@@ -2517,11 +2542,14 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       memberId: request.member!.id,
       data: { template: key, count: created.length },
     });
+    // Read after the reload above, and once for the whole answer rather than
+    // per rule — a template can install several.
+    const home = deps.automations.homeView();
     return reply.code(201).send({
       automations: created
         .map((id) => deps.automations.get(id))
         .filter((record) => record !== undefined)
-        .map(automationWire),
+        .map((record) => automationWire(record, home)),
       warnings,
     });
   });

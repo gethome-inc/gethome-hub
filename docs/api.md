@@ -117,7 +117,7 @@ than no button.
 | `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | `hub.ai` | The home's AI: two credentials, two models, which provider recognises devices, and the switch. **PATCH is the write** — every field optional, absence means "leave this alone": `{enabled?, recordExchanges?, anthropicApiKey?, openaiApiKey?, anthropicModel?, openaiModel?, model?, mappingProvider?, clear?}`. `model` is `anthropicModel` under the name this route has always used; `clear: "anthropic"\|"openai"` forgets one credential and leaves the other; `recordExchanges` starts or stops keeping what each round said, and is off unless asked; `mappingProvider` naming a provider with no key is `400 provider_not_configured`. Keys are told apart by prefix, so one pasted in the other's field is a 400 rather than a 401 an hour later, and a `sk-ant-oat…` subscription token is still refused. **PUT is unchanged** (`{apiKey, model?}`, an Anthropic key, required) for apps that have not moved. See [the answer's shape](#the-ai-settings-answer) |
 | `GET /ai/runs?limit=` | `hub.ai` | what the mapping agent did, newest first: `{id, at, kind, vendor, model, exposesHash, provider, modelId, ok, costUsd, turns, durationMs, errorKind, errorMessage, steps, exchanges}`. A summary, never a transcript — see [ai-adaptation.md](ai-adaptation.md). `exchanges` is how many **rounds** this run kept, `0` unless recording was on when it ran |
 | `GET /ai/runs/:id/exchanges` | `hub.ai` | what that run actually said, round by round, oldest first: `[{seq, at, durationMs, provider, modelId, status, ok, inputTokens, outputTokens, sent, received}]`. `sent`/`received` are `[{kind, label, text?, bytes?}]` — the round's **main data**, not its bodies; `bytes` is present only on a part that was cut, and is what it weighed whole. A run is a *loop*, so one recognition is several rounds and a failed one is followed by the next in the same list. Empty is the ordinary answer — recording is off unless the owner asked, and rounds age out after a week. See [ai-adaptation.md](ai-adaptation.md) |
-| `GET /automations` | floor | every rule in the home, plus `unreadable` — rules a **newer** build wrote that this one cannot parse. They are kept and not run; listing them is what stops a rule silently vanishing after `install.sh` rolls a build back. Each carries `summary` (a whole sentence — the contract) beside `document` (the structure — the convenience), the `activity.message` rule applied to rules, and `icon` — the mark somebody chose, or `null` for the one the app derives |
+| `GET /automations` | floor | every rule in the home, plus `unreadable` — rules a **newer** build wrote that this one cannot parse. They are kept and not run; listing them is what stops a rule silently vanishing after `install.sh` rolls a build back. Each carries `summary` (a whole sentence — the contract) beside `document` (the structure — the convenience), the `activity.message` rule applied to rules, `icon` — the mark somebody chose, or `null` for the one the app derives — and `roomId`, [the one room the rule is about](#which-room-a-rule-is-in) or `null` for a rule about the whole house |
 | `GET /automations/:id` · `GET /automations/:id/runs` | floor | one rule, and why it fired. The trace names the commands a guard **refused** as well as the ones it sent: "nothing happened" and "the hub declined to switch that relay for the fortieth time this hour" look identical from outside |
 | `GET /automations/capabilities` | floor | what a rule can be made of, **generated from the live zod schema**. Render this rather than shipping a copy — the `GET /permissions` rule applied to a vocabulary that will keep growing |
 | `GET /automations/templates` | floor | the shipped presets, with the inputs each needs |
@@ -617,6 +617,45 @@ it changes what other people see, not when it changes how it looks to them.**
 A room's `icon`/`accent` write nothing, and neither does the order rooms are
 listed in — that one never reaches the hub at all, because it is each phone's
 own preference (see the GetHome app's `CLAUDE.md`).
+
+### Which room a rule is in
+
+Every automation on the wire carries `roomId`: **the one room every device the
+rule touches sits in**, or `null`. It is what lets an app put a rule on the page
+of the room it belongs to instead of only in one long list, and say on the
+rule's own page whose room it is.
+
+`null` is the ordinary answer for a rule about the whole house, and it means one
+thing — *this rule is not one room's*. Four ways to get it: the rule reaches
+into two rooms, it touches a device nobody has placed yet, it touches no devices
+at all (a button that only writes a line in the history), or the only room it
+named has since been deleted.
+
+**It is derived on every read and stored nowhere.** A rule's room is a function
+of the document *and of the home as it is right now*: a selector picks up a lamp
+paired next month, and a device moved from the Kitchen to the Hall changes which
+room a rule belongs to with the rule untouched. A column would be a second copy
+of that going stale in the dark. The consequence for a client is the one worth
+knowing: **`roomId` can change without an `automation` frame**, because nothing
+about the automation changed — so re-read the list when the structure it is
+derived from moves (a room or zone written, a device added, removed, or moved to
+another room), not only when a rule does.
+
+Two halves to how it is worked out, and the second is why a resolver alone would
+not do:
+
+- **A selector naming a room declares one.** "Every light in the Kitchen" is the
+  Kitchen's rule on the day it is written, before anybody has paired a lamp.
+  Everything such a target resolves to is in that room by construction, so
+  naming it is the whole of that target's answer.
+- **Everything else is resolved against the home**, exactly as the engine
+  resolves it — triggers, conditions (nested ones included) and actions, plus a
+  toggle's off-actions. A rule that *watches* the Kitchen and switches something
+  in the Hall is not the Kitchen's, and a walk that looked only at what a rule
+  does would have said it was.
+
+A `runAutomation` action is deliberately not followed: the rule it names is its
+own rule, with its own room and its own page.
 
 ### Favorites are per member
 
