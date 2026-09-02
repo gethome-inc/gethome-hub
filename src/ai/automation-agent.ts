@@ -483,9 +483,15 @@ export function createAutomationConversation(
       accepted: true,
       document: parsed.data,
       note: outer.data.note,
+      // **An outcome, not an instruction.** This used to end "Tell them what it
+      // will do, briefly, and stop" — advice the model can never take, since
+      // accepting a submission ends the turn and this result is only read on
+      // the *next* one, where it is stale and reads as a request to describe a
+      // rule from last time. Asking for that line belongs in the system
+      // prompt, where it is read before the response is composed.
       text:
         `Accepted, as a ${automationShape(parsed.data)}: ${describeAutomation(parsed.data, home)}` +
-        `${warnings}\nIt is saved switched off. Tell them what it will do, briefly, and stop.`,
+        `${warnings}\nIt is saved switched off, and they have been shown a card for it.`,
     };
   }
 

@@ -823,6 +823,19 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   with no rows at all — one that never existed, or whose fortnight is up. **`ask_user` carries two to four options** because somebody who does
   not write software taps one and will not compose an answer, and that is the
   single thing that makes this usable by the people it is for.
+  **A submission writes the model's line and then the card, and asking for
+  that line one round too late is why it was blank.** The card carries
+  `describeAutomation`'s sentence — the *rule*, the same words for everybody —
+  while the line above it answers what was actually asked: what changed, in
+  their language. On an edit the card alone never says whether it was done.
+  The instruction to write it sat in `submit_automation`'s own result ("tell
+  them what it will do, briefly, and stop"), which the model can never act on,
+  since accepting a submission *ends the turn* and that result is read only on
+  the next one — where it is stale advice about last time's rule; and the
+  prompt paragraph above it read "prose is not an answer", true about
+  delivering a rule and read as "do not write any". The prompt asks for it in
+  the **same message as the call** now. Neither the hub nor an app writes that
+  line: a canned "All done" is words in the model's mouth.
   **Seven tools and no web.** An agent writing a rule for a house has nothing
   to look up, and leaving search out is a plainer promise than a paragraph
   telling it not to search — the one AI surface here that reaches the

@@ -12,6 +12,7 @@ import {
 } from '../src/db/schema.js';
 import { openTestDb, resetDb, startedAutomations, type TestDb } from './helpers/db.js';
 import type { AutomationConversation, AutomationTurn } from '../src/ai/automation-conversation.js';
+import { automationSystemPrompt } from '../src/ai/automation-prompts.js';
 
 /**
  * The automation agent: the loop over a mocked SDK, and the conversation
@@ -646,6 +647,19 @@ describe('the chat service', () => {
     await chat.idle();
 
     const transcript = await chat.transcript(reply.sessionId);
+
+    // **A line, then the card.** The card carries the rule's own sentence,
+    // which is the same words for everybody; the line above it is the answer
+    // to what was *asked* — what changed, in their language — and on an edit
+    // it is the only thing that says so. It is the model's own prose from the
+    // submitting response, never a canned "All done" written here.
+    expect(transcript.map((message) => message.role)).toEqual([
+      'user',
+      'agent',
+      'preview',
+    ]);
+    expect(transcript[1]?.text).toBe('Here you go.');
+
     const preview = transcript.find((message) => message.role === 'preview');
     expect(preview).toBeDefined();
     const data = preview?.data as { automationId: string; enabled: boolean };
@@ -656,6 +670,22 @@ describe('the chat service', () => {
     const saved = engine.get(data.automationId);
     expect(saved?.name).toBe('Evening lights');
     expect(saved?.enabled).toBe(false);
+  });
+
+  it('asks for that line in the same message as the call, not after it', async () => {
+    /**
+     * **The turn ends when a submission is accepted**, so anything the model
+     * plans to say afterwards is never said. The instruction to say it lived
+     * in `submit_automation`'s own result — read only on the *next* turn,
+     * where it is stale — and the paragraph above it in the prompt read as
+     * "prose is not an answer". Between them a finished rule arrived as a
+     * bare card with nothing said about it.
+     */
+    const prompt = automationSystemPrompt();
+    expect(prompt).toContain('same message as that call');
+    // And it says what the line is for: not the rule again, which the card
+    // already carries.
+    expect(prompt).toContain('do not describe it again');
   });
 
   it('survives a store that refuses after the model has already answered', async () => {

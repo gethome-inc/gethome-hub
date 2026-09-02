@@ -360,6 +360,27 @@ falls through to prose rather than being dropped. `text` is always the sentence;
 | `preview` | the rule's **summary**, from `describeAutomation` | `{automationId, name, shape, enabled, edited}` |
 | `note` | something the hub is saying on its own behalf — a provider that failed, a rule that could not be saved | — |
 
+**A submission writes two rows: the model's line, then the card.** They say
+different things and the card cannot do both jobs — it carries
+`describeAutomation`'s sentence, which is the *rule*, worded the same for
+everybody and mechanical by design, while the line above it is the answer to
+what was actually **asked**: what changed, in the person's own language, with a
+caveat if there is one. On an edit ("make it 10 lux and put the name in
+English") the card alone never says whether that was done.
+
+The line is the model's own prose from the submitting response, and it was
+empty for a while for two reasons that compounded. The instruction to write it
+lived in `submit_automation`'s own *result* — "tell them what it will do,
+briefly, and stop" — which the model can never act on, because accepting a
+submission ends the turn and that result is only read on the next one, where it
+is stale advice about a rule from last time. And the paragraph above it in the
+system prompt read "prose is not an answer", which is true about *delivering a
+rule* and reads as "do not bother writing any". So the prompt now asks for the
+line **in the same message as the call**, and says what it is for — not the
+rule again, which is the card. It is never written by the hub or the apps: a
+canned "All done" is words in the model's mouth, and the same reason both chats
+give an empty page a stage rather than a fake greeting.
+
 Two fields on `preview` are there because leaving them out was wrong in a way
 only a real app finds. **`name`**, because `text` is the summary rather than a
 title, and a client without it would have to look the id up in a list it may not
