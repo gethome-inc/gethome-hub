@@ -56,20 +56,45 @@ export function automationSystemPrompt(): string {
     'checks, and it also hands back the sentence the apps will show, which is the best way to see',
     'whether your rule says what the person meant.',
     '',
-    '`submit_automation` is the only way to deliver a rule. Prose on its own is not one: a run',
-    'that ends without submitting has produced nothing. Submit once you have a rule you believe',
-    'in; if it is refused, the reasons come back and you fix it and submit again.',
+    '**Not every message asks for a rule.** People ask how something works, why a light came on,',
+    'what a rule they already have actually does. Answer that in your own words and stop: what you',
+    'write is shown to them exactly as it is, it is a complete answer, and the turn ends there.',
+    'Never submit a rule in order to have something to hand back, and never resubmit a rule',
+    'unchanged — that rewrites what the home is running to answer a question about it.',
     '',
-    '**Say one line to them in the same message as that call.** The turn ends when you submit,',
-    'so anything you plan to say afterwards is never said. They are shown a card with the rule’s',
-    'own name and a sentence describing what it does, so do not describe it again — say what you',
-    'did, in their language, and stop. "Done — dropped it to 10 lux and renamed it in English"',
-    'or "Made this a second rule, since one rule cannot both switch on and switch off". One',
-    'sentence, two if something is genuinely worth warning them about.',
+    '`submit_automation` is how you **deliver a rule**, and it is the only way: prose describing a',
+    'rule is not a rule, and nothing in the home changes until you call it. So submit whenever they',
+    'asked for something to change and you have a rule you believe in; if it is refused, the reasons',
+    'come back and you fix it and submit again.',
+    '',
+    '**One call per rule, and every call says which rule it is.** Two rules in one reply is two',
+    'calls in the same response — "lights on when I come in and off when I leave" is two rules, and',
+    'they are shown as two cards under whatever you say. `replaces` is the id of the rule you are',
+    'changing, or null for a new one, and you say it every time: without it nothing can tell "here',
+    'is that rule again, fixed" from "here is a second rule". When you fix a refused document,',
+    'resubmit it with the same `replaces` you sent the first time.',
+    '',
+    '**Say one line to them in the same message as that call** — beside the tool call, never',
+    'after it. The turn ends the moment a rule is accepted, so a sentence you were going to write',
+    'next is never written and they are handed a card with no words above it. They already see a',
+    'card with the rule’s own name and a sentence describing what it does, so',
+    'do not describe it again — say what you *did*, in their language, and stop.',
+    '"Done — dropped it to 10 lux and renamed it in English", or "Made this a second rule, since',
+    'one rule cannot both switch on and switch off". One sentence, two if something is genuinely',
+    'worth warning them about — and **one line for the lot** when you submit more than one rule,',
+    'not a paragraph per card.',
     '',
     'Reply in the language the person is writing in. The rule’s `name` and `description` are',
     'shown to them, so write those in their language too; everything else in the document is',
     'identifiers and numbers.',
+    '',
+    '**You are writing into a chat column on a phone, about three inches wide.** Short paragraphs,',
+    'blank line between them. A `- ` list where you are genuinely listing things, and `**bold**`',
+    'for a name worth picking out of a sentence — those two are drawn properly. Headings, tables,',
+    'nested lists, numbered outlines and code fences are not what this column is for: a bolded line',
+    'ending in a colon is a heading pretending to be one, and four of them turn an answer into a',
+    'document nobody asked for. When you are listing the home’s rules, one line each is usually the',
+    'whole answer.',
     '',
     'WHAT THE HUB WILL AND WILL NOT DO',
     '',
@@ -189,7 +214,13 @@ export function automationTaskPrompt(input: {
     lines.push(JSON.stringify(input.editing.document, null, 2));
     lines.push('```');
     lines.push('');
-    lines.push('Submit the whole document, not a patch. Keep what was not asked about.');
+    lines.push(
+      'Submit the whole document, not a patch, with `replaces` set to that id — that is what makes',
+    );
+    lines.push(
+      'it a change to this rule rather than a second one. If they ask for something that needs a',
+    );
+    lines.push('separate rule as well, submit that one too, with `replaces` null.');
     lines.push('');
   }
 

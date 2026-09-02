@@ -7,11 +7,14 @@ import { EFFORT, MAX_OUTPUT_TOKENS, type AgentAuth } from './agent-core.js';
 import { estimateCostUsd, isSupportedModel, supportedModelIds } from './models.js';
 import {
   AUTOMATION_MAX_BUDGET_USD,
+  AUTOMATION_MAX_RULES_PER_TURN,
   AUTOMATION_MAX_TURNS,
   AUTOMATION_TIMEOUT_MS,
   type AutomationConversation,
   type AutomationTurn,
   type AutomationTurnContext,
+  type SubmittedRule,
+  type SubmittedTurn,
 } from './automation-conversation.js';
 import {
   AUTOMATION_TOOLS,
@@ -179,6 +182,31 @@ export function createAutomationConversation(
     const watchdog = setTimeout(() => controller.abort(), AUTOMATION_TIMEOUT_MS);
     watchdog.unref?.();
 
+    /**
+     * A rule that was accepted with nothing said about it, held back for one
+     * more round so the model can say its line.
+     *
+     * **A card with no words above it is the worst answer this agent gives.**
+     * The prompt asks for the sentence in the same message as the call — the
+     * turn ends the moment a rule is accepted, so anything planned for
+     * "afterwards" is never written — and a model that forgets leaves somebody
+     * who asked for a change staring at a rule card with no idea what was
+     * decided or why. The rule is already saved by then, so there is nothing
+     * to undo; what is missing is only the sentence, and the one thing that
+     * can supply it is the model.
+     *
+     * So the accepted submission is *kept* rather than returned, the results
+     * (which already say "Accepted") go back, and the loop runs once more.
+     * Exactly once: the flag is what ends it, so a model that answers with
+     * more tool calls hands the card over with whatever it did say rather than
+     * spending another round. It costs a round trip only in the case where the
+     * words are missing, which the prompt is written to make rare.
+     */
+    // A holder rather than a bare `let`: read before the assignment that fills
+    // it, a `let` is flow-narrowed to `null` for the whole first pass, and the
+    // read below is exactly there — one round earlier in the same loop.
+    const silence: { submission: SubmittedTurn | null } = { submission: null };
+
     try {
       for (let turn = 1; turn <= AUTOMATION_MAX_TURNS; turn += 1) {
         /**
@@ -276,13 +304,28 @@ export function createAutomationConversation(
 
         // Prose and nothing else: the model has handed back. That is a
         // perfectly good end to a turn here, unlike in the mapping run where
-        // it means the answer channel went unused.
+        // it means the answer channel went unused — a question about the home
+        // is answered by writing back and by nothing else.
         if (calls.length === 0) {
+          // The words a silent submission was sent back for. The rule is
+          // already saved; this is the sentence that goes above its card.
+          const submitted = silence.submission;
+          if (submitted !== null) return { ...submitted, text: said };
           return { kind: 'said', text: said || 'Ready when you are.' };
         }
 
         const results: Anthropic.ToolResultBlockParam[] = [];
         let handedBack: AutomationTurn | null = null;
+        /**
+         * Every rule accepted in *this* response, in the order they were
+         * submitted.
+         *
+         * One reply can legitimately carry two — "lights on when I come in and
+         * off when I leave" is two rules, which the prompt has always said —
+         * and a single `handedBack` meant the second overwrote the first: both
+         * were told "Accepted" and only one was ever saved.
+         */
+        const submitted: SubmittedRule[] = [];
 
         for (const call of calls) {
           if (call.name === 'ask_user') {
@@ -345,6 +388,22 @@ export function createAutomationConversation(
           }
 
           if (call.name === 'submit_automation') {
+            if (submitted.length >= AUTOMATION_MAX_RULES_PER_TURN) {
+              // Bounded rather than refused outright: what is already accepted
+              // is saved and shown, and the rest are asked for again once the
+              // person has seen these — a reply that writes a page of rules
+              // into somebody's home is a misread, not an answer.
+              results.push({
+                type: 'tool_result',
+                tool_use_id: call.id,
+                content:
+                  `That is more than ${AUTOMATION_MAX_RULES_PER_TURN} rules in one reply. The ` +
+                  'ones already accepted are saved; tell them what those do and offer the rest ' +
+                  'once they have replied.',
+                is_error: true,
+              });
+              continue;
+            }
             const outcome = evaluateSubmission(call.input, tools);
             results.push({
               type: 'tool_result',
@@ -361,6 +420,11 @@ export function createAutomationConversation(
               outcome.accepted ? undefined : outcome.text,
             );
             if (outcome.accepted) {
+              submitted.push({
+                document: outcome.document,
+                replaces: outcome.replaces ?? null,
+                ...(outcome.note !== undefined ? { note: outcome.note } : {}),
+              });
               // **The other order of the same collision**, and the more
               // expensive one: with a question already open, overwriting it
               // here left `ask_user`'s call with no result and the next
@@ -385,20 +449,17 @@ export function createAutomationConversation(
                 });
                 pendingQuestion = null;
               }
-              handedBack = {
-                kind: 'submitted',
-                document: outcome.document,
-                accepted: true,
-                text: said,
-                ...(outcome.note !== undefined ? { note: outcome.note } : {}),
-              };
+              handedBack = { kind: 'submitted', rules: submitted, text: said };
             }
             continue;
           }
 
           const result = runAutomationTool(call.name, call.input, tools);
           const step = toolStep(call.name);
-          context?.onStep?.(step.summary, step.kind);
+          // The tool's own line about what it actually did — which device, how
+          // many matched, the sentence a draft would carry. Absent for a tool
+          // that has nothing worth reading under its name.
+          context?.onStep?.(step.summary, step.kind, result.detail);
           results.push({
             type: 'tool_result',
             tool_use_id: call.id,
@@ -419,7 +480,25 @@ export function createAutomationConversation(
 
         messages.push({ role: 'user', content: results });
 
+        // A rule accepted with nothing said about it: keep it, and give the
+        // model one round to say what it did. Anything it says next comes back
+        // through the no-calls branch above, carrying this submission with it.
+        if (handedBack?.kind === 'submitted' && handedBack.text.trim().length === 0) {
+          if (silence.submission !== null) return handedBack;
+          silence.submission = handedBack;
+          context?.onStep?.('Writing it up for you', 'thinking');
+          continue;
+        }
+
         if (handedBack) return handedBack;
+
+        // **Exactly one round, whatever that round turns out to be.** The rule
+        // is already saved and the person is waiting in front of it, so a model
+        // that answered the ask with more tool calls does not get to spend a
+        // third round on a sentence: it is handed over with whatever it did
+        // say, which is usually nothing and is no worse than before.
+        const held = silence.submission;
+        if (held !== null) return { ...held, text: said };
       }
 
       return {
@@ -444,7 +523,13 @@ export function createAutomationConversation(
   function evaluateSubmission(
     input: unknown,
     context: AutomationToolContext,
-  ): { accepted: boolean; text: string; document?: unknown; note?: string | undefined } {
+  ): {
+    accepted: boolean;
+    text: string;
+    document?: unknown;
+    note?: string | undefined;
+    replaces?: string | null;
+  } {
     const outer = submitAutomationInput.safeParse(input);
     if (!outer.success) {
       return {
@@ -483,6 +568,7 @@ export function createAutomationConversation(
       accepted: true,
       document: parsed.data,
       note: outer.data.note,
+      replaces: outer.data.replaces,
       // **An outcome, not an instruction.** This used to end "Tell them what it
       // will do, briefly, and stop" — advice the model can never take, since
       // accepting a submission ends the turn and this result is only read on
@@ -491,7 +577,10 @@ export function createAutomationConversation(
       // prompt, where it is read before the response is composed.
       text:
         `Accepted, as a ${automationShape(parsed.data)}: ${describeAutomation(parsed.data, home)}` +
-        `${warnings}\nIt is saved switched off, and they have been shown a card for it.`,
+        `${warnings}\n` +
+        (outer.data.replaces === null
+          ? 'It is saved as a new rule, switched off, and they have been shown a card for it.'
+          : 'It replaces the rule you named, and they have been shown a card for it.'),
     };
   }
 

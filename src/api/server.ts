@@ -2151,6 +2151,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   const automationWire = (record: ReturnType<AutomationEngine['list']>[number]) => ({
     id: record.id,
     name: record.name,
+    /**
+     * The mark somebody chose, or null for "the app decides" — the room rule
+     * (`icon`/`accent`) applied to a rule. An app derives one from the name
+     * and the shape when this is empty, which is what every rule written
+     * before anybody restyled it carries.
+     */
+    icon: record.icon,
     description: record.document.description ?? null,
     enabled: record.enabled,
     active: record.active,
@@ -2324,18 +2331,36 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   });
 
   /**
-   * Edit it, or switch it on and off.
+   * Edit it, rename it, restyle it, or switch it on and off.
    *
-   * Both in one route because both are editing: `enabled` is whether the rule
-   * exists as far as the home is concerned, which is a decision about the rule
-   * rather than about the house. Switching it back on clears whatever the
+   * All in one route because all of them are editing: `enabled` is whether the
+   * rule exists as far as the home is concerned, which is a decision about the
+   * rule rather than about the house. Switching it back on clears whatever the
    * circuit breaker wrote, since a stale explanation on a working rule is
    * worse than none.
+   *
+   * **`name` and `icon` are what a rule is called and how it is drawn**, and
+   * they are here rather than only inside `document` because a rename is a
+   * different act from an edit: what the house *does* is unchanged, the apps
+   * hold the summary rather than the document (`summary` is the contract —
+   * see `automationWire`), and asking a phone to send back a whole rule
+   * document to fix a typo would mean every app carrying a second copy of the
+   * DSL. `name` is written into the document too — see
+   * `AutomationStore.setLook` for why that is not optional — and `icon` is the
+   * room rule: `null` puts it back to the mark the app derives, leaving the
+   * field out keeps whatever it wears.
    */
   app.patch('/api/v1/automations/:id', needs('automation.manage'), async (request, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     const body = z
-      .object({ document: z.unknown().optional(), enabled: z.boolean().optional() })
+      .object({
+        document: z.unknown().optional(),
+        enabled: z.boolean().optional(),
+        // The document's own bound, so a name can never be typed here that a
+        // later edit in conversation would have to refuse.
+        name: z.string().trim().min(1).max(80).optional(),
+        icon: lookTokenSchema,
+      })
       .parse(request.body ?? {});
     const record = deps.automations.get(id);
     if (!record) return reply.code(404).send({ error: 'not_found' });
@@ -2359,20 +2384,47 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       warnings = report.warnings;
       await deps.automationStore.update(id, parsed.data, request.member!.id);
     }
+    if (body.name !== undefined || body.icon !== undefined) {
+      await deps.automationStore.setLook(id, {
+        ...(body.name !== undefined ? { name: body.name } : {}),
+        ...(body.icon !== undefined ? { icon: body.icon } : {}),
+      });
+    }
     if (body.enabled !== undefined) {
       await deps.automationStore.setEnabled(id, body.enabled);
     }
 
     await deps.automations.reload();
     deps.events.emit('automationChanged', id);
+    // A rename is logged and a restyle is not, the rooms rule: the activity
+    // log is read a week later, and "somebody changed that rule's icon" is not
+    // what anybody is looking for in it — while "who renamed this" is exactly
+    // the sort of thing a shared home asks.
+    if (body.name !== undefined && body.name !== record.name) {
+      await deps.activity.record({
+        kind: 'automation.renamed',
+        message: `${request.member!.name} renamed the automation “${record.name}” to “${body.name}”`,
+        memberId: request.member!.id,
+        data: {
+          automationId: id,
+          automationName: body.name,
+          previousName: record.name,
+          memberName: request.member!.name,
+        },
+      });
+    }
     if (body.enabled !== undefined) {
+      // The name as it stands *after* this request, so a rename and a switch
+      // made in one call do not leave two rows in the feed disagreeing about
+      // what the rule is called.
+      const name = body.name ?? record.name;
       await deps.activity.record({
         kind: body.enabled ? 'automation.enabled' : 'automation.disabled',
-        message: `${request.member!.name} switched the automation “${record.name}” ${
+        message: `${request.member!.name} switched the automation “${name}” ${
           body.enabled ? 'on' : 'off'
         }`,
         memberId: request.member!.id,
-        data: { automationId: id, automationName: record.name },
+        data: { automationId: id, automationName: name },
       });
     }
     const saved = deps.automations.get(id);

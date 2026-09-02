@@ -37,6 +37,22 @@ export interface AutomationToolContext {
 export interface AutomationToolResult {
   text: string;
   isError?: boolean;
+  /**
+   * The one line a *person* should read under this step, when there is one.
+   *
+   * The `text` above is for the model — JSON, whole documents, the home's
+   * inventory — and none of it belongs on a phone. This is what actually
+   * happened, in the words the sentence beside it is written in: which device
+   * was looked at, how many matched, whether the draft would be accepted. It
+   * rides the same `step` frame `ask_user`'s question does and is the whole of
+   * the difference between "Checking the rule would work" and "Checking the
+   * rule would work — When the living room sensor sees somebody, switch the
+   * lamp on".
+   *
+   * Kept short: it is stored on a transcript row (cut at 400 characters) and
+   * drawn as one clamped line an app opens on a tap.
+   */
+  detail?: string;
 }
 
 export interface AutomationToolDefinition {
@@ -93,6 +109,19 @@ export const submitAutomationInput = z
     document: z.unknown(),
     /** One line for the version history: what changed and why. */
     note: z.string().max(200).optional(),
+    /**
+     * The rule this replaces, or `null` for a new one.
+     *
+     * **Required and nullable rather than optional**, because an omitted id is
+     * genuinely ambiguous between the two things a submission can mean — "here
+     * is the rule again, fixed" and "here is a second rule" — and the hub
+     * guessed for a while: every submission after the first in a conversation
+     * silently *overwrote* the first, so a chat could only ever produce one
+     * rule and "and also switch everything off at midnight" quietly replaced
+     * what had just been written. Nothing here can tell those apart, and the
+     * model can, so it says every time.
+     */
+    replaces: z.string().nullable(),
   })
   .strict();
 
@@ -119,10 +148,16 @@ function submitSchema(): Record<string, unknown> {
   return {
     type: 'object',
     additionalProperties: false,
-    required: ['document'],
+    required: ['document', 'replaces'],
     properties: {
       document: json(automationDocumentSchema),
       note: { type: 'string', maxLength: 200, description: 'One line for the version history.' },
+      replaces: {
+        type: ['string', 'null'],
+        description:
+          'The id of the rule this replaces — including one you wrote earlier in this same ' +
+          'conversation — or null to save it as a new rule. Always say which.',
+      },
     },
   };
 }
@@ -205,9 +240,13 @@ export const AUTOMATION_TOOLS: readonly AutomationToolDefinition[] = [
   {
     name: 'submit_automation',
     description:
-      'Deliver the finished rule. This is the only way to answer: a conversation that ends ' +
-      'without it has produced nothing. If the document is refused the reasons come back — fix ' +
-      'them and submit again.',
+      'Deliver one finished rule. This is the only way to *save* one — nothing in the home ' +
+      'changes until you call it — but it is not how you answer: prose reaches the person on ' +
+      'its own, so a question is answered by writing back and nothing else. **One call per ' +
+      'rule**: two rules in one reply is two calls in the same response, and each is shown as ' +
+      'its own card. Set `replaces` to the id of the rule you are changing, or to null for a ' +
+      'new one. If the document is refused the reasons come back — fix them and submit again ' +
+      'with the same `replaces`.',
     schema: submitSchema,
   },
 ];
@@ -246,7 +285,17 @@ export function runAutomationTool(
           }
           return true;
         });
+        const room = input.roomId
+          ? home.rooms.find((entry) => entry.id === input.roomId)?.name
+          : undefined;
+        const narrowed = [
+          input.capability !== undefined ? `that can ${input.capability}` : undefined,
+          room !== undefined ? `in the ${room}` : undefined,
+        ].filter((part): part is string => part !== undefined);
         return {
+          detail:
+            `${matched.length} ${matched.length === 1 ? 'device' : 'devices'}` +
+            (narrowed.length > 0 ? ` ${narrowed.join(' ')}` : ''),
           text: JSON.stringify(
             matched.map((device) => ({
               id: device.id,
@@ -270,6 +319,7 @@ export function runAutomationTool(
         const device = context.home().devices.find((entry) => entry.id === deviceId);
         if (!device) return { text: `No device with id ${deviceId} in this home.`, isError: true };
         return {
+          detail: device.name,
           text: JSON.stringify(
             {
               id: device.id,
@@ -291,7 +341,13 @@ export function runAutomationTool(
 
       case 'list_rooms_zones': {
         const home = context.home();
+        const rooms = `${home.rooms.length} ${home.rooms.length === 1 ? 'room' : 'rooms'}`;
+        const zones =
+          home.zones.length > 0
+            ? ` · ${home.zones.length} ${home.zones.length === 1 ? 'zone' : 'zones'}`
+            : '';
         return {
+          detail: `${rooms}${zones}`,
           text: JSON.stringify({ rooms: home.rooms, zones: home.zones }, null, 2),
         };
       }
@@ -302,7 +358,7 @@ export function runAutomationTool(
         if (!entry) {
           return { text: `No automation with id ${automationId} in this home.`, isError: true };
         }
-        return { text: JSON.stringify(entry.document, null, 2) };
+        return { detail: entry.name, text: JSON.stringify(entry.document, null, 2) };
       }
 
       case 'dry_run': {
@@ -320,12 +376,19 @@ export function runAutomationTool(
         }
         const home = context.home();
         const report = sanityCheckAutomation(parsed.data, home);
+        const summary = describeAutomation(parsed.data, home);
         return {
+          // **The sentence the apps would show, or the first reason it would
+          // be refused.** This is the most useful line the whole trail carries:
+          // it is what the rule *says* it will do, read out while the agent is
+          // still deciding, so somebody watching sees the rule before the card
+          // arrives rather than only afterwards.
+          detail: report.problems[0] ?? summary,
           text: JSON.stringify(
             {
               ...report,
               shape: automationShape(parsed.data),
-              summary: describeAutomation(parsed.data, home),
+              summary,
               wouldBeAccepted: report.problems.length === 0,
             },
             null,

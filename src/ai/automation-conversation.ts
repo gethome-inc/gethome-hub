@@ -52,26 +52,60 @@ export const AUTOMATION_SESSION_TTL_MS = 2 * 60 * 60_000;
 export const AUTOMATION_MAX_SESSIONS = 8;
 
 /**
+ * Rules one response may deliver.
+ *
+ * A reply carrying two is the case this exists for — "lights on when I come in
+ * and off when I leave" — and three or four is a large ask answered in one go.
+ * Past that it is a model that has misread the room, and the cost lands in
+ * somebody's home as a page of rules they did not ask for, so the rest are
+ * refused *inside* the turn with a sentence saying to send them after the
+ * person has replied. Every other unbounded thing here has a bound; this is
+ * that rule applied to the one tool that writes to the home.
+ */
+export const AUTOMATION_MAX_RULES_PER_TURN = 4;
+
+/**
  * What a turn ended with.
  *
  * `said` and `question` are both suspensions and both perfectly ordinary;
  * `submitted` is the answer; `stopped` is a turn that ran out of rounds,
  * budget or time, and carries the sentence a person should read.
  */
+/**
+ * One rule the model handed over, already validated.
+ *
+ * `replaces` is the id of the rule it is a new version of, or `null` for a new
+ * one — the model says which on every submission, because nothing else can
+ * tell "here is that rule again, fixed" from "here is a second rule".
+ */
+export interface SubmittedRule {
+  document: unknown;
+  note?: string | undefined;
+  replaces: string | null;
+}
+
 export type AutomationTurn =
   | { kind: 'question'; question: AskUser }
   | {
       kind: 'submitted';
-      document: unknown;
-      note?: string | undefined;
-      /** Whether the hub accepted it. A refusal is handed back inside the same
-       *  turn, so the model fixes and resubmits without the person seeing it. */
-      accepted: boolean;
-      /** What the model said alongside it, when it said anything. */
+      /**
+       * **A list, because one reply can carry more than one rule.** "Lights on
+       * when I come in and off when I leave" is two rules — the prompt has said
+       * so since the day it shipped — and the loop used to keep a single
+       * `handedBack`, so the second submission in a response overwrote the
+       * first and one of the two was silently dropped between being accepted
+       * and being saved. Each becomes its own card.
+       */
+      rules: SubmittedRule[];
+      /** What the model said alongside them, when it said anything. */
       text: string;
     }
   | { kind: 'said'; text: string }
   | { kind: 'stopped'; reason: string };
+
+/** The accepted-rules arm on its own, for the loop that holds one back while it
+ *  asks the model for the sentence that goes above the cards. */
+export type SubmittedTurn = Extract<AutomationTurn, { kind: 'submitted' }>;
 
 /** What a running turn reports as it happens, for the socket. */
 export interface AutomationTurnContext {

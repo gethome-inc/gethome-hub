@@ -320,6 +320,75 @@ describe('editing', () => {
     expect((reverted.json() as { name: string }).name).toBe('I’m leaving');
     await app.inject({ method: 'DELETE', url: `/api/v1/automations/${id}`, headers: auth(token) });
   });
+
+  /**
+   * Renaming is not editing, and the document has to hear about it anyway.
+   *
+   * The apps hold the summary rather than the document, so fixing a typo must
+   * not mean sending a whole rule back; and the column and `document.name` are
+   * one fact stored twice, so a rename that touched only the column would be
+   * undone by the next edit made in conversation.
+   */
+  it('renames and restyles without spending a version, and writes the name into the document', async () => {
+    const created = await create(button);
+    const { id } = created.json() as { id: string };
+    const before = (
+      await app.inject({
+        method: 'GET',
+        url: `/api/v1/automations/${id}/versions`,
+        headers: auth(token),
+      })
+    ).json() as unknown[];
+
+    const patched = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/automations/${id}`,
+      headers: auth(token),
+      payload: { name: 'Out for the day', icon: 'door' },
+    });
+    expect(patched.statusCode).toBe(200);
+    expect(patched.json()).toMatchObject({ name: 'Out for the day', icon: 'door' });
+
+    const read = (
+      await app.inject({
+        method: 'GET',
+        url: `/api/v1/automations/${id}`,
+        headers: auth(token),
+      })
+    ).json() as { name: string; icon: string | null; document: { name: string } };
+    expect(read.name).toBe('Out for the day');
+    expect(read.icon).toBe('door');
+    // What the agent reads when it is asked to change this rule.
+    expect(read.document.name).toBe('Out for the day');
+
+    const after = (
+      await app.inject({
+        method: 'GET',
+        url: `/api/v1/automations/${id}/versions`,
+        headers: auth(token),
+      })
+    ).json() as unknown[];
+    expect(after.length).toBe(before.length);
+
+    // A rename is worth a line in a shared home's history; a restyle is not.
+    const feed = (
+      await app.inject({ method: 'GET', url: '/api/v1/activity', headers: auth(token) })
+    ).json() as { kind: string; message: string }[];
+    const renames = feed.filter((entry) => entry.kind === 'automation.renamed');
+    expect(renames).toHaveLength(1);
+    expect(renames[0]!.message).toContain('Out for the day');
+
+    // `null` is a real answer: back to the mark the app derives.
+    const cleared = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/automations/${id}`,
+      headers: auth(token),
+      payload: { icon: null },
+    });
+    expect((cleared.json() as { icon: string | null }).icon).toBeNull();
+
+    await app.inject({ method: 'DELETE', url: `/api/v1/automations/${id}`, headers: auth(token) });
+  });
 });
 
 describe('templates', () => {

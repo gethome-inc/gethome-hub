@@ -34,6 +34,8 @@ export const MAX_RUN_STEPS = 40;
 export interface AutomationRecord {
   id: string;
   name: string;
+  /** The app's own mark token, or null for "the app decides" — see the column. */
+  icon: string | null;
   enabled: boolean;
   active: boolean;
   disabledReason: string | null;
@@ -109,6 +111,7 @@ export class AutomationStore {
       records.push({
         id: row.id,
         name: row.name,
+        icon: row.icon,
         enabled: row.enabled,
         active: row.active,
         disabledReason: row.disabledReason,
@@ -167,6 +170,48 @@ export class AutomationStore {
       .returning();
     if (!row) return null;
     return this.toRecord(id, document, row);
+  }
+
+  /**
+   * Rename a rule, or restyle it — the two halves of what a rule is *called*.
+   *
+   * **A rename writes the document as well as the column**, because they are
+   * one fact stored twice: `update()` sets `name` from `document.name`, so a
+   * rename that touched only the column would be silently undone by the next
+   * edit made in conversation — and the agent reads the document, so it would
+   * go on calling the rule by a name nobody in the home uses any more.
+   *
+   * **No version row.** A version records what the rule used to *say*, and ten
+   * are kept per rule to walk back out of a bad afternoon; spending one on a
+   * rename would evict an edit that actually changed what the house does. The
+   * behaviour is untouched here.
+   *
+   * `icon` is three-valued in the same way the route's body is: leaving it
+   * `undefined` keeps whatever the rule wears, and `null` puts it back to the
+   * mark the app derives.
+   */
+  async setLook(
+    id: string,
+    look: { name?: string; icon?: string | null },
+  ): Promise<AutomationRecord | null> {
+    const existing = await this.row(id);
+    if (!existing) return null;
+    const document = existing.document as AutomationDocument;
+    const renamed =
+      look.name !== undefined && look.name !== document.name
+        ? { ...document, name: look.name }
+        : document;
+    const [row] = await this.db
+      .update(automations)
+      .set({
+        ...(look.name !== undefined ? { name: look.name, document: renamed } : {}),
+        ...(look.icon !== undefined ? { icon: look.icon } : {}),
+        updatedAt: new Date(),
+      })
+      .where(eq(automations.id, id))
+      .returning();
+    if (!row) return null;
+    return this.toRecord(id, renamed, row);
   }
 
   /**
@@ -324,6 +369,7 @@ export class AutomationStore {
     return {
       id,
       name: row.name,
+      icon: row.icon,
       enabled: row.enabled,
       active: row.active,
       disabledReason: row.disabledReason,

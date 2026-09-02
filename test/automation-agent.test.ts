@@ -17,6 +17,7 @@ import type {
   AutomationTurnContext,
 } from '../src/ai/automation-conversation.js';
 import { automationSystemPrompt } from '../src/ai/automation-prompts.js';
+import { AUTOMATION_TOOLS } from '../src/ai/automation-tools.js';
 
 /**
  * The automation agent: the loop over a mocked SDK, and the conversation
@@ -224,7 +225,12 @@ describe('the automation conversation', () => {
           toolUse('ask_user', { question: 'Which lamp?', options: [{ id: 'a', label: 'Bedside' }] }, callId),
         ]),
       )
-      .mockReturnValueOnce(assistant([toolUse('submit_automation', { document: goodDocument })]));
+      .mockReturnValueOnce(
+        assistant([
+          text('Done — the bedside lamp it is.'),
+          toolUse('submit_automation', { document: goodDocument, replaces: null }),
+        ]),
+      );
 
     const conversation = conversationFor();
     const first = await conversation.send('lights please');
@@ -277,10 +283,16 @@ describe('the automation conversation', () => {
         assistant([
           toolUse('submit_automation', {
             document: { ...goodDocument, triggers: [], actions: [] },
+            replaces: null,
           }),
         ]),
       )
-      .mockReturnValueOnce(assistant([toolUse('submit_automation', { document: goodDocument })]));
+      .mockReturnValueOnce(
+        assistant([
+          text('Done — evening lights are saved.'),
+          toolUse('submit_automation', { document: goodDocument, replaces: null }),
+        ]),
+      );
 
     const turn = await conversationFor().send('write me a rule');
     expect(turn.kind).toBe('submitted');
@@ -307,6 +319,7 @@ describe('the automation conversation', () => {
                 },
               ],
             },
+            replaces: null,
           }),
         ]),
       )
@@ -321,11 +334,16 @@ describe('the automation conversation', () => {
   it('answers an ordinary tool call and carries on', async () => {
     streamMock
       .mockReturnValueOnce(assistant([toolUse('list_devices', {})]))
-      .mockReturnValueOnce(assistant([toolUse('submit_automation', { document: goodDocument })]));
+      .mockReturnValueOnce(
+        assistant([
+          text('Done — that lamp goes on in the evening.'),
+          toolUse('submit_automation', { document: goodDocument, replaces: null }),
+        ]),
+      );
 
-    const steps: { summary: string; kind: string }[] = [];
+    const steps: { summary: string; kind: string; detail?: string | undefined }[] = [];
     const turn = await conversationFor([{ id: deviceId, name: 'Kitchen lamp' }]).send('what have I got', {
-      onStep: (summary, kind) => steps.push({ summary, kind }),
+      onStep: (summary, kind, detail) => steps.push({ summary, kind, detail }),
     });
     expect(turn.kind).toBe('submitted');
 
@@ -347,9 +365,84 @@ describe('the automation conversation', () => {
       'thinking',
       'writing',
     ]);
+    // **A step says what exactly, where the tool knows.** "Looking at your
+    // devices" is the act; the line under it is what came back, which is the
+    // difference between a trail that reassures and one that informs.
+    expect(steps[1]?.detail).toBe('1 device');
 
     const second = streamMock.mock.calls[1]?.[0] as { messages: unknown[] };
     expect(JSON.stringify(second.messages)).toContain('Kitchen lamp');
+  });
+
+  it('sends a silent submission back once, so a card never arrives with no words', async () => {
+    /**
+     * **The prompt asks; this is what happens when the model forgets.** A rule
+     * accepted with nothing said about it is a card and no explanation, on the
+     * one screen whose job is telling somebody what their house is about to
+     * start doing — and the turn is over by then, so there is no later round
+     * to say it in. The rule is already saved, so nothing is undone: the
+     * submission is held back and the loop runs once more purely for the
+     * sentence.
+     */
+    streamMock
+      .mockReturnValueOnce(assistant([toolUse('submit_automation', { document: goodDocument, replaces: null })]))
+      .mockReturnValueOnce(assistant([text('Готово — свет включится вечером.')], 'end_turn'));
+
+    const steps: string[] = [];
+    const turn = await conversationFor().send('сделай правило', {
+      onStep: (summary) => steps.push(summary),
+    });
+
+    expect(turn.kind).toBe('submitted');
+    expect((turn as { text: string }).text).toBe('Готово — свет включится вечером.');
+    expect((turn as { rules: { document: { name: string } }[] }).rules).toHaveLength(1);
+    expect((turn as { rules: { document: unknown }[] }).rules[0]?.document).toMatchObject({
+      name: 'Evening lights',
+    });
+    // The wait is accounted for rather than silent — the round it costs is one
+    // the person is watching.
+    expect(steps).toContain('Writing it up for you');
+  });
+
+  it('asks only once, and hands the rule over with whatever was said', async () => {
+    // A model that answers the ask with more tool calls does not get a third
+    // round: the rule is saved and the person is waiting in front of it, so it
+    // is handed over with whatever that round said — usually nothing, which is
+    // no worse than before and is bounded.
+    streamMock
+      .mockReturnValueOnce(assistant([toolUse('submit_automation', { document: goodDocument, replaces: null })]))
+      .mockReturnValueOnce(assistant([text('Saved it.'), toolUse('list_devices', {})]))
+      .mockReturnValueOnce(assistant([text('never reached')], 'end_turn'));
+
+    const turn = await conversationFor().send('write me a rule');
+
+    expect(turn.kind).toBe('submitted');
+    expect((turn as { text: string }).text).toBe('Saved it.');
+    expect(streamMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('takes two rules from one response, and stops at the bound', async () => {
+    // Two is the case this exists for. Past the bound the rest are refused
+    // *inside* the turn — what was accepted is saved and shown, and the model
+    // is told to offer the others once the person has replied.
+    const rule = (name: string) => ({ ...goodDocument, name });
+    streamMock.mockReturnValueOnce(
+      assistant([
+        text('Two rules — one cannot both switch on and switch off.'),
+        toolUse('submit_automation', { document: rule('On'), replaces: null }, 'a'),
+        toolUse('submit_automation', { document: rule('Off'), replaces: null }, 'b'),
+        toolUse('submit_automation', { document: rule('Three'), replaces: null }, 'c'),
+        toolUse('submit_automation', { document: rule('Four'), replaces: null }, 'd'),
+        toolUse('submit_automation', { document: rule('Five'), replaces: null }, 'e'),
+      ]),
+    );
+
+    const turn = await conversationFor().send('lights on and off');
+
+    expect(turn.kind).toBe('submitted');
+    const rules = (turn as { rules: { document: { name: string } }[] }).rules;
+    expect(rules.map((entry) => entry.document.name)).toEqual(['On', 'Off', 'Three', 'Four']);
+    expect((turn as { text: string }).text).toContain('Two rules');
   });
 
   it('closes every call in a response that also asked a question', async () => {
@@ -433,7 +526,7 @@ describe('the automation conversation', () => {
       .mockReturnValueOnce(
         assistant([
           toolUse('ask_user', { question: 'Which lamp?', options: [{ id: 'a', label: 'Bedside' }] }, 'toolu_ask'),
-          toolUse('submit_automation', { document: goodDocument }, 'toolu_submit'),
+          toolUse('submit_automation', { document: goodDocument, replaces: null }, 'toolu_submit'),
         ]),
       )
       .mockReturnValueOnce(assistant([text('unused')], 'end_turn'));
@@ -454,7 +547,7 @@ describe('the automation conversation', () => {
     streamMock
       .mockReturnValueOnce(
         assistant([
-          toolUse('submit_automation', { document: goodDocument }, 'toolu_submit'),
+          toolUse('submit_automation', { document: goodDocument, replaces: null }, 'toolu_submit'),
           toolUse('ask_user', { question: 'Anything else?', options: [{ id: 'a', label: 'No' }] }, 'toolu_ask'),
         ]),
       )
@@ -485,7 +578,7 @@ describe('the automation conversation', () => {
 
     streamMock
       .mockReturnValueOnce(
-        assistant([toolUse('submit_automation', { document: goodDocument }, 'toolu_broken')]),
+        assistant([toolUse('submit_automation', { document: goodDocument, replaces: null }, 'toolu_broken')]),
       )
       .mockReturnValueOnce(assistant([text('Right you are.')], 'end_turn'));
 
@@ -658,7 +751,7 @@ describe('the chat service', () => {
 
   it('saves a submitted rule switched off, and shows it as a preview', async () => {
     const { chat, engine } = await chatFor([
-      { kind: 'submitted', document: goodDocument, accepted: true, text: 'Here you go.' },
+      { kind: 'submitted', rules: [{ document: goodDocument, replaces: null }], text: 'Here you go.' },
     ]);
 
     // `start` answers the moment the message is taken — an acknowledgement,
@@ -710,6 +803,22 @@ describe('the chat service', () => {
     expect(prompt).toContain('do not describe it again');
   });
 
+  it('says prose is a complete answer, so a question is not answered with a rule', async () => {
+    /**
+     * A real conversation went wrong here: asked "how does this work?" about a
+     * rule, the model reasoned that "the framework seems to require submitting
+     * something to produce output" — the prompt's own words — and resubmitted
+     * the rule unchanged, which rewrote what the home was running to answer a
+     * question about it, and handed back a card with nothing said.
+     */
+    const prompt = automationSystemPrompt();
+    expect(prompt).toContain('Not every message asks for a rule');
+    expect(prompt).toContain('never resubmit a rule');
+    // And the tool that told it the same thing says the opposite now.
+    const submit = AUTOMATION_TOOLS.find((tool) => tool.name === 'submit_automation');
+    expect(submit?.description).toContain('prose reaches the person on its own');
+  });
+
   it('survives a store that refuses after the model has already answered', async () => {
     /**
      * **The turn's promise must never reject.** Only the provider call was
@@ -720,7 +829,7 @@ describe('the chat service', () => {
      * conversation's spend was never written either.
      */
     const { chat } = await chatFor(
-      [{ kind: 'submitted', document: goodDocument, accepted: true, text: 'Here you go.' }],
+      [{ kind: 'submitted', rules: [{ document: goodDocument, replaces: null }], text: 'Here you go.' }],
       undefined,
       true,
     );
@@ -735,32 +844,95 @@ describe('the chat service', () => {
     expect(transcript.some((message) => message.role === 'note')).toBe(true);
   });
 
-  it('edits the rule it just wrote rather than writing a second one', async () => {
+  it('replaces the rule the model names, so a fix leaves no draft behind', async () => {
     /**
-     * "Actually, make it half past seven" is the ordinary shape of this
-     * conversation, and the model answers it by submitting a whole document
-     * again — `submit_automation` is the only answer channel and it never
-     * patches. The session only ever learned an id when the chat was *opened*
-     * on an existing rule, so a second submission created a second rule and
-     * left the draft nobody wanted sitting in the home.
+     * **The model says which rule a submission is**, because nothing here can
+     * tell "that rule again, fixed" from "a second rule". It was positional
+     * for a while — the first submission created, every one after it replaced
+     * — which was right about a fix and silently wrong about a conversation
+     * that produces two rules.
      */
-    const { chat, engine } = await chatFor([
-      { kind: 'submitted', document: goodDocument, accepted: true, text: 'Here you go.' },
-      {
-        kind: 'submitted',
-        document: { ...goodDocument, name: 'Evening lights, later' },
-        accepted: true,
-        text: 'Moved it.',
-      },
-    ]);
+    const turns: AutomationTurn[] = [
+      { kind: 'submitted', rules: [{ document: goodDocument, replaces: null }], text: 'Here you go.' },
+    ];
+    const { chat, engine } = await chatFor(turns);
 
     const started = await chat.start({ memberId: memberId, message: 'evening lights' });
     await chat.idle();
+
+    // The id the model learns from `rememberSaved`, which primes its next turn.
+    const written = engine.list()[0]!.id;
+    turns.push({
+      kind: 'submitted',
+      rules: [{ document: { ...goodDocument, name: 'Evening lights, later' }, replaces: written }],
+      text: 'Moved it.',
+    });
     await chat.reply(started.sessionId, memberId, 'make it later');
     await chat.idle();
 
     expect(engine.list()).toHaveLength(1);
     expect(engine.list()[0]?.name).toBe('Evening lights, later');
+  });
+
+  it('leaves two rules behind when the conversation asked for two', async () => {
+    /**
+     * The case the old positional rule made impossible: "and also switch
+     * everything off at midnight" used to *overwrite* the rule written a
+     * minute earlier, so a chat could only ever leave one rule in the home.
+     */
+    const { chat, engine } = await chatFor([
+      { kind: 'submitted', rules: [{ document: goodDocument, replaces: null }], text: 'Here you go.' },
+      {
+        kind: 'submitted',
+        rules: [{ document: { ...goodDocument, name: 'Everything off' }, replaces: null }],
+        text: 'And that one too.',
+      },
+    ]);
+
+    const started = await chat.start({ memberId: memberId, message: 'evening lights' });
+    await chat.idle();
+    await chat.reply(started.sessionId, memberId, 'and everything off at midnight');
+    await chat.idle();
+
+    expect(engine.list().map((rule) => rule.name).sort()).toEqual([
+      'Evening lights',
+      'Everything off',
+    ]);
+  });
+
+  it('carries two rules in one reply, as one line and two cards', async () => {
+    // "Lights on when I come in and off when I leave" is two rules, which the
+    // prompt has said since the day it shipped — so one response can submit
+    // twice, and each is its own card under one sentence.
+    const { chat, engine } = await chatFor([
+      {
+        kind: 'submitted',
+        rules: [
+          { document: goodDocument, replaces: null },
+          { document: { ...goodDocument, name: 'Evening lights off' }, replaces: null },
+        ],
+        text: 'Two rules — one cannot both switch on and switch off.',
+      },
+    ]);
+
+    const started = await chat.start({ memberId: memberId, message: 'lights on and off' });
+    await chat.idle();
+
+    const transcript = await chat.transcript(started.sessionId);
+    // One line, then a card each — in the order they were submitted.
+    expect(transcript.map((message) => message.role)).toEqual([
+      'user',
+      'agent',
+      'preview',
+      'preview',
+    ]);
+    expect(transcript.slice(2).map((message) => (message.data as { name: string }).name)).toEqual([
+      'Evening lights',
+      'Evening lights off',
+    ]);
+    expect(engine.list()).toHaveLength(2);
+    // Both switched off: two rules is not a reason to start doing either.
+    expect(engine.list().every((rule) => !rule.enabled)).toBe(true);
   });
 
   it('writes the transcript, and it outlives the conversation', async () => {
@@ -793,7 +965,7 @@ describe('the chat service', () => {
 
   it('records what the conversation spent, in the one AI list', async () => {
     const { chat } = await chatFor([
-      { kind: 'submitted', document: goodDocument, accepted: true, text: '' },
+      { kind: 'submitted', rules: [{ document: goodDocument, replaces: null }], text: '' },
     ]);
     await chat.start({ memberId: memberId, message: 'go' });
     // The spend is written by the *turn*, not by the request that started it —
@@ -852,7 +1024,7 @@ describe('the chat service', () => {
      * a copy between them would read as two rounds.
      */
     const { chat } = await chatFor(
-      [{ kind: 'submitted', document: goodDocument, accepted: true, text: 'Here you go.' }],
+      [{ kind: 'submitted', rules: [{ document: goodDocument, replaces: null }], text: 'Here you go.' }],
       undefined,
       undefined,
       undefined,
@@ -962,7 +1134,7 @@ describe('the chat service', () => {
 
   it('names what answered, so a conversation says what it cost and on what', async () => {
     const { chat } = await chatFor([
-      { kind: 'submitted', document: goodDocument, accepted: true, text: '' },
+      { kind: 'submitted', rules: [{ document: goodDocument, replaces: null }], text: '' },
     ]);
     const started = await chat.start({ memberId: memberId, message: 'go' });
     await chat.idle();
@@ -1008,8 +1180,8 @@ describe('the chat service', () => {
     let spent = 0.12;
     const { chat } = await chatFor(
       [
-        { kind: 'submitted', document: goodDocument, accepted: true, text: 'one' },
-        { kind: 'submitted', document: goodDocument, accepted: true, text: 'two' },
+        { kind: 'submitted', rules: [{ document: goodDocument, replaces: null }], text: 'one' },
+        { kind: 'submitted', rules: [{ document: goodDocument, replaces: null }], text: 'two' },
       ],
       undefined,
       undefined,
@@ -1044,7 +1216,7 @@ describe('the chat service', () => {
      * already follows.
      */
     const { chat } = await chatFor([
-      { kind: 'submitted', document: goodDocument, accepted: true, text: '' },
+      { kind: 'submitted', rules: [{ document: goodDocument, replaces: null }], text: '' },
     ]);
     const started = await chat.start({ memberId: memberId, message: 'go' });
     await chat.idle();

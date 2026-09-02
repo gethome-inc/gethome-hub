@@ -270,6 +270,42 @@ is the only one in which somebody can still look.
 
 ---
 
+## What a rule is called, and how it is drawn
+
+`name` and `icon` move through `PATCH /automations/:id` beside `document` and
+`enabled`, and they are a different act from an edit: what the house *does* is
+unchanged. They are separable from the document for the reason `summary`
+exists at all — the apps hold the sentence rather than the structure, so
+asking a phone to send a whole rule back to fix a typo would mean every app
+carrying a second copy of the DSL.
+
+Three rules.
+
+**A rename writes the document too.** `name` is a column *and*
+`document.name`, and `AutomationStore.update` sets the column from the
+document — so a rename that touched only the column would be silently undone
+by the next edit made in conversation, and the agent, which reads the
+document, would go on calling the rule by a name nobody in the home uses any
+more. `setLook` writes both.
+
+**It spends no version.** A version records what the rule used to *say* and
+ten are kept per rule to walk back out of a bad afternoon; spending one on a
+rename would evict an edit that actually changed what the house does.
+
+**A rename is logged and a restyle is not** — the rooms rule
+(`PATCH /rooms/:id`). The activity log is read a week later, and "somebody
+changed that rule's icon" is not what anybody is looking for in it, while
+"who renamed this" is exactly the sort of thing a shared home asks.
+
+`icon` is an **opaque app token**, null by default, meaning "the app decides":
+the apps derive a mark from the rule's name and shape, so a rule nobody has
+styled stores nothing and looks as it always did. The vocabulary is
+deliberately not validated here — an allowlist would need a hub upgrade for
+every mark an app adds, and an unknown token costs only a fallback to the
+derived glyph.
+
+---
+
 ## Writing one in conversation
 
 `src/ai/automation-*.ts`. The agent is **authoring only**: the runtime above
@@ -304,12 +340,48 @@ and why a *typed* reply to a question is routed to `answer` anyway.
 `submit_automation` runs and hands back the sentence the apps will show, which
 is the best available test of whether a rule says what somebody meant.
 
-**`submit_automation` is the only answer channel**, and a refusal is a
-`tool_result` rather than the end of the conversation: the model fixes the
-document and resubmits without the person ever seeing that it got it wrong
-once. Deliberately not a `strict` tool, the `submit_mapping` reasoning — strict
-mode guarantees the shape and cannot express "the target must have that
-capability".
+**`submit_automation` is the only way to *deliver a rule*, and deliberately not
+the only way to answer.** A refusal is a `tool_result` rather than the end of
+the conversation: the model fixes the document and resubmits without the person
+ever seeing that it got it wrong once. Deliberately not a `strict` tool, the
+`submit_mapping` reasoning — strict mode guarantees the shape and cannot express
+"the target must have that capability".
+
+The distinction cost a real conversation. Asked "how does this work?" about a
+rule, the model reasoned — in words the person could read on their own screen —
+that *"the framework seems to require submitting something to produce output"*,
+and resubmitted the rule unchanged. That was the prompt's own sentence ("a run
+that ends without submitting has produced nothing") and the tool's own
+description read the same way, so the model was right about what it had been
+told. It rewrote what the home was running in order to answer a question about
+it, and handed back a card with nothing said above it. Both now say the true
+thing: prose reaches the person exactly as it is written, a question is answered
+by writing back and by nothing else, and a rule is never resubmitted unchanged.
+
+**And the prompt says what the prose is being written *into*.** A model writes
+Markdown, and until both halves of this were fixed the apps drew it as
+characters — an answer listing four rules arrived with `**Напрямую по имени
+устройства:**` over a column of literal hyphens, on the one screen whose whole
+job is explaining a house to somebody who does not write software. The app now
+renders it (`AgentProse` in the iOS repo: paragraphs, `- ` lists and `**bold**`
+laid out rather than shown), and the prompt describes the column — three inches
+wide, short paragraphs, a list where something is genuinely being listed, bold
+for a name worth picking out of a sentence. Headings, tables, nested lists,
+numbered outlines and code fences are named as not being what it is for, because
+a bolded line ending in a colon is a heading pretending not to be one and four
+of them turn an answer into a document nobody asked for. Neither half is worth
+much alone: rendering Markdown nobody was told to keep simple gives a
+well-typeset document in a chat bubble, and asking for restraint without
+rendering it still shows the asterisks.
+
+**A step says what it did, not only what it was.** `AutomationToolResult` carries
+an optional `detail` beside the `text` the model reads — the device that was
+looked at, how many matched, the sentence a draft would carry, the first reason
+one would be refused — and it rides the same `step` frame `ask_user`'s question
+does. The `text` is JSON for a model; this is one line for a person, drawn
+clamped under the step's own sentence and opened on a tap. `dry_run`'s is the
+most useful line the trail carries: the rule read out while the agent is still
+deciding, rather than only on the card afterwards.
 
 **Where a wider world would attach, when there is one.** The obvious next thing
 somebody wants is a rule that reaches beyond the house — a web API, an MCP
@@ -360,6 +432,46 @@ falls through to prose rather than being dropped. `text` is always the sentence;
 | `preview` | the rule's **summary**, from `describeAutomation` | `{automationId, name, shape, enabled, edited}` |
 | `note` | something the hub is saying on its own behalf — a provider that failed, a rule that could not be saved | — |
 
+**One conversation, any number of rules — and one reply can carry more than one
+card.** Two things had to change for that. The loop kept a *single*
+`handedBack`, so a second `submit_automation` in one response overwrote the
+first: both were told "Accepted" and only one was ever saved. And the save was
+positional — the first submission created a rule, the session remembered it,
+and every submission after that *replaced* it — which was right about a model
+fixing the rule it had just written and silently wrong about the case people
+actually ask for, where "and also switch everything off at midnight" overwrote
+what had been written a minute earlier.
+
+So a turn hands back a **list** of rules, and each submission says which rule
+it is: `replaces` is the id of the rule being changed, or `null` for a new one.
+Required and nullable rather than optional, because an omitted id is exactly
+the ambiguity that caused the bug, and the model is the only thing that can
+resolve it. Three consequences.
+
+**The ids reach the model on `ChatSession.priming`** — the channel `revive()`
+already uses for context that belongs to the conversation rather than to the
+transcript. A rule the model wrote a minute ago has an id it has never seen
+(the ids in the first user message are from before this chat wrote anything),
+so every save primes the next turn with "the rule X is saved with id …", and a
+revived conversation's recap carries a preview row's id for the same reason.
+Neither is ever written down as a message.
+
+**One row per rule**, in submission order, so an app draws a card per rule with
+its own switch and has nothing to unpack — and `edited` is per rule, since one
+reply can change one rule and add another.
+
+**And the sentence covers the lot**: the prompt asks for one line above the
+cards rather than a paragraph per card.
+
+The number of rules one response may deliver is bounded
+(`AUTOMATION_MAX_RULES_PER_TURN`, four). Two is the case this exists for and
+four is a large ask answered in one go; past that it is a model that has
+misread the room, and the cost lands in somebody's home as a page of rules
+nobody asked for. The ones already accepted are saved and shown, and the rest
+are refused *inside* the turn with a sentence telling it to offer them once the
+person has replied — the `submit_mapping` stance, where a refusal is a
+`tool_result` rather than the end of a conversation.
+
 **A submission writes two rows: the model's line, then the card.** They say
 different things and the card cannot do both jobs — it carries
 `describeAutomation`'s sentence, which is the *rule*, worded the same for
@@ -380,6 +492,20 @@ line **in the same message as the call**, and says what it is for — not the
 rule again, which is the card. It is never written by the hub or the apps: a
 canned "All done" is words in the model's mouth, and the same reason both chats
 give an empty page a stage rather than a fake greeting.
+
+**And when the model forgets anyway, the loop sends the submission back for
+it — once.** A prompt is a request, not a guarantee, and the failure it does not
+cover is the worst answer this agent gives: a card with nothing above it, on the
+one screen whose job is telling somebody what their house is about to start
+doing, with the turn already over so there is no later round to say it in. The
+rule is saved by then, so nothing is undone; what is missing is only the
+sentence, and the one thing that can supply it is the model. So an accepted
+submission with no prose is *held* rather than returned, the tool results (which
+already say "Accepted") go back, and the loop runs one more round purely for the
+line — reported as its own step, because it is a round the person is watching.
+**Exactly one**: a model that answers with more tool calls hands the card over
+with whatever it did say, since spending a third round on a sentence it will not
+write is worse than handing over without one.
 
 Two fields on `preview` are there because leaving them out was wrong in a way
 only a real app finds. **`name`**, because `text` is the summary rather than a

@@ -774,6 +774,22 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   And a new rule is created **switched off** whatever the caller asks, because
   the moment between "here is what I wrote for you" and "your house is now
   doing it" is the only one in which somebody can still look.
+  **What a rule is *called* is not what it does**, so `name` and `icon` ride on
+  `PATCH /automations/:id` beside `document` — the apps hold the `summary`
+  rather than the structure, and making them send a whole rule back to fix a
+  typo would mean every app carrying a second copy of the DSL. Three rules, and
+  the first is the one that bites: **a rename writes `document.name` too**,
+  because `AutomationStore.update` sets the column *from* the document, so a
+  rename that touched only the column would be undone by the next edit made in
+  conversation — and the agent reads the document, so it would go on using a
+  name nobody in the home uses any more. It **spends no version** (ten are kept
+  per rule to walk back out of a bad afternoon, and the behaviour is untouched),
+  and a rename is **logged** where a restyle is not — the rooms rule, since the
+  feed is read a week later and "somebody changed that rule's icon" is not what
+  anybody is looking for in it. `icon` is an opaque app token, null meaning
+  "the app derives one" from the name and the shape, unvalidated here for the
+  reason a room's is: an allowlist would need a hub upgrade for every mark an
+  app adds.
   **The catalog is generated** from the live zod schema and is the one source
   the agent, the apps and the docs all read — the `GET /permissions` rule
   applied to a vocabulary that will keep growing. Units are written out in
@@ -823,6 +839,42 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   with no rows at all — one that never existed, or whose fortnight is up. **`ask_user` carries two to four options** because somebody who does
   not write software taps one and will not compose an answer, and that is the
   single thing that makes this usable by the people it is for.
+  **Prose *is* an answer, and saying otherwise cost a rule.** The prompt read
+  "a run that ends without submitting has produced nothing" and
+  `submit_automation`'s description said the same, so asked "how does this
+  work?" the model reasoned — visibly, in the trail — that "the framework seems
+  to require submitting something to produce output" and resubmitted the rule
+  unchanged: it rewrote what the home was running to answer a question about it,
+  and handed back a card with nothing said. Both now say the true thing —
+  submitting is the only way to *deliver a rule*, prose reaches the person
+  exactly as written, and a rule is never resubmitted unchanged.
+  **A step says what it did, not only what it was**: `AutomationToolResult`
+  carries an optional `detail` beside the `text` the model reads (the device
+  looked at, how many matched, the sentence a draft would carry, the first
+  reason it would be refused), and it rides the same `step` frame `ask_user`'s
+  question does — `dry_run`'s is the most useful line in the trail, the rule read
+  out while the agent is still deciding rather than only on the card afterwards.
+  **One conversation, any number of rules — and one reply can carry more than
+  one card.** Two faults, and they read as one: the loop kept a single
+  `handedBack`, so a second `submit_automation` in one response overwrote the
+  first (both told "Accepted", one ever saved); and the save was positional —
+  first submission creates, every one after it *replaces* — which was right
+  about a model fixing the rule it had just written and silently wrong about
+  "and also switch everything off at midnight", which overwrote what had been
+  written a minute earlier. So a turn hands back a **list**, and each
+  submission says which rule it is: `replaces` is an id or `null`, **required
+  and nullable** rather than optional, because an omitted id is exactly the
+  ambiguity that caused the bug and only the model can resolve it. The ids
+  reach it on `ChatSession.priming` — the `revive()` channel, model-only,
+  never a transcript row — since a rule written a minute ago has an id the
+  model has never seen; a revived conversation's recap carries a preview row's
+  id for the same reason. One row per rule (so an app draws a card each, with
+  `edited` per rule), and the prompt asks for **one line for the lot** rather
+  than a paragraph per card. Bounded at four rules a response
+  (`AUTOMATION_MAX_RULES_PER_TURN`): two is the case this exists for, and past
+  four it is a model that has misread the room writing a page of rules into
+  somebody's home — the accepted ones are saved and the rest refused inside the
+  turn, to be offered once the person has replied.
   **A submission writes the model's line and then the card, and asking for
   that line one round too late is why it was blank.** The card carries
   `describeAutomation`'s sentence — the *rule*, the same words for everybody —
@@ -835,7 +887,23 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   prompt paragraph above it read "prose is not an answer", true about
   delivering a rule and read as "do not write any". The prompt asks for it in
   the **same message as the call** now. Neither the hub nor an app writes that
-  line: a canned "All done" is words in the model's mouth.
+  line: a canned "All done" is words in the model's mouth. **And when the model
+  forgets anyway the loop sends the submission back for it — once**: an accepted
+  rule with no prose is held rather than returned, the results go back, and one
+  more round runs purely for the sentence (its own step, since the person is
+  watching it). Exactly one, because the rule is already saved and a third round
+  spent on a sentence the model will not write is worse than handing the card
+  over without one.
+  **The prompt says what the prose is written *into*.** A model writes Markdown,
+  and both halves of that were missing: the apps drew it as characters and the
+  prompt never described the surface, so an answer listing four rules arrived
+  with `**a bolded heading:**` over a column of literal hyphens. The app renders
+  it now (`AgentProse`), and the prompt names the column — three inches wide,
+  short paragraphs, a list where something is genuinely listed, bold for a name
+  worth picking out — with headings, tables, nested lists and code fences called
+  out as not what it is for. Either half alone is worth little: rendering
+  Markdown nobody was told to keep simple gives a typeset document in a chat
+  bubble, and asking for restraint without rendering still shows the asterisks.
   **Seven tools and no web.** An agent writing a rule for a house has nothing
   to look up, and leaving search out is a plainer promise than a paragraph
   telling it not to search — the one AI surface here that reaches the

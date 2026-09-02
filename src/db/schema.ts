@@ -583,6 +583,18 @@ export const automations = sqliteTable(
     id: uuidPk(),
     name: text('name').notNull(),
     /**
+     * The mark an app draws beside the rule, as an opaque token — `null`
+     * meaning "the app decides", exactly as a room's `icon` does.
+     *
+     * The apps derive one from the rule's name and shape when this is empty,
+     * so a rule nobody has styled stores nothing and looks as it always did.
+     * The vocabulary belongs to the apps and is deliberately not validated
+     * here: an allowlist would need a hub upgrade for every mark an app adds,
+     * and a token this build has never heard of costs only a fallback to the
+     * derived glyph.
+     */
+    icon: text('icon'),
+    /**
      * Whether the rule exists and is listening. Changing this is an edit and
      * needs `automation.manage`.
      */
