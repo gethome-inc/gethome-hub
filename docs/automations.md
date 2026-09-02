@@ -270,6 +270,42 @@ is the only one in which somebody can still look.
 
 ---
 
+## What a rule is called, and how it is drawn
+
+`name` and `icon` move through `PATCH /automations/:id` beside `document` and
+`enabled`, and they are a different act from an edit: what the house *does* is
+unchanged. They are separable from the document for the reason `summary`
+exists at all — the apps hold the sentence rather than the structure, so
+asking a phone to send a whole rule back to fix a typo would mean every app
+carrying a second copy of the DSL.
+
+Three rules.
+
+**A rename writes the document too.** `name` is a column *and*
+`document.name`, and `AutomationStore.update` sets the column from the
+document — so a rename that touched only the column would be silently undone
+by the next edit made in conversation, and the agent, which reads the
+document, would go on calling the rule by a name nobody in the home uses any
+more. `setLook` writes both.
+
+**It spends no version.** A version records what the rule used to *say* and
+ten are kept per rule to walk back out of a bad afternoon; spending one on a
+rename would evict an edit that actually changed what the house does.
+
+**A rename is logged and a restyle is not** — the rooms rule
+(`PATCH /rooms/:id`). The activity log is read a week later, and "somebody
+changed that rule's icon" is not what anybody is looking for in it, while
+"who renamed this" is exactly the sort of thing a shared home asks.
+
+`icon` is an **opaque app token**, null by default, meaning "the app decides":
+the apps derive a mark from the rule's name and shape, so a rule nobody has
+styled stores nothing and looks as it always did. The vocabulary is
+deliberately not validated here — an allowlist would need a hub upgrade for
+every mark an app adds, and an unknown token costs only a fallback to the
+derived glyph.
+
+---
+
 ## Writing one in conversation
 
 `src/ai/automation-*.ts`. The agent is **authoring only**: the runtime above

@@ -774,6 +774,22 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   And a new rule is created **switched off** whatever the caller asks, because
   the moment between "here is what I wrote for you" and "your house is now
   doing it" is the only one in which somebody can still look.
+  **What a rule is *called* is not what it does**, so `name` and `icon` ride on
+  `PATCH /automations/:id` beside `document` — the apps hold the `summary`
+  rather than the structure, and making them send a whole rule back to fix a
+  typo would mean every app carrying a second copy of the DSL. Three rules, and
+  the first is the one that bites: **a rename writes `document.name` too**,
+  because `AutomationStore.update` sets the column *from* the document, so a
+  rename that touched only the column would be undone by the next edit made in
+  conversation — and the agent reads the document, so it would go on using a
+  name nobody in the home uses any more. It **spends no version** (ten are kept
+  per rule to walk back out of a bad afternoon, and the behaviour is untouched),
+  and a rename is **logged** where a restyle is not — the rooms rule, since the
+  feed is read a week later and "somebody changed that rule's icon" is not what
+  anybody is looking for in it. `icon` is an opaque app token, null meaning
+  "the app derives one" from the name and the shape, unvalidated here for the
+  reason a room's is: an allowlist would need a hub upgrade for every mark an
+  app adds.
   **The catalog is generated** from the live zod schema and is the one source
   the agent, the apps and the docs all read — the `GET /permissions` rule
   applied to a vocabulary that will keep growing. Units are written out in
