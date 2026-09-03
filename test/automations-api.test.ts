@@ -557,3 +557,66 @@ describe('starting a conversation', () => {
     expect(response.json()).toMatchObject({ error: 'ai_disabled' });
   });
 });
+
+/**
+ * Which room a rule is in, over the wire.
+ *
+ * The derivation itself is covered against a fixture home in
+ * `automations-schema.test.ts`; what this adds is that the answer reaches a
+ * client at all — on the rule a write comes back with and on the list — and
+ * that it is a live read rather than something stored at creation.
+ */
+describe('the room on a rule', () => {
+  it('names the room a selector is about, and nothing for a rule about no devices', async () => {
+    const room = await app.inject({
+      method: 'POST',
+      url: '/api/v1/rooms',
+      headers: auth(token),
+      payload: { name: 'Kitchen' },
+    });
+    const { id: roomId } = room.json() as { id: string };
+
+    // A rule about one room, written before anything is paired into it — the
+    // case resolving devices alone would answer "nowhere" for.
+    const inRoom = await create({
+      name: 'Kitchen off',
+      triggers: [{ kind: 'manual' }],
+      actions: [
+        {
+          kind: 'deviceCommand',
+          target: { select: { capability: 'onOff', roomId } },
+          command: { type: 'power', on: false },
+        },
+      ],
+    });
+    expect(inRoom.json()).toMatchObject({ roomId });
+    const { id: inRoomId } = inRoom.json() as { id: string };
+
+    const houseWide = await create(button);
+    expect(houseWide.json()).toMatchObject({ roomId: null });
+    const { id: houseWideId } = houseWide.json() as { id: string };
+
+    const list = await app.inject({ method: 'GET', url: '/api/v1/automations', headers: auth(token) });
+    const rooms = new Map(
+      (list.json() as { automations: { id: string; roomId: string | null }[] }).automations.map(
+        (rule) => [rule.id, rule.roomId] as const,
+      ),
+    );
+    expect(rooms.get(inRoomId)).toBe(roomId);
+    expect(rooms.get(houseWideId)).toBeNull();
+
+    // The room goes and the rule stays: nothing stored it, so the answer is
+    // simply re-derived against a home that no longer has that room.
+    await app.inject({ method: 'DELETE', url: `/api/v1/rooms/${roomId}`, headers: auth(token) });
+    const after = await app.inject({
+      method: 'GET',
+      url: `/api/v1/automations/${inRoomId}`,
+      headers: auth(token),
+    });
+    expect(after.json()).toMatchObject({ roomId: null });
+
+    for (const id of [inRoomId, houseWideId]) {
+      await app.inject({ method: 'DELETE', url: `/api/v1/automations/${id}`, headers: auth(token) });
+    }
+  });
+});

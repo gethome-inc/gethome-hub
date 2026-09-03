@@ -790,6 +790,27 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   "the app derives one" from the name and the shape, unvalidated here for the
   reason a room's is: an allowlist would need a hub upgrade for every mark an
   app adds.
+  **Where a rule happens is derived, never stored** (`scope.ts`): every rule on
+  the wire carries `roomId`, the one room every device it touches sits in, or
+  null for a rule about the whole house — which is what lets an app put a rule
+  on the page of the room it belongs to. A rule's room is a function of the
+  document *and of the home right now* (a selector picks up a lamp paired next
+  month; a device moved between rooms changes the answer with the rule
+  untouched), so a column would be a second copy going stale in the dark; it is
+  computed per read beside `summary` and costs what that costs. Four rules.
+  **A selector naming a room declares one** whether or not anything is in it
+  yet — "every light in the Kitchen" is the Kitchen's rule the day it is
+  written, and everything such a target resolves to is in that room by
+  construction. **What a rule watches counts**, not only what it does: the walk
+  covers triggers, conditions (nested, since `all`/`any`/`not` hold more of
+  them), actions and a toggle's off-actions, because a rule watching the
+  Kitchen and switching the Hall is not the Kitchen's. **Touching a device
+  nobody has placed disqualifies it** — the "not in a room" bucket is somewhere
+  nobody has said, and the rule becomes the room's the moment that device is
+  placed. And **`runAutomation` is not followed**: that rule has its own room
+  and its own page. The half a client has to know is that **`roomId` moves
+  without an `automation` frame**, because nothing about the automation
+  changed — so an app re-reads on structure, not only on rules.
   **The catalog is generated** from the live zod schema and is the one source
   the agent, the apps and the docs all read — the `GET /permissions` rule
   applied to a vocabulary that will keep growing. Units are written out in

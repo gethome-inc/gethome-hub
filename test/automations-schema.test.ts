@@ -14,6 +14,7 @@ import { automationCatalog, catalogAsPrompt } from '../src/automations/catalog.j
 import { AUTOMATION_TEMPLATES, findTemplate } from '../src/automations/templates.js';
 import { describeTarget, resolveTarget, type AutomationHomeView } from '../src/automations/targets.js';
 import { describeAutomation } from '../src/automations/summarize.js';
+import { automationRoom } from '../src/automations/scope.js';
 
 // ── A small home to check documents against ──────────────────────────────────
 
@@ -818,5 +819,199 @@ describe('templates', () => {
     // room going dark around somebody reading is why people give up on this.
     const off = documents[1]!;
     expect(off.triggers[0]).toMatchObject({ kind: 'deviceState', for: 5 * 60_000 });
+  });
+});
+
+// ── Which room a rule is in ──────────────────────────────────────────────────
+
+describe('the room a rule belongs to', () => {
+  const unplacedId = randomUUID();
+  const emptyRoomId = randomUUID();
+
+  /** The same home, plus a device nobody has put anywhere. */
+  const withUnplaced = () => {
+    const base = home();
+    return {
+      ...base,
+      devices: [
+        ...base.devices,
+        {
+          id: unplacedId,
+          name: 'New plug',
+          roomId: null,
+          online: true,
+          endpoints: [{ endpointId: 1, deviceKind: 'outlet' as const, capabilities: ['onOff' as const] }],
+        },
+      ],
+    };
+  };
+
+  it('is the room when everything the rule touches is in it', () => {
+    // Kitchen motion switches the kitchen ceiling light: the commonest rule
+    // there is, and the whole reason this exists.
+    expect(automationRoom(parse(motionLight), home())).toBe(kitchenId);
+  });
+
+  it('is nothing when the rule reaches across two rooms', () => {
+    const doc = parse({
+      ...motionLight,
+      actions: [
+        { kind: 'deviceCommand', target: { deviceIds: [lampId] }, command: { type: 'power', on: true } },
+      ],
+    });
+    expect(automationRoom(doc, home())).toBeNull();
+  });
+
+  it('counts what a rule watches, not only what it does', () => {
+    // Same actions, and the trigger is what takes it out of the Bedroom.
+    const doc = parse({
+      name: 'Blind on kitchen motion',
+      triggers: [
+        { kind: 'deviceState', target: { deviceIds: [motionId] }, path: 'sensors.occupied', op: 'eq', value: true },
+      ],
+      actions: [
+        { kind: 'deviceCommand', target: { deviceIds: [blindId] }, command: { type: 'closeCovering' } },
+      ],
+    });
+    expect(automationRoom(doc, home())).toBeNull();
+  });
+
+  it('counts a condition, however deeply it is nested', () => {
+    const doc = parse({
+      name: 'Lamp at ten unless the kitchen is busy',
+      triggers: [{ kind: 'schedule', at: '22:00' }],
+      conditions: [
+        {
+          kind: 'not',
+          condition: {
+            kind: 'any',
+            conditions: [
+              { kind: 'deviceState', target: { deviceIds: [motionId] }, path: 'sensors.occupied', op: 'eq', value: true },
+            ],
+          },
+        },
+      ],
+      actions: [
+        { kind: 'deviceCommand', target: { deviceIds: [lampId] }, command: { type: 'power', on: true } },
+      ],
+    });
+    expect(automationRoom(doc, home())).toBeNull();
+  });
+
+  it('counts what a mode does when it is switched off', () => {
+    const doc = parse({
+      name: 'Night',
+      triggers: [{ kind: 'manual' }],
+      actions: [
+        { kind: 'deviceCommand', target: { deviceIds: [ceilingLightId] }, command: { type: 'power', on: false } },
+      ],
+      offActions: [
+        { kind: 'deviceCommand', target: { deviceIds: [lampId] }, command: { type: 'power', on: true } },
+      ],
+    });
+    expect(automationRoom(doc, home())).toBeNull();
+  });
+
+  it('takes the room a selector names before anything is paired into it', () => {
+    // The rule is the Kitchen's on the day it is written. Waiting for a device
+    // to resolve would make "every light in the Kitchen" belong nowhere until
+    // somebody bought a lamp.
+    const doc = parse({
+      name: 'Kitchen heating down',
+      triggers: [{ kind: 'schedule', at: '23:00' }],
+      actions: [
+        {
+          kind: 'deviceCommand',
+          target: { select: { kind: 'climate', roomId: kitchenId } },
+          command: { type: 'power', on: false },
+        },
+      ],
+    });
+    expect(resolveTarget({ select: { kind: 'climate', roomId: kitchenId } }, home())).toEqual([]);
+    expect(automationRoom(doc, home())).toBe(kitchenId);
+  });
+
+  it('ignores a room the home no longer has', () => {
+    const doc = parse({
+      name: 'Rule that outlived its room',
+      triggers: [{ kind: 'schedule', at: '23:00' }],
+      actions: [
+        {
+          kind: 'deviceCommand',
+          target: { select: { capability: 'onOff', roomId: emptyRoomId } },
+          command: { type: 'power', on: false },
+        },
+      ],
+    });
+    expect(automationRoom(doc, home())).toBeNull();
+  });
+
+  it('is nothing while the rule touches a device nobody has placed', () => {
+    const doc = parse({
+      name: 'Kitchen light and the new plug',
+      triggers: [{ kind: 'manual' }],
+      actions: [
+        {
+          kind: 'deviceCommand',
+          target: { deviceIds: [ceilingLightId, unplacedId] },
+          command: { type: 'power', on: false },
+        },
+      ],
+    });
+    expect(automationRoom(doc, withUnplaced())).toBeNull();
+
+    // …and becomes the Kitchen's the moment somebody says where the plug is,
+    // with the document untouched. That is the whole reason this is derived
+    // on every read rather than stored.
+    const placed = withUnplaced();
+    const plug = placed.devices.find((device) => device.id === unplacedId)!;
+    expect(
+      automationRoom(doc, {
+        ...placed,
+        devices: placed.devices.map((device) =>
+          device.id === unplacedId ? { ...plug, roomId: kitchenId } : device,
+        ),
+      }),
+    ).toBe(kitchenId);
+  });
+
+  it('is nothing for a rule that touches no devices at all', () => {
+    const doc = parse({
+      name: 'Just says so',
+      triggers: [{ kind: 'manual' }],
+      actions: [{ kind: 'logActivity', message: 'somebody pressed it' }],
+    });
+    expect(automationRoom(doc, home())).toBeNull();
+  });
+
+  it('answers a zone selector with the room, when the zone holds one', () => {
+    // Upstairs is the Bedroom and nothing else, so everything this reaches is
+    // in one room — which is true rather than clever, and stops being true the
+    // day a second room joins the zone.
+    const doc = parse({
+      name: 'Upstairs off',
+      triggers: [{ kind: 'manual' }],
+      actions: [
+        {
+          kind: 'deviceCommand',
+          target: { select: { capability: 'onOff', zoneId: upstairsId } },
+          command: { type: 'power', on: false },
+        },
+      ],
+    });
+    expect(automationRoom(doc, home())).toBe(bedroomId);
+  });
+
+  it('reads a device that has moved room without the rule changing', () => {
+    const moved = home();
+    const doc = parse(motionLight);
+    expect(
+      automationRoom(doc, {
+        ...moved,
+        devices: moved.devices.map((device) =>
+          device.id === ceilingLightId ? { ...device, roomId: bedroomId } : device,
+        ),
+      }),
+    ).toBeNull();
   });
 });

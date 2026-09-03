@@ -306,6 +306,59 @@ derived glyph.
 
 ---
 
+## Where a rule happens
+
+`src/automations/scope.ts`. Every rule on the wire carries `roomId` — **the one
+room every device it touches sits in**, or `null`. Most rules in a home are
+about one room (the hall light and the hall motion sensor, the bedroom blinds on
+a schedule), and knowing which lets an app put a rule on that room's page rather
+than only in one long list.
+
+**It is derived on every read and stored nowhere**, and that is the whole design
+rather than an optimisation. A rule's room is a function of the document *and of
+the home as it is right now*: a selector picks up a lamp paired next month, a
+device moved from the Kitchen to the Hall changes which room a rule belongs to
+with the rule untouched, and a room can be deleted out from under a document
+that names it. A column would be a second copy of all that going stale in the
+dark — `describeAutomation` takes the same stance beside it, and it is cheap for
+the same reason: a home is tens of devices, not thousands.
+
+The consequence a client has to know: **`roomId` can change without an
+`automation` frame**, because nothing about the automation changed. An app
+re-reads the list when the structure it is derived from moves — a room or zone
+written, a device added, removed or moved — not only when a rule does.
+
+Four things decide the answer.
+
+**A selector naming a room declares one**, whether or not anything is in it yet.
+"Every light in the Kitchen" is the Kitchen's rule on the day it is written, and
+resolving devices alone would have left it belonging nowhere until somebody
+bought a lamp. Everything such a target resolves to is in that room by
+construction, so naming it is also the whole of that target's answer.
+
+**What a rule watches counts, not only what it does.** The walk covers triggers,
+conditions — nested ones included, since `all`/`any`/`not` hold more of them —
+actions, and a toggle's off-actions. A rule that watches the Kitchen and
+switches something in the Hall is not the Kitchen's, and a walk that looked only
+at the actions would have said it was. A command resolves with the capability
+the engine will need, exactly as `sanity.ts` resolves it, so the devices counted
+are the devices a run would actually reach.
+
+**Touching a device nobody has placed disqualifies the rule.** A device in the
+"not in a room" bucket is somewhere — nobody has said where — so a rule reaching
+into it is not confined to a room, and becomes confined the moment that device
+is placed. That is the same live derivation as everything else here, pointed at
+the case that looks like an edge and is really just an unfinished home.
+
+**A `runAutomation` action is not followed.** The rule it names is its own rule
+with its own room and its own page; chasing it would need cycle protection for
+an answer that belongs to somebody else.
+
+`null` is therefore the ordinary answer for a rule about the whole house, and it
+says one thing: *this rule is not one room's*.
+
+---
+
 ## Writing one in conversation
 
 `src/ai/automation-*.ts`. The agent is **authoring only**: the runtime above
