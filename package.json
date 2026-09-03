@@ -1,6 +1,6 @@
 {
   "name": "gethome-hub",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "GetHome Hub — a local smart-home hub hosting Matter, Zigbee (via Zigbee2MQTT), and MQTT devices behind one canonical device schema.",
   "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
