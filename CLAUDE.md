@@ -811,6 +811,31 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   and its own page. The half a client has to know is that **`roomId` moves
   without an `automation` frame**, because nothing about the automation
   changed — so an app re-reads on structure, not only on rules.
+  **A rule is also sent as a picture** (`outline.ts`): the same document as four
+  lists of display-ready steps — when, only if, then, and a toggle's off-branch
+  — so an app can *draw* a rule instead of printing the sentence. It is the
+  `message`/`data` split one step further, and the reason it belongs here rather
+  than in an app is the reason `summary` does: neither app decodes the DSL,
+  because a second copy of it would go stale there in the dark, and a sentence
+  was then the only thing either could show. The hub already interprets the
+  document to run it; this interprets it once more to draw it. Six rules, all of
+  them the ones `summary` already lives by. `title` is the only field that is
+  always there and `glyph` is an **opaque token** — the room-icon vocabulary
+  applied to a step — so a step kind added later reaches an older app as an
+  unrecognised mark over a line that is still true, and adding one needs no app
+  release. A step is **three fields** because it is three thoughts (the act,
+  what it acts on, the qualifier), and only the hub knows which half is which.
+  **Two tenses**: a trigger is the moment of crossing ("goes above"), a
+  condition is asked while the rule runs ("is above") — one table for both said
+  a rule waits for its condition to move. `tone: "quiet"` marks a step that is
+  not an act on the home (a wait, a log line), which is what lets an app draw a
+  wait as the *gap* between steps. Nesting is `children` + `join`, indented
+  rather than recursed. And it is **derived per read and read-only**: nothing
+  addresses a node in the document, because a builder would be this same list
+  with its steps addressable and that is a decision to make on purpose.
+  `phrasing.ts` is the one place a stored number becomes what a person means by
+  it, shared by both surfaces — two copies of that table is two places for the
+  centi-°C mistake to come back in only one of them.
   **The catalog is generated** from the live zod schema and is the one source
   the agent, the apps and the docs all read — the `GET /permissions` rule
   applied to a vocabulary that will keep growing. Units are written out in

@@ -38,6 +38,7 @@ import { automationDocumentSchema } from '../automations/schema.js';
 import { sanityCheckAutomation } from '../automations/sanity.js';
 import { automationCatalog } from '../automations/catalog.js';
 import { AUTOMATION_TEMPLATES, findTemplate } from '../automations/templates.js';
+import { automationOutline } from '../automations/outline.js';
 import { automationShape, describeAutomation } from '../automations/summarize.js';
 import { automationRoom } from '../automations/scope.js';
 import type { AutomationHomeView } from '../automations/targets.js';
@@ -2178,6 +2179,20 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     shape: automationShape(record.document),
     summary: describeAutomation(record.document, home),
     /**
+     * The same rule as a **storyboard** — when, only if, then — so an app can
+     * draw it rather than print it (`automationOutline`).
+     *
+     * `summary` stays the contract and this is the picture beside it: neither
+     * app decodes the document, because the DSL will keep growing and a second
+     * copy of it in Swift would go stale here without anybody noticing. A
+     * sentence was the only thing that left an app able to show, and a sentence
+     * is a poor answer to "what does this actually do" for somebody who does
+     * not write software. Every field but `title` is optional and `glyph` is an
+     * opaque token, so a step kind added later reaches an older app as a
+     * generic mark over a line that is still true.
+     */
+    outline: automationOutline(record.document, home),
+    /**
      * The room this rule is *one room's*, or null for a rule about the whole
      * house — derived from the document and the home as it is right now
      * (`automationRoom`), never stored. A selector naming a room declares one
@@ -2314,6 +2329,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       ...report,
       shape: automationShape(parsed.data),
       summary: describeAutomation(parsed.data, deps.automations.homeView()),
+      outline: automationOutline(parsed.data, deps.automations.homeView()),
     };
   });
 

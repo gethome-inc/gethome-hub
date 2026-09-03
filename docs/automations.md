@@ -306,6 +306,88 @@ derived glyph.
 
 ---
 
+## A rule as a storyboard
+
+`src/automations/outline.ts`. Every rule on the wire carries `outline` beside
+`summary`: the same document, interpreted once more, as **four lists of steps
+ready to draw**.
+
+```jsonc
+{
+  "when":   [ { "glyph": "motion", "title": "Motion detected",
+                "subject": "any of the motion sensors in Hall",
+                "detail": "held for 30 seconds" } ],
+  "onlyIf": [ { "glyph": "clock", "title": "Between 22:00 and 06:00",
+                "detail": "overnight" } ],
+  "then":   [ { "glyph": "powerOn", "title": "Switch on",
+                "subject": "all the lights in Hall" },
+              { "glyph": "wait", "title": "Wait 3 minutes", "tone": "quiet" },
+              { "glyph": "powerOff", "title": "Switch off",
+                "subject": "all the lights in Hall" } ],
+  "otherwise": null
+}
+```
+
+**Why the hub draws it.** Neither app decodes the document, deliberately: the
+DSL will keep growing, and a second copy of it in Swift would go stale there
+without anybody noticing — which is the whole reason `summary` exists. But a
+sentence was then the *only* thing an app could show, and the sentence for the
+rule above is a paragraph to parse on the one screen whose job is telling
+somebody who does not write software what their house is about to start doing
+by itself. So the hub — which already interprets the document in order to
+**run** it — interprets it once more to **draw** it, and hands over something
+with no schema in it.
+
+**It is the `message`/`data` split one step further.** `summary` is still the
+contract: always there, always true, and what an app falls back to when there is
+no outline — which is what a hub older than this sends, and is what makes the
+picture safe to add.
+
+Five rules.
+
+**Every field but `title` is optional, and `glyph` is opaque.** The tokens
+(`motion`, `powerOn`, `wait`, `group`…) are the room-icon vocabulary applied to
+a step: the hub stores and sends a word, and the mapping from a word to a mark
+belongs to whichever app is drawing. So a step kind a later build adds arrives
+at an older app as an unrecognised mark over a line that is still true, rather
+than as something that fails to decode. Adding a token needs no app release.
+
+**Three fields, because a step is three thoughts.** `title` is the act ("Switch
+on", "Motion detected", "At 22:00"), `subject` is what it acts on ("all the
+lights in Kitchen"), `detail` is the qualifier ("held for 30 seconds", "to
+40%"). Splitting them is what lets an app draw a step as a tile rather than as a
+line of prose, and the split is the hub's to make because only the hub knows
+which half is which.
+
+**Two tenses.** A trigger is the moment of *crossing* — the whole of what
+edge-triggering means — so it reads "Temperature goes above 25 °C". A condition
+is asked while the rule is already running: "Temperature is above 25 °C". One
+table for both said a rule waits for its condition to move, which is exactly
+what a condition does not do. The quantifier follows the same rule: a
+`deviceState` trigger fires the moment **any** matched device crosses, so its
+subject says so, while a condition's says what its `match` asked for.
+
+**`tone: "quiet"` is a step that is not an act on the home** — a wait, a line
+written in the history. An app draws those back rather than tinted, so the steps
+that actually happen are the ones carrying colour; the iOS app draws a wait as
+the *gap* between two steps rather than as a third step beside them.
+
+**Nesting is `children` with a `join`.** `all`/`any`/`not` become a step whose
+title is the group and whose children are the conditions inside it, up to the
+schema's four levels. An app indents rather than recursing.
+
+**It is derived on every read and stored nowhere**, beside `summary` and
+`roomId`, for the same reason all three are: a storyboard names devices and
+rooms, and both move under it.
+
+**And it is deliberately read-only.** Nothing in it addresses a node in the
+document, because this release draws a rule and changes it in conversation. A
+builder would be this same list with its steps addressable — which is the
+argument for getting the picture right first, not for shipping half an editor
+with it.
+
+---
+
 ## Where a rule happens
 
 `src/automations/scope.ts`. Every rule on the wire carries `roomId` — **the one
