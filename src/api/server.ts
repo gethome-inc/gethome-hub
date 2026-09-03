@@ -1,4 +1,9 @@
-import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
+import Fastify, {
+  type FastifyBaseLogger,
+  type FastifyInstance,
+  type FastifyReply,
+  type FastifyRequest,
+} from 'fastify';
 import websocket from '@fastify/websocket';
 import { randomUUID } from 'node:crypto';
 import { eq, max } from 'drizzle-orm';
@@ -23,6 +28,20 @@ import { effectiveModel, isSupportedModel, PROVIDER_MODELS, supportedModelIds } 
 // `MappingLibrary.repair` loads the agent on demand.
 import type { MappingLibrary } from '../ai/library.js';
 import type { AiRunLog } from '../core/ai-runs.js';
+import type { AutomationEngine } from '../automations/engine.js';
+import {
+  AutomationNotConfiguredError,
+  type AutomationChat,
+} from '../ai/automation-chat.js';
+import type { AutomationStore } from '../automations/store.js';
+import { automationDocumentSchema } from '../automations/schema.js';
+import { sanityCheckAutomation } from '../automations/sanity.js';
+import { automationCatalog } from '../automations/catalog.js';
+import { AUTOMATION_TEMPLATES, findTemplate } from '../automations/templates.js';
+import { automationOutline } from '../automations/outline.js';
+import { automationShape, describeAutomation } from '../automations/summarize.js';
+import { automationRoom } from '../automations/scope.js';
+import type { AutomationHomeView } from '../automations/targets.js';
 import { RADIO_MODES, writeRadioMode, type RadioBudget, type RadioMode } from '../core/radio.js';
 import {
   canApplyUpdate,
@@ -106,6 +125,16 @@ export interface ApiDeps {
   aiRuns: AiRunLog;
   /** Every device model this hub knows how to interpret. */
   mappings: MappingLibrary;
+  /** The rules the home runs by itself, and the scenes the apps draw. */
+  automations: AutomationEngine;
+  automationStore: AutomationStore;
+  /**
+   * The conversations rules get written in. Constructed unconditionally — a
+   * hub with no key never builds a provider client and the routes answer
+   * `409 ai_not_configured`, which is the answer an app needs rather than a
+   * missing route it cannot tell from an old hub.
+   */
+  automationChat: AutomationChat;
 }
 
 /**
@@ -2109,6 +2138,573 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // The total goes back too, so an app can say what it is *not* showing
     // rather than letting a cut log read as the whole story.
     return readUpdateLog(deps.dataDir, tail ?? 200);
+  });
+
+  // ── Automations ──────────────────────────────────────────────────────────
+
+  /**
+   * A rule as the apps read it.
+   *
+   * `summary` is the contract and the document is the convenience — the
+   * activity log's `message`/`data` split, for the same reason: an app a
+   * version behind meets a node it cannot parse and must still be able to draw
+   * a card that says something true. `shape` is what it draws: a button, a
+   * toggle (a mode), or a rule that watches the home and has nothing to press.
+   */
+  const automationWire = (
+    record: ReturnType<AutomationEngine['list']>[number],
+    /**
+     * The home to read the rule against, so a route drawing a list builds it
+     * once rather than once per rule. `homeView()` walks every device and every
+     * record, and both the sentence and the room below are read out of it —
+     * per rule that is two rebuilds of the whole home for each line of the
+     * list. Defaulted, so a route answering with a single rule stays a
+     * one-liner.
+     */
+    home: AutomationHomeView = deps.automations.homeView(),
+  ) => ({
+    id: record.id,
+    name: record.name,
+    /**
+     * The mark somebody chose, or null for "the app decides" — the room rule
+     * (`icon`/`accent`) applied to a rule. An app derives one from the name
+     * and the shape when this is empty, which is what every rule written
+     * before anybody restyled it carries.
+     */
+    icon: record.icon,
+    description: record.document.description ?? null,
+    enabled: record.enabled,
+    active: record.active,
+    disabledReason: record.disabledReason,
+    shape: automationShape(record.document),
+    summary: describeAutomation(record.document, home),
+    /**
+     * The same rule as a **storyboard** — when, only if, then — so an app can
+     * draw it rather than print it (`automationOutline`).
+     *
+     * `summary` stays the contract and this is the picture beside it: neither
+     * app decodes the document, because the DSL will keep growing and a second
+     * copy of it in Swift would go stale here without anybody noticing. A
+     * sentence was the only thing that left an app able to show, and a sentence
+     * is a poor answer to "what does this actually do" for somebody who does
+     * not write software. Every field but `title` is optional and `glyph` is an
+     * opaque token, so a step kind added later reaches an older app as a
+     * generic mark over a line that is still true.
+     */
+    outline: automationOutline(record.document, home),
+    /**
+     * The room this rule is *one room's*, or null for a rule about the whole
+     * house — derived from the document and the home as it is right now
+     * (`automationRoom`), never stored. A selector naming a room declares one
+     * before anything is paired into it; a device moved to another room
+     * changes the answer with the rule untouched, which is why this is
+     * computed on every read rather than written down anywhere.
+     */
+    roomId: automationRoom(record.document, home),
+    document: record.document,
+    createdAt: record.createdAt.toISOString(),
+    updatedAt: record.updatedAt.toISOString(),
+  });
+
+  /**
+   * Reading the home is the floor, and a rule is the home.
+   *
+   * `unreadable` rides along rather than being hidden: a document written by a
+   * newer build is kept and not run (see `AutomationStore.load`), and an app
+   * that simply did not list it would show a rule silently vanishing after a
+   * rollback.
+   */
+  app.get('/api/v1/automations', authed, async () => {
+    const home = deps.automations.homeView();
+    return {
+      automations: deps.automations.list().map((record) => automationWire(record, home)),
+      unreadable: deps.automations.unreadableRules(),
+    };
+  });
+
+  /**
+   * What an automation can be made of — generated from the live zod schema, so
+   * a catalog cannot drift from what the validator accepts. The `GET
+   * /permissions` rule applied to a vocabulary that will keep growing: the apps
+   * render this rather than shipping a copy of it.
+   */
+  app.get('/api/v1/automations/capabilities', authed, async () => automationCatalog());
+
+  app.get('/api/v1/automations/templates', authed, async () =>
+    AUTOMATION_TEMPLATES.map((template) => ({
+      key: template.key,
+      title: template.title,
+      summary: template.summary,
+      glyph: template.glyph,
+      inputs: template.inputs,
+    })),
+  );
+
+  app.get('/api/v1/automations/:id', authed, async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const record = deps.automations.get(id);
+    if (!record) return reply.code(404).send({ error: 'not_found' });
+    return automationWire(record);
+  });
+
+  /**
+   * Why the light came on at three in the morning.
+   *
+   * The floor, like the activity log and the reading history: this is the home
+   * explaining itself, and a member who cannot read it is one who cannot find
+   * out what the house did to them.
+   */
+  app.get('/api/v1/automations/:id/runs', authed, async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    if (!deps.automations.get(id)) return reply.code(404).send({ error: 'not_found' });
+    const { limit } = z.object({ limit: z.coerce.number().int().min(1).max(100).optional() }).parse(
+      request.query ?? {},
+    );
+    return deps.automationStore.runs(id, limit ?? 20);
+  });
+
+  /**
+   * Press it.
+   *
+   * **The floor, deliberately.** Pressing "I'm leaving" switches lights and
+   * locks doors, and working the home is what being a member means — the same
+   * argument that killed `device.control`. A role that may work every light
+   * individually and not the button that works them together would be a rule
+   * nobody asked for.
+   */
+  app.post('/api/v1/automations/:id/run', authed, async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const record = deps.automations.get(id);
+    if (!record) return reply.code(404).send({ error: 'not_found' });
+    if (!record.enabled) return reply.code(409).send({ error: 'automation_disabled' });
+    if (automationShape(record.document) === 'watching') {
+      return reply.code(409).send({ error: 'not_pressable' });
+    }
+    await deps.automations.runManually(id, request.member!.name);
+    return reply.code(202).send({ accepted: true });
+  });
+
+  /**
+   * Switch a mode on or off — "Security is on".
+   *
+   * Also the floor, and a *different* thing from `enabled` below. Turning a
+   * mode on is working the home; enabling a rule is editing it. Two words, two
+   * permissions, and keeping them apart is what lets a guest arm the house
+   * without being able to rewrite what arming it does.
+   */
+  app.put('/api/v1/automations/:id/active', authed, async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const { active } = z.object({ active: z.boolean() }).parse(request.body);
+    const record = deps.automations.get(id);
+    if (!record) return reply.code(404).send({ error: 'not_found' });
+    if (!record.enabled) return reply.code(409).send({ error: 'automation_disabled' });
+    if (automationShape(record.document) !== 'toggle') {
+      return reply.code(409).send({ error: 'not_a_toggle' });
+    }
+    await deps.automations.setActive(id, active, request.member!.name);
+    return { active };
+  });
+
+  /**
+   * Check a document without saving it.
+   *
+   * What the agent calls before it submits, and what an app can call to draw a
+   * preview. Warnings come back beside problems because the interesting ones
+   * are not refusals: a loop is sometimes a bug and sometimes a thermostat, and
+   * saying so beats both refusing and staying quiet.
+   */
+  app.post('/api/v1/automations/dry-run', needs('automation.manage'), async (request, reply) => {
+    const parsed = automationDocumentSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(422).send({
+        error: 'invalid_automation',
+        issues: parsed.error.issues.map((issue) => ({
+          path: issue.path.join('.'),
+          message: issue.message,
+        })),
+      });
+    }
+    const report = sanityCheckAutomation(parsed.data, deps.automations.homeView());
+    return {
+      ...report,
+      shape: automationShape(parsed.data),
+      summary: describeAutomation(parsed.data, deps.automations.homeView()),
+      outline: automationOutline(parsed.data, deps.automations.homeView()),
+    };
+  });
+
+  /**
+   * Save a new rule — **switched off**.
+   *
+   * That is not a default anybody has to remember: `AutomationStore.create`
+   * writes `enabled: false` whatever the caller says, because the moment
+   * between "here is what I wrote for you" and "your house is now doing it" is
+   * the only one in which somebody can still look.
+   */
+  app.post('/api/v1/automations', needs('automation.manage'), async (request, reply) => {
+    const parsed = automationDocumentSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(422).send({
+        error: 'invalid_automation',
+        issues: parsed.error.issues.map((issue) => ({
+          path: issue.path.join('.'),
+          message: issue.message,
+        })),
+      });
+    }
+    const report = sanityCheckAutomation(parsed.data, deps.automations.homeView());
+    if (report.problems.length > 0) {
+      return reply.code(422).send({ error: 'invalid_automation', ...report });
+    }
+    const record = await deps.automationStore.create(parsed.data, request.member!.id);
+    await deps.automations.reload();
+    deps.events.emit('automationChanged', record.id);
+    await deps.activity.record({
+      kind: 'automation.added',
+      message: `${request.member!.name} added the automation “${record.name}”`,
+      memberId: request.member!.id,
+      data: { automationId: record.id, automationName: record.name },
+    });
+    const saved = deps.automations.get(record.id);
+    return reply
+      .code(201)
+      .send({ ...(saved ? automationWire(saved) : {}), warnings: report.warnings });
+  });
+
+  /**
+   * Edit it, rename it, restyle it, or switch it on and off.
+   *
+   * All in one route because all of them are editing: `enabled` is whether the
+   * rule exists as far as the home is concerned, which is a decision about the
+   * rule rather than about the house. Switching it back on clears whatever the
+   * circuit breaker wrote, since a stale explanation on a working rule is
+   * worse than none.
+   *
+   * **`name` and `icon` are what a rule is called and how it is drawn**, and
+   * they are here rather than only inside `document` because a rename is a
+   * different act from an edit: what the house *does* is unchanged, the apps
+   * hold the summary rather than the document (`summary` is the contract —
+   * see `automationWire`), and asking a phone to send back a whole rule
+   * document to fix a typo would mean every app carrying a second copy of the
+   * DSL. `name` is written into the document too — see
+   * `AutomationStore.setLook` for why that is not optional — and `icon` is the
+   * room rule: `null` puts it back to the mark the app derives, leaving the
+   * field out keeps whatever it wears.
+   */
+  app.patch('/api/v1/automations/:id', needs('automation.manage'), async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const body = z
+      .object({
+        document: z.unknown().optional(),
+        enabled: z.boolean().optional(),
+        // The document's own bound, so a name can never be typed here that a
+        // later edit in conversation would have to refuse.
+        name: z.string().trim().min(1).max(80).optional(),
+        icon: lookTokenSchema,
+      })
+      .parse(request.body ?? {});
+    const record = deps.automations.get(id);
+    if (!record) return reply.code(404).send({ error: 'not_found' });
+
+    let warnings: string[] = [];
+    if (body.document !== undefined) {
+      const parsed = automationDocumentSchema.safeParse(body.document);
+      if (!parsed.success) {
+        return reply.code(422).send({
+          error: 'invalid_automation',
+          issues: parsed.error.issues.map((issue) => ({
+            path: issue.path.join('.'),
+            message: issue.message,
+          })),
+        });
+      }
+      const report = sanityCheckAutomation(parsed.data, deps.automations.homeView(), { selfId: id });
+      if (report.problems.length > 0) {
+        return reply.code(422).send({ error: 'invalid_automation', ...report });
+      }
+      warnings = report.warnings;
+      await deps.automationStore.update(id, parsed.data, request.member!.id);
+    }
+    if (body.name !== undefined || body.icon !== undefined) {
+      await deps.automationStore.setLook(id, {
+        ...(body.name !== undefined ? { name: body.name } : {}),
+        ...(body.icon !== undefined ? { icon: body.icon } : {}),
+      });
+    }
+    if (body.enabled !== undefined) {
+      await deps.automationStore.setEnabled(id, body.enabled);
+    }
+
+    await deps.automations.reload();
+    deps.events.emit('automationChanged', id);
+    // A rename is logged and a restyle is not, the rooms rule: the activity
+    // log is read a week later, and "somebody changed that rule's icon" is not
+    // what anybody is looking for in it — while "who renamed this" is exactly
+    // the sort of thing a shared home asks.
+    if (body.name !== undefined && body.name !== record.name) {
+      await deps.activity.record({
+        kind: 'automation.renamed',
+        message: `${request.member!.name} renamed the automation “${record.name}” to “${body.name}”`,
+        memberId: request.member!.id,
+        data: {
+          automationId: id,
+          automationName: body.name,
+          previousName: record.name,
+          memberName: request.member!.name,
+        },
+      });
+    }
+    if (body.enabled !== undefined) {
+      // The name as it stands *after* this request, so a rename and a switch
+      // made in one call do not leave two rows in the feed disagreeing about
+      // what the rule is called.
+      const name = body.name ?? record.name;
+      await deps.activity.record({
+        kind: body.enabled ? 'automation.enabled' : 'automation.disabled',
+        message: `${request.member!.name} switched the automation “${name}” ${
+          body.enabled ? 'on' : 'off'
+        }`,
+        memberId: request.member!.id,
+        data: { automationId: id, automationName: name },
+      });
+    }
+    const saved = deps.automations.get(id);
+    return { ...(saved ? automationWire(saved) : {}), warnings };
+  });
+
+  app.delete('/api/v1/automations/:id', needs('automation.manage'), async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const record = deps.automations.get(id);
+    if (!record) return reply.code(404).send({ error: 'not_found' });
+    await deps.automationStore.remove(id);
+    await deps.automations.reload();
+    deps.events.emit('automationChanged', id);
+    await deps.activity.record({
+      kind: 'automation.removed',
+      message: `${request.member!.name} removed the automation “${record.name}”`,
+      memberId: request.member!.id,
+      data: { automationId: id, automationName: record.name },
+    });
+    return reply.code(204).send();
+  });
+
+  /**
+   * What it used to say.
+   *
+   * An agent rewrites a rule, the home behaves oddly at three in the morning,
+   * and without this the only way back is remembering. Reverting is an
+   * ordinary edit, so it writes a version of its own.
+   */
+  app.get('/api/v1/automations/:id/versions', needs('automation.manage'), async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    if (!deps.automations.get(id)) return reply.code(404).send({ error: 'not_found' });
+    return deps.automationStore.versions(id);
+  });
+
+  app.post('/api/v1/automations/:id/revert', needs('automation.manage'), async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const { versionId } = z.object({ versionId: z.uuid() }).parse(request.body);
+    if (!deps.automations.get(id)) return reply.code(404).send({ error: 'not_found' });
+    const version = (await deps.automationStore.versions(id)).find((row) => row.id === versionId);
+    if (!version) return reply.code(404).send({ error: 'unknown_version' });
+    const parsed = automationDocumentSchema.safeParse(version.document);
+    if (!parsed.success) return reply.code(422).send({ error: 'invalid_automation' });
+    await deps.automationStore.update(id, parsed.data, request.member!.id, 'reverted');
+    await deps.automations.reload();
+    deps.events.emit('automationChanged', id);
+    const saved = deps.automations.get(id);
+    return saved ? automationWire(saved) : reply.code(404).send({ error: 'not_found' });
+  });
+
+  /**
+   * Install a shipped template.
+   *
+   * A template can install more than one rule — "light on movement" is
+   * genuinely two, one for arriving and one for leaving — so this answers with
+   * a list. Sanity problems are reported per rule rather than aborting the
+   * whole thing halfway: a home missing the devices for one half should still
+   * get the other.
+   */
+  app.post('/api/v1/automations/templates/:key', needs('automation.manage'), async (request, reply) => {
+    const { key } = z.object({ key: z.string().min(1).max(60) }).parse(request.params);
+    const inputs = z.record(z.string(), z.string()).parse(request.body ?? {});
+    const template = findTemplate(key);
+    if (!template) return reply.code(404).send({ error: 'unknown_template' });
+
+    let documents;
+    try {
+      documents = template.build(inputs);
+    } catch (error) {
+      return reply.code(400).send({ error: 'bad_inputs', detail: (error as Error).message });
+    }
+
+    const created: string[] = [];
+    const warnings: string[] = [];
+    for (const document of documents) {
+      const report = sanityCheckAutomation(document, deps.automations.homeView());
+      warnings.push(...report.warnings);
+      if (report.problems.length > 0) {
+        warnings.push(...report.problems);
+        continue;
+      }
+      const record = await deps.automationStore.create(document, request.member!.id, `from ${key}`);
+      created.push(record.id);
+    }
+    await deps.automations.reload();
+    for (const id of created) deps.events.emit('automationChanged', id);
+    await deps.activity.record({
+      kind: 'automation.added',
+      message: `${request.member!.name} added “${template.title}”`,
+      memberId: request.member!.id,
+      data: { template: key, count: created.length },
+    });
+    // Read after the reload above, and once for the whole answer rather than
+    // per rule — a template can install several.
+    const home = deps.automations.homeView();
+    return reply.code(201).send({
+      automations: created
+        .map((id) => deps.automations.get(id))
+        .filter((record) => record !== undefined)
+        .map((record) => automationWire(record, home)),
+      warnings,
+    });
+  });
+
+  /**
+   * The home's timezone, which is what "at ten in the evening" means.
+   *
+   * Reading it is the floor; setting it needs `automation.manage`, because
+   * schedules are the only thing that reads it and getting it wrong is how a
+   * heating rule fires at three in the morning. The system's zone seeds it and
+   * the database owns it afterwards — the `HUB_NAME` split.
+   */
+  app.get('/api/v1/settings/timezone', authed, async () => ({
+    timezone: deps.settings.timezone,
+  }));
+
+  app.put('/api/v1/settings/timezone', needs('automation.manage'), async (request, reply) => {
+    const { timezone } = z.object({ timezone: z.string().min(1).max(80) }).parse(request.body);
+    if (!(await deps.settings.setTimezone(timezone))) {
+      return reply.code(400).send({ error: 'unknown_timezone' });
+    }
+    return { timezone: deps.settings.timezone };
+  });
+
+  // ── Writing a rule in conversation ───────────────────────────────────────
+
+  /**
+   * Two permissions, and the route asks for both.
+   *
+   * `automation.manage` because a conversation ends in a saved rule, and
+   * `hub.ai` because it spends the home's money — the same key that guards
+   * recognising a device and drawing a portrait. `needs()` takes one, so the
+   * second is checked here and refused in the same shape, since an app turns
+   * `{error, permission}` into a sentence and has no way to read a bare 403.
+   */
+  const chatGuard = async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!deps.access.can(request.member!.id, 'hub.ai')) {
+      await reply.code(403).send({ error: 'forbidden', permission: 'hub.ai' });
+      return reply;
+    }
+    return undefined;
+  };
+
+  /**
+   * Turn a configuration refusal into a code an app can branch on **and a
+   * sentence it can show**.
+   *
+   * The codes lead to different screens — "there is no key", "the owner
+   * switched this off", "this needs the other vendor's key" — and `detail`
+   * rides along so an app that has never met a code a later build added still
+   * has something true to print. Without it, one of these reached a phone as
+   * "The hub answered 500." over a home that was configured perfectly well.
+   */
+  const chatRefusal = (error: unknown, reply: FastifyReply) => {
+    if (error instanceof AutomationNotConfiguredError) {
+      return reply.code(409).send({ error: error.code, detail: error.message });
+    }
+    throw error;
+  };
+
+  app.post('/api/v1/automations/chat', needs('automation.manage'), async (request, reply) => {
+    const refused = await chatGuard(request, reply);
+    if (refused) return refused;
+    const body = z
+      .object({ message: z.string().trim().min(1).max(2_000), automationId: z.uuid().optional() })
+      .parse(request.body);
+    if (body.automationId !== undefined && !deps.automations.get(body.automationId)) {
+      return reply.code(404).send({ error: 'not_found' });
+    }
+    try {
+      const reply_ = await deps.automationChat.start({
+        memberId: request.member!.id,
+        message: body.message,
+        ...(body.automationId !== undefined ? { automationId: body.automationId } : {}),
+      });
+      return reply.code(201).send(reply_);
+    } catch (error) {
+      return chatRefusal(error, reply);
+    }
+  });
+
+  app.post(
+    '/api/v1/automations/chat/:id/messages',
+    needs('automation.manage'),
+    async (request, reply) => {
+      const refused = await chatGuard(request, reply);
+      if (refused) return refused;
+      const { id } = z.object({ id: z.uuid() }).parse(request.params);
+      const { message } = z
+        .object({ message: z.string().trim().min(1).max(2_000) })
+        .parse(request.body);
+      const answered = await deps.automationChat.reply(id, request.member!.id, message);
+      /**
+       * `410` rather than `404`, and the difference matters: the conversation
+       * existed and its transcript is still readable — what is gone is the
+       * ability to *continue* it, because the model's own history lives in
+       * memory and the hub restarted. An app tells somebody to start a new one
+       * rather than that nothing was ever there.
+       */
+      if (!answered) return reply.code(410).send({ error: 'conversation_ended' });
+      return answered;
+    },
+  );
+
+  /**
+   * Every conversation this home has had.
+   *
+   * Listed **before** the `:id` route below, or Fastify would try to parse
+   * `chats` as a session uuid. Reading is guarded like the rest of the chat
+   * surface: a transcript names the home's devices and what somebody asked
+   * for, which is the same shape of thing the rules themselves are.
+   */
+  app.get('/api/v1/automations/chats', needs('automation.manage'), async (request, reply) => {
+    const refused = await chatGuard(request, reply);
+    if (refused) return refused;
+    return deps.automationChat.list();
+  });
+
+  app.get('/api/v1/automations/chat/:id', needs('automation.manage'), async (request, reply) => {
+    const refused = await chatGuard(request, reply);
+    if (refused) return refused;
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    // The same `spend` block the list carries, so a chat opened straight from
+    // a link says what it cost without the list having been read first.
+    const spend = await deps.automationChat.spend(id);
+    return {
+      sessionId: id,
+      live: deps.automationChat.isLive(id),
+      ...(spend !== undefined ? { spend } : {}),
+      messages: await deps.automationChat.transcript(id),
+    };
+  });
+
+  app.delete('/api/v1/automations/chat/:id', needs('automation.manage'), async (request, reply) => {
+    const refused = await chatGuard(request, reply);
+    if (refused) return refused;
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    await deps.automationChat.close(id);
+    return reply.code(204).send();
   });
 
   // ── WebSocket event stream ───────────────────────────────────────────────

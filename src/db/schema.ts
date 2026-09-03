@@ -445,6 +445,32 @@ export const aiRuns = sqliteTable('ai_runs', {
   durationMs: integer('duration_ms'),
   errorKind: text('error_kind'),
   errorMessage: text('error_message'),
+  /**
+   * The rule an `automate` run produced, when it produced one.
+   *
+   * Additive and nullable so the AI spend page stays **one** list: a device
+   * recognition and a conversation that wrote an automation are both "what the
+   * home spent on AI", and splitting them into two tables would mean two
+   * screens answering one question. A mapping run leaves it null and an
+   * `automate` run leaves `exposes_hash` empty, which is the honest reading of
+   * a column that is about a device model.
+   */
+  automationId: text('automation_id'),
+  /**
+   * The conversation this run belongs to, for an `automate` row.
+   *
+   * **Without it a conversation's own spend was unattributable.** The model,
+   * the provider and the cost were all recorded — and linked to nothing a
+   * person could point at: `automation_id` is null for a chat that never
+   * submitted, and a conversation the hub *revived* writes a row per
+   * incarnation, so even a successful one could not be totalled. Reading
+   * "what did this cost, and what wrote it" back for one chat is a `where`
+   * on this column and a `sum`.
+   *
+   * Nullable and additive, like `automation_id`: a mapping run has no session,
+   * and rows written before this column stay readable.
+   */
+  sessionId: text('session_id'),
   /** `AgentStep[]` as JSON. */
   steps: text('steps', { mode: 'json' }).notNull(),
 });
@@ -540,3 +566,156 @@ export const settings = sqliteTable('settings', {
   key: text('key').primaryKey(),
   value: text('value', { mode: 'json' }).notNull(),
 });
+
+/**
+ * A rule the home runs by itself — and, with a `manual` trigger, the thing
+ * the apps draw as a scene. There is deliberately no separate scenes table:
+ * "press this and the house does that" is this object with one trigger kind,
+ * and a second store would be a second vocabulary to keep in step.
+ *
+ * `document` is the whole `AutomationDocument` as JSON, validated by
+ * `src/automations/schema.ts` on the way in and interpreted — never executed —
+ * on the way out. `src/automations/` is canonical.
+ */
+export const automations = sqliteTable(
+  'automations',
+  {
+    id: uuidPk(),
+    name: text('name').notNull(),
+    /**
+     * The mark an app draws beside the rule, as an opaque token — `null`
+     * meaning "the app decides", exactly as a room's `icon` does.
+     *
+     * The apps derive one from the rule's name and shape when this is empty,
+     * so a rule nobody has styled stores nothing and looks as it always did.
+     * The vocabulary belongs to the apps and is deliberately not validated
+     * here: an allowlist would need a hub upgrade for every mark an app adds,
+     * and a token this build has never heard of costs only a fallback to the
+     * derived glyph.
+     */
+    icon: text('icon'),
+    /**
+     * Whether the rule exists and is listening. Changing this is an edit and
+     * needs `automation.manage`.
+     */
+    enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
+    /**
+     * Whether a *manual toggle* is currently switched on — "Security is on".
+     * Deliberately a different column from `enabled` and a different
+     * permission: switching a mode on is working the home, which is the
+     * floor, while enabling a rule is editing it.
+     */
+    active: integer('active', { mode: 'boolean' }).notNull().default(false),
+    /**
+     * Why the hub switched this off by itself — today, only the runaway
+     * circuit breaker in `src/automations/guards.ts`. Null when a person did
+     * it, so an app can tell "I turned this off" from "the hub stopped it and
+     * here is the sentence".
+     */
+    disabledReason: text('disabled_reason'),
+    /** `AutomationDocument` as JSON. */
+    document: text('document', { mode: 'json' }).notNull(),
+    /**
+     * Who wrote it. `ON DELETE SET NULL` like every other member reference
+     * here: a rule outlives the person who added it, and the home keeps
+     * running it.
+     */
+    createdBy: text('created_by').references(() => members.id, { onDelete: 'set null' }),
+    sortOrder: integer('sort_order').notNull().default(0),
+    createdAt: createdAt(),
+    updatedAt: createdAt('updated_at'),
+  },
+  (table) => [index('automations_enabled').on(table.enabled)],
+);
+
+/**
+ * What a rule said before the last edit.
+ *
+ * An agent rewrites a document and the home behaves oddly at three in the
+ * morning; without this the only way back is remembering what it used to say.
+ * A document is a couple of kilobytes of JSON, so a handful of versions per
+ * rule is nothing beside one portrait — this is a bound on *bulk*, like
+ * `device_portraits`, not on write frequency.
+ */
+export const automationVersions = sqliteTable(
+  'automation_versions',
+  {
+    id: uuidPk(),
+    automationId: text('automation_id')
+      .notNull()
+      .references(() => automations.id, { onDelete: 'cascade' }),
+    at: createdAt('at'),
+    document: text('document', { mode: 'json' }).notNull(),
+    /** Who made the edit this version replaced. */
+    memberId: text('member_id').references(() => members.id, { onDelete: 'set null' }),
+    /** One line: "created", "edited in chat", "reverted to an earlier version". */
+    note: text('note'),
+  },
+  (table) => [index('automation_versions_automation').on(table.automationId, table.at)],
+);
+
+/**
+ * One firing, and what happened in it — the answer to "why did the light come
+ * on at three in the morning".
+ *
+ * **A row per firing, never a row per state report**, which is the line
+ * `device.command` and the reading history both hold. A rule that fires twice
+ * a day writes two rows; a rule that fires every few seconds is one the
+ * circuit breaker switches off, so this table cannot become the SD card
+ * problem by itself.
+ *
+ * `steps` carries what was evaluated and what was sent — including the
+ * commands a guard refused, which is the half that would otherwise be
+ * invisible: "nothing happened" and "the hub declined to switch that relay for
+ * the fortieth time this hour" look identical from outside.
+ */
+export const automationRuns = sqliteTable(
+  'automation_runs',
+  {
+    id: uuidPk(),
+    automationId: text('automation_id')
+      .notNull()
+      .references(() => automations.id, { onDelete: 'cascade' }),
+    at: createdAt('at'),
+    /** manual | deviceState | deviceEvent | schedule | interval | action */
+    trigger: text('trigger').notNull(),
+    /** One sentence naming what set it off. */
+    cause: text('cause').notNull(),
+    /** ran | skipped | refused | failed | interrupted */
+    outcome: text('outcome').notNull(),
+    durationMs: integer('duration_ms'),
+    /** `AutomationRunStep[]` as JSON — bounded when it is written. */
+    steps: text('steps', { mode: 'json' }).notNull(),
+  },
+  (table) => [index('automation_runs_automation').on(table.automationId, table.at)],
+);
+
+/**
+ * What was said while a rule was being written.
+ *
+ * **The display transcript, not the conversation.** The provider's own message
+ * history — thinking blocks, tool calls, tool results, the home inventory —
+ * lives in memory inside the running conversation and dies with the process,
+ * because it is tens of kilobytes per round and it is the write amplification
+ * the rest of this store is arranged to avoid. What is written here is what an
+ * app draws: a few hundred bytes a message.
+ *
+ * The cost of that split is honest and small: after a restart a chat is
+ * readable history and continuing means starting a new one. The rule it
+ * produced is a row in `automations` and is not lost.
+ */
+export const automationChatMessages = sqliteTable(
+  'automation_chat_messages',
+  {
+    id: uuidPk(),
+    sessionId: text('session_id').notNull(),
+    at: createdAt('at'),
+    /** user | agent | question | preview | note */
+    role: text('role').notNull(),
+    text: text('text').notNull(),
+    /** Options for a question, the automation id for a preview. */
+    data: text('data', { mode: 'json' }),
+    memberId: text('member_id').references(() => members.id, { onDelete: 'set null' }),
+  },
+  (table) => [index('automation_chat_session').on(table.sessionId, table.at)],
+);

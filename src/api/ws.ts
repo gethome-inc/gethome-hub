@@ -8,6 +8,7 @@ import type {
   ZigbeeLifecycleEvent,
 } from '../core/bus.js';
 import type { AiRunEvent } from '../core/ai-runs.js';
+import type { AutomationChatEvent, AutomationRunEvent } from '../core/bus.js';
 import { deviceWire } from './dto.js';
 import type { HubStatusReader } from '../core/hub-status.js';
 
@@ -91,7 +92,7 @@ export class MemberSessions {
 }
 
 /** Streams a client can ask for beyond the always-on events. */
-const OPTIONAL_STREAMS = ['mqtt', 'zigbee', 'ai'] as const;
+const OPTIONAL_STREAMS = ['mqtt', 'zigbee', 'ai', 'automations'] as const;
 type OptionalStream = (typeof OPTIONAL_STREAMS)[number];
 
 /**
@@ -276,6 +277,17 @@ export function attachWebSocket(
    * five-second heartbeat, which has its own frame.
    */
   const onRadioChanged = () => send({ type: 'hubStatus', ...hubStatus.snapshot() });
+  /**
+   * An automation was created, edited, switched on, or removed.
+   *
+   * Always-on and to every socket, like `structure` and `portraits`: a rule is
+   * the *house's*, so somebody switching "Night" on in the kitchen has to
+   * reach the phone in the bedroom drawing the same card. The id and nothing
+   * else — `GET /automations` is a short read, and a payload here would be a
+   * second shape for a fact that already has one.
+   */
+  const onAutomationChanged = (automationId: string) =>
+    send({ type: 'automation', automationId });
 
   deps.events.on('stateChanged', onState);
   deps.events.on('deviceUpserted', onUpserted);
@@ -288,6 +300,7 @@ export function attachWebSocket(
   deps.events.on('permitJoin', onPermitJoin);
   deps.events.on('commissioningProgress', onCommissioning);
   deps.events.on('radioChanged', onRadioChanged);
+  deps.events.on('automationChanged', onAutomationChanged);
   // Same frame, other reason: a radio *mode* was recorded. One handler, since
   // the frame is the whole snapshot and the two causes are indistinguishable
   // to a client — which is the point, it just has to be current.
@@ -324,6 +337,30 @@ export function attachWebSocket(
 
   const onZigbeeEvent = (event: ZigbeeLifecycleEvent) => send({ type: 'zigbeeEvent', event });
   const onAiRun = (event: AiRunEvent) => send({ type: 'aiRun', event });
+  /**
+   * A rule fired, or declined to — **opt-in**, unlike the change above.
+   *
+   * This is the trace somebody watches while working out why the light came
+   * on, and a home with a motion rule produces one every time anybody walks
+   * through the hall. A phone drawing a dashboard must not pay for that, which
+   * is the `MqttObserver` stance: a socket that never subscribes never has the
+   * listener attached.
+   */
+  /**
+   * `run` rather than `event`, and the key matters.
+   *
+   * `zigbeeEvent` and `aiRun` both carry theirs under `event`, with different
+   * shapes — which is fine for a JavaScript client and fatal for a typed one:
+   * the iOS app decodes one envelope struct for every frame, so a second type
+   * under a key it already has means every automation frame fails to decode
+   * and takes the whole socket message with it. A distinct key costs nothing
+   * and names the thing.
+   */
+  const onAutomationRun = (event: AutomationRunEvent) => send({ type: 'automationRun', run: event });
+  /** The model's text as it arrives, and one line per thing a turn did. On the
+   *  same opt-in stream: it is the highest-rate frame the hub can emit and it
+   *  matters only to the one client with the chat open. */
+  const onAutomationChat = (event: AutomationChatEvent) => send({ type: 'automationChat', chat: event });
 
   const available = (stream: OptionalStream): boolean =>
     stream === 'mqtt' ? deps.mqttObserver !== undefined : true;
@@ -346,6 +383,10 @@ export function attachWebSocket(
       }
       if (stream === 'zigbee') deps.events.on('zigbeeEvent', onZigbeeEvent);
       if (stream === 'ai') deps.events.on('aiRun', onAiRun);
+      if (stream === 'automations') {
+        deps.events.on('automationRun', onAutomationRun);
+        deps.events.on('automationChat', onAutomationChat);
+      }
     }
     send({
       type: 'subscribed',
@@ -363,6 +404,10 @@ export function attachWebSocket(
       }
       if (stream === 'zigbee') deps.events.off('zigbeeEvent', onZigbeeEvent);
       if (stream === 'ai') deps.events.off('aiRun', onAiRun);
+      if (stream === 'automations') {
+        deps.events.off('automationRun', onAutomationRun);
+        deps.events.off('automationChat', onAutomationChat);
+      }
     }
     send({ type: 'subscribed', streams: [...subscribed] });
   };
@@ -432,6 +477,7 @@ export function attachWebSocket(
     deps.events.off('commandFailed', onCommandFailed);
     deps.events.off('structureChanged', onStructure);
     deps.events.off('portraitsChanged', onPortraits);
+    deps.events.off('automationChanged', onAutomationChanged);
     deps.events.off('activity', onActivity);
     deps.events.off('accessChanged', onAccessChanged);
     deps.events.off('permitJoin', onPermitJoin);
@@ -446,6 +492,10 @@ export function attachWebSocket(
     }
     if (subscribed.has('zigbee')) deps.events.off('zigbeeEvent', onZigbeeEvent);
     if (subscribed.has('ai')) deps.events.off('aiRun', onAiRun);
+    if (subscribed.has('automations')) {
+      deps.events.off('automationRun', onAutomationRun);
+      deps.events.off('automationChat', onAutomationChat);
+    }
     subscribed.clear();
   };
   socket.on('close', detach);

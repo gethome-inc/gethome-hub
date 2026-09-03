@@ -94,6 +94,14 @@ export const PERMISSIONS: readonly PermissionDescriptor[] = [
       'Read what everybody did, by name. Without this, only your own actions are visible.',
   },
   {
+    key: 'automation.manage',
+    group: 'Home',
+    title: 'Create and change automations',
+    summary:
+      'Write the rules the home runs by itself — schedules, sensors, and the buttons and modes ' +
+      'on the dashboard. Everybody can press them; this is who can change what they do.',
+  },
+  {
     key: 'member.invite',
     group: 'People',
     title: 'Invite people',
@@ -158,6 +166,7 @@ export type PermissionKey =
   | 'home.structure'
   | 'home.rename'
   | 'activity.read'
+  | 'automation.manage'
   | 'member.invite'
   | 'member.remove'
   | 'role.manage'
@@ -197,6 +206,16 @@ export const BUILTIN_ROLES = [
      * there did not mean "an update needs care", it meant the phone in the
      * owner's own hand could never update their own hub, ever.
      *
+     * `automation.manage` is here on the same reading of who lives in a home.
+     * A rule is bounded (the engine's guards hold whatever it says), reversible
+     * (switch it off, or revert the document), and named in the activity log —
+     * the three-part test for a default. The person who notices the hall light
+     * should come on when somebody walks past is the person standing in the
+     * hall, and making them ask a laptop in a drawer is the trap `hub.update`
+     * fell into. Guest is where the line falls: somebody staying the weekend
+     * may press "I'm leaving" — that is the floor — and has no business
+     * rewriting what it does.
+     *
      * `hub.ai` joined it later on exactly that argument. It spends money, which
      * is a real reason for care and not a reason for owner-only: the person
      * standing in the house is the one who wants a device recognised or a
@@ -224,6 +243,7 @@ export const BUILTIN_ROLES = [
       'device.add',
       'home.structure',
       'activity.read',
+      'automation.manage',
       'hub.radio',
       'hub.update',
       'hub.ai',

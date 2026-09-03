@@ -18,6 +18,7 @@ import { BUILTIN_ROLES, PERMISSION_KEYS, type RoleWire } from '../src/core/acces
 import type { AdapterBus, ProtocolAdapter } from '../src/adapters/adapter.js';
 import type { HubCommand } from '../src/schema/index.js';
 import {
+  startedAutomations,
   bootedHome,
   loadedAccess,
   loadedFavorites,
@@ -112,6 +113,16 @@ describe.skipIf(!handle)('roles and permissions', () => {
     registry.registerAdapter(adapter);
     await registry.start();
     const settings = new SettingsService(db, Buffer.alloc(32).toString('base64'));
+    const {
+    engine: automations,
+    store: automationStore,
+    chat: automationChat,
+  } = await startedAutomations(
+      db,
+      events,
+      registry,
+      activity,
+    );
     app = await buildServer({
       db,
       log,
@@ -121,6 +132,9 @@ describe.skipIf(!handle)('roles and permissions', () => {
       access,
       pairing,
       activity,
+      automations,
+      automationStore,
+      automationChat,
       history: await startedHistory(db, events),
       portraits: testPortraits(db, events),
       settings,
@@ -238,6 +252,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
       'device.add',
       'home.structure',
       'activity.read',
+      'automation.manage',
       'hub.radio',
       'hub.update',
       // The one key in this row that `authed` never allowed, and it is here on
@@ -364,6 +379,42 @@ describe.skipIf(!handle)('roles and permissions', () => {
       ],
       ['POST', '/api/v1/invites', 'member.invite', {}],
       ['GET', '/api/v1/roles', '', undefined],
+      // Writing the rules the home runs by itself. **Pressing** one is
+      // deliberately absent from this table: working the home is the floor, so
+      // `POST /automations/:id/run` and `PUT …/active` take any token — see
+      // the pair of tests below.
+      ['POST', '/api/v1/automations', 'automation.manage', { name: 'x' } as object],
+      [
+        'PATCH',
+        '/api/v1/automations/33333333-3333-4333-a333-333333333333',
+        'automation.manage',
+        { enabled: false } as object,
+      ],
+      [
+        'DELETE',
+        '/api/v1/automations/33333333-3333-4333-a333-333333333333',
+        'automation.manage',
+        undefined,
+      ],
+      ['POST', '/api/v1/automations/dry-run', 'automation.manage', { name: 'x' } as object],
+      // Writing a rule in conversation needs `automation.manage` *and*
+      // `hub.ai`, because it ends in a saved rule and spends the home's money.
+      // The guard the route names first is the one a refusal reports.
+      ['POST', '/api/v1/automations/chat', 'automation.manage', { message: 'hi' } as object],
+      [
+        'GET',
+        '/api/v1/automations/chat/44444444-4444-4444-a444-444444444444',
+        'automation.manage',
+        undefined,
+      ],
+      ['POST', '/api/v1/automations/templates/away', 'automation.manage', {} as object],
+      ['PUT', '/api/v1/settings/timezone', 'automation.manage', { timezone: 'UTC' } as object],
+      // Reading the home is the floor, and the rules are the home — including
+      // what they are made of and why one fired.
+      ['GET', '/api/v1/automations', '', undefined],
+      ['GET', '/api/v1/automations/capabilities', '', undefined],
+      ['GET', '/api/v1/automations/templates', '', undefined],
+      ['GET', '/api/v1/settings/timezone', '', undefined],
       // What a run said to a provider is the home's AI, so it sits behind the
       // key it was spent with. The guard runs before the handler, so a run
       // that does not exist still proves the refusal.
@@ -487,6 +538,65 @@ describe.skipIf(!handle)('roles and permissions', () => {
     ).json() as Array<{ memberId: string | null }>;
     expect(asMember.some((row) => row.memberId !== guestId)).toBe(true);
     expect(asMember.length).toBeGreaterThan(asGuest.length);
+  });
+
+  /**
+   * The allowed half of `automation.manage`, and the line it draws.
+   *
+   * A permission with only a refusal test can be broken by denying everybody,
+   * which is why every key needs both — and here the pair is the whole design:
+   * **pressing** a rule is the floor and **writing** one is the permission, so
+   * a guest arms the house and cannot rewrite what arming it does.
+   */
+  it('lets a guest press an automation and refuses to let them write one', async () => {
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/v1/automations',
+      headers: auth(ownerToken),
+      payload: {
+        name: 'I am leaving',
+        triggers: [{ kind: 'manual' }],
+        actions: [{ kind: 'logActivity', message: 'Everyone out' }],
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    const id = (created.json() as { id: string }).id;
+
+    // Created switched off, always — the moment somebody can still look.
+    expect((created.json() as { enabled: boolean }).enabled).toBe(false);
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/automations/${id}`,
+      headers: auth(ownerToken),
+      payload: { enabled: true },
+    });
+
+    const pressed = await app.inject({
+      method: 'POST',
+      url: `/api/v1/automations/${id}/run`,
+      headers: auth(guestToken),
+    });
+    expect(pressed.statusCode).toBe(202);
+
+    const refused = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/automations/${id}`,
+      headers: auth(guestToken),
+      payload: { enabled: false },
+    });
+    expect(refused.statusCode).toBe(403);
+
+    // The allowed half comes from an ordinary Member rather than by editing
+    // the matrix: `automation.manage` is in the built-in set, so this asserts
+    // the default as well as the guard, and leaves the shared log alone.
+    const allowed = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/automations/${id}`,
+      headers: auth(memberToken),
+      payload: { enabled: false },
+    });
+    expect(allowed.statusCode).toBe(200);
+    expect((allowed.json() as { enabled: boolean }).enabled).toBe(false);
   });
 
   // ── Editing the matrix ────────────────────────────────────────────────────

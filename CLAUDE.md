@@ -15,7 +15,8 @@ The `docs/` files are canonical for their domains; read the relevant one before
 touching that code: `architecture.md` (module boundaries, data flow),
 `device-schema.md` (**the** capability/unit/wire contract), `api.md`,
 `zigbee.md`, `matter.md`, `mqtt-integrations.md` (public integrator
-convention), `ai-adaptation.md`, `portraits.md`, `ecosystem.md`.
+convention), `ai-adaptation.md`, `automations.md`, `portraits.md`,
+`ecosystem.md`.
 
 **There is no Docker and no database server anywhere any more.** The hub runs as
 systemd units (`deploy/install.sh`, `deploy/gethome-hubctl`) and the store is a
@@ -694,6 +695,397 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   tree rather than by anything the hub knows. Note the direction before
   reaching for this to explain a device stuck offline: it made devices falsely
   **online**, never falsely offline.
+- **Automations are data the hub interprets, and the guards are not
+  negotiable.** `src/automations/` is the rules a home runs by itself, and a
+  **scene is an automation with a `manual` trigger** — one object, one store,
+  one vocabulary, because "press this and the house does that" is not a second
+  system. `docs/automations.md` is canonical.
+  **The document is `MappingDescriptor`'s rule again**, and for five reasons
+  rather than one: the service account can read `hub-secret.json`, the token
+  hashes and `<data>/update/` (a write there starts a root unit); there is no
+  compiler in the bundle; a rule has to be rendered to a person in their own
+  language; a rule has to be checkable before it runs; and a rule outlives the
+  build that wrote it, so `version` is **defaulted** (the `z.literal(1)` bill
+  came due once already) and a document this build cannot parse is kept,
+  reported and **not run** rather than silently missing a step.
+  **A target is a selector, not only a list of ids** — "every light in the
+  Kitchen". It is the request people actually make, it survives a lamp being
+  paired next month, and it is the only way a template authored before it meets
+  a home can install into one. The resolver also picks the endpoint carrying
+  the capability the command needs, so a two-gang switch does the obvious thing
+  without the author knowing it has two endpoints. Reachability is deliberately
+  **not** a filter: a command to a sleeping battery device is queued by the
+  protocol, and dropping unreachable devices would un-target half a home of
+  sensors and make a rule mean different things at different times.
+  **A `deviceState` trigger fires on the crossing**, never on every report
+  while the test still holds — a battery at 12% reports hourly and would
+  announce itself hourly for a month. The first evaluation of a pair *adopts*
+  the answer and says nothing, which is `REACHABILITY_QUIET_MS`'s judgement
+  applied to rules; and because the engine only sees a device when it
+  **changes**, triggers have to be **primed against the home as it is** on
+  every load, or the first change ever observed is mistaken for first sight and
+  swallowed. That one cost a motion rule the first person to walk past it, on
+  every boot.
+  **A threshold on a continuously-varying reading is refused without `for` or
+  `hysteresis`.** This is `STATE_FLUSH_MS` pointed at a relay instead of an SD
+  card, and it is the rule the schema cannot express, so `sanity.ts` holds it.
+  The two are not interchangeable: `for` suppresses a spike, `hysteresis`
+  suppresses a value resting *on* the threshold and dithering across it, which
+  an edge does nothing about because every wobble is a real edge. Actuator
+  positions are deliberately not continuous — `level.current` moves because
+  somebody moved it.
+  **Five guards, and they apply to automation-driven commands only.** A person
+  tapping a card quickly is a person; software tapping quickly is a bug, and
+  that distinction is the whole reason the limits can be this tight.
+  Idempotence first (one comparison against the registry's cache, and it
+  absorbs most flapping); a two-second floor per endpoint, because a relay
+  rated for 100 000 operations switched once a second is dead in a day and a
+  half; hourly and daily budgets per device; causation with a depth cap; and a
+  circuit breaker that switches a runaway rule off, writes `disabled_reason`
+  and puts one line in the activity log. **Attribution is recorded *before* the
+  write**: Zigbee2MQTT publishes optimistically, so a mains device can report
+  its new state before `execute` resolves, and with the record afterwards
+  `causeOf` answered "nobody" for exactly the reports our own commands caused —
+  every link of a loop restarted at depth 0 and no chain could be cut. Three
+  commands are never idempotent (`toggle` is defined by what it does,
+  `stopCovering` is an interrupt, `irSend` has no state behind it), and a value
+  never reported always sends: silence is not evidence.
+  **The clock is injected and nothing is made up.** The tick fires for the
+  minute it is *in*, so a schedule missed while the hub was down does not fire
+  late; everything is held while the clock is implausible, because a Pi has no
+  RTC and boots into a fictional time NTP corrects seconds later; an `interval`
+  arms on the first tick rather than firing, since a restart is not an interval
+  elapsing. A `wait` does not survive a restart and is capped at fifteen
+  minutes to say so. `tick()` is public for the reason `HistoryService.flush()`
+  is — a scheduler that reads `Date.now()` can only be tested by waiting.
+  **Only a manual run reaches the activity log**, which is the log's own rule
+  (what was *asked*, never what was reported): a motion rule's forty daily
+  firings would drown a feed bounded at 5 000 rows. Traces live in
+  `automation_runs`, bounded **per rule** — a global cap lets one chatty rule
+  evict every trace of a quiet one — and they record the commands a guard
+  *refused*, since "nothing happened" and "the hub declined to switch that
+  relay for the fortieth time this hour" look identical from outside. The one
+  automatic firing that does get a row is the breaker switching a rule off,
+  because somebody has to find that a week later.
+  **`enabled` and `active` are two words with two permissions.** `enabled` is
+  whether the rule exists and is listening → `automation.manage`; `active` is
+  whether a mode is switched on right now → **the floor**, because pressing
+  "Night" switches lights and working the home is what being a member means.
+  And a new rule is created **switched off** whatever the caller asks, because
+  the moment between "here is what I wrote for you" and "your house is now
+  doing it" is the only one in which somebody can still look.
+  **What a rule is *called* is not what it does**, so `name` and `icon` ride on
+  `PATCH /automations/:id` beside `document` — the apps hold the `summary`
+  rather than the structure, and making them send a whole rule back to fix a
+  typo would mean every app carrying a second copy of the DSL. Three rules, and
+  the first is the one that bites: **a rename writes `document.name` too**,
+  because `AutomationStore.update` sets the column *from* the document, so a
+  rename that touched only the column would be undone by the next edit made in
+  conversation — and the agent reads the document, so it would go on using a
+  name nobody in the home uses any more. It **spends no version** (ten are kept
+  per rule to walk back out of a bad afternoon, and the behaviour is untouched),
+  and a rename is **logged** where a restyle is not — the rooms rule, since the
+  feed is read a week later and "somebody changed that rule's icon" is not what
+  anybody is looking for in it. `icon` is an opaque app token, null meaning
+  "the app derives one" from the name and the shape, unvalidated here for the
+  reason a room's is: an allowlist would need a hub upgrade for every mark an
+  app adds.
+  **Where a rule happens is derived, never stored** (`scope.ts`): every rule on
+  the wire carries `roomId`, the one room every device it touches sits in, or
+  null for a rule about the whole house — which is what lets an app put a rule
+  on the page of the room it belongs to. A rule's room is a function of the
+  document *and of the home right now* (a selector picks up a lamp paired next
+  month; a device moved between rooms changes the answer with the rule
+  untouched), so a column would be a second copy going stale in the dark; it is
+  computed per read beside `summary` and costs what that costs. Four rules.
+  **A selector naming a room declares one** whether or not anything is in it
+  yet — "every light in the Kitchen" is the Kitchen's rule the day it is
+  written, and everything such a target resolves to is in that room by
+  construction. **What a rule watches counts**, not only what it does: the walk
+  covers triggers, conditions (nested, since `all`/`any`/`not` hold more of
+  them), actions and a toggle's off-actions, because a rule watching the
+  Kitchen and switching the Hall is not the Kitchen's. **Touching a device
+  nobody has placed disqualifies it** — the "not in a room" bucket is somewhere
+  nobody has said, and the rule becomes the room's the moment that device is
+  placed. And **`runAutomation` is not followed**: that rule has its own room
+  and its own page. The half a client has to know is that **`roomId` moves
+  without an `automation` frame**, because nothing about the automation
+  changed — so an app re-reads on structure, not only on rules.
+  **A rule is also sent as a picture** (`outline.ts`): the same document as four
+  lists of display-ready steps — when, only if, then, and a toggle's off-branch
+  — so an app can *draw* a rule instead of printing the sentence. It is the
+  `message`/`data` split one step further, and the reason it belongs here rather
+  than in an app is the reason `summary` does: neither app decodes the DSL,
+  because a second copy of it would go stale there in the dark, and a sentence
+  was then the only thing either could show. The hub already interprets the
+  document to run it; this interprets it once more to draw it. Six rules, all of
+  them the ones `summary` already lives by. `title` is the only field that is
+  always there and `glyph` is an **opaque token** — the room-icon vocabulary
+  applied to a step — so a step kind added later reaches an older app as an
+  unrecognised mark over a line that is still true, and adding one needs no app
+  release. A step is **three fields** because it is three thoughts (the act,
+  what it acts on, the qualifier), and only the hub knows which half is which.
+  **Two tenses**: a trigger is the moment of crossing ("goes above"), a
+  condition is asked while the rule runs ("is above") — one table for both said
+  a rule waits for its condition to move. `tone: "quiet"` marks a step that is
+  not an act on the home (a wait, a log line), which is what lets an app draw a
+  wait as the *gap* between steps. Nesting is `children` + `join`, indented
+  rather than recursed. And it is **derived per read and read-only**: nothing
+  addresses a node in the document, because a builder would be this same list
+  with its steps addressable and that is a decision to make on purpose.
+  `phrasing.ts` is the one place a stored number becomes what a person means by
+  it, shared by both surfaces — two copies of that table is two places for the
+  centi-°C mistake to come back in only one of them.
+  **The catalog is generated** from the live zod schema and is the one source
+  the agent, the apps and the docs all read — the `GET /permissions` rule
+  applied to a vocabulary that will keep growing. Units are written out in
+  words at every path and command, because a model that writes 22 for 22 °C
+  produces a rule wrong by two orders of magnitude that reads perfectly.
+- **The automation agent is authoring, never runtime, and it lives on the
+  hub.** `src/ai/automation-*.ts` writes rules in conversation;
+  `src/automations/` runs them, with no key, no network and no idea the agent
+  exists. So `ai_enabled: false` stops rules being *written* and touches
+  nothing already running — "stop spending my money on this for now" must not
+  put the lights out on a schedule. `docs/automations.md` is canonical.
+  On the hub for the same reason the mapper is (the Agent SDK's 276 MB binary
+  and per-run subprocess), and **not in the cloud** for a reason of its own:
+  this agent's tools *are* the home, the home is on a local network, and a
+  provider's container cannot reach it — every tool call would need a tunnel
+  that does not exist.
+  **A conversation suspends, which is what makes it different from a mapping
+  run.** That run is one call that either submits a descriptor or does not;
+  this one hands control back on `ask_user` **and** on a prose ending, both of
+  which outlive the request. So the provider owns the message history (it is
+  the vendor's own shape) and the conversation is an object with a lifetime.
+  Answering closes the tool call `ask_user` opened — a plain user message after
+  a pending call is a conversation the API refuses — which is why `answer()`
+  sits beside `send()` and why a *typed* reply is routed to `answer` anyway.
+  **Two stores, and the split is what makes keeping a chat affordable.** The
+  message history is in memory, tens of kilobytes a round, and dies with the
+  process; the transcript an app draws is on disk, a few hundred bytes a
+  message.
+  **The memory is rebuilt from the record, and it has to be, because the two
+  lifetimes are two hours and a fortnight.** A restart or the idle sweep used
+  to cost the *continuation* — `410 conversation_ended`, the chat readable and
+  nothing more — which sounded like an edge and was the ordinary case: for
+  thirteen of every fourteen days everything in the conversations list answered
+  410, both apps drew a closed composer over it, and "ask it to try again" was
+  not a thing anybody could do about a conversation that had worked perfectly.
+  `revive()` builds a fresh provider conversation under the same session id and
+  primes it with a recap of the stored rows. Three rules. The recap reaches the
+  **model and never the transcript** — it is a read-back of rows that are
+  already there, and writing it down would put the chat inside itself as a
+  message — so it rides on `ChatSession.priming`, consumed by the first
+  exchange. It is worded as *history rather than memory*, because a model told
+  it remembers a decision it is only reading will defend it. And **ownership is
+  read back out of the rows** (`automation_chat_messages.member_id`): a live
+  session carries its member and `reply` compares against it, while a revived
+  one is built from the caller's own id, so without that any member could
+  reopen anybody's conversation by its id. The only `410` left is a session
+  with no rows at all — one that never existed, or whose fortnight is up. **`ask_user` carries two to four options** because somebody who does
+  not write software taps one and will not compose an answer, and that is the
+  single thing that makes this usable by the people it is for.
+  **Prose *is* an answer, and saying otherwise cost a rule.** The prompt read
+  "a run that ends without submitting has produced nothing" and
+  `submit_automation`'s description said the same, so asked "how does this
+  work?" the model reasoned — visibly, in the trail — that "the framework seems
+  to require submitting something to produce output" and resubmitted the rule
+  unchanged: it rewrote what the home was running to answer a question about it,
+  and handed back a card with nothing said. Both now say the true thing —
+  submitting is the only way to *deliver a rule*, prose reaches the person
+  exactly as written, and a rule is never resubmitted unchanged.
+  **A step says what it did, not only what it was**: `AutomationToolResult`
+  carries an optional `detail` beside the `text` the model reads (the device
+  looked at, how many matched, the sentence a draft would carry, the first
+  reason it would be refused), and it rides the same `step` frame `ask_user`'s
+  question does — `dry_run`'s is the most useful line in the trail, the rule read
+  out while the agent is still deciding rather than only on the card afterwards.
+  **One conversation, any number of rules — and one reply can carry more than
+  one card.** Two faults, and they read as one: the loop kept a single
+  `handedBack`, so a second `submit_automation` in one response overwrote the
+  first (both told "Accepted", one ever saved); and the save was positional —
+  first submission creates, every one after it *replaces* — which was right
+  about a model fixing the rule it had just written and silently wrong about
+  "and also switch everything off at midnight", which overwrote what had been
+  written a minute earlier. So a turn hands back a **list**, and each
+  submission says which rule it is: `replaces` is an id or `null`, **required
+  and nullable** rather than optional, because an omitted id is exactly the
+  ambiguity that caused the bug and only the model can resolve it. The ids
+  reach it on `ChatSession.priming` — the `revive()` channel, model-only,
+  never a transcript row — since a rule written a minute ago has an id the
+  model has never seen; a revived conversation's recap carries a preview row's
+  id for the same reason. One row per rule (so an app draws a card each, with
+  `edited` per rule), and the prompt asks for **one line for the lot** rather
+  than a paragraph per card. Bounded at four rules a response
+  (`AUTOMATION_MAX_RULES_PER_TURN`): two is the case this exists for, and past
+  four it is a model that has misread the room writing a page of rules into
+  somebody's home — the accepted ones are saved and the rest refused inside the
+  turn, to be offered once the person has replied.
+  **A submission writes the model's line and then the card, and asking for
+  that line one round too late is why it was blank.** The card carries
+  `describeAutomation`'s sentence — the *rule*, the same words for everybody —
+  while the line above it answers what was actually asked: what changed, in
+  their language. On an edit the card alone never says whether it was done.
+  The instruction to write it sat in `submit_automation`'s own result ("tell
+  them what it will do, briefly, and stop"), which the model can never act on,
+  since accepting a submission *ends the turn* and that result is read only on
+  the next one — where it is stale advice about last time's rule; and the
+  prompt paragraph above it read "prose is not an answer", true about
+  delivering a rule and read as "do not write any". The prompt asks for it in
+  the **same message as the call** now. Neither the hub nor an app writes that
+  line: a canned "All done" is words in the model's mouth. **And when the model
+  forgets anyway the loop sends the submission back for it — once**: an accepted
+  rule with no prose is held rather than returned, the results go back, and one
+  more round runs purely for the sentence (its own step, since the person is
+  watching it). Exactly one, because the rule is already saved and a third round
+  spent on a sentence the model will not write is worse than handing the card
+  over without one.
+  **The prompt says what the prose is written *into*.** A model writes Markdown,
+  and both halves of that were missing: the apps drew it as characters and the
+  prompt never described the surface, so an answer listing four rules arrived
+  with `**a bolded heading:**` over a column of literal hyphens. The app renders
+  it now (`AgentProse`), and the prompt names the column — three inches wide,
+  short paragraphs, a list where something is genuinely listed, bold for a name
+  worth picking out — with headings, tables, nested lists and code fences called
+  out as not what it is for. Either half alone is worth little: rendering
+  Markdown nobody was told to keep simple gives a typeset document in a chat
+  bubble, and asking for restraint without rendering still shows the asterisks.
+  **Seven tools and no web.** An agent writing a rule for a house has nothing
+  to look up, and leaving search out is a plainer promise than a paragraph
+  telling it not to search — the one AI surface here that reaches the
+  provider's API and nothing else. `submit_automation` is the only answer
+  channel and a refusal is a `tool_result` rather than the end of the
+  conversation, so the model fixes its document and resubmits without the
+  person seeing it got it wrong; `dry_run` is the agent checking its own work
+  against the same rules, and it hands back the sentence the apps will show.
+  The prompt is built from `catalogAsPrompt()`, names the refusals rather than
+  begging for care (the guards are enforced, and a prompt implying otherwise
+  reads as the only thing between somebody and a burnt-out relay), and says
+  plainly that **there are no notifications** — a model that does not know
+  that invents a notify action and spends a round finding out while somebody
+  watches. `ai_runs` rows with `kind: 'automate'`, because what a home spent on
+  AI is one question and two tables would make it two screens.
+  **What a conversation cost is answerable, and three rules make it so.**
+  `ai_runs.session_id` is the link: `automation_id` is null for a chat that
+  submitted nothing and a revived one writes a row per incarnation, so nothing
+  else could total them. **Each row is a delta, never a running total** — one
+  is written at every submission (a conversation that has done its job should
+  not wait on an abandoned tab) and another when the session closes, so a
+  two-rule chat writes several and summing totals would report half as much
+  again as it cost; `record` was once-only for a while, which simply dropped
+  everything after the first rule. **A live conversation's unwritten
+  remainder is added** where `GET /automations/chats` answers, because the
+  chat somebody is watching is exactly the one with no row yet, and drawing it
+  as free until minutes after they stop looking is the worst possible moment
+  to be right. And **the model is read back, never re-derived**:
+  `effectiveModel` answers "what will *run*" and is meant to move with the
+  offered list, which is precisely wrong for a record of a run that already
+  happened — so `provider`/`modelId` are the columns verbatim and only the
+  label goes through `modelLabel`, which falls back to the raw id once a model
+  is retired. Absent rather than zero when the ledger no longer has it: sixty
+  runs against a fortnight of transcript means a readable chat can outlive its
+  own spend row, and `$0.00` is a claim where nothing is the truth.
+  **The agent picks its own provider, and it is deliberately not the
+  mapper's.** `ai.provider` answers "which model reads a device's exposes
+  tree" — a real choice, because both halves of *that* are written. Only one
+  half of this one is, so reading the same field turned an unrelated preference
+  into a refusal: a home with both keys that recognised devices with OpenAI
+  could not write a rule at all, with a perfectly good Anthropic key sitting
+  beside it. It runs on Anthropic whenever the home has a key that can, and a
+  legacy subscription token is not one, since the loop authenticates with
+  `x-api-key`.
+  **Every way this can be refused is an `AutomationNotConfiguredError` with a
+  code *and* a sentence**, and that is the whole of a real bug: the OpenAI case
+  threw an `AiUnavailableError` past the route's refusal handler, Fastify
+  answered `{"statusCode":500,…}`, and the app drew "The hub answered 500."
+  over a hub that was working perfectly and had just said what was wrong.
+  Three codes, because they lead to three different screens — no key, AI
+  switched off, a key of the wrong kind — with `detail` riding along so an app
+  that has never met a code a later build adds still shows something true.
+  **A spinner is not an answer to "what is happening", so the socket carries
+  four phases.** `step` is one line per thing the agent did, `thinking` is its
+  own summarized reasoning as it arrives, `delta` is the reply, `turn` says the
+  transcript is ready. Steps used to be reported only once something had
+  *happened* — and the first thing that happens in a round is none of it, so the
+  longest wait in every round was three animated dots. A step now goes up
+  **before** the request, and the reasoning is streamed, which only works
+  because the loop asks for `display: 'summarized'` (this model's default
+  streams thinking blocks empty). `kind` is what an app draws a mark from and is
+  about the *shape of the act* rather than the tool — three tools all mean
+  "reading your home" — so a new tool needs no app release; it is an open
+  string, the `commandFailed.kind` rule.
+  **And the working outlives the wait**: the round's steps are written into the
+  **first row that round records** (`data.steps`, the frame's own three fields
+  so the live trail and the stored one cannot drift), whichever kind of row it
+  is — prose, a question, a card, or the note saying the model could not be
+  reached, which is the ending with the most to explain. They were a stream and
+  nothing else, gone the moment the turn landed, which is right about a dozen
+  open rows above every answer and wrong about the *fact* that there were a
+  dozen: a rule arrives out of a handful of tool calls and the page whose job
+  is explaining a house to somebody who does not write software was left with
+  the conclusion alone. Five bounds hold it to the size of a transcript row —
+  the round's first row rather than each of them, the buffer cleared when a
+  round **begins** so a throw cannot hand its working to the next answer, the
+  person's own row never taking them, and **the last twelve** steps with text
+  and detail **cut rather than dropped** (twelve covers every round this agent
+  runs; the *last* twelve is the direction an app's live trail drops from, so
+  what was watched is a suffix of what is read back). The sentences live in
+  `automation-tools.ts` beside the tools: `Looked up list_rooms_zones.` is a
+  function signature read out loud, on the one screen whose whole job is telling
+  somebody who does not write software what their house is doing.
+  **Nothing is ever sent with a `tool_use` left unanswered, and the repair
+  belongs before the next *user* turn.** Every call in an assistant turn needs
+  a result in the very next message, and a conversation that breaks that rule
+  is refused outright and for ever — `messages.N: tool_use ids were found
+  without tool_result blocks`. The assistant turn is pushed the moment it
+  arrives, so any exit between that push and the results leaves a dangling
+  call: a `refusal`, a `pause_turn` carrying calls (now answered rather than
+  skipped past), and above all *anything that throws* — `evaluateSubmission`
+  reads the home outside `runAutomationTool`'s own catch, and `exchange`
+  swallows the throw, writes a note and leaves the conversation open, so the
+  damage is invisible until the next message is refused along with every one
+  after it. `settleDanglingCalls()` closes them with `is_error` results, and it
+  sits in `send()` before the user turn is pushed rather than beside the
+  request, which is where it was first put and where it can never fire: mid-loop
+  the last message is always the results of the round before.
+  **`ask_user` hands back mid-response, and every *other* call in that response
+  still has to be closed.** The API's rule is per response — each `tool_use` in
+  an assistant turn needs a `tool_result` in the very next message — and handing
+  the question back used to abandon the rest (calls before it collected and
+  dropped, calls after it never run), so the next request carried a
+  half-answered turn and the conversation was refused outright with `400
+  tool_use ids were found without tool_result blocks`, reaching the chat as a
+  wall of JSON where the answer belonged. They are stashed and sent with the
+  answer; a second question in one response is refused inside the turn rather
+  than left open, since only one call id can be closed by an answer.
+  **A transcript nothing can find again is a transcript thrown away**, which is
+  what `GET /automations/chats` exists for: the fourteen-day record was
+  unreachable the moment a page closed, because the only way back was a session
+  id nobody writes down. Its `title` is the first thing the *person* said (the
+  agent's opening line is about the home, not about the ask) and `live` says
+  whether it can be *continued* as against merely read — two different states,
+  and an app has to offer the right one rather than find out on the next
+  message.
+  **A message is acknowledged, never awaited.** `POST /automations/chat` and
+  `…/messages` answer the moment the hub takes the message — the person's own
+  row and nothing else — because a turn is a provider loop with a three-minute
+  watchdog and the iOS client gives a hub ten seconds. This is the
+  `POST /devices/:id/remap` lesson, and this route shipped with the very bug
+  that one was written to avoid: a conversation working perfectly reported
+  "the request timed out" every time, while the reply it went on to produce
+  arrived on a socket nobody was waiting on. Turns are **chained per
+  conversation** (two exchanges against one provider history would interleave
+  the messages array, and chaining is also what makes `awaitingAnswer()` get
+  asked when a turn *begins* rather than when it was queued), and **every turn
+  emits a `turn` frame, the failed ones included** — that frame is what says
+  the transcript is ready to re-read and what takes an app's "thinking"
+  indicator down, so the provider-failure path returning without one left a
+  failed round spinning for ever over a note nothing had gone back for.
+  **The test seam (`createConversation`) therefore sits *after* every
+  configuration check.** It stands in for the network, not for the rules: above
+  them it was a bypass, letting the suite reach a conversation the real hub
+  would have refused — the "a mock laxer than the thing it stands in for tests
+  the mock" trap, and exactly why the refusal shipped untested.
 - **Nothing is unsupported by default — three layers, in order.** Devices are
   made usable by (1) **typed capabilities** (canonical schema), then (2)
   **generic custom fields** (`custom`) for every leftover parameter, generated

@@ -16,6 +16,7 @@ import { MappingLibrary } from '../src/ai/library.js';
 import { MAX_PER_DEVICE, PortraitService } from '../src/portraits/store.js';
 import type { AdapterBus, ProtocolAdapter } from '../src/adapters/adapter.js';
 import {
+  startedAutomations,
   bootedHome,
   loadedAccess,
   loadedFavorites,
@@ -89,6 +90,16 @@ describe.skipIf(!handle)('device portraits', () => {
     await registry.start();
     settings = new SettingsService(db, Buffer.alloc(32).toString('base64'));
     portraits = new PortraitService(db, events, dataDir, log);
+    const {
+    engine: automations,
+    store: automationStore,
+    chat: automationChat,
+  } = await startedAutomations(
+      db,
+      events,
+      registry,
+      activity,
+    );
     app = await buildServer({
       db,
       log,
@@ -98,6 +109,9 @@ describe.skipIf(!handle)('device portraits', () => {
       access,
       pairing,
       activity,
+      automations,
+      automationStore,
+      automationChat,
       history: await startedHistory(db, events),
       portraits,
       settings,

@@ -10,12 +10,21 @@ import { FavoritesService } from '../../src/core/favorites.js';
 import { AccessService } from '../../src/core/access.js';
 import { HistoryService } from '../../src/core/history.js';
 import { PortraitService } from '../../src/portraits/store.js';
+import { ActivityService } from '../../src/core/activity.js';
+import { AutomationEngine, type EngineRegistry } from '../../src/automations/engine.js';
+import { AutomationStore } from '../../src/automations/store.js';
+import { AutomationChat, type AutomationChatOptions } from '../../src/ai/automation-chat.js';
+import { AiRunLog } from '../../src/core/ai-runs.js';
+import { SettingsService } from '../../src/core/settings.js';
 import type { HubEventBus } from '../../src/core/bus.js';
 import type { MqttBrokerConfig } from '../../src/core/mqtt-access.js';
 import {
   activity,
   aiMappings,
   aiRuns,
+  automationRuns,
+  automationVersions,
+  automations,
   deviceFavorites,
   devicePortraits,
   devices,
@@ -65,6 +74,9 @@ export async function openTestDb(): Promise<TestDb | null> {
  */
 export async function resetDb(db: Db): Promise<void> {
   await db.delete(activity);
+  await db.delete(automationRuns);
+  await db.delete(automationVersions);
+  await db.delete(automations);
   await db.delete(tokens);
   await db.delete(invites);
   await db.delete(endpoints);
@@ -168,4 +180,68 @@ export function testBroker(
     baseTopic: 'zigbee2mqtt',
     ...overrides,
   };
+}
+
+/**
+ * A started `AutomationEngine` and its store, which is what `src/index.ts`
+ * hands the API.
+ *
+ * A named fixture rather than a literal per suite, for the reason `testBroker`
+ * is one: `ApiDeps` requires both fields precisely so a suite cannot forget
+ * them, and five hand-built engines is the shape that goes stale one at a
+ * time. The clock is injectable for the suites that care about schedules; the
+ * rest take the real one and never reach the scheduler.
+ */
+export async function startedAutomations(
+  db: Db,
+  events: HubEventBus,
+  registry: EngineRegistry,
+  activity: ActivityService,
+  options: {
+    now?: () => number;
+    timezone?: () => string;
+    /** The suite's own, when it has one — otherwise a throwaway with no key,
+     *  which is what a hub that has never been given one looks like. */
+    settings?: SettingsService;
+    runs?: AiRunLog;
+    /** Stands in for a provider, so a suite never reaches one. */
+    createConversation?: AutomationChatOptions['createConversation'];
+  } = {},
+): Promise<{ engine: AutomationEngine; store: AutomationStore; chat: AutomationChat }> {
+  const store = new AutomationStore(db);
+  const engine = new AutomationEngine({
+    store,
+    registry,
+    events,
+    activity,
+    log: pino({ level: 'silent' }),
+    readStructure: async () => {
+      const [roomRows, zoneRows] = await Promise.all([
+        db.query.rooms.findMany(),
+        db.query.zones.findMany(),
+      ]);
+      return {
+        rooms: roomRows.map((row) => ({ id: row.id, name: row.name, zoneId: row.zoneId })),
+        zones: zoneRows.map((row) => ({ id: row.id, name: row.name })),
+      };
+    },
+    timezone: options.timezone ?? (() => 'UTC'),
+    ...(options.now !== undefined ? { now: options.now } : {}),
+  });
+  await engine.start();
+  const settings =
+    options.settings ?? new SettingsService(db, Buffer.alloc(32).toString('base64'));
+  const chat = new AutomationChat({
+    db,
+    settings,
+    engine,
+    store,
+    events,
+    runs: options.runs ?? new AiRunLog(db, events),
+    log: pino({ level: 'silent' }),
+    ...(options.createConversation !== undefined
+      ? { createConversation: options.createConversation }
+      : {}),
+  });
+  return { engine, store, chat };
 }

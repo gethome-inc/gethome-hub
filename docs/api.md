@@ -117,6 +117,24 @@ than no button.
 | `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | `hub.ai` | The home's AI: two credentials, two models, which provider recognises devices, and the switch. **PATCH is the write** — every field optional, absence means "leave this alone": `{enabled?, recordExchanges?, anthropicApiKey?, openaiApiKey?, anthropicModel?, openaiModel?, model?, mappingProvider?, clear?}`. `model` is `anthropicModel` under the name this route has always used; `clear: "anthropic"\|"openai"` forgets one credential and leaves the other; `recordExchanges` starts or stops keeping what each round said, and is off unless asked; `mappingProvider` naming a provider with no key is `400 provider_not_configured`. Keys are told apart by prefix, so one pasted in the other's field is a 400 rather than a 401 an hour later, and a `sk-ant-oat…` subscription token is still refused. **PUT is unchanged** (`{apiKey, model?}`, an Anthropic key, required) for apps that have not moved. See [the answer's shape](#the-ai-settings-answer) |
 | `GET /ai/runs?limit=` | `hub.ai` | what the mapping agent did, newest first: `{id, at, kind, vendor, model, exposesHash, provider, modelId, ok, costUsd, turns, durationMs, errorKind, errorMessage, steps, exchanges}`. A summary, never a transcript — see [ai-adaptation.md](ai-adaptation.md). `exchanges` is how many **rounds** this run kept, `0` unless recording was on when it ran |
 | `GET /ai/runs/:id/exchanges` | `hub.ai` | what that run actually said, round by round, oldest first: `[{seq, at, durationMs, provider, modelId, status, ok, inputTokens, outputTokens, sent, received}]`. `sent`/`received` are `[{kind, label, text?, bytes?}]` — the round's **main data**, not its bodies; `bytes` is present only on a part that was cut, and is what it weighed whole. A run is a *loop*, so one recognition is several rounds and a failed one is followed by the next in the same list. Empty is the ordinary answer — recording is off unless the owner asked, and rounds age out after a week. See [ai-adaptation.md](ai-adaptation.md) |
+| `GET /automations` | floor | every rule in the home, plus `unreadable` — rules a **newer** build wrote that this one cannot parse. They are kept and not run; listing them is what stops a rule silently vanishing after `install.sh` rolls a build back. Each carries `summary` (a whole sentence — the contract) beside `document` (the structure — the convenience), the `activity.message` rule applied to rules, [`outline`](automations.md#a-rule-as-a-storyboard) — the same rule as a **storyboard** so an app can *draw* it rather than print it — `icon` — the mark somebody chose, or `null` for the one the app derives — and `roomId`, [the one room the rule is about](#which-room-a-rule-is-in) or `null` for a rule about the whole house |
+| `GET /automations/:id` · `GET /automations/:id/runs` | floor | one rule, and why it fired. The trace names the commands a guard **refused** as well as the ones it sent: "nothing happened" and "the hub declined to switch that relay for the fortieth time this hour" look identical from outside |
+| `GET /automations/capabilities` | floor | what a rule can be made of, **generated from the live zod schema**. Render this rather than shipping a copy — the `GET /permissions` rule applied to a vocabulary that will keep growing |
+| `GET /automations/templates` | floor | the shipped presets, with the inputs each needs |
+| `POST /automations/:id/run` | floor | press a button automation → `202`. **The floor, deliberately**: pressing "I'm leaving" switches lights, and working the home is what being a member means. `409 automation_disabled`, `409 not_pressable` for a rule that watches the home and has nothing to press |
+| `PUT /automations/:id/active` | floor | `{active}` — switch a *mode* on or off. Also the floor, and a different thing from `enabled` below: turning a mode on is working the home, enabling a rule is editing it. `409 not_a_toggle` |
+| `POST /automations` | `automation.manage` | the document as the body → `201`, **always switched off**, with `warnings`. `422 {error:"invalid_automation", issues}` for a shape the schema refuses, `422 {…, problems, warnings}` for one it accepts and the home cannot use — a threshold on a continuously-varying reading with no `for` or `hysteresis` is the commonest |
+| `PATCH /automations/:id` | `automation.manage` | `{document?, enabled?, name?, icon?}`. Switching it back on clears whatever the circuit breaker wrote. **`name` and `icon` are what a rule is called and how it is drawn**, and they are here rather than only inside `document` because a rename is a different act from an edit: the apps hold the `summary`, so asking a phone to send a whole rule back to fix a typo would mean every app carrying a second copy of the DSL. A rename is written into `document.name` as well as the column — they are one fact stored twice, and an edit made in conversation afterwards would otherwise put the old name back. It costs no version (ten are kept per rule to walk back out of a bad afternoon, and the behaviour is untouched) and it *is* written to the activity log, where a restyle is not — the rooms rule. `icon` is an opaque app token, `null` for "the app derives one" |
+| `DELETE /automations/:id` | `automation.manage` | forget it, and its versions and traces with it |
+| `GET /automations/:id/versions` · `POST /automations/:id/revert` | `automation.manage` | what it used to say, and going back to it. `{versionId}` |
+| `POST /automations/dry-run` | `automation.manage` | check a document without saving: `{problems, warnings, shape, summary, outline}` — the same pair every rule carries, so a preview draws exactly what the saved rule would |
+| `POST /automations/templates/:key` | `automation.manage` | install a preset. A template may install **more than one** rule — "light on movement" is genuinely two — so this answers with a list |
+| `POST /automations/chat` | `automation.manage` **+** `hub.ai` | start a conversation: `{message, automationId?}` → `201 {sessionId, messages}`. **An acknowledgement, not an outcome**: `messages` is the person's own row and nothing else, and it answers the moment the hub takes the message — a turn is a provider loop with a three-minute watchdog and no client waits that long. What the agent says arrives on the opt-in `automations` stream, and its `turn` frame is what says the transcript is ready to re-read. Three refusals, all `409 {error, detail}` because they lead to three different screens: `ai_not_configured` (no key), `ai_disabled` (the owner switched AI off), `automation_needs_anthropic` (a key, but only OpenAI's — the OpenAI half of this agent is not written). `detail` is a sentence, so an app that has never met one of these codes still shows something true. The route names `automation.manage` in a refusal; the second key is checked in the handler and refused in the same `{error, permission}` shape |
+| `POST /automations/chat/:id/messages` | `automation.manage` **+** `hub.ai` | `{message}` → the same acknowledgement shape, and the same rule: it returns when the message is taken, never when the turn ends. Turns are chained per conversation, so a second message sent while one is running is queued rather than run beside it. A typed reply to a question is treated as the *answer* to it, since only the conversation knows whether a tool call is outstanding. **`410 conversation_ended`** only when there is nothing left to read — a session that never existed, or one past the fortnight transcripts are kept for. A hub that has merely *forgotten how to continue* (a restart, or the two-hour idle sweep) rebuilds the model's memory from the stored transcript and carries on under the same session id, because that state is the ordinary one and refusing it made the whole conversations list read-only |
+| `GET /automations/chats` | `automation.manage` **+** `hub.ai` | every conversation this home has had, newest first: `[{sessionId, startedAt, updatedAt, messageCount, title, live, spend?}]`. `title` is the **first thing the person said** — the agent's opening line is about the home rather than about what was asked — and `live` is whether it can still be *continued*, which is a different question from whether it can be read. `spend` is `{usd, provider, modelId, model}`: what it cost and what answered, with `model` the label to draw and `modelId` the id as recorded. It is **absent rather than zero** when the hub cannot say — `ai_runs` keeps sixty runs and a transcript a fortnight, so a readable conversation can outlive its own spend row, and `$0.00` about one that plainly cost something is a claim |
+| `GET /automations/chat/:id` | `automation.manage` **+** `hub.ai` | `{sessionId, live, spend?, messages}` — the transcript, oldest first, with the same `spend` block the list carries so a chat opened from a link says what it cost without the list having been read. `live: false` is history. A message is `{id, at, role, text, data?}` with `role` an **open** vocabulary (`user`/`agent`/`question`/`preview`/`note`); see [`docs/automations.md`](automations.md) for what `data` carries per row. **One turn can write several `preview` rows** — a reply that delivers two rules is one `agent` line followed by a card each, in submission order, so draw a card per row rather than assuming one per turn. The **first** row a round writes also carries `data.steps` — `[{text, kind, detail?}]`, what the agent did to produce it, the same three fields the `step` frame streams — so a conversation read back next week shows the working and not only the answer |
+| `DELETE /automations/chat/:id` | `automation.manage` **+** `hub.ai` | end it and write down what it spent |
+| `GET /settings/timezone` · `PUT /settings/timezone` | floor · `automation.manage` | what "at ten in the evening" means. The system's zone seeds it and the database owns it; `400 unknown_timezone` for one `Intl` cannot use, refused here rather than taking every schedule down on every tick |
 | `GET /device-mappings` | `hub.ai` | the mapping library: one entry per device model, `{adapter, exposesHash, vendor, model, status, source, problems, endpoints, deviceIds, createdAt, updatedAt}` |
 | `GET /device-mappings/:exposesHash` | `hub.ai` | the download — an envelope naming the device, see [below](#the-device-mapping-library) |
 | `PUT /device-mappings/:exposesHash` | `hub.ai` | the upload. Accepts the envelope or a bare descriptor. `422 {error:"invalid_mapping", problems, issues?}` when the hub can't use it — and it is **kept**, so `…/repair` can work from it |
@@ -135,7 +153,7 @@ than no button.
 
 ### Roles and permissions in full
 
-#### The twelve permissions
+#### The fifteen permissions
 
 `GET /permissions` is the authority and carries a `title` and a `summary` for
 each. **Render those rather than shipping copy of your own** — it is the
@@ -152,6 +170,7 @@ it gates its own screens on.
 | `home.structure` | Home |
 | `home.rename` | Home |
 | `activity.read` | Home |
+| `automation.manage` | Home |
 | `member.invite` | People |
 | `member.remove` | People |
 | `role.manage` | People |
@@ -169,6 +188,7 @@ it gates its own screens on.
 | `device.add` | ✓ | ✓ | |
 | `home.structure` | ✓ | ✓ | |
 | `activity.read` | ✓ | ✓ | |
+| `automation.manage` | ✓ | ✓ | |
 | `hub.radio` | ✓ | ✓ | |
 | `hub.update` | ✓ | ✓ | |
 | `hub.ai` | ✓ | ✓ | |
@@ -597,6 +617,45 @@ it changes what other people see, not when it changes how it looks to them.**
 A room's `icon`/`accent` write nothing, and neither does the order rooms are
 listed in — that one never reaches the hub at all, because it is each phone's
 own preference (see the GetHome app's `CLAUDE.md`).
+
+### Which room a rule is in
+
+Every automation on the wire carries `roomId`: **the one room every device the
+rule touches sits in**, or `null`. It is what lets an app put a rule on the page
+of the room it belongs to instead of only in one long list, and say on the
+rule's own page whose room it is.
+
+`null` is the ordinary answer for a rule about the whole house, and it means one
+thing — *this rule is not one room's*. Four ways to get it: the rule reaches
+into two rooms, it touches a device nobody has placed yet, it touches no devices
+at all (a button that only writes a line in the history), or the only room it
+named has since been deleted.
+
+**It is derived on every read and stored nowhere.** A rule's room is a function
+of the document *and of the home as it is right now*: a selector picks up a lamp
+paired next month, and a device moved from the Kitchen to the Hall changes which
+room a rule belongs to with the rule untouched. A column would be a second copy
+of that going stale in the dark. The consequence for a client is the one worth
+knowing: **`roomId` can change without an `automation` frame**, because nothing
+about the automation changed — so re-read the list when the structure it is
+derived from moves (a room or zone written, a device added, removed, or moved to
+another room), not only when a rule does.
+
+Two halves to how it is worked out, and the second is why a resolver alone would
+not do:
+
+- **A selector naming a room declares one.** "Every light in the Kitchen" is the
+  Kitchen's rule on the day it is written, before anybody has paired a lamp.
+  Everything such a target resolves to is in that room by construction, so
+  naming it is the whole of that target's answer.
+- **Everything else is resolved against the home**, exactly as the engine
+  resolves it — triggers, conditions (nested ones included) and actions, plus a
+  toggle's off-actions. A rule that *watches* the Kitchen and switches something
+  in the Hall is not the Kitchen's, and a walk that looked only at what a rule
+  does would have said it was.
+
+A `runAutomation` action is deliberately not followed: the rule it names is its
+own rule, with its own room and its own page.
 
 ### Favorites are per member
 
@@ -1355,14 +1414,14 @@ ambiguous, so the board stays put and a person decides with
 
 ### Opt-in streams
 
-`hello` advertises which of the three optional streams this hub can serve, so a
+`hello` advertises which of the four optional streams this hub can serve, so a
 client never has to infer it from a version number — a hub with the MQTT
 adapter off simply lists fewer. Ask for the ones you need:
 
 ```
-→ {"type":"subscribe","streams":["mqtt","zigbee","ai"]}
+→ {"type":"subscribe","streams":["mqtt","zigbee","ai","automations"]}
 → {"type":"unsubscribe","streams":["mqtt"]}
-← {"type":"subscribed","streams":["zigbee","ai"],"unavailable":["mqtt"]}
+← {"type":"subscribed","streams":["zigbee","ai","automations"],"unavailable":["mqtt"]}
 ```
 
 and then:
@@ -1373,7 +1432,46 @@ and then:
 {"type":"mqtt","dropped":N}                             rate limit hit; N frames skipped
 {"type":"zigbeeEvent","event":{at,type,ieee,name?}}     joined|announced|interviewing|interviewed|interview-failed|left
 {"type":"aiRun","event":{phase,id,at,kind,exposesHash,vendor?,model?,step?,ok?,costUsd?,error?}}
+{"type":"automationRun","run":{automationId,name,at,trigger,cause,outcome,commands,refused,detail?}}
+{"type":"automationChat","chat":{sessionId,phase,at,text,kind?,detail?}}  phase: thinking | delta | step | turn
 ```
+
+Both carry their payload under their **own key** rather than the `event` that
+`zigbeeEvent` and `aiRun` use. That is not tidiness: a typed client decodes one
+envelope for every frame, so a second shape under a key it already has makes
+every automation frame fail to decode and takes the socket message with it.
+
+`automationChat` has **four phases, because a spinner is not an answer to "what
+is happening"**: one line per thing the agent did (`step`), its own summarized
+reasoning as it arrives (`thinking`), the reply as it is produced (`delta`), and
+the end of an exchange (`turn`) — after which the stored transcript is what to
+draw. A round is tens of seconds of the model reading the home and deciding
+before a word of the reply exists, so a client with only `delta` had a spinner
+for the longest part of every one; a step goes up *before* each request, and the
+reasoning fills the rest. Being the highest-rate frames the hub can emit and of
+interest only to the one client with the chat open is why they are opt-in.
+
+On a `step`, **`kind` is what an app draws a mark from** — `reading` ·
+`checking` · `writing` · `asking` · `thinking` — and it names the *shape of the
+act* rather than the tool, so a client draws seven tools with five marks and the
+hub can grow an eighth without an app release. Open string, the
+`commandFailed.kind` rule: an unknown word gets a neutral mark and keeps its
+sentence. See [`docs/automations.md`](automations.md) for the vocabulary.
+
+**`automationRun` is opt-in for the same reason the others are.** It is the
+trace somebody watches while working out why the light came on, and a home with
+a motion rule produces one every time anybody walks through the hall. The
+*change* frame is not opt-in and arrives on every socket:
+
+```
+{"type":"automation","automationId":"…"}   created, edited, enabled, switched on, removed
+```
+
+because a rule is the **house's** — somebody switching "Night" on in the
+kitchen has to reach the phone in the bedroom drawing the same card, which is
+exactly why `structure` and `portraits` are always-on too. It carries the id and
+nothing else: `GET /automations` is a short read, and a payload here would be a
+second shape for a fact that already has one.
 
 **They are opt-in because they are not free.** The MQTT tap is a wildcard
 subscription on the broker and can be thousands of messages a minute; attaching

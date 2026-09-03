@@ -33,7 +33,7 @@ vi.mock('../src/ai/openai-agent.js', () => ({ createOpenAiMappingAgent }));
 
 const { SettingsService } = await import('../src/core/settings.js');
 const { AiDeviceMapper } = await import('../src/ai/mapper.js');
-const { defaultModelFor } = await import('../src/ai/models.js');
+const { defaultModelFor, effectiveModel, modelLabel } = await import('../src/ai/models.js');
 const { openTestDb, resetDb } = await import('./helpers/db.js');
 const { mapExposes } = await import('../src/adapters/zigbee/exposes-mapper.js');
 type Z2mDevice = import('../src/adapters/zigbee/exposes-mapper.js').Z2mDevice;
@@ -109,5 +109,34 @@ describe.skipIf(!handle)('which model a run is given', () => {
     await mapper.requestMapping(lamp, mapExposes(lamp), { force: true });
 
     expect(new Set(modelsGiven(createMappingAgent))).toEqual(new Set(['claude-opus-5']));
+  });
+});
+
+/**
+ * The other half of the same distinction, and the one that gets it backwards.
+ *
+ * `effectiveModel` is about the *future* — a stored preference read against
+ * what is still offered — so it moves when the list moves, and that is the
+ * whole point of it. Naming a model that has already run is about the past and
+ * must not move at all: a conversation from last month cost what it cost, on
+ * the model it was billed for, and re-deriving that would rewrite a record.
+ */
+describe('naming a model that has already run', () => {
+  it('uses the offered label while the model is still offered', () => {
+    expect(modelLabel('anthropic', 'claude-opus-5')).toBe('Opus 5');
+    expect(modelLabel('openai', 'gpt-5.6-sol')).toBe('GPT-5.6 Sol');
+  });
+
+  it('hands back the raw id once it is retired, and never the current default', () => {
+    // `claude-sonnet-5` is priced but not offered — exactly the shape of a
+    // model a home ran before it was retired.
+    expect(effectiveModel('anthropic', 'claude-sonnet-5')).toBe('claude-opus-5');
+    expect(modelLabel('anthropic', 'claude-sonnet-5')).toBe('claude-sonnet-5');
+  });
+
+  it('survives a provider the build no longer knows', () => {
+    // The column is read back as a plain string, so a provider retired
+    // between the row being written and it being read must not throw.
+    expect(modelLabel('mistral', 'some-model-9')).toBe('some-model-9');
   });
 });
