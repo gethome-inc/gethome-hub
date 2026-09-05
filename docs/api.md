@@ -331,10 +331,10 @@ One hub hosts exactly one home and a home cannot move between hubs, so there is
 There used to be two. `GET /hub` answered `HUB_NAME` from
 `/etc/gethome/hub.env` — written once by the installer and never edited by
 anyone — while `GET /home` answered a database row the apps could rename. So a
-hub whose owner had called it "Дача" in the app still advertised itself as
-"GetHome Hub" over mDNS, still said "GetHome Hub" in GetHome Studio, and two
-hubs on one Mac were two rows with the same name. The second name was never a
-second fact, only a second place for the first one to be wrong.
+hub whose owner had called it "Summer House" in the app still advertised
+itself as "GetHome Hub" over mDNS, still said "GetHome Hub" in GetHome Studio,
+and two hubs on one Mac were two rows with the same name. The second name was
+never a second fact, only a second place for the first one to be wrong.
 
 - **`HUB_NAME` seeds; the database owns.** The environment variable names a hub
   that has no name yet — a first boot. After that it is inert: editing

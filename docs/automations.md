@@ -495,8 +495,8 @@ by writing back and by nothing else, and a rule is never resubmitted unchanged.
 
 **And the prompt says what the prose is being written *into*.** A model writes
 Markdown, and until both halves of this were fixed the apps drew it as
-characters — an answer listing four rules arrived with `**Напрямую по имени
-устройства:**` over a column of literal hyphens, on the one screen whose whole
+characters — an answer listing four rules arrived with `**Directly by device
+name:**` over a column of literal hyphens, on the one screen whose whole
 job is explaining a house to somebody who does not write software. The app now
 renders it (`AgentProse` in the iOS repo: paragraphs, `- ` lists and `**bold**`
 laid out rather than shown), and the prompt describes the column — three inches

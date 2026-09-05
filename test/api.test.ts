@@ -622,23 +622,23 @@ describe.skipIf(!handle)('hub API', () => {
       method: 'PATCH',
       url: '/api/v1/home',
       headers: auth(ownerToken),
-      payload: { name: '  Дача  ' },
+      payload: { name: '  Summer House  ' },
     });
     expect(renamed.statusCode).toBe(200);
     // Trimmed on the way in, so no screen ever renders the padding.
-    expect((renamed.json() as { name: string }).name).toBe('Дача');
+    expect((renamed.json() as { name: string }).name).toBe('Summer House');
 
     // The public route is the one Studio's hub list polls without a token, so
     // it is the one that has to have moved.
     const hub = await app.inject({ method: 'GET', url: '/api/v1/hub' });
-    expect((hub.json() as { name: string }).name).toBe('Дача');
+    expect((hub.json() as { name: string }).name).toBe('Summer House');
 
     const home = await app.inject({
       method: 'GET',
       url: '/api/v1/home',
       headers: auth(memberToken),
     });
-    expect((home.json() as { name: string }).name).toBe('Дача');
+    expect((home.json() as { name: string }).name).toBe('Summer House');
   });
 
   it('refuses a nameless home rather than storing one', async () => {
@@ -652,7 +652,7 @@ describe.skipIf(!handle)('hub API', () => {
       expect(response.statusCode).toBe(400);
     }
     const hub = await app.inject({ method: 'GET', url: '/api/v1/hub' });
-    expect((hub.json() as { name: string }).name).toBe('Дача');
+    expect((hub.json() as { name: string }).name).toBe('Summer House');
   });
 
   /**

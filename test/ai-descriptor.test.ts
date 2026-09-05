@@ -463,7 +463,7 @@ describe.skipIf(!handle)('AiDeviceMapper', () => {
   });
 
   it('hashes by schema, not by name', () => {
-    const renamed = { ...soilProbe, friendly_name: 'Другой датчик' };
+    const renamed = { ...soilProbe, friendly_name: 'Another sensor' };
     expect(exposesHash(renamed)).toBe(exposesHash(soilProbe));
     const differentSchema = {
       ...soilProbe,

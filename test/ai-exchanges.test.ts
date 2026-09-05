@@ -63,10 +63,10 @@ describe('one round, written down', () => {
   });
 
   it('counts bytes rather than characters, and cuts on a character', () => {
-    // `String.length` is UTF-16 units, so a Cyrillic payload under-reports by
-    // half — and `subarray().toString()` would split the last two-byte
+    // `String.length` is UTF-16 units, so an accented payload under-reports
+    // by half — and `subarray().toString()` would split the last two-byte
     // sequence and leave U+FFFD behind.
-    const part = exchangePart('message', 'user', 'я'.repeat(MAX_EXCHANGE_TEXT));
+    const part = exchangePart('message', 'user', 'é'.repeat(MAX_EXCHANGE_TEXT));
     expect(part.bytes).toBe(MAX_EXCHANGE_TEXT * 2);
     expect(part.text).not.toContain('�');
   });
