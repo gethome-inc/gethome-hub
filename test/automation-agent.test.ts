@@ -386,15 +386,15 @@ describe('the automation conversation', () => {
      */
     streamMock
       .mockReturnValueOnce(assistant([toolUse('submit_automation', { document: goodDocument, replaces: null })]))
-      .mockReturnValueOnce(assistant([text('Готово — свет включится вечером.')], 'end_turn'));
+      .mockReturnValueOnce(assistant([text('Done — the lights will come on this evening.')], 'end_turn'));
 
     const steps: string[] = [];
-    const turn = await conversationFor().send('сделай правило', {
+    const turn = await conversationFor().send('make me a rule', {
       onStep: (summary) => steps.push(summary),
     });
 
     expect(turn.kind).toBe('submitted');
-    expect((turn as { text: string }).text).toBe('Готово — свет включится вечером.');
+    expect((turn as { text: string }).text).toBe('Done — the lights will come on this evening.');
     expect((turn as { rules: { document: { name: string } }[] }).rules).toHaveLength(1);
     expect((turn as { rules: { document: unknown }[] }).rules[0]?.document).toMatchObject({
       name: 'Evening lights',

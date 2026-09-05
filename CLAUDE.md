@@ -1397,9 +1397,10 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   which the installer writes once and nobody ever edits, while `GET /home`
   answered a database row the apps could rename. A home cannot move between
   hubs, so the second name was never a second fact — only a second place for
-  the first one to be wrong, and it was: a hub renamed to "Дача" in the app
-  still advertised itself as "GetHome Hub" over mDNS and still read "GetHome
-  Hub" in GetHome Studio, where two hubs were two rows with the same name.
+  the first one to be wrong, and it was: a hub renamed to "Summer House" in
+  the app still advertised itself as "GetHome Hub" over mDNS and still read
+  "GetHome Hub" in GetHome Studio, where two hubs were two rows with the same
+  name.
   `src/core/home.ts` holds the one name; `GET /hub`, `GET /home` and the
   WebSocket hello all read it from there, and `PATCH /home` is the only writer.
   Three rules: **the environment seeds and the database owns** — `HUB_NAME`

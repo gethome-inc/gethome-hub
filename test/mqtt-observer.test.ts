@@ -69,13 +69,15 @@ describe('MqttObserver', () => {
 
   it('cuts on a character, not on a byte', () => {
     const { instance, seen } = observer();
-    // Cyrillic is two bytes a character, so a cut at 8192 lands mid-sequence.
-    instance.ingest('zigbee2mqtt/датчик', payload('я'.repeat(9000)));
+    // The euro sign is three bytes a character, so the 8192-byte cut lands
+    // mid-sequence: 2730 whole characters are 8190 bytes, and the two bytes
+    // after them are half of a character nothing may render.
+    instance.ingest('zigbee2mqtt/café sensor', payload('€'.repeat(9000)));
 
     const frame = seen[0]!;
     expect(frame.truncated).toBe(true);
     expect(frame.payload).not.toContain('�');
-    expect(frame.payload).toBe('я'.repeat(4096));
+    expect(frame.payload).toBe('€'.repeat(2730));
   });
 
   it('leaves an ordinary payload whole, and still reports its size', () => {
