@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "4b8121f4-ffd8-466a-9ffd-17d00108ccea",
-  "prevId": "901f7bfe-9239-4c96-a968-831a8214db3c",
+  "id": "8654a98e-b703-4caa-858f-062098c1c00b",
+  "prevId": "4b8121f4-ffd8-466a-9ffd-17d00108ccea",
   "tables": {
     "activity": {
       "name": "activity",
@@ -508,6 +508,13 @@
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
+        },
+        "surface": {
+          "name": "surface",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         }
       },
       "indexes": {
@@ -515,6 +522,14 @@
           "name": "automation_chat_session",
           "columns": [
             "session_id",
+            "at"
+          ],
+          "isUnique": false
+        },
+        "automation_chat_surface": {
+          "name": "automation_chat_surface",
+          "columns": [
+            "surface",
             "at"
           ],
           "isUnique": false

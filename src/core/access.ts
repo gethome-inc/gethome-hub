@@ -15,7 +15,8 @@ import type { HubEventBus } from './bus.js';
  * Three ideas hold it together, and each is load-bearing:
  *
  * 1. **The floor is not a permission.** Reading the home, renaming yourself,
- *    leaving, and pinning your own favorites are what *being a member* means.
+ *    leaving, pinning your own favorites and minting a sign-in code for your
+ *    *own* next device are what *being a member* means.
  *    They are not in the catalog and no role can take them away, because a
  *    member with nothing at all is a token that can only 401 behind an app
  *    that cannot draw a single screen.
@@ -105,7 +106,10 @@ export const PERMISSIONS: readonly PermissionDescriptor[] = [
     key: 'member.invite',
     group: 'People',
     title: 'Invite people',
-    summary: 'Create an invite code so somebody can join this home.',
+    summary:
+      'Create a code so somebody can join this home \u2014 or sign somebody who is already ' +
+      'here in on another device, which brings them back as themselves rather than as a ' +
+      'second person. Your own devices need no permission.',
   },
   {
     key: 'member.remove',

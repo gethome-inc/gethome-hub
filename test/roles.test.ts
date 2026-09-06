@@ -65,6 +65,8 @@ describe.skipIf(!handle)('roles and permissions', () => {
 
   let ownerToken: string;
   let memberToken: string;
+  let memberId: string;
+  let ownerId: string;
   let guestToken: string;
   let guestId: string;
   let deviceId: string;
@@ -165,7 +167,8 @@ describe.skipIf(!handle)('roles and permissions', () => {
       payload: { code, memberName: 'Georgy', deviceName: 'MacBook' },
     });
     ownerToken = (claimed.json() as { token: string }).token;
-    ({ token: memberToken } = await join('Anna', 'member'));
+    ownerId = (claimed.json() as { member: { id: string } }).member.id;
+    ({ token: memberToken, id: memberId } = await join('Anna', 'member'));
     ({ token: guestToken, id: guestId } = await join('Kolya', 'guest'));
 
     // One room and one device to act on.
@@ -941,6 +944,245 @@ describe.skipIf(!handle)('roles and permissions', () => {
       payload: {},
     });
     expect(plain.json()).toMatchObject({ roleName: 'Member' });
+  });
+
+  /**
+   * A sign-in code for **yourself** is the floor, and a guest is the proof:
+   * they hold no permission at all, and adding their own tablet grants exactly
+   * the authority they are already holding a token for. Anybody who can ask
+   * could copy that token to the other device instead, so a key over this
+   * would be a lock on the front door of a house with no walls.
+   */
+  it('lets any member mint a sign-in code for themselves, with no permission', async () => {
+    // Whatever this guest is called by now — an earlier test renames them, and
+    // a code's `memberName` is the row's, not a literal from up the file.
+    const known = (
+      await app.inject({ method: 'GET', url: '/api/v1/me', headers: auth(guestToken) })
+    ).json().name as string;
+
+    const minted = await app.inject({
+      method: 'POST',
+      url: '/api/v1/invites',
+      headers: auth(guestToken),
+      payload: { memberId: 'me' },
+    });
+    expect(minted.statusCode).toBe(201);
+    expect(minted.json()).toMatchObject({ memberId: guestId, memberName: known, roleId: null });
+
+    // And it really is a second device for the same person: no row is added,
+    // the guest's own role comes back, and the token they already had is
+    // untouched.
+    const before = (
+      await app.inject({ method: 'GET', url: '/api/v1/members', headers: auth(ownerToken) })
+    ).json() as MemberRow[];
+    const { code } = minted.json() as { code: string };
+    const back = await app.inject({
+      method: 'POST',
+      url: '/api/v1/pair',
+      payload: { code, memberName: 'someone else entirely', deviceName: 'iPad' },
+    });
+    expect(back.statusCode).toBe(200);
+    const body = back.json() as { token: string; member: MemberRow & { permissions?: string[] } };
+    expect(body.member.id).toBe(guestId);
+    expect(body.member.name).toBe(known);
+    expect(body.member.roleName).toBe('Guest');
+    const after = (
+      await app.inject({ method: 'GET', url: '/api/v1/members', headers: auth(ownerToken) })
+    ).json() as MemberRow[];
+    expect(after).toHaveLength(before.length);
+    expect(
+      (await app.inject({ method: 'GET', url: '/api/v1/me', headers: auth(body.token) })).json(),
+    ).toMatchObject({ role: { key: 'guest' } });
+    expect(
+      (await app.inject({ method: 'GET', url: '/api/v1/me', headers: auth(guestToken) }))
+        .statusCode,
+    ).toBe(200);
+
+    // Spent, exactly like an invite.
+    expect(
+      (
+        await app.inject({
+          method: 'POST',
+          url: '/api/v1/pair',
+          payload: { code, memberName: 'Kolya' },
+        })
+      ).statusCode,
+    ).toBe(401);
+  });
+
+  /**
+   * Somebody *else's* is `member.invite` — it is that permission's own
+   * sentence, putting a person into this home, with the person already named.
+   * What it adds over minting them a fresh invite is their history, not
+   * authority: whoever can invite could already create a peer at any
+   * non-owner role.
+   */
+  it('needs member.invite to mint a sign-in code for somebody else, and logs it', async () => {
+    const refused = await app.inject({
+      method: 'POST',
+      url: '/api/v1/invites',
+      headers: auth(guestToken),
+      payload: { memberId: memberId },
+    });
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json()).toMatchObject({ error: 'forbidden', permission: 'member.invite' });
+
+    const minted = await app.inject({
+      method: 'POST',
+      url: '/api/v1/invites',
+      headers: auth(ownerToken),
+      payload: { memberId: memberId },
+    });
+    expect(minted.statusCode).toBe(201);
+    expect(minted.json()).toMatchObject({ memberId, memberName: 'Anna' });
+
+    // Handing somebody their identity for fifteen minutes is what makes
+    // `member.invite` safe to delegate only if the home can see who did it.
+    const log = (
+      await app.inject({ method: 'GET', url: '/api/v1/activity', headers: auth(ownerToken) })
+    ).json() as Array<{ kind: string; message: string }>;
+    expect(log[0]).toMatchObject({ kind: 'member.signin-code' });
+    expect(log[0]!.message).toContain('Anna');
+
+    // Signing in is its own line too — "joined the home as Member" every time
+    // somebody picks up their tablet is a person arriving twice, in a feed
+    // read a week later.
+    const { code } = minted.json() as { code: string };
+    await app.inject({
+      method: 'POST',
+      url: '/api/v1/pair',
+      payload: { code, memberName: 'Anna', deviceName: 'iPad' },
+    });
+    const after = (
+      await app.inject({ method: 'GET', url: '/api/v1/activity', headers: auth(ownerToken) })
+    ).json() as Array<{ kind: string; message: string; data?: { deviceName?: string } }>;
+    expect(after[0]).toMatchObject({ kind: 'member.signed-in' });
+    // The device is named in the sentence and deliberately not in
+    // `data.deviceName`, which means a device *in the home* everywhere else.
+    expect(after[0]!.message).toBe('Anna signed in on iPad.');
+    expect(after[0]!.data?.deviceName).toBeUndefined();
+  });
+
+  /**
+   * An **owner's** needs an owner, because there the identity *is* the
+   * authority: without this, `member.invite` — which a home may hand to a role
+   * it invented — would quietly mean "become the owner", and every other key
+   * would be a formality.
+   */
+  it('lets only an owner mint a sign-in code for an owner', async () => {
+    const inviter = (
+      await app.inject({
+        method: 'POST',
+        url: '/api/v1/roles',
+        headers: auth(ownerToken),
+        payload: { name: 'Housemate', permissions: ['member.invite'] },
+      })
+    ).json() as RoleWire;
+    const { token } = await join('Masha', 'member');
+    expect(
+      (
+        await app.inject({
+          method: 'PATCH',
+          url: `/api/v1/members/${(await app.inject({ method: 'GET', url: '/api/v1/me', headers: auth(token) })).json().id}`,
+          headers: auth(ownerToken),
+          payload: { roleId: inviter.id },
+        })
+      ).statusCode,
+    ).toBe(200);
+
+    // They may mint one for an ordinary member…
+    expect(
+      (
+        await app.inject({
+          method: 'POST',
+          url: '/api/v1/invites',
+          headers: auth(token),
+          payload: { memberId },
+        })
+      ).statusCode,
+    ).toBe(201);
+
+    // …and not for the owner.
+    const refused = await app.inject({
+      method: 'POST',
+      url: '/api/v1/invites',
+      headers: auth(token),
+      payload: { memberId: ownerId },
+    });
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json()).toMatchObject({ error: 'not_owner' });
+
+    // The owner's own is the floor, like anybody else's.
+    expect(
+      (
+        await app.inject({
+          method: 'POST',
+          url: '/api/v1/invites',
+          headers: auth(ownerToken),
+          payload: { memberId: ownerId },
+        })
+      ).statusCode,
+    ).toBe(201);
+  });
+
+  it('refuses a code that names both a role and a member, and one that names nobody', async () => {
+    const both = await app.inject({
+      method: 'POST',
+      url: '/api/v1/invites',
+      headers: auth(ownerToken),
+      payload: { memberId, roleId: await roleId('guest') },
+    });
+    expect(both.statusCode).toBe(400);
+    expect(both.json()).toMatchObject({ error: 'invalid_target' });
+
+    const unknown = await app.inject({
+      method: 'POST',
+      url: '/api/v1/invites',
+      headers: auth(ownerToken),
+      payload: { memberId: '11111111-1111-4111-a111-111111111111' },
+    });
+    expect(unknown.statusCode).toBe(404);
+    expect(unknown.json()).toMatchObject({ error: 'unknown_member' });
+  });
+
+  /**
+   * Removing somebody takes the codes minted for them with it. Two things ride
+   * on that: `invites.member_id` carries no `ON DELETE` action (SQLite cannot
+   * attach one to a column added by `ALTER TABLE`), so without it the raw
+   * foreign key turns an ordinary removal into a 500 — and a code left to
+   * expire would be fifteen minutes in which a removed member could let
+   * themselves back in.
+   */
+  it('takes a removed member\u2019s outstanding sign-in codes with them', async () => {
+    const { token, id } = await join('Petya', 'guest');
+    const { code } = (
+      await app.inject({
+        method: 'POST',
+        url: '/api/v1/invites',
+        headers: auth(token),
+        payload: { memberId: 'me' },
+      })
+    ).json() as { code: string };
+
+    expect(
+      (
+        await app.inject({
+          method: 'DELETE',
+          url: `/api/v1/members/${id}`,
+          headers: auth(ownerToken),
+        })
+      ).statusCode,
+    ).toBe(204);
+
+    expect(
+      (
+        await app.inject({
+          method: 'POST',
+          url: '/api/v1/pair',
+          payload: { code, memberName: 'Petya' },
+        })
+      ).statusCode,
+    ).toBe(401);
   });
 
   // ── Reaching an app that is already open ──────────────────────────────────

@@ -142,6 +142,12 @@ describe.skipIf(!handle)('hub API', () => {
       // readings at all, which is how it knows to offer a chart rather than a
       // doorway to a 404.
       history: { bucketSeconds: 300, retentionDays: 7 },
+      // Same rule, and here it is load-bearing rather than tidy: an app that
+      // does not find this block must not ask for a sign-in code, because an
+      // older hub strips the unknown `memberId` and answers with an ordinary
+      // invite — which adds the duplicate person the whole feature exists to
+      // stop, with nothing on the way back to say so.
+      pairing: { signInCodes: true },
     });
   });
 

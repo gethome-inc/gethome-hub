@@ -350,6 +350,19 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // is a different question, and it is answered by `GET /settings/ai` —
     // which not every member of a home may read.
     portraits: deps.portraits.describe(),
+    // Additive, and presence is the capability once more: a hub carrying this
+    // block mints **sign-in codes** (`POST /invites {memberId}`), so somebody
+    // already in the home comes back on another device as themselves rather
+    // than as a second person with the same name.
+    //
+    // An app that does not find it must not offer one, and the reason is
+    // sharper than the usual "don't draw a button that can only fail": an
+    // older hub's route parses the body with a schema that has never heard of
+    // `memberId`, and zod *strips* what it does not know — so the request
+    // succeeds and answers with an ordinary **invite**. Claiming that would
+    // add exactly the duplicate person this exists to prevent, which is the
+    // one refusal that must not be discovered afterwards.
+    pairing: { signInCodes: true },
     // Additive: an app that doesn't know about this field ignores it, and one
     // that does can say "plug a coordinator in" instead of showing an empty
     // Zigbee section with no explanation.
@@ -422,11 +435,22 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       return reply.code(401).send({ error: 'invalid_code' });
     }
     const role = deps.access.roleFor(result.member.id);
+    // Two arrivals, two sentences. A sign-in adds a device to somebody who is
+    // already here, so saying they "joined the home as Member" would report a
+    // person arriving every time they picked up their tablet — and the feed is
+    // read a week later, where that reads as somebody being added twice.
+    const joinMessage = role
+      ? `${result.member.name} joined the home as ${role.name}.`
+      : `${result.member.name} joined the home.`;
+    // The device rides in the **sentence**, not in `data.deviceName`: that key
+    // means a device *in the home* everywhere else in this log, and an app
+    // reading it would title the row "iPad" as though somebody had paired one.
+    const signedInMessage = body.deviceName
+      ? `${result.member.name} signed in on ${body.deviceName}.`
+      : `${result.member.name} signed in on another device.`;
     await deps.activity.record({
-      kind: 'member.joined',
-      message: role
-        ? `${result.member.name} joined the home as ${role.name}.`
-        : `${result.member.name} joined the home.`,
+      kind: result.signedIn ? 'member.signed-in' : 'member.joined',
+      message: result.signedIn ? signedInMessage : joinMessage,
       memberId: result.member.id,
       data: {
         memberName: result.member.name,
@@ -1491,7 +1515,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (deps.access.isLastOwner(member.id)) {
       return reply.code(409).send({ error: 'cannot_remove_owner' });
     }
-    await deps.db.delete(members).where(eq(members.id, member.id));
+    await deleteMemberRow(member.id);
     await endMembership(member.id, `${member.name} left the home.`, 'member.left');
     return reply.code(204).send();
   });
@@ -1508,7 +1532,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (deps.access.isLastOwner(target.id)) {
       return reply.code(409).send({ error: 'cannot_remove_owner' });
     }
-    await deps.db.delete(members).where(eq(members.id, id));
+    await deleteMemberRow(id);
     await endMembership(
       target.id,
       `${request.member!.name} removed ${target.name} from the home.`,
@@ -1539,6 +1563,25 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * afterwards, so the name belongs in the sentence, which is where a person
    * reading the log next week will look for it.
    */
+  /**
+   * Delete a member row, taking any **sign-in codes** minted for them with it.
+   *
+   * `invites.member_id` is a column added by `ALTER TABLE`, so it carries no
+   * `ON DELETE` action — SQLite cannot attach one — and the raw foreign key
+   * would refuse the delete, turning "remove somebody from the home" into a
+   * 500 whenever a code for them was still in the air. This is the
+   * `invites.role_id` rule pointed at a member, and it comes out the same way:
+   * a code whose whole content is "sign in as this person" means nothing once
+   * that person is gone, and leaving it to expire would be a fifteen-minute
+   * window in which a removed member could still let themselves back in. Used
+   * and expired rows go too, since nothing reads them and a row that isn't
+   * there is simply not a code.
+   */
+  async function deleteMemberRow(memberId: string) {
+    await deps.db.delete(invites).where(eq(invites.memberId, memberId));
+    await deps.db.delete(members).where(eq(members.id, memberId));
+  }
+
   async function endMembership(
     memberId: string,
     message: string,
@@ -1555,8 +1598,20 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     await deps.activity.record({ kind, message });
   }
 
+  /**
+   * The codes that are still live.
+   *
+   * `memberId` is what tells an **invite** from a **sign-in code**: null means
+   * claiming it adds somebody, a value means it lets that person on to another
+   * device. A derived `kind` beside it would be a second copy of one fact, so
+   * there isn't one — the same shape `roomId: null` gives a rule about the
+   * whole house.
+   */
   app.get('/api/v1/invites', needs('member.invite'), async () => {
     const rows = await deps.db.query.invites.findMany();
+    const memberNames = new Map(
+      (await deps.db.query.members.findMany()).map((row) => [row.id, row.name]),
+    );
     const now = Date.now();
     return rows
       .filter((row) => row.usedBy === null && row.expiresAt.getTime() > now)
@@ -1567,13 +1622,15 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
           role: row.role,
           roleId: role?.id ?? null,
           roleName: role?.name ?? null,
+          memberId: row.memberId,
+          memberName: row.memberId ? (memberNames.get(row.memberId) ?? null) : null,
           expiresAt: row.expiresAt,
         };
       });
   });
 
   /**
-   * Mint an invite code — for a role.
+   * Mint a code — for a role, or **for somebody who is already here**.
    *
    * `invites.role` has carried a role since the first migration and the claim
    * path has honoured it just as long; this route simply never passed one, so
@@ -1585,25 +1642,115 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * reads the invite's role and writes the legacy `owner` word when its key
    * says so, so nothing downstream needed changing — this route was the only
    * thing refusing.
+   *
+   * **`memberId` makes it a sign-in code instead**, and that is the whole of
+   * how a second device — or one whose app was deleted and installed again —
+   * comes back as the same person. Claiming it inserts nobody, so the AI
+   * conversations, the activity attributed to them and their own favorites are
+   * still theirs. It is deliberately the *same* route, table, expiry, single
+   * use and `/pair` endpoint: two ways to mint one code beats a second code
+   * with its own rate limit, its own replay window and its own way of being
+   * wrong. Naming both is `400 invalid_target` rather than a silent
+   * precedence, because a `roleId` beside a member who already has one can
+   * only be a client that meant something.
+   *
+   * **Who may ask is asked of the body**, which is why this is `authed` with
+   * the check inside rather than `needs(…)`. `PATCH /devices/:id` is the
+   * precedent and the reason is the same: one field decides which question to
+   * ask. Three answers.
+   *
+   * *Your own* is the **floor** — no permission at all, and `me` is accepted
+   * as the id for a client that has never learnt its own. It grants exactly
+   * the authority the caller is already holding a token for, and anybody who
+   * can ask for one could simply copy that token to the other device, so a key
+   * over it would be a lock on the front door of a house with no walls. The
+   * companion to `PATCH /members/me` and `DELETE /members/me`.
+   *
+   * *Somebody else's* is `member.invite`, because it is that permission's own
+   * sentence — putting a person into this home — with the person already
+   * named. What it adds over minting them a fresh invite is their *history*,
+   * not authority: whoever can invite could already create a peer at any
+   * non-owner role. That is worth a line in the activity log, which it gets,
+   * and it is not worth a permission of its own that every home would have to
+   * understand for a thing that happens once a year.
+   *
+   * *An owner's* needs an owner (`403 not_owner`), because there the identity
+   * **is** the authority: without it `member.invite` — which a home may hand
+   * to a role it invented — would quietly mean "become the owner". The same
+   * guard `POST /invites {roleId: owner}` and `PATCH /members/:id` carry, and
+   * the same code, which both apps already read as "ask an owner".
    */
-  app.post('/api/v1/invites', needs('member.invite'), async (request, reply) => {
+  app.post('/api/v1/invites', authed, async (request, reply) => {
     const body = z
-      .object({ roleId: z.uuid().optional() })
+      .object({
+        roleId: z.uuid().optional(),
+        // `me` for the same reason `PATCH /members/me` takes it: the member id
+        // is handed back exactly once, by `POST /pair`, and a client that
+        // claimed over SSH never saw one at all.
+        memberId: z.union([z.literal('me'), z.uuid()]).optional(),
+      })
       .parse(request.body ?? {});
+    const caller = request.member!;
+
+    if (body.memberId !== undefined) {
+      if (body.roleId) return reply.code(400).send({ error: 'invalid_target' });
+      const targetId = body.memberId === 'me' ? caller.id : body.memberId;
+      const target = await deps.db.query.members.findFirst({ where: eq(members.id, targetId) });
+      if (!target) return reply.code(404).send({ error: 'unknown_member' });
+      const forSelf = target.id === caller.id;
+      if (!forSelf && !deps.access.can(caller.id, 'member.invite')) {
+        return reply.code(403).send({ error: 'forbidden', permission: 'member.invite' });
+      }
+      if (!forSelf && deps.access.isOwner(target.id) && !deps.access.isOwner(caller.id)) {
+        return reply.code(403).send({ error: 'not_owner' });
+      }
+      const code = await deps.pairing.createSignInCode(caller.id, target.id);
+      if (!code) return reply.code(404).send({ error: 'unknown_member' });
+      // Minting one for yourself is your own business and logging every "and
+      // my iPad too" would be noise. Minting one for somebody else hands over
+      // their identity for fifteen minutes, and a home that can delegate
+      // `member.invite` has to be able to see who did that — the same reason
+      // reading the broker password writes a line.
+      if (!forSelf) {
+        await deps.activity.record({
+          kind: 'member.signin-code',
+          message: `${caller.name} created a sign-in code for ${target.name}.`,
+          memberId: caller.id,
+          // `subjectName` rather than a word of its own: `member.role-changed`
+          // already means "who this was done to" by it, and one idea in two
+          // vocabularies is how an app comes to render one of them as nothing.
+          data: { memberName: caller.name, subjectName: target.name },
+        });
+      }
+      return reply.code(201).send({
+        code: code.code,
+        expiresAt: code.expiresAt,
+        roleId: null,
+        roleName: null,
+        memberId: code.memberId,
+        memberName: code.memberName,
+      });
+    }
+
+    if (!deps.access.can(caller.id, 'member.invite')) {
+      return reply.code(403).send({ error: 'forbidden', permission: 'member.invite' });
+    }
     if (body.roleId) {
       const role = deps.access.role(body.roleId);
       if (!role) return reply.code(404).send({ error: 'unknown_role' });
-      if (role.key === OWNER_ROLE_KEY && !deps.access.isOwner(request.member!.id)) {
+      if (role.key === OWNER_ROLE_KEY && !deps.access.isOwner(caller.id)) {
         return reply.code(403).send({ error: 'not_owner' });
       }
     }
-    const invite = await deps.pairing.createInvite(request.member!.id, body.roleId);
+    const invite = await deps.pairing.createInvite(caller.id, body.roleId);
     const role = invite.roleId ? deps.access.role(invite.roleId) : undefined;
     return reply.code(201).send({
       code: invite.code,
       expiresAt: invite.expiresAt,
       roleId: invite.roleId,
       roleName: role?.name ?? null,
+      memberId: null,
+      memberName: null,
     });
   });
 

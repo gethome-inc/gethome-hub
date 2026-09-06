@@ -1286,6 +1286,55 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   member row with nothing to click on. This is what lets GetHome Studio — which
   has no accounts and no user name of its own — claim as *the Mac* and offer
   the rename afterwards.
+- **A person is a member row and a device is a token row, so coming back is a
+  code that names somebody.** Every arrival used to insert a member, which is
+  right for the first one and wrong for every one after it: a second phone, or
+  the same phone after the app was deleted and installed again, walked in as a
+  stranger with the same name and left the AI conversations
+  (`automation_chat_messages.member_id`), the lines attributed to that person in
+  the activity log and their own favorites behind on a member nobody could ever
+  sign in as again. `invites.member_id` is the whole fix — null is the invite
+  that has always existed, a value is a **sign-in code** and `claim` issues
+  another token instead of inserting a row. `docs/api.md` is canonical. Six
+  rules. **It is deliberately the same code**: one route, one table, fifteen
+  minutes, single use, one per-address rate limit, one `claimId` replay window
+  and one `/pair`, because a second kind of code is a second set of ways to be
+  wrong; `memberId` is the only thing that tells them apart, on `POST` and in
+  `GET /invites` alike, and there is no derived `kind` beside it. **An app must
+  ask `GET /hub` for `pairing.signInCodes` before offering one**, and that is
+  not the usual "no button that can only fail": a hub older than this parses the
+  body with a schema that has never heard of `memberId`, zod *strips* what it
+  does not know, and the request **succeeds** with an ordinary invite — which
+  adds the duplicate person the whole thing exists to prevent, with nothing on
+  the way back to say so. **The name on
+  the claim is ignored** — the code says who this is, and a field somebody fills
+  in on a reconnect screen must not rename them for the whole house; an app
+  shows the name that comes back. **The token they already had keeps working**,
+  because this is "another device" rather than "moved to a new phone"; ending
+  access is still `DELETE /members/:id`, which takes every token with the row.
+  **Who may ask is asked of the body**, which is why the route is `authed` with
+  the check inside — `PATCH /devices/:id`'s shape, and for its reason. Your own
+  is the **floor** (`memberId: "me"` is accepted, for the client that never
+  learnt its id): it grants exactly the authority the caller already holds a
+  token for, and anybody who could ask could copy that token to the other device
+  instead. Somebody else's is `member.invite` — that permission's own sentence
+  with the person already named, adding their *history* rather than authority,
+  since whoever can invite could already mint a peer at any non-owner role. An
+  **owner's** needs an owner, because there the identity *is* the authority and
+  without the guard `member.invite` would quietly mean "become the owner". **The
+  one for somebody else is logged** (`member.signin-code`) and your own is not:
+  handing over an identity for fifteen minutes is what makes the permission safe
+  to delegate, while a line every time somebody adds their tablet is noise in a
+  feed read a week later. Claiming writes `member.signed-in`, not
+  `member.joined` — picking up a tablet is not a person arriving — with the
+  device named in the **sentence** and deliberately not in `data.deviceName`,
+  which means a device *in the home* everywhere else in this log. And **removing
+  a member takes their outstanding codes with them**, in both delete routes and
+  before the row goes: `invites.member_id` is an `ALTER TABLE` column so SQLite
+  gives it no `ON DELETE` action (the `invites.role_id` situation exactly), the
+  raw foreign key would turn an ordinary removal into a 500, and a code left to
+  expire is fifteen minutes in which somebody just removed could let themselves
+  back in.
 - **Access is a table the home edits, and three rules hold it up.** Roles are
   rows (`roles`), permissions are a named vocabulary owned by
   `src/core/access.ts`, and a member holds one role; `requirePermission` in
@@ -1293,7 +1342,8 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   beside it, because two mechanisms are two places for a route to be wrong.
   `docs/api.md` is canonical.
   **First, the floor is not a permission.** Reading the home, **working a
-  device**, renaming yourself, leaving, and pinning your own favorites are what
+  device**, renaming yourself, leaving, pinning your own favorites and putting
+  yourself on another of your own devices are what
   *being a member* means and no role can take them away — a member with nothing
   at all is a token that can only 401 behind an app with nothing to draw.
   Switching things on was a `device.control` key for a day, and it is the
@@ -1305,7 +1355,8 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `PATCH /devices/:id` is the one route whose check reads the *body*:
   `name`/`roomId` are the house's and need `device.edit`, while the caller's own
   `favorite` needs nothing, and a guest who can work the lights must be able to
-  put the kettle on their own dashboard.
+  put the kettle on their own dashboard. `POST /invites` is the second, for the
+  same reason — see the bullet below.
   **Second, the owner is never evaluated.** `can()` answers `true` for the owner
   without reading a stored set, so a permission a later build adds is theirs
   automatically and no edit to the matrix can lock a home out of itself. One
