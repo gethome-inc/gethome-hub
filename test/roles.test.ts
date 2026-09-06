@@ -1033,9 +1033,12 @@ describe.skipIf(!handle)('roles and permissions', () => {
     });
     const after = (
       await app.inject({ method: 'GET', url: '/api/v1/activity', headers: auth(ownerToken) })
-    ).json() as Array<{ kind: string; data?: { deviceName?: string } }>;
+    ).json() as Array<{ kind: string; message: string; data?: { deviceName?: string } }>;
     expect(after[0]).toMatchObject({ kind: 'member.signed-in' });
-    expect(after[0]!.data?.deviceName).toBe('iPad');
+    // The device is named in the sentence and deliberately not in
+    // `data.deviceName`, which means a device *in the home* everywhere else.
+    expect(after[0]!.message).toBe('Anna signed in on iPad.');
+    expect(after[0]!.data?.deviceName).toBeUndefined();
   });
 
   /**

@@ -579,9 +579,10 @@ log**; minting your own writes nothing. Handing over an identity for fifteen
 minutes is what makes `member.invite` safe to delegate only if the home can see
 who did it — the reason reading the broker password writes a line — while
 logging every "and my tablet too" would be noise in a feed read a week later.
-Claiming writes `member.signed-in` (with `data.deviceName` when the client sent
-one) rather than `member.joined`, because somebody picking up their tablet is
-not a person arriving.
+Claiming writes `member.signed-in` rather than `member.joined`, because somebody
+picking up their tablet is not a person arriving; the device is named in the
+**sentence** and deliberately not in `data.deviceName`, which means a device *in
+the home* everywhere else in the log.
 
 **Removing a member takes their outstanding codes with them.**
 `invites.member_id` is a column added by `ALTER TABLE`, so SQLite gives it no
@@ -1164,7 +1165,8 @@ client must render an unknown kind from `message` rather than drop it.
 
 The five that move access — `member.role-changed` and the `role.*` four —
 carry `data.memberName` (who did it) and `data.roleName`, with `previousName`
-on a rename and `subjectName` on `member.role-changed`. A permission edit
+on a rename and `subjectName` on `member.role-changed` — which
+`member.signin-code` uses too, for the person the code was made for. A permission edit
 records **a sentence, never the diff**: this log is read a week later, where
 "Georgy changed what Guest can do" is the whole of what anybody is looking for,
 and the [`access` frame](#what-you-may-do-access) is what tells an app that is

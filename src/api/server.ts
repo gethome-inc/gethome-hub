@@ -428,15 +428,18 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const joinMessage = role
       ? `${result.member.name} joined the home as ${role.name}.`
       : `${result.member.name} joined the home.`;
+    // The device rides in the **sentence**, not in `data.deviceName`: that key
+    // means a device *in the home* everywhere else in this log, and an app
+    // reading it would title the row "iPad" as though somebody had paired one.
+    const signedInMessage = body.deviceName
+      ? `${result.member.name} signed in on ${body.deviceName}.`
+      : `${result.member.name} signed in on another device.`;
     await deps.activity.record({
       kind: result.signedIn ? 'member.signed-in' : 'member.joined',
-      message: result.signedIn
-        ? `${result.member.name} signed in on another device.`
-        : joinMessage,
+      message: result.signedIn ? signedInMessage : joinMessage,
       memberId: result.member.id,
       data: {
         memberName: result.member.name,
-        ...(body.deviceName ? { deviceName: body.deviceName } : {}),
         ...(role ? { roleName: role.name } : {}),
       },
     });
@@ -1699,7 +1702,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
           kind: 'member.signin-code',
           message: `${caller.name} created a sign-in code for ${target.name}.`,
           memberId: caller.id,
-          data: { memberName: caller.name, targetName: target.name },
+          // `subjectName` rather than a word of its own: `member.role-changed`
+          // already means "who this was done to" by it, and one idea in two
+          // vocabularies is how an app comes to render one of them as nothing.
+          data: { memberName: caller.name, subjectName: target.name },
         });
       }
       return reply.code(201).send({

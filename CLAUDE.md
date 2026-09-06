@@ -1271,7 +1271,9 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   handing over an identity for fifteen minutes is what makes the permission safe
   to delegate, while a line every time somebody adds their tablet is noise in a
   feed read a week later. Claiming writes `member.signed-in`, not
-  `member.joined` — picking up a tablet is not a person arriving. And **removing
+  `member.joined` — picking up a tablet is not a person arriving — with the
+  device named in the **sentence** and deliberately not in `data.deviceName`,
+  which means a device *in the home* everywhere else in this log. And **removing
   a member takes their outstanding codes with them**, in both delete routes and
   before the row goes: `invites.member_id` is an `ALTER TABLE` column so SQLite
   gives it no `ON DELETE` action (the `invites.role_id` situation exactly), the
