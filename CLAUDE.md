@@ -1245,7 +1245,13 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   minutes, single use, one per-address rate limit, one `claimId` replay window
   and one `/pair`, because a second kind of code is a second set of ways to be
   wrong; `memberId` is the only thing that tells them apart, on `POST` and in
-  `GET /invites` alike, and there is no derived `kind` beside it. **The name on
+  `GET /invites` alike, and there is no derived `kind` beside it. **An app must
+  ask `GET /hub` for `pairing.signInCodes` before offering one**, and that is
+  not the usual "no button that can only fail": a hub older than this parses the
+  body with a schema that has never heard of `memberId`, zod *strips* what it
+  does not know, and the request **succeeds** with an ordinary invite — which
+  adds the duplicate person the whole thing exists to prevent, with nothing on
+  the way back to say so. **The name on
   the claim is ignored** — the code says who this is, and a field somebody fills
   in on a reconnect screen must not rename them for the whole house; an app
   shows the name that comes back. **The token they already had keeps working**,

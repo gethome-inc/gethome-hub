@@ -336,6 +336,19 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // is a different question, and it is answered by `GET /settings/ai` —
     // which not every member of a home may read.
     portraits: deps.portraits.describe(),
+    // Additive, and presence is the capability once more: a hub carrying this
+    // block mints **sign-in codes** (`POST /invites {memberId}`), so somebody
+    // already in the home comes back on another device as themselves rather
+    // than as a second person with the same name.
+    //
+    // An app that does not find it must not offer one, and the reason is
+    // sharper than the usual "don't draw a button that can only fail": an
+    // older hub's route parses the body with a schema that has never heard of
+    // `memberId`, and zod *strips* what it does not know — so the request
+    // succeeds and answers with an ordinary **invite**. Claiming that would
+    // add exactly the duplicate person this exists to prevent, which is the
+    // one refusal that must not be discovered afterwards.
+    pairing: { signInCodes: true },
     // Additive: an app that doesn't know about this field ignores it, and one
     // that does can say "plug a coordinator in" instead of showing an empty
     // Zigbee section with no explanation.
