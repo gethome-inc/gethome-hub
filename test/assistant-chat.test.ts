@@ -17,6 +17,7 @@ import { AssistantChat } from '../src/ai/assistant-chat.js';
 import { AutomationNotConfiguredError } from '../src/ai/automation-chat.js';
 import type { AssistantTurn } from '../src/ai/assistant-agent.js';
 import type { AgentConversation, ChatTurnContext } from '../src/ai/chat/chat-runtime.js';
+import type { AutomationConversation, AutomationTurn } from '../src/ai/automation-conversation.js';
 import { ASSISTANT_MODELS, effectiveAssistantModel } from '../src/ai/models.js';
 
 /**
@@ -49,7 +50,15 @@ describe('the assistant', () => {
 
   let assistantFor: (
     turns: AssistantTurn[],
-    options?: { cost?: () => number; gate?: Promise<void> },
+    options?: {
+      cost?: () => number;
+      gate?: Promise<void>;
+      /** What the *other* agent says, when the test delegates to it. Scripted
+       *  for the same reason this one is: a suite must never reach a provider,
+       *  and a sub-agent with no seam fails its first round — which is real
+       *  behaviour and the wrong thing to be asserting on here. */
+      delegated?: AutomationTurn[];
+    },
   ) => Promise<{
     assistant: AssistantChat;
     automationChat: Awaited<ReturnType<typeof startedAutomations>>['chat'];
@@ -77,12 +86,26 @@ describe('the assistant', () => {
           commanded.push({ deviceId, endpointId, type: command.type });
         },
       };
+      let delegatedRound = 0;
+      const delegatedTurn = async (): Promise<AutomationTurn> => {
+        const at = delegatedRound;
+        delegatedRound += 1;
+        return options?.delegated?.[at] ?? { kind: 'said', text: 'nothing left to say' };
+      };
+      const scriptedDelegate: AutomationConversation = {
+        provider: 'anthropic',
+        modelId: 'claude-opus-5',
+        awaitingAnswer: () => false,
+        costUsd: () => 0.02,
+        send: delegatedTurn,
+        answer: delegatedTurn,
+      };
       const { engine, chat: automationChat } = await startedAutomations(
         handle!.db,
         events,
         registry,
         activity,
-        { settings },
+        { settings, createConversation: () => scriptedDelegate },
       );
       startedEngines.push(engine);
 
@@ -253,6 +276,71 @@ describe('the assistant', () => {
     // come back with anything yet. What moves it is that agent's own `turn`
     // frame, never a second round with this one.
     expect(card.status).toBe('working');
+  });
+
+  it('moves the card as the other agent gets on with it, without a second round', async () => {
+    const brief = 'switch the hall lamp on at sunset';
+    const document = {
+      version: 1,
+      name: 'Hall lamp at sunset',
+      mode: 'single',
+      triggers: [{ kind: 'manual' }],
+      actions: [{ kind: 'logActivity', message: 'Sunset' }],
+    };
+    const { assistant, automationChat } = await assistantFor([], {
+      delegated: [
+        {
+          kind: 'question',
+          question: { question: 'Which hall lamp?', options: [{ id: 'a', label: 'The tall one' }] },
+        },
+        { kind: 'submitted', rules: [{ document, replaces: null }], text: 'Written.' },
+      ],
+    });
+    const tools = (
+      assistant as unknown as {
+        toolContext: (id: string) => {
+          delegate: (agent: string, brief: string) => Promise<{ sessionId: string }>;
+        };
+      }
+    ).toolContext(memberId);
+    const handed = await tools.delegate('automations', brief);
+    await automationChat.idle();
+
+    const { assistant: second } = await assistantFor([
+      {
+        kind: 'handed',
+        text: 'Handed that over.',
+        handoffs: [{ agent: 'automations', brief, sessionId: handed.sessionId }],
+      },
+    ]);
+    const started = await second.start({ memberId, message: 'sunset lamp please' });
+    await second.idle();
+
+    const card = async () =>
+      (await second.transcript(started.sessionId)).find((row) => row.role === 'handoff')?.data as
+        | { status: string; automationIds: string[] }
+        | undefined;
+
+    // It asked something, and its own `turn` frame is what said so. **No
+    // second round with the assistant's model**: the status is read off that
+    // conversation's transcript and written onto the row.
+    expect((await card())?.status).toBe('asked');
+
+    // Answered, it writes the rule — and the card says which one, so the app
+    // can draw it without asking anything else.
+    await automationChat.reply(handed.sessionId, memberId, 'the tall one');
+    await automationChat.idle();
+    const delivered = await card();
+    expect(delivered?.status).toBe('delivered');
+    expect(delivered?.automationIds).toHaveLength(1);
+
+    // And the assistant was never asked anything to work that out: its own
+    // transcript is exactly what its one turn wrote.
+    expect((await second.transcript(started.sessionId)).map((row) => row.role)).toEqual([
+      'user',
+      'agent',
+      'handoff',
+    ]);
   });
 
   it('refuses a handover the member’s role cannot make, in a sentence', async () => {

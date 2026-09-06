@@ -150,26 +150,23 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
   }
 
   /**
-   * A delegated conversation has finished a turn — say so on the card.
+   * Where a delegated conversation has got to, read off its own rows.
    *
-   * Read back from that conversation's own transcript rather than from
-   * anything this class remembered, for the reason a rule's room is derived
-   * per read: the sub-agent's rows are the truth about what it did, and a
-   * second copy here would be a second thing to keep in step.
+   * **Derived rather than remembered**, the reason a rule's room is: the
+   * sub-agent's transcript is the truth about what it did, and a second copy
+   * here would be a second thing to keep in step. Most specific first, the
+   * `diagnosis.ts` rule — a conversation that has written a rule *and* gone on
+   * to ask something is still asking.
    */
-  private async followDelegated(sessionId: string): Promise<void> {
-    const tracked = this.delegated.get(sessionId);
-    if (!tracked) return;
-
+  private async standingOf(
+    sessionId: string,
+  ): Promise<{ status: string; automationIds: string[] }> {
     const rows = await this.options.automationChat.transcript(sessionId);
     const automationIds = rows
       .filter((row) => row.role === 'preview')
       .map((row) => (row.data as { automationId?: string } | undefined)?.automationId)
       .filter((id): id is string => typeof id === 'string');
     const last = rows.at(-1);
-
-    // Most specific first, the `diagnosis.ts` rule: a conversation that has
-    // written a rule *and* gone on to ask something is still asking.
     const status =
       last?.role === 'question'
         ? 'asked'
@@ -178,7 +175,15 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
           : last?.role === 'note'
             ? 'failed'
             : 'working';
+    return { status, automationIds };
+  }
 
+  /** A delegated conversation has finished a turn — say so on the card. */
+  private async followDelegated(sessionId: string): Promise<void> {
+    const tracked = this.delegated.get(sessionId);
+    if (!tracked) return;
+
+    const { status, automationIds } = await this.standingOf(sessionId);
     const payload: HandoffPayload = { ...tracked.payload, status, automationIds };
     // Unchanged is not worth a write, and this fires on every turn the other
     // agent takes.
@@ -210,13 +215,22 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
     }
     for (const handoff of turn.handoffs) {
       const agent = this.delegates.find((entry) => entry.key === handoff.agent);
+      /**
+       * **Read once here as well as on every later frame.** The other agent
+       * starts the moment `delegate` returns and this row is written when the
+       * assistant's turn *ends* — which can be several rounds later, and it
+       * only takes one for a quick sub-agent to have already asked something.
+       * Written as `working` regardless, the card would then sit on a stale
+       * word until that agent next spoke, which for one waiting on an answer
+       * is for ever.
+       */
+      const standing = await this.standingOf(handoff.sessionId);
       const payload: HandoffPayload = {
         agent: handoff.agent,
         title: agent?.title ?? handoff.agent,
         brief: handoff.brief,
         sessionId: handoff.sessionId,
-        status: 'working',
-        automationIds: [],
+        ...standing,
       };
       const row = await this.write(session, 'handoff', handoff.brief, payload);
       this.delegated.set(handoff.sessionId, { messageId: row.id, payload });
