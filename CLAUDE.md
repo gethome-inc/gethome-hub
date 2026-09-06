@@ -1670,6 +1670,30 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   deliberately allowed — an old build without an index is slower, not broken.
   This is the rule the `devices.favorite` column has always been kept for; it was
   written down and enforced by nothing.
+  **And the journal is the other half, because drizzle gates on `when` and never
+  on the hash.** `SQLiteSyncDialect.migrate` reads the newest `created_at` out
+  of `__drizzle_migrations` once and runs every migration whose `when` is
+  greater, so a migration that is **renamed is a migration it has never seen**,
+  byte-identical or not. That matters because renaming is not optional: two
+  branches each add an `0012`, one lands first, and the other has to be
+  renumbered on the merge — and git says nothing about it, since the two `.sql`
+  files have different names and merge without a conflict, leaving a repository
+  with two migrations claiming one index. `test/migrations.test.ts` now asserts
+  the journal's four invariants (indices 0…n−1 once each, `when` strictly
+  increasing, a file per entry and an entry per file), which is what says so.
+  **The cost lands on hubs that installed the branch under the old number** —
+  every hub `--branch` was tested on, which is the whole point of branch
+  bundles. They already have the change and meet it again as a new migration:
+  `duplicate column name`, the hub exits 1, and the installer's rollback is the
+  only thing that saves the evening. The repair is to **record it as applied
+  rather than re-run it** — one row into `__drizzle_migrations` with the new
+  migration's `when` (the `hash` column is written but never read, so use the
+  real `sha256` of the file) — after checking the schema really does already
+  carry the change. Two shortcuts are wrong and both look right: giving the
+  renumbered migration its *old* `when` fixes the test hub and silently skips it
+  on every hub already past that point, and teaching the boot path to drop an
+  `ADD COLUMN` whose column exists puts cleverness in the one code path whose
+  failure costs a rollback, while masking a migration that is genuinely wrong.
 - **Versioning is a symlink, not a container.** Each build unpacks into
   `/opt/gethome/releases/<build-id>/` and `current` points at the one that
   runs; CI stamps `VERSION` into the bundle, which names the directory and

@@ -80,3 +80,60 @@ describe('migrations stay readable by the build before them', () => {
     },
   );
 });
+
+/**
+ * The journal is the other half of the same story, and nothing was checking it.
+ *
+ * `meta/_journal.json` is what drizzle actually reads: an ordered list of tags
+ * with a `when` beside each, and **the `when` is the only thing that decides
+ * whether a migration runs**. `SQLiteSyncDialect.migrate` reads the newest
+ * `created_at` out of `__drizzle_migrations` once, then runs every migration
+ * whose `when` is greater. It never looks at the hash. So a migration that is
+ * *renamed* is a migration drizzle has never seen, whatever it contains — and
+ * one given an older `when` than a hub's last applied migration is silently
+ * skipped for ever.
+ *
+ * Both of those arrive the same way: two branches each add an `0012`, one
+ * lands first, and the other has to be renumbered on the merge. Git says
+ * nothing about it, because the two `.sql` files have different names and merge
+ * without a conflict — leaving a repository with two migrations claiming the
+ * same index, which is a clean merge that boots wrong. That happened here, and
+ * these four assertions are what would have said so.
+ *
+ * The renumbering itself is unavoidable and correct; what it costs is that a
+ * hub which installed the branch under the *old* number already has the change
+ * and will meet it again as a new migration. `CLAUDE.md` carries the repair —
+ * record it as applied rather than re-running it, since the SQL is the same
+ * file under a new name.
+ */
+describe('the migration journal says what is really there', () => {
+  const journal = JSON.parse(
+    readFileSync(path.join(migrationsDir, 'meta', '_journal.json'), 'utf8'),
+  ) as { entries: Array<{ idx: number; when: number; tag: string }> };
+
+  it('numbers its entries 0…n−1, once each', () => {
+    // Two entries at the same index is the shape a merge of two branches that
+    // each added a migration takes when nobody renumbers one of them.
+    expect(journal.entries.map((entry) => entry.idx)).toEqual(
+      journal.entries.map((_, index) => index),
+    );
+  });
+
+  it('gives every migration a `when` later than the one before it', () => {
+    // `when` is the whole gate. A renumbered migration that keeps its old
+    // timestamp fixes the hub it was tested on and is skipped on every hub
+    // already past that point — the tempting shortcut, and the wrong one.
+    const whens = journal.entries.map((entry) => entry.when);
+    expect(whens).toEqual([...whens].sort((a, b) => a - b));
+    expect(new Set(whens).size).toBe(whens.length);
+  });
+
+  it('has a file for every entry, and an entry for every file', () => {
+    // Either direction is a rename somebody only half finished: an entry with
+    // no file throws on boot, and a file with no entry is a migration that
+    // quietly never runs.
+    const tagged = journal.entries.map((entry) => `${entry.tag}.sql`).sort();
+    const onDisk = migrations().map((migration) => migration.file);
+    expect(tagged).toEqual(onDisk);
+  });
+});
