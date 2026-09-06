@@ -132,6 +132,66 @@ export const PROVIDER_MODELS: Readonly<
   },
 };
 
+/**
+ * What the **assistant** may run on, which is a different question from the
+ * mapper's and gets a different answer.
+ *
+ * The mapper offers one model per provider on purpose: a descriptor is cached
+ * against a device *model* and silently shapes every unit of it the home ever
+ * meets, so a cheaper tier that is wrong once is wrong for ever, and the run
+ * happens a handful of times in a hub's life. None of that is true of a chat.
+ * A conversation is many small rounds, it is read the moment it is written,
+ * and a reply somebody does not like is answered with another message — so
+ * what a model costs per round is a real trade a home can make, and both
+ * halves of it are visible.
+ *
+ * So the assistant offers two and the picker means something. Opus 5 is the
+ * default and the recommendation; Sonnet 5 is the same conversation at rather
+ * less than half the price. Both are already in `PRICING`, so nothing about
+ * cost estimation moves.
+ *
+ * Anthropic only, for the reason the automations agent is: only the Anthropic
+ * loop is written.
+ */
+export const ASSISTANT_MODELS: {
+  readonly default: string;
+  readonly choices: readonly ModelChoice[];
+} = {
+  default: 'claude-opus-5',
+  choices: [
+    {
+      id: 'claude-opus-5',
+      label: 'Opus 5',
+      note: 'The most capable. Best at a house it has to work out.',
+      recommended: true,
+    },
+    {
+      id: 'claude-sonnet-5',
+      label: 'Sonnet 5',
+      note: 'Quicker and cheaper. Good for everyday questions and switching things on.',
+    },
+  ],
+};
+
+/**
+ * Which model the assistant will actually run on.
+ *
+ * `effectiveModel`'s rule, and it exists separately for the same reason the
+ * list does: a stored model counts only while it is still offered, or retiring
+ * one leaves the homes that had chosen it as the only homes still running it,
+ * silently, with nothing on a screen changed.
+ *
+ * **And the loop has to read this, not the column.** That is the one bug the
+ * mapper paid a release for: every surface that *reported* a model went
+ * through `effectiveModel` while the call that picked one to run read the
+ * stored value, so a hub ran a model every screen said it was not running.
+ * `test/ai-model-choice.test.ts` pins both halves.
+ */
+export function effectiveAssistantModel(stored: string | null | undefined): string {
+  const offered = ASSISTANT_MODELS.choices.some((choice) => choice.id === stored);
+  return offered && stored ? stored : ASSISTANT_MODELS.default;
+}
+
 /** The Anthropic default, kept flat because the agent has always read it so. */
 export const DEFAULT_MODEL = PROVIDER_MODELS.anthropic.default;
 

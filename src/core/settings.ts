@@ -2,6 +2,12 @@ import { eq } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import { settings } from '../db/schema.js';
 import { decryptSecret, encryptSecret, type EncryptedValue } from './crypto.js';
+// A real edge into the AI module, and deliberately the only one: `models.ts`
+// imports `AiProvider` back with `import type`, which is erased, so there is
+// no runtime cycle. It is worth it to make `getAiSettings` answer with the
+// model that will *run* rather than the column — the mapper's one expensive
+// bug was exactly that gap between the two.
+import { effectiveAssistantModel } from '../ai/models.js';
 
 /**
  * The providers the hub can hold a credential for.
@@ -37,6 +43,15 @@ export interface AiProviderSettings {
   hasKey: boolean;
   /** The model this provider runs the mapping agent on; null means the default. */
   model: string | null;
+}
+
+export interface AiAssistantSettings {
+  /**
+   * The model the assistant runs on, as it will actually run — never the
+   * stored column. Null is not a state here: `effectiveAssistantModel` has
+   * already turned an absent or retired choice into the default.
+   */
+  model: string;
 }
 
 export interface AiSettings {
@@ -88,6 +103,8 @@ export interface AiSettings {
   legacySubscriptionToken: boolean;
   anthropic: AiProviderSettings;
   openai: AiProviderSettings;
+  /** What the assistant runs on. Its own choice, not the mapper's. */
+  assistant: AiAssistantSettings;
   /**
    * True when both keys are stored, so which provider recognises devices is a
    * choice somebody has to make rather than one the hub can derive. An app
@@ -213,6 +230,7 @@ export class SettingsService {
       anthropic,
       openai,
       mappingChoosable: anthropic.hasKey && openai.hasKey,
+      assistant: { model: effectiveAssistantModel(await this.get<string>('ai_assistant_model')) },
     };
   }
 
@@ -257,6 +275,19 @@ export class SettingsService {
     // of the row already means "use the default model".
     if (model === null) await this.unset(SLOTS[provider].model);
     else await this.set(SLOTS[provider].model, model);
+  }
+
+  /**
+   * Which model the assistant answers on.
+   *
+   * Its own key rather than a second use of `ai_model`, which is the mapper's
+   * and answers a different question — the two agents are offered different
+   * lists for reasons that have nothing to do with each other, and one column
+   * would make changing either change both.
+   */
+  async setAssistantModel(model: string | null): Promise<void> {
+    if (model === null) await this.unset('ai_assistant_model');
+    else await this.set('ai_assistant_model', model);
   }
 
   /** Which provider recognises devices when both keys are configured. */
