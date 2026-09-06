@@ -228,7 +228,11 @@ export class AutomationChat extends ChatRuntime<AutomationTurn> {
    * somebody constructed directly, not only for the one path that happens to
    * ask first.
    */
-  protected async openConversation(automationId: string | undefined): Promise<AutomationConversation> {
+  protected async openConversation(input: {
+    memberId: string;
+    topic: string | undefined;
+  }): Promise<AutomationConversation> {
+    const automationId = input.topic;
     const ai = await this.options.settings.getAiSettings();
     if (!ai.enabled) throw new AgentNotConfiguredError('ai_disabled');
     if (!ai.hasKey) throw new AgentNotConfiguredError('ai_not_configured');

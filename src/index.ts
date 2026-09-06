@@ -29,6 +29,7 @@ import { MappingLibrary } from './ai/library.js';
 import { AutomationStore } from './automations/store.js';
 import { AutomationEngine } from './automations/engine.js';
 import { AutomationChat } from './ai/automation-chat.js';
+import { AssistantChat } from './ai/assistant-chat.js';
 import type { ZigbeeAdapter } from './adapters/zigbee/adapter.js';
 import type { MqttAdapter } from './adapters/mqtt/adapter.js';
 import type { MatterAdapter } from './adapters/matter/adapter.js';
@@ -218,6 +219,19 @@ async function main(): Promise<void> {
         })
       : undefined;
 
+  // Constructed unconditionally and costing nothing until somebody opens a
+  // chat: no client, no prompt and no vendor SDK is loaded until the first
+  // message, which is `lazy.ts`'s seam one module over.
+  const automationChat = new AutomationChat({
+    db,
+    settings,
+    engine: automations,
+    store: automationStore,
+    events,
+    runs: aiRuns,
+    log: log.child({ module: 'ai' }),
+  });
+
   const app = await buildServer({
     db,
     log,
@@ -252,14 +266,21 @@ async function main(): Promise<void> {
     // Constructed unconditionally and costing nothing until somebody opens a
     // chat: no client, no prompt and no vendor SDK is loaded until the first
     // message, which is `lazy.ts`'s seam one module over.
-    automationChat: new AutomationChat({
+    automationChat,
+    // The assistant. It holds the automations chat rather than the other way
+    // round, because delegation only goes one way: the assistant hands a job
+    // over, and the agent it hands to knows nothing about it.
+    assistantChat: new AssistantChat({
       db,
       settings,
-      engine: automations,
-      store: automationStore,
       events,
       runs: aiRuns,
       log: log.child({ module: 'ai' }),
+      access,
+      activity,
+      registry,
+      engine: automations,
+      automationChat,
     }),
     mappings: new MappingLibrary({
       db,

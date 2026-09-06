@@ -94,6 +94,7 @@ describe.skipIf(!handle)('device portraits', () => {
     engine: automations,
     store: automationStore,
     chat: automationChat,
+    assistant: assistantChat,
   } = await startedAutomations(
       db,
       events,
@@ -112,6 +113,7 @@ describe.skipIf(!handle)('device portraits', () => {
       automations,
       automationStore,
       automationChat,
+      assistantChat,
       history: await startedHistory(db, events),
       portraits,
       settings,

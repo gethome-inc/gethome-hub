@@ -117,6 +117,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
     engine: automations,
     store: automationStore,
     chat: automationChat,
+    assistant: assistantChat,
   } = await startedAutomations(
       db,
       events,
@@ -135,6 +136,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
       automations,
       automationStore,
       automationChat,
+      assistantChat,
       history: await startedHistory(db, events),
       portraits: testPortraits(db, events),
       settings,
@@ -408,6 +410,26 @@ describe.skipIf(!handle)('roles and permissions', () => {
         undefined,
       ],
       ['POST', '/api/v1/automations/templates/away', 'automation.manage', {} as object],
+      // **The assistant is `hub.ai` alone**, not `automation.manage`: asking
+      // what the kitchen is doing and switching a lamp on is the floor, and a
+      // conversation is guarded by the key it spends. Handing a job to the
+      // automations agent is where `automation.manage` is asked, and it is
+      // asked inside the tool — so a guest gets a sentence the model reads out
+      // rather than a route that 403s at them.
+      ['POST', '/api/v1/assistant/chat', 'hub.ai', { message: 'hi' } as object],
+      ['GET', '/api/v1/assistant/chats', 'hub.ai', undefined],
+      [
+        'GET',
+        '/api/v1/assistant/chat/44444444-4444-4444-a444-444444444444',
+        'hub.ai',
+        undefined,
+      ],
+      [
+        'DELETE',
+        '/api/v1/assistant/chat/44444444-4444-4444-a444-444444444444',
+        'hub.ai',
+        undefined,
+      ],
       ['PUT', '/api/v1/settings/timezone', 'automation.manage', { timezone: 'UTC' } as object],
       // Reading the home is the floor, and the rules are the home — including
       // what they are made of and why one fired.

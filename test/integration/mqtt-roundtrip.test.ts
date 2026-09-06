@@ -110,6 +110,7 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
     engine: automations,
     store: automationStore,
     chat: automationChat,
+    assistant: assistantChat,
   } = await startedAutomations(
       db,
       events,
@@ -128,6 +129,7 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
       automations,
       automationStore,
       automationChat,
+      assistantChat,
       history: await startedHistory(db, events),
       portraits: testPortraits(db, events),
       settings,

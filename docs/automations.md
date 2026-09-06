@@ -9,6 +9,13 @@ with a manual trigger** — there is no second system for scenes and there
 should not be one, because "press this and the house does that" is this object
 with one trigger kind.
 
+A conversation here can also be **started by another agent**: the assistant
+hands automation work over rather than learning the DSL, and what arrives is an
+ordinary conversation whose first message is the brief it wrote — nothing about
+this agent changes for it. See [`docs/assistant.md`](assistant.md) for the
+handoff contract, and for why the assistant never sees this conversation's
+rounds.
+
 ---
 
 ## The two halves, and why they are separate

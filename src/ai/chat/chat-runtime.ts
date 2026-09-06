@@ -359,7 +359,10 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
    * wrong kind of key, has to be told so as a refusal rather than discovering
    * it through a conversation that never says anything.
    */
-  protected abstract openConversation(topic: string | undefined): Promise<AgentConversation<Turn>>;
+  protected abstract openConversation(input: {
+    memberId: string;
+    topic: string | undefined;
+  }): Promise<AgentConversation<Turn>>;
 
   /**
    * Write down a turn arm only this surface can produce.
@@ -399,7 +402,10 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       if (oldest) await this.close(oldest.id);
     }
 
-    const conversation = await this.openConversation(input.topic);
+    const conversation = await this.openConversation({
+      memberId: input.memberId,
+      topic: input.topic,
+    });
     const session: ChatSession<Turn> = {
       id: randomUUID(),
       memberId: input.memberId,
@@ -462,7 +468,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     if (owner === null || owner !== memberId) return null;
 
     const topic = this.topicFromRows(rows);
-    const conversation = await this.openConversation(topic);
+    const conversation = await this.openConversation({ memberId, topic });
     const session: ChatSession<Turn> = {
       id: sessionId,
       memberId,

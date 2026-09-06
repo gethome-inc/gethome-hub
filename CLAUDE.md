@@ -15,8 +15,8 @@ The `docs/` files are canonical for their domains; read the relevant one before
 touching that code: `architecture.md` (module boundaries, data flow),
 `device-schema.md` (**the** capability/unit/wire contract), `api.md`,
 `zigbee.md`, `matter.md`, `mqtt-integrations.md` (public integrator
-convention), `ai-adaptation.md`, `automations.md`, `portraits.md`,
-`ecosystem.md`.
+convention), `ai-adaptation.md`, `automations.md`, `assistant.md`,
+`portraits.md`, `ecosystem.md`.
 
 **There is no Docker and no database server anywhere any more.** The hub runs as
 systemd units (`deploy/install.sh`, `deploy/gethome-hubctl`) and the store is a
@@ -1086,6 +1086,61 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   them it was a bypass, letting the suite reach a conversation the real hub
   would have refused — the "a mock laxer than the thing it stands in for tests
   the mock" trap, and exactly why the refusal shipped untested.
+- **There are two conversational agents now, and one runtime under both.**
+  `docs/assistant.md` is canonical. The assistant (`src/ai/assistant-*.ts`) is
+  the one behind the app's assistant button: it answers about the home and the
+  app, works devices, presses scenes — and **hands automation work to the
+  automations agent** rather than learning the DSL.
+  **`ChatRuntime` (`src/ai/chat/chat-runtime.ts`) is everything that is not
+  about which agent is talking**, extracted from `AutomationChat` rather than
+  copied out of it: sessions with a lifetime, the memory rebuilt from the
+  transcript, the four socket phases, the step capture, the spend deltas, the
+  retention, the list. A subclass supplies which model and prompt open a
+  conversation and what to write down for the arms only it has; the three arms
+  *every* agent has are the runtime's, so a new agent cannot get them subtly
+  different. `chat/agent-loop.ts` is the same argument for the parts that are
+  the **API's** shape — the two cache breakpoints, `display: 'summarized'`, the
+  abort that becomes a sentence, and `QuestionGate`, which is the rule that no
+  request may carry a `tool_use` with no `tool_result` after it. Each agent
+  keeps its own `pump`, because what *ends* a turn genuinely differs.
+  **One transcript store**, told apart by a nullable `surface` column on
+  `automation_chat_messages` (null = `automation`, which every row written
+  before it is). Two tables would be a second retention sweep, a second recap
+  and a second step capture — and the second copy is where the bug lives. The
+  rollback cost is named rather than discovered: an older build ignores the
+  column and would list assistant chats among the automations ones, which is a
+  confusing row on a build that has already failed its health check.
+  **The handoff is the design, and it is two rules.** The *brief* is the whole
+  interface — a self-contained task in the person's language, and the only
+  thing that crosses — so the assistant never receives the other agent's tool
+  calls, reasoning or transcript, which is what keeps its context the size of a
+  conversation however many agents there come to be. And it is
+  **acknowledged, never awaited**: `delegate` returns in milliseconds with the
+  other agent's session id, the `POST /devices/:id/remap` lesson this
+  repository has now paid for twice. What the app draws is a `handoff` row
+  carrying that session id and nothing copied from it — the live trail, the
+  questions and the rules are read from the sub-agent's own conversation, over
+  the frames an app already draws. Its `status` moves as that agent's turns
+  land, written by reading its transcript rather than by a second round with
+  the model: the assistant is never re-entered for a job it has handed on.
+  **The registry is a table because of the third agent, not the second**
+  (`src/ai/agents/registry.ts`): `delegate`'s description is *generated* from
+  it, so adding an agent is one entry rather than a new tool, a new prompt
+  paragraph and a release of both apps. `permission` is checked when the tool
+  runs, so a member whose role cannot hand a job over gets a sentence the model
+  reads out rather than a capability silently absent.
+  **The assistant's model list is its own** (`ASSISTANT_MODELS` — Opus 5 and
+  Sonnet 5), and the mapper's one-model list is untouched: a descriptor is
+  cached against a device model and shapes every unit of it for ever, while a
+  chat is many small rounds answered with another message when the reply is
+  poor. `effectiveAssistantModel` is what **runs** as well as what is reported,
+  which is the gap that cost the mapper a release. Effort is `medium` here
+  against the mapper's `high`, and is exposed by neither.
+  **`control_device` is the one tool that writes to the home**, through the
+  registry's ordinary path and into the activity log **named for the person who
+  asked** — the feed is read a week later and "the assistant" is nobody anyone
+  can go and ask. Bounded per *turn*, not as a guard against a person tapping
+  quickly but against a model reading "everything off" as the whole house.
 - **Nothing is unsupported by default — three layers, in order.** Devices are
   made usable by (1) **typed capabilities** (canonical schema), then (2)
   **generic custom fields** (`custom`) for every leftover parameter, generated
@@ -1820,7 +1875,8 @@ After landing a change, update the docs it invalidates in the same change:
 schema/units/wire → `docs/device-schema.md` (+ the iOS repo needs a matching
 change — flag it); routes/auth → `docs/api.md`; adapter behavior/topics →
 `docs/zigbee.md` / `docs/matter.md` / `docs/mqtt-integrations.md`; AI
-trigger/DSL → `docs/ai-adaptation.md`; portraits → `docs/portraits.md`;
+trigger/DSL → `docs/ai-adaptation.md`; the assistant, the chat runtime or the
+delegate registry → `docs/assistant.md`; portraits → `docs/portraits.md`;
 module boundaries → this file +
 `docs/architecture.md`; installer markers, autostart or Zigbee detection →
 `docs/zigbee.md` + the marker list in `deploy/install.sh` (and flag the Studio

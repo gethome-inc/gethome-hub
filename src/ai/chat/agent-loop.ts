@@ -70,9 +70,9 @@ export interface TurnRequest {
    * How hard the model works. `high` for a job cached against a device model
    * for ever; `medium` for a chat, which is many small rounds read the moment
    * they arrive. Not exposed to anybody: two settings for one decision is one
-   * too many.
+   * too many, so each agent states its own and nothing configures it.
    */
-  effort?: typeof EFFORT;
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 }
 
 /**

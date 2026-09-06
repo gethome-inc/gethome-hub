@@ -14,6 +14,7 @@ import { ActivityService } from '../../src/core/activity.js';
 import { AutomationEngine, type EngineRegistry } from '../../src/automations/engine.js';
 import { AutomationStore } from '../../src/automations/store.js';
 import { AutomationChat, type AutomationChatOptions } from '../../src/ai/automation-chat.js';
+import { AssistantChat, type AssistantChatOptions } from '../../src/ai/assistant-chat.js';
 import { AiRunLog } from '../../src/core/ai-runs.js';
 import { SettingsService } from '../../src/core/settings.js';
 import type { HubEventBus } from '../../src/core/bus.js';
@@ -22,6 +23,7 @@ import {
   activity,
   aiMappings,
   aiRuns,
+  automationChatMessages,
   automationRuns,
   automationVersions,
   automations,
@@ -77,6 +79,11 @@ export async function resetDb(db: Db): Promise<void> {
   await db.delete(automationRuns);
   await db.delete(automationVersions);
   await db.delete(automations);
+  // Transcripts outlive the conversations that wrote them by a fortnight,
+  // which is the point of them and makes them the one table that leaks
+  // between tests: a suite asserting on the conversations *list* was reading
+  // the previous test's chats as well as its own.
+  await db.delete(automationChatMessages);
   await db.delete(tokens);
   await db.delete(invites);
   await db.delete(endpoints);
@@ -206,8 +213,18 @@ export async function startedAutomations(
     runs?: AiRunLog;
     /** Stands in for a provider, so a suite never reaches one. */
     createConversation?: AutomationChatOptions['createConversation'];
+    /** The same, for the assistant. */
+    createAssistantConversation?: AssistantChatOptions['createConversation'];
+    /** The suite's own, when it has one — the assistant asks it whether a
+     *  member may hand a job to another agent. */
+    access?: AccessService;
   } = {},
-): Promise<{ engine: AutomationEngine; store: AutomationStore; chat: AutomationChat }> {
+): Promise<{
+  engine: AutomationEngine;
+  store: AutomationStore;
+  chat: AutomationChat;
+  assistant: AssistantChat;
+}> {
   const store = new AutomationStore(db);
   const engine = new AutomationEngine({
     store,
@@ -243,5 +260,22 @@ export async function startedAutomations(
       ? { createConversation: options.createConversation }
       : {}),
   });
-  return { engine, store, chat };
+  const access = options.access ?? new AccessService(db, events);
+  if (options.access === undefined) await access.load();
+  const assistant = new AssistantChat({
+    db,
+    settings,
+    events,
+    runs: options.runs ?? new AiRunLog(db, events),
+    log: pino({ level: 'silent' }),
+    access,
+    activity,
+    registry,
+    engine,
+    automationChat: chat,
+    ...(options.createAssistantConversation !== undefined
+      ? { createConversation: options.createAssistantConversation }
+      : {}),
+  });
+  return { engine, store, chat, assistant };
 }
