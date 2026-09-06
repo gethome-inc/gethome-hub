@@ -29,6 +29,15 @@ export interface Member {
 export interface ClaimResult {
   token: string;
   member: Member;
+  /**
+   * True when the code signed an **existing** member in on another device
+   * rather than creating one — the sign-in half of `createSignInCode`.
+   *
+   * The caller needs it for two things it cannot work out from the member
+   * alone: which sentence goes in the activity log, and whether the name the
+   * client sent was used or ignored.
+   */
+  signedIn: boolean;
 }
 
 const INVITE_TTL_MS = 15 * 60 * 1000;
@@ -44,6 +53,14 @@ const LAST_USED_RESOLUTION_MS = 60 * 60 * 1000;
  * - The first successful `claim` with that code creates the `owner` member
  *   and invalidates the code.
  * - Owners mint short-lived invite codes; claiming one creates a `member`.
+ * - A **sign-in code** is the same code with a member named on it, and it
+ *   creates nobody: claiming one issues another token for that member. A
+ *   person is a member row and a device is a token row, so somebody's second
+ *   phone — or the same phone after the app was deleted and installed again —
+ *   has to arrive as another token, not another person. It used to arrive as
+ *   another person, which left their AI conversations, their line in the
+ *   activity log and their own favorites behind on a member nobody could ever
+ *   sign in as again.
  * - Tokens are opaque 32-byte values returned in plaintext exactly once;
  *   only their sha256 is stored.
  *
@@ -160,6 +177,28 @@ export class PairingService {
       where: and(eq(invites.codeHash, codeHash), isNull(invites.usedBy), gt(invites.expiresAt, new Date())),
     });
     if (!invite) return null;
+
+    // A **sign-in code**: the invite names somebody who is already in the
+    // home, so this issues them another token and inserts nothing. The name
+    // the client sent is deliberately dropped — the code says who this is, and
+    // a field somebody filled in on a reconnect screen must not rename them
+    // for the whole house. `PATCH /members/me` is where a rename lives.
+    if (invite.memberId) {
+      const existing = await this.db.query.members.findFirst({
+        where: eq(members.id, invite.memberId),
+      });
+      // Their row went while the code was in somebody's hand. Codes minted for
+      // a member are deleted with them, so this is the race rather than the
+      // ordinary case — and a code that resolves to nobody is not a code.
+      if (!existing) return null;
+      await this.db.update(invites).set({ usedBy: existing.id }).where(eq(invites.id, invite.id));
+      const role = existing.role === 'owner' ? 'owner' : 'member';
+      this.log.info(`Member "${existing.name}" signed in on another device.`);
+      return this.rememberClaim(
+        claimId,
+        await this.issueToken(existing.id, existing.name, role, existing.roleId, deviceName, true),
+      );
+    }
     // The invite names the role. A code minted before roles existed carries
     // only the legacy word, and `member` is what that has always meant.
     const roleRecord =
@@ -207,6 +246,46 @@ export class PairingService {
     return { code, expiresAt, roleId: resolved };
   }
 
+  /**
+   * Mint a **sign-in code** for somebody already in the home.
+   *
+   * The same eight digits, the same fifteen minutes, the same single use, the
+   * same `/pair` route — the only difference is that claiming it issues a
+   * token for the member named here instead of inserting one. That is the
+   * whole of what makes a second phone, or a reinstalled app, come back as the
+   * same person rather than as a stranger with the same name.
+   *
+   * `role`/`roleId` are written as the role that member holds **right now**,
+   * and nothing on this path ever reads them back: the member already has a
+   * role, and `claim` takes it from the member row. They are the rollback
+   * mirror the columns beside them have always been — a build from before this
+   * column has no idea the code names anybody, so it would admit its holder as
+   * a new member, and the mirror at least admits them at the level the home
+   * had actually given them.
+   *
+   * Who may ask is the route's business, not this one's: for yourself it is
+   * the floor, and for somebody else it is `member.invite` with the owner's
+   * own guard on top.
+   */
+  async createSignInCode(
+    createdBy: string,
+    memberId: string,
+  ): Promise<{ code: string; expiresAt: Date; memberId: string; memberName: string } | null> {
+    const member = await this.db.query.members.findFirst({ where: eq(members.id, memberId) });
+    if (!member) return null;
+    const code = generateNumericCode();
+    const expiresAt = new Date(Date.now() + INVITE_TTL_MS);
+    await this.db.insert(invites).values({
+      codeHash: sha256Hex(code),
+      role: member.role === 'owner' ? 'owner' : 'member',
+      roleId: member.roleId,
+      memberId: member.id,
+      createdBy,
+      expiresAt,
+    });
+    return { code, expiresAt, memberId: member.id, memberName: member.name };
+  }
+
   /** Resolve a bearer token to its member, refreshing last_used_at now and then. */
   async verifyToken(token: string): Promise<Member | null> {
     const row = await this.db.query.tokens.findFirst({ where: eq(tokens.tokenHash, sha256Hex(token)) });
@@ -238,6 +317,7 @@ export class PairingService {
     role: MemberRole,
     roleId: string | null,
     deviceName?: string,
+    signedIn = false,
   ): Promise<ClaimResult> {
     const token = generateToken();
     await this.db.insert(tokens).values({
@@ -245,7 +325,7 @@ export class PairingService {
       tokenHash: sha256Hex(token),
       deviceName: deviceName ?? null,
     });
-    return { token, member: { id: memberId, name: memberName, role, roleId } };
+    return { token, member: { id: memberId, name: memberName, role, roleId }, signedIn };
   }
 
   private get codeFile(): string {

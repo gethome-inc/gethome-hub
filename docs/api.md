@@ -35,6 +35,12 @@ the code is a one-time proof of physical access, not a password.
 3. Owners mint **invite codes** (`POST /invites`, 15-minute TTL, single use);
    claiming one through the same `/pair` endpoint creates a **member**. This is
    how a phone or a second Mac joins.
+4. `POST /invites {"memberId"}` mints a **sign-in code** instead — the same
+   eight digits, TTL, single use and `/pair` route, for somebody who is
+   *already* in the home. Claiming it creates nobody and issues another token
+   for that member, so a second phone, or the same phone after the app was
+   deleted and installed again, comes back as **the same person**. See
+   [below](#signing-in-again-post-invites-with-a-memberid).
 
 **On the hub's own machine there is a shorter route.** `gethome-hubctl claim
 --name "…" --device "…"` reads the code and claims in one step, printing
@@ -60,8 +66,10 @@ everyone.
 
 - **The floor is not a permission.** Reading the home (`GET /hub`, `/home`,
   `/rooms`, `/zones`, `/devices`, `/members`, `/roles`, `/permissions`, `/me`,
-  the WebSocket), **working a device**, renaming yourself, leaving, and pinning
-  your own favorites are what *being a member* means. No role can take them
+  the WebSocket), **working a device**, renaming yourself, leaving, pinning
+  your own favorites and putting yourself on another of your own devices
+  ([a sign-in code for yourself](#signing-in-again-post-invites-with-a-memberid))
+  are what *being a member* means. No role can take them
   away, and none of them appears in the matrix. A member with nothing at all
   would be a token that can only 401 behind an app with nothing to draw.
 
@@ -112,7 +120,7 @@ than no button.
 | `GET /matter/commission/:jobId` | floor | `{status: running\|done\|failed, nodeId?, error?}` |
 | `POST /zigbee/permit-join` | `device.add` | `{seconds}`, 0–900 (0 = close the network) → `{permitJoin, seconds}` describing the **live** window, which is not always what was asked for. See [below](#the-zigbee-join-window) |
 | `GET /members` · `PATCH /members/me` · `DELETE /members/me` · `DELETE /members/:id` | floor · floor (itself) · floor (itself) · `member.remove` | rows carry `isSelf`, `roleId` and `roleName`; `PATCH` takes `{name}` and renames **the caller**; `DELETE` on either route answers `204` and revokes that member's tokens; the owner cannot be removed, by anyone or by itself. See [below](#which-member-you-are-isself-and-patch-membersme) |
-| `GET /invites` · `POST /invites` | `member.invite` | `POST {roleId?}` → `201 {code, expiresAt, roleId, roleName}`. Omitting `roleId` mints a **Member** invite, which is what every invite this hub has ever made was. An **owner** invite is allowed and needs the caller to be one (`403 not_owner`) |
+| `GET /invites` · `POST /invites` | `member.invite` · see notes | `POST {roleId?}` → `201 {code, expiresAt, roleId, roleName, memberId: null, memberName: null}`. Omitting `roleId` mints a **Member** invite, which is what every invite this hub has ever made was. An **owner** invite is allowed and needs the caller to be one (`403 not_owner`). **`POST {memberId}` mints a sign-in code** for somebody already here — `roleId` beside it is `400 invalid_target`, an unknown one is `404 unknown_member`, and the answer carries `memberId`/`memberName` with `roleId: null`. Who may ask is asked of the body: your own (`memberId: "me"` is accepted) is the **floor**, somebody else's is `member.invite`, an **owner's** needs an owner. `GET` lists the live codes, each with `memberId` — null for an invite — and `memberName`. See [below](#signing-in-again-post-invites-with-a-memberid) |
 | `GET /activity?limit=&before=` | floor · `activity.read` | reverse-chronological, cursor = `before` id; rows carry `data` — see [below](#the-activity-log) |
 | `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | `hub.ai` | The home's AI: two credentials, two models, which provider recognises devices, and the switch. **PATCH is the write** — every field optional, absence means "leave this alone": `{enabled?, recordExchanges?, anthropicApiKey?, openaiApiKey?, anthropicModel?, openaiModel?, model?, mappingProvider?, clear?}`. `model` is `anthropicModel` under the name this route has always used; `clear: "anthropic"\|"openai"` forgets one credential and leaves the other; `recordExchanges` starts or stops keeping what each round said, and is off unless asked; `mappingProvider` naming a provider with no key is `400 provider_not_configured`. Keys are told apart by prefix, so one pasted in the other's field is a 400 rather than a 401 an hour later, and a `sk-ant-oat…` subscription token is still refused. **PUT is unchanged** (`{apiKey, model?}`, an Anthropic key, required) for apps that have not moved. See [the answer's shape](#the-ai-settings-answer) |
 | `GET /ai/runs?limit=` | `hub.ai` | what the mapping agent did, newest first: `{id, at, kind, vendor, model, exposesHash, provider, modelId, ok, costUsd, turns, durationMs, errorKind, errorMessage, steps, exchanges}`. A summary, never a transcript — see [ai-adaptation.md](ai-adaptation.md). `exchanges` is how many **rounds** this run kept, `0` unless recording was on when it ran |
@@ -510,6 +518,76 @@ An app that lets a device claim a hub should say what that name will be and let
 it be changed later: GetHome Studio, which has no accounts and no user name of
 its own, offers the Mac's own name and renames through this route from the hub
 page.
+
+### Signing in again (`POST /invites` with a `memberId`)
+
+**A person is a member row; a device is a token row.** Everything personal on
+this hub hangs off the first — the AI conversations in
+`automation_chat_messages.member_id`, the lines attributed to somebody in the
+activity log, their own favorites, the name the whole home reads. Every arrival
+used to insert a member, so a second phone, or the same phone after the app was
+deleted and installed again, walked in as a stranger with the same name and left
+all of it behind on a member nobody could ever sign in as again.
+
+A sign-in code fixes that by naming the person on the code:
+
+```
+POST /invites  {"memberId": "…"}      →  201 {code, expiresAt, memberId, memberName, roleId: null, roleName: null}
+POST /pair     {"code", "memberName"} →  200 {token, member}   // the member already here
+```
+
+Deliberately the **same** route, table, 15-minute expiry, single use, per-address
+rate limit, `claimId` replay and `/pair` endpoint as an invite — two ways to mint
+one code beats a second code with its own way of being wrong. `memberId` is the
+only thing that tells them apart, on `POST` and in `GET /invites` alike, where
+`null` means an invite; there is no derived `kind` beside it, because that would
+be a second copy of one fact.
+
+Four things follow from it.
+
+**The name on the claim is ignored.** The code says who this is, and a field
+somebody fills in on a reconnect screen must not rename them for the whole
+house. `PATCH /members/me` is where a rename lives. An app should show the name
+that comes *back*, which is the member's own.
+
+**The token they already had keeps working.** This is "another device", not
+"moved to a new phone" — a tablet and a phone are two tokens on one member.
+Ending access is still `DELETE /members/:id`, which takes every token with the
+row.
+
+**Who may ask is asked of the body**, which is why this route is authenticated
+with the check inside rather than gated at the door — the shape `PATCH
+/devices/:id` already has, and for the same reason: one field decides which
+question to ask.
+
+| Code for | Needs | Why |
+|---|---|---|
+| yourself (`memberId: "me"` or your own id) | **the floor** | It grants exactly the authority you are already holding a token for, and anyone who can ask could copy that token to the other device instead. The companion to `PATCH /members/me` and `DELETE /members/me` |
+| somebody else | `member.invite` | That permission's own sentence — putting a person into this home — with the person already named. What it adds over minting them a fresh invite is their *history*, not authority: whoever can invite could already create a peer at any non-owner role |
+| somebody holding the **owner** role | the caller must be an owner (`403 not_owner`) | There the identity **is** the authority. Without this, `member.invite` — which a home may hand to a role it invented — would quietly mean "become the owner", and every other key would be a formality. The same guard `POST /invites {roleId: owner}` and `PATCH /members/:id` carry |
+
+**Minting one for somebody else writes `member.signin-code` to the activity
+log**; minting your own writes nothing. Handing over an identity for fifteen
+minutes is what makes `member.invite` safe to delegate only if the home can see
+who did it — the reason reading the broker password writes a line — while
+logging every "and my tablet too" would be noise in a feed read a week later.
+Claiming writes `member.signed-in` (with `data.deviceName` when the client sent
+one) rather than `member.joined`, because somebody picking up their tablet is
+not a person arriving.
+
+**Removing a member takes their outstanding codes with them.**
+`invites.member_id` is a column added by `ALTER TABLE`, so SQLite gives it no
+`ON DELETE` action — the `invites.role_id` situation exactly — and the raw
+foreign key would otherwise turn an ordinary removal into a 500. Both delete
+routes clear the codes first, which also closes the fifteen-minute window in
+which a removed member could have let themselves back in.
+
+One rollback note. The column is additive, so a build from before it ignores it
+and would admit a sign-in code's holder as a *new* member — the behaviour this
+replaces, for a code minted in the minute a failed build was live.
+`createSignInCode` writes `role`/`roleId` as the role that member currently
+holds so that even then they arrive at the right level; nothing on the current
+path ever reads them back.
 
 ### Leaving and removing (`DELETE /members/me`, `DELETE /members/:id`)
 
@@ -1067,7 +1145,8 @@ The kinds: `device.command`, `device.added`, `device.removed`,
 `device.online`, `device.offline`, `device.renamed`, `device.moved`,
 `device.portrait`,
 `room.added`, `room.renamed`, `room.removed`, `zone.added`, `zone.renamed`,
-`zone.removed`, `member.joined`, `member.left`, `member.removed`,
+`zone.removed`, `member.joined`, `member.signed-in`, `member.signin-code`,
+`member.left`, `member.removed`,
 `member.renamed`, `member.role-changed`, `role.added`, `role.renamed`,
 `role.changed`, `role.removed`, `home.renamed`, `hub.radio`, `hub.mqtt`,
 `adapter.error`,

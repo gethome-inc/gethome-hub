@@ -1,3 +1,4 @@
+import { eq } from 'drizzle-orm';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -5,7 +6,7 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { pino } from 'pino';
 import { PairingService } from '../src/core/pairing.js';
 import { sha256Hex, generateToken, encryptSecret, decryptSecret } from '../src/core/crypto.js';
-import { invites, tokens } from '../src/db/schema.js';
+import { invites, members, tokens } from '../src/db/schema.js';
 import { HubEventBus } from '../src/core/bus.js';
 import { openTestDb, resetDb, loadedAccess } from './helpers/db.js';
 
@@ -136,6 +137,78 @@ describe.skipIf(!handle)('PairingService', () => {
     const doomed = await pairing.createInvite(owner!.member.id, custom.id);
     await access.deleteRole(custom.id);
     expect(await pairing.claim(doomed.code, 'Masha')).toBeNull();
+  });
+
+  /**
+   * The whole point of a sign-in code: a second device arrives as the person
+   * who is already here, not as a new one. Everything personal on this hub —
+   * an AI conversation, a line in the activity log, a favorite — hangs off the
+   * member row, so a new row means all of it is left behind on somebody nobody
+   * can sign in as any more.
+   */
+  it('signs an existing member in on another device instead of creating one', async () => {
+    const bootCode = readFileSync(path.join(dataDir, 'pairing-code'), 'utf8').trim();
+    const owner = await pairing.claim(bootCode, 'Georgy');
+    const invite = await pairing.createInvite(owner!.member.id, access.builtinRoleId('guest')!);
+    const anna = await pairing.claim(invite.code, 'Anna', 'iPhone');
+
+    const signIn = await pairing.createSignInCode(owner!.member.id, anna!.member.id);
+    expect(signIn?.memberName).toBe('Anna');
+
+    // The name is deliberately dropped: the code says who this is, and a field
+    // filled in on a reconnect screen must not rename somebody for the whole
+    // house.
+    const back = await pairing.claim(signIn!.code, 'whatever they typed', 'iPad');
+    expect(back?.signedIn).toBe(true);
+    expect(back!.member.id).toBe(anna!.member.id);
+    expect(back!.member.name).toBe('Anna');
+    expect(back!.member.roleId).toBe(access.builtinRoleId('guest'));
+    expect(await db.select().from(members)).toHaveLength(2);
+
+    // Two devices, two tokens, and the first one still works — that is what
+    // "another device" means, as against "moved to a new phone".
+    expect((await pairing.verifyToken(back!.token))?.id).toBe(anna!.member.id);
+    expect((await pairing.verifyToken(anna!.token))?.id).toBe(anna!.member.id);
+
+    // Single use, exactly like an invite.
+    expect(await pairing.claim(signIn!.code, 'Anna')).toBeNull();
+
+    // And it expires the same way.
+    const stale = await pairing.createSignInCode(owner!.member.id, anna!.member.id);
+    await db.update(invites).set({ expiresAt: new Date(Date.now() - 1000) });
+    expect(await pairing.claim(stale!.code, 'Anna')).toBeNull();
+  });
+
+  it('mints no sign-in code for somebody who is not in the home', async () => {
+    const bootCode = readFileSync(path.join(dataDir, 'pairing-code'), 'utf8').trim();
+    const owner = await pairing.claim(bootCode, 'Georgy');
+    expect(
+      await pairing.createSignInCode(owner!.member.id, '11111111-1111-4111-a111-111111111111'),
+    ).toBeNull();
+  });
+
+  /**
+   * A sign-in code goes with the member it names, and the order is the whole
+   * of it: `invites.member_id` is a column added by `ALTER TABLE` and so
+   * carries no `ON DELETE` action, which means the raw foreign key refuses to
+   * delete a member while a code for them is outstanding. The routes clear the
+   * codes first — this is that order, and what it buys: a removed member has
+   * no fifteen-minute window in which they can let themselves back in.
+   */
+  it('takes a member\u2019s outstanding sign-in codes with them', async () => {
+    const bootCode = readFileSync(path.join(dataDir, 'pairing-code'), 'utf8').trim();
+    const owner = await pairing.claim(bootCode, 'Georgy');
+    const invite = await pairing.createInvite(owner!.member.id);
+    const anna = await pairing.claim(invite.code, 'Anna');
+    const signIn = await pairing.createSignInCode(owner!.member.id, anna!.member.id);
+
+    // The foreign key is the backstop that refuses if a route ever forgets.
+    await expect(db.delete(members).where(eq(members.id, anna!.member.id))).rejects.toThrow();
+
+    await db.delete(invites).where(eq(invites.memberId, anna!.member.id));
+    await db.delete(members).where(eq(members.id, anna!.member.id));
+    expect(await pairing.claim(signIn!.code, 'Mallory')).toBeNull();
+    expect(await db.select().from(members)).toHaveLength(1);
   });
 
   it('keeps the same pairing code across restarts while unclaimed', async () => {

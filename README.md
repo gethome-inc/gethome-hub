@@ -57,7 +57,9 @@ hub can control them.
   a flat line.
   ([docs/api.md](docs/api.md#recorded-readings-get-devicesidhistory))
 - **Sharing built in** — pairing-code claim makes you the owner; short-lived
-  invite codes add family members. Only hub homes are shareable in GetHome.
+  invite codes add family members, and a sign-in code brings one of them back on
+  another device as themselves, with their own history rather than as a second
+  person. Only hub homes are shareable in GetHome.
 - **Roles and permissions** — Owner, Member and Guest ship built in, a home can
   add its own, and what each one may do is a table edited from either app. A
   Guest works the lights and keeps their own favorites without touching the
