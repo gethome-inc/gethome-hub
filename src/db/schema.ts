@@ -286,6 +286,35 @@ export const invites = sqliteTable('invites', {
   role: text('role').notNull().default('member'),
   /** Which role the person claiming this code joins as. Null = `member`. */
   roleId: text('role_id').references(() => roles.id),
+  /**
+   * Who this code is *for*, when it is a **sign-in code** rather than an
+   * invite — the one field that tells the two apart.
+   *
+   * Null is the ordinary invite: claiming it inserts a member. A value here
+   * means claiming it issues another token for the member already named, so a
+   * second phone, or one whose app was deleted and installed again, comes back
+   * as **the same person** — with their AI conversations, their line in the
+   * activity log and their own favorites still theirs. Without it every
+   * arrival was a new row and all of that was left behind on a member nobody
+   * could sign in as again.
+   *
+   * **Nullable, and with no `onDelete` action — both are forced**, exactly as
+   * on `members.role_id` and `rooms.zone_id`: SQLite cannot `ADD COLUMN … NOT
+   * NULL` without a SQL-level default, and it cannot attach a referential
+   * action to a column added by `ALTER TABLE` at all. So the routes that
+   * delete a member drop the codes minted for them first — the
+   * `invites.role_id` rule, and for the same reason: a code whose member is
+   * gone means nothing, and the raw foreign key would otherwise turn removing
+   * somebody into a 500.
+   *
+   * `role`/`roleId` beside it mirror the role that member *holds* when the
+   * code is minted. Nothing reads them on this path — the member already has a
+   * role — but `install.sh` rolls back to the previous release when a build
+   * fails its health check, and that build has never heard of this column: it
+   * would admit the holder as a new member, which is the behaviour this change
+   * replaces, and the mirror at least admits them at the right level.
+   */
+  memberId: text('member_id').references(() => members.id),
   createdBy: text('created_by').references(() => members.id, { onDelete: 'set null' }),
   expiresAt: integer('expires_at', { mode: 'timestamp_ms' }).notNull(),
   usedBy: text('used_by').references(() => members.id, { onDelete: 'set null' }),
