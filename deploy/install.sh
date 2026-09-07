@@ -1167,12 +1167,14 @@ $SUDO chown -R "$SERVICE_USER:$SERVICE_USER" "$Z2M_DATA_DIR"
 # coordinator hangs off the Pi's USB socket and the Wi-Fi antenna is printed on
 # the board beside it.
 #
-# What that collision produces does not look like a Zigbee fault, which is what
-# makes it expensive. Zigbee wins — short frames, low duty cycle — and Wi-Fi
-# loses *inbound*: beacons are small and slow and still arrive, so the link
-# reports a healthy signal, while data frames to the hub are retried and
-# dropped. The hub is up, its automations are running over the very radio that
-# is jamming it, and every phone in the house says it cannot be reached.
+# What that costs is **retries and throughput, in proportion to how busy the
+# Zigbee side is**, and it is worth being exact about the size of it: a Zigbee
+# frame is tens of bytes at 250 kbit/s, so a quiet home is a fraction of a
+# percent of the air and costs almost nothing. It is a standing handicap on the
+# Wi-Fi rather than an outage — the thing to reach for when a hub is slow or
+# lossy, not when it disappears completely, which is a link that is down or a
+# path that is broken and wants looking for elsewhere. The reason to avoid it
+# anyway is that it is free to avoid at install time and expensive afterwards.
 #
 # So the channel is picked at the only moment it can be picked: when this hub
 # has never formed a network. Changing it afterwards is not an upgrade — it is
@@ -1180,9 +1182,10 @@ $SUDO chown -R "$SERVICE_USER:$SERVICE_USER" "$Z2M_DATA_DIR"
 # already has a network keeps the channel it formed on, whatever the Wi-Fi
 # under it has done since.
 # The other half of that decision, for a hub that already has a network. The
-# channel is not ours to move there — but it is ours to *name*, and until
-# somebody names it the symptom belongs to nothing: Zigbee is connected, the
-# devices report, and the only casualty is the other radio.
+# channel is not ours to move there — but it is ours to *name*, because nothing
+# else in the system ever will: Zigbee is connected, the devices report, and
+# what suffers is the other radio. Said as a standing handicap, never as a
+# diagnosis — see the sizing above.
 zigbee_network_channel() {
   local backup="$Z2M_DATA_DIR/coordinator_backup.json" channel=""
   if [[ -f "$backup" ]]; then
@@ -1209,7 +1212,7 @@ warn_if_zigbee_jams_wifi() {
   # is transmitting into this hub's own uplink from a few centimetres away.
   (( gap <= 11 )) || return 0
   clear="$(zigbee_channel_clear_of_wifi "$wifi_mhz")"
-  warn "This hub's Wi-Fi (${wifi_mhz} MHz) and its Zigbee network (channel ${zigbee_channel}, ${zigbee_mhz} MHz) are on the same frequency, and the two radios are a few centimetres apart. Zigbee wins that contention; the Wi-Fi loses traffic coming *in*, so the hub can go unreachable from the apps for minutes at a time while it is running perfectly and its automations keep firing. Moving Zigbee to channel ${clear} is the fix, and it is not done for you because the network re-forms: mains-powered devices usually follow, battery ones usually have to be paired again."
+  warn "This hub's Wi-Fi (${wifi_mhz} MHz) and its Zigbee network (channel ${zigbee_channel}, ${zigbee_mhz} MHz) are on the same frequency, and the two radios are a few centimetres apart. They share the air rather than take turns, so the Wi-Fi carries more retries and less throughput than it should — how much depends on how busy the Zigbee network is, and a quiet one costs little. Channel ${clear} is clear of this hub's Wi-Fi. It is not changed for you, and is worth changing only if something is actually wrong: the network re-forms, so mains-powered devices usually follow and battery ones usually have to be paired again."
 }
 
 zigbee_channel_clear_of_wifi() {

@@ -56,13 +56,15 @@ centre ±11 MHz. So channel 11 — 2405 MHz — is inside Wi-Fi channel 1
 coordinator hangs off the Pi's USB socket and the Wi-Fi antenna is printed on
 the board next to it.
 
-The failure that produces is not a Zigbee failure, which is what makes it
-expensive to diagnose. Zigbee wins the contention — short frames, low duty
-cycle — and **Wi-Fi loses inbound**: beacons are small and slow and keep
-arriving, so the link goes on reporting a healthy signal, while data frames to
-the hub are retried and dropped. What an owner sees is a hub that is up, whose
-automations are running over the very radio that is jamming it, and which every
-phone in the house says cannot be reached.
+**What it costs is retries and throughput, in proportion to how busy the Zigbee
+side is**, and the size matters. A Zigbee frame is tens of bytes at 250 kbit/s,
+so a quiet home occupies a fraction of a percent of the air and the collision
+costs almost nothing; a chatty one — a power meter reporting every few seconds,
+a network under load — costs progressively more. It is a **standing handicap on
+the Wi-Fi**, not an outage: reach for it when a hub is slow or lossy, not when
+it disappears completely, which is a link that is down or a path that is broken
+and wants looking for elsewhere. What makes it worth avoiding is that it is free
+to avoid before the network exists and expensive afterwards.
 
 So `install.sh` picks the channel furthest from whatever Wi-Fi channel the hub
 is associated on, and does it **only when this hub has never formed a network** —
@@ -76,7 +78,8 @@ network's channel against the Wi-Fi the hub is associated on and emits a
 `@@WARN@@` when they overlap, naming both, the channel to move to, and the cost
 of moving. It has to be said out loud because nothing else will say it: the
 coordinator is reached, the devices report, `zigbee.connected` is `true`, and
-the only casualty is the other radio.
+what suffers is the other radio. It is worded as a standing handicap, never as
+a diagnosis of an outage.
 
 **An existing network keeps the channel it formed on**, whatever the Wi-Fi under
 it has done since. Moving it is not an upgrade: mains-powered routers usually

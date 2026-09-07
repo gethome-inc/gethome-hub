@@ -215,9 +215,13 @@ describe('an existing Zigbee network on top of the hub Wi-Fi', () => {
     expect(said).toContain('WARN');
     expect(said).toContain('channel 11');
     expect(said).toContain('2405 MHz');
-    expect(said).toContain('channel 25');
+    expect(said).toMatch(/[Cc]hannel 25/);
     // Never silently: moving it re-forms the network.
     expect(said).toMatch(/paired again/);
+    // And never as a diagnosis of an outage — it is a standing handicap whose
+    // size depends on how busy the Zigbee side is. Saying more than that sends
+    // somebody after the wrong radio for an evening.
+    expect(said).not.toMatch(/unreachable|cannot be reached/i);
   });
 
   it('stays quiet when the two radios are already clear of each other', () => {

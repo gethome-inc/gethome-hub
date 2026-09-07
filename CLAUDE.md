@@ -1785,14 +1785,16 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   5 MHz apart from 2405 MHz, a 20 MHz Wi-Fi channel is its centre ±11 MHz, so
   Zigbee2MQTT's default of 11 (2405 MHz) sits inside Wi-Fi channel 1 — with the
   coordinator on the Pi's USB socket and the Wi-Fi antenna printed on the board
-  beside it. **The failure is not a Zigbee failure**, which is the whole reason
-  it is worth a bullet: Zigbee wins the contention and Wi-Fi loses *inbound*,
-  and because beacons are small and slow they keep arriving, so the link reports
-  a healthy signal (−38 dBm on the hub this was found on) while data frames are
-  retried away. What that looks like from outside is the same picture the Wi-Fi
-  power-save bullet above describes — a hub that is up, running its automations
-  over the very radio jamming it, unreachable from every phone in the house —
-  which is why both had to be ruled out separately. `install.sh` picks the
+  beside it. **What it costs is retries and throughput, in
+  proportion to how busy the Zigbee side is**, and the size is the part worth
+  writing down: a Zigbee frame is tens of bytes at 250 kbit/s, so a quiet home
+  is a fraction of a percent of the air and the collision costs almost nothing,
+  while a power meter reporting every few seconds costs progressively more. It
+  is a standing handicap on the Wi-Fi, **never an explanation for a hub that
+  disappears outright** — that is a link that is down or a path that is broken,
+  and mistaking one for the other sends a whole evening after the wrong radio.
+  Avoiding it is free before the network exists and expensive after, which is
+  the whole reason it is decided at install time. `install.sh` picks the
   channel furthest from whatever Wi-Fi channel the hub is associated on, 26
   excluded (regions cap its power, some devices will not join it) and 25 as the
   answer when there is no Wi-Fi to measure. **Only when this hub has never
