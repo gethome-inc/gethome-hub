@@ -894,6 +894,123 @@ if ! $SUDO systemctl restart mosquitto >/dev/null 2>&1; then
   service_failure mosquitto
 fi
 
+# ── Wi-Fi must not doze ────────────────────────────────────────────────────
+# A hub is a machine nobody talks to for hours and then everybody talks to at
+# once — a phone opens the app, Studio browses for it, somebody SSHs in. That
+# is the worst traffic pattern there is for 802.11 power save, and on the
+# Raspberry Pi's brcmfmac it is the difference between a hub that answers and
+# a hub that has to be woken up. The chip is asked to sleep by default
+# (`brcmf_cfg80211_set_power_mgmt: power save enabled`, in every Pi's kernel
+# log), and the failure that follows is the one nobody can diagnose from the
+# app: the board is up, the coordinator is up, a motion rule is switching the
+# hall light on — and both apps say the hub cannot be reached, because the
+# radio is asleep and the access point's buffered frames went nowhere. It
+# takes SSH down with it, which is exactly what makes it look like the hub's
+# own fault. The one fact that says otherwise is that the automations kept
+# running, and nobody is looking at that while the app says "can't reach".
+#
+# The saving is on the order of 20 mA, on a mains-powered board that is the
+# home's front door. Not a trade worth making — so it goes off now, and off
+# again on every association, because that is where it comes back.
+#
+# A wired hub needs none of this: the interface is whichever one carries the
+# default route (which provably exists — the bundle was just downloaded over
+# it), and a machine that reaches the LAN over Ethernet gets no unit, no
+# dispatcher, and nothing said about it. `GETHOME_NET_DIR` and the two path
+# overrides are there for the same reason `GETHOME_CMDLINE` is: so a test can
+# run this against files it owns rather than against the machine it is on.
+find_iw() {
+  local found
+  found="$(command -v iw 2>/dev/null || true)"
+  if [[ -z "$found" && -x /usr/sbin/iw ]]; then found=/usr/sbin/iw; fi
+  printf '%s' "$found"
+}
+
+keep_wifi_awake() {
+  local net_dir="${GETHOME_NET_DIR:-/sys/class/net}"
+  local dispatcher="${GETHOME_NM_DISPATCHER:-/etc/NetworkManager/dispatcher.d/50-gethome-wifi-awake}"
+  local unit="${GETHOME_WIFI_UNIT:-/etc/systemd/system/gethome-wifi-awake.service}"
+  local iface iw_bin persisted=""
+
+  iface="$(ip -o route show default 2>/dev/null \
+    | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }' || true)"
+  # Wired, or no default route to judge by: nothing to do and nothing to say.
+  [[ -n "$iface" && -d "${net_dir}/${iface}/wireless" ]] || return 0
+
+  iw_bin="$(find_iw)"
+  if [[ -z "$iw_bin" ]]; then
+    $SUDO apt-get install -y -qq --no-install-recommends iw >/dev/null 2>&1 || true
+    iw_bin="$(find_iw)"
+  fi
+  if [[ -z "$iw_bin" ]]; then
+    warn "This hub reaches the network over Wi-Fi (${iface}) and 'iw' could not be installed, so power saving is still on. The hub may stop answering for minutes at a time while the radio sleeps."
+    return 0
+  fi
+
+  # The link that is up right now, so this install does not have to wait for a
+  # reconnect to take effect.
+  $SUDO "$iw_bin" dev "$iface" set power_save off >/dev/null 2>&1 || true
+
+  if command -v nmcli >/dev/null 2>&1; then
+    # NetworkManager turns power save back on as it associates, so a value
+    # written into one profile is a value the next profile has not got — and a
+    # home that re-enters its Wi-Fi password next month gets a fresh profile
+    # with the fault back in it. The dispatcher covers every wireless
+    # connection this machine ever grows, which is the one thing enumerating
+    # today's profiles cannot do. NM ignores a dispatcher script that anyone
+    # but root can write, so the ownership and the mode are part of the fix.
+    $SUDO mkdir -p "$(dirname "$dispatcher")"
+    if $SUDO tee "$dispatcher" >/dev/null <<DISPATCH
+#!/bin/sh
+# Installed by GetHome. NetworkManager turns 802.11 power save back on as it
+# associates; this turns it off again once the connection is up, for whichever
+# wireless interface came up. deploy/install.sh says why.
+[ "\$2" = "up" ] || exit 0
+[ -d "${net_dir}/\$1/wireless" ] || exit 0
+exec ${iw_bin} dev "\$1" set power_save off
+DISPATCH
+    then
+      $SUDO chown root:root "$dispatcher" 2>/dev/null || true
+      if $SUDO chmod 0755 "$dispatcher"; then persisted="NetworkManager"; fi
+    fi
+  else
+    # A wpa_supplicant/dhcpcd machine has no dispatcher, so the unit is bound
+    # to the device and runs whenever it appears.
+    if $SUDO tee "$unit" >/dev/null <<UNIT
+[Unit]
+Description=Keep the GetHome hub's Wi-Fi radio awake
+Wants=sys-subsystem-net-devices-${iface}.device
+After=sys-subsystem-net-devices-${iface}.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=${iw_bin} dev ${iface} set power_save off
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    then
+      $SUDO systemctl daemon-reload >/dev/null 2>&1 || true
+      if $SUDO systemctl enable --now gethome-wifi-awake >/dev/null 2>&1; then
+        persisted="systemd"
+      fi
+    fi
+  fi
+
+  # Ask the radio rather than trusting the write: a driver with no support for
+  # the call answers success and changes nothing.
+  if ! $SUDO "$iw_bin" dev "$iface" get power_save 2>/dev/null | grep -qi 'power save: off'; then
+    warn "Wi-Fi power saving could not be turned off on ${iface}. The hub works, but it may stop answering for minutes at a time while the radio sleeps — the apps and SSH both go quiet while the hub itself keeps running."
+  elif [[ -z "$persisted" ]]; then
+    warn "Wi-Fi power saving is off on ${iface} now, but it could not be made to stay off, so it comes back on the next reconnect."
+  else
+    say "Wi-Fi power saving is off on ${iface}, and stays off across reconnects (${persisted})."
+  fi
+}
+
+keep_wifi_awake
+
 # ── mDNS ───────────────────────────────────────────────────────────────────
 # avahi answers for this machine's own name; the hub hands it the
 # `_gethome._tcp` service rather than running a second responder of its own.

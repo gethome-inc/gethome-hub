@@ -113,6 +113,20 @@ published for it. Both the installer and GetHome Studio stop first and say that
 the *card* needs rewriting, not that the Pi is wrong. Studio checks the card
 before it writes anything at all.
 
+**Wi-Fi is fine, and the install turns its power saving off.** A hub is talked
+to in bursts — a phone opens the app, Studio browses for it, somebody SSHs in —
+and 802.11 power save is at its worst exactly there. On the Raspberry Pi's
+Broadcom radio it produces a failure that looks nothing like its cause: the
+board is up and its automations keep firing, while the apps and SSH both say
+the machine cannot be reached, for seconds or for ten minutes. The installer
+turns power saving off on whichever interface carries the LAN and makes it stay
+off across reconnects; a hub on Ethernet is left alone. It costs about 20 mA on
+a board that is plugged into the wall.
+
+Give the hub a fixed address while you are in the router — a DHCP reservation
+for its MAC is enough. The apps find it over mDNS and remember the address they
+last saw, so a hub that moves is a hub they have to find again.
+
 ### The Zigbee coordinator
 
 A USB Zigbee coordinator is what lets the hub pair Zigbee devices — bulbs,

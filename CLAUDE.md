@@ -1780,6 +1780,37 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   an attack and too tight for the feature it protects would pass every static
   check and ship a broken integrator story. `docs/mqtt-integrations.md` is
   canonical for integrators, `docs/api.md` for the route.
+- **The hub's Wi-Fi must not doze, and the failure it causes is why this is in
+  the installer rather than in a troubleshooting page.** 802.11 power save is on
+  by default on the Pi's brcmfmac (`brcmf_cfg80211_set_power_mgmt: power save
+  enabled`, in every Pi's kernel log), and a hub is the worst possible traffic
+  pattern for it: nobody talks to the machine for hours, and then a phone opens
+  the app. What comes out the other side is a hub that is *up* and unreachable —
+  the board running, the coordinator running, a motion rule switching the hall
+  light on, and both apps saying the hub cannot be reached. **It takes SSH with
+  it**, which is the half that misleads: an owner who cannot reach port 8420
+  *or* port 22 concludes the hub has crashed, and every measurement taken
+  afterwards (memory, restarts, `MemoryHigh`, disk) comes back clean, because
+  nothing was ever wrong with the hub. The one fact pointing the right way is
+  that the automations kept running, and nobody looks at that while the app says
+  "can't reach". `keep_wifi_awake()` turns it off on the interface carrying the
+  default route, and a wired hub gets no unit, no dispatcher and nothing said
+  about it. Four rules. **Off now *and* off later**: NetworkManager re-enables
+  it on every association, so the live `iw` call is only half the fix — the
+  other half is a dispatcher script, which covers every wireless profile the
+  machine ever grows where writing `802-11-wireless.powersave` into today's
+  profiles would miss the one a home creates when it retypes its Wi-Fi password
+  next month; a machine with no NetworkManager gets a unit bound to the device
+  instead. **Ask the radio, never the write** — a driver with no support for the
+  call answers success and changes nothing, so the outcome is read back with
+  `get power_save` and an unverified one is a `@@WARN@@`, the `service_failure`
+  rule one layer down. **The interface is the one carrying the default route**,
+  which provably exists at that point in the install (the bundle was just
+  downloaded over it), so nothing has to guess between a LAN interface and one
+  in AP mode. And the paths are overridable (`GETHOME_NET_DIR`,
+  `GETHOME_NM_DISPATCHER`, `GETHOME_WIFI_UNIT`) for the reason `GETHOME_CMDLINE`
+  is — `test/deploy-wifi.test.ts` runs the real function against files it owns,
+  including running the dispatcher the way NetworkManager runs it.
 - **When a unit won't start, put the reason in the log.** `service_failure()`
   prints `systemctl status` and the last journal lines into the install output.
   The mosquitto bug above was invisible for a whole round because the installer

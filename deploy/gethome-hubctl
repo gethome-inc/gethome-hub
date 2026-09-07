@@ -403,7 +403,7 @@ cmd_uninstall() {
   # one suffix, so both of these survived an uninstall and were left pointing at
   # units that no longer existed.
   $SUDO systemctl disable --now "$HUB_UNIT" "$Z2M_UNIT" "$DETECT_UNIT" gethome-zram.service \
-    gethome-radio.path gethome-update.path >/dev/null 2>&1 || true
+    gethome-wifi-awake.service gethome-radio.path gethome-update.path >/dev/null 2>&1 || true
   $SUDO rm -f /etc/systemd/system/gethome-*.service /etc/systemd/system/gethome-*.path
   $SUDO rm -f /etc/udev/rules.d/99-gethome-zigbee.rules
   $SUDO rm -f /etc/mosquitto/conf.d/gethome.conf
@@ -411,6 +411,9 @@ cmd_uninstall() {
   # refusing anonymous clients on a machine with no hub left to authenticate.
   $SUDO rm -f /etc/mosquitto/gethome.passwd /etc/mosquitto/gethome.acl
   $SUDO rm -f /etc/avahi/services/gethome-hub.service
+  # The one file that is not ours by name: without it NetworkManager goes on
+  # running a script for a hub that is gone, on every association.
+  $SUDO rm -f /etc/NetworkManager/dispatcher.d/50-gethome-wifi-awake
   $SUDO rm -f /etc/sysctl.d/60-gethome.conf
   $SUDO rm -f /usr/local/lib/gethome-zigbee-detect.sh /usr/local/lib/gethome-zram.sh
   $SUDO rm -rf "$INSTALL_DIR" /var/lib/gethome "$CONF_DIR"
