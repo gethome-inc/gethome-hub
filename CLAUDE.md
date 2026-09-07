@@ -1780,6 +1780,22 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   an attack and too tight for the feature it protects would pass every static
   check and ship a broken integrator story. `docs/mqtt-integrations.md` is
   canonical for integrators, `docs/api.md` for the route.
+- **`Storage=auto` is not persistence, and a hub that cannot remember
+  yesterday cannot be diagnosed.** systemd reads it as "persist if
+  `/var/log/journal` exists", and on the Pi this was found on that directory
+  existed and was **empty** — journald had never adopted it, so everything the
+  machine logged lived in `/run` and went with every reboot. What that costs is
+  precise: a hub that went unreachable on Tuesday and recovered by itself has
+  no record of Tuesday left by Wednesday, and `journalctl --list-boots`
+  answering with one boot is the only sign. `install.sh` states
+  `Storage=persistent` rather than inferring it, creates the directory and
+  flushes — the drop-in alone leaves the logs where they were — and bounds it
+  at 64 MB, because journald sizes itself at 10% of the filesystem and that is
+  six gigabytes of SD-card writes on a 64 GB card. This is the one place the
+  card's write budget is spent on something nobody reads until it matters:
+  every other bound here (`STATE_FLUSH_MS`, the activity log's two, the history
+  buckets) exists to *stop* writing, and this one exists because the alternative
+  is a support question with no evidence behind it.
 - **The hub's Wi-Fi must not doze, and the failure it causes is why this is in
   the installer rather than in a troubleshooting page.** 802.11 power save is on
   by default on the Pi's brcmfmac (`brcmf_cfg80211_set_power_mgmt: power save

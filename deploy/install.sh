@@ -894,6 +894,42 @@ if ! $SUDO systemctl restart mosquitto >/dev/null 2>&1; then
   service_failure mosquitto
 fi
 
+# ── The log has to survive the reboot that hid the problem ─────────────────
+# systemd's `Storage=auto` means "persist if /var/log/journal exists", and on
+# the Pi this was found on that directory existed and was **empty** — journald
+# had never been told to adopt it, so every log the machine had was in `/run`,
+# thrown away on every boot. The cost lands exactly where it hurts: a hub that
+# went unreachable on Tuesday and recovered by itself has no record of Tuesday
+# left by Wednesday, and what the machine was doing at the time is the only
+# question worth asking. `journalctl --list-boots` answering with one boot is
+# what that looks like from the outside.
+#
+# `Storage=persistent` states it rather than inferring it from a directory, and
+# the caps are for the SD card: journald sizes itself at 10% of the filesystem,
+# which on a 64 GB card is six gigabytes of writes nobody asked for. 64 MB is
+# weeks of a hub that is behaving itself, and the boots either side of one that
+# is not.
+$SUDO mkdir -p /etc/systemd/journald.conf.d
+if $SUDO tee /etc/systemd/journald.conf.d/50-gethome.conf >/dev/null <<'JOURNALD'
+# Written by GetHome. A hub is a machine nobody is sitting in front of, so what
+# it logged before the last reboot is usually the only evidence there is.
+[Journal]
+Storage=persistent
+# The bound is the SD card's, not the filesystem's: journald's own default
+# would take 10% of the card.
+SystemMaxUse=64M
+SystemMaxFileSize=8M
+RuntimeMaxUse=16M
+JOURNALD
+then
+  $SUDO mkdir -p /var/log/journal
+  $SUDO systemd-tmpfiles --create --prefix /var/log/journal >/dev/null 2>&1 || true
+  $SUDO systemctl restart systemd-journald >/dev/null 2>&1 || true
+  $SUDO journalctl --flush >/dev/null 2>&1 || true
+else
+  warn "The system log could not be made persistent, so a reboot will keep losing what the hub logged before it."
+fi
+
 # ── Wi-Fi must not doze ────────────────────────────────────────────────────
 # A hub is a machine nobody talks to for hours and then everybody talks to at
 # once — a phone opens the app, Studio browses for it, somebody SSHs in. That

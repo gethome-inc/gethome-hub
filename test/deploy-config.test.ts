@@ -481,6 +481,30 @@ describe('deploy/install.sh', () => {
    * against a `cmdline.txt` the test owns, exactly the way
    * `GETHOME_ZIGBEE_SCAN_DIR` lets the Zigbee tests stage a coordinator.
    */
+  /**
+   * **`Storage=auto` is not persistence, and the difference is invisible.**
+   * Found on a Zero 2 W whose `/var/log/journal` existed and was empty:
+   * journald had never adopted it, so `journalctl --list-boots` answered with
+   * the current boot and nothing else, and every outage the owner was trying
+   * to explain had been thrown away by the reboot that ended it.
+   */
+  it('makes the system log survive a reboot, within a bound the card can take', () => {
+    const journald = heredoc('JOURNALD');
+    // Stated, never inferred from a directory that may or may not be there.
+    expect(journald).toContain('Storage=persistent');
+    // And bounded: journald's own default is 10% of the filesystem, which on
+    // the cards these run on is gigabytes of writes nobody asked for.
+    expect(journald).toMatch(/^SystemMaxUse=\d+M$/m);
+    expect(journald).toMatch(/^RuntimeMaxUse=\d+M$/m);
+    const cap = Number(/^SystemMaxUse=(\d+)M$/m.exec(journald)![1]);
+    expect(cap).toBeGreaterThanOrEqual(16);
+    expect(cap).toBeLessThanOrEqual(256);
+    // The directory and the flush are what actually move it off /run — the
+    // drop-in alone leaves the logs exactly where they were.
+    expect(installer).toContain('mkdir -p /var/log/journal');
+    expect(installer).toContain('journalctl --flush');
+  });
+
   it('turns the memory cgroup back on without breaking the boot', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'gethome-cmdline-'));
     dirs.push(dir);
