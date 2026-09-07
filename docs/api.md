@@ -142,6 +142,11 @@ than no button.
 | `GET /automations/chats` | `automation.manage` **+** `hub.ai` | every conversation this home has had, newest first: `[{sessionId, startedAt, updatedAt, messageCount, title, live, spend?}]`. `title` is the **first thing the person said** — the agent's opening line is about the home rather than about what was asked — and `live` is whether it can still be *continued*, which is a different question from whether it can be read. `spend` is `{usd, provider, modelId, model}`: what it cost and what answered, with `model` the label to draw and `modelId` the id as recorded. It is **absent rather than zero** when the hub cannot say — `ai_runs` keeps sixty runs and a transcript a fortnight, so a readable conversation can outlive its own spend row, and `$0.00` about one that plainly cost something is a claim |
 | `GET /automations/chat/:id` | `automation.manage` **+** `hub.ai` | `{sessionId, live, spend?, messages}` — the transcript, oldest first, with the same `spend` block the list carries so a chat opened from a link says what it cost without the list having been read. `live: false` is history. A message is `{id, at, role, text, data?}` with `role` an **open** vocabulary (`user`/`agent`/`question`/`preview`/`note`); see [`docs/automations.md`](automations.md) for what `data` carries per row. **One turn can write several `preview` rows** — a reply that delivers two rules is one `agent` line followed by a card each, in submission order, so draw a card per row rather than assuming one per turn. The **first** row a round writes also carries `data.steps` — `[{text, kind, detail?}]`, what the agent did to produce it, the same three fields the `step` frame streams — so a conversation read back next week shows the working and not only the answer |
 | `DELETE /automations/chat/:id` | `automation.manage` **+** `hub.ai` | end it and write down what it spent |
+| `POST /assistant/chat` | `hub.ai` | start a conversation with the **assistant** — the agent behind the app's assistant button: `{message}` → `201 {sessionId, messages}`. Same acknowledgement shape and same rule as the automations chat above, and the same three `409` refusals. Guarded by `hub.ai` **alone**: asking what the kitchen is doing and switching a lamp on is the floor, and the key is asked because a conversation spends the home's money. Handing a job to another agent is where `automation.manage` is asked, and it is asked *inside the tool* — so a member whose role cannot do it gets a sentence the model reads out rather than a route that 403s |
+| `POST /assistant/chat/:id/messages` | `hub.ai` | `{message}` → the same acknowledgement. `410 conversation_ended` only when there is nothing left to read |
+| `GET /assistant/chats` | `hub.ai` | the assistant's own conversations, newest first, in the same shape `GET /automations/chats` answers. The two lists are **disjoint**: rows carry a `surface`, and a row written before that column existed is an automations row |
+| `GET /assistant/chat/:id` | `hub.ai` | `{sessionId, live, spend?, messages}`, the same shape as an automations transcript with one more `role`: **`handoff`**, a job handed to another agent. Its `data` is `{agent, title, brief, sessionId, status, automationIds}` — `sessionId` is the *other* agent's conversation, which is where the live trail, its questions and the rules it wrote are read from; `status` is `working`/`asked`/`delivered`/`failed` and is an **open** string; `automationIds` fills as that agent saves rules. Nothing about the other conversation is copied into this one |
+| `DELETE /assistant/chat/:id` | `hub.ai` | end it and write down what it spent |
 | `GET /settings/timezone` · `PUT /settings/timezone` | floor · `automation.manage` | what "at ten in the evening" means. The system's zone seeds it and the database owns it; `400 unknown_timezone` for one `Intl` cannot use, refused here rather than taking every schedule down on every tick |
 | `GET /device-mappings` | `hub.ai` | the mapping library: one entry per device model, `{adapter, exposesHash, vendor, model, status, source, problems, endpoints, deviceIds, createdAt, updatedAt}` |
 | `GET /device-mappings/:exposesHash` | `hub.ai` | the download — an envelope naming the device, see [below](#the-device-mapping-library) |
@@ -998,6 +1003,12 @@ the second provider reads exactly what it read before — plus a per-provider ha
     "openai":    { "hasKey": true, "model": "gpt-5.6-sol", "models": [ … ] }
   },
   "mapping":   { "provider": "anthropic", "choosable": true },
+  "assistant": { "model": "claude-opus-5",
+                 "models": [ { "id": "claude-opus-5", "label": "Opus 5",
+                               "note": "The most capable. Best at a house it has to work out.",
+                               "recommended": true },
+                             { "id": "claude-sonnet-5", "label": "Sonnet 5",
+                               "note": "Quicker and cheaper. …" } ] },
   "portraits": { "model": "gpt-image-2", "maxPerDevice": 6, "budgetBytes": 314572800 }
 }
 ```
@@ -1022,6 +1033,19 @@ money is worth stating even when it isn't a question. **`model` is what will
 run, not what is stored**: a setting naming a model no longer offered resolves
 to the one that is, so an app never draws a model this hub will not use. Writing
 a retired id is still accepted — it just isn't what runs.
+
+**`assistant` is a different question from `providers`, and it really is a
+picker.** `providers.<name>.models` answers "which model reads a device's
+exposes tree"; `assistant.models` answers "which model answers in the
+assistant", and the two lists differ because the trades do. A mapping
+descriptor is cached against a device model and shapes every unit of it the
+home ever meets, so a cheaper tier that is wrong once is wrong for ever and the
+list is one entry long. A conversation is many small rounds, read the moment
+they arrive and answered with another message when the reply is poor — so what
+a round costs is a real choice, and this list has two. Write it with
+`PATCH /settings/ai {assistantModel}`; `null` clears it back to the default. As
+above, `assistant.model` is what will **run**, and a stored id this build no
+longer offers resolves to the default rather than being refused.
 
 **`provider` and `mapping.provider` are the same answer**: which provider would
 recognise a device right now. With one key there is no choice to make; with two,
@@ -1523,7 +1547,14 @@ and then:
 {"type":"aiRun","event":{phase,id,at,kind,exposesHash,vendor?,model?,step?,ok?,costUsd?,error?}}
 {"type":"automationRun","run":{automationId,name,at,trigger,cause,outcome,commands,refused,detail?}}
 {"type":"automationChat","chat":{sessionId,phase,at,text,kind?,detail?}}  phase: thinking | delta | step | turn
+{"type":"assistantChat","chat":{…the same shape…}}      the assistant, on the same stream
 ```
+
+**The assistant rides the `automations` stream too, deliberately.** A job the
+assistant hands over is an *automations* conversation, so an app drawing a
+handoff card has to receive both kinds of frame for one screen — asking it to
+subscribe twice for that is a contract that will be got wrong once. One
+subscription, two frame types, told apart by `type`.
 
 Both carry their payload under their **own key** rather than the `event` that
 `zigbeeEvent` and `aiRun` use. That is not tidiness: a typed client decodes one

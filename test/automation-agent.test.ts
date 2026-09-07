@@ -1149,24 +1149,47 @@ describe('the chat service', () => {
     expect(summary?.spend?.model).toBe('Opus 5');
   });
 
-  it('counts what a live conversation has spent but not yet written down', async () => {
+  it('banks a turn as it lands, and still counts what is not on disk yet', async () => {
     /**
-     * **A chat in progress is exactly the one on screen**, and its rows are
-     * written when it submits and again when it closes — so reading the
-     * ledger alone would draw a paid conversation as free while somebody
-     * watched it work, and jump to the real figure minutes after they had
-     * stopped looking.
+     * **A turn is what spends, so a turn is what gets written down.**
+     *
+     * This test used to assert the opposite — "nothing in the ledger yet: it
+     * neither submitted nor closed" — and that was the shape of a real bug
+     * rather than a rule. A row was written when a conversation *delivered*
+     * something and otherwise only when the idle sweep dropped the session two
+     * hours later, and the assistant delivers nothing at all: it answers a
+     * question or switches a lamp on. So the whole price of a conversation sat
+     * in memory, and a hub restart — an update, a radio switch, a power cut —
+     * took it with it. Every price in both apps, gone at once, which is how it
+     * was found. The sweep is only reached from `start`, too, so a home that
+     * stopped beginning conversations never recorded the ones it had.
+     *
+     * The other half is unchanged and is still worth pinning: a chat in
+     * progress is exactly the one on screen, and whatever the round *now
+     * running* has spent is not on disk yet, so the ledger alone would draw it
+     * as cheaper than it is.
      */
-    const { chat } = await chatFor([{ kind: 'said', text: 'thinking about it' }]);
+    let spent = 0.12;
+    const { chat } = await chatFor(
+      [{ kind: 'said', text: 'thinking about it' }],
+      undefined,
+      undefined,
+      () => spent,
+    );
     const started = await chat.start({ memberId: memberId, message: 'go' });
     await chat.idle();
 
-    // Nothing in the ledger yet: it neither submitted nor closed.
-    expect(await handle.db.select().from(aiRunsTable)).toHaveLength(0);
+    // Banked by the turn itself: no delivery, no close, no sweep.
+    const rows = await handle.db.select().from(aiRunsTable);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.costUsd).toBeCloseTo(0.12);
+    expect(rows[0]?.sessionId).toBe(started.sessionId);
     expect(chat.isLive(started.sessionId)).toBe(true);
 
+    // And a round still running is added on top of what is on disk.
+    spent = 0.2;
     const [summary] = await chat.list();
-    expect(summary?.spend?.usd).toBeCloseTo(0.12);
+    expect(summary?.spend?.usd).toBeCloseTo(0.2);
     expect(summary?.spend?.model).toBe('Opus 5');
   });
 

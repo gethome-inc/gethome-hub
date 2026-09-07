@@ -2,9 +2,9 @@ import Anthropic from '@anthropic-ai/sdk';
 import type { Logger } from '../logging.js';
 import { automationDocumentSchema } from '../automations/schema.js';
 import { sanityCheckAutomation } from '../automations/sanity.js';
-import { AiUnavailableError, classifyApiError } from './errors.js';
-import { EFFORT, MAX_OUTPUT_TOKENS, type AgentAuth } from './agent-core.js';
-import { estimateCostUsd, isSupportedModel, supportedModelIds } from './models.js';
+import { type AgentAuth } from './agent-core.js';
+import { isSupportedModel, supportedModelIds } from './models.js';
+import { QuestionGate, RunUsage, streamTurn } from './chat/agent-loop.js';
 import {
   AUTOMATION_MAX_BUDGET_USD,
   AUTOMATION_MAX_RULES_PER_TURN,
@@ -66,32 +66,6 @@ function buildTools(): Anthropic.Tool[] {
   }));
 }
 
-class RunUsage {
-  private input = 0;
-  private output = 0;
-  private cacheRead = 0;
-  private cacheWrite = 0;
-
-  constructor(private readonly model: string) {}
-
-  add(usage: Anthropic.Usage | undefined): void {
-    if (!usage) return;
-    this.input += usage.input_tokens ?? 0;
-    this.output += usage.output_tokens ?? 0;
-    this.cacheRead += usage.cache_read_input_tokens ?? 0;
-    this.cacheWrite += usage.cache_creation_input_tokens ?? 0;
-  }
-
-  costUsd(): number {
-    return estimateCostUsd(this.model, {
-      input_tokens: this.input,
-      output_tokens: this.output,
-      cache_read_input_tokens: this.cacheRead,
-      cache_creation_input_tokens: this.cacheWrite,
-    });
-  }
-}
-
 export interface AutomationAgentOptions {
   auth: AgentAuth;
   modelId: string;
@@ -117,57 +91,17 @@ export function createAutomationConversation(
   const usage = new RunUsage(modelId);
 
   const messages: Anthropic.MessageParam[] = [];
-  /** The `ask_user` call the conversation is waiting on, if any. */
-  let pendingQuestion: string | null = null;
   /**
-   * Results for the **other** tool calls in the same response as that
-   * question, waiting to go back with the answer.
+   * The question this conversation is waiting on, and the other results from
+   * the same response that travel with its answer.
    *
-   * A model may call two things at once — look at the devices *and* ask which
-   * lamp — and the API's rule is per response, not per call: every `tool_use`
-   * in an assistant message must be answered by a `tool_result` in the very
-   * next message. Handing the question back used to abandon the rest, so the
-   * next request carried an assistant turn with an unanswered call in it and
-   * the whole conversation was refused with `400 tool_use ids were found
-   * without tool_result blocks`.
+   * Shared with the assistant (`chat/agent-loop.ts`), because the two bugs it
+   * exists for are the API's rule rather than this agent's: every `tool_use`
+   * in a response needs a `tool_result` in the very next message, and a
+   * conversation that breaks that is refused outright and for ever.
    */
-  let pendingResults: Anthropic.ToolResultBlockParam[] = [];
+  const gate = new QuestionGate(messages, log, 'automation agent');
 
-  /**
-   * Answer anything the last assistant turn left open, so the next request is
-   * a conversation the API will accept. See the call site for why.
-   *
-   * The results say the step did not finish, which is true and is the only
-   * thing that can be said — whatever threw did so before the tool ran, or
-   * while it did. `is_error` so the model treats it as a step to retry rather
-   * than as an outcome.
-   */
-  function settleDanglingCalls(): void {
-    const last = messages.at(-1);
-    if (last === undefined || last.role !== 'assistant' || !Array.isArray(last.content)) return;
-
-    const open = last.content
-      .filter((block): block is Anthropic.ToolUseBlock => block.type === 'tool_use')
-      .map((block) => block.id)
-      // The question the person is being asked is outstanding on purpose, and
-      // `answer()` is what closes it.
-      .filter((id) => id !== pendingQuestion);
-    if (open.length === 0) return;
-
-    log.warn(
-      { count: open.length },
-      'automation agent: closing tool calls a failed round left open',
-    );
-    messages.push({
-      role: 'user',
-      content: open.map((id) => ({
-        type: 'tool_result' as const,
-        tool_use_id: id,
-        content: 'That step did not finish. Try it again if you still need it.',
-        is_error: true,
-      })),
-    });
-  }
   let opened = false;
 
   /**
@@ -234,47 +168,19 @@ export function createAutomationConversation(
           };
         }
 
-        let response: Anthropic.Message;
-        try {
-          const stream = client.messages.stream(
-            {
-              model: modelId,
-              max_tokens: MAX_OUTPUT_TOKENS,
-              system: [
-                { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } },
-              ],
-              cache_control: { type: 'ephemeral' },
-              messages,
-              tools: definitions,
-              // `display: 'summarized'` on purpose: the default on Opus 5 is
-              // `omitted`, which streams empty thinking blocks — right for a
-              // job nobody watches, and a silent minute in a chat.
-              thinking: { type: 'adaptive', display: 'summarized' },
-              output_config: { effort: EFFORT },
-            },
-            { signal: controller.signal },
-          );
-          if (context?.onDelta) stream.on('text', (delta) => context.onDelta?.(delta));
-          // The reasoning, as it arrives. Only ever non-empty because the
-          // request asks for `display: 'summarized'` — with the default on this
-          // model the thinking blocks stream empty and this never fires, which
-          // is exactly the silence it exists to fill.
-          if (context?.onThinking) stream.on('thinking', (delta) => context.onThinking?.(delta));
-          response = await stream.finalMessage();
-        } catch (error) {
-          if (controller.signal.aborted) {
-            throw new AiUnavailableError(
-              'aborted',
-              `the automation agent stopped answering after ${AUTOMATION_TIMEOUT_MS / 1000}s`,
-            );
-          }
-          throw classifyApiError(error) ?? error;
-        }
-
-        usage.add(response.usage);
-        // Verbatim, thinking blocks included — the API requires it when a
-        // thinking conversation continues.
-        messages.push({ role: 'assistant', content: response.content });
+        const round = await streamTurn({
+          client,
+          modelId,
+          systemPrompt,
+          messages,
+          tools: definitions,
+          signal: controller.signal,
+          usage,
+          context,
+          label: 'the automation agent',
+          timeoutMs: AUTOMATION_TIMEOUT_MS,
+        });
+        const response = round.response;
 
         if (response.stop_reason === 'refusal') {
           return {
@@ -283,15 +189,7 @@ export function createAutomationConversation(
           };
         }
 
-        const said = response.content
-          .filter((block): block is Anthropic.TextBlock => block.type === 'text')
-          .map((block) => block.text)
-          .join('\n')
-          .trim();
-
-        const calls = response.content.filter(
-          (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use',
-        );
+        const { said, calls } = round;
 
         // A pause is the API asking to be called again with the same
         // conversation — but only once anything it *did* call has been
@@ -341,7 +239,7 @@ export function createAutomationConversation(
               });
               continue;
             }
-            if (pendingQuestion !== null) {
+            if (gate.isOpen) {
               // Two questions in one response. Only one can be outstanding —
               // an answer closes one call id — so the second is refused here
               // rather than left open, which would be the same 400 by another
@@ -381,7 +279,7 @@ export function createAutomationConversation(
             // response still needs its result, and skipping them left the
             // assistant turn half-answered and the API refusing the whole
             // conversation on the next request.
-            pendingQuestion = call.id;
+            gate.open(call.id);
             context?.onStep?.(toolStep('ask_user').summary, 'asking', parsed.data.question);
             handedBack = { kind: 'question', question: parsed.data };
             continue;
@@ -438,17 +336,11 @@ export function createAutomationConversation(
               //
               // So the submission wins and the question is retracted, in the
               // turn, where the model can see it happen.
-              if (pendingQuestion !== null) {
-                results.push({
-                  type: 'tool_result',
-                  tool_use_id: pendingQuestion,
-                  content:
-                    'That question was not asked: a rule was submitted in the same response, ' +
-                    'which ends the turn. Ask it once they have replied.',
-                  is_error: true,
-                });
-                pendingQuestion = null;
-              }
+              gate.retract(
+                results,
+                'That question was not asked: a rule was submitted in the same response, ' +
+                  'which ends the turn. Ask it once they have replied.',
+              );
               handedBack = { kind: 'submitted', rules: submitted, text: said };
             }
             continue;
@@ -474,7 +366,7 @@ export function createAutomationConversation(
           // own result is the person's answer, which does not exist until they
           // give it. So the rest are stashed and `answer()` sends them all
           // together.
-          pendingResults = results;
+          gate.stash(results);
           return handedBack;
         }
 
@@ -589,7 +481,7 @@ export function createAutomationConversation(
     modelId,
 
     async send(text, context) {
-      if (pendingQuestion !== null) {
+      if (gate.isOpen) {
         // Somebody typed instead of tapping an option. That is an answer, and
         // treating it as a fresh message would leave the model's question
         // unclosed and the API refusing the conversation.
@@ -614,7 +506,7 @@ export function createAutomationConversation(
        * outstanding by design and `pendingResults` already accounts for every
        * other call in it.
        */
-      settleDanglingCalls();
+      gate.settleDangling();
       messages.push({
         role: 'user',
         content: opened ? text : `${taskPrompt}\n\n${text}`.trim(),
@@ -625,27 +517,17 @@ export function createAutomationConversation(
     },
 
     async answer(text, context) {
-      if (pendingQuestion === null) return this.send(text, context);
-      const toolUseId = pendingQuestion;
-      const alsoOutstanding = pendingResults;
-      pendingQuestion = null;
-      pendingResults = [];
-      messages.push({
-        role: 'user',
-        // The answer **and** every other call the same response made. One
-        // message, every `tool_use` in the assistant turn accounted for —
-        // which is the API's actual rule, and sending only the answer is what
-        // used to refuse the conversation outright.
-        content: [
-          ...alsoOutstanding,
-          { type: 'tool_result', tool_use_id: toolUseId, content: text },
-        ],
-      });
+      if (!gate.isOpen) return this.send(text, context);
+      // The answer **and** every other call the same response made. One
+      // message, every `tool_use` in the assistant turn accounted for — which
+      // is the API's actual rule, and sending only the answer is what used to
+      // refuse the conversation outright.
+      gate.answer(text);
       return pump(context);
     },
 
     awaitingAnswer() {
-      return pendingQuestion !== null;
+      return gate.isOpen;
     },
 
     costUsd() {

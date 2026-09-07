@@ -361,6 +361,15 @@ export function attachWebSocket(
    *  same opt-in stream: it is the highest-rate frame the hub can emit and it
    *  matters only to the one client with the chat open. */
   const onAutomationChat = (event: AutomationChatEvent) => send({ type: 'automationChat', chat: event });
+  /**
+   * The assistant's own frames, on the **same** opt-in stream.
+   *
+   * One subscription rather than two, because a handoff's frames are the
+   * *other* agent's `automationChat` frames: an app watching an assistant
+   * conversation has to receive both to draw the card, and asking it to
+   * subscribe twice for one screen is a contract that will be got wrong once.
+   */
+  const onAssistantChat = (event: AutomationChatEvent) => send({ type: 'assistantChat', chat: event });
 
   const available = (stream: OptionalStream): boolean =>
     stream === 'mqtt' ? deps.mqttObserver !== undefined : true;
@@ -386,6 +395,7 @@ export function attachWebSocket(
       if (stream === 'automations') {
         deps.events.on('automationRun', onAutomationRun);
         deps.events.on('automationChat', onAutomationChat);
+        deps.events.on('assistantChat', onAssistantChat);
       }
     }
     send({
@@ -407,6 +417,7 @@ export function attachWebSocket(
       if (stream === 'automations') {
         deps.events.off('automationRun', onAutomationRun);
         deps.events.off('automationChat', onAutomationChat);
+        deps.events.off('assistantChat', onAssistantChat);
       }
     }
     send({ type: 'subscribed', streams: [...subscribed] });
@@ -495,6 +506,7 @@ export function attachWebSocket(
     if (subscribed.has('automations')) {
       deps.events.off('automationRun', onAutomationRun);
       deps.events.off('automationChat', onAutomationChat);
+      deps.events.off('assistantChat', onAssistantChat);
     }
     subscribed.clear();
   };

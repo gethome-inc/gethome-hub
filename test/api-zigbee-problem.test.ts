@@ -77,6 +77,7 @@ describe.skipIf(!handle)('why Zigbee is down, over HTTP', () => {
     engine: automations,
     store: automationStore,
     chat: automationChat,
+    assistant: assistantChat,
   } = await startedAutomations(
       db,
       events,
@@ -95,6 +96,7 @@ describe.skipIf(!handle)('why Zigbee is down, over HTTP', () => {
       automations,
       automationStore,
       automationChat,
+      assistantChat,
       history: await startedHistory(db, events),
       portraits: testPortraits(db, events),
       settings,

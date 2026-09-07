@@ -739,12 +739,34 @@ export const automationChatMessages = sqliteTable(
     id: uuidPk(),
     sessionId: text('session_id').notNull(),
     at: createdAt('at'),
-    /** user | agent | question | preview | note */
+    /** user | agent | question | preview | handoff | note */
     role: text('role').notNull(),
     text: text('text').notNull(),
-    /** Options for a question, the automation id for a preview. */
+    /** Options for a question, the automation id for a preview, the delegated
+     *  session for a handoff. */
     data: text('data', { mode: 'json' }),
     memberId: text('member_id').references(() => members.id, { onDelete: 'set null' }),
+    /**
+     * Which agent's conversation this row belongs to — `automation` or
+     * `assistant`, null meaning `automation`.
+     *
+     * **One transcript store rather than two**, because everything around a
+     * row is surface-agnostic and worth writing once: the fortnight's
+     * retention sweep, the recap a revived conversation is primed with, the
+     * per-round step capture, the spend link into `ai_runs`. A second table
+     * would be a second copy of all of it, and the second copy is where the
+     * bug lives.
+     *
+     * Nullable and additive, so a build older than this column still reads
+     * every row — the migration rule. What that build cannot do is tell the
+     * two apart, so a rolled-back hub lists assistant conversations among the
+     * automations ones. That is a confusing row on a build that has already
+     * failed its health check, which is the cheaper of the two costs.
+     */
+    surface: text('surface'),
   },
-  (table) => [index('automation_chat_session').on(table.sessionId, table.at)],
+  (table) => [
+    index('automation_chat_session').on(table.sessionId, table.at),
+    index('automation_chat_surface').on(table.surface, table.at),
+  ],
 );

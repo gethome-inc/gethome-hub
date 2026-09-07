@@ -338,6 +338,25 @@ export function automationCatalog(): AutomationCatalog {
  * say — which unit a number is in, why a threshold on a noisy reading is
  * refused, that 0 means open.
  */
+/**
+ * What a command can be, in words.
+ *
+ * Its own function because two agents need it and only one of them needs the
+ * rest of the catalog: the assistant sends commands and never writes a
+ * document, so handing it the triggers, the conditions and the readable paths
+ * would be a page of vocabulary about a thing it cannot do — paid for on the
+ * first round of every conversation.
+ */
+export function commandsAsPrompt(): string {
+  const catalog = automationCatalog();
+  const lines = ['COMMANDS — what can be sent to a device, and what it must have:'];
+  for (const command of catalog.commands) {
+    const needs = command.capability ? ` (needs ${command.capability})` : '';
+    lines.push(`- ${command.id}${needs}: ${command.summary}${command.note ? ` ${command.note}` : ''}`);
+  }
+  return lines.join('\n');
+}
+
 export function catalogAsPrompt(): string {
   const catalog = automationCatalog();
   const lines: string[] = [];
@@ -369,11 +388,7 @@ export function catalogAsPrompt(): string {
     lines.push(`- ${path.id}: ${path.summary}${unit}${continuous}`);
   }
 
-  lines.push('', 'COMMANDS — what an action can send, and what the target must have:');
-  for (const command of catalog.commands) {
-    const needs = command.capability ? ` (needs ${command.capability})` : '';
-    lines.push(`- ${command.id}${needs}: ${command.summary}${command.note ? ` ${command.note}` : ''}`);
-  }
+  lines.push('', commandsAsPrompt());
 
   lines.push(
     '',

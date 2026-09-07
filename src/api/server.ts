@@ -23,7 +23,13 @@ import type { MatterAdapter } from '../adapters/matter/adapter.js';
 import type { ZigbeeAdapter } from '../adapters/zigbee/adapter.js';
 // Dependency-free model catalog (a price table and an allowlist) — importing
 // it here does not pull the AI stack into the API layer.
-import { effectiveModel, isSupportedModel, PROVIDER_MODELS, supportedModelIds } from '../ai/models.js';
+import {
+  ASSISTANT_MODELS,
+  effectiveModel,
+  isSupportedModel,
+  PROVIDER_MODELS,
+  supportedModelIds,
+} from '../ai/models.js';
 // Local operations on stored JSON — zod only, no Anthropic SDK in this graph.
 // `MappingLibrary.repair` loads the agent on demand.
 import type { MappingLibrary } from '../ai/library.js';
@@ -33,6 +39,7 @@ import {
   AutomationNotConfiguredError,
   type AutomationChat,
 } from '../ai/automation-chat.js';
+import type { AssistantChat } from '../ai/assistant-chat.js';
 import type { AutomationStore } from '../automations/store.js';
 import { automationDocumentSchema } from '../automations/schema.js';
 import { sanityCheckAutomation } from '../automations/sanity.js';
@@ -135,6 +142,13 @@ export interface ApiDeps {
    * missing route it cannot tell from an old hub.
    */
   automationChat: AutomationChat;
+  /**
+   * The assistant's conversations. Constructed unconditionally for the reason
+   * the automations chat is: a hub with no key never builds a provider client
+   * and the routes answer `409 ai_not_configured`, which is the answer an app
+   * needs rather than a missing route it cannot tell from an old hub.
+   */
+  assistantChat: AssistantChat;
 }
 
 /**
@@ -1799,6 +1813,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       status,
       providers: { anthropic: forProvider('anthropic'), openai: forProvider('openai') },
       mapping: { provider: ai.provider, choosable: ai.mappingChoosable },
+      // What answers in the assistant, and what it could answer on. Its own
+      // block rather than more fields on `providers`, because it is a
+      // different question from "which model reads a device's exposes tree"
+      // and is offered a different list for reasons that have nothing to do
+      // with the other one.
+      assistant: { model: ai.assistant.model, models: ASSISTANT_MODELS.choices },
       portraits: deps.portraits.describe(),
     };
   };
@@ -1843,6 +1863,16 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     model: modelField('anthropic'),
     anthropicModel: modelField('anthropic'),
     openaiModel: modelField('openai'),
+    /**
+     * Which model answers in the assistant.
+     *
+     * Deliberately **not** validated against the offered list. The list moves,
+     * a retired id is still priced, and `getAiSettings` already turns an
+     * unoffered choice into the default on the way out — so refusing one here
+     * would only 400 an app a version behind for a value that is harmless.
+     * `null` clears it back to the default.
+     */
+    assistantModel: z.string().min(1).max(120).nullable().optional(),
     anthropicApiKey: apiKeyField('anthropic'),
     openaiApiKey: apiKeyField('openai'),
     mappingProvider: z.enum(AI_PROVIDERS).optional(),
@@ -1914,6 +1944,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const anthropicModel = body.anthropicModel !== undefined ? body.anthropicModel : body.model;
     if (anthropicModel !== undefined) await deps.settings.setAiModel(anthropicModel, 'anthropic');
     if (body.openaiModel !== undefined) await deps.settings.setAiModel(body.openaiModel, 'openai');
+    // Its own column, because the assistant is offered its own list. A model
+    // this build has retired is stored rather than refused — `getAiSettings`
+    // already answers with what will *run* — so an older app naming one is
+    // never 400-ed for it.
+    if (body.assistantModel !== undefined) {
+      await deps.settings.setAssistantModel(body.assistantModel);
+    }
     if (body.mappingProvider !== undefined) {
       // Asked after the key writes above, so one request can save a key and
       // point the agent at it. A provider with no credential is refused rather
@@ -2851,6 +2888,69 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (refused) return refused;
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     await deps.automationChat.close(id);
+    return reply.code(204).send();
+  });
+
+  // ── The assistant ────────────────────────────────────────────────────────
+
+  /**
+   * The conversation behind the assistant button, and it is guarded by
+   * **`hub.ai` alone**.
+   *
+   * Not `automation.manage`, which the automations chat needs: asking what the
+   * kitchen is doing and switching a lamp on is the floor — an app whose whole
+   * job is working the home cannot have a member who may not work the home,
+   * and reading it is the floor everywhere else here too. `hub.ai` is asked
+   * because a conversation spends the home's money, which is the one thing
+   * about this that is not free.
+   *
+   * Handing a job to another agent is where a permission is asked, and it is
+   * asked *there* — when the tool runs, against that agent's own key — so a
+   * guest gets a sentence the model can read out rather than a feature that is
+   * silently absent.
+   */
+  app.post('/api/v1/assistant/chat', needs('hub.ai'), async (request, reply) => {
+    const body = z.object({ message: z.string().trim().min(1).max(2_000) }).parse(request.body);
+    try {
+      const started = await deps.assistantChat.start({
+        memberId: request.member!.id,
+        message: body.message,
+      });
+      return reply.code(201).send(started);
+    } catch (error) {
+      return chatRefusal(error, reply);
+    }
+  });
+
+  app.post('/api/v1/assistant/chat/:id/messages', needs('hub.ai'), async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const { message } = z
+      .object({ message: z.string().trim().min(1).max(2_000) })
+      .parse(request.body);
+    const answered = await deps.assistantChat.reply(id, request.member!.id, message);
+    // `410` rather than `404`: the conversation existed and its transcript is
+    // still readable — what is gone is the ability to continue it.
+    if (!answered) return reply.code(410).send({ error: 'conversation_ended' });
+    return answered;
+  });
+
+  /** Listed before the `:id` route below, or Fastify parses `chats` as a uuid. */
+  app.get('/api/v1/assistant/chats', needs('hub.ai'), async () => deps.assistantChat.list());
+
+  app.get('/api/v1/assistant/chat/:id', needs('hub.ai'), async (request) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const spend = await deps.assistantChat.spend(id);
+    return {
+      sessionId: id,
+      live: deps.assistantChat.isLive(id),
+      ...(spend !== undefined ? { spend } : {}),
+      messages: await deps.assistantChat.transcript(id),
+    };
+  });
+
+  app.delete('/api/v1/assistant/chat/:id', needs('hub.ai'), async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    await deps.assistantChat.close(id);
     return reply.code(204).send();
   });
 

@@ -57,6 +57,7 @@ beforeAll(async () => {
     engine: automations,
     store: automationStore,
     chat: automationChat,
+    assistant: assistantChat,
   } = await startedAutomations(db, events, registry, activity, { settings });
   engine = automations;
 
@@ -72,6 +73,7 @@ beforeAll(async () => {
     automations,
     automationStore,
     automationChat,
+    assistantChat,
     history: await startedHistory(db, events),
     portraits: testPortraits(db, events),
     settings,

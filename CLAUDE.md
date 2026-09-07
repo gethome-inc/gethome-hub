@@ -15,8 +15,8 @@ The `docs/` files are canonical for their domains; read the relevant one before
 touching that code: `architecture.md` (module boundaries, data flow),
 `device-schema.md` (**the** capability/unit/wire contract), `api.md`,
 `zigbee.md`, `matter.md`, `mqtt-integrations.md` (public integrator
-convention), `ai-adaptation.md`, `automations.md`, `portraits.md`,
-`ecosystem.md`.
+convention), `ai-adaptation.md`, `automations.md`, `assistant.md`,
+`portraits.md`, `ecosystem.md`.
 
 **There is no Docker and no database server anywhere any more.** The hub runs as
 systemd units (`deploy/install.sh`, `deploy/gethome-hubctl`) and the store is a
@@ -969,15 +969,26 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `ai_runs.session_id` is the link: `automation_id` is null for a chat that
   submitted nothing and a revived one writes a row per incarnation, so nothing
   else could total them. **Each row is a delta, never a running total** — one
-  is written at every submission (a conversation that has done its job should
-  not wait on an abandoned tab) and another when the session closes, so a
-  two-rule chat writes several and summing totals would report half as much
-  again as it cost; `record` was once-only for a while, which simply dropped
-  everything after the first rule. **A live conversation's unwritten
-  remainder is added** where `GET /automations/chats` answers, because the
-  chat somebody is watching is exactly the one with no row yet, and drawing it
-  as free until minutes after they stop looking is the worst possible moment
-  to be right. And **the model is read back, never re-derived**:
+  is written at the end of **every turn**, so a chat writes several and summing
+  totals would report far more than it cost; `record` was once-only for a
+  while, which simply dropped everything after the first rule.
+  **A turn is what spends, so a turn is what is written down** (`ChatRuntime.
+  bank`), and that was learned the expensive way. The row used to wait for a
+  *delivery* — a rule submitted, a job handed over — and otherwise for the idle
+  sweep two hours later; the assistant delivers nothing at all, it answers a
+  question or switches a lamp on, so the whole price of a conversation sat in
+  memory and a hub restart took it with it. Every price in both apps
+  disappeared at once after an update, which is how it was found. The sweep is
+  only reached from `start` besides, so a home that stops beginning
+  conversations never records the ones it had. The row is **awaited before the
+  `turn` frame** so an app that re-reads the moment it is told to finds the
+  round it just watched, and swallowed if it fails, because bookkeeping must
+  not be what ends a turn. `RETAIN_RUNS` moved 60 → 250 with it: sixty was
+  chosen when a run was a *job*, and per turn it had become about ten
+  conversations against a fortnight of transcript they are meant to price.
+  **A live conversation's unwritten remainder is still added** where
+  `GET /automations/chats` answers, because the round *now running* has spent
+  money no row has yet. And **the model is read back, never re-derived**:
   `effectiveModel` answers "what will *run*" and is meant to move with the
   offered list, which is precisely wrong for a record of a run that already
   happened — so `provider`/`modelId` are the columns verbatim and only the
@@ -1086,6 +1097,67 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   them it was a bypass, letting the suite reach a conversation the real hub
   would have refused — the "a mock laxer than the thing it stands in for tests
   the mock" trap, and exactly why the refusal shipped untested.
+- **There are two conversational agents now, and one runtime under both.**
+  `docs/assistant.md` is canonical. The assistant (`src/ai/assistant-*.ts`) is
+  the one behind the app's assistant button: it answers about the home and the
+  app, works devices, presses scenes — and **hands automation work to the
+  automations agent** rather than learning the DSL.
+  **`ChatRuntime` (`src/ai/chat/chat-runtime.ts`) is everything that is not
+  about which agent is talking**, extracted from `AutomationChat` rather than
+  copied out of it: sessions with a lifetime, the memory rebuilt from the
+  transcript, the four socket phases, the step capture, the spend deltas, the
+  retention, the list. A subclass supplies which model and prompt open a
+  conversation and what to write down for the arms only it has; the three arms
+  *every* agent has are the runtime's, so a new agent cannot get them subtly
+  different. `chat/agent-loop.ts` is the same argument for the parts that are
+  the **API's** shape — the two cache breakpoints, `display: 'summarized'`, the
+  abort that becomes a sentence, and `QuestionGate`, which is the rule that no
+  request may carry a `tool_use` with no `tool_result` after it. Each agent
+  keeps its own `pump`, because what *ends* a turn genuinely differs.
+  **One transcript store**, told apart by a nullable `surface` column on
+  `automation_chat_messages` (null = `automation`, which every row written
+  before it is). Two tables would be a second retention sweep, a second recap
+  and a second step capture — and the second copy is where the bug lives. The
+  rollback cost is named rather than discovered: an older build ignores the
+  column and would list assistant chats among the automations ones, which is a
+  confusing row on a build that has already failed its health check.
+  **The handoff is the design, and it is two rules.** The *brief* is the whole
+  interface — a self-contained task in the person's language, and the only
+  thing that crosses — so the assistant never receives the other agent's tool
+  calls, reasoning or transcript, which is what keeps its context the size of a
+  conversation however many agents there come to be. And it is
+  **acknowledged, never awaited**: `delegate` returns in milliseconds with the
+  other agent's session id, the `POST /devices/:id/remap` lesson this
+  repository has now paid for twice. What the app draws is a `handoff` row
+  carrying that session id and nothing copied from it — the live trail, the
+  questions and the rules are read from the sub-agent's own conversation, over
+  the frames an app already draws. Its `status` moves as that agent's turns
+  land, written by reading its transcript rather than by a second round with
+  the model: the assistant is never re-entered for a job it has handed on.
+  **The registry is a table because of the third agent, not the second**
+  (`src/ai/agents/registry.ts`): `delegate`'s description is *generated* from
+  it, so adding an agent is one entry rather than a new tool, a new prompt
+  paragraph and a release of both apps. `permission` is checked when the tool
+  runs, so a member whose role cannot hand a job over gets a sentence the model
+  reads out rather than a capability silently absent.
+  **The assistant's model list is its own** (`ASSISTANT_MODELS` — Opus 5 and
+  Sonnet 5), and the mapper's one-model list is untouched: a descriptor is
+  cached against a device model and shapes every unit of it for ever, while a
+  chat is many small rounds answered with another message when the reply is
+  poor. `effectiveAssistantModel` is what **runs** as well as what is reported,
+  which is the gap that cost the mapper a release. **And `modelLabel` reads
+  both lists**, which is the same shape of gap from the other end: it names a
+  model that has already run and searched the mapper's alone, so a chat on
+  Sonnet 5 — offered here and nowhere else — reported `claude-sonnet-5` where a
+  chat on Opus reported "Opus 5", and the apps drew a raw id over one
+  conversation and a name over the next. One `ai_runs` table, two surfaces
+  asking one question of it, so the answer is the union. Effort is `medium` here
+  against the mapper's `high`, and is exposed by neither.
+  **`control_device` is the one tool that writes to the home**, through the
+  registry's ordinary path and into the activity log **named for the person who
+  asked** — the feed is read a week later and "the assistant" is nobody anyone
+  can go and ask. Bounded per *turn*, not as a guard against a person tapping
+  quickly but against a model reading "everything off" as the whole house.
 - **Nothing is unsupported by default — three layers, in order.** Devices are
   made usable by (1) **typed capabilities** (canonical schema), then (2)
   **generic custom fields** (`custom`) for every leftover parameter, generated
@@ -1615,6 +1687,30 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   deliberately allowed — an old build without an index is slower, not broken.
   This is the rule the `devices.favorite` column has always been kept for; it was
   written down and enforced by nothing.
+  **And the journal is the other half, because drizzle gates on `when` and never
+  on the hash.** `SQLiteSyncDialect.migrate` reads the newest `created_at` out
+  of `__drizzle_migrations` once and runs every migration whose `when` is
+  greater, so a migration that is **renamed is a migration it has never seen**,
+  byte-identical or not. That matters because renaming is not optional: two
+  branches each add an `0012`, one lands first, and the other has to be
+  renumbered on the merge — and git says nothing about it, since the two `.sql`
+  files have different names and merge without a conflict, leaving a repository
+  with two migrations claiming one index. `test/migrations.test.ts` now asserts
+  the journal's four invariants (indices 0…n−1 once each, `when` strictly
+  increasing, a file per entry and an entry per file), which is what says so.
+  **The cost lands on hubs that installed the branch under the old number** —
+  every hub `--branch` was tested on, which is the whole point of branch
+  bundles. They already have the change and meet it again as a new migration:
+  `duplicate column name`, the hub exits 1, and the installer's rollback is the
+  only thing that saves the evening. The repair is to **record it as applied
+  rather than re-run it** — one row into `__drizzle_migrations` with the new
+  migration's `when` (the `hash` column is written but never read, so use the
+  real `sha256` of the file) — after checking the schema really does already
+  carry the change. Two shortcuts are wrong and both look right: giving the
+  renumbered migration its *old* `when` fixes the test hub and silently skips it
+  on every hub already past that point, and teaching the boot path to drop an
+  `ADD COLUMN` whose column exists puts cleverness in the one code path whose
+  failure costs a rollback, while masking a migration that is genuinely wrong.
 - **Versioning is a symlink, not a container.** Each build unpacks into
   `/opt/gethome/releases/<build-id>/` and `current` points at the one that
   runs; CI stamps `VERSION` into the bundle, which names the directory and
@@ -1871,7 +1967,8 @@ After landing a change, update the docs it invalidates in the same change:
 schema/units/wire → `docs/device-schema.md` (+ the iOS repo needs a matching
 change — flag it); routes/auth → `docs/api.md`; adapter behavior/topics →
 `docs/zigbee.md` / `docs/matter.md` / `docs/mqtt-integrations.md`; AI
-trigger/DSL → `docs/ai-adaptation.md`; portraits → `docs/portraits.md`;
+trigger/DSL → `docs/ai-adaptation.md`; the assistant, the chat runtime or the
+delegate registry → `docs/assistant.md`; portraits → `docs/portraits.md`;
 module boundaries → this file +
 `docs/architecture.md`; installer markers, autostart or Zigbee detection →
 `docs/zigbee.md` + the marker list in `deploy/install.sh` (and flag the Studio

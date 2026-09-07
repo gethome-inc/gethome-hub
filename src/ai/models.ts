@@ -132,6 +132,66 @@ export const PROVIDER_MODELS: Readonly<
   },
 };
 
+/**
+ * What the **assistant** may run on, which is a different question from the
+ * mapper's and gets a different answer.
+ *
+ * The mapper offers one model per provider on purpose: a descriptor is cached
+ * against a device *model* and silently shapes every unit of it the home ever
+ * meets, so a cheaper tier that is wrong once is wrong for ever, and the run
+ * happens a handful of times in a hub's life. None of that is true of a chat.
+ * A conversation is many small rounds, it is read the moment it is written,
+ * and a reply somebody does not like is answered with another message — so
+ * what a model costs per round is a real trade a home can make, and both
+ * halves of it are visible.
+ *
+ * So the assistant offers two and the picker means something. Opus 5 is the
+ * default and the recommendation; Sonnet 5 is the same conversation at rather
+ * less than half the price. Both are already in `PRICING`, so nothing about
+ * cost estimation moves.
+ *
+ * Anthropic only, for the reason the automations agent is: only the Anthropic
+ * loop is written.
+ */
+export const ASSISTANT_MODELS: {
+  readonly default: string;
+  readonly choices: readonly ModelChoice[];
+} = {
+  default: 'claude-opus-5',
+  choices: [
+    {
+      id: 'claude-opus-5',
+      label: 'Opus 5',
+      note: 'The most capable. Best at a house it has to work out.',
+      recommended: true,
+    },
+    {
+      id: 'claude-sonnet-5',
+      label: 'Sonnet 5',
+      note: 'Quicker and cheaper. Good for everyday questions and switching things on.',
+    },
+  ],
+};
+
+/**
+ * Which model the assistant will actually run on.
+ *
+ * `effectiveModel`'s rule, and it exists separately for the same reason the
+ * list does: a stored model counts only while it is still offered, or retiring
+ * one leaves the homes that had chosen it as the only homes still running it,
+ * silently, with nothing on a screen changed.
+ *
+ * **And the loop has to read this, not the column.** That is the one bug the
+ * mapper paid a release for: every surface that *reported* a model went
+ * through `effectiveModel` while the call that picked one to run read the
+ * stored value, so a hub ran a model every screen said it was not running.
+ * `test/ai-model-choice.test.ts` pins both halves.
+ */
+export function effectiveAssistantModel(stored: string | null | undefined): string {
+  const offered = ASSISTANT_MODELS.choices.some((choice) => choice.id === stored);
+  return offered && stored ? stored : ASSISTANT_MODELS.default;
+}
+
 /** The Anthropic default, kept flat because the agent has always read it so. */
 export const DEFAULT_MODEL = PROVIDER_MODELS.anthropic.default;
 
@@ -173,6 +233,17 @@ export function effectiveModel(provider: AiProvider, stored: string | null | und
  * second table of names for retired models, which is a list to keep in step
  * with nothing to keep it honest.
  *
+ * **"The offered list" is every list this hub offers, not the mapper's**, and
+ * reading it as the mapper's alone is a bug that shipped. There are two
+ * vocabularies here — `PROVIDER_MODELS` for recognising a device and
+ * `ASSISTANT_MODELS` for a conversation — and Sonnet 5 is only on the second,
+ * so every assistant chat that ran on it reported `claude-sonnet-5` where a
+ * chat on Opus reported "Opus 5". The apps drew exactly that: a raw id at the
+ * top of one conversation and a name at the top of the next, which reads as
+ * the app failing to translate rather than as the hub naming two different
+ * things. Both surfaces record into one `ai_runs` table and both ask this
+ * question of it, so the answer has to cover the union.
+ *
  * It is the hub's job rather than an app's for the reason the model *list* is:
  * the apps render what the hub tells them instead of shipping ids of their own.
  *
@@ -181,10 +252,25 @@ export function effectiveModel(provider: AiProvider, stored: string | null | und
  * the case the lookup below has to survive.
  */
 export function modelLabel(provider: string, model: string): string {
-  const known = PROVIDER_MODELS[provider as AiProvider] as
-    | (typeof PROVIDER_MODELS)[AiProvider]
-    | undefined;
-  return known?.choices.find((choice) => choice.id === model)?.label ?? model;
+  return namedModels(provider).find((choice) => choice.id === model)?.label ?? model;
+}
+
+/**
+ * Every model this hub has a name for, under the provider that would have run
+ * it.
+ *
+ * The assistant's list is Anthropic-only — only that loop is written — so it
+ * is named under that provider and nowhere else, which keeps the lookup a
+ * statement about who ran what rather than a flat search of every id the hub
+ * has ever heard of. A model on both lists is named once; the first match wins
+ * and the two agree on the label, which is the only field read here.
+ */
+function namedModels(provider: string): readonly ModelChoice[] {
+  const mapper = (
+    PROVIDER_MODELS[provider as AiProvider] as (typeof PROVIDER_MODELS)[AiProvider] | undefined
+  )?.choices;
+  if (provider === 'anthropic') return [...(mapper ?? []), ...ASSISTANT_MODELS.choices];
+  return mapper ?? [];
 }
 
 /** Server-side web search, billed per request rather than per token. */

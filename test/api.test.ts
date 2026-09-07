@@ -81,6 +81,7 @@ describe.skipIf(!handle)('hub API', () => {
     engine: automations,
     store: automationStore,
     chat: automationChat,
+    assistant: assistantChat,
   } = await startedAutomations(
       db,
       events,
@@ -99,6 +100,7 @@ describe.skipIf(!handle)('hub API', () => {
       automations,
       automationStore,
       automationChat,
+      assistantChat,
       history,
       portraits: testPortraits(db, events, dataDir),
       settings,

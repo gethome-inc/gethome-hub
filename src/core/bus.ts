@@ -132,6 +132,21 @@ export interface HubEvents {
    * be attached to it.
    */
   automationChat: [event: AutomationChatEvent];
+  /**
+   * The same, for the assistant.
+   *
+   * A separate event rather than a `surface` field on the one above, because
+   * the two are addressed differently: an app with the automations page open
+   * wants one and an app with the assistant open wants the other, and telling
+   * them apart in the client after the fact means every frame of the busiest
+   * stream on the socket is delivered to a listener that will drop it.
+   *
+   * They ride the **same opt-in stream** (`automations`) all the same, which
+   * is what lets the assistant follow a conversation it delegated without a
+   * second subscription: a handoff's frames are that sub-agent's own
+   * `automationChat` frames, arriving on a socket that already has them.
+   */
+  assistantChat: [event: AutomationChatEvent];
 }
 
 /**
