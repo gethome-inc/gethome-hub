@@ -962,16 +962,37 @@ find_iw() {
   printf '%s' "$found"
 }
 
+# The interface the LAN is reached over, when that is a wireless one. Empty for
+# a wired hub, and empty when there is no default route to judge by.
+lan_wifi_iface() {
+  local net_dir="${GETHOME_NET_DIR:-/sys/class/net}" iface
+  iface="$(ip -o route show default 2>/dev/null \
+    | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }' || true)"
+  [[ -n "$iface" && -d "${net_dir}/${iface}/wireless" ]] || return 0
+  printf '%s' "$iface"
+}
+
+# What that interface is associated on, in MHz. Empty when it is not, or when
+# the driver will not say — the caller must treat that as "no information",
+# never as a frequency.
+wifi_frequency_mhz() {
+  local iface iw_bin
+  iface="$(lan_wifi_iface)"
+  [[ -n "$iface" ]] || return 0
+  iw_bin="$(find_iw)"
+  [[ -n "$iw_bin" ]] || return 0
+  "$iw_bin" dev "$iface" link 2>/dev/null | awk '/freq:/ { printf "%d", $2; exit }'
+}
+
 keep_wifi_awake() {
   local net_dir="${GETHOME_NET_DIR:-/sys/class/net}"
   local dispatcher="${GETHOME_NM_DISPATCHER:-/etc/NetworkManager/dispatcher.d/50-gethome-wifi-awake}"
   local unit="${GETHOME_WIFI_UNIT:-/etc/systemd/system/gethome-wifi-awake.service}"
   local iface iw_bin persisted=""
 
-  iface="$(ip -o route show default 2>/dev/null \
-    | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }' || true)"
   # Wired, or no default route to judge by: nothing to do and nothing to say.
-  [[ -n "$iface" && -d "${net_dir}/${iface}/wireless" ]] || return 0
+  iface="$(lan_wifi_iface)"
+  [[ -n "$iface" ]] || return 0
 
   iw_bin="$(find_iw)"
   if [[ -z "$iw_bin" ]]; then
@@ -1137,10 +1158,56 @@ $SUDO chown -R "$SERVICE_USER:$SERVICE_USER" "$Z2M_DATA_DIR"
 # rewriting it would lose somebody's whole Zigbee network. Creating it when it
 # is absent, or replacing one `onboarding:` line when it is present, does
 # neither.
+# ── Zigbee and Wi-Fi are the same band, and the default puts them on top ───
+# 802.15.4 channels 11–26 sit 5 MHz apart from 2405 MHz and are 2 MHz wide; a
+# 20 MHz Wi-Fi channel covers its centre ±11 MHz. So several Zigbee channels
+# fall *inside* every Wi-Fi channel, and Zigbee2MQTT's default — 11, at
+# 2405 MHz — is inside Wi-Fi channel 1, which is the commonest Wi-Fi channel
+# there is. On this hardware the two radios are centimetres apart: the
+# coordinator hangs off the Pi's USB socket and the Wi-Fi antenna is printed on
+# the board beside it.
+#
+# What that collision produces does not look like a Zigbee fault, which is what
+# makes it expensive. Zigbee wins — short frames, low duty cycle — and Wi-Fi
+# loses *inbound*: beacons are small and slow and still arrive, so the link
+# reports a healthy signal, while data frames to the hub are retried and
+# dropped. The hub is up, its automations are running over the very radio that
+# is jamming it, and every phone in the house says it cannot be reached.
+#
+# So the channel is picked at the only moment it can be picked: when this hub
+# has never formed a network. Changing it afterwards is not an upgrade — it is
+# a home whose sleepy devices all have to be paired again — so a hub that
+# already has a network keeps the channel it formed on, whatever the Wi-Fi
+# under it has done since.
+zigbee_channel_clear_of_wifi() {
+  local wifi_mhz="$1" best=25 best_gap=-1 channel gap mhz
+  # Nothing to measure — a wired hub, or a radio that would not say. 25 is
+  # still the better guess than 11: it is clear of Wi-Fi 1 and 6, which is most
+  # homes, and 11 sits inside the first of them.
+  if [[ -z "$wifi_mhz" ]]; then printf '25'; return 0; fi
+  # 26 is left out on purpose: several regions cap its transmit power and some
+  # devices will not join on it at all.
+  for channel in $(seq 11 25); do
+    mhz=$((2405 + 5 * (channel - 11)))
+    if (( mhz > wifi_mhz )); then gap=$((mhz - wifi_mhz)); else gap=$((wifi_mhz - mhz)); fi
+    if (( gap > best_gap )); then best_gap=$gap; best=$channel; fi
+  done
+  printf '%s' "$best"
+}
+
 Z2M_CONFIG="$Z2M_DATA_DIR/configuration.yaml"
 Z2M_ONBOARDING_CHANGED=""
 if [[ ! -f "$Z2M_CONFIG" ]]; then
-  printf 'onboarding: false\n' | $SUDO tee "$Z2M_CONFIG" >/dev/null \
+  # A backup means a network exists even with the config gone, and its channel
+  # is not ours to move.
+  if [[ -f "$Z2M_DATA_DIR/coordinator_backup.json" ]]; then
+    Z2M_NEW_CONFIG=$'onboarding: false\n'
+  else
+    ZIGBEE_CHANNEL="$(zigbee_channel_clear_of_wifi "$(wifi_frequency_mhz)")"
+    Z2M_NEW_CONFIG=$'onboarding: false\nadvanced:\n  channel: '"${ZIGBEE_CHANNEL}"$'\n'
+    say "Zigbee will form its network on channel ${ZIGBEE_CHANNEL}, clear of this hub's Wi-Fi."
+  fi
+  printf '%s' "$Z2M_NEW_CONFIG" | $SUDO tee "$Z2M_CONFIG" >/dev/null \
     && $SUDO chown "$SERVICE_USER:$SERVICE_USER" "$Z2M_CONFIG" \
     && Z2M_ONBOARDING_CHANGED=1
 elif grep -qE '^onboarding:[[:space:]]*true' "$Z2M_CONFIG" 2>/dev/null; then

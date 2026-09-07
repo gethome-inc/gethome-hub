@@ -90,8 +90,9 @@ function run(options: {
        SUDO=""
        say()  { printf 'SAY %s\\n' "$*"; }
        warn() { printf 'WARN %s\\n' "$*"; }
-       eval "$(sed -n '/^find_iw() {/,/^}/p' "$1")"
-       eval "$(sed -n '/^keep_wifi_awake() {/,/^}/p' "$1")"
+       for fn in find_iw lan_wifi_iface wifi_frequency_mhz keep_wifi_awake; do
+         eval "$(sed -n "/^$fn() {/,/^}/p" "$1")"
+       done
        keep_wifi_awake`,
       'bash',
       INSTALLER,
@@ -120,6 +121,83 @@ function run(options: {
 }
 
 const WIFI_ROUTE = 'default via 192.168.0.1 dev wlan0 proto dhcp src 192.168.0.200 metric 600\n';
+
+/** Run `zigbee_channel_clear_of_wifi` out of install.sh for one Wi-Fi centre. */
+function zigbeeChannelFor(wifiMhz: string): number {
+  return Number(
+    execFileSync(
+      'bash',
+      [
+        '-c',
+        `set -euo pipefail
+         eval "$(sed -n '/^zigbee_channel_clear_of_wifi() {/,/^}/p' "$1")"
+         zigbee_channel_clear_of_wifi "$2"`,
+        'bash',
+        INSTALLER,
+        wifiMhz,
+      ],
+      { encoding: 'utf8' },
+    ),
+  );
+}
+
+/**
+ * **Zigbee and Wi-Fi share the band, and Zigbee2MQTT's default sits in the
+ * middle of the commonest Wi-Fi channel there is.** Channel 11 is 2405 MHz,
+ * inside Wi-Fi channel 1 (2412 ± 11), with the coordinator on the Pi's USB
+ * socket and the Wi-Fi antenna printed on the board next to it. Zigbee wins
+ * that contention and Wi-Fi loses inbound, which reads as a hub that is up,
+ * running its automations, and unreachable from every phone in the house.
+ */
+describe('choosing a Zigbee channel', () => {
+  it('stays clear of whichever Wi-Fi channel this hub is on', () => {
+    // Wi-Fi 1 and 6 both push it to the top of the band; Wi-Fi 11 to the
+    // bottom. The point is the distance, not the particular number.
+    expect(zigbeeChannelFor('2412')).toBe(25);
+    expect(zigbeeChannelFor('2437')).toBe(25);
+    expect(zigbeeChannelFor('2462')).toBe(11);
+    expect(zigbeeChannelFor('2472')).toBe(11);
+  });
+
+  it('never lands inside the Wi-Fi channel it was given', () => {
+    for (const wifi of [2412, 2417, 2422, 2427, 2437, 2447, 2452, 2462, 2472]) {
+      const zigbee = zigbeeChannelFor(String(wifi));
+      const mhz = 2405 + 5 * (zigbee - 11);
+      // A 20 MHz Wi-Fi channel is its centre ± 11 MHz.
+      expect(Math.abs(mhz - wifi), `Zigbee ${zigbee} (${mhz} MHz) vs Wi-Fi ${wifi} MHz`)
+        .toBeGreaterThan(11);
+    }
+  });
+
+  /**
+   * A wired hub, or a radio that would not say, is *no information* — never a
+   * frequency. 25 is still the better guess than upstream's 11, which is
+   * inside Wi-Fi channel 1.
+   */
+  it('guesses away from the common Wi-Fi channels when it cannot measure', () => {
+    expect(zigbeeChannelFor('')).toBe(25);
+  });
+
+  /** 26 is capped or unsupported in enough places not to be worth choosing. */
+  it('never picks channel 26', () => {
+    for (let wifi = 2400; wifi <= 2490; wifi += 5) {
+      expect(zigbeeChannelFor(String(wifi))).toBeLessThanOrEqual(25);
+      expect(zigbeeChannelFor(String(wifi))).toBeGreaterThanOrEqual(11);
+    }
+  });
+
+  /**
+   * **And only when this hub has never formed a network.** Moving the channel
+   * on a home that already has one is not an upgrade, it is every sleepy
+   * device needing to be paired again.
+   */
+  it('leaves an existing network on the channel it formed on', () => {
+    const installer = readFileSync(INSTALLER, 'utf8');
+    expect(installer).toContain('coordinator_backup.json');
+    const guarded = installer.slice(installer.indexOf('if [[ ! -f "$Z2M_CONFIG" ]]; then'));
+    expect(guarded.slice(0, guarded.indexOf('elif'))).toContain('coordinator_backup.json');
+  });
+});
 
 describe('keeping the hub on the network', () => {
   /**

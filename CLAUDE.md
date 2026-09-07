@@ -1780,6 +1780,26 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   an attack and too tight for the feature it protects would pass every static
   check and ship a broken integrator story. `docs/mqtt-integrations.md` is
   canonical for integrators, `docs/api.md` for the route.
+- **Zigbee and Wi-Fi are one band, and upstream's default channel is inside the
+  commonest Wi-Fi channel there is.** 802.15.4 channels 11–26 are 2 MHz wide and
+  5 MHz apart from 2405 MHz, a 20 MHz Wi-Fi channel is its centre ±11 MHz, so
+  Zigbee2MQTT's default of 11 (2405 MHz) sits inside Wi-Fi channel 1 — with the
+  coordinator on the Pi's USB socket and the Wi-Fi antenna printed on the board
+  beside it. **The failure is not a Zigbee failure**, which is the whole reason
+  it is worth a bullet: Zigbee wins the contention and Wi-Fi loses *inbound*,
+  and because beacons are small and slow they keep arriving, so the link reports
+  a healthy signal (−38 dBm on the hub this was found on) while data frames are
+  retried away. What that looks like from outside is the same picture the Wi-Fi
+  power-save bullet above describes — a hub that is up, running its automations
+  over the very radio jamming it, unreachable from every phone in the house —
+  which is why both had to be ruled out separately. `install.sh` picks the
+  channel furthest from whatever Wi-Fi channel the hub is associated on, 26
+  excluded (regions cap its power, some devices will not join it) and 25 as the
+  answer when there is no Wi-Fi to measure. **Only when this hub has never
+  formed a network**, though — no `configuration.yaml` and no
+  `coordinator_backup.json` — because moving the channel of a home that already
+  works is not an upgrade: routers follow, sleepy end devices do not, and the
+  home wakes to a list of things to pair again. `docs/zigbee.md` is canonical.
 - **`Storage=auto` is not persistence, and a hub that cannot remember
   yesterday cannot be diagnosed.** systemd reads it as "persist if
   `/var/log/journal` exists", and on the Pi this was found on that directory

@@ -46,6 +46,36 @@ or 5 runs both together and never makes the choice.
    `POST /api/v1/zigbee/permit-join {"seconds":120}`) and put the device in
    pairing mode.
 
+### The channel, and why the default is the wrong one here
+
+**Zigbee and Wi-Fi are the same 2.4 GHz band, and Zigbee2MQTT's default channel
+sits inside the commonest Wi-Fi channel there is.** 802.15.4 channels 11–26 are
+2 MHz wide and 5 MHz apart from 2405 MHz; a 20 MHz Wi-Fi channel covers its
+centre ±11 MHz. So channel 11 — 2405 MHz — is inside Wi-Fi channel 1
+(2401–2423), and on this hardware the two radios are centimetres apart: the
+coordinator hangs off the Pi's USB socket and the Wi-Fi antenna is printed on
+the board next to it.
+
+The failure that produces is not a Zigbee failure, which is what makes it
+expensive to diagnose. Zigbee wins the contention — short frames, low duty
+cycle — and **Wi-Fi loses inbound**: beacons are small and slow and keep
+arriving, so the link goes on reporting a healthy signal, while data frames to
+the hub are retried and dropped. What an owner sees is a hub that is up, whose
+automations are running over the very radio that is jamming it, and which every
+phone in the house says cannot be reached.
+
+So `install.sh` picks the channel furthest from whatever Wi-Fi channel the hub
+is associated on, and does it **only when this hub has never formed a network** —
+no `configuration.yaml` and no `coordinator_backup.json`. Channel 26 is left out
+(several regions cap its transmit power, and some devices will not join on it),
+and a hub with no Wi-Fi to measure gets 25, which is clear of Wi-Fi 1 and 6.
+
+**An existing network keeps the channel it formed on**, whatever the Wi-Fi under
+it has done since. Moving it is not an upgrade: mains-powered routers usually
+follow, sleepy end devices usually do not, and the home wakes up to a list of
+things that have to be paired again. Changing the channel of a home that already
+works is the owner's decision, made in Zigbee2MQTT, with that cost understood.
+
 ### Finding the coordinator
 
 `deploy/zigbee-detect.sh` is the single authority on which USB device is a
