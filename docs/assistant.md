@@ -20,6 +20,17 @@ is many small rounds, read the moment they arrive and answered with another
 message when the reply is poor — so what a round costs is a real choice
 somebody can make, and both halves of it are visible.
 
+**Two lists means `modelLabel` has to read both**, and it did not. It names a
+model that has already run — the label an app draws over a finished
+conversation — and it searched the mapper's `PROVIDER_MODELS` alone. Sonnet 5
+is on the assistant's list and nowhere else, so a chat that ran on it reported
+`claude-sonnet-5` where a chat on Opus reported "Opus 5", and an app drew a raw
+id at the top of one conversation and a name at the top of the next, which
+reads as the app failing to translate rather than as the hub naming two
+different things. Both surfaces record into one `ai_runs` table and both ask
+this question of it, so the answer covers the union — the assistant's list
+under Anthropic, where it belongs, since only that loop is written.
+
 ## Two agents, one runtime
 
 `ChatRuntime` (`src/ai/chat/chat-runtime.ts`) is everything about *having* a

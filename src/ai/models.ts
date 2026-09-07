@@ -233,6 +233,17 @@ export function effectiveModel(provider: AiProvider, stored: string | null | und
  * second table of names for retired models, which is a list to keep in step
  * with nothing to keep it honest.
  *
+ * **"The offered list" is every list this hub offers, not the mapper's**, and
+ * reading it as the mapper's alone is a bug that shipped. There are two
+ * vocabularies here — `PROVIDER_MODELS` for recognising a device and
+ * `ASSISTANT_MODELS` for a conversation — and Sonnet 5 is only on the second,
+ * so every assistant chat that ran on it reported `claude-sonnet-5` where a
+ * chat on Opus reported "Opus 5". The apps drew exactly that: a raw id at the
+ * top of one conversation and a name at the top of the next, which reads as
+ * the app failing to translate rather than as the hub naming two different
+ * things. Both surfaces record into one `ai_runs` table and both ask this
+ * question of it, so the answer has to cover the union.
+ *
  * It is the hub's job rather than an app's for the reason the model *list* is:
  * the apps render what the hub tells them instead of shipping ids of their own.
  *
@@ -241,10 +252,25 @@ export function effectiveModel(provider: AiProvider, stored: string | null | und
  * the case the lookup below has to survive.
  */
 export function modelLabel(provider: string, model: string): string {
-  const known = PROVIDER_MODELS[provider as AiProvider] as
-    | (typeof PROVIDER_MODELS)[AiProvider]
-    | undefined;
-  return known?.choices.find((choice) => choice.id === model)?.label ?? model;
+  return namedModels(provider).find((choice) => choice.id === model)?.label ?? model;
+}
+
+/**
+ * Every model this hub has a name for, under the provider that would have run
+ * it.
+ *
+ * The assistant's list is Anthropic-only — only that loop is written — so it
+ * is named under that provider and nowhere else, which keeps the lookup a
+ * statement about who ran what rather than a flat search of every id the hub
+ * has ever heard of. A model on both lists is named once; the first match wins
+ * and the two agree on the label, which is the only field read here.
+ */
+function namedModels(provider: string): readonly ModelChoice[] {
+  const mapper = (
+    PROVIDER_MODELS[provider as AiProvider] as (typeof PROVIDER_MODELS)[AiProvider] | undefined
+  )?.choices;
+  if (provider === 'anthropic') return [...(mapper ?? []), ...ASSISTANT_MODELS.choices];
+  return mapper ?? [];
 }
 
 /** Server-side web search, billed per request rather than per token. */

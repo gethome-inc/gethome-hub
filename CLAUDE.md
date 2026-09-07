@@ -1134,7 +1134,13 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   cached against a device model and shapes every unit of it for ever, while a
   chat is many small rounds answered with another message when the reply is
   poor. `effectiveAssistantModel` is what **runs** as well as what is reported,
-  which is the gap that cost the mapper a release. Effort is `medium` here
+  which is the gap that cost the mapper a release. **And `modelLabel` reads
+  both lists**, which is the same shape of gap from the other end: it names a
+  model that has already run and searched the mapper's alone, so a chat on
+  Sonnet 5 — offered here and nowhere else — reported `claude-sonnet-5` where a
+  chat on Opus reported "Opus 5", and the apps drew a raw id over one
+  conversation and a name over the next. One `ai_runs` table, two surfaces
+  asking one question of it, so the answer is the union. Effort is `medium` here
   against the mapper's `high`, and is exposed by neither.
   **`control_device` is the one tool that writes to the home**, through the
   registry's ordinary path and into the activity log **named for the person who

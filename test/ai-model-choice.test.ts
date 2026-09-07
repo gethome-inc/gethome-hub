@@ -127,11 +127,43 @@ describe('naming a model that has already run', () => {
     expect(modelLabel('openai', 'gpt-5.6-sol')).toBe('GPT-5.6 Sol');
   });
 
-  it('hands back the raw id once it is retired, and never the current default', () => {
-    // `claude-sonnet-5` is priced but not offered — exactly the shape of a
-    // model a home ran before it was retired.
+  /**
+   * The bug this file was already watching for, from the direction it was not
+   * watching.
+   *
+   * There are two vocabularies — `PROVIDER_MODELS` for recognising a device,
+   * `ASSISTANT_MODELS` for a conversation — and `modelLabel` read only the
+   * first. Sonnet 5 is on the second alone, so every assistant chat that ran
+   * on it reported `claude-sonnet-5` where a chat on Opus reported "Opus 5",
+   * and the apps drew a raw id at the top of one conversation and a name at
+   * the top of the next.
+   *
+   * The assertion below used to say the opposite, and it was right when it was
+   * written: `claude-sonnet-5` was then priced and offered nowhere, which is
+   * exactly the shape of a retired model. The assistant shipping made it an
+   * offered one and nothing came back to this file — so the test went on
+   * passing about a fact that had changed, which is how the bug reached a
+   * screen. A genuinely retired id is used for that case now.
+   */
+  it('names a model the assistant offers, though the mapper does not', () => {
+    expect(modelLabel('anthropic', 'claude-sonnet-5')).toBe('Sonnet 5');
+    // Still not the mapper's to run: the two lists answer two questions, and
+    // this is the one that has to keep saying no.
     expect(effectiveModel('anthropic', 'claude-sonnet-5')).toBe('claude-opus-5');
-    expect(modelLabel('anthropic', 'claude-sonnet-5')).toBe('claude-sonnet-5');
+  });
+
+  it('hands back the raw id once it is retired, and never the current default', () => {
+    // Priced, so a row really can name it, and on neither list — which is
+    // what a model a home ran before it was retired looks like.
+    expect(effectiveModel('anthropic', 'claude-opus-4-6')).toBe('claude-opus-5');
+    expect(modelLabel('anthropic', 'claude-opus-4-6')).toBe('claude-opus-4-6');
+  });
+
+  it('does not name an Anthropic model under another provider', () => {
+    // The assistant's list is Anthropic-only, so it is searched under that
+    // provider and nowhere else: the label says who ran what, not merely
+    // whether the hub has ever heard of the id.
+    expect(modelLabel('openai', 'claude-sonnet-5')).toBe('claude-sonnet-5');
   });
 
   it('survives a provider the build no longer knows', () => {
