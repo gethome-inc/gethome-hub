@@ -1179,6 +1179,39 @@ $SUDO chown -R "$SERVICE_USER:$SERVICE_USER" "$Z2M_DATA_DIR"
 # a home whose sleepy devices all have to be paired again — so a hub that
 # already has a network keeps the channel it formed on, whatever the Wi-Fi
 # under it has done since.
+# The other half of that decision, for a hub that already has a network. The
+# channel is not ours to move there — but it is ours to *name*, and until
+# somebody names it the symptom belongs to nothing: Zigbee is connected, the
+# devices report, and the only casualty is the other radio.
+zigbee_network_channel() {
+  local backup="$Z2M_DATA_DIR/coordinator_backup.json" channel=""
+  if [[ -f "$backup" ]]; then
+    channel="$($SUDO grep -o '"logical_channel"[[:space:]]*:[[:space:]]*[0-9]*' "$backup" 2>/dev/null \
+      | head -n1 | grep -o '[0-9]*$' || true)"
+  fi
+  if [[ -z "$channel" && -f "$Z2M_CONFIG" ]]; then
+    channel="$($SUDO sed -n 's/^[[:space:]]*channel:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+      "$Z2M_CONFIG" 2>/dev/null | head -n1 || true)"
+  fi
+  printf '%s' "$channel"
+}
+
+warn_if_zigbee_jams_wifi() {
+  local wifi_mhz zigbee_channel zigbee_mhz gap clear
+  wifi_mhz="$(wifi_frequency_mhz)"
+  zigbee_channel="$(zigbee_network_channel)"
+  # No Wi-Fi to collide with, or no network yet: nothing to say either way.
+  [[ -n "$wifi_mhz" && -n "$zigbee_channel" ]] || return 0
+  (( zigbee_channel >= 11 && zigbee_channel <= 26 )) || return 0
+  zigbee_mhz=$((2405 + 5 * (zigbee_channel - 11)))
+  if (( zigbee_mhz > wifi_mhz )); then gap=$((zigbee_mhz - wifi_mhz)); else gap=$((wifi_mhz - zigbee_mhz)); fi
+  # A 20 MHz Wi-Fi channel is its centre ±11 MHz. Inside that, the coordinator
+  # is transmitting into this hub's own uplink from a few centimetres away.
+  (( gap <= 11 )) || return 0
+  clear="$(zigbee_channel_clear_of_wifi "$wifi_mhz")"
+  warn "This hub's Wi-Fi (${wifi_mhz} MHz) and its Zigbee network (channel ${zigbee_channel}, ${zigbee_mhz} MHz) are on the same frequency, and the two radios are a few centimetres apart. Zigbee wins that contention; the Wi-Fi loses traffic coming *in*, so the hub can go unreachable from the apps for minutes at a time while it is running perfectly and its automations keep firing. Moving Zigbee to channel ${clear} is the fix, and it is not done for you because the network re-forms: mains-powered devices usually follow, battery ones usually have to be paired again."
+}
+
 zigbee_channel_clear_of_wifi() {
   local wifi_mhz="$1" best=25 best_gap=-1 channel gap mhz
   # Nothing to measure — a wired hub, or a radio that would not say. 25 is
@@ -1683,6 +1716,13 @@ if [[ -n "$ZIGBEE_READY" ]]; then
       ZIGBEE_READY=""
     fi
   fi
+fi
+
+# A Zigbee network that works perfectly can still be sitting on top of this
+# hub's own Wi-Fi, and nothing above would notice: the coordinator is reached,
+# the devices report, and the only casualty is the other radio.
+if [[ -n "$ZIGBEE_READY" ]]; then
+  warn_if_zigbee_jams_wifi
 fi
 
 # What this hub can actually talk to, said in as many words. The radio decision

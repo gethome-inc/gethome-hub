@@ -70,6 +70,14 @@ no `configuration.yaml` and no `coordinator_backup.json`. Channel 26 is left out
 (several regions cap its transmit power, and some devices will not join on it),
 and a hub with no Wi-Fi to measure gets 25, which is clear of Wi-Fi 1 and 6.
 
+**A hub that already has a network is told rather than moved.** Every install
+before this chose nothing and formed on 11, so the installer compares the
+network's channel against the Wi-Fi the hub is associated on and emits a
+`@@WARN@@` when they overlap, naming both, the channel to move to, and the cost
+of moving. It has to be said out loud because nothing else will say it: the
+coordinator is reached, the devices report, `zigbee.connected` is `true`, and
+the only casualty is the other radio.
+
 **An existing network keeps the channel it formed on**, whatever the Wi-Fi under
 it has done since. Moving it is not an upgrade: mains-powered routers usually
 follow, sleepy end devices usually do not, and the home wakes up to a list of

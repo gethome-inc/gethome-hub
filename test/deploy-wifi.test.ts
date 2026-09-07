@@ -149,6 +149,88 @@ function zigbeeChannelFor(wifiMhz: string): number {
  * that contention and Wi-Fi loses inbound, which reads as a hub that is up,
  * running its automations, and unreachable from every phone in the house.
  */
+/**
+ * Run `warn_if_zigbee_jams_wifi` with a fake `ip`/`iw` and a coordinator backup
+ * the test owns. Returns whatever it said, which for most hubs is nothing.
+ */
+function collisionWarning(options: { wifiMhz: string; zigbeeChannel?: number }): string {
+  const dir = mkdtempSync(path.join(tmpdir(), 'gethome-zigbee-'));
+  dirs.push(dir);
+  const bin = path.join(dir, 'bin');
+  const net = path.join(dir, 'net');
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(path.join(net, 'wlan0', 'wireless'), { recursive: true });
+  script(path.join(bin, 'ip'), `printf '%s' "$FAKE_ROUTE"`);
+  script(path.join(bin, 'iw'), `[ "$3" = "link" ] && printf 'Connected\n\tfreq: %s.0\n' "$FAKE_FREQ"; exit 0`);
+  if (options.zigbeeChannel !== undefined) {
+    writeFileSync(
+      path.join(dir, 'coordinator_backup.json'),
+      JSON.stringify({ metadata: { version: 1 }, logical_channel: options.zigbeeChannel }),
+    );
+  }
+
+  return execFileSync(
+    'bash',
+    [
+      '-c',
+      `set -euo pipefail
+       SUDO=""
+       Z2M_DATA_DIR="$2"
+       Z2M_CONFIG="$2/configuration.yaml"
+       say()  { printf 'SAY %s\n' "$*"; }
+       warn() { printf 'WARN %s\n' "$*"; }
+       for fn in find_iw lan_wifi_iface wifi_frequency_mhz zigbee_channel_clear_of_wifi \
+                 zigbee_network_channel warn_if_zigbee_jams_wifi; do
+         eval "$(sed -n "/^$fn() {/,/^}/p" "$1")"
+       done
+       warn_if_zigbee_jams_wifi`,
+      'bash',
+      INSTALLER,
+      dir,
+    ],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH ?? ''}`,
+        FAKE_ROUTE: WIFI_ROUTE,
+        FAKE_FREQ: options.wifiMhz,
+        GETHOME_NET_DIR: net,
+      },
+    },
+  );
+}
+
+/**
+ * **A hub that already has a network keeps its channel — but is told.** This is
+ * the half the choice above cannot reach: every hub installed before it, this
+ * one included, formed on Zigbee 11 and may be sitting on its own uplink. The
+ * symptom has no owner until somebody names it, because Zigbee is connected,
+ * the devices report, and the casualty is the other radio entirely.
+ */
+describe('an existing Zigbee network on top of the hub Wi-Fi', () => {
+  it('says so, and names the channel to move to and what moving costs', () => {
+    // The case this was found on: Zigbee 11 (2405 MHz) inside Wi-Fi 1 (2412).
+    const said = collisionWarning({ wifiMhz: '2412', zigbeeChannel: 11 });
+    expect(said).toContain('WARN');
+    expect(said).toContain('channel 11');
+    expect(said).toContain('2405 MHz');
+    expect(said).toContain('channel 25');
+    // Never silently: moving it re-forms the network.
+    expect(said).toMatch(/paired again/);
+  });
+
+  it('stays quiet when the two radios are already clear of each other', () => {
+    expect(collisionWarning({ wifiMhz: '2412', zigbeeChannel: 25 })).toBe('');
+    expect(collisionWarning({ wifiMhz: '2462', zigbeeChannel: 11 })).toBe('');
+  });
+
+  /** No network yet is the install that picks a channel, not one to warn about. */
+  it('stays quiet when this hub has no network', () => {
+    expect(collisionWarning({ wifiMhz: '2412' })).toBe('');
+  });
+});
+
 describe('choosing a Zigbee channel', () => {
   it('stays clear of whichever Wi-Fi channel this hub is on', () => {
     // Wi-Fi 1 and 6 both push it to the top of the band; Wi-Fi 11 to the

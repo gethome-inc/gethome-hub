@@ -1799,7 +1799,12 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   formed a network**, though — no `configuration.yaml` and no
   `coordinator_backup.json` — because moving the channel of a home that already
   works is not an upgrade: routers follow, sleepy end devices do not, and the
-  home wakes to a list of things to pair again. `docs/zigbee.md` is canonical.
+  home wakes to a list of things to pair again. And a hub that already
+  has a network is **told rather than moved**: the installer compares the two
+  and emits a `@@WARN@@` naming both channels, the one to move to and what
+  moving costs, because nothing else in the system will ever say it —
+  `zigbee.connected` is `true`, the devices report, and the casualty is the
+  other radio. `docs/zigbee.md` is canonical.
 - **`Storage=auto` is not persistence, and a hub that cannot remember
   yesterday cannot be diagnosed.** systemd reads it as "persist if
   `/var/log/journal` exists", and on the Pi this was found on that directory
