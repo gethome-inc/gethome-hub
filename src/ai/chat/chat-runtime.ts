@@ -818,6 +818,9 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       this.base.log.warn({ err: error }, 'chat turn failed');
       await this.write(session, 'note', message);
       session.lastAt = Date.now();
+      // A round that failed still spent money, so it is written down like
+      // any other — see the note beside the call on the ordinary path.
+      await this.bank(session, false);
       // **The `turn` frame goes out on this path too.** It is what tells an
       // app the stored transcript is ready to re-read — and what takes its
       // "thinking" indicator down. Returning without one left a failed round
@@ -829,7 +832,46 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
 
     session.lastAt = Date.now();
     await this.recordTurn(session, turn);
+    await this.bank(session, true);
     this.settle(session, turn.kind);
+  }
+
+  /**
+   * Write what this turn spent into the ledger, now.
+   *
+   * **A turn is what spends, so a turn is what gets written down**, and
+   * leaving it to anything later cost every price in the apps once. The
+   * ledger row used to be written when a conversation *delivered* something —
+   * a rule submitted, a job handed over — and otherwise only when the idle
+   * sweep dropped the session two hours later. The assistant usually delivers
+   * nothing at all: it answers a question, switches a lamp on, and its whole
+   * cost sits in `ChatSession.conversation`, which is memory. So a hub restart
+   * — an update, a radio switch, a power cut — took every unrecorded penny
+   * with it, and every conversation that had been open at the time went from
+   * naming its price to naming nothing. Which is exactly what an owner sees
+   * after updating their hub: the prices, everywhere, gone.
+   *
+   * Worse, the sweep is only reached from `start`, so a home that stops
+   * beginning new conversations never records the ones it had.
+   *
+   * `record` is already a **delta** and already no-ops when nothing new has
+   * been spent, so calling it every turn is what that design was for: several
+   * rows sum to one conversation, and the row for the turn that has just
+   * landed is on disk before the reply reaches the phone.
+   *
+   * **Awaited, and never allowed to throw.** One small insert before the
+   * `turn` frame goes out, so an app that re-reads the moment it is told the
+   * transcript is ready finds the price of the round it has just watched
+   * rather than the one before it; and swallowed, because bookkeeping must
+   * not be what ends a turn — the run log's own rule, which is also why
+   * `AiRunLog.finish` catches its own write.
+   */
+  private async bank(session: ChatSession<Turn>, ok: boolean): Promise<void> {
+    try {
+      await this.record(session, ok);
+    } catch {
+      // Nothing to do about it here, and nothing worth failing a turn for.
+    }
   }
 
   protected emit(event: AutomationChatEvent): void {

@@ -40,6 +40,17 @@ to continue one, the four socket phases, per-round step capture, spend recorded
 as deltas into `ai_runs`, a fortnight's retention, and the list that makes a
 conversation findable again.
 
+**Spend is banked at the end of every turn**, and that is a rule rather than a
+detail. The row used to wait for a *delivery* — a rule submitted, a job handed
+over — and otherwise for the idle sweep two hours later. This agent delivers
+nothing: it answers a question, or switches a lamp on. So the whole price of a
+conversation sat in `ChatSession` memory, and a hub restart — an update, a
+radio switch, a power cut — took it with it; after updating a hub, every price
+in both apps was simply gone. `ChatRuntime.bank` writes it as each turn lands,
+awaited before the `turn` frame so an app re-reading on that signal finds the
+round it has just watched, and swallowed if the write fails, because
+bookkeeping must not be what ends a turn.
+
 It was all inside `AutomationChat`, and none of it was ever about automations.
 A subclass supplies three things and nothing else: which model and prompt open
 a conversation, what to write down for the turn arms only it can produce, and

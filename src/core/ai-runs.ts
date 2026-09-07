@@ -8,10 +8,18 @@ import type { HubEventBus } from './bus.js';
 
 /**
  * How many runs are kept. Each is a row plus at most `MAX_STEPS` short strings,
- * so sixty of them are tens of kilobytes — a log an owner can scroll without
- * being a thing that grows on an SD card for the life of the hub.
+ * so a couple of hundred are tens of kilobytes — a log an owner can scroll
+ * without being a thing that grows on an SD card for the life of the hub.
+ *
+ * **It was sixty, and sixty stopped meaning what it used to.** The number was
+ * chosen when a run was a *job*: one recognition of one device, a handful in a
+ * hub's life. A conversation now writes a row per **turn** — that is what makes
+ * a price survive a restart, see `ChatRuntime.bank` — so sixty rows became
+ * about ten conversations, against a fortnight of transcript they are supposed
+ * to price. The same prune also decides how far back the AI page's run list
+ * reaches, and chat rows carry no steps, so they are the cheap ones.
  */
-const RETAIN_RUNS = 60;
+const RETAIN_RUNS = 250;
 
 /** Steps recorded per run. A run that searches more than this has gone wrong
  *  in a way the first forty lines will already show. */

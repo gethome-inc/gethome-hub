@@ -969,15 +969,26 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `ai_runs.session_id` is the link: `automation_id` is null for a chat that
   submitted nothing and a revived one writes a row per incarnation, so nothing
   else could total them. **Each row is a delta, never a running total** — one
-  is written at every submission (a conversation that has done its job should
-  not wait on an abandoned tab) and another when the session closes, so a
-  two-rule chat writes several and summing totals would report half as much
-  again as it cost; `record` was once-only for a while, which simply dropped
-  everything after the first rule. **A live conversation's unwritten
-  remainder is added** where `GET /automations/chats` answers, because the
-  chat somebody is watching is exactly the one with no row yet, and drawing it
-  as free until minutes after they stop looking is the worst possible moment
-  to be right. And **the model is read back, never re-derived**:
+  is written at the end of **every turn**, so a chat writes several and summing
+  totals would report far more than it cost; `record` was once-only for a
+  while, which simply dropped everything after the first rule.
+  **A turn is what spends, so a turn is what is written down** (`ChatRuntime.
+  bank`), and that was learned the expensive way. The row used to wait for a
+  *delivery* — a rule submitted, a job handed over — and otherwise for the idle
+  sweep two hours later; the assistant delivers nothing at all, it answers a
+  question or switches a lamp on, so the whole price of a conversation sat in
+  memory and a hub restart took it with it. Every price in both apps
+  disappeared at once after an update, which is how it was found. The sweep is
+  only reached from `start` besides, so a home that stops beginning
+  conversations never records the ones it had. The row is **awaited before the
+  `turn` frame** so an app that re-reads the moment it is told to finds the
+  round it just watched, and swallowed if it fails, because bookkeeping must
+  not be what ends a turn. `RETAIN_RUNS` moved 60 → 250 with it: sixty was
+  chosen when a run was a *job*, and per turn it had become about ten
+  conversations against a fortnight of transcript they are meant to price.
+  **A live conversation's unwritten remainder is still added** where
+  `GET /automations/chats` answers, because the round *now running* has spent
+  money no row has yet. And **the model is read back, never re-derived**:
   `effectiveModel` answers "what will *run*" and is meant to move with the
   offered list, which is precisely wrong for a record of a run that already
   happened — so `provider`/`modelId` are the columns verbatim and only the
