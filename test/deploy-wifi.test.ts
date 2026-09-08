@@ -38,6 +38,8 @@ interface Outcome {
   unit: string;
   /** What the installer said, `say` and `warn` together. */
   output: string;
+  /** The fake sysfs this run was given, so a test can add an interface to it. */
+  netDir: string;
 }
 
 function script(file: string, body: string): void {
@@ -49,12 +51,20 @@ function script(file: string, body: string): void {
  * Run `keep_wifi_awake` out of install.sh.
  *
  * `route` is what `ip -o route show default` answers, `wireless` names the
- * interfaces that have a `wireless/` directory under the fake sysfs, and
- * `radioObeys: false` is the driver that reports success and changes nothing.
+ * interfaces that are wireless under the fake sysfs, and `radioObeys: false`
+ * is the driver that reports success and changes nothing.
+ *
+ * `marker` is which of the two sysfs entries those interfaces get. `wireless/`
+ * is the wireless-extensions directory and is what most drivers have;
+ * `phy80211` is cfg80211's own link to the radio and is what a driver built
+ * without the extensions has instead. Both have to count, or the whole
+ * section silently does nothing on the second kind of board — and says
+ * nothing, because "not a wireless hub" is the case that is meant to be quiet.
  */
 function run(options: {
   route: string;
   wireless: string[];
+  marker?: 'wireless' | 'phy80211';
   networkManager?: boolean;
   radioObeys?: boolean;
 }): Outcome {
@@ -67,7 +77,15 @@ function run(options: {
   const dispatcher = path.join(dir, 'dispatcher.d', '50-gethome-wifi-awake');
   const unit = path.join(dir, 'gethome-wifi-awake.service');
   mkdirSync(bin, { recursive: true });
-  for (const iface of options.wireless) mkdirSync(path.join(net, iface, 'wireless'), { recursive: true });
+  for (const iface of options.wireless) {
+    mkdirSync(path.join(net, iface), { recursive: true });
+    if ((options.marker ?? 'wireless') === 'wireless') {
+      mkdirSync(path.join(net, iface, 'wireless'), { recursive: true });
+    } else {
+      // A symlink into the ieee80211 tree, which is what sysfs has there.
+      writeFileSync(path.join(net, iface, 'phy80211'), '');
+    }
+  }
   writeFileSync(state, 'Power save: on\n');
 
   script(path.join(bin, 'ip'), `printf '%s' "$FAKE_ROUTE"`);
@@ -91,7 +109,13 @@ function run(options: {
        say()  { printf 'SAY %s\\n' "$*"; }
        warn() { printf 'WARN %s\\n' "$*"; }
        for fn in find_iw lan_wifi_iface wifi_frequency_mhz keep_wifi_awake; do
-         eval "$(sed -n "/^$fn() {/,/^}/p" "$1")"
+         # The sed program is built first, deliberately. Written inline, its
+         # braces sit inside a second level of double quotes within a command
+         # substitution — which bash 3.2, the bash macOS ships and the one this
+         # suite is usually run under, brace-expands anyway: sed is handed
+         # \`/^fn() /\` and \`/^/p\` as two arguments and every extraction fails.
+         prog="/^$fn() {/,/^}/p"
+         eval "$(sed -n "$prog" "$1")"
        done
        keep_wifi_awake`,
       'bash',
@@ -117,6 +141,7 @@ function run(options: {
     dispatcherMode: existsSync(dispatcher) ? (statSync(dispatcher).mode & 0o777).toString(8) : '',
     unit: existsSync(unit) ? readFileSync(unit, 'utf8') : '',
     output,
+    netDir: net,
   };
 }
 
@@ -181,7 +206,8 @@ function collisionWarning(options: { wifiMhz: string; zigbeeChannel?: number }):
        warn() { printf 'WARN %s\n' "$*"; }
        for fn in find_iw lan_wifi_iface wifi_frequency_mhz zigbee_channel_clear_of_wifi \
                  zigbee_network_channel warn_if_zigbee_jams_wifi; do
-         eval "$(sed -n "/^$fn() {/,/^}/p" "$1")"
+         prog="/^$fn() {/,/^}/p"
+         eval "$(sed -n "$prog" "$1")"
        done
        warn_if_zigbee_jams_wifi`,
       'bash',
@@ -316,6 +342,22 @@ describe('keeping the hub on the network', () => {
   });
 
   /**
+   * **A radio we fail to recognise is a fix that never runs and never says
+   * so.** `wireless/` is the wireless-extensions directory, and a driver built
+   * without them has only cfg80211's `phy80211` link — on which asking for the
+   * first alone reads as "this hub is wired", which is the one answer that is
+   * deliberately silent. The board would keep dozing with a clean install log.
+   */
+  it('recognises a radio that has only cfg80211s marker', () => {
+    const result = run({ route: WIFI_ROUTE, wireless: ['wlan0'], marker: 'phy80211' });
+    expect(result.calls).toContain('dev wlan0 set power_save off');
+    expect(result.output).toContain('SAY Wi-Fi power saving is off on wlan0');
+    // And the dispatcher has to ask the same question, or the fix lasts until
+    // the next association.
+    expect(result.dispatcher).toContain('phy80211');
+  });
+
+  /**
    * The live write is only half of it: NetworkManager turns power save back on
    * as it associates, so a hub that is fixed until its next reconnect is a hub
    * that is not fixed.
@@ -359,6 +401,20 @@ describe('keeping the hub on the network', () => {
 
     invoke('wlan0', 'up');
     expect(readFileSync(calls, 'utf8').trim()).toBe('dev wlan0 set power_save off');
+
+    // And a radio the extensions do not describe — cfg80211's `phy80211` and
+    // no `wireless/` — is still a radio. NM hands the dispatcher every
+    // interface on the machine, so this is the test that the question it asks
+    // is the right one for both kinds.
+    mkdirSync(path.join(result.netDir, 'wlan1'), { recursive: true });
+    writeFileSync(path.join(result.netDir, 'wlan1', 'phy80211'), '');
+    mkdirSync(path.join(result.netDir, 'eth1'), { recursive: true });
+    invoke('eth1', 'up');
+    invoke('wlan1', 'up');
+    expect(readFileSync(calls, 'utf8').trim().split('\n')).toEqual([
+      'dev wlan0 set power_save off',
+      'dev wlan1 set power_save off',
+    ]);
   });
 
   /**

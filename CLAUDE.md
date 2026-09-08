@@ -1847,7 +1847,12 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   instead. **Ask the radio, never the write** — a driver with no support for the
   call answers success and changes nothing, so the outcome is read back with
   `get power_save` and an unverified one is a `@@WARN@@`, the `service_failure`
-  rule one layer down. **The interface is the one carrying the default route**,
+  rule one layer down. **A radio is recognised by either sysfs marker** —
+  `wireless/` is the wireless-extensions directory and `phy80211` is cfg80211's
+  own link, and a driver built without the extensions has only the second;
+  asking for the first alone reads as "this hub is wired", which is the one
+  answer that is deliberately silent, so such a board would keep dozing behind
+  a clean install log. **The interface is the one carrying the default route**,
   which provably exists at that point in the install (the bundle was just
   downloaded over it), so nothing has to guess between a LAN interface and one
   in AP mode. And the paths are overridable (`GETHOME_NET_DIR`,

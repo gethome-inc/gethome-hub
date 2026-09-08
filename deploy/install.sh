@@ -968,7 +968,15 @@ lan_wifi_iface() {
   local net_dir="${GETHOME_NET_DIR:-/sys/class/net}" iface
   iface="$(ip -o route show default 2>/dev/null \
     | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }' || true)"
-  [[ -n "$iface" && -d "${net_dir}/${iface}/wireless" ]] || return 0
+  [[ -n "$iface" ]] || return 0
+  # Two markers, because only one of them is guaranteed. `wireless/` is the old
+  # wireless-extensions directory, and a driver built without them has none;
+  # `phy80211` is cfg80211's own link to the radio and is there on everything
+  # this hub runs on. Asking for the first alone is how the whole of the
+  # section below turns into a no-op that says nothing — "no wireless
+  # interface" is the case that is meant to be silent, so a radio we failed to
+  # recognise would leave power saving on and never mention it.
+  [[ -d "${net_dir}/${iface}/wireless" || -e "${net_dir}/${iface}/phy80211" ]] || return 0
   printf '%s' "$iface"
 }
 
@@ -996,6 +1004,14 @@ keep_wifi_awake() {
 
   iw_bin="$(find_iw)"
   if [[ -z "$iw_bin" ]]; then
+    # With the lists refreshed first. The packages step above is the only one
+    # that runs `apt-get update`, and it only reaches it when something it
+    # needs is missing — so on a hub where everything else was already there,
+    # an install here would be resolving against whatever the card happened to
+    # have cached, which on an image that has sat in a drawer is nothing. That
+    # failure is silent by construction: it ends in the warning below, on a
+    # hub whose radio then goes on sleeping.
+    $SUDO apt-get update -qq >/dev/null 2>&1 || true
     $SUDO apt-get install -y -qq --no-install-recommends iw >/dev/null 2>&1 || true
     iw_bin="$(find_iw)"
   fi
@@ -1023,7 +1039,7 @@ keep_wifi_awake() {
 # associates; this turns it off again once the connection is up, for whichever
 # wireless interface came up. deploy/install.sh says why.
 [ "\$2" = "up" ] || exit 0
-[ -d "${net_dir}/\$1/wireless" ] || exit 0
+[ -d "${net_dir}/\$1/wireless" ] || [ -e "${net_dir}/\$1/phy80211" ] || exit 0
 exec ${iw_bin} dev "\$1" set power_save off
 DISPATCH
     then
