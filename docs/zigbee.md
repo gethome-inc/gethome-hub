@@ -326,6 +326,42 @@ hub). Not both. Two separate things decide which:
 > and days of real traffic, because being wrong here means hubs that run out of
 > memory in people's homes a week after they were installed, which is the
 > failure this whole architecture was chosen to avoid.
+>
+> **And the hub itself is now exempt from that paging** (`MemorySwapMax=0` on
+> `gethome-hubd.service`). The paragraph above is the budget working as
+> designed; it is also, unchanged, a fault that reads as a dead hub. Swap goes
+> to whatever has been idle longest, and on a hub that is the hub — nobody asks
+> it anything for hours — so its heap and its JIT code go to zram, and
+> Raspberry Pi OS's own `rpi-zram-writeback` moves the idle part of that onto
+> the SD card. Then somebody opens the app.
+>
+> Measured on a Zero 2 W up 38 hours with Zigbee only:
+>
+> | | resident | in swap |
+> |---|---|---|
+> | hub | 35 MB | **55 MB** |
+> | Zigbee2MQTT | 24 MB | 83 MB |
+>
+> with `MemFree` 110 MB, `MemAvailable` 200 MB, the board at 0% CPU and 25 MB
+> of the two written back onto the card. **Nothing needed that memory.** Waking
+> it is ~14 000 single-page faults — `vm.page-cluster` is 0, so there is no
+> readahead to amortise them — zstd decompression on a 1 GHz A53, and 4 KB
+> random card reads for the written-back part, against an app that gives
+> `GET /hub` four seconds.
+>
+> What that looks like from outside is precisely the report this section exists
+> under: the board up, the automations firing (their working set is small and
+> stays hot, which is why nothing points at memory), and the app and SSH quiet
+> together until it clears on its own — with a second or third pull-to-refresh
+> appearing to fix it, because what actually happened is the pages arrived.
+>
+> So the hub is pinned and everything else keeps the swap. Z2M is the optional
+> process, which its hard `MemoryMax` and `OOMScoreAdjust=500` already say, and
+> the page cache — 243 MB of `node_modules`, read once at startup — is what the
+> kernel should be reclaiming instead. The cost is the hub's real working set
+> resident, the 139 MB in the table above against a 200 MB `MemoryHigh`. Like
+> `MemoryHigh`, it needs the memory cgroup and does nothing on a board that has
+> not rebooted since the installer turned it back on.
 
 | | Who sets it | Where it lives | What it means |
 |---|---|---|---|

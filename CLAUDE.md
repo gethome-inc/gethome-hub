@@ -1919,6 +1919,34 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   rather than at rest, and devices are exactly what keeps a working set hot.
   Changing it needs the same board with devices paired and days of real
   traffic — `docs/zigbee.md` carries the tables and the reasoning.
+  **And the hub is not where that headroom comes from** (`MemorySwapMax=0`).
+  The sentence above — the board affords both radios by keeping two thirds of
+  them cold — is true and is also the whole of a fault that reads as a dead
+  hub. The kernel spends swap on whatever has been idle longest, and on a hub
+  that is the hub: nobody asks it anything for hours, so its heap and its JIT
+  code go into zram, and Raspberry Pi OS's own `rpi-zram-writeback` then moves
+  the idle part of that onto the SD card. Then a phone opens the app. Measured
+  on a Zero 2 W up 38 hours: hubd resident 35 MB with **55 MB of itself in
+  swap**, Z2M resident 24 MB with 83 MB in swap, 25 MB of the pair written back
+  to the card — with **110 MB of RAM free** and the board at 0% CPU. Nothing
+  needed that memory. Waking it is ~14 000 single-page faults (`vm.page-cluster`
+  is 0, so no readahead amortises them), zstd on a 1 GHz A53, and 4 KB random
+  card reads for the written-back part; the iOS app gives `GET /hub` four
+  seconds. What that draws is the board up, the automations firing off a hot
+  working set of their own — which is why nothing points at memory — and the
+  app and SSH going quiet together, clearing by itself, with a second or third
+  pull-to-refresh "fixing" it because the pages have arrived. So the hub's
+  memory is pinned and **everything else keeps the swap**: Z2M is the optional
+  process (its hard `MemoryMax` and +500 OOM score already say so) and the page
+  cache — 243 MB of `node_modules` read once at startup — is what should be
+  reclaimed instead. It costs the board the hub's real working set resident,
+  ~139 MB against a 200 MB `MemoryHigh`, which is the number the budget above
+  was written around anyway. cgroup v2 only, and inert wherever the memory
+  controller is still off — the `MemoryHigh` caveat exactly, and the same
+  reason `OOMScoreAdjust` sits beside it. **`vm.swappiness` stays at 100**:
+  with the hub exempt, the aggressive setting now applies only to the things
+  that should be paying, so lowering it would take headroom from Z2M to buy
+  nothing.
 - **Don't add compressed swap a system already has.** Raspberry Pi OS Trixie
   ships its own (`systemd-zram-setup@zram0`, presented as `rpi-swap`, with
   writeback to the card), and `gethome-zram.service` added a second one beside

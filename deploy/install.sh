@@ -490,8 +490,18 @@ fi
 # compressed and in RAM, so it wants the same tuning either way.
 if [[ -n "$SMALL_BOARD" ]]; then
   $SUDO tee /etc/sysctl.d/60-gethome.conf >/dev/null <<'SYSCTL'
-# Tuned for compressed swap in RAM, which is cheap to use and costs the SD card
-# nothing — the defaults assume swapping means writing to a disk.
+# Tuned for compressed swap in RAM, which is far cheaper to use than a disk —
+# the kernel's defaults assume swapping means writing to one.
+#
+# Two things this is *not* saying. It is not saying the card is untouched:
+# Raspberry Pi OS gives its zram a backing device and moves idle pages onto the
+# card from a daily timer, so a page that goes out here can end up being read
+# back 4 KB at a time off an SD card. And it is not saying the hub may be
+# swapped — gethome-hubd.service sets MemorySwapMax=0 and is exempt from all of
+# this, because a hub that has to be paged back in before it can answer is a
+# hub that reads as unreachable. What is left for zram to spend is Zigbee2MQTT,
+# the page cache, and whatever else the board is running, which is the right
+# order to spend it in.
 vm.swappiness=100
 vm.vfs_cache_pressure=50
 SYSCTL
@@ -1406,6 +1416,44 @@ ProtectSystem=full
 # Throttle, don't kill. See the sizing block near the top: a hard MemoryMax
 # anywhere near the real working set turns a busy minute into a restart.
 ${HUB_MEM_HIGH}
+# **The hub is not where headroom comes from.** Compressed swap is what lets a
+# 512 MB board hold two radios, and the kernel spends it on whatever has been
+# idle longest — which on a hub is the hub. Nobody talks to it for hours, so
+# its heap and its JIT code go into zram, and Raspberry Pi OS's own
+# rpi-zram-writeback then moves the idle part of that onto the SD card. Then a
+# phone opens the app.
+#
+# Measured on a Zero 2 W that had been up 38 hours: hubd resident 35 MB with
+# 55 MB of itself in swap, Zigbee2MQTT resident 24 MB with 83 MB in swap, 25 MB
+# of the two written back to the card — with 110 MB of RAM free and the board
+# at 0% CPU. Nothing needed that memory. Waking it is 14 000 single-page faults
+# (vm.page-cluster is 0, so there is no readahead to amortise them), zstd
+# decompression on a 1 GHz A53, and for the written-back part 4 KB random reads
+# off an SD card. The app gives its health check four seconds.
+#
+# (No backticks below this line: the unit is written from an unquoted heredoc,
+# so bash would run whatever they enclose. There is a test for that.)
+#
+# That is the whole shape of the fault this hub is unreachable with: the board
+# is up, the automations keep firing — their working set is tiny and stays hot,
+# which is why nothing points at memory — and the app and SSH both go quiet
+# together while the machine faults a hundred megabytes back in. It clears by
+# itself, and a second or third pull-to-refresh "fixing" it is the pages
+# arriving, not the network recovering.
+#
+# So the hub's own memory is pinned and everything else keeps the swap: Z2M is
+# the optional process (that is what its hard MemoryMax and +500 OOM score
+# already say), and the page cache — 243 MB of node_modules read once at
+# startup — is what the kernel should be reclaiming instead. This costs the
+# board the hub's real working set in RAM, ~139 MB with both radios up against
+# a 200 MB MemoryHigh, which is the number the sizing block was written around
+# in the first place.
+#
+# cgroup v2 only, and silently ignored where the memory controller is off —
+# which is every Raspberry Pi that has not rebooted since the section above
+# turned it back on. That is the same caveat MemoryHigh carries, and the same
+# reason OOMScoreAdjust exists beside it.
+MemorySwapMax=0
 # A memory spike should cost the hub a restart, not the machine a reboot.
 OOMPolicy=continue
 # And when the board genuinely runs out, the kernel should reach for

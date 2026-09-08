@@ -570,6 +570,45 @@ describe('deploy/install.sh', () => {
   });
 
   /**
+   * **The hub must not be paged out, and everything else still may be.**
+   *
+   * Measured on a Zero 2 W up 38 hours: hubd resident 35 MB with 55 MB of
+   * itself in zram, Zigbee2MQTT resident 24 MB with 83 MB in zram, 25 MB of
+   * the pair written back onto the SD card by Raspberry Pi OS's own
+   * `rpi-zram-writeback` — while 110 MB of RAM sat free and the board was
+   * idle. Nothing needed that memory; the kernel took it because the hub is
+   * the thing on this machine that goes hours without being asked anything.
+   *
+   * What it costs is the fault this exists to remove: the board is up, the
+   * automations keep firing off a hot working set of their own, and the app
+   * and SSH go quiet together for as long as it takes to fault a hundred
+   * megabytes back through zstd and, for the written-back part, off a card
+   * 4 KB at a time. The app gives `GET /hub` four seconds.
+   */
+  it('keeps the hub out of swap and leaves the swap to everything else', () => {
+    const hubUnit = installer.slice(
+      installer.indexOf('gethome-hubd.service >/dev/null <<UNIT'),
+      installer.indexOf('gethome-zigbee2mqtt.service >/dev/null <<UNIT'),
+    );
+    expect(hubUnit, 'a hub that has to be paged in before it answers reads as unreachable')
+      .toMatch(/^MemorySwapMax=0$/m);
+
+    // And only the hub. Zigbee2MQTT is the optional process — the one the hard
+    // MemoryMax and the +500 OOM score already nominate — so pinning it too
+    // would spend the headroom that makes a 512 MB board hold two radios.
+    const z2mUnit = installer.slice(
+      installer.indexOf('gethome-zigbee2mqtt.service >/dev/null <<UNIT'),
+      installer.indexOf('gethome-hubctl'),
+    );
+    expect(z2mUnit).not.toMatch(/^MemorySwapMax=/m);
+
+    // The tuning stays as it was: zram is still what the rest of the board
+    // spends, which is the only reason pinning the hub is affordable.
+    const sysctl = heredoc('SYSCTL');
+    expect(sysctl).toMatch(/^vm\.swappiness=\d+$/m);
+  });
+
+  /**
    * `MemoryMax` was the whole of "Zigbee2MQTT should die before the hub does",
    * and it needs a cgroup controller the Pi disables. `oom_score_adj` needs
    * nothing, works from the first start, and says the same thing to the only
