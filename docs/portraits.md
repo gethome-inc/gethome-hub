@@ -51,6 +51,32 @@ The palette is the app's, and that is deliberate: a portrait is drawn to sit on
 a GetHome device page, the way `rooms.icon` holds a token only the apps know how
 to draw.
 
+**The finish and the light are written for a model that obeys.** The palette used to
+say `matte soft-touch`, and `gpt-image-2` gave it a sheen anyway; 2.5 adheres far more
+closely and rendered the sentence exactly — a dry, chalky, desaturated body with no
+highlight anywhere and the cobalt reduced to a few stray pixels. The render was not
+worse than before, it was **more faithful to a prompt that asked for the wrong thing**,
+which is the shape to expect from every prompt in this repository written against a
+looser model. Three changes came out of it, and each says a true thing the prompt had
+left the model to guess.
+
+Matte is about the highlight's **roll-off**, not its absence, so the finish now asks for
+an even micro-texture, a gentle sheen along the curves and real tonal range across the
+body — a dark object with none of that reads as unfinished plastic however correct its
+hex value is. The cobalt is named as the device's **own indicator** rather than as a
+light in the scene, because that is what it is: a lamp with a blue studio light on it is
+a photograph of a different object. And the **light has a direction** — "soft top light
+and gentle rim light" named two lights and no direction at all, which a model with
+nothing else to go on resolves as flat frontal fill, so a key, a fill and a rim are
+placed by hand.
+
+**The angle is on the generate path only.** With no photo the model invents the whole
+object anyway, so asking for the three-quarter view every product page uses is the
+cheapest improvement available — a device shot head-on reads as a flat cut-out whatever
+its finish. The edit path is told the opposite, to keep the photo's own viewpoint:
+turning an object there means inventing the sides the camera never saw, which is exactly
+where an unusual device stops being itself.
+
 ## Drawing (`src/portraits/openai-images.ts`)
 
 OpenAI's Image API over plain `fetch`. **No SDK**: this is two endpoints and one

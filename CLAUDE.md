@@ -1297,6 +1297,18 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   and "no scenery" were a backdrop described in front of the one capability the
   path exists for. The shadow ban stays — a shadow is something the object casts,
   not a place it is standing in.
+  **And the finish and the light were rewritten for a model that obeys**, which is the
+  shape to expect from every prompt here written against a looser one: the palette said
+  `matte soft-touch`, `gpt-image-2` gave it a sheen anyway, and 2.5 rendered the sentence
+  exactly — a dry, chalky body with no highlight and the cobalt down to a few pixels. Not
+  a worse render, a *more faithful one to a prompt that asked for the wrong thing*. Matte
+  is the highlight's **roll-off** rather than its absence; the cobalt is named as the
+  device's **own indicator** rather than a light in the scene, since a lamp with a blue
+  studio light on it is a photograph of a different object; and the light now has a
+  **direction**, because "soft top light and gentle rim light" names two lights and no
+  direction and resolves as flat frontal fill. The three-quarter **angle is on the
+  generate path only** — with no photo the model invents the object anyway, while turning
+  one on the edit path means inventing the sides the camera never saw.
   **What a drawing cost goes in `ai_runs`; who asked goes on the picture.** A
   portrait is the third thing that spends the home's money on AI, so every draw
   writes one row (`kind: 'portrait'`), failures included with the provider's own
