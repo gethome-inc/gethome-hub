@@ -37,6 +37,25 @@ describe('deploy/install.sh', () => {
   }
 
   /**
+   * One systemd unit as `install.sh` writes it, from its heredoc marker to the
+   * terminator.
+   *
+   * **Not "up to the next mention of `gethome-hubctl`", which is what three of
+   * these did.** That worked only while no line above the units happened to
+   * name it, so a *comment* added anywhere earlier in the file silently
+   * inverted the slice and emptied it — and an assertion on `''` passes for
+   * several of the things these tests check. The heredoc has an exact end;
+   * use it.
+   */
+  function unitBody(service: string): string {
+    const start = installer.indexOf(`${service} >/dev/null <<UNIT`);
+    expect(start, `${service} is not written by install.sh`).toBeGreaterThan(-1);
+    const end = installer.indexOf('\nUNIT\n', start);
+    expect(end, `${service}'s heredoc is not terminated`).toBeGreaterThan(start);
+    return installer.slice(start, end);
+  }
+
+  /**
    * The broker config as it lands on a Pi: our drop-in and ACL with the
    * installer's own paths swapped for ones this test owns.
    */
@@ -253,14 +272,8 @@ describe('deploy/install.sh', () => {
    * a `GETHOME_UPDATE=1` line there the wrong answer.
    */
   it('hands the broker credentials to both units, after hub.env', () => {
-    const hubUnit = installer.slice(
-      installer.indexOf('gethome-hubd.service >/dev/null <<UNIT'),
-      installer.indexOf('gethome-zigbee2mqtt.service >/dev/null <<UNIT'),
-    );
-    const z2mUnit = installer.slice(
-      installer.indexOf('gethome-zigbee2mqtt.service >/dev/null <<UNIT'),
-      installer.indexOf('gethome-hubctl'),
-    );
+    const hubUnit = unitBody('gethome-hubd.service');
+    const z2mUnit = unitBody('gethome-zigbee2mqtt.service');
 
     for (const unit of [hubUnit, z2mUnit]) {
       expect(unit).not.toBe('');
@@ -343,10 +356,7 @@ describe('deploy/install.sh', () => {
     ).toMatch(/ExecStart=\$\{NODE_BIN\} \$\{HUB_V8_FLAGS\}/);
 
     // And the unit must not carry a MemoryMax for hubd from anywhere else.
-    const hubUnit = installer.slice(
-      installer.indexOf('gethome-hubd.service >/dev/null <<UNIT'),
-      installer.indexOf('gethome-zigbee2mqtt.service >/dev/null <<UNIT'),
-    );
+    const hubUnit = unitBody('gethome-hubd.service');
     expect(hubUnit).toContain('${HUB_MEM_HIGH}');
     // A directive, not the word — the comment above it explains why there
     // isn't one, and matching prose would make this test unfixable.
@@ -365,14 +375,8 @@ describe('deploy/install.sh', () => {
    */
   it('puts the systemd restart limits in the section systemd reads', () => {
     const units = [
-      installer.slice(
-        installer.indexOf('gethome-hubd.service >/dev/null <<UNIT'),
-        installer.indexOf('gethome-zigbee2mqtt.service >/dev/null <<UNIT'),
-      ),
-      installer.slice(
-        installer.indexOf('gethome-zigbee2mqtt.service >/dev/null <<UNIT'),
-        installer.indexOf('gethome-hubctl'),
-      ),
+      unitBody('gethome-hubd.service'),
+      unitBody('gethome-zigbee2mqtt.service'),
     ];
     for (const unit of units) {
       expect(unit).not.toBe('');
@@ -586,20 +590,14 @@ describe('deploy/install.sh', () => {
    * 4 KB at a time. The app gives `GET /hub` four seconds.
    */
   it('keeps the hub out of swap and leaves the swap to everything else', () => {
-    const hubUnit = installer.slice(
-      installer.indexOf('gethome-hubd.service >/dev/null <<UNIT'),
-      installer.indexOf('gethome-zigbee2mqtt.service >/dev/null <<UNIT'),
-    );
+    const hubUnit = unitBody('gethome-hubd.service');
     expect(hubUnit, 'a hub that has to be paged in before it answers reads as unreachable')
       .toMatch(/^MemorySwapMax=0$/m);
 
     // And only the hub. Zigbee2MQTT is the optional process — the one the hard
     // MemoryMax and the +500 OOM score already nominate — so pinning it too
     // would spend the headroom that makes a 512 MB board hold two radios.
-    const z2mUnit = installer.slice(
-      installer.indexOf('gethome-zigbee2mqtt.service >/dev/null <<UNIT'),
-      installer.indexOf('gethome-hubctl'),
-    );
+    const z2mUnit = unitBody('gethome-zigbee2mqtt.service');
     expect(z2mUnit).not.toMatch(/^MemorySwapMax=/m);
 
     // The tuning stays as it was: zram is still what the rest of the board
@@ -620,14 +618,8 @@ describe('deploy/install.sh', () => {
       expect(found, 'OOMScoreAdjust is what works without the memory cgroup').not.toBeNull();
       return Number(found![1]);
     };
-    const hub = adjust(installer.slice(
-      installer.indexOf('gethome-hubd.service >/dev/null <<UNIT'),
-      installer.indexOf('gethome-zigbee2mqtt.service >/dev/null <<UNIT'),
-    ));
-    const z2m = adjust(installer.slice(
-      installer.indexOf('gethome-zigbee2mqtt.service >/dev/null <<UNIT'),
-      installer.indexOf('gethome-hubctl'),
-    ));
+    const hub = adjust(unitBody('gethome-hubd.service'));
+    const z2m = adjust(unitBody('gethome-zigbee2mqtt.service'));
     expect(hub, 'the optional process is the one that should be picked').toBeLessThan(z2m);
     // Not -1000: that exempts the hub from the OOM killer outright, so a hub
     // that is itself leaking takes the machine down instead of being restarted
