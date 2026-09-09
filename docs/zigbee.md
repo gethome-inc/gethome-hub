@@ -349,11 +349,15 @@ hub). Not both. Two separate things decide which:
 > random card reads for the written-back part, against an app that gives
 > `GET /hub` four seconds.
 >
-> What that looks like from outside is precisely the report this section exists
-> under: the board up, the automations firing (their working set is small and
-> stays hot, which is why nothing points at memory), and the app and SSH quiet
-> together until it clears on its own — with a second or third pull-to-refresh
-> appearing to fix it, because what actually happened is the pages arrived.
+> What that costs is the *first request* after a quiet spell: seconds, against
+> an app that waits four. It is worth fixing on its own terms.
+>
+> **It is not what makes a hub unreachable, and reading it that way cost two
+> rounds.** ICMP is answered by the kernel, so a hub that will not answer a
+> ping is not a hub whose userspace has been paged out — and during a real
+> outage the hub answered nothing at all, ping included. That fault is the
+> quiet-path one in `CLAUDE.md` (`keep_wifi_reachable`), and it is a different
+> thing entirely. The two look alike from an app, which is the whole trap.
 >
 > So the hub is pinned and everything else keeps the swap. Z2M is the optional
 > process, which its hard `MemoryMax` and `OOMScoreAdjust=500` already say, and

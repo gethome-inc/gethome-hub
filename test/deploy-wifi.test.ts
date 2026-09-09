@@ -157,6 +157,8 @@ function keepalive(options: { route: string; wireless: string[]; arping?: boolea
   unit: string;
   script: string;
   scriptMode: string;
+  /** Every `systemctl` invocation, in order. */
+  systemctl: string;
   output: string;
 } {
   const dir = mkdtempSync(path.join(tmpdir(), 'gethome-keepalive-'));
@@ -167,8 +169,9 @@ function keepalive(options: { route: string; wireless: string[]; arping?: boolea
   const script = path.join(dir, 'lib', 'gethome-wifi-keepalive.sh');
   mkdirSync(bin, { recursive: true });
   for (const iface of options.wireless) mkdirSync(path.join(net, iface, 'wireless'), { recursive: true });
+  const systemctl = path.join(dir, 'systemctl-calls');
   script_(path.join(bin, 'ip'), `printf '%s' "$FAKE_ROUTE"`);
-  script_(path.join(bin, 'systemctl'), 'exit 0');
+  script_(path.join(bin, 'systemctl'), `echo "$*" >> "${systemctl}"`);
   // Stubbed rather than borrowed from the host: whether this machine happens
   // to have `arping` decides which branch runs, and a test that says something
   // different on a Mac and in CI is the trap this file already carries a note
@@ -184,7 +187,7 @@ function keepalive(options: { route: string; wireless: string[]; arping?: boolea
        SUDO=""
        say()  { printf 'SAY %s\n' "$*"; }
        warn() { printf 'WARN %s\n' "$*"; }
-       for fn in lan_wifi_iface keep_wifi_reachable; do
+       for fn in lan_wifi_iface find_arping keep_wifi_reachable; do
          prog="/^$fn() {/,/^}/p"
          eval "$(sed -n "$prog" "$1")"
        done
@@ -209,6 +212,7 @@ function keepalive(options: { route: string; wireless: string[]; arping?: boolea
     unit: existsSync(unit) ? readFileSync(unit, 'utf8') : '',
     script: existsSync(script) ? readFileSync(script, 'utf8') : '',
     scriptMode: existsSync(script) ? (statSync(script).mode & 0o777).toString(8) : '',
+    systemctl: existsSync(systemctl) ? readFileSync(systemctl, 'utf8') : '',
     output,
   };
 }
@@ -239,7 +243,7 @@ describe('keeping the hub reachable after a quiet spell', () => {
     // **A gratuitous ARP, not a unicast.** A ping at the router is addressed
     // to the router and never crosses the bridge it is meant to keep warm;
     // that was shipped first and did not work. `-U` is the broadcast form.
-    expect(result.script).toMatch(/arping\s+-U\b/);
+    expect(result.script).toMatch(/arping["']? -U\b/);
     expect(result.scriptMode).toBe('755');
     // Bounded and quiet: this is a broadcast, so every station on the network
     // pays for it, and one every few seconds would be rude.
@@ -252,6 +256,26 @@ describe('keeping the hub reachable after a quiet spell', () => {
     expect(result.script).toContain('ip -4 -o addr show');
     expect(result.unit).toContain('Restart=always');
     expect(result.output).toContain('SAY');
+    // **The binary is baked in by path, not looked up at run time.** Debian
+    // has two different programs called `arping` with different interface
+    // flags, and root's PATH finds `/usr/sbin` before `/usr/bin` — so a hub
+    // with both installed would run the one whose flags we are not using, and
+    // fail silently into the gateway ping that was measured not to work.
+    expect(result.script).toMatch(/\/arping["' ]/);
+    expect(result.script).not.toMatch(/^\s*arping /m);
+  });
+
+  /**
+   * **Every update re-runs the installer, so the unit has to be restarted.**
+   * `enable --now` does nothing to a unit that is already running, which would
+   * leave a rewritten script on disk while the old one kept running until the
+   * board next rebooted — a fix that ships and does not take effect, which is
+   * the failure this branch has already paid for twice.
+   */
+  it('restarts the keep-alive rather than only enabling it', () => {
+    const result = keepalive({ route: WIFI_ROUTE, wireless: ['wlan0'] });
+    expect(result.systemctl).toMatch(/^restart gethome-wifi-keepalive$/m);
+    expect(result.systemctl).not.toMatch(/enable --now/);
   });
 
   /**
@@ -262,7 +286,7 @@ describe('keeping the hub reachable after a quiet spell', () => {
   it('says so when it cannot send the broadcast', () => {
     const result = keepalive({ route: WIFI_ROUTE, wireless: ['wlan0'], arping: false });
     expect(result.output).toContain('WARN');
-    expect(result.output).toMatch(/arping/);
+    expect(result.output).toMatch(/could not announce itself/);
   });
 
   /** A wired hub has no access point to convince. */

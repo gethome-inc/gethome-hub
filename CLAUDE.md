@@ -2003,10 +2003,14 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   needed that memory. Waking it is ~14 000 single-page faults (`vm.page-cluster`
   is 0, so no readahead amortises them), zstd on a 1 GHz A53, and 4 KB random
   card reads for the written-back part; the iOS app gives `GET /hub` four
-  seconds. What that draws is the board up, the automations firing off a hot
-  working set of their own — which is why nothing points at memory — and the
-  app and SSH going quiet together, clearing by itself, with a second or third
-  pull-to-refresh "fixing" it because the pages have arrived. So the hub's
+  seconds. What that costs is the *first request* after a quiet spell — seconds,
+  against an app that waits four — and it is worth fixing on its own terms.
+  **It is not what makes a hub unreachable, and reading it that way cost two
+  rounds of this branch.** ICMP is answered by the kernel, so a hub that will
+  not answer a ping is not one whose userspace has been paged out; during a
+  real outage this hub answered nothing at all, ping included. That is the
+  quiet-path fault above (`keep_wifi_reachable`), and it is a different thing
+  that looks identical from an app — which is the whole trap. So the hub's
   memory is pinned and **everything else keeps the swap**: Z2M is the optional
   process (its hard `MemoryMax` and +500 OOM score already say so) and the page
   cache — 243 MB of `node_modules` read once at startup — is what should be

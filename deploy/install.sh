@@ -972,6 +972,21 @@ find_iw() {
   printf '%s' "$found"
 }
 
+# **Two different programs are called `arping`, and root gets the wrong one by
+# default.** `iputils-arping` installs `/usr/bin/arping` and takes `-I` for the
+# interface; Thomas Habets' `arping` package installs `/usr/sbin/arping` and
+# takes `-i`. Root's PATH on Debian puts `/usr/sbin` *first*, so a hub with
+# both would run the one whose flags we are not using — and it would fail
+# silently, leaving the gateway ping alone, which is exactly what was measured
+# not to work. Resolved by path here, and the caller sends one real
+# announcement before trusting it.
+find_arping() {
+  local cand
+  for cand in /usr/bin/arping "$(command -v arping 2>/dev/null || true)"; do
+    if [[ -n "$cand" && -x "$cand" ]]; then printf '%s' "$cand"; return 0; fi
+  done
+}
+
 # The interface the LAN is reached over, when that is a wireless one. Empty for
 # a wired hub, and empty when there is no default route to judge by.
 lan_wifi_iface() {
@@ -1075,7 +1090,11 @@ WantedBy=multi-user.target
 UNIT
     then
       $SUDO systemctl daemon-reload >/dev/null 2>&1 || true
-      if $SUDO systemctl enable --now gethome-wifi-awake >/dev/null 2>&1; then
+      $SUDO systemctl enable gethome-wifi-awake >/dev/null 2>&1 || true
+      # Restarted rather than `--now`, for the reason `keep_wifi_reachable`
+      # gives: this is a `RemainAfterExit` oneshot, so an update that changed
+      # its ExecStart would otherwise not run until the board rebooted.
+      if $SUDO systemctl restart gethome-wifi-awake >/dev/null 2>&1; then
         persisted="systemd"
       fi
     fi
@@ -1128,7 +1147,7 @@ UNIT
 # default route fresh. A wired hub gets none of this, for the reason it gets no
 # dispatcher.
 keep_wifi_reachable() {
-  local iface unit="${GETHOME_KEEPALIVE_UNIT:-/etc/systemd/system/gethome-wifi-keepalive.service}"
+  local iface self arping_bin unit="${GETHOME_KEEPALIVE_UNIT:-/etc/systemd/system/gethome-wifi-keepalive.service}"
   local script="${GETHOME_KEEPALIVE_SCRIPT:-/usr/local/lib/gethome-wifi-keepalive.sh}"
 
   iface="$(lan_wifi_iface)"
@@ -1137,16 +1156,25 @@ keep_wifi_reachable() {
   # `arping` sends the broadcast. It is only wanted on a wireless hub, so it is
   # installed here rather than with the base packages — and with the lists
   # refreshed first, for the reason `iw` is.
-  if ! command -v arping >/dev/null 2>&1; then
+  arping_bin="$(find_arping)"
+  if [[ -z "$arping_bin" ]]; then
     $SUDO apt-get update -qq >/dev/null 2>&1 || true
     $SUDO apt-get install -y -qq --no-install-recommends iputils-arping >/dev/null 2>&1 || true
+    arping_bin="$(find_arping)"
   fi
-  if ! command -v arping >/dev/null 2>&1; then
-    warn "This hub reaches the network over Wi-Fi and 'arping' could not be installed, so it cannot announce itself to the router. It may become unreachable for minutes at a time after a quiet spell, while running perfectly."
+
+  # Ask, never assume — `keep_wifi_awake`'s rule, and here it covers more than
+  # a missing binary: an announcement that cannot be sent leaves the hub with
+  # the gateway ping alone, which is the thing that was measured *not* to work.
+  # One real broadcast during the install is what tells the two apart.
+  self="$(ip -4 -o addr show "$iface" 2>/dev/null | awk '{ split($4, a, "/"); print a[1]; exit }')"
+  if [[ -z "$arping_bin" ]] || ! $SUDO "$arping_bin" -U -c 1 -I "$iface" "${self:-0.0.0.0}" >/dev/null 2>&1; then
+    warn "This hub reaches the network over Wi-Fi (${iface}) and could not announce itself to the router. It works, but it may become unreachable for minutes at a time after a quiet spell, while running perfectly."
+    arping_bin=""
   fi
 
   $SUDO mkdir -p "$(dirname "$script")"
-  if ! $SUDO tee "$script" >/dev/null <<'KEEPALIVE'
+  if ! $SUDO tee "$script" >/dev/null <<KEEPALIVE
 #!/bin/sh
 # Installed by GetHome. deploy/install.sh says why in full; the short version
 # is that the router ages this hub out of the table it uses to reach it from
@@ -1163,13 +1191,14 @@ keep_wifi_reachable() {
 # interface that moves does not leave this announcing an address it no longer
 # has. Nothing is checked for a reply: transmitting is what does the work.
 while :; do
-  iface=$(ip route show default 2>/dev/null |
-    awk '/^default/ { for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')
-  if [ -n "$iface" ]; then
-    self=$(ip -4 -o addr show "$iface" 2>/dev/null | awk '{ split($4, a, "/"); print a[1]; exit }')
-    [ -n "$self" ] && arping -U -c 1 -I "$iface" "$self" >/dev/null 2>&1
-    gateway=$(ip route show default 2>/dev/null | awk '/^default/ { print $3; exit }')
-    [ -n "$gateway" ] && ping -c 1 -W 1 "$gateway" >/dev/null 2>&1
+  iface=\$(ip route show default 2>/dev/null |
+    awk '/^default/ { for (i = 1; i < NF; i++) if (\$i == "dev") { print \$(i + 1); exit } }')
+  if [ -n "\$iface" ]; then
+    self=\$(ip -4 -o addr show "\$iface" 2>/dev/null | awk '{ split(\$4, a, "/"); print a[1]; exit }')
+    [ -n "\$self" ] && [ -x "${arping_bin:-/nonexistent}" ] &&
+      "${arping_bin:-/nonexistent}" -U -c 1 -I "\$iface" "\$self" >/dev/null 2>&1
+    gateway=\$(ip route show default 2>/dev/null | awk '/^default/ { print \$3; exit }')
+    [ -n "\$gateway" ] && ping -c 1 -W 1 "\$gateway" >/dev/null 2>&1
   fi
   sleep 20
 done
@@ -1199,7 +1228,12 @@ WantedBy=multi-user.target
 UNIT
   then
     $SUDO systemctl daemon-reload >/dev/null 2>&1 || true
-    if $SUDO systemctl enable --now gethome-wifi-keepalive >/dev/null 2>&1; then
+    $SUDO systemctl enable gethome-wifi-keepalive >/dev/null 2>&1 || true
+    # `restart`, not `enable --now`. Every update re-runs this installer and
+    # rewrites the script above, and `--now` on a unit that is already running
+    # does nothing at all — so the fix would sit on disk until the next reboot
+    # while the old one kept running. `restart` starts a stopped unit too.
+    if $SUDO systemctl restart gethome-wifi-keepalive >/dev/null 2>&1; then
       say "The hub will announce itself on the network every 20 seconds, so it stays reachable after a quiet spell."
       return 0
     fi
