@@ -1105,6 +1105,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
           deviceId: id,
           kind,
           apiKey,
+          // Recorded on the picture as well as in the log below: the log is
+          // bounded at 30 days and a portrait is not, so this is the copy that
+          // is still there when somebody asks who drew it.
+          member: { id: request.member!.id, name: request.member!.name },
           ...(body.photo !== undefined
             ? { photo: { bytes: Buffer.from(body.photo, 'base64'), contentType: body.photoType } }
             : {}),

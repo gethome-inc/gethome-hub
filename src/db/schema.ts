@@ -486,6 +486,17 @@ export const aiRuns = sqliteTable('ai_runs', {
    */
   automationId: text('automation_id'),
   /**
+   * The picture a `portrait` run produced, when it produced one.
+   *
+   * The `automation_id` argument applied to the third thing that spends money:
+   * a device recognition, a conversation and a portrait are all "what the home
+   * spent on AI", so they are one list rather than three screens. Null on a
+   * draw that failed, which is the honest reading — and a `portrait` row leaves
+   * `exposes_hash` empty for the reason an `automate` one does, that column
+   * being about a device model.
+   */
+  portraitId: text('portrait_id'),
+  /**
    * The conversation this run belongs to, for an `automate` row.
    *
    * **Without it a conversation's own spend was unattributable.** The model,
@@ -583,6 +594,22 @@ export const devicePortraits = sqliteTable(
     /** Whether a photo was the reference, which is the difference a person can see. */
     fromPhoto: integer('from_photo', { mode: 'boolean' }).notNull().default(false),
     selected: integer('selected', { mode: 'boolean' }).notNull().default(false),
+    /**
+     * Who had it drawn — and their name beside the id, for the activity log's
+     * own reason one table over.
+     *
+     * The drawing is already recorded there (`device.portrait`, with the member
+     * on it), and that row is **not** where this can be read from: the log is
+     * bounded at 5 000 rows and 30 days while a portrait has no age bound at
+     * all, so a picture outlives the only record of who asked for it. Nullable
+     * because every portrait drawn before this column exists has no answer, and
+     * carrying no `ON DELETE` action because SQLite gives an `ALTER TABLE`
+     * column none — the `invites.member_id` situation exactly. Which is the
+     * whole reason the name is copied: the id may point at somebody who has
+     * since been removed, and the row read next week is all that is left.
+     */
+    memberId: text('member_id'),
+    memberName: text('member_name'),
   },
   (table) => [index('device_portraits_device').on(table.deviceId)],
 );

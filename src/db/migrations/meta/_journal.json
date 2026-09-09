@@ -99,6 +99,13 @@
       "when": 1788728439475,
       "tag": "0013_cynical_champions",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1788728439476,
+      "tag": "0014_wakeful_wolfsbane",
+      "breakpoints": true
     }
   ]
 }

@@ -27,6 +27,26 @@ jobs:
           # otherwise hold this step open until the job limit kills it — apt
           # has no timeout of its own. Retries cover the ordinary flake.
           apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30)
+          # The runner image ships apt repositories this project never installs
+          # from — Google Chrome, Microsoft — and `apt-get update` refreshes
+          # every one of them. A hash mismatch on any single list is a *fatal*
+          # update, not a skipped one: on 2026-09-09 dl.google.com served a
+          # `Packages.gz` whose checksum did not match the `Release` file
+          # beside it, apt exited 100, and a job that wanted nothing but
+          # mosquitto died in twelve seconds without reaching `npm ci`. The
+          # retries above do not help, because nothing failed to arrive — the
+          # file that arrived was the wrong one. So the third-party lists are
+          # moved aside and only Ubuntu's own archive is refreshed. Ubuntu's
+          # own entry survives under both layouts the images use: plain
+          # `sources.list` on 22.04, which is not in this directory at all,
+          # and `sources.list.d/ubuntu.sources` on 24.04 and later, which is
+          # named here so it stays. Nothing is deleted — a step that quietly
+          # broke the archive it needs would be worse than the flake it fixes,
+          # and `apt-get install` below is what proves it did not.
+          sudo mkdir -p /etc/apt/sources.list.d.off
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \
+            \( -name '*.list' -o -name '*.sources' \) ! -name 'ubuntu.sources' \
+            -exec mv -t /etc/apt/sources.list.d.off {} +
           sudo apt-get update -qq "${apt_opts[@]}"
           sudo apt-get install -y -qq "${apt_opts[@]}" mosquitto
           printf 'listener 1883\nallow_anonymous true\n' | sudo tee /etc/mosquitto/conf.d/ci.conf >/dev/null
@@ -99,6 +119,11 @@ jobs:
           fi
           echo "shellcheck is not on this image; installing it"
           apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30)
+          # The third-party lists again — see the note on the mosquitto step.
+          sudo mkdir -p /etc/apt/sources.list.d.off
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \
+            \( -name '*.list' -o -name '*.sources' \) ! -name 'ubuntu.sources' \
+            -exec mv -t /etc/apt/sources.list.d.off {} +
           sudo apt-get update -qq "${apt_opts[@]}"
           sudo apt-get install -y -qq "${apt_opts[@]}" shellcheck
       - run: shellcheck -S warning deploy/install.sh deploy/zigbee-detect.sh deploy/update-runner.sh deploy/gethome-hubctl

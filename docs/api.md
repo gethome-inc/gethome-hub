@@ -110,7 +110,7 @@ than no button.
 | `DELETE /devices/:id` | `device.remove` | also unpairs at the protocol level |
 | `POST /devices/:id/endpoints/:endpointId/commands` | floor | body = canonical command; `202`. IR-remote intents (`irLearn`/`irSaveLearned`/`irSend`/`irDeleteCommand`/`irRenameCommand`) are resolved against the endpoint's stored code library (see [device-schema.md](device-schema.md)) |
 | `GET /devices/:id/history?from=&to=&points=&series=` | floor | what this device's readings did over a window, already thinned to a drawable size — see [below](#recorded-readings-get-devicesidhistory). `from`/`to` are epoch ms and default to the last day; `from >= to` is `400 invalid_range`; an unknown device is `404` |
-| `GET /devices/:id/portraits` | floor | the pictures this home has had drawn of a device, newest first: `{id, at, bytes, provider, model, fromPhoto, selected}`. Reading is the floor — a portrait is what the device *looks like*, so a guest whose dashboard could not draw it would be looking at a different home. See [below](#device-portraits) |
+| `GET /devices/:id/portraits` | floor | the pictures this home has had drawn of a device, newest first: `{id, at, bytes, provider, model, fromPhoto, selected, drawnBy?}`. `drawnBy: {id, name}` is who had it drawn — `id` is null once that person has left the home and absent altogether on a portrait drawn before the hub recorded it, so an app draws no line rather than an empty one. Reading is the floor — a portrait is what the device *looks like*, so a guest whose dashboard could not draw it would be looking at a different home. See [below](#device-portraits) |
 | `GET /portraits/:portraitId` | floor | the PNG itself — `image/png`, a strong `ETag` and `Cache-Control: immutable`, because a portrait's bytes never change (a new one gets a new id) |
 | `POST /devices/:id/portraits` | `hub.ai` | draw one. `{photo?: base64, photoType?}` — absent draws from the device's kind alone. Synchronous, and it holds the request for the minutes an image takes. `409 openai_not_configured` (its own code: portraits are OpenAI's job, and a hub can be configured for recognition and not for this), `409 portrait_busy`, `409 no_space`, `502 {error:"provider_failed", kind, detail}` carrying OpenAI's own sentence |
 | `PATCH /devices/:id/portraits` | `device.edit` | `{selected: id\|null}` — which one the home sees. `null` is a *state*: the procedural sphere, chosen over every picture there is |
@@ -1009,7 +1009,7 @@ the second provider reads exactly what it read before — plus a per-provider ha
                                "recommended": true },
                              { "id": "claude-sonnet-5", "label": "Sonnet 5",
                                "note": "Quicker and cheaper. …" } ] },
-  "portraits": { "model": "gpt-image-2", "maxPerDevice": 6, "budgetBytes": 314572800 }
+  "portraits": { "model": "gpt-image-2.5-flare", "maxPerDevice": 6, "budgetBytes": 314572800 }
 }
 ```
 
@@ -1073,8 +1073,8 @@ already knows the device's canonical `kind`, so a caller sends nothing but
 "draw this device", optionally with a photo to restyle — which is also what
 keeps two apps from producing two different-looking homes.
 
-Drawing needs an **OpenAI** key (`gpt-image-2`, which supports transparent
-backgrounds in preview and is used for a clean cut-out).
+Drawing needs an **OpenAI** key (`gpt-image-2.5-flare`, which supports
+transparent backgrounds and is used for a clean cut-out).
 Recognition may be running on Anthropic at the same time, which is why the
 refusal is `openai_not_configured` rather than `ai_not_configured`.
 
@@ -1105,6 +1105,44 @@ in the next room is looking at the same device.
 Only the *drawing* is written to the activity log (`device.portrait`). Choosing
 between portraits and deleting one are restyles, and a restyle is not what
 somebody reads the log for a week later — the same line `rooms.icon` holds.
+
+**What a drawing cost goes in `ai_runs`, and who asked goes on the picture.**
+They are two questions with two lifetimes, which is why they are stored in two
+places rather than one.
+
+A portrait is the third thing that spends the home's money on AI, so every
+drawing writes one `ai_runs` row (`kind: "portrait"`, `adapter: "portraits"`)
+beside the mapping runs and the conversations — the price, the wall-clock
+`durationMs` and the model, in the one table whose whole argument is that *what
+did this home spend on AI* is a single question and three tables would be three
+screens answering it. `portraitId` links the row to the picture it bought, the
+way `automationId` links a chat's row to the rule it wrote; `exposesHash` is
+empty, that column being about a device model. A **failed** draw is recorded
+too, with the provider's own `errorKind` and sentence, because it is what
+answers "why did nothing happen" a day later — and it buys no picture, so
+`portraitId` is null.
+
+The price is read off the provider's own `usage`, never estimated from the size
+and quality we asked for: 2.5 bills per token, so the response is the only thing
+that actually knows. When it reports none, `costUsd` is **absent rather than
+zero** — `$0.00` is a claim and "nothing was reported" is the truth, the line
+`ai_runs` already holds for a conversation whose spend row has been pruned. And
+when the response gives no `input_tokens_details`, the whole input is priced at
+the dearer image rate, since there is then no way to tell a prompt from a
+reference photo and an estimate that reads low is the one that surprises
+somebody.
+
+Per-portrait spend is therefore answerable only while that run row lives:
+`ai_runs` keeps the last 250 runs of every kind, and a chat writes one per turn,
+so a picture can outlive its own price. That is the same trade the conversations
+already make, and it is the reason **`drawnBy` is on the portrait row instead**.
+The drawing is in the activity log with the member on it, but that log is bounded
+at 5 000 rows and 30 days while a portrait has no age bound at all — so the log
+is not where "who drew this" can be read from a season later. The member's *name*
+is copied beside the id for the activity log's own reason: the column carries no
+`ON DELETE` action (SQLite gives an `ALTER TABLE` column none — the
+`invites.member_id` situation), so the id may point at somebody who has since
+been removed, and the row read next week is all that is left of them.
 
 ### The device-mapping library
 

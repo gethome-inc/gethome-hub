@@ -44,7 +44,7 @@ const RETAIN_EXCHANGES = 1000;
  * device recognition from rule-writing into two tables would make it two
  * screens. Such a row leaves `exposesHash` empty and fills `automationId`.
  */
-export type AiRunKind = 'map' | 'repair' | 'automate' | 'assist';
+export type AiRunKind = 'map' | 'repair' | 'automate' | 'assist' | 'portrait';
 
 export interface AiRunEvent {
   phase: 'started' | 'step' | 'finished';
@@ -101,6 +101,15 @@ export interface AiRunStart {
 
 export interface AiRunOutcome {
   ok: boolean;
+  /**
+   * The picture a `portrait` run produced.
+   *
+   * On the *outcome* rather than on `AiRunStart` beside `automationId`, because
+   * it is not knowable when the run begins: a portrait's id is minted as its
+   * bytes are written, and a draw that fails never has one. Each of the two
+   * sits where its answer actually exists.
+   */
+  portraitId?: string | undefined;
   costUsd?: number | undefined;
   turns?: number | undefined;
   durationMs?: number | undefined;
@@ -204,6 +213,7 @@ export class AiRunLog {
             provider: input.provider ?? null,
             modelId: input.modelId ?? null,
             automationId: input.automationId ?? null,
+            portraitId: outcome.portraitId ?? null,
             sessionId: input.sessionId ?? null,
             ok: outcome.ok,
             costUsd: outcome.costUsd ?? null,

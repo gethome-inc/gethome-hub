@@ -118,20 +118,29 @@ async function main(): Promise<void> {
   // per report and one wakeup every five minutes.
   const history = new HistoryService(db, events, log.child({ module: 'history' }));
   await history.start();
-  // The pictures a home has had drawn of its devices. Files under the data
-  // directory with a row each; constructed unconditionally, because reading
-  // them needs no credential and a hub with none simply has no rows.
-  const portraits = new PortraitService(db, events, config.DATA_DIR, log.child({ module: 'portraits' }));
   // Favorites are one member's pins rather than a property of the home, so they
   // live beside the registry instead of on the device row. Loaded once: this is
   // read for every device on every `GET /devices` and on every `deviceUpserted`
   // frame, and a household's worth of pins is a few hundred bytes.
   const favorites = new FavoritesService(db, events);
   await favorites.load();
-  // What the mapping agent does, recorded and streamed. Constructed
-  // unconditionally: a hub with no key never writes a row, and the API still
-  // has to be able to answer "nothing has run".
+  // What the AI has done, recorded and streamed — mapping runs, conversations
+  // and portraits alike, because what a home spent on AI is one question.
+  // Constructed unconditionally: a hub with no key never writes a row, and the
+  // API still has to be able to answer "nothing has run". It is built *before*
+  // the portrait service because that service now writes to it.
   const aiRuns = new AiRunLog(db, events);
+
+  // The pictures a home has had drawn of its devices. Files under the data
+  // directory with a row each; constructed unconditionally, because reading
+  // them needs no credential and a hub with none simply has no rows.
+  const portraits = new PortraitService(
+    db,
+    events,
+    config.DATA_DIR,
+    log.child({ module: 'portraits' }),
+    aiRuns,
+  );
 
   // The rules the home runs by itself — and, with a manual trigger, the things
   // the apps draw as scenes. Constructed here and *started* after the registry
