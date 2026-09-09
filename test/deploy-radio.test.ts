@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -24,7 +24,12 @@ const dirs: string[] = [];
 function tmp(): string {
   const dir = mkdtempSync(path.join(tmpdir(), 'gethome-radio-'));
   dirs.push(dir);
-  return dir;
+  // Resolved, because the script under test resolves too: its `readlink -f`
+  // follows macOS's /var -> /private/var symlink, so the device node it wrote
+  // into zigbee.env and the path held here were one file under two names, and
+  // every assertion about a serial port failed on the machine most of this
+  // suite is written on while CI stayed green.
+  return realpathSync(dir);
 }
 
 afterEach(() => {

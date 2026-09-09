@@ -268,7 +268,22 @@ apply_matter() {
   current=$(read_env ADAPTER_MATTER "$HUB_ENV")
   [[ "$current" == "$MATTER_WANTED" ]] && return 0
   if grep -q '^ADAPTER_MATTER=' "$HUB_ENV" 2>/dev/null; then
-    sed -i "s/^ADAPTER_MATTER=.*/ADAPTER_MATTER=${MATTER_WANTED}/" "$HUB_ENV" || return 0
+    # Deliberately not `sed -i`. It is GNU-only in this form — BSD sed reads
+    # the next argument as the backup suffix, so on macOS the substitution
+    # becomes the suffix, the write fails, and `|| return 0` swallows it. This
+    # script only ever *runs* on Linux, but `test/deploy-radio.test.ts` runs it
+    # on whatever the contributor has, and a test that cannot reach the write
+    # it is asserting on is a test of nothing.
+    local rewritten="${HUB_ENV}.gethome.$$"
+    if ! sed "s/^ADAPTER_MATTER=.*/ADAPTER_MATTER=${MATTER_WANTED}/" "$HUB_ENV" > "$rewritten"; then
+      rm -f "$rewritten"
+      return 0
+    fi
+    # The mode and owner come across before the swap: `mv` would hand the
+    # replacement whatever the umask says, and hub.env is read by the service
+    # user on every start.
+    chmod --reference="$HUB_ENV" "$rewritten" 2>/dev/null || chmod 0644 "$rewritten"
+    mv -f "$rewritten" "$HUB_ENV" || { rm -f "$rewritten"; return 0; }
   else
     printf 'ADAPTER_MATTER=%s\n' "$MATTER_WANTED" >> "$HUB_ENV" || return 0
   fi
