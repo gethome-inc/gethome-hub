@@ -1616,6 +1616,16 @@ hub can grow an eighth without an app release. Open string, the
 `commandFailed.kind` rule: an unknown word gets a neutral mark and keeps its
 sentence. See [`docs/automations.md`](automations.md) for the vocabulary.
 
+**A stored round carries one kind the socket never sends.** `data.steps` on a
+transcript row can hold `kind: "said"` — prose from a round that then went on to
+call a tool, kept because only the *last* round's text becomes a row and that
+narration would otherwise exist nowhere. No `step` frame goes out for it: the
+words already reached the client as `delta`s while they were being written, and
+a frame would draw the same sentence twice. A client that folds its own streamed
+prose into its live trail therefore ends up with the same trail either way. A
+step's `detail` can likewise now hold the model's **reasoning**, hung on the step
+it was produced under wherever the tool sent no sentence of its own.
+
 **`automationRun` is opt-in for the same reason the others are.** It is the
 trace somebody watches while working out why the light came on, and a home with
 a motion rule produces one every time anybody walks through the hall. The

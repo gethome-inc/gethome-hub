@@ -55,14 +55,15 @@ export interface TurnRequest {
   signal: AbortSignal;
   usage: RunUsage;
   /**
-   * Only the two halves of the stream this function actually drives.
+   * Only the halves of the stream this function actually drives.
    *
    * Narrowed rather than taking the whole context, because `onStep`'s `kind`
    * is each agent's own vocabulary — a callback taking `AutomationStepKind`
    * cannot stand in for one taking `string`, which is contravariance rather
    * than a nuisance: it would accept a word the caller cannot handle.
+   * `onSaid` takes a plain string and so travels with the other two.
    */
-  context: Pick<ChatTurnContext, 'onDelta' | 'onThinking'> | undefined;
+  context: Pick<ChatTurnContext, 'onDelta' | 'onThinking' | 'onSaid'> | undefined;
   /** Named in the sentence a timeout produces, so it reads about this agent. */
   label: string;
   timeoutMs: number;
@@ -147,6 +148,25 @@ export async function streamTurn(request: TurnRequest): Promise<{
   const calls = response.content.filter(
     (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use',
   );
+
+  /**
+   * **Prose from a round that then calls a tool is not the answer, and it was
+   * being thrown away.**
+   *
+   * A model narrates as it works — *"I'll set that up for you."* — and then
+   * calls something. That sentence goes out over `onDelta` and is never
+   * recorded: only the *last* round's text becomes the transcript row, so a
+   * conversation read back next week shows the conclusion with nothing of the
+   * commentary that led to it. Worse for the app drawing it live, which
+   * accumulates deltas: two rounds of prose arrived run together with no space
+   * between them, and were then replaced wholesale when the turn landed.
+   *
+   * Reported here rather than in either pump, because it is the same fact in
+   * both and this is the one place they share. `calls.length > 0` is the whole
+   * of the test: prose with nothing after it *is* the answer, and recording it
+   * would put the reply in the transcript twice.
+   */
+  if (said.length > 0 && calls.length > 0) context?.onSaid?.(said);
 
   return { response, said, calls };
 }

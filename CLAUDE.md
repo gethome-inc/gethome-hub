@@ -1062,6 +1062,22 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `automation-tools.ts` beside the tools: `Looked up list_rooms_zones.` is a
   function signature read out loud, on the one screen whose whole job is telling
   somebody who does not write software what their house is doing.
+  **And two things a round produced were streamed and then dropped, so the trail
+  somebody read back was a thinner thing than the one they watched.** The model's
+  **reasoning** arrives between one step and the next, which makes it the working
+  of the step already on screen; it is hung on that step's `detail` when the next
+  step lands, when prose is said, or when the reply starts — the last because a
+  round can end without another step. Only into an empty slot: a tool's own
+  `detail` is the better sentence wherever there is one. And **prose from a round
+  that then calls a tool is not the answer** — a model narrates ("I'll set that
+  up for you.") and then calls something, and only the *last* round's text
+  becomes a row — so it is kept as a step of its own, `kind: 'said'`, reported
+  from `streamTurn` where both agents share it. That kind is the one the socket
+  **never sends**: the words already reached the app as deltas, and a frame would
+  draw the same sentence twice. Both are why `clip()` exists: `slice` was fine
+  while these fields held the hub's own fixed sentences and cuts model-written
+  prose mid-word, so it cuts at a word, appends an ellipsis, and counts the
+  ellipsis against the bound.
   **Nothing is ever sent with a `tool_use` left unanswered, and the repair
   belongs before the next *user* turn.** Every call in an assistant turn needs
   a result in the very next message, and a conversation that breaks that rule

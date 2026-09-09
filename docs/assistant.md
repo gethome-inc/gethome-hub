@@ -66,6 +66,13 @@ rather than a stack trace, and `QuestionGate` — the rule that no request may
 ever carry a `tool_use` with no `tool_result` after it. Every one of those was
 learned by breaking something; a second copy is a second place to unlearn it.
 
+**Reporting what a round said before it went off to work is there too**, for
+the same reason: a model narrates and then calls something, only the last
+round's text becomes a transcript row, and the loop is the one place that has
+`said` and `calls` in hand at once. It goes into the round's working as a
+`said` step rather than out as a frame — `docs/automations.md` has the whole of
+it.
+
 What each agent keeps is its own `pump`, because what ends a turn genuinely
 differs: a rule for one, a handoff for the other.
 
