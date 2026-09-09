@@ -46,6 +46,47 @@ or 5 runs both together and never makes the choice.
    `POST /api/v1/zigbee/permit-join {"seconds":120}`) and put the device in
    pairing mode.
 
+### The channel, and why the default is the wrong one here
+
+**Zigbee and Wi-Fi are the same 2.4 GHz band, and Zigbee2MQTT's default channel
+sits inside the commonest Wi-Fi channel there is.** 802.15.4 channels 11–26 are
+2 MHz wide and 5 MHz apart from 2405 MHz; a 20 MHz Wi-Fi channel covers its
+centre ±11 MHz. So channel 11 — 2405 MHz — is inside Wi-Fi channel 1
+(2401–2423), and on this hardware the two radios are centimetres apart: the
+coordinator hangs off the Pi's USB socket and the Wi-Fi antenna is printed on
+the board next to it.
+
+**What it costs is retries and throughput, in proportion to how busy the Zigbee
+side is**, and the size matters. A Zigbee frame is tens of bytes at 250 kbit/s,
+so a quiet home occupies a fraction of a percent of the air and the collision
+costs almost nothing; a chatty one — a power meter reporting every few seconds,
+a network under load — costs progressively more. It is a **standing handicap on
+the Wi-Fi**, not an outage: reach for it when a hub is slow or lossy, not when
+it disappears completely, which is a link that is down or a path that is broken
+and wants looking for elsewhere. What makes it worth avoiding is that it is free
+to avoid before the network exists and expensive afterwards.
+
+So `install.sh` picks the channel furthest from whatever Wi-Fi channel the hub
+is associated on, and does it **only when this hub has never formed a network** —
+no `configuration.yaml` and no `coordinator_backup.json`. Channel 26 is left out
+(several regions cap its transmit power, and some devices will not join on it),
+and a hub with no Wi-Fi to measure gets 25, which is clear of Wi-Fi 1 and 6.
+
+**A hub that already has a network is told rather than moved.** Every install
+before this chose nothing and formed on 11, so the installer compares the
+network's channel against the Wi-Fi the hub is associated on and emits a
+`@@WARN@@` when they overlap, naming both, the channel to move to, and the cost
+of moving. It has to be said out loud because nothing else will say it: the
+coordinator is reached, the devices report, `zigbee.connected` is `true`, and
+what suffers is the other radio. It is worded as a standing handicap, never as
+a diagnosis of an outage.
+
+**An existing network keeps the channel it formed on**, whatever the Wi-Fi under
+it has done since. Moving it is not an upgrade: mains-powered routers usually
+follow, sleepy end devices usually do not, and the home wakes up to a list of
+things that have to be paired again. Changing the channel of a home that already
+works is the owner's decision, made in Zigbee2MQTT, with that cost understood.
+
 ### Finding the coordinator
 
 `deploy/zigbee-detect.sh` is the single authority on which USB device is a
@@ -285,6 +326,46 @@ hub). Not both. Two separate things decide which:
 > and days of real traffic, because being wrong here means hubs that run out of
 > memory in people's homes a week after they were installed, which is the
 > failure this whole architecture was chosen to avoid.
+>
+> **And the hub itself is now exempt from that paging** (`MemorySwapMax=0` on
+> `gethome-hubd.service`). The paragraph above is the budget working as
+> designed; it is also, unchanged, a fault that reads as a dead hub. Swap goes
+> to whatever has been idle longest, and on a hub that is the hub — nobody asks
+> it anything for hours — so its heap and its JIT code go to zram, and
+> Raspberry Pi OS's own `rpi-zram-writeback` moves the idle part of that onto
+> the SD card. Then somebody opens the app.
+>
+> Measured on a Zero 2 W up 38 hours with Zigbee only:
+>
+> | | resident | in swap |
+> |---|---|---|
+> | hub | 35 MB | **55 MB** |
+> | Zigbee2MQTT | 24 MB | 83 MB |
+>
+> with `MemFree` 110 MB, `MemAvailable` 200 MB, the board at 0% CPU and 25 MB
+> of the two written back onto the card. **Nothing needed that memory.** Waking
+> it is ~14 000 single-page faults — `vm.page-cluster` is 0, so there is no
+> readahead to amortise them — zstd decompression on a 1 GHz A53, and 4 KB
+> random card reads for the written-back part, against an app that gives
+> `GET /hub` four seconds.
+>
+> What that costs is the *first request* after a quiet spell: seconds, against
+> an app that waits four. It is worth fixing on its own terms.
+>
+> **It is not what makes a hub unreachable, and reading it that way cost two
+> rounds.** ICMP is answered by the kernel, so a hub that will not answer a
+> ping is not a hub whose userspace has been paged out — and during a real
+> outage the hub answered nothing at all, ping included. That fault is the
+> quiet-path one in `CLAUDE.md` (`keep_wifi_reachable`), and it is a different
+> thing entirely. The two look alike from an app, which is the whole trap.
+>
+> So the hub is pinned and everything else keeps the swap. Z2M is the optional
+> process, which its hard `MemoryMax` and `OOMScoreAdjust=500` already say, and
+> the page cache — 243 MB of `node_modules`, read once at startup — is what the
+> kernel should be reclaiming instead. The cost is the hub's real working set
+> resident, the 139 MB in the table above against a 200 MB `MemoryHigh`. Like
+> `MemoryHigh`, it needs the memory cgroup and does nothing on a board that has
+> not rebooted since the installer turned it back on.
 
 | | Who sets it | Where it lives | What it means |
 |---|---|---|---|

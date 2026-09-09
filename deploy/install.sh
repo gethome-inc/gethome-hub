@@ -490,8 +490,18 @@ fi
 # compressed and in RAM, so it wants the same tuning either way.
 if [[ -n "$SMALL_BOARD" ]]; then
   $SUDO tee /etc/sysctl.d/60-gethome.conf >/dev/null <<'SYSCTL'
-# Tuned for compressed swap in RAM, which is cheap to use and costs the SD card
-# nothing — the defaults assume swapping means writing to a disk.
+# Tuned for compressed swap in RAM, which is far cheaper to use than a disk —
+# the kernel's defaults assume swapping means writing to one.
+#
+# Two things this is *not* saying. It is not saying the card is untouched:
+# Raspberry Pi OS gives its zram a backing device and moves idle pages onto the
+# card from a daily timer, so a page that goes out here can end up being read
+# back 4 KB at a time off an SD card. And it is not saying the hub may be
+# swapped — gethome-hubd.service sets MemorySwapMax=0 and is exempt from all of
+# this, because a hub that has to be paged back in before it can answer is a
+# hub that reads as unreachable. What is left for zram to spend is Zigbee2MQTT,
+# the page cache, and whatever else the board is running, which is the right
+# order to spend it in.
 vm.swappiness=100
 vm.vfs_cache_pressure=50
 SYSCTL
@@ -894,6 +904,346 @@ if ! $SUDO systemctl restart mosquitto >/dev/null 2>&1; then
   service_failure mosquitto
 fi
 
+# ── The log has to survive the reboot that hid the problem ─────────────────
+# systemd's `Storage=auto` means "persist if /var/log/journal exists", and on
+# the Pi this was found on that directory existed and was **empty** — journald
+# had never been told to adopt it, so every log the machine had was in `/run`,
+# thrown away on every boot. The cost lands exactly where it hurts: a hub that
+# went unreachable on Tuesday and recovered by itself has no record of Tuesday
+# left by Wednesday, and what the machine was doing at the time is the only
+# question worth asking. `journalctl --list-boots` answering with one boot is
+# what that looks like from the outside.
+#
+# `Storage=persistent` states it rather than inferring it from a directory, and
+# the caps are for the SD card: journald sizes itself at 10% of the filesystem,
+# which on a 64 GB card is six gigabytes of writes nobody asked for. 64 MB is
+# weeks of a hub that is behaving itself, and the boots either side of one that
+# is not.
+$SUDO mkdir -p /etc/systemd/journald.conf.d
+if $SUDO tee /etc/systemd/journald.conf.d/50-gethome.conf >/dev/null <<'JOURNALD'
+# Written by GetHome. A hub is a machine nobody is sitting in front of, so what
+# it logged before the last reboot is usually the only evidence there is.
+[Journal]
+Storage=persistent
+# The bound is the SD card's, not the filesystem's: journald's own default
+# would take 10% of the card.
+SystemMaxUse=64M
+SystemMaxFileSize=8M
+RuntimeMaxUse=16M
+JOURNALD
+then
+  $SUDO mkdir -p /var/log/journal
+  $SUDO systemd-tmpfiles --create --prefix /var/log/journal >/dev/null 2>&1 || true
+  $SUDO systemctl restart systemd-journald >/dev/null 2>&1 || true
+  $SUDO journalctl --flush >/dev/null 2>&1 || true
+else
+  warn "The system log could not be made persistent, so a reboot will keep losing what the hub logged before it."
+fi
+
+# ── Wi-Fi must not doze ────────────────────────────────────────────────────
+# A hub is a machine nobody talks to for hours and then everybody talks to at
+# once — a phone opens the app, Studio browses for it, somebody SSHs in. That
+# is the worst traffic pattern there is for 802.11 power save, and on the
+# Raspberry Pi's brcmfmac it is the difference between a hub that answers and
+# a hub that has to be woken up. The chip is asked to sleep by default
+# (`brcmf_cfg80211_set_power_mgmt: power save enabled`, in every Pi's kernel
+# log), and the failure that follows is the one nobody can diagnose from the
+# app: the board is up, the coordinator is up, a motion rule is switching the
+# hall light on — and both apps say the hub cannot be reached, because the
+# radio is asleep and the access point's buffered frames went nowhere. It
+# takes SSH down with it, which is exactly what makes it look like the hub's
+# own fault. The one fact that says otherwise is that the automations kept
+# running, and nobody is looking at that while the app says "can't reach".
+#
+# The saving is on the order of 20 mA, on a mains-powered board that is the
+# home's front door. Not a trade worth making — so it goes off now, and off
+# again on every association, because that is where it comes back.
+#
+# A wired hub needs none of this: the interface is whichever one carries the
+# default route (which provably exists — the bundle was just downloaded over
+# it), and a machine that reaches the LAN over Ethernet gets no unit, no
+# dispatcher, and nothing said about it. `GETHOME_NET_DIR` and the two path
+# overrides are there for the same reason `GETHOME_CMDLINE` is: so a test can
+# run this against files it owns rather than against the machine it is on.
+find_iw() {
+  local found
+  found="$(command -v iw 2>/dev/null || true)"
+  if [[ -z "$found" && -x /usr/sbin/iw ]]; then found=/usr/sbin/iw; fi
+  printf '%s' "$found"
+}
+
+# **Two different programs are called `arping`, and root gets the wrong one by
+# default.** `iputils-arping` installs `/usr/bin/arping` and takes `-I` for the
+# interface; Thomas Habets' `arping` package installs `/usr/sbin/arping` and
+# takes `-i`. Root's PATH on Debian puts `/usr/sbin` *first*, so a hub with
+# both would run the one whose flags we are not using — and it would fail
+# silently, leaving the gateway ping alone, which is exactly what was measured
+# not to work. Resolved by path here, and the caller sends one real
+# announcement before trusting it.
+find_arping() {
+  local cand
+  for cand in /usr/bin/arping "$(command -v arping 2>/dev/null || true)"; do
+    if [[ -n "$cand" && -x "$cand" ]]; then printf '%s' "$cand"; return 0; fi
+  done
+}
+
+# The interface the LAN is reached over, when that is a wireless one. Empty for
+# a wired hub, and empty when there is no default route to judge by.
+lan_wifi_iface() {
+  local net_dir="${GETHOME_NET_DIR:-/sys/class/net}" iface
+  iface="$(ip -o route show default 2>/dev/null \
+    | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }' || true)"
+  [[ -n "$iface" ]] || return 0
+  # Two markers, because only one of them is guaranteed. `wireless/` is the old
+  # wireless-extensions directory, and a driver built without them has none;
+  # `phy80211` is cfg80211's own link to the radio and is there on everything
+  # this hub runs on. Asking for the first alone is how the whole of the
+  # section below turns into a no-op that says nothing — "no wireless
+  # interface" is the case that is meant to be silent, so a radio we failed to
+  # recognise would leave power saving on and never mention it.
+  [[ -d "${net_dir}/${iface}/wireless" || -e "${net_dir}/${iface}/phy80211" ]] || return 0
+  printf '%s' "$iface"
+}
+
+# What that interface is associated on, in MHz. Empty when it is not, or when
+# the driver will not say — the caller must treat that as "no information",
+# never as a frequency.
+wifi_frequency_mhz() {
+  local iface iw_bin
+  iface="$(lan_wifi_iface)"
+  [[ -n "$iface" ]] || return 0
+  iw_bin="$(find_iw)"
+  [[ -n "$iw_bin" ]] || return 0
+  "$iw_bin" dev "$iface" link 2>/dev/null | awk '/freq:/ { printf "%d", $2; exit }'
+}
+
+keep_wifi_awake() {
+  local net_dir="${GETHOME_NET_DIR:-/sys/class/net}"
+  local dispatcher="${GETHOME_NM_DISPATCHER:-/etc/NetworkManager/dispatcher.d/50-gethome-wifi-awake}"
+  local unit="${GETHOME_WIFI_UNIT:-/etc/systemd/system/gethome-wifi-awake.service}"
+  local iface iw_bin persisted=""
+
+  # Wired, or no default route to judge by: nothing to do and nothing to say.
+  iface="$(lan_wifi_iface)"
+  [[ -n "$iface" ]] || return 0
+
+  iw_bin="$(find_iw)"
+  if [[ -z "$iw_bin" ]]; then
+    # With the lists refreshed first. The packages step above is the only one
+    # that runs `apt-get update`, and it only reaches it when something it
+    # needs is missing — so on a hub where everything else was already there,
+    # an install here would be resolving against whatever the card happened to
+    # have cached, which on an image that has sat in a drawer is nothing. That
+    # failure is silent by construction: it ends in the warning below, on a
+    # hub whose radio then goes on sleeping.
+    $SUDO apt-get update -qq >/dev/null 2>&1 || true
+    $SUDO apt-get install -y -qq --no-install-recommends iw >/dev/null 2>&1 || true
+    iw_bin="$(find_iw)"
+  fi
+  if [[ -z "$iw_bin" ]]; then
+    warn "This hub reaches the network over Wi-Fi (${iface}) and 'iw' could not be installed, so power saving is still on. The hub may stop answering for minutes at a time while the radio sleeps."
+    return 0
+  fi
+
+  # The link that is up right now, so this install does not have to wait for a
+  # reconnect to take effect.
+  $SUDO "$iw_bin" dev "$iface" set power_save off >/dev/null 2>&1 || true
+
+  if command -v nmcli >/dev/null 2>&1; then
+    # NetworkManager turns power save back on as it associates, so a value
+    # written into one profile is a value the next profile has not got — and a
+    # home that re-enters its Wi-Fi password next month gets a fresh profile
+    # with the fault back in it. The dispatcher covers every wireless
+    # connection this machine ever grows, which is the one thing enumerating
+    # today's profiles cannot do. NM ignores a dispatcher script that anyone
+    # but root can write, so the ownership and the mode are part of the fix.
+    $SUDO mkdir -p "$(dirname "$dispatcher")"
+    if $SUDO tee "$dispatcher" >/dev/null <<DISPATCH
+#!/bin/sh
+# Installed by GetHome. NetworkManager turns 802.11 power save back on as it
+# associates; this turns it off again once the connection is up, for whichever
+# wireless interface came up. deploy/install.sh says why.
+[ "\$2" = "up" ] || exit 0
+[ -d "${net_dir}/\$1/wireless" ] || [ -e "${net_dir}/\$1/phy80211" ] || exit 0
+exec ${iw_bin} dev "\$1" set power_save off
+DISPATCH
+    then
+      $SUDO chown root:root "$dispatcher" 2>/dev/null || true
+      if $SUDO chmod 0755 "$dispatcher"; then persisted="NetworkManager"; fi
+    fi
+  else
+    # A wpa_supplicant/dhcpcd machine has no dispatcher, so the unit is bound
+    # to the device and runs whenever it appears.
+    if $SUDO tee "$unit" >/dev/null <<UNIT
+[Unit]
+Description=Keep the GetHome hub's Wi-Fi radio awake
+Wants=sys-subsystem-net-devices-${iface}.device
+After=sys-subsystem-net-devices-${iface}.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=${iw_bin} dev ${iface} set power_save off
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    then
+      $SUDO systemctl daemon-reload >/dev/null 2>&1 || true
+      $SUDO systemctl enable gethome-wifi-awake >/dev/null 2>&1 || true
+      # Restarted rather than `--now`, for the reason `keep_wifi_reachable`
+      # gives: this is a `RemainAfterExit` oneshot, so an update that changed
+      # its ExecStart would otherwise not run until the board rebooted.
+      if $SUDO systemctl restart gethome-wifi-awake >/dev/null 2>&1; then
+        persisted="systemd"
+      fi
+    fi
+  fi
+
+  # Ask the radio rather than trusting the write: a driver with no support for
+  # the call answers success and changes nothing.
+  if ! $SUDO "$iw_bin" dev "$iface" get power_save 2>/dev/null | grep -qi 'power save: off'; then
+    warn "Wi-Fi power saving could not be turned off on ${iface}. The hub works, but it may stop answering for minutes at a time while the radio sleeps — the apps and SSH both go quiet while the hub itself keeps running."
+  elif [[ -z "$persisted" ]]; then
+    warn "Wi-Fi power saving is off on ${iface} now, but it could not be made to stay off, so it comes back on the next reconnect."
+  else
+    say "Wi-Fi power saving is off on ${iface}, and stays off across reconnects (${persisted})."
+  fi
+}
+
+# ── The hub has to announce itself, and it has to do it by broadcast ──────
+# **The fault this fixes needs the path to be idle, and that is what named
+# it.** A continuous one-per-second ping from a Mac on the same Wi-Fi held the
+# hub reachable for fourteen minutes without a single loss, while twenty
+# minutes earlier the same hub had been unreachable for four minutes at a
+# stretch. Traffic prevented it; quiet caused it. That is the owner's whole
+# experience too — open the app after a while and it cannot find the hub, keep
+# using it and nothing ever goes wrong.
+#
+# What goes quiet is one *pair*. Measured on the hub this came from: the Mac
+# is on 5 GHz and the hub's radio is on 2.4 GHz, so their traffic crosses the
+# bridge between the two radios inside the router, and it is the entry for
+# this hub on that bridge which ages out while it is silent. Everything else
+# keeps working and says so — during one of these the hub answered its own
+# health check in 3 ms, exchanged pings with the gateway throughout, and
+# served another client 37 KB in a single 20-second window, while three pings
+# from the Mac got nothing and its `rx_bytes` counter did not move by one of
+# them. Nothing on the hub is wrong, which is why nothing on the hub ever
+# reports it.
+#
+# **A unicast to the gateway does not fix this, and shipping one is how that
+# was learned.** Those frames are addressed to the router itself and are
+# consumed by it; they never cross the bridge they are meant to keep warm. A
+# **gratuitous ARP is broadcast**, so it is flooded to every segment — it
+# refreshes the access point's forwarding table on both radios and every
+# client's ARP cache, in one frame of a few dozen bytes.
+#
+# Measured, with the path deliberately idled for 55 seconds between every
+# probe, which is the condition the fault needs: **252 probes over four hours,
+# 503 of 504 replies, one lost packet** — against a gateway control that lost
+# none. Before it, the same probe found multi-minute blackouts.
+#
+# The gateway ping stays beside it: it costs nothing and it keeps the hub's own
+# default route fresh. A wired hub gets none of this, for the reason it gets no
+# dispatcher.
+keep_wifi_reachable() {
+  local iface self arping_bin unit="${GETHOME_KEEPALIVE_UNIT:-/etc/systemd/system/gethome-wifi-keepalive.service}"
+  local script="${GETHOME_KEEPALIVE_SCRIPT:-/usr/local/lib/gethome-wifi-keepalive.sh}"
+
+  iface="$(lan_wifi_iface)"
+  [[ -n "$iface" ]] || return 0
+
+  # `arping` sends the broadcast. It is only wanted on a wireless hub, so it is
+  # installed here rather than with the base packages — and with the lists
+  # refreshed first, for the reason `iw` is.
+  arping_bin="$(find_arping)"
+  if [[ -z "$arping_bin" ]]; then
+    $SUDO apt-get update -qq >/dev/null 2>&1 || true
+    $SUDO apt-get install -y -qq --no-install-recommends iputils-arping >/dev/null 2>&1 || true
+    arping_bin="$(find_arping)"
+  fi
+
+  # Ask, never assume — `keep_wifi_awake`'s rule, and here it covers more than
+  # a missing binary: an announcement that cannot be sent leaves the hub with
+  # the gateway ping alone, which is the thing that was measured *not* to work.
+  # One real broadcast during the install is what tells the two apart.
+  self="$(ip -4 -o addr show "$iface" 2>/dev/null | awk '{ split($4, a, "/"); print a[1]; exit }')"
+  if [[ -z "$arping_bin" ]] || ! $SUDO "$arping_bin" -U -c 1 -I "$iface" "${self:-0.0.0.0}" >/dev/null 2>&1; then
+    warn "This hub reaches the network over Wi-Fi (${iface}) and could not announce itself to the router. It works, but it may become unreachable for minutes at a time after a quiet spell, while running perfectly."
+    arping_bin=""
+  fi
+
+  $SUDO mkdir -p "$(dirname "$script")"
+  if ! $SUDO tee "$script" >/dev/null <<KEEPALIVE
+#!/bin/sh
+# Installed by GetHome. deploy/install.sh says why in full; the short version
+# is that the router ages this hub out of the table it uses to reach it from
+# its other radio, a hub is silent for minutes at a time, and what comes of
+# that is a hub nothing on the network can reach while it runs perfectly.
+#
+# **Broadcast is the whole point.** A gratuitous ARP is flooded to every
+# segment, so it refreshes the access point's forwarding table on both radios
+# and every client's ARP cache at once. A unicast to the router does not: it is
+# addressed to the router itself and never crosses the bridge it is meant to
+# keep warm. That was tried first and did not work.
+#
+# Everything is re-read each round rather than captured, so a lease or an
+# interface that moves does not leave this announcing an address it no longer
+# has. Nothing is checked for a reply: transmitting is what does the work.
+while :; do
+  iface=\$(ip route show default 2>/dev/null |
+    awk '/^default/ { for (i = 1; i < NF; i++) if (\$i == "dev") { print \$(i + 1); exit } }')
+  if [ -n "\$iface" ]; then
+    self=\$(ip -4 -o addr show "\$iface" 2>/dev/null | awk '{ split(\$4, a, "/"); print a[1]; exit }')
+    [ -n "\$self" ] && [ -x "${arping_bin:-/nonexistent}" ] &&
+      "${arping_bin:-/nonexistent}" -U -c 1 -I "\$iface" "\$self" >/dev/null 2>&1
+    gateway=\$(ip route show default 2>/dev/null | awk '/^default/ { print \$3; exit }')
+    [ -n "\$gateway" ] && ping -c 1 -W 1 "\$gateway" >/dev/null 2>&1
+  fi
+  sleep 20
+done
+KEEPALIVE
+  then
+    warn "Could not install the Wi-Fi keep-alive. The hub works, but it may become unreachable for minutes at a time after a quiet spell, while running perfectly."
+    return 0
+  fi
+  $SUDO chmod 0755 "$script"
+
+  if $SUDO tee "$unit" >/dev/null <<UNIT
+[Unit]
+Description=Keep this hub reachable on Wi-Fi
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${script}
+Restart=always
+RestartSec=10
+# Nothing here is urgent, and it must never be what wakes a loaded board.
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  then
+    $SUDO systemctl daemon-reload >/dev/null 2>&1 || true
+    $SUDO systemctl enable gethome-wifi-keepalive >/dev/null 2>&1 || true
+    # `restart`, not `enable --now`. Every update re-runs this installer and
+    # rewrites the script above, and `--now` on a unit that is already running
+    # does nothing at all — so the fix would sit on disk until the next reboot
+    # while the old one kept running. `restart` starts a stopped unit too.
+    if $SUDO systemctl restart gethome-wifi-keepalive >/dev/null 2>&1; then
+      say "The hub will announce itself on the network every 20 seconds, so it stays reachable after a quiet spell."
+      return 0
+    fi
+  fi
+  warn "Could not start the Wi-Fi keep-alive. The hub works, but it may become unreachable for minutes at a time after a quiet spell, while running perfectly."
+}
+
+keep_wifi_awake
+keep_wifi_reachable
+
 # ── mDNS ───────────────────────────────────────────────────────────────────
 # avahi answers for this machine's own name; the hub hands it the
 # `_gethome._tcp` service rather than running a second responder of its own.
@@ -984,10 +1334,92 @@ $SUDO chown -R "$SERVICE_USER:$SERVICE_USER" "$Z2M_DATA_DIR"
 # rewriting it would lose somebody's whole Zigbee network. Creating it when it
 # is absent, or replacing one `onboarding:` line when it is present, does
 # neither.
+# ── Zigbee and Wi-Fi are the same band, and the default puts them on top ───
+# 802.15.4 channels 11–26 sit 5 MHz apart from 2405 MHz and are 2 MHz wide; a
+# 20 MHz Wi-Fi channel covers its centre ±11 MHz. So several Zigbee channels
+# fall *inside* every Wi-Fi channel, and Zigbee2MQTT's default — 11, at
+# 2405 MHz — is inside Wi-Fi channel 1, which is the commonest Wi-Fi channel
+# there is. On this hardware the two radios are centimetres apart: the
+# coordinator hangs off the Pi's USB socket and the Wi-Fi antenna is printed on
+# the board beside it.
+#
+# What that costs is **retries and throughput, in proportion to how busy the
+# Zigbee side is**, and it is worth being exact about the size of it: a Zigbee
+# frame is tens of bytes at 250 kbit/s, so a quiet home is a fraction of a
+# percent of the air and costs almost nothing. It is a standing handicap on the
+# Wi-Fi rather than an outage — the thing to reach for when a hub is slow or
+# lossy, not when it disappears completely, which is a link that is down or a
+# path that is broken and wants looking for elsewhere. The reason to avoid it
+# anyway is that it is free to avoid at install time and expensive afterwards.
+#
+# So the channel is picked at the only moment it can be picked: when this hub
+# has never formed a network. Changing it afterwards is not an upgrade — it is
+# a home whose sleepy devices all have to be paired again — so a hub that
+# already has a network keeps the channel it formed on, whatever the Wi-Fi
+# under it has done since.
+# The other half of that decision, for a hub that already has a network. The
+# channel is not ours to move there — but it is ours to *name*, because nothing
+# else in the system ever will: Zigbee is connected, the devices report, and
+# what suffers is the other radio. Said as a standing handicap, never as a
+# diagnosis — see the sizing above.
+zigbee_network_channel() {
+  local backup="$Z2M_DATA_DIR/coordinator_backup.json" channel=""
+  if [[ -f "$backup" ]]; then
+    channel="$($SUDO grep -o '"logical_channel"[[:space:]]*:[[:space:]]*[0-9]*' "$backup" 2>/dev/null \
+      | head -n1 | grep -o '[0-9]*$' || true)"
+  fi
+  if [[ -z "$channel" && -f "$Z2M_CONFIG" ]]; then
+    channel="$($SUDO sed -n 's/^[[:space:]]*channel:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+      "$Z2M_CONFIG" 2>/dev/null | head -n1 || true)"
+  fi
+  printf '%s' "$channel"
+}
+
+warn_if_zigbee_jams_wifi() {
+  local wifi_mhz zigbee_channel zigbee_mhz gap clear
+  wifi_mhz="$(wifi_frequency_mhz)"
+  zigbee_channel="$(zigbee_network_channel)"
+  # No Wi-Fi to collide with, or no network yet: nothing to say either way.
+  [[ -n "$wifi_mhz" && -n "$zigbee_channel" ]] || return 0
+  (( zigbee_channel >= 11 && zigbee_channel <= 26 )) || return 0
+  zigbee_mhz=$((2405 + 5 * (zigbee_channel - 11)))
+  if (( zigbee_mhz > wifi_mhz )); then gap=$((zigbee_mhz - wifi_mhz)); else gap=$((wifi_mhz - zigbee_mhz)); fi
+  # A 20 MHz Wi-Fi channel is its centre ±11 MHz. Inside that, the coordinator
+  # is transmitting into this hub's own uplink from a few centimetres away.
+  (( gap <= 11 )) || return 0
+  clear="$(zigbee_channel_clear_of_wifi "$wifi_mhz")"
+  warn "This hub's Wi-Fi (${wifi_mhz} MHz) and its Zigbee network (channel ${zigbee_channel}, ${zigbee_mhz} MHz) are on the same frequency, and the two radios are a few centimetres apart. They share the air rather than take turns, so the Wi-Fi carries more retries and less throughput than it should — how much depends on how busy the Zigbee network is, and a quiet one costs little. Channel ${clear} is clear of this hub's Wi-Fi. It is not changed for you, and is worth changing only if something is actually wrong: the network re-forms, so mains-powered devices usually follow and battery ones usually have to be paired again."
+}
+
+zigbee_channel_clear_of_wifi() {
+  local wifi_mhz="$1" best=25 best_gap=-1 channel gap mhz
+  # Nothing to measure — a wired hub, or a radio that would not say. 25 is
+  # still the better guess than 11: it is clear of Wi-Fi 1 and 6, which is most
+  # homes, and 11 sits inside the first of them.
+  if [[ -z "$wifi_mhz" ]]; then printf '25'; return 0; fi
+  # 26 is left out on purpose: several regions cap its transmit power and some
+  # devices will not join on it at all.
+  for channel in $(seq 11 25); do
+    mhz=$((2405 + 5 * (channel - 11)))
+    if (( mhz > wifi_mhz )); then gap=$((mhz - wifi_mhz)); else gap=$((wifi_mhz - mhz)); fi
+    if (( gap > best_gap )); then best_gap=$gap; best=$channel; fi
+  done
+  printf '%s' "$best"
+}
+
 Z2M_CONFIG="$Z2M_DATA_DIR/configuration.yaml"
 Z2M_ONBOARDING_CHANGED=""
 if [[ ! -f "$Z2M_CONFIG" ]]; then
-  printf 'onboarding: false\n' | $SUDO tee "$Z2M_CONFIG" >/dev/null \
+  # A backup means a network exists even with the config gone, and its channel
+  # is not ours to move.
+  if [[ -f "$Z2M_DATA_DIR/coordinator_backup.json" ]]; then
+    Z2M_NEW_CONFIG=$'onboarding: false\n'
+  else
+    ZIGBEE_CHANNEL="$(zigbee_channel_clear_of_wifi "$(wifi_frequency_mhz)")"
+    Z2M_NEW_CONFIG=$'onboarding: false\nadvanced:\n  channel: '"${ZIGBEE_CHANNEL}"$'\n'
+    say "Zigbee will form its network on channel ${ZIGBEE_CHANNEL}, clear of this hub's Wi-Fi."
+  fi
+  printf '%s' "$Z2M_NEW_CONFIG" | $SUDO tee "$Z2M_CONFIG" >/dev/null \
     && $SUDO chown "$SERVICE_USER:$SERVICE_USER" "$Z2M_CONFIG" \
     && Z2M_ONBOARDING_CHANGED=1
 elif grep -qE '^onboarding:[[:space:]]*true' "$Z2M_CONFIG" 2>/dev/null; then
@@ -1134,6 +1566,44 @@ ProtectSystem=full
 # Throttle, don't kill. See the sizing block near the top: a hard MemoryMax
 # anywhere near the real working set turns a busy minute into a restart.
 ${HUB_MEM_HIGH}
+# **The hub is not where headroom comes from.** Compressed swap is what lets a
+# 512 MB board hold two radios, and the kernel spends it on whatever has been
+# idle longest — which on a hub is the hub. Nobody talks to it for hours, so
+# its heap and its JIT code go into zram, and Raspberry Pi OS's own
+# rpi-zram-writeback then moves the idle part of that onto the SD card. Then a
+# phone opens the app.
+#
+# Measured on a Zero 2 W that had been up 38 hours: hubd resident 35 MB with
+# 55 MB of itself in swap, Zigbee2MQTT resident 24 MB with 83 MB in swap, 25 MB
+# of the two written back to the card — with 110 MB of RAM free and the board
+# at 0% CPU. Nothing needed that memory. Waking it is 14 000 single-page faults
+# (vm.page-cluster is 0, so there is no readahead to amortise them), zstd
+# decompression on a 1 GHz A53, and for the written-back part 4 KB random reads
+# off an SD card. The app gives its health check four seconds.
+#
+# (No backticks below this line: the unit is written from an unquoted heredoc,
+# so bash would run whatever they enclose. There is a test for that.)
+#
+# That is the whole shape of the fault this hub is unreachable with: the board
+# is up, the automations keep firing — their working set is tiny and stays hot,
+# which is why nothing points at memory — and the app and SSH both go quiet
+# together while the machine faults a hundred megabytes back in. It clears by
+# itself, and a second or third pull-to-refresh "fixing" it is the pages
+# arriving, not the network recovering.
+#
+# So the hub's own memory is pinned and everything else keeps the swap: Z2M is
+# the optional process (that is what its hard MemoryMax and +500 OOM score
+# already say), and the page cache — 243 MB of node_modules read once at
+# startup — is what the kernel should be reclaiming instead. This costs the
+# board the hub's real working set in RAM, ~139 MB with both radios up against
+# a 200 MB MemoryHigh, which is the number the sizing block was written around
+# in the first place.
+#
+# cgroup v2 only, and silently ignored where the memory controller is off —
+# which is every Raspberry Pi that has not rebooted since the section above
+# turned it back on. That is the same caveat MemoryHigh carries, and the same
+# reason OOMScoreAdjust exists beside it.
+MemorySwapMax=0
 # A memory spike should cost the hub a restart, not the machine a reboot.
 OOMPolicy=continue
 # And when the board genuinely runs out, the kernel should reach for
@@ -1463,6 +1933,13 @@ if [[ -n "$ZIGBEE_READY" ]]; then
       ZIGBEE_READY=""
     fi
   fi
+fi
+
+# A Zigbee network that works perfectly can still be sitting on top of this
+# hub's own Wi-Fi, and nothing above would notice: the coordinator is reached,
+# the devices report, and the only casualty is the other radio.
+if [[ -n "$ZIGBEE_READY" ]]; then
+  warn_if_zigbee_jams_wifi
 fi
 
 # What this hub can actually talk to, said in as many words. The radio decision

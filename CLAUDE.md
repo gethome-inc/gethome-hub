@@ -68,6 +68,24 @@ npm audit --omit=dev --audit-level=moderate  # what CI gates on; reads the lockf
 `deploy/` has no type checker behind it, so CI runs `shellcheck -S warning` over
 every script there. Keep it clean.
 
+**And keep it portable in the parts a test executes, which shellcheck will not
+tell you.** These scripts only ever *run* on Linux, so a GNU-only idiom is
+harmless there and quietly fatal here: `test/deploy-radio.test.ts` and
+`test/deploy-wifi.test.ts` run the real functions on whatever the contributor
+has, which on macOS is BSD userland and **bash 3.2**. Both halves have bitten.
+`sed -i "s/…/…/"` is GNU-only in that form — BSD sed reads the substitution as
+the backup suffix, so `apply_matter` failed, its `|| return 0` swallowed it,
+and 14 tests asserted on a write that had never happened. And in the test
+harness, `sed -n "/^$fn() {/,/^}/p"` written inline puts braces inside a second
+level of double quotes within a command substitution, which bash 3.2
+brace-expands anyway: sed gets two arguments, every extraction fails, and 10 of
+15 tests went red locally while CI stayed green. The rule is the one the
+`buildServer` note further down states for `test/`: **a test that cannot reach
+the thing it asserts on is a test of nothing**, and green CI does not tell you
+which of the two you have. Prefer a temporary file over `sed -i`, build a sed
+program into a variable before using it, and run `npm test` on the machine you
+are writing on.
+
 **Dependencies are gated, not just watched.** Every vulnerable package this repo
 has shipped arrived transitively — `mqtt → socks → ip-address`, and
 `@anthropic-ai/claude-agent-sdk → @modelcontextprotocol/sdk → hono` before that
@@ -1780,6 +1798,138 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   an attack and too tight for the feature it protects would pass every static
   check and ship a broken integrator story. `docs/mqtt-integrations.md` is
   canonical for integrators, `docs/api.md` for the route.
+- **Zigbee and Wi-Fi are one band, and upstream's default channel is inside the
+  commonest Wi-Fi channel there is.** 802.15.4 channels 11–26 are 2 MHz wide and
+  5 MHz apart from 2405 MHz, a 20 MHz Wi-Fi channel is its centre ±11 MHz, so
+  Zigbee2MQTT's default of 11 (2405 MHz) sits inside Wi-Fi channel 1 — with the
+  coordinator on the Pi's USB socket and the Wi-Fi antenna printed on the board
+  beside it. **What it costs is retries and throughput, in
+  proportion to how busy the Zigbee side is**, and the size is the part worth
+  writing down: a Zigbee frame is tens of bytes at 250 kbit/s, so a quiet home
+  is a fraction of a percent of the air and the collision costs almost nothing,
+  while a power meter reporting every few seconds costs progressively more. It
+  is a standing handicap on the Wi-Fi, **never an explanation for a hub that
+  disappears outright** — that is a link that is down or a path that is broken,
+  and mistaking one for the other sends a whole evening after the wrong radio.
+  Avoiding it is free before the network exists and expensive after, which is
+  the whole reason it is decided at install time. `install.sh` picks the
+  channel furthest from whatever Wi-Fi channel the hub is associated on, 26
+  excluded (regions cap its power, some devices will not join it) and 25 as the
+  answer when there is no Wi-Fi to measure. **Only when this hub has never
+  formed a network**, though — no `configuration.yaml` and no
+  `coordinator_backup.json` — because moving the channel of a home that already
+  works is not an upgrade: routers follow, sleepy end devices do not, and the
+  home wakes to a list of things to pair again. And a hub that already
+  has a network is **told rather than moved**: the installer compares the two
+  and emits a `@@WARN@@` naming both channels, the one to move to and what
+  moving costs, because nothing else in the system will ever say it —
+  `zigbee.connected` is `true`, the devices report, and the casualty is the
+  other radio. `docs/zigbee.md` is canonical.
+- **A Pi's journal lies about its own first minute, and the hub says the one
+  number that cannot.** There is no RTC on any board this runs on, so the
+  machine boots into whatever `fake-hwclock` saved at the last shutdown and
+  `systemd-timesyncd` corrects it seconds later — which means every wall-clock
+  timestamp before `Initial clock synchronization` is off by however far behind
+  that saved time was, and the correction reads as a gap where nothing happened.
+  Measured on a Zero 2 W: `Started gethome-hubd` to the hub's first log line
+  read as **4 minutes 39 seconds** in `journalctl`'s default output and was
+  **17.3 seconds** in `-o short-monotonic`, with the API listening 64 s after
+  power-on. The whole machine appears to stall and resume together, which is
+  the tell — a hub that was genuinely slow would be slow alone. So read a boot
+  with `-o short-monotonic`, and note that the hub itself now reports
+  `(17.3s to load)` beside its version: everything before that line is the
+  module graph, it is the longest single step in a start on a small board, and
+  `process.uptime()` is the only clock in the building that does not jump.
+- **`Storage=auto` is not persistence, and a hub that cannot remember
+  yesterday cannot be diagnosed.** systemd reads it as "persist if
+  `/var/log/journal` exists", and on the Pi this was found on that directory
+  existed and was **empty** — journald had never adopted it, so everything the
+  machine logged lived in `/run` and went with every reboot. What that costs is
+  precise: a hub that went unreachable on Tuesday and recovered by itself has
+  no record of Tuesday left by Wednesday, and `journalctl --list-boots`
+  answering with one boot is the only sign. `install.sh` states
+  `Storage=persistent` rather than inferring it, creates the directory and
+  flushes — the drop-in alone leaves the logs where they were — and bounds it
+  at 64 MB, because journald sizes itself at 10% of the filesystem and that is
+  six gigabytes of SD-card writes on a 64 GB card. This is the one place the
+  card's write budget is spent on something nobody reads until it matters:
+  every other bound here (`STATE_FLUSH_MS`, the activity log's two, the history
+  buckets) exists to *stop* writing, and this one exists because the alternative
+  is a support question with no evidence behind it.
+- **The hub's Wi-Fi must not doze, and the failure it causes is why this is in
+  the installer rather than in a troubleshooting page.** 802.11 power save is on
+  by default on the Pi's brcmfmac (`brcmf_cfg80211_set_power_mgmt: power save
+  enabled`, in every Pi's kernel log), and a hub is the worst possible traffic
+  pattern for it: nobody talks to the machine for hours, and then a phone opens
+  the app. What comes out the other side is a hub that is *up* and unreachable —
+  the board running, the coordinator running, a motion rule switching the hall
+  light on, and both apps saying the hub cannot be reached. **It takes SSH with
+  it**, which is the half that misleads: an owner who cannot reach port 8420
+  *or* port 22 concludes the hub has crashed, and every measurement taken
+  afterwards (memory, restarts, `MemoryHigh`, disk) comes back clean, because
+  nothing was ever wrong with the hub. The one fact pointing the right way is
+  that the automations kept running, and nobody looks at that while the app says
+  "can't reach". `keep_wifi_awake()` turns it off on the interface carrying the
+  default route, and a wired hub gets no unit, no dispatcher and nothing said
+  about it. Four rules. **Off now *and* off later**: NetworkManager re-enables
+  it on every association, so the live `iw` call is only half the fix — the
+  other half is a dispatcher script, which covers every wireless profile the
+  machine ever grows where writing `802-11-wireless.powersave` into today's
+  profiles would miss the one a home creates when it retypes its Wi-Fi password
+  next month; a machine with no NetworkManager gets a unit bound to the device
+  instead. **Ask the radio, never the write** — a driver with no support for the
+  call answers success and changes nothing, so the outcome is read back with
+  `get power_save` and an unverified one is a `@@WARN@@`, the `service_failure`
+  rule one layer down. **A radio is recognised by either sysfs marker** —
+  `wireless/` is the wireless-extensions directory and `phy80211` is cfg80211's
+  own link, and a driver built without the extensions has only the second;
+  asking for the first alone reads as "this hub is wired", which is the one
+  answer that is deliberately silent, so such a board would keep dozing behind
+  a clean install log. **The interface is the one carrying the default route**,
+  which provably exists at that point in the install (the bundle was just
+  downloaded over it), so nothing has to guess between a LAN interface and one
+  in AP mode. And the paths are overridable (`GETHOME_NET_DIR`,
+  `GETHOME_NM_DISPATCHER`, `GETHOME_WIFI_UNIT`) for the reason `GETHOME_CMDLINE`
+  is — `test/deploy-wifi.test.ts` runs the real function against files it owns,
+  including running the dispatcher the way NetworkManager runs it.
+- **The hub has to announce itself, by broadcast, or it goes unreachable after
+  a quiet spell.** This is the fault the outage reports were, and what named it
+  was the shape rather than any counter: a continuous one-per-second ping from
+  a Mac on the same Wi-Fi held the hub reachable for **fourteen minutes with no
+  loss at all**, twenty minutes after that same hub had been unreachable for
+  four minutes at a stretch. Traffic prevented it; quiet caused it — which is
+  the owner's whole experience, since an app opened after a while *is* a path
+  that has been silent.
+  **What goes quiet is one pair.** The Mac is on 5 GHz and the hub's radio on
+  2.4 GHz, so their traffic crosses the bridge between the two radios inside
+  the router, and it is this hub's entry on that bridge which ages out. Nothing
+  on the hub is wrong and everything on it says so: during one of these it
+  answered its own health check in 3 ms, exchanged pings with the gateway
+  throughout, and served *another* client 37 KB inside one 20-second window,
+  while three pings from the Mac got nothing and `rx_bytes` did not move by one
+  of them. **A hub that is unreachable from one client and serving another at
+  the same second is not a hub with a problem** — which is why every
+  measurement taken on it came back clean, twice, before this was found.
+  **A unicast to the gateway does not fix it, and shipping one is how that was
+  learned.** Those frames are addressed to the router itself and are consumed
+  by it; they never cross the bridge they were meant to keep warm. A
+  **gratuitous ARP is broadcast** (`arping -U`), so it is flooded to every
+  segment and refreshes the access point's forwarding table on both radios and
+  every client's ARP cache in one frame of a few dozen bytes.
+  `keep_wifi_reachable()` sends one every 20 seconds, re-reading the interface
+  and address each round so a moved lease does not leave it announcing an
+  address it no longer has, with the gateway ping kept beside it because it
+  costs nothing and keeps the hub's own default route fresh. A wired hub gets
+  none of it. Measured with the path deliberately idled for 55 seconds between
+  every probe, which is the condition the fault needs: **252 probes over four
+  hours, 503 of 504 replies, one lost packet**, against a gateway control that
+  lost none — where the same probe before it found multi-minute blackouts.
+  **Note what this rules out, because two earlier fixes were argued from it.**
+  ICMP is answered by the kernel, so a hub that will not answer a ping is not a
+  hub with a paged-out or busy userspace and no amount of `MemorySwapMax`
+  reaches it; and the hub exchanging traffic with the gateway throughout rules
+  out its own radio, its power save and anything the *hub* buffers. Those two
+  fixes are real and stand on their own measurements. Neither was this.
 - **When a unit won't start, put the reason in the log.** `service_failure()`
   prints `systemctl status` and the last journal lines into the install output.
   The mosquitto bug above was invisible for a whole round because the installer
@@ -1840,6 +1990,38 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   rather than at rest, and devices are exactly what keeps a working set hot.
   Changing it needs the same board with devices paired and days of real
   traffic — `docs/zigbee.md` carries the tables and the reasoning.
+  **And the hub is not where that headroom comes from** (`MemorySwapMax=0`).
+  The sentence above — the board affords both radios by keeping two thirds of
+  them cold — is true and is also the whole of a fault that reads as a dead
+  hub. The kernel spends swap on whatever has been idle longest, and on a hub
+  that is the hub: nobody asks it anything for hours, so its heap and its JIT
+  code go into zram, and Raspberry Pi OS's own `rpi-zram-writeback` then moves
+  the idle part of that onto the SD card. Then a phone opens the app. Measured
+  on a Zero 2 W up 38 hours: hubd resident 35 MB with **55 MB of itself in
+  swap**, Z2M resident 24 MB with 83 MB in swap, 25 MB of the pair written back
+  to the card — with **110 MB of RAM free** and the board at 0% CPU. Nothing
+  needed that memory. Waking it is ~14 000 single-page faults (`vm.page-cluster`
+  is 0, so no readahead amortises them), zstd on a 1 GHz A53, and 4 KB random
+  card reads for the written-back part; the iOS app gives `GET /hub` four
+  seconds. What that costs is the *first request* after a quiet spell — seconds,
+  against an app that waits four — and it is worth fixing on its own terms.
+  **It is not what makes a hub unreachable, and reading it that way cost two
+  rounds of this branch.** ICMP is answered by the kernel, so a hub that will
+  not answer a ping is not one whose userspace has been paged out; during a
+  real outage this hub answered nothing at all, ping included. That is the
+  quiet-path fault above (`keep_wifi_reachable`), and it is a different thing
+  that looks identical from an app — which is the whole trap. So the hub's
+  memory is pinned and **everything else keeps the swap**: Z2M is the optional
+  process (its hard `MemoryMax` and +500 OOM score already say so) and the page
+  cache — 243 MB of `node_modules` read once at startup — is what should be
+  reclaimed instead. It costs the board the hub's real working set resident,
+  ~139 MB against a 200 MB `MemoryHigh`, which is the number the budget above
+  was written around anyway. cgroup v2 only, and inert wherever the memory
+  controller is still off — the `MemoryHigh` caveat exactly, and the same
+  reason `OOMScoreAdjust` sits beside it. **`vm.swappiness` stays at 100**:
+  with the hub exempt, the aggressive setting now applies only to the things
+  that should be paying, so lowering it would take headroom from Z2M to buy
+  nothing.
 - **Don't add compressed swap a system already has.** Raspberry Pi OS Trixie
   ships its own (`systemd-zram-setup@zram0`, presented as `rpi-swap`, with
   writeback to the card), and `gethome-zram.service` added a second one beside
