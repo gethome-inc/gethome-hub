@@ -1279,6 +1279,25 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   and "no scenery" were a backdrop described in front of the one capability the
   path exists for. The shadow ban stays — a shadow is something the object casts,
   not a place it is standing in.
+  **What a drawing cost goes in `ai_runs`; who asked goes on the picture.** A
+  portrait is the third thing that spends the home's money on AI, so every draw
+  writes one row (`kind: 'portrait'`), failures included with the provider's own
+  `errorKind` — that table's argument is that what a home spent is *one*
+  question, and three tables would be three screens answering it; `portraitId`
+  links the row to what it bought the way `automationId` does for a rule, and
+  `finish` times the run so the duration is free. The price is read off the
+  response's own `usage`, because 2.5 bills per token and estimating from the
+  size we asked for is a guess dressed as a fact — with **no usage meaning no
+  price rather than a free one** (`$0.00` is a claim where nothing is the truth)
+  and an unsplit input priced at the dearer image rate, since an estimate that
+  reads low is the one that surprises somebody. **`drawnBy` is on the portrait
+  row** and is not a second copy of the activity log's `device.portrait` line:
+  that log is bounded at 5 000 rows and 30 days while a portrait has no age
+  bound, and `ai_runs` keeps 250 runs of every kind with a chat writing one per
+  turn — so both records of who drew a picture expire while the picture does
+  not. The member's *name* rides beside the id for the log's own reason: an
+  `ALTER TABLE` column gets no `ON DELETE` action in SQLite, so the id may point
+  at somebody long removed.
 - **`<data>/pairing-code` is a contract, and it now *survives* restarts.** It
   used to be re-minted on every boot, and that was the bug: any code that had
   been read — `install.sh`'s `@@PAIRING@@` marker, or a value Studio fetched a

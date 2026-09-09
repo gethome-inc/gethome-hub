@@ -53,6 +53,7 @@ describe.skipIf(!handle)('device portraits', () => {
   let events: HubEventBus;
   let settings: SettingsService;
   let portraits: PortraitService;
+  let runs: AiRunLog;
   let dataDir: string;
   let deviceId: string;
   let adapter: FakeAdapter;
@@ -63,6 +64,16 @@ describe.skipIf(!handle)('device portraits', () => {
 
   /** A PNG-shaped buffer; nothing here decodes it, and the hub never does either. */
   const png = (size = 2048) => Buffer.alloc(size, 7);
+
+  /**
+   * What `drawPortrait` answers: the bytes plus what the provider billed. The
+   * usage is the shape OpenAI's Image API really returns, because a mock laxer
+   * than the thing it stands in for tests the mock.
+   */
+  const drawing = (size = 2048) => ({
+    png: png(size),
+    usage: { inputTextTokens: 200, inputImageTokens: 0, outputTokens: 4160 },
+  });
 
   class FakeAdapter implements ProtocolAdapter {
     readonly id = 'zigbee' as const;
@@ -76,7 +87,7 @@ describe.skipIf(!handle)('device portraits', () => {
 
   beforeEach(async () => {
     drawMock.mockReset();
-    drawMock.mockResolvedValue(png());
+    drawMock.mockResolvedValue(drawing());
     await resetDb(db);
     dataDir = mkdtempSync(path.join(tmpdir(), 'gethome-portraits-'));
     events = new HubEventBus();
@@ -89,7 +100,8 @@ describe.skipIf(!handle)('device portraits', () => {
     registry.registerAdapter(adapter);
     await registry.start();
     settings = new SettingsService(db, Buffer.alloc(32).toString('base64'));
-    portraits = new PortraitService(db, events, dataDir, log);
+    runs = new AiRunLog(db, events);
+    portraits = new PortraitService(db, events, dataDir, log, runs);
     const {
     engine: automations,
     store: automationStore,
@@ -117,7 +129,7 @@ describe.skipIf(!handle)('device portraits', () => {
       history: await startedHistory(db, events),
       portraits,
       settings,
-      aiRuns: new AiRunLog(db, events),
+      aiRuns: runs,
       mappings: new MappingLibrary({ db, settings, registry, log }),
       hubId: 'hub-portraits',
       home: await bootedHome(db, 'Portrait Hub'),
@@ -180,6 +192,73 @@ describe.skipIf(!handle)('device portraits', () => {
       headers: auth(token),
       payload,
     });
+
+  // ── What it cost, how long it took, and who asked ─────────────────────────
+
+  /**
+   * A portrait is the third thing that spends the home's money on AI, so it
+   * lands in the same ledger as a mapping run and a conversation — one table,
+   * because "what did this home spend on AI" is one question and three tables
+   * would be three screens answering it.
+   */
+  it('writes one ai_runs row per drawing, with the price, the wall-clock and the picture it bought', async () => {
+    await settings.setAiKey('openai', 'sk-proj-1234567890');
+    const response = await draw();
+    expect(response.statusCode).toBe(200);
+    const portrait = response.json() as { id: string };
+
+    const { PORTRAIT_MODEL } = await import('../src/portraits/openai-images.js');
+    const rows = await runs.list(10);
+    const row = rows.find((entry) => entry.kind === 'portrait');
+    expect(row).toBeDefined();
+    expect(row).toMatchObject({
+      kind: 'portrait',
+      ok: true,
+      provider: 'openai',
+      modelId: PORTRAIT_MODEL,
+      portraitId: portrait.id,
+    });
+    // 200 text @ $5, 4160 output @ $30, per million — the mock's own usage.
+    expect(row!.costUsd).toBeCloseTo((200 * 5 + 4160 * 30) / 1_000_000, 10);
+    expect(row!.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  /**
+   * A failed draw is recorded too, with the provider's own words: it is what
+   * answers "why did nothing happen" a day later. It buys no picture, so
+   * `portraitId` stays null — and it is usually free, which is exactly why the
+   * price is left *absent* rather than written as zero.
+   */
+  it('records a refused drawing as a failed run rather than not at all', async () => {
+    await settings.setAiKey('openai', 'sk-proj-1234567890');
+    const { PortraitDrawError } = await import('../src/portraits/openai-images.js');
+    drawMock.mockRejectedValueOnce(new PortraitDrawError('Your account has no credit.', 'billing'));
+    expect((await draw()).statusCode).toBe(502);
+
+    const row = (await runs.list(10)).find((entry) => entry.kind === 'portrait');
+    expect(row).toMatchObject({ ok: false, errorKind: 'billing', portraitId: null });
+    expect(row!.costUsd).toBeNull();
+  });
+
+  /**
+   * Recorded on the picture as well as in the activity log, because the log is
+   * bounded at 5 000 rows and 30 days while a portrait has no age bound: the
+   * row is what still answers "who drew this" a season later. The name rides
+   * beside the id since the column carries no `ON DELETE` action.
+   */
+  it('records who had the portrait drawn, on the portrait itself', async () => {
+    await settings.setAiKey('openai', 'sk-proj-1234567890');
+    const drawn = (await draw()).json() as { drawnBy?: { id: string | null; name: string } };
+    expect(drawn.drawnBy?.name).toBeTruthy();
+
+    const listed = await app.inject({
+      method: 'GET',
+      url: `/api/v1/devices/${deviceId}/portraits`,
+      headers: auth(memberToken),
+    });
+    const [first] = listed.json() as Array<{ drawnBy?: { id: string | null; name: string } }>;
+    expect(first?.drawnBy).toEqual(drawn.drawnBy);
+  });
 
   // ── The credential ────────────────────────────────────────────────────────
 
@@ -393,7 +472,7 @@ describe.skipIf(!handle)('device portraits', () => {
     drawMock.mockImplementationOnce(
       () =>
         new Promise((resolve) => {
-          release = () => resolve(png());
+          release = () => resolve(drawing());
         }),
     );
 
@@ -440,7 +519,7 @@ describe.skipIf(!handle)('device portraits', () => {
    */
   it('sweeps the oldest to stay inside its disk budget, and skips what is on screen', async () => {
     await settings.setAiKey('openai', 'sk-proj-1234567890');
-    const tight = new PortraitService(db, events, dataDir, log, { budgetBytes: 5000 });
+    const tight = new PortraitService(db, events, dataDir, log, runs, { budgetBytes: 5000 });
     const kind = 'light' as const;
     const first = await tight.draw({ deviceId, kind, apiKey: 'sk-proj-x' });
     const second = await tight.draw({ deviceId, kind, apiKey: 'sk-proj-x' });

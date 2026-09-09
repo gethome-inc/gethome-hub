@@ -156,12 +156,20 @@ export async function startedHistory(db: Db, events: HubEventBus): Promise<Histo
  * needs an OpenAI key — so a suite gets the routes, the rows and the bounds
  * without a network.
  */
-export function testPortraits(db: Db, events: HubEventBus, dataDir?: string): PortraitService {
+export function testPortraits(
+  db: Db,
+  events: HubEventBus,
+  dataDir?: string,
+  runs?: AiRunLog,
+): PortraitService {
   return new PortraitService(
     db,
     events,
     dataDir ?? mkdtempSync(path.join(tmpdir(), 'gethome-portraits-')),
     pino({ level: 'silent' }),
+    // A suite that does not care about the ledger still gets a real one, so a
+    // drawing writes its row the way a hub does rather than into a stub.
+    runs ?? new AiRunLog(db, events),
   );
 }
 

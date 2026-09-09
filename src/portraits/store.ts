@@ -2,13 +2,14 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rm, statfs, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { and, desc, eq, sql } from 'drizzle-orm';
+import type { AiRunLog } from '../core/ai-runs.js';
 import type { Db } from '../db/client.js';
 import { devicePortraits } from '../db/schema.js';
 import type { HubEventBus } from '../core/bus.js';
 import type { Logger } from '../logging.js';
 import type { DeviceKind } from '../schema/index.js';
 import type { AiProvider } from '../core/settings.js';
-import { drawPortrait, PORTRAIT_MODEL } from './openai-images.js';
+import { drawPortrait, portraitCostUsd, PortraitDrawError, PORTRAIT_MODEL } from './openai-images.js';
 import { EDIT_PROMPT, generatePrompt } from './prompts.js';
 
 /**
@@ -56,6 +57,12 @@ export interface PortraitRecord {
   model: string;
   fromPhoto: boolean;
   selected: boolean;
+  /**
+   * Who had it drawn. Absent on a portrait drawn before the hub recorded it,
+   * and `id` is null once that person has been removed from the home — the
+   * name outlives them, which is the point of copying it.
+   */
+  drawnBy?: { id: string | null; name: string };
 }
 
 /** What `GET /hub` carries. Its *presence* is what says this hub can draw. */
@@ -81,6 +88,8 @@ export interface DrawInput {
   kind: DeviceKind;
   apiKey: string;
   photo?: { bytes: Buffer; contentType: string };
+  /** Who asked. Recorded on the portrait, which outlives the log row about it. */
+  member?: { id: string; name: string };
 }
 
 export class PortraitService {
@@ -103,6 +112,13 @@ export class PortraitService {
     private readonly events: HubEventBus,
     dataDir: string,
     private readonly log: Logger,
+    /**
+     * Where a drawing's price and duration go — required rather than optional
+     * on purpose. A portrait is the third thing that spends the home's money on
+     * AI, and an optional ledger is one a call site forgets to pass and nobody
+     * notices until somebody asks what a month cost.
+     */
+    private readonly runs: AiRunLog,
     limits: Partial<PortraitLimits> = {},
   ) {
     this.limits = {
@@ -141,6 +157,11 @@ export class PortraitService {
       model: row.model,
       fromPhoto: row.fromPhoto,
       selected: row.selected,
+      // Keyed on the *name*: the id is nullable and unconstrained, so a member
+      // who has left leaves a row that still says who drew the picture. A
+      // portrait from before this was recorded has neither and says nothing,
+      // which an app draws as no line rather than as an empty one.
+      ...(row.memberName !== null ? { drawnBy: { id: row.memberId, name: row.memberName } } : {}),
     }));
   }
 
@@ -180,27 +201,77 @@ export class PortraitService {
     }
   }
 
+  /**
+   * One `ai_runs` row per drawing, failures included.
+   *
+   * That table's whole argument is that what a home spent on AI is **one**
+   * question: a device recognition, a conversation and a portrait all bill the
+   * same account, and three tables would be three screens answering it. So the
+   * price and the wall-clock go there — `finish` times the run itself — beside
+   * the mapping runs, rather than into columns on the picture.
+   *
+   * A failed draw is recorded too, with the provider's own `kind` and sentence.
+   * It is what answers "why did nothing happen" a day later, and it is usually
+   * free, which is exactly why `costUsd` is left absent rather than zeroed.
+   */
   private async drawNow(input: DrawInput): Promise<PortraitRecord> {
     await this.assertSpace();
-    // Imported normally, unlike the mapper behind `lazy.ts`: what that seam
-    // exists to keep out of a keyless hub's memory is an SDK, and this is
-    // `fetch` and two prompt strings.
-    const png = await drawPortrait({
-      apiKey: input.apiKey,
-      prompt: input.photo ? EDIT_PROMPT : generatePrompt(input.kind),
-      ...(input.photo !== undefined ? { photo: input.photo } : {}),
+    const run = this.runs.begin({
+      kind: 'portrait',
+      adapter: 'portraits',
+      // Empty on purpose: this column is about a device model, and a picture of
+      // a device is not one. The `automate` rows next to it do the same.
+      exposesHash: '',
+      provider: 'openai',
+      modelId: PORTRAIT_MODEL,
     });
-    return this.store(input.deviceId, png, {
+
+    let drawing;
+    try {
+      // Imported normally, unlike the mapper behind `lazy.ts`: what that seam
+      // exists to keep out of a keyless hub's memory is an SDK, and this is
+      // `fetch` and two prompt strings.
+      drawing = await drawPortrait({
+        apiKey: input.apiKey,
+        prompt: input.photo ? EDIT_PROMPT : generatePrompt(input.kind),
+        ...(input.photo !== undefined ? { photo: input.photo } : {}),
+      });
+    } catch (error) {
+      await run.finish({
+        ok: false,
+        ...(error instanceof PortraitDrawError ? { errorKind: error.kind } : {}),
+        ...(error instanceof Error ? { errorMessage: error.message } : {}),
+      });
+      throw error;
+    }
+
+    const stored = await this.store(input.deviceId, drawing.png, {
       provider: 'openai',
       model: PORTRAIT_MODEL,
       fromPhoto: input.photo !== undefined,
+      ...(input.member !== undefined ? { member: input.member } : {}),
     });
+    // After the picture is safely on disk: the drawing is the job, and a ledger
+    // write that threw before it would lose one the home has already paid for.
+    // `costUsd` is absent rather than zero when the provider reported no usage.
+    const costUsd = portraitCostUsd(drawing.usage);
+    await run.finish({
+      ok: true,
+      portraitId: stored.id,
+      ...(costUsd !== undefined ? { costUsd } : {}),
+    });
+    return stored;
   }
 
   private async store(
     deviceId: string,
     png: Buffer,
-    meta: { provider: AiProvider; model: string; fromPhoto: boolean },
+    meta: {
+      provider: AiProvider;
+      model: string;
+      fromPhoto: boolean;
+      member?: { id: string; name: string };
+    },
   ): Promise<PortraitRecord> {
     const id = randomUUID();
     await mkdir(path.join(this.root, safeSegment(deviceId)), { recursive: true });
@@ -215,6 +286,10 @@ export class PortraitService {
       provider: meta.provider,
       model: meta.model,
       fromPhoto: meta.fromPhoto,
+      // The name beside the id, because the id carries no `ON DELETE` action
+      // and the person may be gone by the time anybody reads the row.
+      memberId: meta.member?.id ?? null,
+      memberName: meta.member?.name ?? null,
       selected: true,
     });
     await this.prune(deviceId);

@@ -85,6 +85,53 @@ Failures carry the vendor's own sentence and a `kind` from the shared
 classifier in `src/ai/errors.ts` — which branches on HTTP status rather than on
 anybody's error vocabulary, which is exactly why it is reusable here.
 
+## What it cost, how long it took, and who asked
+
+Three facts with two lifetimes, so they are kept in two places.
+
+**The price and the wall-clock go to `ai_runs`** — one row per drawing,
+`kind: 'portrait'`, `adapter: 'portraits'`, beside the mapping runs and the
+conversations. That table's whole argument is that *what did this home spend on
+AI* is one question: a device recognition, a chat and a picture all bill the
+same account, and three tables would be three screens answering it.
+`portraitId` links the row to what it bought, the way `automationId` links a
+chat's row to the rule it wrote, and `exposesHash` is empty because that column
+is about a device model. `AiRunHandle.finish` times the run itself, so the
+duration costs nothing to record.
+
+A **failed** draw writes a row too, carrying the provider's own `errorKind` and
+sentence: it is what answers "why did nothing happen" a day later. It buys no
+picture, so `portraitId` is null — and it is usually free, which is exactly why
+its price is left absent rather than written as zero.
+
+**The price is the provider's own number.** 2.5 bills per token, so `usage` on
+the image response is the only thing that actually knows; estimating from the
+size and quality we asked for would be a guess dressed as a fact.
+`PRICE_PER_MTOK` lives in `openai-images.ts` rather than in `src/ai/models.ts`
+because it is a fact about `PORTRAIT_MODEL` and the two have to move together —
+that file's `PRICING` is the mapping agent's list and carries two rates, while an
+image model bills three, a reference photo being tokenised at the dearer image
+rate. Two rules hold it honest. **No usage means no price, never a free one**:
+`portraitCostUsd` answers `undefined`, because `$0.00` is a claim where nothing
+is the truth — the line `ai_runs` already holds for a conversation whose spend
+row has been pruned. And **an unsplit input is priced at the image rate**, since
+without `input_tokens_details` there is no telling a prompt from a photo, and an
+estimate that reads low is the one that surprises somebody.
+
+**Who asked goes on the portrait row instead**, and that is not duplication of
+the activity log — it is the same fact with a longer life. The drawing is
+already logged (`device.portrait`, with the member on it), but that log is
+bounded at 5 000 rows and 30 days while a portrait has no age bound at all, so a
+picture outlives the only record of who wanted it. `ai_runs` is no better: it
+keeps the last 250 runs of every kind and a chat writes one per *turn*, so
+per-portrait spend is genuinely answerable only for a while. The member's
+**name** is copied beside the id for the activity log's own reason: the column
+carries no `ON DELETE` action — SQLite gives an `ALTER TABLE` column none, the
+`invites.member_id` situation exactly — so the id may point at somebody long
+removed, and the row read next week is all that is left of them. `drawnBy` is
+absent on a portrait drawn before any of this existed, which an app draws as no
+line rather than an empty one.
+
 ## Storing (`src/portraits/store.ts`)
 
 ```

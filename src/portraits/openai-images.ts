@@ -106,8 +106,59 @@ export interface DrawOptions {
   signal?: AbortSignal;
 }
 
-/** Returns the PNG bytes. Throws `PortraitDrawError` for anything else. */
-export async function drawPortrait(options: DrawOptions): Promise<Buffer> {
+/**
+ * What the provider says one drawing consumed. Absent when it said nothing —
+ * see `portraitCostUsd`, which answers `undefined` rather than `0` for that.
+ */
+export interface PortraitUsage {
+  /** The prompt. */
+  inputTextTokens: number;
+  /** A reference photo, tokenised — zero on the generate path. */
+  inputImageTokens: number;
+  /** The picture itself, which is nearly all of the bill. */
+  outputTokens: number;
+}
+
+export interface PortraitDrawing {
+  png: Buffer;
+  usage?: PortraitUsage;
+}
+
+/**
+ * What the pinned model charges, in USD per million tokens.
+ *
+ * **It lives here rather than in `src/ai/models.ts` because it is a fact about
+ * `PORTRAIT_MODEL`,** and the two have to move together: that file's `PRICING`
+ * is the mapping agent's model list and carries two rates, while an image model
+ * bills three — a reference photo is tokenised at the dearer image rate, which
+ * is why the edit path costs more on the input side than the generate path.
+ *
+ * Output dominates: a 1024² render is thousands of output tokens against a
+ * prompt of a few hundred, so an input rate that is a little wrong barely moves
+ * the total while a missing output rate would be the whole of it.
+ */
+const PRICE_PER_MTOK = { textInput: 5, imageInput: 8, imageOutput: 30 } as const;
+
+/**
+ * What a drawing cost, or **`undefined` when the provider did not say**.
+ *
+ * Never `0`: this is `ai_runs`' own rule about a chat whose spend row has been
+ * pruned — `$0.00` is a claim, and "nothing was reported" is the truth. A hub
+ * meeting a response shape that carries no `usage` records a run with a
+ * duration and no price rather than a free one.
+ */
+export function portraitCostUsd(usage: PortraitUsage | undefined): number | undefined {
+  if (!usage) return undefined;
+  return (
+    (usage.inputTextTokens * PRICE_PER_MTOK.textInput +
+      usage.inputImageTokens * PRICE_PER_MTOK.imageInput +
+      usage.outputTokens * PRICE_PER_MTOK.imageOutput) /
+    1_000_000
+  );
+}
+
+/** Returns the PNG bytes and what the provider billed. Throws `PortraitDrawError` otherwise. */
+export async function drawPortrait(options: DrawOptions): Promise<PortraitDrawing> {
   const abort = AbortSignal.timeout(TIMEOUT_MS);
   const signal = options.signal ? AbortSignal.any([options.signal, abort]) : abort;
   const request: RequestInit = options.photo
@@ -152,9 +203,9 @@ export async function drawPortrait(options: DrawOptions): Promise<Buffer> {
     throw new PortraitDrawError(detail, kind);
   }
 
-  const png = firstImage(body);
-  if (!png) throw new PortraitDrawError('OpenAI answered without an image.', 'refused');
-  return png;
+  const drawing = readDrawing(body);
+  if (!drawing) throw new PortraitDrawError('OpenAI answered without an image.', 'refused');
+  return drawing;
 }
 
 function editForm(prompt: string, photo: { bytes: Buffer; contentType: string }): FormData {
@@ -174,16 +225,61 @@ function editForm(prompt: string, photo: { bytes: Buffer; contentType: string })
   return form;
 }
 
-/** The GPT image models always answer base64; there is no `url` form to handle. */
-function firstImage(body: string): Buffer | null {
+/**
+ * The GPT image models always answer base64; there is no `url` form to handle.
+ *
+ * `usage` rides on the same response and used to be thrown away with the rest
+ * of it, which is why a portrait was the one thing the home spent money on with
+ * no price against it. It is read defensively — the picture is the point, and a
+ * response whose accounting moves must still yield a portrait.
+ */
+function readDrawing(body: string): PortraitDrawing | null {
   try {
-    const parsed = JSON.parse(body) as { data?: Array<{ b64_json?: string }> };
+    const parsed = JSON.parse(body) as {
+      data?: Array<{ b64_json?: string }>;
+      usage?: {
+        input_tokens?: unknown;
+        output_tokens?: unknown;
+        input_tokens_details?: { text_tokens?: unknown; image_tokens?: unknown };
+      };
+    };
     const encoded = parsed.data?.[0]?.b64_json;
     if (typeof encoded !== 'string' || encoded.length === 0) return null;
-    return Buffer.from(encoded, 'base64');
+    const png = Buffer.from(encoded, 'base64');
+    const usage = readUsage(parsed.usage);
+    return usage ? { png, usage } : { png };
   } catch {
     return null;
   }
+}
+
+function count(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+/**
+ * The breakdown when it is there, and the **dearer** reading when it is not.
+ *
+ * `input_tokens_details` splits the prompt from a reference photo, and without
+ * it there is no way to tell them apart — so the whole input is priced at the
+ * image rate. That is deliberately the direction `mostExpensive()` picks in
+ * `models.ts`: an estimate that reads low is the one that surprises somebody.
+ */
+function readUsage(raw: {
+  input_tokens?: unknown;
+  output_tokens?: unknown;
+  input_tokens_details?: { text_tokens?: unknown; image_tokens?: unknown };
+} | undefined): PortraitUsage | undefined {
+  if (!raw) return undefined;
+  const output = count(raw.output_tokens);
+  if (output === undefined) return undefined;
+  const text = count(raw.input_tokens_details?.text_tokens);
+  const image = count(raw.input_tokens_details?.image_tokens);
+  if (text !== undefined || image !== undefined) {
+    return { inputTextTokens: text ?? 0, inputImageTokens: image ?? 0, outputTokens: output };
+  }
+  const input = count(raw.input_tokens) ?? 0;
+  return { inputTextTokens: 0, inputImageTokens: input, outputTokens: output };
 }
 
 /** OpenAI's own sentence, which is always better than one written here. */
