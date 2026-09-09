@@ -113,6 +113,35 @@ published for it. Both the installer and GetHome Studio stop first and say that
 the *card* needs rewriting, not that the Pi is wrong. Studio checks the card
 before it writes anything at all.
 
+**Wi-Fi is fine, and the install turns its power saving off.** A hub is talked
+to in bursts — a phone opens the app, Studio browses for it, somebody SSHs in —
+and 802.11 power save is at its worst exactly there. On the Raspberry Pi's
+Broadcom radio it produces a failure that looks nothing like its cause: the
+board is up and its automations keep firing, while the apps and SSH both say
+the machine cannot be reached, for seconds or for ten minutes. The installer
+turns power saving off on whichever interface carries the LAN and makes it stay
+off across reconnects; a hub on Ethernet is left alone. It costs about 20 mA on
+a board that is plugged into the wall.
+
+**The hub also announces itself on your network every twenty seconds**, and
+that is the fix for the one that is hardest to believe: a hub that is running
+perfectly and cannot be reached, until you wait, or until something else on the
+network happens to talk to it.
+
+Routers keep a table of which device is on which radio, and they let an entry
+expire when the device has been quiet. A hub is quiet — it answers when asked
+and says nothing in between — so after a while your phone's messages to it stop
+being delivered, while the hub sits there with a full signal, running your
+automations, answering its own checks in milliseconds. Measured here: a
+continuous ping held it reachable for fourteen minutes without a single loss,
+twenty minutes after the same hub had been unreachable for four minutes.
+Traffic prevented it; quiet caused it. With the announcement in place: four
+hours of deliberately idle probing, one lost packet out of 504.
+
+Give the hub a fixed address while you are in the router — a DHCP reservation
+for its MAC is enough. The apps find it over mDNS and remember the address they
+last saw, so a hub that moves is a hub they have to find again.
+
 ### The Zigbee coordinator
 
 A USB Zigbee coordinator is what lets the hub pair Zigbee devices — bulbs,
@@ -274,6 +303,17 @@ restart; it also
 sets `OOMScoreAdjust` on both units, and that is the half that needs no kernel
 feature, no reboot and no cgroup. It is what actually keeps the kernel's choice
 of victim off the hub, from the moment the units start.
+
+**The hub's own memory is also kept out of compressed swap** (`MemorySwapMax=0`),
+and that is the other thing a container could not have been told. A small board
+affords two radios by letting the kernel compress whatever has been idle
+longest — which on a hub is the hub, because nobody talks to it for hours.
+Measured on a Zero 2 W that had been up 38 hours with nothing wrong: 55 MB of
+the hub sitting in compressed swap while 110 MB of RAM was free and the board
+was idle. Waking that costs seconds, and the phone asking is the one that pays
+for it — which is what a hub that is plainly running but "cannot be reached"
+usually turns out to be. Zigbee2MQTT and the page cache keep the swap; they are
+what it is for.
 
 ### The prebuilt bundle
 

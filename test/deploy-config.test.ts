@@ -481,6 +481,30 @@ describe('deploy/install.sh', () => {
    * against a `cmdline.txt` the test owns, exactly the way
    * `GETHOME_ZIGBEE_SCAN_DIR` lets the Zigbee tests stage a coordinator.
    */
+  /**
+   * **`Storage=auto` is not persistence, and the difference is invisible.**
+   * Found on a Zero 2 W whose `/var/log/journal` existed and was empty:
+   * journald had never adopted it, so `journalctl --list-boots` answered with
+   * the current boot and nothing else, and every outage the owner was trying
+   * to explain had been thrown away by the reboot that ended it.
+   */
+  it('makes the system log survive a reboot, within a bound the card can take', () => {
+    const journald = heredoc('JOURNALD');
+    // Stated, never inferred from a directory that may or may not be there.
+    expect(journald).toContain('Storage=persistent');
+    // And bounded: journald's own default is 10% of the filesystem, which on
+    // the cards these run on is gigabytes of writes nobody asked for.
+    expect(journald).toMatch(/^SystemMaxUse=\d+M$/m);
+    expect(journald).toMatch(/^RuntimeMaxUse=\d+M$/m);
+    const cap = Number(/^SystemMaxUse=(\d+)M$/m.exec(journald)![1]);
+    expect(cap).toBeGreaterThanOrEqual(16);
+    expect(cap).toBeLessThanOrEqual(256);
+    // The directory and the flush are what actually move it off /run — the
+    // drop-in alone leaves the logs exactly where they were.
+    expect(installer).toContain('mkdir -p /var/log/journal');
+    expect(installer).toContain('journalctl --flush');
+  });
+
   it('turns the memory cgroup back on without breaking the boot', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'gethome-cmdline-'));
     dirs.push(dir);
@@ -543,6 +567,45 @@ describe('deploy/install.sh', () => {
     writeFileSync(controllers, 'cpuset cpu io memory pids\n');
     writeFileSync(cmdline, `${original}\n`);
     expect(rewrite()).toBe(`${original}\n`);
+  });
+
+  /**
+   * **The hub must not be paged out, and everything else still may be.**
+   *
+   * Measured on a Zero 2 W up 38 hours: hubd resident 35 MB with 55 MB of
+   * itself in zram, Zigbee2MQTT resident 24 MB with 83 MB in zram, 25 MB of
+   * the pair written back onto the SD card by Raspberry Pi OS's own
+   * `rpi-zram-writeback` — while 110 MB of RAM sat free and the board was
+   * idle. Nothing needed that memory; the kernel took it because the hub is
+   * the thing on this machine that goes hours without being asked anything.
+   *
+   * What it costs is the fault this exists to remove: the board is up, the
+   * automations keep firing off a hot working set of their own, and the app
+   * and SSH go quiet together for as long as it takes to fault a hundred
+   * megabytes back through zstd and, for the written-back part, off a card
+   * 4 KB at a time. The app gives `GET /hub` four seconds.
+   */
+  it('keeps the hub out of swap and leaves the swap to everything else', () => {
+    const hubUnit = installer.slice(
+      installer.indexOf('gethome-hubd.service >/dev/null <<UNIT'),
+      installer.indexOf('gethome-zigbee2mqtt.service >/dev/null <<UNIT'),
+    );
+    expect(hubUnit, 'a hub that has to be paged in before it answers reads as unreachable')
+      .toMatch(/^MemorySwapMax=0$/m);
+
+    // And only the hub. Zigbee2MQTT is the optional process — the one the hard
+    // MemoryMax and the +500 OOM score already nominate — so pinning it too
+    // would spend the headroom that makes a 512 MB board hold two radios.
+    const z2mUnit = installer.slice(
+      installer.indexOf('gethome-zigbee2mqtt.service >/dev/null <<UNIT'),
+      installer.indexOf('gethome-hubctl'),
+    );
+    expect(z2mUnit).not.toMatch(/^MemorySwapMax=/m);
+
+    // The tuning stays as it was: zram is still what the rest of the board
+    // spends, which is the only reason pinning the hub is affordable.
+    const sysctl = heredoc('SYSCTL');
+    expect(sysctl).toMatch(/^vm\.swappiness=\d+$/m);
   });
 
   /**
