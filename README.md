@@ -289,6 +289,17 @@ sets `OOMScoreAdjust` on both units, and that is the half that needs no kernel
 feature, no reboot and no cgroup. It is what actually keeps the kernel's choice
 of victim off the hub, from the moment the units start.
 
+**The hub's own memory is also kept out of compressed swap** (`MemorySwapMax=0`),
+and that is the other thing a container could not have been told. A small board
+affords two radios by letting the kernel compress whatever has been idle
+longest — which on a hub is the hub, because nobody talks to it for hours.
+Measured on a Zero 2 W that had been up 38 hours with nothing wrong: 55 MB of
+the hub sitting in compressed swap while 110 MB of RAM was free and the board
+was idle. Waking that costs seconds, and the phone asking is the one that pays
+for it — which is what a hub that is plainly running but "cannot be reached"
+usually turns out to be. Zigbee2MQTT and the page cache keep the swap; they are
+what it is for.
+
 ### The prebuilt bundle
 
 The Pi downloads the hub; it does not compile it. `.github/workflows/bundle.yml`

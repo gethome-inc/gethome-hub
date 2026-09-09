@@ -68,6 +68,24 @@ npm audit --omit=dev --audit-level=moderate  # what CI gates on; reads the lockf
 `deploy/` has no type checker behind it, so CI runs `shellcheck -S warning` over
 every script there. Keep it clean.
 
+**And keep it portable in the parts a test executes, which shellcheck will not
+tell you.** These scripts only ever *run* on Linux, so a GNU-only idiom is
+harmless there and quietly fatal here: `test/deploy-radio.test.ts` and
+`test/deploy-wifi.test.ts` run the real functions on whatever the contributor
+has, which on macOS is BSD userland and **bash 3.2**. Both halves have bitten.
+`sed -i "s/…/…/"` is GNU-only in that form — BSD sed reads the substitution as
+the backup suffix, so `apply_matter` failed, its `|| return 0` swallowed it,
+and 14 tests asserted on a write that had never happened. And in the test
+harness, `sed -n "/^$fn() {/,/^}/p"` written inline puts braces inside a second
+level of double quotes within a command substitution, which bash 3.2
+brace-expands anyway: sed gets two arguments, every extraction fails, and 10 of
+15 tests went red locally while CI stayed green. The rule is the one the
+`buildServer` note further down states for `test/`: **a test that cannot reach
+the thing it asserts on is a test of nothing**, and green CI does not tell you
+which of the two you have. Prefer a temporary file over `sed -i`, build a sed
+program into a variable before using it, and run `npm test` on the machine you
+are writing on.
+
 **Dependencies are gated, not just watched.** Every vulnerable package this repo
 has shipped arrived transitively — `mqtt → socks → ip-address`, and
 `@anthropic-ai/claude-agent-sdk → @modelcontextprotocol/sdk → hono` before that
