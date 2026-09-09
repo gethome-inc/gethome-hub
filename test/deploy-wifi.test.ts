@@ -332,7 +332,13 @@ function zigbeeChannelFor(wifiMhz: string): number {
  * Run `warn_if_zigbee_jams_wifi` with a fake `ip`/`iw` and a coordinator backup
  * the test owns. Returns whatever it said, which for most hubs is nothing.
  */
-function collisionWarning(options: { wifiMhz: string; zigbeeChannel?: number }): string {
+function collisionWarning(options: {
+  wifiMhz: string;
+  zigbeeChannel?: number;
+  /** A memory carried over from an earlier call, to run the hub's *second*
+   *  install rather than only its first. */
+  notice?: string;
+}): string {
   const dir = mkdtempSync(path.join(tmpdir(), 'gethome-zigbee-'));
   dirs.push(dir);
   const bin = path.join(dir, 'bin');
@@ -358,8 +364,9 @@ function collisionWarning(options: { wifiMhz: string; zigbeeChannel?: number }):
        Z2M_CONFIG="$2/configuration.yaml"
        say()  { printf 'SAY %s\n' "$*"; }
        warn() { printf 'WARN %s\n' "$*"; }
+       CONF_DIR="$2"
        for fn in find_iw lan_wifi_iface wifi_frequency_mhz zigbee_channel_clear_of_wifi \
-                 zigbee_network_channel warn_if_zigbee_jams_wifi; do
+                 zigbee_network_channel zigbee_notice_file warn_if_zigbee_jams_wifi; do
          prog="/^$fn() {/,/^}/p"
          eval "$(sed -n "$prog" "$1")"
        done
@@ -376,9 +383,17 @@ function collisionWarning(options: { wifiMhz: string; zigbeeChannel?: number }):
         FAKE_ROUTE: WIFI_ROUTE,
         FAKE_FREQ: options.wifiMhz,
         GETHOME_NET_DIR: net,
+        GETHOME_ZIGBEE_NOTICE: options.notice ?? path.join(dir, 'zigbee-channel-notice'),
       },
     },
   );
+}
+
+/** Where a `collisionWarning` run should keep (or clear) its memory. */
+function noticeFile(): string {
+  const dir = mkdtempSync(path.join(tmpdir(), 'gethome-notice-'));
+  dirs.push(dir);
+  return path.join(dir, 'zigbee-channel-notice');
 }
 
 /**
@@ -402,6 +417,56 @@ describe('an existing Zigbee network on top of the hub Wi-Fi', () => {
     // size depends on how busy the Zigbee side is. Saying more than that sends
     // somebody after the wrong radio for an evening.
     expect(said).not.toMatch(/unreachable|cannot be reached/i);
+  });
+
+  /**
+   * **Once, not on every update.** `gethome-hubctl update` *is* `install.sh`,
+   * and `update-runner.sh` collects `@@WARN@@` into `status.json`, which the
+   * hub serves and the iOS app draws on its update checklist — so without a
+   * memory this is ninety words about radio physics in front of somebody every
+   * time they update a hub that is working, about the one thing they cannot
+   * act on without re-pairing their battery devices. The message is worth
+   * hearing; hearing it eleven times is what makes it worthless.
+   */
+  it('says it once, and not again for the same pair', () => {
+    const notice = noticeFile();
+    const first = collisionWarning({ wifiMhz: '2412', zigbeeChannel: 11, notice });
+    expect(first).toContain('WARN');
+    expect(existsSync(notice), 'it has to remember having said it').toBe(true);
+
+    // The next update, of a hub where nothing has changed.
+    expect(collisionWarning({ wifiMhz: '2412', zigbeeChannel: 11, notice })).toBe('');
+  });
+
+  /**
+   * **Keyed on the pair, because a move is a different situation.** A router
+   * put on another channel, or a network re-formed, may have made this worse
+   * or made it go away — and either way the sentence names both frequencies
+   * and the channel to move to, so the one already read is about a hub that no
+   * longer exists.
+   */
+  it('says it again when either radio moves', () => {
+    const notice = noticeFile();
+    expect(collisionWarning({ wifiMhz: '2412', zigbeeChannel: 11, notice })).toContain('WARN');
+    // The owner moved the Zigbee network — and not far enough. Wi-Fi 1 is
+    // 2412 ± 11, so channel 13 at 2415 MHz is still inside it. That is exactly
+    // the case worth saying twice: they acted, and it did not work.
+    const moved = collisionWarning({ wifiMhz: '2412', zigbeeChannel: 13, notice });
+    expect(moved).toContain('WARN');
+    expect(moved).toContain('channel 13');
+  });
+
+  /**
+   * And a collision that goes away takes the memory with it, so one appearing
+   * later is announced afresh rather than swallowed by a note about the last
+   * one.
+   */
+  it('forgets once the two are clear, so a later collision still speaks', () => {
+    const notice = noticeFile();
+    expect(collisionWarning({ wifiMhz: '2412', zigbeeChannel: 11, notice })).toContain('WARN');
+    expect(collisionWarning({ wifiMhz: '2462', zigbeeChannel: 11, notice })).toBe('');
+    expect(existsSync(notice), 'no collision, nothing to remember').toBe(false);
+    expect(collisionWarning({ wifiMhz: '2412', zigbeeChannel: 11, notice })).toContain('WARN');
   });
 
   it('stays quiet when the two radios are already clear of each other', () => {

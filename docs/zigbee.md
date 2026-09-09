@@ -81,6 +81,19 @@ coordinator is reached, the devices report, `zigbee.connected` is `true`, and
 what suffers is the other radio. It is worded as a standing handicap, never as
 a diagnosis of an outage.
 
+**And it is said once.** `gethome-hubctl update` re-runs the installer, and
+`update-runner.sh` collects every `@@WARN@@` into `status.json`, which the hub
+serves and the app draws on its update checklist — so a warning here is one the
+owner meets on every update, for ever, about the one thing they cannot act on
+without re-pairing their battery devices. The message is true and worth
+hearing; hearing it eleven times is what makes it worthless. It is remembered
+in `/etc/gethome/zigbee-channel-notice`, keyed on the **pair**: which Zigbee
+channel against which Wi-Fi frequency. Move either — a router put on another
+channel, a network re-formed — and it is said again, because the situation may
+have become worse or gone away and the sentence names both frequencies. Clear
+the collision entirely and the memory is deleted, so one appearing later is
+announced afresh rather than swallowed by a note about the last one.
+
 **An existing network keeps the channel it formed on**, whatever the Wi-Fi under
 it has done since. Moving it is not an upgrade: mains-powered routers usually
 follow, sleepy end devices usually do not, and the home wakes up to a list of

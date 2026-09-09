@@ -1866,7 +1866,22 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   and emits a `@@WARN@@` naming both channels, the one to move to and what
   moving costs, because nothing else in the system will ever say it —
   `zigbee.connected` is `true`, the devices report, and the casualty is the
-  other radio. `docs/zigbee.md` is canonical.
+  other radio.
+  **Once, though, not on every update.** `gethome-hubctl update` *is*
+  `install.sh`, and `update-runner.sh` collects `@@WARN@@` into `status.json`,
+  which the hub serves and the iOS app draws on its update checklist — so
+  without a memory this is ninety words about radio physics in front of
+  somebody every time they update a working hub, about the one thing they
+  cannot act on without re-pairing their battery devices. That is
+  `zigbee.problem`'s rule pointed at a message that is *true*: worth hearing,
+  worthless heard eleven times. `zigbee_notice_file` remembers it, keyed on the
+  **pair** — which Zigbee channel against which Wi-Fi frequency — so a router
+  moved to another channel or a network re-formed is said again, since it may
+  have become worse or gone away and the sentence names both. And a collision
+  that clears **forgets**, so one appearing later is announced afresh rather
+  than swallowed by a note about the last one. `zigbee.env`'s idiom, with the
+  one difference that this memory is allowed to be deleted.
+  `docs/zigbee.md` is canonical.
 - **A Pi's journal lies about its own first minute, and the hub says the one
   number that cannot.** There is no RTC on any board this runs on, so the
   machine boots into whatever `fake-hwclock` saved at the last shutdown and

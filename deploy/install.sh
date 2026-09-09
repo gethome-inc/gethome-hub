@@ -1375,18 +1375,55 @@ zigbee_network_channel() {
   printf '%s' "$channel"
 }
 
+# **Said once, not on every update.** This runs from `install.sh`, and
+# `gethome-hubctl update` *is* `install.sh` — so a warning here is a warning the
+# owner meets every single time they update, for ever. It travels, too:
+# `update-runner.sh` collects `@@WARN@@` into `status.json`, the hub serves it,
+# and the iOS app draws it on the update checklist. Ninety words about radio
+# physics, on every update, about a hub that is working — and about the one
+# thing the owner cannot act on without re-pairing their battery devices.
+#
+# That is the shape of the noise `zigbee.problem` already refuses ("a wrong
+# diagnosis is worse than none, because the caller already has
+# `connected: false`") and the activity log's rule about a feed read a week
+# later. The message itself is true and worth hearing; hearing it eleven times
+# is what makes it worthless.
+#
+# So it is remembered, keyed on the **pair** — which Zigbee channel against
+# which Wi-Fi frequency. If either moves the situation is genuinely different
+# and it is said again, because it may have become worse or gone away. This is
+# `zigbee.env`'s idiom: a small file that is the memory of something that has
+# already been decided.
+zigbee_notice_file() { printf '%s' "${GETHOME_ZIGBEE_NOTICE:-$CONF_DIR/zigbee-channel-notice}"; }
+
 warn_if_zigbee_jams_wifi() {
-  local wifi_mhz zigbee_channel zigbee_mhz gap clear
+  local wifi_mhz zigbee_channel zigbee_mhz gap clear notice pair told
+  notice="$(zigbee_notice_file)"
   wifi_mhz="$(wifi_frequency_mhz)"
   zigbee_channel="$(zigbee_network_channel)"
-  # No Wi-Fi to collide with, or no network yet: nothing to say either way.
+  # No Wi-Fi to collide with, or no network yet: nothing to say either way, and
+  # nothing learned — so the memory is left exactly as it is.
   [[ -n "$wifi_mhz" && -n "$zigbee_channel" ]] || return 0
   (( zigbee_channel >= 11 && zigbee_channel <= 26 )) || return 0
   zigbee_mhz=$((2405 + 5 * (zigbee_channel - 11)))
   if (( zigbee_mhz > wifi_mhz )); then gap=$((zigbee_mhz - wifi_mhz)); else gap=$((wifi_mhz - zigbee_mhz)); fi
   # A 20 MHz Wi-Fi channel is its centre ±11 MHz. Inside that, the coordinator
   # is transmitting into this hub's own uplink from a few centimetres away.
-  (( gap <= 11 )) || return 0
+  if (( gap > 11 )); then
+    # Positively clear of each other. Forget having said anything, so a
+    # collision that appears later — a router moved to another channel, a
+    # network re-formed — is announced afresh rather than swallowed by a
+    # memory of the last one.
+    $SUDO rm -f "$notice" 2>/dev/null || true
+    return 0
+  fi
+  pair="${zigbee_channel}:${wifi_mhz}"
+  told="$($SUDO cat "$notice" 2>/dev/null || true)"
+  # Already said, about exactly this pair. The situation has not changed and
+  # neither has the advice, so there is nothing here the owner has not read.
+  [[ "$told" == "$pair" ]] && return 0
+  $SUDO mkdir -p "$(dirname "$notice")" 2>/dev/null || true
+  printf '%s\n' "$pair" | $SUDO tee "$notice" >/dev/null 2>&1 || true
   clear="$(zigbee_channel_clear_of_wifi "$wifi_mhz")"
   warn "This hub's Wi-Fi (${wifi_mhz} MHz) and its Zigbee network (channel ${zigbee_channel}, ${zigbee_mhz} MHz) are on the same frequency, and the two radios are a few centimetres apart. They share the air rather than take turns, so the Wi-Fi carries more retries and less throughput than it should — how much depends on how busy the Zigbee network is, and a quiet one costs little. Channel ${clear} is clear of this hub's Wi-Fi. It is not changed for you, and is worth changing only if something is actually wrong: the network re-forms, so mains-powered devices usually follow and battery ones usually have to be paired again."
 }
