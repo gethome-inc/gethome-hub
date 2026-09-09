@@ -67,7 +67,18 @@ const build = (() => {
 async function main(): Promise<void> {
   const config = loadConfig();
   const log = createLogger(config.LOG_LEVEL);
-  log.info(`GetHome Hub ${version} starting…${build ? ` (build ${build})` : ''}`);
+  // The uptime is not decoration. Everything before this line is the module
+  // graph loading, which on a Zero 2 W is the longest single step in a start
+  // and the one that varies — and it cannot be read off the journal, because
+  // the only other timestamp available is systemd's "Started", in wall-clock
+  // time, on a board with no RTC. A Pi boots into whatever `fake-hwclock`
+  // saved at the last shutdown and NTP corrects it seconds later, so the first
+  // minute of the journal contains a jump of arbitrary size: on the hub this
+  // was written for, `Started gethome-hubd` to this line read as 4 minutes 39
+  // seconds and was 17.3. That is exactly the shape of an answer somebody acts
+  // on — it was, for a while — so the hub says the one number that cannot lie.
+  const loadedIn = `${process.uptime().toFixed(1)}s to load`;
+  log.info(`GetHome Hub ${version} starting…${build ? ` (build ${build})` : ''} (${loadedIn})`);
 
   const secret = ensureHubSecret(config.DATA_DIR);
   const { db, close } = createDb(config.DATABASE_FILE);

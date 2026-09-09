@@ -1807,6 +1807,21 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   moving costs, because nothing else in the system will ever say it —
   `zigbee.connected` is `true`, the devices report, and the casualty is the
   other radio. `docs/zigbee.md` is canonical.
+- **A Pi's journal lies about its own first minute, and the hub says the one
+  number that cannot.** There is no RTC on any board this runs on, so the
+  machine boots into whatever `fake-hwclock` saved at the last shutdown and
+  `systemd-timesyncd` corrects it seconds later — which means every wall-clock
+  timestamp before `Initial clock synchronization` is off by however far behind
+  that saved time was, and the correction reads as a gap where nothing happened.
+  Measured on a Zero 2 W: `Started gethome-hubd` to the hub's first log line
+  read as **4 minutes 39 seconds** in `journalctl`'s default output and was
+  **17.3 seconds** in `-o short-monotonic`, with the API listening 64 s after
+  power-on. The whole machine appears to stall and resume together, which is
+  the tell — a hub that was genuinely slow would be slow alone. So read a boot
+  with `-o short-monotonic`, and note that the hub itself now reports
+  `(17.3s to load)` beside its version: everything before that line is the
+  module graph, it is the longest single step in a start on a small board, and
+  `process.uptime()` is the only clock in the building that does not jump.
 - **`Storage=auto` is not persistence, and a hub that cannot remember
   yesterday cannot be diagnosed.** systemd reads it as "persist if
   `/var/log/journal` exists", and on the Pi this was found on that directory
