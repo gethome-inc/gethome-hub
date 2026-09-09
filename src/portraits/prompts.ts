@@ -28,12 +28,25 @@ const PALETTE =
  * middle at a consistent ~80% of the frame, independent of how a reference photo
  * was framed. The apps normalise what comes back as well, because the model
  * still drifts; the prompt only gets the raw render close.
+ *
+ * **What it no longer does is name a scene, and that is OpenAI's own rule for
+ * transparent assets rather than a preference of ours.** A prompt's instructions
+ * take priority over `background: transparent`, so a backdrop mentioned
+ * *anywhere* — including inside a ban on it — is a backdrop the model may decide
+ * to draw instead of leaving the frame empty. "Empty space", "no ground plane",
+ * "no surface beneath it" and "no scenery" were four of them standing directly
+ * in front of the one capability this whole path exists for. The **shadow** ban
+ * stays exactly as it was: a shadow is something the object casts rather than a
+ * place it is standing in, and that variant list is what stopped the soft ground
+ * shadow in the first place. What changed is that the rule is now put entirely
+ * as a fact about the object — it rests on nothing and casts nothing — with the
+ * transparency stated positively and first.
  */
 const FLOATING_ALONE =
-  'The object floats alone in empty space: no ground plane, no surface beneath it, ' +
-  'no cast shadow, no drop shadow, no contact shadow, no reflection, and no light ' +
-  'pooling under the object. Every pixel outside the object itself is fully ' +
-  'transparent. No text, no logos, no scenery. ' +
+  'The object is isolated: every pixel that is not the object itself is fully ' +
+  'transparent. It rests on nothing and casts nothing — no cast shadow, no drop ' +
+  'shadow, no contact shadow, no reflection, and no light pooling beneath it. ' +
+  'No text and no logos. ' +
   'Center the object precisely in the square frame — its visual middle at the exact ' +
   "center of the image, both horizontally and vertically — sized so the object's longest " +
   'side spans about 80% of the frame, leaving a small, roughly equal margin of transparent ' +
@@ -86,5 +99,5 @@ export const EDIT_PROMPT =
   'Preserve its true shape, proportions, silhouette, parts, and every recognizable detail — ' +
   'do not change what the object is or turn it into a different product. Only restyle its ' +
   `surface finish: give it a ${PALETTE}. Center it and float it on a fully transparent ` +
-  'background, with soft top light and a gentle rim light. Leave the photo’s background, ' +
-  `floor, and shadows behind — they are not part of the object. ${FLOATING_ALONE}`;
+  'background, with soft top light and a gentle rim light. Keep only the object ' +
+  `itself from the photo: nothing that surrounds it there carries over. ${FLOATING_ALONE}`;

@@ -9,20 +9,42 @@
  * handing back typed content blocks for a forty-turn tool loop; nothing here
  * needs that.
  *
- * **`gpt-image-2` is pinned.** Its transparent-background support is currently
- * preview, but a transparent cut-out is the whole point: the apps float the
- * object over their own glow and contact shadow, so a baked-in white square
- * would be a grey slab on the page. If OpenAI changes that preview capability,
- * the request fails with the provider's own message rather than silently
- * returning a boxed image.
+ * **`gpt-image-2.5-flare` is pinned, and moving off `gpt-image-2` cost nothing
+ * at the wire.** Same two endpoints, same fields, same base64 answer: 2.5 kept
+ * the Image API's shape, so the migration is a model id plus a re-read of the
+ * three facts that hang off it (transparency, format, quality). What changes is
+ * the wait — Flare is the small, fast half of the 2.5 pair and draws in a
+ * fraction of `gpt-image-2`'s time, which on a surface where somebody watches an
+ * orb is the whole reason to move. The other half, `gpt-image-2.5-sunburst`, is
+ * the quality tier and is deliberately **not** taken: a portrait here is one
+ * matte object on a transparent ground in a fixed palette, drawn at card size by
+ * every surface that shows it, so the tier that spends longer would spend it on
+ * detail this render throws away.
+ *
+ * **A transparent cut-out is still the whole point** — the apps float the object
+ * over their own glow and contact shadow, so a baked-in white square would be a
+ * grey slab on the page. Both 2.5 models support `transparent` outright rather
+ * than in preview, which is what makes this pin ordinary rather than a bet on a
+ * capability that might be withdrawn; if it ever is, the request fails with the
+ * provider's own message rather than silently returning a boxed image.
  */
 
 import { classifyApiError } from '../ai/errors.js';
 
-export const PORTRAIT_MODEL = 'gpt-image-2';
+export const PORTRAIT_MODEL = 'gpt-image-2.5-flare';
 
 /** Square, because every surface that draws a portrait draws it in a square. */
 const SIZE = '1024x1024';
+
+/**
+ * 2.5 widened this to `low | medium | high | xhigh | max`, and `high` stays.
+ *
+ * Two reasons, and neither is thrift alone. OpenAI's own guidance puts a
+ * transparent background at its best at medium or high, so the tiers above it
+ * are not free of risk on the one capability this whole path exists for. And
+ * the point of moving to Flare was the wait: spending the time it saves on
+ * detail nobody can see on a device tile would be the migration undoing itself.
+ */
 const QUALITY = 'high';
 
 /**
@@ -54,6 +76,13 @@ const EDITS_URL = 'https://api.openai.com/v1/images/edits';
  * still working on and has already billed — which is exactly what a four-minute
  * deadline would have done, and why this note now records where the number
  * came from.
+ *
+ * **That measurement is `gpt-image-2`'s, and the deadline is deliberately kept
+ * as it is.** Flare draws in a fraction of that time, so ten minutes went from
+ * merely safe to generous — which is the right direction for a ceiling nobody
+ * should ever reach. Re-measure before tightening it: the figure above was
+ * earned on this prompt, at this quality, with a photo to restyle, and nothing
+ * here has been timed on the new model yet.
  */
 const TIMEOUT_MS = 10 * 60 * 1000;
 

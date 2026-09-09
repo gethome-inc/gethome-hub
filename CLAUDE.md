@@ -1265,9 +1265,20 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   sphere, chosen — rather than an absence, which is what saves a column meaning
   the same thing twice. And **no thumbnails are made here**: that would mean a
   native image library on a 415 MB board for something each app already derives
-  and caches. `gpt-image-2` is pinned because it supports transparent
-  backgrounds in preview, which is the whole point of a cut-out the apps float
-  over their own glow.
+  and caches. `gpt-image-2.5-flare` is pinned because it supports transparent
+  backgrounds, which is the whole point of a cut-out the apps float over their
+  own glow — and because it is the *fast* half of the 2.5 pair, on a surface
+  where somebody watches an orb until the picture lands. Moving off `gpt-image-2`
+  cost nothing at the wire: 2.5 kept the Image API's shape, so it was a model id
+  and a re-read of the three facts hanging off it. `quality` stays `high` rather
+  than reaching for the `xhigh`/`max` that 2.5 added — transparency is at its
+  best at medium or high, and spending the saved time on detail nobody sees at
+  card size would undo the reason for moving. **The prompt stopped naming a
+  scene** with it (`src/portraits/prompts.ts`): a prompt's instructions take
+  priority over `background: transparent`, so "empty space", "no ground plane"
+  and "no scenery" were a backdrop described in front of the one capability the
+  path exists for. The shadow ban stays — a shadow is something the object casts,
+  not a place it is standing in.
 - **`<data>/pairing-code` is a contract, and it now *survives* restarts.** It
   used to be re-minted on every boot, and that was the bug: any code that had
   been read — `install.sh`'s `@@PAIRING@@` marker, or a value Studio fetched a

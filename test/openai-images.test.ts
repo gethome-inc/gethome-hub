@@ -17,7 +17,7 @@ describe('OpenAI portrait generation', () => {
     vi.unstubAllGlobals();
   });
 
-  it('uses GPT Image 2 with a transparent PNG background for a generated portrait', async () => {
+  it('uses GPT Image 2.5 Flare with a transparent PNG background for a generated portrait', async () => {
     await expect(drawPortrait({ apiKey: 'sk-proj-test', prompt: 'A smart wall plug.' })).resolves.toEqual(
       Buffer.from('portrait'),
     );
@@ -34,10 +34,10 @@ describe('OpenAI portrait generation', () => {
       output_format: 'png',
       quality: 'high',
     });
-    expect(PORTRAIT_MODEL).toBe('gpt-image-2');
+    expect(PORTRAIT_MODEL).toBe('gpt-image-2.5-flare');
   });
 
-  it('uses the GPT Image 2 edits endpoint when a photo is supplied', async () => {
+  it('uses the GPT Image 2.5 Flare edits endpoint when a photo is supplied', async () => {
     await drawPortrait({
       apiKey: 'sk-proj-test',
       prompt: 'Restyle this device.',

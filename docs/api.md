@@ -1009,7 +1009,7 @@ the second provider reads exactly what it read before — plus a per-provider ha
                                "recommended": true },
                              { "id": "claude-sonnet-5", "label": "Sonnet 5",
                                "note": "Quicker and cheaper. …" } ] },
-  "portraits": { "model": "gpt-image-2", "maxPerDevice": 6, "budgetBytes": 314572800 }
+  "portraits": { "model": "gpt-image-2.5-flare", "maxPerDevice": 6, "budgetBytes": 314572800 }
 }
 ```
 
@@ -1073,8 +1073,8 @@ already knows the device's canonical `kind`, so a caller sends nothing but
 "draw this device", optionally with a photo to restyle — which is also what
 keeps two apps from producing two different-looking homes.
 
-Drawing needs an **OpenAI** key (`gpt-image-2`, which supports transparent
-backgrounds in preview and is used for a clean cut-out).
+Drawing needs an **OpenAI** key (`gpt-image-2.5-flare`, which supports
+transparent backgrounds and is used for a clean cut-out).
 Recognition may be running on Anthropic at the same time, which is why the
 refusal is `openai_not_configured` rather than `ai_not_configured`.
 

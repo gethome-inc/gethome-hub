@@ -58,12 +58,28 @@ response field, and the hub ships its production `node_modules` to a Raspberry
 Pi — the same reasoning that keeps the GitHub update check and the installer's
 health poll on `fetch`.
 
-**`gpt-image-2` is pinned.** `gpt-image-1.5` is deprecated; the newer model
-supports `background: transparent` in preview, and a transparent cut-out is the
-whole point: the apps float the object over their own glow and contact shadow,
-so a boxed image would be a grey slab on the page. A model that rejected
-`transparent` would fail with OpenAI's own message rather than quietly returning
-a square.
+**`gpt-image-2.5-flare` is pinned, and the wire did not move to get there.**
+2.5 kept the Image API's shape — same two endpoints, same `size` / `background` /
+`output_format` / `quality` / `n` fields, same base64 answer — so the migration
+off `gpt-image-2` was a model id and a re-read of the facts hanging off it.
+Flare is the fast half of the 2.5 pair and draws in a fraction of `gpt-image-2`'s
+time, which is the whole reason to move on a surface where somebody watches an
+orb. `gpt-image-2.5-sunburst`, the quality half, is deliberately not taken: a
+portrait is one matte object on a transparent ground in a fixed palette, drawn at
+card size by every surface that shows it, so the slower tier would spend its time
+on detail this render throws away.
+
+A transparent cut-out is still the whole point — the apps float the object over
+their own glow and contact shadow, so a boxed image would be a grey slab on the
+page. Both 2.5 models support `background: transparent` outright rather than in
+preview, and a model that rejected it would fail with OpenAI's own message rather
+than quietly returning a square.
+
+**`quality` stays `high`** though 2.5 widened it to
+`low | medium | high | xhigh | max`. OpenAI's guidance puts a transparent
+background at its best at medium or high, so the tiers above are not free of risk
+on the one capability this path exists for — and spending Flare's saved time on
+detail nobody can see on a device tile would undo the reason for moving.
 
 Failures carry the vendor's own sentence and a `kind` from the shared
 classifier in `src/ai/errors.ts` — which branches on HTTP status rather than on
