@@ -1092,33 +1092,41 @@ UNIT
   fi
 }
 
-# ── And the access point has to keep believing it is awake ────────────────
-# Power save off is half of it. The other half is that an access point keeps
-# its *own* view of whether a client is asleep, and it learns that only from
-# frames the client sends. A hub sends almost nothing: it answers when asked
-# and is otherwise silent for minutes at a time, which is exactly the state in
-# which that view can go stale — and while it is stale the AP buffers unicast
-# for a client it thinks is dozing, and those frames are never delivered.
+# ── The hub has to announce itself, and it has to do it by broadcast ──────
+# **The fault this fixes needs the path to be idle, and that is what named
+# it.** A continuous one-per-second ping from a Mac on the same Wi-Fi held the
+# hub reachable for fourteen minutes without a single loss, while twenty
+# minutes earlier the same hub had been unreachable for four minutes at a
+# stretch. Traffic prevented it; quiet caused it. That is the owner's whole
+# experience too — open the app after a while and it cannot find the hub, keep
+# using it and nothing ever goes wrong.
 #
-# Measured on the Zero 2 W this came from, with power save verified off. From
-# a Mac on the same Wi-Fi, twelve pings and twelve HTTP requests over 55
-# seconds, every one of them lost — while the hub sat at -37 dBm with its
-# gateway REACHABLE, answering its own health check in 3 ms, and its
-# `rx_bytes` counter did not move by so much as one of those packets. It was
-# not deaf to *everything*: 184 bytes of ambient broadcast arrived in the
-# middle of it, which is the whole tell. Broadcast is flooded to every client
-# and unicast is not, so a hub receiving one and not the other is a hub the AP
-# is holding frames for. It cleared by itself the moment the hub next
-# transmitted, and both apps and SSH were gone together for the whole minute —
-# which is the report this all started from.
+# What goes quiet is one *pair*. Measured on the hub this came from: the Mac
+# is on 5 GHz and the hub's radio is on 2.4 GHz, so their traffic crosses the
+# bridge between the two radios inside the router, and it is the entry for
+# this hub on that bridge which ages out while it is silent. Everything else
+# keeps working and says so — during one of these the hub answered its own
+# health check in 3 ms, exchanged pings with the gateway throughout, and
+# served another client 37 KB in a single 20-second window, while three pings
+# from the Mac got nothing and its `rx_bytes` counter did not move by one of
+# them. Nothing on the hub is wrong, which is why nothing on the hub ever
+# reports it.
 #
-# So the hub says something, quietly, on a timer. One packet at the gateway
-# every 15 seconds is a few hundred bytes an hour and it is *transmitting*
-# that matters, not the reply: a frame from the client is what refreshes the
-# AP's idea of it. That also covers the neighbouring version of the same
-# fault, an AP ageing a silent client out of its table.
+# **A unicast to the gateway does not fix this, and shipping one is how that
+# was learned.** Those frames are addressed to the router itself and are
+# consumed by it; they never cross the bridge they are meant to keep warm. A
+# **gratuitous ARP is broadcast**, so it is flooded to every segment — it
+# refreshes the access point's forwarding table on both radios and every
+# client's ARP cache, in one frame of a few dozen bytes.
 #
-# A wired hub gets none of this, for the reason it gets no dispatcher.
+# Measured, with the path deliberately idled for 55 seconds between every
+# probe, which is the condition the fault needs: **252 probes over four hours,
+# 503 of 504 replies, one lost packet** — against a gateway control that lost
+# none. Before it, the same probe found multi-minute blackouts.
+#
+# The gateway ping stays beside it: it costs nothing and it keeps the hub's own
+# default route fresh. A wired hub gets none of this, for the reason it gets no
+# dispatcher.
 keep_wifi_reachable() {
   local iface unit="${GETHOME_KEEPALIVE_UNIT:-/etc/systemd/system/gethome-wifi-keepalive.service}"
   local script="${GETHOME_KEEPALIVE_SCRIPT:-/usr/local/lib/gethome-wifi-keepalive.sh}"
@@ -1126,26 +1134,48 @@ keep_wifi_reachable() {
   iface="$(lan_wifi_iface)"
   [[ -n "$iface" ]] || return 0
 
+  # `arping` sends the broadcast. It is only wanted on a wireless hub, so it is
+  # installed here rather than with the base packages — and with the lists
+  # refreshed first, for the reason `iw` is.
+  if ! command -v arping >/dev/null 2>&1; then
+    $SUDO apt-get update -qq >/dev/null 2>&1 || true
+    $SUDO apt-get install -y -qq --no-install-recommends iputils-arping >/dev/null 2>&1 || true
+  fi
+  if ! command -v arping >/dev/null 2>&1; then
+    warn "This hub reaches the network over Wi-Fi and 'arping' could not be installed, so it cannot announce itself to the router. It may become unreachable for minutes at a time after a quiet spell, while running perfectly."
+  fi
+
   $SUDO mkdir -p "$(dirname "$script")"
   if ! $SUDO tee "$script" >/dev/null <<'KEEPALIVE'
 #!/bin/sh
-# Installed by GetHome. Keeps this hub's access point aware that its radio is
-# awake, by transmitting one small packet on a timer. deploy/install.sh says
-# why; the short version is that an AP buffers unicast for a client it believes
-# is dozing, a hub is silent for minutes at a time, and a stale belief is a hub
-# that cannot be reached while it is running perfectly.
+# Installed by GetHome. deploy/install.sh says why in full; the short version
+# is that the router ages this hub out of the table it uses to reach it from
+# its other radio, a hub is silent for minutes at a time, and what comes of
+# that is a hub nothing on the network can reach while it runs perfectly.
 #
-# The gateway is re-read every round rather than captured once, so a lease that
-# moves does not leave this pinging an address nobody answers for. The reply is
-# not the point and is not checked: transmitting is what refreshes the AP.
+# **Broadcast is the whole point.** A gratuitous ARP is flooded to every
+# segment, so it refreshes the access point's forwarding table on both radios
+# and every client's ARP cache at once. A unicast to the router does not: it is
+# addressed to the router itself and never crosses the bridge it is meant to
+# keep warm. That was tried first and did not work.
+#
+# Everything is re-read each round rather than captured, so a lease or an
+# interface that moves does not leave this announcing an address it no longer
+# has. Nothing is checked for a reply: transmitting is what does the work.
 while :; do
-  gateway=$(ip route show default 2>/dev/null | awk '/^default/ { print $3; exit }')
-  [ -n "$gateway" ] && ping -c 1 -W 1 "$gateway" >/dev/null 2>&1
-  sleep 15
+  iface=$(ip route show default 2>/dev/null |
+    awk '/^default/ { for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')
+  if [ -n "$iface" ]; then
+    self=$(ip -4 -o addr show "$iface" 2>/dev/null | awk '{ split($4, a, "/"); print a[1]; exit }')
+    [ -n "$self" ] && arping -U -c 1 -I "$iface" "$self" >/dev/null 2>&1
+    gateway=$(ip route show default 2>/dev/null | awk '/^default/ { print $3; exit }')
+    [ -n "$gateway" ] && ping -c 1 -W 1 "$gateway" >/dev/null 2>&1
+  fi
+  sleep 20
 done
 KEEPALIVE
   then
-    warn "Could not install the Wi-Fi keep-alive. The hub works, but it may become unreachable for a minute at a time while its access point holds frames for a radio it thinks is asleep."
+    warn "Could not install the Wi-Fi keep-alive. The hub works, but it may become unreachable for minutes at a time after a quiet spell, while running perfectly."
     return 0
   fi
   $SUDO chmod 0755 "$script"
@@ -1170,11 +1200,11 @@ UNIT
   then
     $SUDO systemctl daemon-reload >/dev/null 2>&1 || true
     if $SUDO systemctl enable --now gethome-wifi-keepalive >/dev/null 2>&1; then
-      say "The hub will keep its Wi-Fi connection fresh, so it stays reachable while it is idle."
+      say "The hub will announce itself on the network every 20 seconds, so it stays reachable after a quiet spell."
       return 0
     fi
   fi
-  warn "Could not start the Wi-Fi keep-alive. The hub works, but it may become unreachable for a minute at a time while its access point holds frames for a radio it thinks is asleep."
+  warn "Could not start the Wi-Fi keep-alive. The hub works, but it may become unreachable for minutes at a time after a quiet spell, while running perfectly."
 }
 
 keep_wifi_awake

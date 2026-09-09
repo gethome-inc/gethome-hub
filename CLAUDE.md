@@ -1892,27 +1892,44 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `GETHOME_NM_DISPATCHER`, `GETHOME_WIFI_UNIT`) for the reason `GETHOME_CMDLINE`
   is — `test/deploy-wifi.test.ts` runs the real function against files it owns,
   including running the dispatcher the way NetworkManager runs it.
-- **Power save off is half the link; the access point's own belief is the
-  other half.** An AP keeps its own view of whether a client is asleep and
-  learns it only from frames the client sends — and a hub sends almost nothing,
-  answering when asked and silent for minutes between. While that view is stale
-  the AP buffers unicast for a client it thinks is dozing and those frames are
-  never delivered. Caught live from a Mac on the same Wi-Fi, power save
-  verified off and memory already pinned: twelve pings and twelve HTTP requests
-  over 55 seconds, **every one lost**, while the hub sat at -37 dBm with its
-  gateway REACHABLE, answered its own health check in 3 ms, and its `rx_bytes`
-  counter did not move by one of those packets. **184 bytes of ambient
-  broadcast arrived in the middle of it, and that is the tell**: broadcast is
-  flooded to every client and unicast is not, so a hub receiving one and not
-  the other is a hub whose AP is holding frames for it. It cleared by itself
-  the moment the hub next transmitted. `keep_wifi_reachable()` therefore sends
-  one packet at the gateway every 15 seconds — the *transmitting* is the point
-  and the reply is not checked, the gateway is re-read each round so a moved
-  lease does not leave it talking to nobody, and a wired hub gets none of it.
-  **Note what this rules out**: ICMP is answered by the kernel, so a hub that
-  will not answer a ping is not a hub with a paged-out or busy userspace, and
-  no amount of `MemorySwapMax` reaches it. Both fixes are real and they are
-  different faults; this is the one the outage reports were.
+- **The hub has to announce itself, by broadcast, or it goes unreachable after
+  a quiet spell.** This is the fault the outage reports were, and what named it
+  was the shape rather than any counter: a continuous one-per-second ping from
+  a Mac on the same Wi-Fi held the hub reachable for **fourteen minutes with no
+  loss at all**, twenty minutes after that same hub had been unreachable for
+  four minutes at a stretch. Traffic prevented it; quiet caused it — which is
+  the owner's whole experience, since an app opened after a while *is* a path
+  that has been silent.
+  **What goes quiet is one pair.** The Mac is on 5 GHz and the hub's radio on
+  2.4 GHz, so their traffic crosses the bridge between the two radios inside
+  the router, and it is this hub's entry on that bridge which ages out. Nothing
+  on the hub is wrong and everything on it says so: during one of these it
+  answered its own health check in 3 ms, exchanged pings with the gateway
+  throughout, and served *another* client 37 KB inside one 20-second window,
+  while three pings from the Mac got nothing and `rx_bytes` did not move by one
+  of them. **A hub that is unreachable from one client and serving another at
+  the same second is not a hub with a problem** — which is why every
+  measurement taken on it came back clean, twice, before this was found.
+  **A unicast to the gateway does not fix it, and shipping one is how that was
+  learned.** Those frames are addressed to the router itself and are consumed
+  by it; they never cross the bridge they were meant to keep warm. A
+  **gratuitous ARP is broadcast** (`arping -U`), so it is flooded to every
+  segment and refreshes the access point's forwarding table on both radios and
+  every client's ARP cache in one frame of a few dozen bytes.
+  `keep_wifi_reachable()` sends one every 20 seconds, re-reading the interface
+  and address each round so a moved lease does not leave it announcing an
+  address it no longer has, with the gateway ping kept beside it because it
+  costs nothing and keeps the hub's own default route fresh. A wired hub gets
+  none of it. Measured with the path deliberately idled for 55 seconds between
+  every probe, which is the condition the fault needs: **252 probes over four
+  hours, 503 of 504 replies, one lost packet**, against a gateway control that
+  lost none — where the same probe before it found multi-minute blackouts.
+  **Note what this rules out, because two earlier fixes were argued from it.**
+  ICMP is answered by the kernel, so a hub that will not answer a ping is not a
+  hub with a paged-out or busy userspace and no amount of `MemorySwapMax`
+  reaches it; and the hub exchanging traffic with the gateway throughout rules
+  out its own radio, its power save and anything the *hub* buffers. Those two
+  fixes are real and stand on their own measurements. Neither was this.
 - **When a unit won't start, put the reason in the log.** `service_failure()`
   prints `systemctl status` and the last journal lines into the install output.
   The mosquitto bug above was invisible for a whole round because the installer

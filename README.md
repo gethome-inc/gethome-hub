@@ -123,12 +123,20 @@ turns power saving off on whichever interface carries the LAN and makes it stay
 off across reconnects; a hub on Ethernet is left alone. It costs about 20 mA on
 a board that is plugged into the wall.
 
-It also sends one small packet to your router every fifteen seconds. An access
-point keeps its own idea of whether a device is awake, and it only learns that
-from what the device sends — so a hub, which is quiet for minutes at a time,
-can end up with the router holding messages for a radio it believes is asleep.
-Measured here: fifty-five seconds during which nothing at all reached a hub
-that was up, at full signal, and answering itself in three milliseconds.
+**The hub also announces itself on your network every twenty seconds**, and
+that is the fix for the one that is hardest to believe: a hub that is running
+perfectly and cannot be reached, until you wait, or until something else on the
+network happens to talk to it.
+
+Routers keep a table of which device is on which radio, and they let an entry
+expire when the device has been quiet. A hub is quiet — it answers when asked
+and says nothing in between — so after a while your phone's messages to it stop
+being delivered, while the hub sits there with a full signal, running your
+automations, answering its own checks in milliseconds. Measured here: a
+continuous ping held it reachable for fourteen minutes without a single loss,
+twenty minutes after the same hub had been unreachable for four minutes.
+Traffic prevented it; quiet caused it. With the announcement in place: four
+hours of deliberately idle probing, one lost packet out of 504.
 
 Give the hub a fixed address while you are in the router — a DHCP reservation
 for its MAC is enough. The apps find it over mDNS and remember the address they

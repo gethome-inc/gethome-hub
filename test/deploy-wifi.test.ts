@@ -153,7 +153,7 @@ const WIFI_ROUTE = 'default via 192.168.0.1 dev wlan0 proto dhcp src 192.168.0.2
  * Returns the unit and the script it writes, or empty strings for the wired
  * hub that must get neither.
  */
-function keepalive(options: { route: string; wireless: string[] }): {
+function keepalive(options: { route: string; wireless: string[]; arping?: boolean }): {
   unit: string;
   script: string;
   scriptMode: string;
@@ -169,6 +169,12 @@ function keepalive(options: { route: string; wireless: string[] }): {
   for (const iface of options.wireless) mkdirSync(path.join(net, iface, 'wireless'), { recursive: true });
   script_(path.join(bin, 'ip'), `printf '%s' "$FAKE_ROUTE"`);
   script_(path.join(bin, 'systemctl'), 'exit 0');
+  // Stubbed rather than borrowed from the host: whether this machine happens
+  // to have `arping` decides which branch runs, and a test that says something
+  // different on a Mac and in CI is the trap this file already carries a note
+  // about. `apt-get` too, so the install path is never reached for real.
+  if (options.arping !== false) script_(path.join(bin, 'arping'), 'exit 0');
+  script_(path.join(bin, 'apt-get'), 'exit 0');
 
   const output = execFileSync(
     'bash',
@@ -208,34 +214,55 @@ function keepalive(options: { route: string; wireless: string[] }): {
 }
 
 /**
- * **Power save off is half the fix, and the other half is the access point.**
+ * **The fault needs the path to be idle, and that is what named it.**
  *
- * An AP keeps its own view of whether a client is asleep and learns it only
- * from frames the client sends — and a hub sends almost nothing. Measured on a
- * Zero 2 W with power save verified off: from a Mac on the same Wi-Fi, twelve
- * pings and twelve HTTP requests over 55 seconds, every one lost, while the
- * hub sat at -37 dBm answering its own health check in 3 ms and its
- * `rx_bytes` counter did not move by one of those packets. 184 bytes of
- * ambient broadcast arrived in the middle of it, which is the tell: broadcast
- * is flooded to every client and unicast is not, so the AP was holding frames
- * for a radio it believed was dozing.
+ * A continuous one-per-second ping from a Mac on the same Wi-Fi held the hub
+ * reachable for fourteen minutes without a single loss, twenty minutes after
+ * the same hub had been unreachable for four minutes at a stretch. Traffic
+ * prevented it; quiet caused it — which is the owner's whole experience, since
+ * an app opened after a while is exactly a path that has been silent.
+ *
+ * What goes quiet is one *pair*: the Mac is on 5 GHz and the hub's radio on
+ * 2.4 GHz, so their traffic crosses the bridge between the two radios inside
+ * the router, and it is this hub's entry on that bridge which ages out. During
+ * one of these the hub answered its own health check in 3 ms, exchanged pings
+ * with the gateway throughout and served another client 37 KB in one 20-second
+ * window, while three pings from the Mac got nothing at all.
+ *
+ * Measured with the path deliberately idled for 55 seconds between probes:
+ * **252 probes over four hours, 503 of 504 replies, one lost packet**, against
+ * a gateway control that lost none.
  */
-describe('keeping the hub reachable while it is idle', () => {
-  it('transmits on a timer, so the access point keeps delivering to it', () => {
+describe('keeping the hub reachable after a quiet spell', () => {
+  it('announces itself by broadcast, which is the only thing that crosses', () => {
     const result = keepalive({ route: WIFI_ROUTE, wireless: ['wlan0'] });
-    // Something has to leave the radio. The reply is not the point.
-    expect(result.script).toContain('ping');
+    // **A gratuitous ARP, not a unicast.** A ping at the router is addressed
+    // to the router and never crosses the bridge it is meant to keep warm;
+    // that was shipped first and did not work. `-U` is the broadcast form.
+    expect(result.script).toMatch(/arping\s+-U\b/);
     expect(result.scriptMode).toBe('755');
-    // Bounded and quiet: a hub that pinged every second would be its own
-    // problem on a board this size.
+    // Bounded and quiet: this is a broadcast, so every station on the network
+    // pays for it, and one every few seconds would be rude.
     const interval = Number(/sleep (\d+)/.exec(result.script)![1]);
-    expect(interval).toBeGreaterThanOrEqual(5);
-    expect(interval).toBeLessThanOrEqual(45);
-    // Re-read, never captured: a lease that moves must not leave this
-    // transmitting at an address nobody answers for.
+    expect(interval).toBeGreaterThanOrEqual(10);
+    expect(interval).toBeLessThanOrEqual(60);
+    // Re-read, never captured: a lease or an interface that moves must not
+    // leave this announcing an address it no longer has.
     expect(result.script).toContain('ip route show default');
+    expect(result.script).toContain('ip -4 -o addr show');
     expect(result.unit).toContain('Restart=always');
     expect(result.output).toContain('SAY');
+  });
+
+  /**
+   * **A hub that cannot broadcast has to say so.** Without `arping` the loop
+   * falls back to the gateway ping, which is exactly the thing that was
+   * measured not to work — so the install must not go quiet about it.
+   */
+  it('says so when it cannot send the broadcast', () => {
+    const result = keepalive({ route: WIFI_ROUTE, wireless: ['wlan0'], arping: false });
+    expect(result.output).toContain('WARN');
+    expect(result.output).toMatch(/arping/);
   });
 
   /** A wired hub has no access point to convince. */
