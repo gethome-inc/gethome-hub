@@ -1092,7 +1092,93 @@ UNIT
   fi
 }
 
+# ── And the access point has to keep believing it is awake ────────────────
+# Power save off is half of it. The other half is that an access point keeps
+# its *own* view of whether a client is asleep, and it learns that only from
+# frames the client sends. A hub sends almost nothing: it answers when asked
+# and is otherwise silent for minutes at a time, which is exactly the state in
+# which that view can go stale — and while it is stale the AP buffers unicast
+# for a client it thinks is dozing, and those frames are never delivered.
+#
+# Measured on the Zero 2 W this came from, with power save verified off. From
+# a Mac on the same Wi-Fi, twelve pings and twelve HTTP requests over 55
+# seconds, every one of them lost — while the hub sat at -37 dBm with its
+# gateway REACHABLE, answering its own health check in 3 ms, and its
+# `rx_bytes` counter did not move by so much as one of those packets. It was
+# not deaf to *everything*: 184 bytes of ambient broadcast arrived in the
+# middle of it, which is the whole tell. Broadcast is flooded to every client
+# and unicast is not, so a hub receiving one and not the other is a hub the AP
+# is holding frames for. It cleared by itself the moment the hub next
+# transmitted, and both apps and SSH were gone together for the whole minute —
+# which is the report this all started from.
+#
+# So the hub says something, quietly, on a timer. One packet at the gateway
+# every 15 seconds is a few hundred bytes an hour and it is *transmitting*
+# that matters, not the reply: a frame from the client is what refreshes the
+# AP's idea of it. That also covers the neighbouring version of the same
+# fault, an AP ageing a silent client out of its table.
+#
+# A wired hub gets none of this, for the reason it gets no dispatcher.
+keep_wifi_reachable() {
+  local iface unit="${GETHOME_KEEPALIVE_UNIT:-/etc/systemd/system/gethome-wifi-keepalive.service}"
+  local script="${GETHOME_KEEPALIVE_SCRIPT:-/usr/local/lib/gethome-wifi-keepalive.sh}"
+
+  iface="$(lan_wifi_iface)"
+  [[ -n "$iface" ]] || return 0
+
+  $SUDO mkdir -p "$(dirname "$script")"
+  if ! $SUDO tee "$script" >/dev/null <<'KEEPALIVE'
+#!/bin/sh
+# Installed by GetHome. Keeps this hub's access point aware that its radio is
+# awake, by transmitting one small packet on a timer. deploy/install.sh says
+# why; the short version is that an AP buffers unicast for a client it believes
+# is dozing, a hub is silent for minutes at a time, and a stale belief is a hub
+# that cannot be reached while it is running perfectly.
+#
+# The gateway is re-read every round rather than captured once, so a lease that
+# moves does not leave this pinging an address nobody answers for. The reply is
+# not the point and is not checked: transmitting is what refreshes the AP.
+while :; do
+  gateway=$(ip route show default 2>/dev/null | awk '/^default/ { print $3; exit }')
+  [ -n "$gateway" ] && ping -c 1 -W 1 "$gateway" >/dev/null 2>&1
+  sleep 15
+done
+KEEPALIVE
+  then
+    warn "Could not install the Wi-Fi keep-alive. The hub works, but it may become unreachable for a minute at a time while its access point holds frames for a radio it thinks is asleep."
+    return 0
+  fi
+  $SUDO chmod 0755 "$script"
+
+  if $SUDO tee "$unit" >/dev/null <<UNIT
+[Unit]
+Description=Keep this hub reachable on Wi-Fi
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${script}
+Restart=always
+RestartSec=10
+# Nothing here is urgent, and it must never be what wakes a loaded board.
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  then
+    $SUDO systemctl daemon-reload >/dev/null 2>&1 || true
+    if $SUDO systemctl enable --now gethome-wifi-keepalive >/dev/null 2>&1; then
+      say "The hub will keep its Wi-Fi connection fresh, so it stays reachable while it is idle."
+      return 0
+    fi
+  fi
+  warn "Could not start the Wi-Fi keep-alive. The hub works, but it may become unreachable for a minute at a time while its access point holds frames for a radio it thinks is asleep."
+}
+
 keep_wifi_awake
+keep_wifi_reachable
 
 # ── mDNS ───────────────────────────────────────────────────────────────────
 # avahi answers for this machine's own name; the hub hands it the

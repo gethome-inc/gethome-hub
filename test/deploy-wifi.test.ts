@@ -42,7 +42,7 @@ interface Outcome {
   netDir: string;
 }
 
-function script(file: string, body: string): void {
+function script_(file: string, body: string): void {
   writeFileSync(file, `#!/bin/sh\n${body}\n`);
   chmodSync(file, 0o755);
 }
@@ -88,8 +88,8 @@ function run(options: {
   }
   writeFileSync(state, 'Power save: on\n');
 
-  script(path.join(bin, 'ip'), `printf '%s' "$FAKE_ROUTE"`);
-  script(
+  script_(path.join(bin, 'ip'), `printf '%s' "$FAKE_ROUTE"`);
+  script_(
     path.join(bin, 'iw'),
     `echo "$*" >> "${calls}"
      case "$3 $4" in
@@ -97,8 +97,8 @@ function run(options: {
        "set power_save") [ "$FAKE_RADIO_OBEYS" = "no" ] || echo "Power save: $5" > "${state}" ;;
      esac`,
   );
-  script(path.join(bin, 'systemctl'), 'exit 0');
-  if (options.networkManager !== false) script(path.join(bin, 'nmcli'), 'exit 0');
+  script_(path.join(bin, 'systemctl'), 'exit 0');
+  if (options.networkManager !== false) script_(path.join(bin, 'nmcli'), 'exit 0');
 
   const output = execFileSync(
     'bash',
@@ -147,6 +147,109 @@ function run(options: {
 
 const WIFI_ROUTE = 'default via 192.168.0.1 dev wlan0 proto dhcp src 192.168.0.200 metric 600\n';
 
+/**
+ * Run `keep_wifi_reachable` out of install.sh against files the test owns.
+ *
+ * Returns the unit and the script it writes, or empty strings for the wired
+ * hub that must get neither.
+ */
+function keepalive(options: { route: string; wireless: string[] }): {
+  unit: string;
+  script: string;
+  scriptMode: string;
+  output: string;
+} {
+  const dir = mkdtempSync(path.join(tmpdir(), 'gethome-keepalive-'));
+  dirs.push(dir);
+  const bin = path.join(dir, 'bin');
+  const net = path.join(dir, 'net');
+  const unit = path.join(dir, 'gethome-wifi-keepalive.service');
+  const script = path.join(dir, 'lib', 'gethome-wifi-keepalive.sh');
+  mkdirSync(bin, { recursive: true });
+  for (const iface of options.wireless) mkdirSync(path.join(net, iface, 'wireless'), { recursive: true });
+  script_(path.join(bin, 'ip'), `printf '%s' "$FAKE_ROUTE"`);
+  script_(path.join(bin, 'systemctl'), 'exit 0');
+
+  const output = execFileSync(
+    'bash',
+    [
+      '-c',
+      `set -euo pipefail
+       SUDO=""
+       say()  { printf 'SAY %s\n' "$*"; }
+       warn() { printf 'WARN %s\n' "$*"; }
+       for fn in lan_wifi_iface keep_wifi_reachable; do
+         prog="/^$fn() {/,/^}/p"
+         eval "$(sed -n "$prog" "$1")"
+       done
+       keep_wifi_reachable`,
+      'bash',
+      INSTALLER,
+    ],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH ?? ''}`,
+        FAKE_ROUTE: options.route,
+        GETHOME_NET_DIR: net,
+        GETHOME_KEEPALIVE_UNIT: unit,
+        GETHOME_KEEPALIVE_SCRIPT: script,
+      },
+    },
+  );
+
+  return {
+    unit: existsSync(unit) ? readFileSync(unit, 'utf8') : '',
+    script: existsSync(script) ? readFileSync(script, 'utf8') : '',
+    scriptMode: existsSync(script) ? (statSync(script).mode & 0o777).toString(8) : '',
+    output,
+  };
+}
+
+/**
+ * **Power save off is half the fix, and the other half is the access point.**
+ *
+ * An AP keeps its own view of whether a client is asleep and learns it only
+ * from frames the client sends — and a hub sends almost nothing. Measured on a
+ * Zero 2 W with power save verified off: from a Mac on the same Wi-Fi, twelve
+ * pings and twelve HTTP requests over 55 seconds, every one lost, while the
+ * hub sat at -37 dBm answering its own health check in 3 ms and its
+ * `rx_bytes` counter did not move by one of those packets. 184 bytes of
+ * ambient broadcast arrived in the middle of it, which is the tell: broadcast
+ * is flooded to every client and unicast is not, so the AP was holding frames
+ * for a radio it believed was dozing.
+ */
+describe('keeping the hub reachable while it is idle', () => {
+  it('transmits on a timer, so the access point keeps delivering to it', () => {
+    const result = keepalive({ route: WIFI_ROUTE, wireless: ['wlan0'] });
+    // Something has to leave the radio. The reply is not the point.
+    expect(result.script).toContain('ping');
+    expect(result.scriptMode).toBe('755');
+    // Bounded and quiet: a hub that pinged every second would be its own
+    // problem on a board this size.
+    const interval = Number(/sleep (\d+)/.exec(result.script)![1]);
+    expect(interval).toBeGreaterThanOrEqual(5);
+    expect(interval).toBeLessThanOrEqual(45);
+    // Re-read, never captured: a lease that moves must not leave this
+    // transmitting at an address nobody answers for.
+    expect(result.script).toContain('ip route show default');
+    expect(result.unit).toContain('Restart=always');
+    expect(result.output).toContain('SAY');
+  });
+
+  /** A wired hub has no access point to convince. */
+  it('leaves a wired hub alone', () => {
+    const result = keepalive({
+      route: 'default via 192.168.0.1 dev eth0 proto dhcp metric 100\n',
+      wireless: ['wlan0'],
+    });
+    expect(result.unit).toBe('');
+    expect(result.script).toBe('');
+    expect(result.output).toBe('');
+  });
+});
+
 /** Run `zigbee_channel_clear_of_wifi` out of install.sh for one Wi-Fi centre. */
 function zigbeeChannelFor(wifiMhz: string): number {
   return Number(
@@ -185,8 +288,8 @@ function collisionWarning(options: { wifiMhz: string; zigbeeChannel?: number }):
   const net = path.join(dir, 'net');
   mkdirSync(bin, { recursive: true });
   mkdirSync(path.join(net, 'wlan0', 'wireless'), { recursive: true });
-  script(path.join(bin, 'ip'), `printf '%s' "$FAKE_ROUTE"`);
-  script(path.join(bin, 'iw'), `[ "$3" = "link" ] && printf 'Connected\n\tfreq: %s.0\n' "$FAKE_FREQ"; exit 0`);
+  script_(path.join(bin, 'ip'), `printf '%s' "$FAKE_ROUTE"`);
+  script_(path.join(bin, 'iw'), `[ "$3" = "link" ] && printf 'Connected\n\tfreq: %s.0\n' "$FAKE_FREQ"; exit 0`);
   if (options.zigbeeChannel !== undefined) {
     writeFileSync(
       path.join(dir, 'coordinator_backup.json'),
@@ -384,7 +487,7 @@ describe('keeping the hub on the network', () => {
     const calls = path.join(dir, 'calls');
     const bin = path.join(dir, 'bin');
     mkdirSync(bin, { recursive: true });
-    script(path.join(bin, 'iw'), `echo "$*" >> "${calls}"`);
+    script_(path.join(bin, 'iw'), `echo "$*" >> "${calls}"`);
     // The dispatcher was written with the fake `iw`'s absolute path; point it
     // at this one so the calls it makes land here.
     const dispatcher = path.join(dir, 'dispatch');

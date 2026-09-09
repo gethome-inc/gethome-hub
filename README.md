@@ -123,6 +123,13 @@ turns power saving off on whichever interface carries the LAN and makes it stay
 off across reconnects; a hub on Ethernet is left alone. It costs about 20 mA on
 a board that is plugged into the wall.
 
+It also sends one small packet to your router every fifteen seconds. An access
+point keeps its own idea of whether a device is awake, and it only learns that
+from what the device sends — so a hub, which is quiet for minutes at a time,
+can end up with the router holding messages for a radio it believes is asleep.
+Measured here: fifty-five seconds during which nothing at all reached a hub
+that was up, at full signal, and answering itself in three milliseconds.
+
 Give the hub a fixed address while you are in the router — a DHCP reservation
 for its MAC is enough. The apps find it over mDNS and remember the address they
 last saw, so a hub that moves is a hub they have to find again.

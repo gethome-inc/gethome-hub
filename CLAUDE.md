@@ -1892,6 +1892,27 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `GETHOME_NM_DISPATCHER`, `GETHOME_WIFI_UNIT`) for the reason `GETHOME_CMDLINE`
   is — `test/deploy-wifi.test.ts` runs the real function against files it owns,
   including running the dispatcher the way NetworkManager runs it.
+- **Power save off is half the link; the access point's own belief is the
+  other half.** An AP keeps its own view of whether a client is asleep and
+  learns it only from frames the client sends — and a hub sends almost nothing,
+  answering when asked and silent for minutes between. While that view is stale
+  the AP buffers unicast for a client it thinks is dozing and those frames are
+  never delivered. Caught live from a Mac on the same Wi-Fi, power save
+  verified off and memory already pinned: twelve pings and twelve HTTP requests
+  over 55 seconds, **every one lost**, while the hub sat at -37 dBm with its
+  gateway REACHABLE, answered its own health check in 3 ms, and its `rx_bytes`
+  counter did not move by one of those packets. **184 bytes of ambient
+  broadcast arrived in the middle of it, and that is the tell**: broadcast is
+  flooded to every client and unicast is not, so a hub receiving one and not
+  the other is a hub whose AP is holding frames for it. It cleared by itself
+  the moment the hub next transmitted. `keep_wifi_reachable()` therefore sends
+  one packet at the gateway every 15 seconds — the *transmitting* is the point
+  and the reply is not checked, the gateway is re-read each round so a moved
+  lease does not leave it talking to nobody, and a wired hub gets none of it.
+  **Note what this rules out**: ICMP is answered by the kernel, so a hub that
+  will not answer a ping is not a hub with a paged-out or busy userspace, and
+  no amount of `MemorySwapMax` reaches it. Both fixes are real and they are
+  different faults; this is the one the outage reports were.
 - **When a unit won't start, put the reason in the log.** `service_failure()`
   prints `systemctl status` and the last journal lines into the install output.
   The mosquitto bug above was invisible for a whole round because the installer
