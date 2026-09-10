@@ -464,6 +464,64 @@ describe('the assistant', () => {
     expect(unrelated.sessionId).not.toBe(first.sessionId);
   });
 
+  it('gives a follow-up card its own standing, not the last job’s', async () => {
+    const brief = 'switch the hall lamp on at sunset';
+    const document = {
+      version: 1,
+      name: 'Hall lamp at sunset',
+      mode: 'single',
+      triggers: [{ kind: 'manual' }],
+      actions: [{ kind: 'logActivity', message: 'Sunset' }],
+    };
+    const { assistant, automationChat } = await assistantFor([], {
+      delegated: [{ kind: 'submitted', rules: [{ document, replaces: null }], text: 'Written.' }],
+    });
+    const first = await automationChat.start({ memberId, message: brief });
+    await automationChat.idle();
+
+    const { assistant: talking } = await assistantFor([
+      {
+        kind: 'handed',
+        text: 'Handed that over.',
+        handoffs: [{ agent: 'automations', brief, sessionId: first.sessionId }],
+      },
+      {
+        kind: 'handed',
+        text: 'Passed that on.',
+        handoffs: [{ agent: 'automations', brief: 'make it 11:30', sessionId: first.sessionId }],
+      },
+    ]);
+    const chat = await talking.start({ memberId, message: 'sunset lamp please' });
+    await talking.idle();
+
+    // The follow-up for real: the tool sends the brief to the conversation
+    // that already has the job, which is what puts a fresh `user` row in it —
+    // and so what tells the second job apart from the first.
+    const tools = (
+      talking as unknown as {
+        toolContext: (id: string, sessionId: string) => {
+          delegate: (agent: string, brief: string) => Promise<{ sessionId: string }>;
+        };
+      }
+    ).toolContext(memberId, chat.sessionId);
+    await tools.delegate('automations', 'make it 11:30');
+    await automationChat.idle();
+    await talking.reply(chat.sessionId, memberId, 'actually 11:30');
+    await talking.idle();
+
+    const cards = (await talking.transcript(chat.sessionId))
+      .filter((row) => row.role === 'handoff')
+      .map((row) => row.data as { status: string; automationIds: string[] });
+    expect(cards).toHaveLength(2);
+    // The first job did deliver a rule.
+    expect(cards[0]?.status).toBe('delivered');
+    // The second has only just been asked, and reading the conversation whole
+    // it was born saying "delivered" over the first job's rule — and then
+    // never moved, because nothing about that had changed since.
+    expect(cards[1]?.status).toBe('working');
+    expect(cards[1]?.automationIds).toEqual([]);
+  });
+
   it('starts a fresh conversation when this chat has handed that agent nothing', async () => {
     const { assistant, automationChat } = await assistantFor([{ kind: 'said', text: 'Hello.' }]);
     const chat = await assistant.start({ memberId, message: 'hello' });

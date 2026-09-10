@@ -52,7 +52,13 @@ export interface HandoffPayload {
   /** working · asked · delivered · failed. An open string: an app that meets
    *  a word a later build adds still draws the card and its brief. */
   status: string;
-  /** The rules it wrote, once it has written any. */
+  /**
+   * The rules it wrote for **this** job, once it has written any.
+   *
+   * Scoped to the job rather than to the conversation, since one conversation
+   * can hold two — see `standingOf`. Nothing draws it today; it is what tells
+   * a status apart from the same status with one more rule under it.
+   */
   automationIds: string[];
 }
 
@@ -181,6 +187,17 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
      */
     const carryOn = input.fresh === true ? undefined : await this.lastHandedTo(sessionId, agentKey);
     if (carryOn !== undefined && (await agent.resume({ memberId, sessionId: carryOn, brief }))) {
+      /**
+       * **The old card stops speaking the moment the job moves on.**
+       *
+       * It is still the tracked row until this turn writes its own, and the
+       * other agent starts work at once — so without this the card that asked
+       * for the *last* thing was amended with the standing of the *new* one,
+       * and a job that had delivered a rule went back to reading "working"
+       * seconds later. Untracked, it keeps the last thing that was true of it,
+       * which is what a record is for.
+       */
+      this.delegated.delete(carryOn);
       return {
         sessionId: carryOn,
         text:
@@ -231,7 +248,17 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
   private async standingOf(
     sessionId: string,
   ): Promise<{ status: string; automationIds: string[] }> {
-    const rows = await this.options.automationChat.transcript(sessionId);
+    const all = await this.options.automationChat.transcript(sessionId);
+    /**
+     * **The job, not the conversation.** A follow-up goes back to the agent
+     * that already has the work, so one conversation can hold two jobs — and
+     * read whole, the second card was born saying "delivered" over the *first*
+     * job's rule, and then never moved, because the guard below saw a status
+     * and a count that had not changed. The current job starts at the last
+     * thing said *to* it, which is the brief that opened it.
+     */
+    const opened = all.map((row) => row.role).lastIndexOf('user');
+    const rows = opened < 0 ? all : all.slice(opened + 1);
     const automationIds = rows
       .filter((row) => row.role === 'preview')
       .map((row) => (row.data as { automationId?: string } | undefined)?.automationId)
