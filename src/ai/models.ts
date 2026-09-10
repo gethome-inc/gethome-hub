@@ -133,7 +133,7 @@ export const PROVIDER_MODELS: Readonly<
 };
 
 /**
- * What the **assistant** may run on, which is a different question from the
+ * What an **agent** may run on, which is a different question from the
  * mapper's and gets a different answer.
  *
  * The mapper offers one model per provider on purpose: a descriptor is cached
@@ -145,15 +145,27 @@ export const PROVIDER_MODELS: Readonly<
  * what a model costs per round is a real trade a home can make, and both
  * halves of it are visible.
  *
- * So the assistant offers two and the picker means something. Opus 5 is the
+ * So an agent offers two and the picker means something. Opus 5 is the
  * default and the recommendation; Sonnet 5 is the same conversation at rather
  * less than half the price. Both are already in `PRICING`, so nothing about
  * cost estimation moves.
  *
  * Anthropic only, for the reason the automations agent is: only the Anthropic
  * loop is written.
+ *
+ * **One table for both agents, and two stored columns.** It was
+ * `ASSISTANT_MODELS`, and the automations agent read `ai_model` — the
+ * *mapper's* column — which meant the two questions "which model recognises a
+ * device" and "which model writes a rule" shared an answer. It never showed,
+ * because the mapper offers one model and Sonnet is not in its list, so
+ * `effectiveModel` handed back Opus whatever was stored; the coupling was one
+ * added choice away from surfacing. The ids are the same for both agents
+ * because the argument for offering two is the same argument, and the notes
+ * are written about the *model* rather than about either job — where they
+ * differ per agent, the honest place for that is the app's own copy, not a
+ * second table here waiting to drift.
  */
-export const ASSISTANT_MODELS: {
+export const AGENT_MODELS: {
   readonly default: string;
   readonly choices: readonly ModelChoice[];
 } = {
@@ -162,19 +174,19 @@ export const ASSISTANT_MODELS: {
     {
       id: 'claude-opus-5',
       label: 'Opus 5',
-      note: 'The most capable. Best at a house it has to work out.',
+      note: 'The most capable. Best at anything it has to work out.',
       recommended: true,
     },
     {
       id: 'claude-sonnet-5',
       label: 'Sonnet 5',
-      note: 'Quicker and cheaper. Good for everyday questions and switching things on.',
+      note: 'Quicker, and less than half the price. Good for the straightforward.',
     },
   ],
 };
 
 /**
- * Which model the assistant will actually run on.
+ * Which model an agent will actually run on.
  *
  * `effectiveModel`'s rule, and it exists separately for the same reason the
  * list does: a stored model counts only while it is still offered, or retiring
@@ -185,11 +197,11 @@ export const ASSISTANT_MODELS: {
  * mapper paid a release for: every surface that *reported* a model went
  * through `effectiveModel` while the call that picked one to run read the
  * stored value, so a hub ran a model every screen said it was not running.
- * `test/ai-model-choice.test.ts` pins both halves.
+ * `test/ai-model-choice.test.ts` pins both halves, for both agents.
  */
-export function effectiveAssistantModel(stored: string | null | undefined): string {
-  const offered = ASSISTANT_MODELS.choices.some((choice) => choice.id === stored);
-  return offered && stored ? stored : ASSISTANT_MODELS.default;
+export function effectiveAgentModel(stored: string | null | undefined): string {
+  const offered = AGENT_MODELS.choices.some((choice) => choice.id === stored);
+  return offered && stored ? stored : AGENT_MODELS.default;
 }
 
 /** The Anthropic default, kept flat because the agent has always read it so. */
@@ -236,7 +248,7 @@ export function effectiveModel(provider: AiProvider, stored: string | null | und
  * **"The offered list" is every list this hub offers, not the mapper's**, and
  * reading it as the mapper's alone is a bug that shipped. There are two
  * vocabularies here — `PROVIDER_MODELS` for recognising a device and
- * `ASSISTANT_MODELS` for a conversation — and Sonnet 5 is only on the second,
+ * `AGENT_MODELS` for a conversation — and Sonnet 5 is only on the second,
  * so every assistant chat that ran on it reported `claude-sonnet-5` where a
  * chat on Opus reported "Opus 5". The apps drew exactly that: a raw id at the
  * top of one conversation and a name at the top of the next, which reads as
@@ -269,7 +281,7 @@ function namedModels(provider: string): readonly ModelChoice[] {
   const mapper = (
     PROVIDER_MODELS[provider as AiProvider] as (typeof PROVIDER_MODELS)[AiProvider] | undefined
   )?.choices;
-  if (provider === 'anthropic') return [...(mapper ?? []), ...ASSISTANT_MODELS.choices];
+  if (provider === 'anthropic') return [...(mapper ?? []), ...AGENT_MODELS.choices];
   return mapper ?? [];
 }
 

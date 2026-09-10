@@ -24,7 +24,7 @@ import type { ZigbeeAdapter } from '../adapters/zigbee/adapter.js';
 // Dependency-free model catalog (a price table and an allowlist) — importing
 // it here does not pull the AI stack into the API layer.
 import {
-  ASSISTANT_MODELS,
+  AGENT_MODELS,
   effectiveModel,
   isSupportedModel,
   PROVIDER_MODELS,
@@ -1822,7 +1822,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       // different question from "which model reads a device's exposes tree"
       // and is offered a different list for reasons that have nothing to do
       // with the other one.
-      assistant: { model: ai.assistant.model, models: ASSISTANT_MODELS.choices },
+      assistant: { model: ai.assistant.model, models: AGENT_MODELS.choices },
+      // And what writes the home's rules, which is a separate choice on the
+      // same list: answering questions about the house and writing the rules
+      // it runs by itself are different jobs, and a home may want to spend
+      // differently on them. Its own block for the reason the assistant's is
+      // its own, and it replaces this agent having quietly read the mapper's.
+      automations: { model: ai.automations.model, models: AGENT_MODELS.choices },
       portraits: deps.portraits.describe(),
     };
   };
@@ -1877,6 +1883,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
      * `null` clears it back to the default.
      */
     assistantModel: z.string().min(1).max(120).nullable().optional(),
+    /** Which model writes the home's rules. Unvalidated for the reason above. */
+    automationsModel: z.string().min(1).max(120).nullable().optional(),
     anthropicApiKey: apiKeyField('anthropic'),
     openaiApiKey: apiKeyField('openai'),
     mappingProvider: z.enum(AI_PROVIDERS).optional(),
@@ -1952,6 +1960,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // this build has retired is stored rather than refused — `getAiSettings`
     // already answers with what will *run* — so an older app naming one is
     // never 400-ed for it.
+    if (body.automationsModel !== undefined) {
+      await deps.settings.setAutomationsModel(body.automationsModel);
+    }
     if (body.assistantModel !== undefined) {
       await deps.settings.setAssistantModel(body.assistantModel);
     }

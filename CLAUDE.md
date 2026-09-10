@@ -1192,11 +1192,19 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   paragraph and a release of both apps. `permission` is checked when the tool
   runs, so a member whose role cannot hand a job over gets a sentence the model
   reads out rather than a capability silently absent.
-  **The assistant's model list is its own** (`ASSISTANT_MODELS` — Opus 5 and
+  **The agents' model list is its own** (`AGENT_MODELS` — Opus 5 and
   Sonnet 5), and the mapper's one-model list is untouched: a descriptor is
   cached against a device model and shapes every unit of it for ever, while a
   chat is many small rounds answered with another message when the reply is
-  poor. `effectiveAssistantModel` is what **runs** as well as what is reported,
+  poor. **One list, a column each**: the assistant and the automations agent
+  are offered the same two and choose independently
+  (`ai_assistant_model`, `ai_automations_model`), because answering questions
+  about the house and writing the rules it runs by itself are different jobs a
+  home may want to spend differently on. The automations agent had no column of
+  its own and read `ai_model` — the *mapper's* — which never showed, since that
+  list offers one model and Sonnet is not on it, and was one added choice away
+  from letting "which model recognises a device" decide "which model writes a
+  rule". `effectiveAgentModel` is what **runs** as well as what is reported,
   which is the gap that cost the mapper a release. **And `modelLabel` reads
   both lists**, which is the same shape of gap from the other end: it names a
   model that has already run and searched the mapper's alone, so a chat on

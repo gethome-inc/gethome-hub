@@ -4,7 +4,7 @@ import type { AutomationEngine } from '../automations/engine.js';
 import type { AutomationStore } from '../automations/store.js';
 import { automationDocumentSchema, type AutomationDocument } from '../automations/schema.js';
 import { automationShape, describeAutomation } from '../automations/summarize.js';
-import { effectiveModel } from './models.js';
+import { effectiveAgentModel } from './models.js';
 import type { AutomationConversation, AutomationTurn } from './automation-conversation.js';
 import {
   AgentNotConfiguredError,
@@ -264,10 +264,24 @@ export class AutomationChat extends ChatRuntime<AutomationTurn> {
     const secret = await this.options.settings.aiKey(provider);
     if (!secret) throw new AgentNotConfiguredError('ai_not_configured');
 
-    // `effectiveModel`, never the stored column — the one bug that cost the
-    // mapper a release: every surface that *reported* a model went through it
-    // while the call that picked one to run read the column.
-    const modelId = effectiveModel(provider, ai[provider].model);
+    /**
+     * **This agent's own model, and it did not have one.**
+     *
+     * It read `ai[provider].model` — the *mapper's* column, through the
+     * mapper's list — so "which model recognises a device" and "which model
+     * writes a rule" shared an answer. It never showed, because the mapper
+     * offers one model and Sonnet is not on its list, so `effectiveModel`
+     * handed back Opus whatever was stored. Now it reads its own column
+     * through `AGENT_MODELS`, which is the same two models the assistant is
+     * offered and a choice made separately: answering questions about the
+     * house and writing the rules it runs by itself are different jobs, and a
+     * home may want to spend differently on them.
+     *
+     * `effectiveAgentModel`, never the stored column — the one bug that cost
+     * the mapper a release: every surface that *reported* a model went through
+     * it while the call that picked one to run read the column.
+     */
+    const modelId = effectiveAgentModel(ai.automations.model);
 
     const home = this.options.engine.homeView();
     const editing =

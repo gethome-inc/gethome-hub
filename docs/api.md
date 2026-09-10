@@ -1034,18 +1034,28 @@ run, not what is stored**: a setting naming a model no longer offered resolves
 to the one that is, so an app never draws a model this hub will not use. Writing
 a retired id is still accepted — it just isn't what runs.
 
-**`assistant` is a different question from `providers`, and it really is a
-picker.** `providers.<name>.models` answers "which model reads a device's
-exposes tree"; `assistant.models` answers "which model answers in the
-assistant", and the two lists differ because the trades do. A mapping
-descriptor is cached against a device model and shapes every unit of it the
-home ever meets, so a cheaper tier that is wrong once is wrong for ever and the
-list is one entry long. A conversation is many small rounds, read the moment
-they arrive and answered with another message when the reply is poor — so what
-a round costs is a real choice, and this list has two. Write it with
-`PATCH /settings/ai {assistantModel}`; `null` clears it back to the default. As
-above, `assistant.model` is what will **run**, and a stored id this build no
-longer offers resolves to the default rather than being refused.
+**`assistant` and `automations` are a different question from `providers`, and
+they really are pickers.** `providers.<name>.models` answers "which model reads
+a device's exposes tree"; those two answer "which model answers in the
+assistant" and "which model writes the home's rules", and the lists differ
+because the trades do. A mapping descriptor is cached against a device model and
+shapes every unit of it the home ever meets, so a cheaper tier that is wrong
+once is wrong for ever and the list is one entry long. A conversation is many
+small rounds, read the moment they arrive and answered with another message when
+the reply is poor — so what a round costs is a real choice, and those lists have
+two. Write them with `PATCH /settings/ai {assistantModel}` and
+`{automationsModel}`; `null` clears either back to the default. As above, both
+`model` fields are what will **run**, and a stored id this build no longer
+offers resolves to the default rather than being refused.
+
+**The two agents are offered the same two models and choose separately**, which
+is the point of them being two blocks: answering questions about the house and
+writing the rules it runs by itself are different jobs, and a home may want to
+spend differently on them. `automations` is new — that agent used to read
+`providers.anthropic.model`, the *mapper's* choice, which never showed because
+that list offers one model and Sonnet is not on it, and was one added choice
+away from making "which model recognises a device" silently decide "which model
+writes a rule".
 
 **`provider` and `mapping.provider` are the same answer**: which provider would
 recognise a device right now. With one key there is no choice to make; with two,

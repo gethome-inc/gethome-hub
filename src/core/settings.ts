@@ -7,7 +7,7 @@ import { decryptSecret, encryptSecret, type EncryptedValue } from './crypto.js';
 // no runtime cycle. It is worth it to make `getAiSettings` answer with the
 // model that will *run* rather than the column — the mapper's one expensive
 // bug was exactly that gap between the two.
-import { effectiveAssistantModel } from '../ai/models.js';
+import { effectiveAgentModel } from '../ai/models.js';
 
 /**
  * The providers the hub can hold a credential for.
@@ -45,11 +45,20 @@ export interface AiProviderSettings {
   model: string | null;
 }
 
-export interface AiAssistantSettings {
+/**
+ * Which model one agent runs on.
+ *
+ * One shape for both, and a column each — the assistant and the automations
+ * agent are offered the same two models (`AGENT_MODELS`) and choose
+ * independently, because "answer questions about the house" and "write the
+ * rules it runs by itself" are different jobs somebody may want to spend
+ * differently on.
+ */
+export interface AiAgentSettings {
   /**
-   * The model the assistant runs on, as it will actually run — never the
-   * stored column. Null is not a state here: `effectiveAssistantModel` has
-   * already turned an absent or retired choice into the default.
+   * The model the agent runs on, as it will actually run — never the stored
+   * column. Null is not a state here: `effectiveAgentModel` has already
+   * turned an absent or retired choice into the default.
    */
   model: string;
 }
@@ -104,7 +113,9 @@ export interface AiSettings {
   anthropic: AiProviderSettings;
   openai: AiProviderSettings;
   /** What the assistant runs on. Its own choice, not the mapper's. */
-  assistant: AiAssistantSettings;
+  assistant: AiAgentSettings;
+  /** What writes the home's rules. Its own choice, not the assistant's. */
+  automations: AiAgentSettings;
   /**
    * True when both keys are stored, so which provider recognises devices is a
    * choice somebody has to make rather than one the hub can derive. An app
@@ -230,7 +241,10 @@ export class SettingsService {
       anthropic,
       openai,
       mappingChoosable: anthropic.hasKey && openai.hasKey,
-      assistant: { model: effectiveAssistantModel(await this.get<string>('ai_assistant_model')) },
+      assistant: { model: effectiveAgentModel(await this.get<string>('ai_assistant_model')) },
+      automations: {
+        model: effectiveAgentModel(await this.get<string>('ai_automations_model')),
+      },
     };
   }
 
@@ -281,13 +295,29 @@ export class SettingsService {
    * Which model the assistant answers on.
    *
    * Its own key rather than a second use of `ai_model`, which is the mapper's
-   * and answers a different question — the two agents are offered different
-   * lists for reasons that have nothing to do with each other, and one column
-   * would make changing either change both.
+   * and answers a different question — a descriptor is cached against a device
+   * model for ever, a conversation is many small rounds — and one column would
+   * make changing either change both.
    */
   async setAssistantModel(model: string | null): Promise<void> {
     if (model === null) await this.unset('ai_assistant_model');
     else await this.set('ai_assistant_model', model);
+  }
+
+  /**
+   * Which model writes the home's rules.
+   *
+   * **Its own key, and it did not have one.** This agent read `ai_model` — the
+   * *mapper's* column — so "which model recognises a device" and "which model
+   * writes a rule" shared an answer. It never showed, because the mapper
+   * offers one model and Sonnet is not on its list, so `effectiveModel` handed
+   * back Opus whatever was stored; the coupling was one added choice away from
+   * being a bug somebody had to find. Absent means the default, as everywhere
+   * else here.
+   */
+  async setAutomationsModel(model: string | null): Promise<void> {
+    if (model === null) await this.unset('ai_automations_model');
+    else await this.set('ai_automations_model', model);
   }
 
   /** Which provider recognises devices when both keys are configured. */

@@ -5,7 +5,7 @@ import type { AccessService } from '../core/access.js';
 import type { ActivityService } from '../core/activity.js';
 import type { AutomationEngine } from '../automations/engine.js';
 import type { HubCommand } from '../schema/index.js';
-import { effectiveAssistantModel } from './models.js';
+import { effectiveAgentModel } from './models.js';
 import type { AssistantTurn } from './assistant-agent.js';
 import type { AssistantToolContext, DelegateOutcome } from './assistant-tools.js';
 import { delegateAgents, type DelegateAgent } from './agents/registry.js';
@@ -388,7 +388,7 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
 
     // What will *run*, never the stored column — the one gap that cost the
     // mapper a release, and `getAiSettings` has already closed it here.
-    const modelId = effectiveAssistantModel(ai.assistant.model);
+    const modelId = effectiveAgentModel(ai.assistant.model);
 
     // Imported here rather than at the top, the `lazy.ts` seam: a hub nobody
     // has talked to never loads the SDK.

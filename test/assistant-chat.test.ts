@@ -18,7 +18,7 @@ import { AutomationNotConfiguredError } from '../src/ai/automation-chat.js';
 import type { AssistantTurn } from '../src/ai/assistant-agent.js';
 import type { AgentConversation, ChatTurnContext } from '../src/ai/chat/chat-runtime.js';
 import type { AutomationConversation, AutomationTurn } from '../src/ai/automation-conversation.js';
-import { ASSISTANT_MODELS, effectiveAssistantModel } from '../src/ai/models.js';
+import { AGENT_MODELS, effectiveAgentModel } from '../src/ai/models.js';
 
 /**
  * The assistant: its conversation service over a stand-in for a provider, and
@@ -192,14 +192,44 @@ describe('the assistant', () => {
     // The gap that cost the mapper a release: every surface that *reported* a
     // model went through `effectiveModel` while the call that picked one to
     // run read the stored column.
-    expect(effectiveAssistantModel(null)).toBe(ASSISTANT_MODELS.default);
-    expect(effectiveAssistantModel('claude-sonnet-5')).toBe('claude-sonnet-5');
+    expect(effectiveAgentModel(null)).toBe(AGENT_MODELS.default);
+    expect(effectiveAgentModel('claude-sonnet-5')).toBe('claude-sonnet-5');
     // A model this build no longer offers is stored happily and is simply not
     // what runs — silently keeping a home on a retired one is the failure.
-    expect(effectiveAssistantModel('claude-opus-4-6')).toBe(ASSISTANT_MODELS.default);
+    expect(effectiveAgentModel('claude-opus-4-6')).toBe(AGENT_MODELS.default);
 
     await settings.setAssistantModel('claude-sonnet-5');
     expect((await settings.getAiSettings()).assistant.model).toBe('claude-sonnet-5');
+  });
+
+  it('lets the two agents choose their model apart, and the mapper choose neither', async () => {
+    // One list, a column each: answering questions about the house and writing
+    // the rules it runs by itself are different jobs, and a home may want to
+    // spend differently on them.
+    await settings.setAssistantModel('claude-sonnet-5');
+    await settings.setAutomationsModel('claude-opus-5');
+    let ai = await settings.getAiSettings();
+    expect([ai.assistant.model, ai.automations.model]).toEqual([
+      'claude-sonnet-5',
+      'claude-opus-5',
+    ]);
+
+    await settings.setAutomationsModel('claude-sonnet-5');
+    ai = await settings.getAiSettings();
+    // Moving one leaves the other exactly where it was — which the automations
+    // agent could not have said before, because it read the *mapper's* column.
+    expect(ai.automations.model).toBe('claude-sonnet-5');
+    expect(ai.assistant.model).toBe('claude-sonnet-5');
+
+    // And the mapper's own choice reaches neither, in either direction: a
+    // descriptor is cached against a device model for ever, which is why that
+    // list offers one model and this one offers two.
+    await settings.setAiModel('claude-opus-5', 'anthropic');
+    await settings.setAssistantModel(null);
+    ai = await settings.getAiSettings();
+    expect(ai.anthropic.model).toBe('claude-opus-5');
+    expect(ai.assistant.model).toBe(AGENT_MODELS.default);
+    expect(ai.automations.model).toBe('claude-sonnet-5');
   });
 
   it('works a device through the registry and names the person in the log', async () => {
