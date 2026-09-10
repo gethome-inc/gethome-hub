@@ -411,6 +411,57 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   Read **both** `interview_completed` and `interview_state`: Z2M 2.x replaced
   the first with the second, so `interview_completed === false` read
   `undefined === false` on current installs and adopted devices mid-interview.
+- **An accessory that has never been on a network cannot be found on one, and
+  where to look is the accessory's answer rather than a setting.** A
+  factory-new — or factory-reset — Wi-Fi Matter accessory advertises over
+  Bluetooth LE and nowhere else. `MatterAdapter` used to hardcode
+  `discoveryCapabilities: { onIpNetwork: true }` for every setup code, so it
+  searched the LAN for a device that was never going to be there; matter.js
+  applies **no discovery timeout at all** when one is not passed (`Discovery`
+  guards its `withTimeout` on `!== undefined`), so the job never settled and
+  the app read "Pairing with your hub" until somebody force-quit it — thirty-five
+  minutes, on the hub this was found on. `adapters/matter/setup-code.ts` reads
+  the QR's own `discoveryCapabilities` instead, and a **manual code carries
+  none**: `undefined` there means "the code did not say" and is answered by
+  looking everywhere, never by guessing one place. BLE arrives through an
+  **optional** dependency installed into the environment *before* the
+  controller is built (afterwards it is a transport nothing is holding), with
+  every failure resolving to a named reason rather than throwing — see
+  `deploy/CLAUDE.md` for the rfkill and capability halves, and `docs/matter.md`,
+  which is canonical.
+  **Three refusals happen before anything is searched for**, because in each the
+  answer cannot change while somebody waits: a code the hub cannot read, an
+  accessory whose code says Bluetooth on a hub without it, and one with no
+  network that the hub has no Wi-Fi password to give. Everything else is bounded
+  (three minutes' discovery, four and a half for the job), cancellable — which
+  stops the *discovery*, not just the screen, and is why the hub pairs **one
+  accessory at a time** — and classified into words somebody can act on
+  (`commission-failures.ts`, `write-failures.ts`'s shape and both its rules:
+  open `kind`, most-specific-first). **A failed pairing is logged**, which it
+  was not: the only record of one was a WebSocket frame that had already gone,
+  so the journal of a hub whose owner could pair nothing showed a line saying
+  discovery had started and nothing else, ever. And **the step is a real signal,
+  never a timer**: a candidate reaching the controller's peer set is the moment
+  the advice changes from "hold its button" to "leave it alone", and a
+  five-second timeout would say the same thing about a hub that had found
+  nothing.
+- **A radio that is off and a radio that is missing need opposite words, and
+  both were `connected: false`.** Switching a one-radio board to Matter made the
+  app say *"Zigbee · no stick"* about a coordinator the owner could see from
+  where they were standing — hardware the hub had detected and deliberately
+  stood down. `zigbee.coordinator` (`present`/`absent`/`unknown`) is the fix,
+  read from the detector's own `/etc/gethome/zigbee.env` rather than by scanning
+  USB: `gethome-zigbee-detect` owns that decision with a device table and a
+  `maybe` tier, and a second dumber copy in the hub would eventually disagree
+  with the first. It reads the **by-id name**, never the `/dev/ttyACM0` beside
+  it, or a 3D printer taking that number reports a coordinator present.
+  **And `radio.applying` is on disk rather than in memory**, because applying a
+  radio *restarts the process that recorded it*: the only useful answer is one
+  that survives the restart it describes, and without it every app drew "can't
+  reach your hub" over a change somebody had just made on purpose. It is a
+  **bound, not a wait for the radios to agree** — asking for Zigbee on a hub
+  with no coordinator is reasonable, correctly changes nothing, and would spin
+  for ever.
 - **The AI subsystem's own conventions live in `src/ai/CLAUDE.md`**, which
   loads when you work under `src/ai/`: the mapping library and its five
   routes, the retry path and the backoff gate, `ai_run_exchanges`, the five

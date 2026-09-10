@@ -100,7 +100,7 @@ than no button.
 
 | Method & path | Needs | Notes |
 |---|---|---|
-| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid) |
+| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `matter: {bluetooth, bluetoothReason?, wifi, commissioning}` is present only while Matter is running and says what pairing this hub can actually do — see [below](#pairing-a-matter-accessory). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid) |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
 | `GET /home` · `PATCH /home` | floor · `home.rename` | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name) |
 | `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | floor · `home.structure` | `{id, name, zoneId, icon, accent, sortOrder}`. `POST` takes `{name, zoneId?, icon?, accent?, sortOrder?}` — the name is the only required field anywhere here — and `PATCH` takes the same set with every field optional; `zoneId: null` means "in no zone", and `icon: null` / `accent: null` mean "back to the look the app derives" — each different from leaving the field out. `icon`/`accent` are opaque app tokens (1–40 chars, see [below](#rooms-and-zones)). Names are trimmed before they are measured (1–80), an unknown `zoneId` is `404 unknown_zone`, and a new room goes to the *end* of the order. Deleting a room does not delete its devices — they are simply in no room. Every write broadcasts the [`structure` frame](#rooms-and-zones) |
@@ -116,8 +116,9 @@ than no button.
 | `PATCH /devices/:id/portraits` | `device.edit` | `{selected: id\|null}` — which one the home sees. `null` is a *state*: the procedural sphere, chosen over every picture there is |
 | `DELETE /portraits/:portraitId` | `device.edit` | forget one, file and row |
 | `POST /devices/:id/remap` | `hub.ai` | force-regenerate the AI mapping (Zigbee devices) → `{requested}`. **It answers as soon as the run is under way, never when it ends**: a run is minutes and this is an HTTP request, so what the agent then did arrives on the `ai` stream and in `GET /ai/runs`. `requested: false` means the radio has no published schema for that device right now — a device row can outlive its `bridge/devices` entry — which is a different answer from a run that failed. Being explicit, it also drops a `rejected` mapping and **ignores the backoff gate**, because it is how somebody retries after fixing a key or changing the model. The hub also remaps automatically when a device publishes unknown parameters — see [ai-adaptation.md](ai-adaptation.md). `409 ai_not_configured` with no credential, `409 ai_disabled` when the owner has switched adaptation off |
-| `POST /matter/commission` | `device.add` | `{pairingCode}` → `202 {jobId}` (async) |
-| `GET /matter/commission/:jobId` | floor | `{status: running\|done\|failed, nodeId?, error?}` |
+| `POST /matter/commission` | `device.add` | `{pairingCode, wifi?: {ssid, passphrase}}` → `202 {jobId, deadline}` (async). `wifi` is only for a hub that cannot read its own — see [below](#pairing-a-matter-accessory). `409 already_commissioning` when one is already running, `409 matter_disabled` when this hub has no Matter |
+| `GET /matter/commission/:jobId` | floor | `{status: running\|done\|failed, step?, nodeId?, error?, failure?, startedAt, deadline}` — see [below](#pairing-a-matter-accessory) |
+| `POST /matter/commission/:jobId/cancel` | `device.add` | stop looking → the job as it now stands. `404` for a job the hub has forgotten; a job that has already finished is answered, not refused |
 | `POST /zigbee/permit-join` | `device.add` | `{seconds}`, 0–900 (0 = close the network) → `{permitJoin, seconds}` describing the **live** window, which is not always what was asked for. See [below](#the-zigbee-join-window) |
 | `GET /members` · `PATCH /members/me` · `DELETE /members/me` · `DELETE /members/:id` | floor · floor (itself) · floor (itself) · `member.remove` | rows carry `isSelf`, `roleId` and `roleName`; `PATCH` takes `{name}` and renames **the caller**; `DELETE` on either route answers `204` and revokes that member's tokens; the owner cannot be removed, by anyone or by itself. See [below](#which-member-you-are-isself-and-patch-membersme) |
 | `GET /invites` · `POST /invites` | `member.invite` · see notes | `POST {roleId?}` → `201 {code, expiresAt, roleId, roleName, memberId: null, memberName: null}`. Omitting `roleId` mints a **Member** invite, which is what every invite this hub has ever made was. An **owner** invite is allowed and needs the caller to be one (`403 not_owner`). **`POST {memberId}` mints a sign-in code** for somebody already here — `roleId` beside it is `400 invalid_target`, an unknown one is `404 unknown_member`, and the answer carries `memberId`/`memberName` with `roleId: null`. Who may ask is asked of the body: your own (`memberId: "me"` is accepted) is the **floor**, somebody else's is `member.invite`, an **owner's** needs an owner. `GET` lists the live codes, each with `memberId` — null for an invite — and `memberName`. See [below](#signing-in-again-post-invites-with-a-memberid) |
@@ -446,6 +447,87 @@ Rotating is `gethome-hubctl mqtt --rotate` on the machine itself — root work,
 like the radio and the update, and the only real answer to "somebody who had
 the password has left".
 
+### Pairing a Matter accessory
+
+**An accessory that has never been on a network cannot be found on one.** A
+Wi-Fi Matter plug out of its box — or one somebody has just held the button on
+to reset — advertises over Bluetooth LE and nowhere else, because it has no
+network to advertise on yet. Its QR payload says so: the
+`discoveryCapabilities` bitmap carries BLE and not `onIpNetwork`. A manual
+pairing code carries no such field at all, and the hub treats that as *"the
+code did not say"* — looking everywhere it can rather than guessing one place.
+
+`GET /hub` carries a `matter` block whenever Matter is running, and an app
+should read it before offering the flow:
+
+| Field | Meaning |
+|---|---|
+| `bluetooth` | whether a factory-new accessory can be found at all |
+| `bluetoothReason` | why not: `off`, `unsupported-platform`, `not-installed`, `no-adapter`. Each has a different fix, which is why it is not one boolean |
+| `wifi` | whether the hub already has a Wi-Fi password to hand the accessory |
+| `commissioning` | a pairing is running right now, so a second `POST` would be `409` |
+
+**`wifi: false` is what the request's `wifi` field is for.** Taking an accessory
+on over Bluetooth means giving it a network — step 11 of the commissioning flow
+is `AddOrUpdateWiFiNetwork` — and the hub cannot read the system's own
+credentials: the PSK lives in a root-owned NetworkManager profile and the point
+of the hub's service account is that it cannot read one. A root dispatcher
+writes `/etc/gethome/wifi.env` for it on every association; where that has not
+happened (an Ethernet hub, a machine with no NetworkManager, a hub installed
+before this existed) the app should ask for the password and send it. It is
+never logged and never stored — it goes into the commissioning conversation and
+is forgotten with the job.
+
+#### Watching a job
+
+Progress arrives two ways and they cannot disagree, because one function moves
+the job and emits the frame: the WebSocket `commissioning` frame, and
+`GET /matter/commission/:jobId` for a client that missed one.
+
+`status` is `running`, `done` or `failed` — deliberately unchanged, since a
+fourth value is one an existing client would drop on the floor. What grew sits
+beside it:
+
+- **`step`** is `looking` or `pairing`, on a running job. It is the difference
+  between *"hold the accessory's button until the light blinks"* and *"leave it
+  alone now"*, which is the only advice worth giving during the two minutes
+  this takes — a screen that says "working…" through both is a screen somebody
+  unplugs the accessory in the middle of. It moves on a real signal (a
+  candidate reaching the controller's peer set), never on a timer.
+- **`failure`** is `{kind, summary, detail?}` on a failed one. `summary` is a
+  whole sentence, safe to show as-is for a `kind` an app has never met;
+  `detail` is what matter.js actually said, for a disclosure.
+- **`deadline`** is when the hub gives up (epoch ms), so a screen counts down
+  rather than inventing a patience of its own. Discovery is bounded at three
+  minutes — the Matter spec's own minimum commissioning window — and the job at
+  four and a half.
+
+| `failure.kind` | What happened |
+|---|---|
+| `not-found` | nothing answered anywhere the hub could look. Nearly always: the accessory was not in pairing mode |
+| `needs-bluetooth` | the code says Bluetooth and this hub has none. **Refused before searching** |
+| `needs-wifi` | the accessory has no network and the hub has no password to give it. Refused before searching; ask for one and retry |
+| `bad-code` | not a Matter setup code, or its checksum is wrong. Refused before searching |
+| `wrong-code` | it answered and would not accept that passcode |
+| `already-paired` | still commissioned elsewhere, or out of fabric slots |
+| `cancelled` | somebody pressed Cancel |
+| `failed` | anything else, carrying matter.js's own words in `detail` |
+
+The three refusals marked *before searching* are the point: in each case the
+answer cannot change while somebody waits for it, so three minutes of a spinner
+ending in the same word is strictly worse than the word now.
+
+**A cancelled job is `failed` with `kind: "cancelled"`.** That is not laziness —
+it is what lets a client that has never heard of cancelling show its ordinary
+refusal rather than nothing at all. A client that knows the kind should go
+quietly back to its viewfinder instead of drawing a red card for a thing the
+person just chose.
+
+`POST /matter/commission/:jobId/cancel` needs the same permission as starting
+one, because the hub pairs **one accessory at a time**: a member who could not
+call off somebody else's abandoned job could not pair anything either until it
+timed out.
+
 ### Radio (`GET /hub` and `PUT /settings/radio`)
 
 A 512 MB board has memory for one radio at a time, so what a hub can talk to is
@@ -459,6 +541,24 @@ hub is in:
 | `mode` | `"auto"` (default), `"zigbee"` or `"matter"` — the choice somebody in the home has made, when one has been made |
 | `matter` | whether the Matter adapter is **live right now** |
 | `canRunBoth` | `budget === "both"`, restated so an app can hide the switch without parsing the enum |
+| `applying` | a switch asked for a moment ago is still landing — see [below](#a-radio-switch-in-flight-radioapplying) |
+| `applyingSince` | epoch ms of the request, present only while `applying`, so a screen draws a bar rather than a spinner |
+| `applyingWindowMs` | how long the hub is prepared to claim it (150 s), so no app has to invent the number |
+
+`zigbee.coordinator` is the other half of that question and answers the one an
+app actually has to draw. `connected: false` used to be two completely
+different homes wearing one word:
+
+| Value | What it means | What an app should say |
+|---|---|---|
+| `"unknown"` | no coordinator has ever been recorded on this machine | *no stick* |
+| `"absent"` | one was recorded and its device node is gone right now | *no stick* — it is unplugged, or being reflashed |
+| `"present"` | one is plugged in this second | **never** *no stick*. Either Zigbee is starting, or something has stood it down — usually Matter having the board |
+
+The hub cannot see USB itself; `gethome-zigbee-detect` records what it found in
+`/etc/gethome/zigbee.env` and this reads it back. Without it, switching a
+one-radio Pi to Matter made the app say *"Zigbee · no stick"* about a
+coordinator the owner could see from where they were standing.
 
 `auto` follows the hardware **in one direction**: a coordinator takes the board
 within seconds of being plugged in, and Matter takes it on a board where no
@@ -487,6 +587,27 @@ force restarts nothing at all.
 The switch is cheap to change your mind about: the coordinator's device path and
 Zigbee2MQTT's paired-device list both survive, so devices on the radio that lost
 the board come back when it is handed back. They read as offline meanwhile.
+
+#### A radio switch in flight (`radio.applying`)
+
+Applying a radio **restarts the hub** — around seventy seconds of a closed port
+on a Zero 2 W. That is the whole difficulty of reporting it: the process that
+took the request is killed by the thing it was asked to do, so an app polling
+across the gap saw a refused connection, then a hub reporting the old radios,
+then the new ones, and drew *"can't reach your hub"* over a change somebody had
+just made deliberately.
+
+So the moment is written to the hub's data directory rather than held in
+memory, and `GET /hub` reports it from there — which means it survives the
+restart it is describing. An app that finds `applying: true` should say the hub
+is switching radios and treat an unreachable hub as *expected* until
+`applyingSince + applyingWindowMs`, rather than as a fault.
+
+The window is a **bound, not a wait for the radios to agree**: asking for
+Zigbee on a hub with no coordinator is a reasonable thing to do and correctly
+changes nothing, so a client that waited for the radios to match would wait for
+ever. After the window, `applying` is false whatever happened, and what is live
+is the answer.
 
 ### Which member you are (`isSelf` and `PATCH /members/me`)
 
@@ -1429,8 +1550,10 @@ message. These go to every authorized socket:
 
 {"type":"activity","entry":{id,at,kind,message,deviceId?,memberId?,data?}}
 {"type":"permitJoin","active":true,"remainingSeconds":60}
-{"type":"commissioning","jobId","status","detail"?}     Matter commissioning progress
-{"type":"hubStatus","zigbee":{…},"radio":{…}}           a radio came up, went down, or was switched
+{"type":"commissioning","jobId","status","detail"?,"step"?,"failure"?,"deadline"?}
+                                                        Matter pairing progress — see above
+{"type":"hubStatus","zigbee":{…},"radio":{…},"matter"?:{…}}
+                                                        a radio came up, went down, or was switched
 ```
 
 ### A write that didn't land (`commandFailed`)

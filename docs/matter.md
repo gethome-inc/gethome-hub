@@ -21,27 +21,92 @@ The hub is a **Matter controller** with its own fabric, built on
 native SDK). Devices commissioned onto the hub belong to the *hub*, not to a
 phone — that's what makes hub homes shareable.
 
-## Commissioning (v1: over IP)
+## Commissioning
 
 `POST /api/v1/matter/commission {"pairingCode":"749701123365521327694"}`
 accepts a **manual pairing code** or a **QR payload** (`MT:…`) and runs
-commissioning as an async job (`202 {jobId}`; progress via the WebSocket
-`commissioning` frames and `GET /matter/commission/:jobId`).
+commissioning as an async job (`202 {jobId, deadline}`; progress via the
+WebSocket `commissioning` frames and `GET /matter/commission/:jobId`).
+[api.md](api.md#pairing-a-matter-accessory) is canonical for the wire.
 
-The device must already be reachable over IP:
+### Where the hub looks, and why it is not a setting
 
-- Ethernet or Wi-Fi devices already on your network (e.g. shared from another
-  admin via Matter multi-admin, or Wi-Fi-provisioned during a phone-side
-  setup),
-- Thread devices behind a border router on the LAN.
+**An accessory that has never been on a network cannot be found on one.** A
+factory-new — or factory-reset — Wi-Fi accessory advertises over Bluetooth LE
+and nowhere else; it has no network to advertise on yet, and the point of the
+Bluetooth conversation is that it is handed one. So there are two paths, and
+which is used is the **accessory's own answer**, not a preference:
 
-**BLE-assisted commissioning** (taking a factory-new device through Wi-Fi
-provisioning directly) needs host Bluetooth (`@matter/nodejs-ble` + BlueZ) and
-is a planned follow-up — on a Raspberry Pi the built-in radio makes this a
-natural fit. Until then, the simplest path for factory-new Wi-Fi devices is to
-pair them into another Matter ecosystem first (Apple Home, Google Home, Alexa,
-or `chip-tool`), then share to the hub via multi-admin (open a commissioning
-window) — or use Ethernet/Thread devices.
+- **Over Bluetooth** — anything out of its box. The QR payload's
+  `discoveryCapabilities` bitmap (core spec § 5.1.3.1, Table 60) says BLE and
+  not `onIpNetwork`, and the hub follows it.
+- **Over IP** — anything already on the LAN: Ethernet, Thread behind a border
+  router, or a device shared from another ecosystem under multi-admin.
+
+A **manual** pairing code carries no capability bits at all, and the hub treats
+that as *"the code did not say"* — searching everywhere it can. `undefined` and
+"neither" are different answers and only one of them is safe to act on:
+guessing IP for a manual code is how a perfectly good accessory becomes a
+screen that spins.
+
+This was the bug. The adapter hardcoded `{ onIpNetwork: true }` for every code,
+so it searched the LAN for a device that was never going to be there — and
+matter.js applies **no discovery timeout at all** unless one is passed
+(`Discovery` guards its `withTimeout` on `!== undefined`), so the job never
+settled. On the hub this was found on, one had been running for thirty-five
+minutes with "Pairing with your hub" still on the phone.
+
+### Bluetooth
+
+`@matter/nodejs-ble` (with `@stoprocent/noble` underneath) is an **optional**
+dependency: it is a native module with prebuilt binaries for the two
+architectures the hub ships on and none for whatever somebody is developing on,
+so a hub whose BLE stack did not install must still start, run Matter over IP,
+and say so. `installBle()` resolves every failure to a named reason —
+`unsupported-platform`, `not-installed`, `no-adapter` — which reaches
+`GET /hub` as `matter.bluetoothReason`, because "Bluetooth is off", "this hub
+has none" and "it is blocked" send a person to three different places.
+
+It is installed into the matter.js `Environment` **before** the controller is
+constructed. Afterwards it is a transport nothing is holding, and the hub logs
+`BLE is not enabled on this platform` while having perfectly good Bluetooth.
+
+Two things a Raspberry Pi needs, both handled by `install.sh`:
+
+- **rfkill.** A headless Raspberry Pi OS image ships Bluetooth *soft-blocked*,
+  which is invisible from everywhere the product can see: `hciconfig` lists the
+  adapter happily and bringing it up fails with an errno nothing logs.
+- **Capabilities.** noble talks to the controller over a raw HCI socket, so the
+  unit carries `AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN` (and a matching
+  `CapabilityBoundingSet`) — scoped to the service, rather than `setcap` on a
+  node binary every script on the machine shares.
+
+### The network the accessory is given
+
+Commissioning a Wi-Fi accessory over Bluetooth ends in
+`AddOrUpdateWiFiNetwork(ssid, credentials)`, so a hub that can do the Bluetooth
+half and not that one starts a pairing it cannot finish. The hub cannot read
+the system's own credentials — the PSK is in a root-owned NetworkManager
+profile and the point of the service account is that it cannot read one — so
+`deploy/wifi-credentials.sh` writes `/etc/gethome/wifi.env` (0640, group
+`gethome`) at install time and again from a dispatcher on every association.
+`GET /hub` reports whether the hub has any as `matter.wifi`, and an app may
+send `wifi: {ssid, passphrase}` with the request for a hub that has none.
+
+**Thread accessories are not yet provisioned this way.** Taking one on over
+Bluetooth needs a Thread operational dataset, which means a border router the
+hub is part of; a Thread device already on a LAN border router is commissioned
+over IP as normal.
+
+### Bounds
+
+Discovery is bounded at three minutes — the Matter spec's own minimum
+commissioning window (§ 5.4.2.3), so the longest a correctly-behaved accessory
+can be waiting — and the whole job at four and a half, because PASE,
+attestation, the fabric write and the first CASE session all follow discovery
+and each can stall. A pairing can be cancelled, which stops the discovery
+rather than only closing the screen; the hub runs **one at a time**, which is
+what makes a single cancel unambiguous.
 
 ## Runtime requirements
 

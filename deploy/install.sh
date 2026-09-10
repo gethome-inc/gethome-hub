@@ -2008,6 +2008,19 @@ if [[ -x /usr/local/lib/gethome-zigbee-detect.sh ]]; then
   fi
 fi
 
+# A third state, and neither of the two above. The detector exits non-zero when
+# Zigbee is not the radio here — which includes a board whose owner has *chosen*
+# Matter with a coordinator sitting in its socket. Without asking separately,
+# the install's closing line said "with no Zigbee coordinator plugged in",
+# four lines under the detector's own "A Zigbee coordinator is plugged in", on
+# one screen, about hardware the owner could see. Same read as the hub's, from
+# the same file: the recorded by-id name, and whether it is still there.
+ZIGBEE_STANDING_BY=""
+if [[ -z "$ZIGBEE_CONFIGURED" ]]; then
+  zigbee_recorded=$(sed -n 's/^ZIGBEE_ADAPTER=//p' "$CONF_DIR/zigbee.env" 2>/dev/null | tail -n1)
+  [[ -n "$zigbee_recorded" && -e "$zigbee_recorded" ]] && ZIGBEE_STANDING_BY=1
+fi
+
 # A started service is not a working radio. The detector's success means "a
 # device node is there and I started the unit"; whether Zigbee2MQTT actually
 # reached the stick is a different question, and the hub already answers it —
@@ -2125,6 +2138,14 @@ if [[ "$RADIO_BUDGET" == "one" ]]; then
     say "This board has memory for one radio at a time, and the Zigbee coordinator you plugged in has it, so Matter is off. You can switch to Matter in the GetHome app — the coordinator stays configured, and Zigbee devices come back when you switch back."
   elif [[ -n "$ZIGBEE_CONFIGURED" ]]; then
     say "This board has memory for one radio at a time and the coordinator has it, so Matter is off — and until the coordinator is talking, this hub is running neither radio. Sort out the warning above and Zigbee starts on its own. If you would rather use Matter meanwhile, switch this board in the GetHome app; the coordinator stays configured and Zigbee devices come back when you switch back."
+  elif [[ "$MATTER_ON" == "1" && -n "$ZIGBEE_STANDING_BY" ]]; then
+    # The coordinator is here and standing down, which is a *choice* somebody
+    # made in the app. Said with the other sentence — "with no Zigbee
+    # coordinator plugged in" — this line contradicted the detector's own
+    # output four lines above it, on the same screen, about hardware the owner
+    # could see. It is the installer's half of the same bug the app had, where
+    # a hub set to Matter reported "Zigbee · no stick".
+    say "This board has memory for one radio at a time, and you have set it to Matter — so the Zigbee coordinator that is plugged in is standing by rather than missing. Switch back in the GetHome app whenever you like; it stays configured, and your Zigbee devices come back with it."
   elif [[ "$MATTER_ON" == "1" ]]; then
     say "This board has memory for one radio at a time, and with no Zigbee coordinator plugged in that radio is Matter. Plug a stick in whenever you like (SONOFF ZBDongle-E/P, ConBee, SkyConnect) and Zigbee takes over by itself, with no reboot."
   else

@@ -642,6 +642,39 @@ devices inside Z2M. A device whose exposes definition changes (firmware or
 Z2M update) is re-adopted automatically — the adapter fingerprints the
 definition on every `bridge/devices` sync.
 
+## "No stick" is two different homes
+
+`zigbee.connected: false` is one word covering two situations that need
+opposite words in an app, and until `GET /hub` carried
+`zigbee.coordinator` there was no way to tell them apart:
+
+- **This hub has never had a coordinator.** Perfectly normal — most hubs are
+  bought before the stick is. *"No stick"* is exactly right.
+- **A coordinator is plugged in and something has stood it down.** On a
+  one-radio board that is nearly always the owner switching the radio to
+  Matter, which is a deliberate, reversible choice. *"No stick"* here is the
+  hub telling somebody their hardware has gone missing while they are looking
+  at it.
+
+The hub cannot see USB for itself and deliberately does not try:
+`gethome-zigbee-detect` owns that decision, with a device table, a USB-id table
+and a `maybe` tier, and a second dumber copy of it inside the hub would
+eventually disagree with the first. So the detector records what it found in
+`/etc/gethome/zigbee.env` (`ZIGBEE_ADAPTER`, world-readable) and
+`src/adapters/zigbee/coordinator.ts` reads it back and asks whether the device
+node is still there — two file operations, behind a five-second cache, on a
+route that is polled.
+
+It reads the **by-id name**, never the `/dev/ttyACM0` beside it: the by-id name
+says *which device this is* and survives a reboot, while the node moves the
+moment something else is plugged in — so checking the node would report a
+coordinator present because a 3D printer took its number.
+
+Three values, and `absent` is deliberately not folded into `unknown`: a stick
+that was here and is out right now is most often one being reflashed, which is
+[the repair this project tells people to do](#the-coordinators-own-firmware), and an
+app can say "plug it back in" rather than "buy one".
+
 ## The three layers of device support
 
 **The guiding principle: nothing is unsupported by default.** A Zigbee device

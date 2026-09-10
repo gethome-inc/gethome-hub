@@ -390,6 +390,59 @@ in `deploy/install.sh` must stay accurate.
   reaches it; and the hub exchanging traffic with the gateway throughout rules
   out its own radio, its power save and anything the *hub* buffers. Those two
   fixes are real and stand on their own measurements. Neither was this.
+- **A Matter accessory out of its box needs Bluetooth, and a Raspberry Pi ships
+  with it off.** A factory-new — or factory-reset — Wi-Fi Matter accessory
+  advertises over BLE and nowhere else: it has no network to be found on yet.
+  Without this the hub could only take in accessories already on the LAN, which
+  is a minority of what people buy, and the app searched the network for a
+  device that was never going to be there. Two things stand between a Pi and
+  working Bluetooth and **both are invisible from every surface the product
+  has**. Raspberry Pi OS's headless image leaves the radio **soft-blocked in
+  rfkill**, where `hciconfig` lists the adapter perfectly happily and bringing
+  it up fails with an errno nothing logs — found on a Zero 2 W, where `soft=1`
+  was the whole of it. And noble reaches the controller over a **raw HCI
+  socket**, so the unit carries `AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN`
+  with a matching `CapabilityBoundingSet` (without the second line systemd
+  drops them before the ambient set is applied and the radio silently finds
+  nothing, exactly as with no capabilities at all). Ambient rather than `setcap`
+  on `node`, which would hand raw sockets to every script anybody ever runs with
+  that binary. `matter_bluetooth()` writes the sysfs byte rather than shelling
+  out to `rfkill`, which is not on a minimal image, and enables `systemd-rfkill`
+  because an unblock does not survive a reboot on its own. **A machine with no
+  adapter is silent** — a Pi with the radio off in `config.txt`, a VM, an x86
+  box are ordinary machines, the hub reports it on `GET /hub` and the app
+  explains it; a warning there would fire on every such install.
+- **The other half of Bluetooth is the network the accessory is then given, and
+  the hub is *given* it rather than reading it.** Commissioning a Wi-Fi
+  accessory over BLE ends in `AddOrUpdateWiFiNetwork(ssid, credentials)`, so a
+  hub that can do the first half and not the second starts a pairing it cannot
+  finish. The PSK is in a root-owned NetworkManager profile and the *point* of
+  the service account is that it cannot read one — so `deploy/wifi-credentials.sh`
+  writes `/etc/gethome/wifi.env`, mode 0640, group `gethome`, and the hub reads
+  the one file it is deliberately allowed to read. That is a real widening
+  bounded to exactly that account and that file, and the app may send a password
+  instead for a hub that has none. **The dispatcher is what keeps it true**:
+  `keep_wifi_awake`'s reasoning exactly — a home that retypes its Wi-Fi password
+  next month gets a fresh profile, and enumerating today's profiles is the one
+  thing that cannot cover that. **An open network writes an empty PSK**, which
+  the hub reads as "no credentials": an accessory handed an empty password for a
+  network it cannot join is worse than being told the hub has none. And the
+  shell-quoting is built into a variable before it is used, because inline
+  inside the `printf` the replacement's backslashes go through a second round of
+  quote removal and `Dave's Wi-Fi` comes out mangled — the sed-program rule from
+  `test/deploy-wifi.test.ts`, in a second place.
+- **The detector exits 1 for an ordinary state, so the unit says
+  `SuccessExitStatus=1`.** "Zigbee is not the radio here" — no coordinator, or
+  one plugged into a board the owner has set to Matter — is correct and
+  expected, and `install.sh` reads the exit code to decide what to tell the
+  user, so the code stays. But systemd parks a non-zero oneshot in `failed`, and
+  `gethome-zigbee-detect.service: failed` is exactly what somebody finds when
+  they go looking for why their Zigbee is quiet: it points at the detector
+  instead of at the radio switch they used. The installer's own closing line had
+  the same bug in words — "with no Zigbee coordinator plugged in" printed four
+  lines under the detector's "A Zigbee coordinator is plugged in", on one
+  screen, about hardware the owner could see. `ZIGBEE_STANDING_BY` is the third
+  state neither `ZIGBEE_CONFIGURED` nor `ZIGBEE_READY` covers.
 - **When a unit won't start, put the reason in the log.** `service_failure()`
   prints `systemctl status` and the last journal lines into the install output.
   The mosquitto bug above was invisible for a whole round because the installer
