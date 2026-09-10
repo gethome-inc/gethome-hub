@@ -684,6 +684,14 @@ describe('the chat service', () => {
     extras?: {
       steps?: [string, string, string?][][];
       throws?: boolean;
+      /**
+       * One closure per round, run after that round's scripted steps, for the
+       * halves of the stream a `[text, kind, detail]` triple cannot express:
+       * reasoning arriving between two steps, prose said before a tool call,
+       * the first delta of a reply. It drives the context directly, which is
+       * what the provider's own stream does.
+       */
+      script?: ((context: AutomationTurnContext | undefined) => void)[];
     },
   ) => Promise<{
     chat: InstanceType<typeof AutomationChat>;
@@ -722,6 +730,7 @@ describe('the chat service', () => {
         for (const [text, kind, detail] of extras?.steps?.[at] ?? []) {
           context?.onStep?.(text, kind as never, detail);
         }
+        extras?.script?.[at]?.(context);
         await gate;
         index += 1;
         if (extras?.throws) throw new Error('the provider hung up');
@@ -1130,6 +1139,87 @@ describe('the chat service', () => {
     const [step] = (agent?.data as { steps: ChatStepWire[] }).steps;
     expect(step?.text).toHaveLength(200);
     expect(step?.detail).toHaveLength(400);
+  });
+
+  it('hangs the reasoning on the step it was produced under, rather than dropping it', async () => {
+    const { chat } = await chatFor([{ kind: 'said', text: 'Done.' }], undefined, undefined, undefined, {
+      steps: [[['Reading your home', 'reading']]],
+      script: [
+        (context) => {
+          context?.onThinking?.('The hall lamp is ');
+          context?.onThinking?.('the one they mean.');
+          // The reply starting is what settles it in a round that calls
+          // nothing else — the case with nowhere else for it to go.
+          context?.onDelta?.('Done.');
+        },
+      ],
+    });
+
+    const started = await chat.start({ memberId: memberId, message: 'go' });
+    await chat.idle();
+
+    const agent = (await chat.transcript(started.sessionId)).find(
+      (message) => message.role === 'agent',
+    );
+    const [step] = (agent?.data as { steps: ChatStepWire[] }).steps;
+    expect(step?.detail).toBe('The hall lamp is the one they mean.');
+  });
+
+  it("leaves a tool's own detail alone, because it is the better sentence", async () => {
+    const { chat } = await chatFor([{ kind: 'said', text: 'Done.' }], undefined, undefined, undefined, {
+      steps: [[['Looking at one device closely', 'reading', 'Hall lamp']]],
+      script: [
+        (context) => {
+          context?.onThinking?.('Reasoning that must not overwrite it.');
+          context?.onDelta?.('Done.');
+        },
+      ],
+    });
+
+    const started = await chat.start({ memberId: memberId, message: 'go' });
+    await chat.idle();
+
+    const agent = (await chat.transcript(started.sessionId)).find(
+      (message) => message.role === 'agent',
+    );
+    const [step] = (agent?.data as { steps: ChatStepWire[] }).steps;
+    expect(step?.detail).toBe('Hall lamp');
+  });
+
+  it('keeps what a round said before calling a tool, and sends no frame for it', async () => {
+    const frames: { phase: string; kind: string | undefined; text: string }[] = [];
+    const { chat } = await chatFor([{ kind: 'said', text: 'All done.' }], undefined, undefined, undefined, {
+      script: [
+        (context) => {
+          // The order a real round has: the model narrates, then calls
+          // something.
+          context?.onSaid?.("I'll set that up for you.");
+          context?.onStep?.('Working a device', 'writing' as never);
+        },
+      ],
+    });
+    events.on('automationChat', (event) => {
+      frames.push({ phase: event.phase, kind: event.kind, text: event.text });
+    });
+
+    const started = await chat.start({ memberId: memberId, message: 'go' });
+    await chat.idle();
+
+    const agent = (await chat.transcript(started.sessionId)).find(
+      (message) => message.role === 'agent',
+    );
+    const kept = (agent?.data as { steps: ChatStepWire[] }).steps;
+    // Kept, in the order it happened: the sentence, then what it went off to
+    // do — so a conversation read back next week shows both.
+    expect(kept.map((step) => [step.kind, step.text])).toEqual([
+      ['said', "I'll set that up for you."],
+      ['writing', 'Working a device'],
+    ]);
+    // And not sent: those words already reached the app as deltas while they
+    // were being written, so a frame here would draw them twice.
+    expect(frames.filter((frame) => frame.phase === 'step').map((frame) => frame.kind)).toEqual([
+      'writing',
+    ]);
   });
 
   it('names what answered, so a conversation says what it cost and on what', async () => {

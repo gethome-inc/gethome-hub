@@ -42,6 +42,19 @@ export interface DelegateAgent {
    * `POST /devices/:id/remap` lesson this repository has now paid for twice.
    */
   start(input: { memberId: string; brief: string }): Promise<{ sessionId: string }>;
+  /**
+   * Say something else to a job it already has, and answer as soon as that is
+   * taken too.
+   *
+   * **A follow-up belongs to the conversation that did the work**, which is
+   * the whole of why this exists: every handover used to open a fresh one, so
+   * "now make it 11:30 instead" reached an agent that had never heard of the
+   * rule it had written five seconds earlier, and paid to read the home again
+   * to find out. Answers `false` for a session it can no longer carry on —
+   * past the fortnight, or never there — so the caller can fall back to a
+   * fresh one rather than failing.
+   */
+  resume(input: { memberId: string; sessionId: string; brief: string }): Promise<boolean>;
 }
 
 export function delegateAgents(deps: { automationChat: AutomationChat }): DelegateAgent[] {
@@ -63,6 +76,17 @@ export function delegateAgents(deps: { automationChat: AutomationChat }): Delega
           message: input.brief,
         });
         return { sessionId: reply.sessionId };
+      },
+      async resume(input) {
+        // `reply` revives from the transcript where the memory has gone, so
+        // "can it be carried on" is a question only it can answer — null is
+        // the conversation with no rows at all.
+        const reply = await deps.automationChat.reply(
+          input.sessionId,
+          input.memberId,
+          input.brief,
+        );
+        return reply !== null;
       },
     },
   ];

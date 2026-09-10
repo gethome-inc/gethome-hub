@@ -50,7 +50,7 @@ export interface AssistantToolContext {
   /** Press a rule somebody could press, or switch a mode the other way. */
   runAutomation: (id: string) => Promise<boolean>;
   /** Hand a whole job to another agent. */
-  delegate: (agent: string, brief: string) => Promise<DelegateOutcome>;
+  delegate: (agent: string, brief: string, fresh?: boolean) => Promise<DelegateOutcome>;
   /** The agents that can be handed a job, for the tool's own description. */
   delegates: readonly { key: string; title: string; description: string }[];
 }
@@ -93,6 +93,16 @@ const delegateInput = z
      * other one's tool calls.
      */
     brief: z.string().min(1).max(1_500),
+    /**
+     * This job has nothing to do with the last one handed to that agent.
+     *
+     * **Absent means carry on**, which is the safer default of the two: an
+     * agent given a follow-up in a conversation it has never seen has no idea
+     * what "it" refers to, where an agent carrying a little history it does
+     * not need is merely carrying it. Optional, so the ordinary case costs the
+     * model nothing to get right.
+     */
+    fresh: z.boolean().optional(),
   })
   .strict();
 
@@ -186,7 +196,11 @@ export function assistantTools(
         'Hand a whole job to the agent that does it, and carry on. You do not wait for it and ' +
         'you never see its working — the person watches it happen and answers it directly. ' +
         'Write `brief` as one self-contained message in their own language, carrying everything ' +
-        'that agent needs and nothing about this conversation. Agents:\n' +
+        'that agent needs and nothing about this conversation. If you have handed that agent ' +
+        'something in this conversation already, calling it again continues that same ' +
+        'conversation, so it still has what it learned — write the brief as the next thing to ' +
+        'say to it, not as a job description starting from nothing. Set `fresh: true` only when ' +
+        'the new job has nothing to do with the last one. Agents:\n' +
         delegates.map((entry) => `- ${entry.key}: ${entry.description}`).join('\n'),
       schema: () => json(delegateInput),
     },

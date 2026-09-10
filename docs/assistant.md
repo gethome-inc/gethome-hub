@@ -66,6 +66,13 @@ rather than a stack trace, and `QuestionGate` — the rule that no request may
 ever carry a `tool_use` with no `tool_result` after it. Every one of those was
 learned by breaking something; a second copy is a second place to unlearn it.
 
+**Reporting what a round said before it went off to work is there too**, for
+the same reason: a model narrates and then calls something, only the last
+round's text becomes a transcript row, and the loop is the one place that has
+`said` and `calls` in hand at once. It goes into the round's working as a
+`said` step rather than out as a frame — `docs/automations.md` has the whole of
+it.
+
 What each agent keeps is its own `pump`, because what ends a turn genuinely
 differs: a rule for one, a handoff for the other.
 
@@ -122,7 +129,7 @@ promise than a paragraph asking the model not to search.
 ## The handoff
 
 The assistant does not write automations. It hands the job to the agent that
-does, and two rules carry the whole design.
+does, and three rules carry the whole design.
 
 **The brief is the interface.** The assistant writes a self-contained task in
 the person's own language and hands that over. It never receives the
@@ -135,6 +142,29 @@ agent has to be told its own.
 conversation and returns in milliseconds with its session id, so the model can
 say what it did in the same breath. This is the `POST /devices/:id/remap`
 lesson, which this repository has now paid for twice.
+
+**And a follow-up goes back to the conversation that did the work.** Every
+handover used to open a fresh one, so "now make it 11:30 instead" reached an
+agent that had never heard of the rule it had written five seconds earlier —
+and paid to read the home again to work out what "it" was. `delegate` reads
+back the last `handoff` row in *this* conversation for that agent and continues
+that session (`DelegateAgent.resume`, which revives from the transcript where
+the memory has gone, and answers `false` for a session that can no longer be
+carried on — then it starts fresh rather than failing). Continuing is the
+**default**, because the two failures are not the same size: an agent given a
+follow-up in a conversation it has never seen has no idea what is being talked
+about, where an agent carrying a little history it does not need is merely
+carrying it. `fresh: true` on the tool is how the model says a job genuinely
+starts over. The session is read off the rows rather than remembered in a map —
+the `standingOf` rule: the transcript is the truth about what was handed over,
+and it survives a restart.
+
+A second handover to the same conversation writes a **second card**, and the
+newest one is the live one: `AssistantChat` tracks a delegated session by the
+row it should amend, and the later row replaces the earlier. So the status
+belongs to the card somebody is looking at rather than to the one that has
+scrolled off the top, and an app draws the trail and the rules against the
+newest card for a session — see the iOS side's `overtakenHandoffRows`.
 
 What the app draws is a `handoff` row on the assistant's transcript:
 
@@ -158,6 +188,15 @@ the person never has to leave the assistant to answer it.
 re-entered for a job it has already handed on. A conversation reopened next
 week reads "delivered · 2 rules" rather than a spinner frozen mid-sentence.
 
+**And it says so on the right conversation, as `amend`.** The card is on the
+*assistant's* transcript, so that is the session id the frame carries — under
+the delegated session's id an app dutifully re-read the chat where nothing had
+changed, and the card sat on "working" until somebody closed the page and came
+back. It is `amend` rather than `turn` because nothing here is a round ending:
+this lands whenever the other agent moves, including mid-round in the
+conversation it is about, and `turn` would have taken that round's trail down
+with it. `docs/api.md` is canonical on the phase.
+
 ## The registry, and the third agent
 
 `src/ai/agents/registry.ts` is a table with one entry today, and it is a table
@@ -167,9 +206,11 @@ of both apps before anybody can reach it. With one `delegate` tool whose
 description is **generated** from this table, a third agent is one entry — the
 model is told about it in the same breath as the others, and no app changes.
 
-An entry keeps two rules. `description` is written for the model and is the
-only thing it knows about that agent, so it says what the agent is for *and*
-what it is not — the failure it prevents is a job handed to the wrong agent and
+An entry keeps three rules. `start` and `resume` are both required, because a
+job and a follow-up to it are two different things and an agent that could only
+be started can only ever be told something once. `description` is written for
+the model and is the only thing it knows about that agent, so it says what the
+agent is for *and* what it is not — the failure it prevents is a job handed to the wrong agent and
 a person watching a rule being written when they asked a question. And
 `permission` is checked **when the tool runs**, not when the prompt is built: a
 member whose role cannot hand a job over gets a sentence the model reads out,
@@ -177,8 +218,35 @@ rather than a capability that is silently absent for reasons nobody explains.
 
 ## Refusals
 
-The same three as the automations agent, carrying the same codes because both
-apps already branch on them: `ai_not_configured`, `ai_disabled`,
+**Two kinds, and they are not the same thing.** A *classifier* refusal is the
+model declining a request: HTTP 200, `stop_reason: "refusal"`, and a
+`stop_details` category. It is a content outcome, not an error — code that
+reads `content[0]` without checking the stop reason breaks on it, which is why
+both pumps check first. `refusalSentence` (`chat/agent-loop.ts`) turns the
+category into words: `reasoning_extraction` is somebody asking the assistant to
+show its own thinking, and `cyber` fires on benign security work, which for a
+hub means questions about its own network — the two a home can plausibly trip
+and the two a generic "try asking differently" helps least with. **The stop
+reason decides *that* it was refused and the category decides only the
+sentence**: `stop_details` is informational, is `null` on plenty of real
+refusals, and its `explanation` is not guaranteed present.
+
+Server-side `fallbacks` — where the API re-runs a declined request on another
+model inside the same call — is **deliberately not enabled.** It would recover
+a refusal rather than relabel it, and Anthropic's guidance is to opt in by
+default on Opus-5-class models. Two things argue the other way here. The
+workload is domestic: this agent answers "is the kitchen light on" and writes
+schedules, so the classifiers it could trip are close to never. And the
+parameter is beta with a churn record — `fallback: {model, on_partial}` →
+`fallbacks: [...]` → `fallbacks: "default"`, across three superseded beta
+headers — while this is firmware on a board in somebody's house that updates on
+its own schedule. Enabling it is a two-line change (`client.beta.messages.stream`,
+`betas: ['server-side-fallback-2026-07-01']`, `fallbacks: 'default'`, and the
+`Beta*` request types) and worth revisiting if refusals ever show up in the run
+log.
+
+The other three refusals are the automations agent's, carrying the same codes
+because both apps already branch on them: `ai_not_configured`, `ai_disabled`,
 `automation_needs_anthropic`. Each carries a sentence, so an app that has never
 met a code a later build adds still shows something true.
 

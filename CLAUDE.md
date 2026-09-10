@@ -1062,6 +1062,22 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `automation-tools.ts` beside the tools: `Looked up list_rooms_zones.` is a
   function signature read out loud, on the one screen whose whole job is telling
   somebody who does not write software what their house is doing.
+  **And two things a round produced were streamed and then dropped, so the trail
+  somebody read back was a thinner thing than the one they watched.** The model's
+  **reasoning** arrives between one step and the next, which makes it the working
+  of the step already on screen; it is hung on that step's `detail` when the next
+  step lands, when prose is said, or when the reply starts — the last because a
+  round can end without another step. Only into an empty slot: a tool's own
+  `detail` is the better sentence wherever there is one. And **prose from a round
+  that then calls a tool is not the answer** — a model narrates ("I'll set that
+  up for you.") and then calls something, and only the *last* round's text
+  becomes a row — so it is kept as a step of its own, `kind: 'said'`, reported
+  from `streamTurn` where both agents share it. That kind is the one the socket
+  **never sends**: the words already reached the app as deltas, and a frame would
+  draw the same sentence twice. Both are why `clip()` exists: `slice` was fine
+  while these fields held the hub's own fixed sentences and cuts model-written
+  prose mid-word, so it cuts at a word, appends an ellipsis, and counts the
+  ellipsis against the bound.
   **Nothing is ever sent with a `tool_use` left unanswered, and the repair
   belongs before the next *user* turn.** Every call in an assistant turn needs
   a result in the very next message, and a conversation that breaks that rule
@@ -1139,7 +1155,7 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   rollback cost is named rather than discovered: an older build ignores the
   column and would list assistant chats among the automations ones, which is a
   confusing row on a build that has already failed its health check.
-  **The handoff is the design, and it is two rules.** The *brief* is the whole
+  **The handoff is the design, and it is three rules.** The *brief* is the whole
   interface — a self-contained task in the person's language, and the only
   thing that crosses — so the assistant never receives the other agent's tool
   calls, reasoning or transcript, which is what keeps its context the size of a
@@ -1151,18 +1167,44 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   questions and the rules are read from the sub-agent's own conversation, over
   the frames an app already draws. Its `status` moves as that agent's turns
   land, written by reading its transcript rather than by a second round with
-  the model: the assistant is never re-entered for a job it has handed on.
+  the model: the assistant is never re-entered for a job it has handed on —
+  and said as **`amend` on the assistant's own session**, because the card is
+  on that transcript and nothing here is a round ending. Both halves were
+  wrong and each alone broke it: under the *delegated* session's id an app
+  re-read the chat where nothing had changed and the card sat on "working"
+  until the page was closed and reopened, and as `turn` it would have taken a
+  live round's trail down with it whenever the other agent happened to move.
+  **And a follow-up goes back to the conversation that did the work.** Every
+  handover used to open a fresh one, so "now make it 11:30 instead" reached an
+  agent that had never heard of the rule it had written five seconds earlier
+  and paid to read the home again to find out what "it" was. `delegate` reads
+  the last `handoff` row in *this* conversation for that agent and continues
+  that session (`DelegateAgent.resume`, falling back to a fresh one for a
+  session that can no longer be carried on). Continuing is the **default**,
+  because the two failures are not the same size — no idea what is being
+  talked about, against a little history nobody needed — and `fresh: true` is
+  how the model says a job genuinely starts over. Read off the rows rather than
+  remembered in a map, the `standingOf` rule; a second handover writes a second
+  card and the **newest** one is the live one.
   **The registry is a table because of the third agent, not the second**
   (`src/ai/agents/registry.ts`): `delegate`'s description is *generated* from
   it, so adding an agent is one entry rather than a new tool, a new prompt
   paragraph and a release of both apps. `permission` is checked when the tool
   runs, so a member whose role cannot hand a job over gets a sentence the model
   reads out rather than a capability silently absent.
-  **The assistant's model list is its own** (`ASSISTANT_MODELS` — Opus 5 and
+  **The agents' model list is its own** (`AGENT_MODELS` — Opus 5 and
   Sonnet 5), and the mapper's one-model list is untouched: a descriptor is
   cached against a device model and shapes every unit of it for ever, while a
   chat is many small rounds answered with another message when the reply is
-  poor. `effectiveAssistantModel` is what **runs** as well as what is reported,
+  poor. **One list, a column each**: the assistant and the automations agent
+  are offered the same two and choose independently
+  (`ai_assistant_model`, `ai_automations_model`), because answering questions
+  about the house and writing the rules it runs by itself are different jobs a
+  home may want to spend differently on. The automations agent had no column of
+  its own and read `ai_model` — the *mapper's* — which never showed, since that
+  list offers one model and Sonnet is not on it, and was one added choice away
+  from letting "which model recognises a device" decide "which model writes a
+  rule". `effectiveAgentModel` is what **runs** as well as what is reported,
   which is the gap that cost the mapper a release. **And `modelLabel` reads
   both lists**, which is the same shape of gap from the other end: it names a
   model that has already run and searched the mapper's alone, so a chat on

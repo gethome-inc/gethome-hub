@@ -132,7 +132,7 @@ describe('naming a model that has already run', () => {
    * watching.
    *
    * There are two vocabularies — `PROVIDER_MODELS` for recognising a device,
-   * `ASSISTANT_MODELS` for a conversation — and `modelLabel` read only the
+   * `AGENT_MODELS` for a conversation — and `modelLabel` read only the
    * first. Sonnet 5 is on the second alone, so every assistant chat that ran
    * on it reported `claude-sonnet-5` where a chat on Opus reported "Opus 5",
    * and the apps drew a raw id at the top of one conversation and a name at

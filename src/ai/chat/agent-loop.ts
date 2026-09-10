@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
+import type { RefusalStopDetails } from '@anthropic-ai/sdk/resources/messages';
 import type { Logger } from '../../logging.js';
 import { AiUnavailableError, classifyApiError } from '../errors.js';
 import { EFFORT, MAX_OUTPUT_TOKENS } from '../agent-core.js';
@@ -55,14 +56,15 @@ export interface TurnRequest {
   signal: AbortSignal;
   usage: RunUsage;
   /**
-   * Only the two halves of the stream this function actually drives.
+   * Only the halves of the stream this function actually drives.
    *
    * Narrowed rather than taking the whole context, because `onStep`'s `kind`
    * is each agent's own vocabulary — a callback taking `AutomationStepKind`
    * cannot stand in for one taking `string`, which is contravariance rather
    * than a nuisance: it would accept a word the caller cannot handle.
+   * `onSaid` takes a plain string and so travels with the other two.
    */
-  context: Pick<ChatTurnContext, 'onDelta' | 'onThinking'> | undefined;
+  context: Pick<ChatTurnContext, 'onDelta' | 'onThinking' | 'onSaid'> | undefined;
   /** Named in the sentence a timeout produces, so it reads about this agent. */
   label: string;
   timeoutMs: number;
@@ -148,7 +150,54 @@ export async function streamTurn(request: TurnRequest): Promise<{
     (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use',
   );
 
+  /**
+   * **Prose from a round that then calls a tool is not the answer, and it was
+   * being thrown away.**
+   *
+   * A model narrates as it works — *"I'll set that up for you."* — and then
+   * calls something. That sentence goes out over `onDelta` and is never
+   * recorded: only the *last* round's text becomes the transcript row, so a
+   * conversation read back next week shows the conclusion with nothing of the
+   * commentary that led to it. Worse for the app drawing it live, which
+   * accumulates deltas: two rounds of prose arrived run together with no space
+   * between them, and were then replaced wholesale when the turn landed.
+   *
+   * Reported here rather than in either pump, because it is the same fact in
+   * both and this is the one place they share. `calls.length > 0` is the whole
+   * of the test: prose with nothing after it *is* the answer, and recording it
+   * would put the reply in the transcript twice.
+   */
+  if (said.length > 0 && calls.length > 0) context?.onSaid?.(said);
+
   return { response, said, calls };
+}
+
+/**
+ * Why a round was declined, in the words the person who asked it can use.
+ *
+ * **Branch on `stop_reason`, never on this.** `stop_details` is informational
+ * and is `null` on plenty of real refusals, and its `explanation` is not
+ * guaranteed present — so the caller decides *that* a round was refused from
+ * the stop reason and asks this only for the sentence.
+ *
+ * The category is worth the read because the two that a *home* can plausibly
+ * trip are the two a generic "try asking differently" is least useful for.
+ * `reasoning_extraction` is somebody asking the assistant to show its
+ * thinking, which is a thing to say plainly rather than a failure; `cyber`
+ * fires on benign security work, which for this hub means questions about its
+ * own network. Everything else keeps the generic sentence, including a `null`
+ * category, which is a permanent valid state rather than a gap.
+ */
+export function refusalSentence(response: { stop_details?: RefusalStopDetails | null }): string {
+  switch (response.stop_details?.category) {
+    case 'reasoning_extraction':
+      return 'I can’t show you my own reasoning, but ask me the question itself and I’ll answer it.';
+    case 'cyber':
+      return 'That one is close enough to security work that the model declined it. Asking about '
+        + 'your own devices and what they do is fine — try it in those terms.';
+    default:
+      return 'The model declined to answer that. Try asking for it differently.';
+  }
 }
 
 /**

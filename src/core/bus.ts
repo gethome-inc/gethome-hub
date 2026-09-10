@@ -168,7 +168,19 @@ export interface HubEvents {
  */
 export interface AutomationChatEvent {
   sessionId: string;
-  phase: 'thinking' | 'delta' | 'step' | 'turn';
+  /**
+   * `thinking` · `delta` · `step` · `turn`, and **`amend`**.
+   *
+   * The first four are one round happening. `amend` is not: it says a row
+   * already *in* this transcript has changed and should be re-read, while the
+   * round on screen — if there is one — carries on untouched. It exists
+   * because a handoff card's status is written by the **other** agent
+   * finishing a turn, which can land at any moment, including in the middle of
+   * a round of this conversation. Sent as `turn` it took that round's trail
+   * down with it; a client too old to know the word falls back to re-reading
+   * and clearing, which is where it was before.
+   */
+  phase: 'thinking' | 'delta' | 'step' | 'turn' | 'amend';
   at: string;
   text: string;
   /**

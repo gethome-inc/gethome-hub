@@ -1034,18 +1034,28 @@ run, not what is stored**: a setting naming a model no longer offered resolves
 to the one that is, so an app never draws a model this hub will not use. Writing
 a retired id is still accepted — it just isn't what runs.
 
-**`assistant` is a different question from `providers`, and it really is a
-picker.** `providers.<name>.models` answers "which model reads a device's
-exposes tree"; `assistant.models` answers "which model answers in the
-assistant", and the two lists differ because the trades do. A mapping
-descriptor is cached against a device model and shapes every unit of it the
-home ever meets, so a cheaper tier that is wrong once is wrong for ever and the
-list is one entry long. A conversation is many small rounds, read the moment
-they arrive and answered with another message when the reply is poor — so what
-a round costs is a real choice, and this list has two. Write it with
-`PATCH /settings/ai {assistantModel}`; `null` clears it back to the default. As
-above, `assistant.model` is what will **run**, and a stored id this build no
-longer offers resolves to the default rather than being refused.
+**`assistant` and `automations` are a different question from `providers`, and
+they really are pickers.** `providers.<name>.models` answers "which model reads
+a device's exposes tree"; those two answer "which model answers in the
+assistant" and "which model writes the home's rules", and the lists differ
+because the trades do. A mapping descriptor is cached against a device model and
+shapes every unit of it the home ever meets, so a cheaper tier that is wrong
+once is wrong for ever and the list is one entry long. A conversation is many
+small rounds, read the moment they arrive and answered with another message when
+the reply is poor — so what a round costs is a real choice, and those lists have
+two. Write them with `PATCH /settings/ai {assistantModel}` and
+`{automationsModel}`; `null` clears either back to the default. As above, both
+`model` fields are what will **run**, and a stored id this build no longer
+offers resolves to the default rather than being refused.
+
+**The two agents are offered the same two models and choose separately**, which
+is the point of them being two blocks: answering questions about the house and
+writing the rules it runs by itself are different jobs, and a home may want to
+spend differently on them. `automations` is new — that agent used to read
+`providers.anthropic.model`, the *mapper's* choice, which never showed because
+that list offers one model and Sonnet is not on it, and was one added choice
+away from making "which model recognises a device" silently decide "which model
+writes a rule".
 
 **`provider` and `mapping.provider` are the same answer**: which provider would
 recognise a device right now. With one key there is no choice to make; with two,
@@ -1584,7 +1594,7 @@ and then:
 {"type":"zigbeeEvent","event":{at,type,ieee,name?}}     joined|announced|interviewing|interviewed|interview-failed|left
 {"type":"aiRun","event":{phase,id,at,kind,exposesHash,vendor?,model?,step?,ok?,costUsd?,error?}}
 {"type":"automationRun","run":{automationId,name,at,trigger,cause,outcome,commands,refused,detail?}}
-{"type":"automationChat","chat":{sessionId,phase,at,text,kind?,detail?}}  phase: thinking | delta | step | turn
+{"type":"automationChat","chat":{sessionId,phase,at,text,kind?,detail?}}  phase: thinking | delta | step | turn | amend
 {"type":"assistantChat","chat":{…the same shape…}}      the assistant, on the same stream
 ```
 
@@ -1600,7 +1610,8 @@ envelope for every frame, so a second shape under a key it already has makes
 every automation frame fail to decode and takes the socket message with it.
 
 `automationChat` has **four phases, because a spinner is not an answer to "what
-is happening"**: one line per thing the agent did (`step`), its own summarized
+is happening"** (and a fifth that is not about a round at all — see `amend`
+below): one line per thing the agent did (`step`), its own summarized
 reasoning as it arrives (`thinking`), the reply as it is produced (`delta`), and
 the end of an exchange (`turn`) — after which the stored transcript is what to
 draw. A round is tens of seconds of the model reading the home and deciding
@@ -1615,6 +1626,28 @@ act* rather than the tool, so a client draws seven tools with five marks and the
 hub can grow an eighth without an app release. Open string, the
 `commandFailed.kind` rule: an unknown word gets a neutral mark and keeps its
 sentence. See [`docs/automations.md`](automations.md) for the vocabulary.
+
+**`amend` is not a round.** The other four are one exchange happening; `amend`
+says a row already *in* this transcript has changed and should be re-read,
+while whatever round is on screen carries on untouched. One thing sends it
+today: a handoff card's status, which is written when the **other** agent
+finishes a turn and can therefore land at any moment, including in the middle
+of a round of this conversation. It goes out on the conversation the *card* is
+in, which is the assistant's — sent under the delegated session's id an app
+re-read the chat where nothing had changed and left the card on "working" until
+the page was closed and reopened; sent as `turn` it took the live round's trail
+down with it. A client too old to know the word falls through to re-read and
+clear, which is where it was before.
+
+**A stored round carries one kind the socket never sends.** `data.steps` on a
+transcript row can hold `kind: "said"` — prose from a round that then went on to
+call a tool, kept because only the *last* round's text becomes a row and that
+narration would otherwise exist nowhere. No `step` frame goes out for it: the
+words already reached the client as `delta`s while they were being written, and
+a frame would draw the same sentence twice. A client that folds its own streamed
+prose into its live trail therefore ends up with the same trail either way. A
+step's `detail` can likewise now hold the model's **reasoning**, hung on the step
+it was produced under wherever the tool sent no sentence of its own.
 
 **`automationRun` is opt-in for the same reason the others are.** It is the
 trace somebody watches while working out why the light came on, and a home with

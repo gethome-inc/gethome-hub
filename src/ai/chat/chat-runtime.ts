@@ -66,6 +66,29 @@ const STEP_TEXT_LIMIT = 200;
 const STEP_DETAIL_LIMIT = 400;
 
 /**
+ * Cut to a bound, at a word, with something saying it was cut.
+ *
+ * `slice` was enough while these were the hub's own fixed sentences, which
+ * never came near either limit. They are not any more: a step's detail now
+ * carries the model's reasoning and a `said` step carries its narration, both
+ * of them prose written to no length at all — so the cut lands mid-word most
+ * times it happens, and reads as a bug rather than as a bound. The ellipsis is
+ * the half that matters: without it there is nothing to say the sentence had
+ * more in it.
+ */
+function clip(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  // The ellipsis counts against the bound, or a "cut to 200" is 201 — which is
+  // exactly the kind of off-by-one a bound written down in two repositories
+  // gets wrong once and then disagrees about for ever.
+  const head = text.slice(0, limit - 1);
+  const space = head.lastIndexOf(' ');
+  // A limit with no space anywhere near it is one long token; cutting that
+  // anywhere is as good as anywhere else.
+  return `${(space > limit / 2 ? head.slice(0, space) : head).trimEnd()}…`;
+}
+
+/**
  * One thing an agent did, kept with the message it produced.
  *
  * **The same three fields the socket frame already carries.** An app draws the
@@ -73,15 +96,36 @@ const STEP_DETAIL_LIMIT = 400;
  * back a week later looks like the round somebody watched — one shape rather
  * than two that would drift.
  *
+ * Which is why two things a round produced are now written down that used to
+ * be streamed and dropped: the model's **reasoning**, onto the `detail` of the
+ * step it was produced under, and prose from a round that then called a tool,
+ * as a step of its own (`kind: 'said'`). Both were on screen for the length of
+ * the wait and in the record for none of it, so the trail somebody read back
+ * was a different, thinner thing than the one they watched.
+ *
  * `kind` stays an **open** string, the `commandFailed.kind` rule: a word a
  * later build adds draws the neutral mark and keeps its sentence.
  */
 export interface ChatStepWire {
-  /** The hub's own sentence, present tense, written for a person. */
+  /**
+   * The hub's own sentence, present tense, written for a person — or, on a
+   * `said` step, the model's own narration verbatim.
+   */
   text: string;
-  /** `reading` · `checking` · `writing` · `asking` · `thinking`, and open. */
+  /**
+   * `reading` · `checking` · `writing` · `asking` · `thinking`, and open.
+   *
+   * **`said` is the one that is never sent as a frame.** It marks prose from a
+   * round that then went on to call a tool: the words reached the app as
+   * deltas while they were being written, and this is the copy that outlives
+   * the round.
+   */
   kind: string;
-  /** What exactly — the question about to be asked, why a rule came back. */
+  /**
+   * What exactly — the question about to be asked, why a rule came back, or,
+   * where the tool sent nothing of its own, the model's reasoning under the
+   * step it was produced beneath.
+   */
   detail?: string;
 }
 
@@ -159,6 +203,17 @@ export interface ChatTurnContext {
   onThinking?: (text: string) => void;
   /** One line per notable thing the turn did. */
   onStep?: (summary: string, kind: string, detail?: string) => void;
+  /**
+   * What the model said in a round that then went on to call a tool.
+   *
+   * **Kept, not sent.** It has already gone out word by word over `onDelta`,
+   * so an app watching has it and folds it into its own trail; what it cannot
+   * do is recover it later, because only the last round's text becomes the
+   * transcript row. So this writes it into the round's working and emits no
+   * frame — a second frame carrying words already on screen would be drawn
+   * twice.
+   */
+  onSaid?: (text: string) => void;
 }
 
 /**
@@ -362,6 +417,17 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
   protected abstract openConversation(input: {
     memberId: string;
     topic: string | undefined;
+    /**
+     * Which conversation this is, for a tool that has to know.
+     *
+     * The assistant's `delegate` is the one that does: handing a *follow-up*
+     * to the agent that already has the job means finding what this
+     * conversation handed over before, and a tool context closed over the
+     * member alone cannot ask that question. So the id is minted before the
+     * conversation rather than after it — the only reason `start` no longer
+     * takes `randomUUID()` inline.
+     */
+    sessionId: string;
   }): Promise<AgentConversation<Turn>>;
 
   /**
@@ -402,12 +468,16 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       if (oldest) await this.close(oldest.id);
     }
 
+    // Minted before the conversation, because a tool context is built with it
+    // — see `openConversation`.
+    const sessionId = randomUUID();
     const conversation = await this.openConversation({
       memberId: input.memberId,
       topic: input.topic,
+      sessionId,
     });
     const session: ChatSession<Turn> = {
-      id: randomUUID(),
+      id: sessionId,
       memberId: input.memberId,
       conversation,
       lastAt: Date.now(),
@@ -468,7 +538,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     if (owner === null || owner !== memberId) return null;
 
     const topic = this.topicFromRows(rows);
-    const conversation = await this.openConversation({ memberId, topic });
+    const conversation = await this.openConversation({ memberId, topic, sessionId });
     const session: ChatSession<Turn> = {
       id: sessionId,
       memberId,
@@ -746,6 +816,21 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     }
   }
 
+  /**
+   * One line onto the round's working, bounded.
+   *
+   * Shared by the two things that record — a step the agent took, and prose it
+   * said on the way — because the bound is the point: a transcript row is a
+   * few hundred bytes by design, and a recorder that forgot to drop from the
+   * front is how one quietly becomes kilobytes. The **front** is what goes,
+   * so what an app keeps live is a suffix of what it reads back rather than a
+   * different set.
+   */
+  private keep(session: ChatSession<Turn>, step: ChatStepWire): void {
+    session.steps.push(step);
+    if (session.steps.length > TURN_STEP_LIMIT) session.steps.shift();
+  }
+
   private async runExchange(
     session: ChatSession<Turn>,
     text: string,
@@ -756,6 +841,34 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     // its steps to the next answer.
     session.steps = [];
     let turn: Turn;
+    /**
+     * The model's reasoning since the last step, waiting for something to
+     * belong to.
+     *
+     * **It arrives between one step and the next, which makes it the working
+     * of the step already on screen** — and it was streamed and then dropped,
+     * so the only sentence in a round that ever says *why* lasted exactly as
+     * long as the wait. Written onto that step's `detail` it survives with the
+     * rest of the round's working.
+     */
+    let reasoning = '';
+    /**
+     * Hang whatever has been reasoned onto the step it was produced under.
+     *
+     * **Only into an empty slot.** A tool's own `detail` is the better
+     * sentence wherever there is one — the device it looked at, why a draft
+     * came back — so it is never overwritten; and the buffer is spent either
+     * way, because reasoning that belonged to a step which already had a
+     * detail belongs to nothing else either.
+     */
+    const settleReasoning = (): void => {
+      const said = reasoning.trim();
+      reasoning = '';
+      if (said.length === 0) return;
+      const last = session.steps[session.steps.length - 1];
+      if (last === undefined || last.detail !== undefined) return;
+      last.detail = clip(said, STEP_DETAIL_LIMIT);
+    };
     try {
       // **Consumed once, and it goes to the model rather than to the row.**
       // `say` has already written what the person typed; this is the recap of
@@ -766,16 +879,18 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
 
       turn = await session.conversation[how](primed, {
         onStep: (summary, kind, detail) => {
+          // Whatever was reasoned belongs to the step it was reasoned under,
+          // which is the one already there rather than this one.
+          settleReasoning();
           // Kept as well as sent. The frame fills the wait; the copy is what
           // the row the round is about to write carries, so re-reading the
           // conversation next week shows the working rather than only the
           // answer it produced.
-          session.steps.push({
-            text: summary.slice(0, STEP_TEXT_LIMIT),
+          this.keep(session, {
+            text: clip(summary, STEP_TEXT_LIMIT),
             kind,
-            ...(detail !== undefined ? { detail: detail.slice(0, STEP_DETAIL_LIMIT) } : {}),
+            ...(detail !== undefined ? { detail: clip(detail, STEP_DETAIL_LIMIT) } : {}),
           });
-          if (session.steps.length > TURN_STEP_LIMIT) session.steps.shift();
           this.emit({
             sessionId: session.id,
             phase: 'step',
@@ -785,7 +900,16 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
             ...(detail !== undefined ? { detail } : {}),
           });
         },
+        // **Kept and not sent** — see `ChatTurnContext.onSaid`. The words have
+        // already gone out as deltas; what is missing is a copy that outlives
+        // the round, and a frame here would put the same sentence on screen
+        // twice.
+        onSaid: (text) => {
+          settleReasoning();
+          this.keep(session, { text: clip(text, STEP_TEXT_LIMIT), kind: 'said' });
+        },
         onThinking: (delta) => {
+          reasoning += delta;
           this.emit({
             sessionId: session.id,
             phase: 'thinking',
@@ -794,6 +918,10 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
           });
         },
         onDelta: (delta) => {
+          // The reply has started, so the thinking that led to it is finished
+          // — and this is a round that may end without another step, which
+          // would leave the buffer with nowhere to go.
+          settleReasoning();
           this.emit({
             sessionId: session.id,
             phase: 'delta',

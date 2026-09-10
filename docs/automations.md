@@ -828,6 +828,9 @@ to map seven tool names would need updating every time the agent learns an
 eighth. It is an open string, so a word a client has never met falls back to a
 neutral mark and still shows the sentence.
 
+There is a sixth, `said`, and it is the one kind that **never arrives as a
+frame** — see *What a round said before it went off to work* below.
+
 **The sentences live in `automation-tools.ts`**, beside the tools, so adding one
 puts its wording in the same edit. They are sentences rather than tool names:
 `Looked up list_rooms_zones.` is a function signature read out loud, on the one
@@ -874,6 +877,56 @@ it was.
 **And it is the `step` frame's own three fields.** An app draws the live trail
 from the frames and the stored one from these, so one shape rather than two that
 would drift; `kind` stays open there too.
+
+### What a round said before it went off to work
+
+**A model narrates as it works, and the narration was being thrown away.** It
+writes *"I'll set that up for you."* and then calls something; that sentence
+goes out over `delta` and never reaches the transcript, because only the **last**
+round's text becomes the row. So a conversation read back showed the conclusion
+with nothing of the commentary that led to it — and an app drawing it live had
+it worse, since deltas accumulate: two rounds of prose arrived run together with
+no space between them and were then replaced wholesale when the turn landed.
+
+It is written into the round's working now, as a step of its own with
+`kind: 'said'` and the model's own words as the `text`. Three rules.
+
+**It is kept and not sent.** No `step` frame goes out for it: the words have
+already reached the app as deltas while they were being written, and a frame
+carrying the same sentence would put it on screen twice. This is the only kind
+that behaves that way, which is why it is worth saying out loud — an app cannot
+tell from the frames that a `said` step is coming, and does not need to, because
+it already has the text.
+
+**Prose with nothing after it is the answer, and is not a step.** The test is
+`calls.length > 0` and nothing else; recording the final round's text as well
+would put the reply in the transcript twice.
+
+**And it is reported from `streamTurn`**, which both agents share, rather than
+from either pump — it is the same fact in both, and the loop is the one place
+that already has `said` and `calls` in hand.
+
+### Why, kept with the step it explains
+
+The model's reasoning arrives between one step and the next, which makes it the
+working of the step already on screen. It used to be streamed and dropped, so
+the only sentence in a round that ever says *why* lasted exactly as long as the
+wait — and a round read back was a thinner thing than the one somebody watched.
+
+It is hung on that step's `detail` when the next step lands, when prose is said,
+or when the reply starts — the last of those because a round can end without
+another step, which would leave it with nowhere to go. **Only into an empty
+slot**: a tool's own `detail` is the better sentence wherever there is one, and
+the buffer is spent either way, since reasoning that belonged to a step which
+already had a detail belongs to nothing else either.
+
+Both of these are what made `clip()` necessary. `slice` was enough while these
+fields held the hub's own fixed sentences, which never came near either bound;
+they hold model-written prose now, so a cut lands mid-word most times it happens
+and reads as a bug rather than as a bound. It cuts at a word, appends an
+ellipsis, and **counts the ellipsis against the bound** — or a "cut to 200" is
+201, which is the kind of off-by-one that a limit written down in two
+repositories gets wrong once and then disagrees about for ever.
 
 ### Which provider it runs on, and it is not the mapper's
 

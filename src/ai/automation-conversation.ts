@@ -132,6 +132,20 @@ export interface AutomationTurnContext {
    * shows the words.
    */
   onStep?: (summary: string, kind: AutomationStepKind, detail?: string) => void;
+  /**
+   * What the model said in a round that then went on to call a tool.
+   *
+   * **Declared here as well as on `ChatTurnContext`, because this interface is
+   * where an agent reads the contract.** The runtime passes one object across
+   * both, so leaving it off would work — structurally, a wider object flows
+   * into a narrower parameter and the property is simply invisible — and that
+   * is the failure worth avoiding: a callback that exists at runtime, is
+   * forwarded by this file's own agent, and cannot be seen by anybody reading
+   * the type it is forwarded under.
+   *
+   * See `ChatTurnContext.onSaid` for why it is kept rather than sent.
+   */
+  onSaid?: (text: string) => void;
 }
 
 /**
