@@ -20,6 +20,14 @@ import type { HomeStructure, HubEventBus } from '../core/bus.js';
 import type { Logger } from '../logging.js';
 import { commandSchema } from '../schema/index.js';
 import type { MatterAdapter } from '../adapters/matter/adapter.js';
+// Runtime, and safe to be: this module imports nothing itself, which is what
+// keeps `@matter/main` out of the graph of a hub that isn't running Matter.
+import {
+  CommissionError,
+  commissionFailure,
+  type CommissionFailure,
+} from '../adapters/matter/commission-failures.js';
+import type { CommissionStep } from '../adapters/matter/adapter.js';
 import type { ZigbeeAdapter } from '../adapters/zigbee/adapter.js';
 // Dependency-free model catalog (a price table and an allowlist) — importing
 // it here does not pull the AI stack into the API layer.
@@ -109,6 +117,11 @@ export interface ApiDeps {
   /** Where the owner's radio choice is stored, and how many radios fit. */
   dataDir: string;
   radioBudget: RadioBudget;
+  /**
+   * Where the coordinator detector records what it found — read only to tell
+   * "no Zigbee stick" apart from "the stick is here and Matter has the board".
+   */
+  zigbeeEnvFile: string;
   /** Zigbee2MQTT's data directory — read only to say *why* Zigbee is down. */
   z2mDataDir: string;
   /**
@@ -162,11 +175,40 @@ function sameCommit(a: string, b: string): boolean {
   return a.startsWith(b) || b.startsWith(a);
 }
 
+/**
+ * A Matter pairing, as the app watches it.
+ *
+ * **Everything new here is additive, and that is the whole design.** `status`
+ * keeps its three words exactly — GetHome Studio reads this route too, and a
+ * fourth value is a value an existing client silently drops on the floor. So
+ * the two facts worth adding arrive beside it rather than inside it.
+ *
+ * `step` is the difference between "hold the accessory's button until it
+ * blinks" and "leave it alone now", which is the only advice worth giving
+ * during the two minutes this takes — a screen saying "working…" through both
+ * is a screen somebody unplugs the accessory in the middle of.
+ *
+ * `failure` is the named reason (`adapters/matter/commission-failures.ts`),
+ * and it is also where a **cancel** lives: a job somebody called off is
+ * `failed` with `kind: 'cancelled'`, so an old client shows its ordinary "that
+ * didn't pair" and a new one goes quietly back to the viewfinder. `error`
+ * stays beside it carrying the same sentence, because it is what a client
+ * built before any of this reads and there is no version for it to check.
+ */
 interface CommissionJob {
   id: string;
   status: 'running' | 'done' | 'failed';
+  /** Where a running job has got to. Absent once it has finished. */
+  step?: CommissionStep;
   nodeId?: string;
   error?: string;
+  failure?: CommissionFailure;
+  /** Who started it, kept for the activity trail rather than for the guard. */
+  memberId?: string;
+  /** When it started, so a client that reconnects can size its own patience. */
+  startedAt: number;
+  /** The hub's own deadline, so a screen counts down rather than guessing. */
+  deadline: number;
 }
 
 /**
@@ -177,6 +219,17 @@ interface CommissionJob {
 const PHOTO_BODY_LIMIT = 12 * 1024 * 1024;
 
 const COMMISSION_JOB_TTL_MS = 10 * 60 * 1000;
+/**
+ * What the hub promises a pairing will take at most, so an app can count down
+ * instead of guessing.
+ *
+ * Deliberately a little longer than the adapter's own budget rather than the
+ * same number: this is the deadline a *screen* is drawn against, and one that
+ * expires a second before the hub answers turns every ordinary failure into
+ * two contradicting messages. The adapter is the authority on when to stop;
+ * this is the promise about it.
+ */
+const MATTER_COMMISSION_BUDGET_MS = 5 * 60 * 1000;
 const PAIR_MAX_FAILURES = 10;
 const PAIR_WINDOW_MS = 5 * 60 * 1000;
 
@@ -1173,7 +1226,26 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    */
   app.post('/api/v1/matter/commission', needs('device.add'), async (request, reply) => {
     if (!deps.matter) return reply.code(409).send({ error: 'matter_disabled' });
-    const body = z.object({ pairingCode: z.string().min(8).max(128) }).parse(request.body);
+    const body = z
+      .object({
+        pairingCode: z.string().min(8).max(128),
+        /**
+         * The Wi-Fi to hand an accessory that has none, for a hub that cannot
+         * read its own (`core/wifi.ts`). Never logged and never stored: it goes
+         * straight into the commissioning conversation and is forgotten with
+         * the job.
+         */
+        wifi: z
+          .object({ ssid: z.string().min(1).max(32), passphrase: z.string().min(8).max(63) })
+          .optional(),
+      })
+      .parse(request.body);
+    // One at a time, and said as a refusal rather than a queue: the second
+    // caller is a second *person*, in a house where somebody is already
+    // standing over an accessory holding its button down.
+    if (deps.matter.isCommissioning) {
+      return reply.code(409).send({ error: 'already_commissioning' });
+    }
     // Recorded on the *request*, not on the result: the hub's log is what was
     // asked for, and the accessory's own arrival is the registry's
     // `device.added` a moment later. The pairing code never goes in — it is a
@@ -1184,29 +1256,104 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       memberId: request.member!.id,
       data: { memberName: request.member!.name },
     });
-    const job: CommissionJob = { id: randomUUID(), status: 'running' };
+    const startedAt = Date.now();
+    const job: CommissionJob = {
+      id: randomUUID(),
+      status: 'running',
+      step: 'looking',
+      memberId: request.member!.id,
+      startedAt,
+      deadline: startedAt + MATTER_COMMISSION_BUDGET_MS,
+    };
     commissionJobs.set(job.id, job);
-    deps.events.emit('commissioningProgress', job.id, 'running');
+    /**
+     * One place that moves a job and tells everybody, so the frame and the
+     * polled route can never disagree about it — which is exactly how a screen
+     * ends up stranded on "working…" while `GET` already says it failed.
+     */
+    const move = (
+      status: CommissionJob['status'],
+      extra?: { step?: CommissionStep; nodeId?: string; failure?: CommissionFailure },
+    ): void => {
+      job.status = status;
+      const step = status === 'running' ? (extra?.step ?? job.step) : undefined;
+      if (step === undefined) delete job.step;
+      else job.step = step;
+      if (extra?.nodeId !== undefined) job.nodeId = extra.nodeId;
+      if (extra?.failure !== undefined) {
+        job.failure = extra.failure;
+        job.error = extra.failure.summary;
+      }
+      deps.events.emit('commissioningProgress', {
+        jobId: job.id,
+        status,
+        ...(job.step !== undefined ? { step: job.step } : {}),
+        ...(job.nodeId !== undefined ? { nodeId: job.nodeId } : {}),
+        ...(job.failure !== undefined ? { failure: job.failure } : {}),
+        deadline: job.deadline,
+      });
+    };
+    move('running', { step: 'looking' });
     void deps
-      .matter!.commission(body.pairingCode)
-      .then((nodeId) => {
-        job.status = 'done';
-        job.nodeId = nodeId;
-        deps.events.emit('commissioningProgress', job.id, 'done', nodeId);
+      .matter!.commission({
+        pairingCode: body.pairingCode,
+        ...(body.wifi !== undefined
+          ? { wifi: { ssid: body.wifi.ssid, passphrase: body.wifi.passphrase } }
+          : {}),
+        onProgress: (step) => {
+          // Only forwards, and only while the job is still running: a late
+          // `pairing` arriving after a cancel would reopen a finished screen.
+          if (step === 'pairing' && job.status === 'running' && job.step === 'looking') {
+            move('running', { step: 'pairing' });
+          }
+        },
       })
-      .catch((error: Error) => {
-        job.status = 'failed';
-        job.error = error.message;
-        deps.events.emit('commissioningProgress', job.id, 'failed', error.message);
+      .then((nodeId) => move('done', { nodeId }))
+      .catch((error: unknown) => {
+        const failure =
+          error instanceof CommissionError ? error.failure : commissionFailure('failed', String(error));
+        // **Logged**, which it was not. A pairing that fails is the single most
+        // asked-about thing this hub does, and until now the only record of one
+        // was a WebSocket frame that had already gone — so the journal of a hub
+        // whose owner could not pair anything showed one line saying discovery
+        // had started and nothing else, ever.
+        deps.log.warn({ kind: failure.kind, detail: failure.detail }, 'Matter pairing failed.');
+        move('failed', { failure });
       })
       .finally(() => forgetJobLater(job.id));
-    return reply.code(202).send({ jobId: job.id });
+    return reply.code(202).send({ jobId: job.id, deadline: job.deadline });
   });
 
   app.get('/api/v1/matter/commission/:jobId', authed, async (request, reply) => {
     const { jobId } = z.object({ jobId: z.uuid() }).parse(request.params);
     const job = commissionJobs.get(jobId);
     if (!job) return reply.code(404).send({ error: 'not_found' });
+    return job;
+  });
+
+  /**
+   * Call off a pairing.
+   *
+   * Worth having because the wait is long and the commonest reason to abandon
+   * it is knowing already that it will fail — the wrong code, the wrong box,
+   * an accessory whose light stopped blinking while somebody looked for their
+   * phone. Three minutes of a spinner they cannot stop is three minutes of an
+   * app that looks broken.
+   *
+   * **Whoever started it, or anybody who could have.** The permission is the
+   * same one that starts a pairing: a hub does one at a time, so "cancel" is
+   * about the *hub*, and a second member who cannot stop the first one's
+   * abandoned job cannot pair anything either until it times out.
+   */
+  app.post('/api/v1/matter/commission/:jobId/cancel', needs('device.add'), async (request, reply) => {
+    const { jobId } = z.object({ jobId: z.uuid() }).parse(request.params);
+    const job = commissionJobs.get(jobId);
+    if (!job) return reply.code(404).send({ error: 'not_found' });
+    // Already finished is not an error: the app pressed Cancel a moment after
+    // the hub gave up, and telling it off for that would be telling it off for
+    // the race the hub arranged. The job's own status is the answer.
+    if (job.status !== 'running') return job;
+    deps.matter?.cancelCommissioning();
     return job;
   });
 
@@ -2189,14 +2336,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       memberId: request.member!.id,
       data: { memberName: request.member!.name, mode: body.mode },
     });
-    return {
-      budget: deps.radioBudget,
-      mode: body.mode,
-      matter: deps.matter !== undefined,
-      canRunBoth: deps.radioBudget === 'both',
-      /** The switch is applied out of process; poll GET /hub for the result. */
-      applying: true,
-    };
+    // The whole `radio` block `GET /hub` answers with, from the same snapshot
+    // — because two shapes for one fact drift, and this response and that one
+    // are read by the same screen seconds apart. `applying` is true here
+    // because `writeRadioMode` has just recorded the request; what is *live*
+    // still comes from the adapters, and is deliberately stale.
+    return hubStatus.snapshot().radio;
   });
 
   // ── Updating the hub ─────────────────────────────────────────────────────

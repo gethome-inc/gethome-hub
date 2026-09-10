@@ -1244,6 +1244,103 @@ UNIT
 keep_wifi_awake
 keep_wifi_reachable
 
+# ── Bluetooth, so a factory-new Matter accessory can be found at all ───────
+# **An accessory that has never been on a network cannot be found on one.** A
+# Wi-Fi Matter plug out of its box — or one somebody has just held the button
+# on to reset — advertises over Bluetooth LE and nowhere else, and the
+# conversation that follows is what gives it the Wi-Fi it lives on afterwards.
+# Without this the hub can only take in accessories already on the LAN, which
+# is a minority of what people buy, and was for a long time the whole of what
+# it could do: the app searched the network for a device that was never going
+# to be there and said "Pairing with your hub" until somebody gave up.
+#
+# The radio is usually present and usually off. Raspberry Pi OS ships a
+# headless image with Bluetooth **soft-blocked** in rfkill, which is invisible
+# from anywhere the product can see: `hciconfig` lists the adapter perfectly
+# happily and bringing it up fails with an errno nothing logs. So this
+# unblocks it, makes that stick across reboots, and starts bluetoothd.
+matter_bluetooth() {
+  local rfkill_dir="${GETHOME_RFKILL_DIR:-/sys/class/rfkill}"
+  local entry name unblocked=""
+
+  # No adapter at all is an ordinary machine, not a fault: a Pi 4 with the
+  # radio disabled in config.txt, a virtual machine, an x86 box. The hub says
+  # so on GET /hub and the app explains it; there is nothing to warn about
+  # here.
+  [[ -d "$rfkill_dir" ]] || return 0
+
+  for entry in "$rfkill_dir"/*; do
+    [[ -r "$entry/name" ]] || continue
+    name="$(cat "$entry/name" 2>/dev/null || true)"
+    case "$name" in hci*) ;; *) continue ;; esac
+    # Writing the sysfs node rather than shelling out to `rfkill`: that binary
+    # is not on a minimal image, and this is one byte.
+    if [[ "$(cat "$entry/soft" 2>/dev/null || echo 0)" == "1" ]]; then
+      printf '0' | $SUDO tee "$entry/soft" >/dev/null 2>&1 || true
+    fi
+    [[ "$(cat "$entry/soft" 2>/dev/null || echo 1)" == "0" ]] && unblocked=1
+    if [[ "$(cat "$entry/hard" 2>/dev/null || echo 0)" == "1" ]]; then
+      warn "This board's Bluetooth is blocked by a hardware switch, so the hub cannot pair a brand-new Matter accessory. Accessories already on your network still pair normally."
+      return 0
+    fi
+  done
+
+  [[ -n "$unblocked" ]] || return 0
+
+  # `rfkill unblock` does not survive a reboot on its own. systemd-rfkill
+  # restores the state it saw at shutdown, so unblocking now and letting it
+  # save is the persistence — but only where it is enabled, so ask for it.
+  $SUDO systemctl enable systemd-rfkill >/dev/null 2>&1 || true
+  $SUDO systemctl enable bluetooth >/dev/null 2>&1 || true
+  if $SUDO systemctl start bluetooth >/dev/null 2>&1; then
+    say "Bluetooth is on, so the hub can pair a Matter accessory straight out of its box."
+  else
+    warn "Bluetooth would not start, so the hub can only pair Matter accessories that are already on your network. 'systemctl status bluetooth' says why."
+  fi
+}
+
+# ── The Wi-Fi the hub passes on ────────────────────────────────────────────
+# The other half of the above: taking an accessory on over Bluetooth means
+# handing it a network, and the hub cannot read the root-owned profile the
+# password lives in. deploy/wifi-credentials.sh says why this is a file the hub
+# is *given*. The dispatcher is what keeps it true — a home that retypes its
+# Wi-Fi password next month gets a fresh profile, and enumerating today's
+# profiles is exactly what cannot cover that.
+share_wifi_for_matter() {
+  local helper="${GETHOME_WIFI_CREDS_BIN:-/usr/local/lib/gethome-wifi-credentials.sh}"
+  local dispatcher="${GETHOME_WIFI_CREDS_DISPATCHER:-/etc/NetworkManager/dispatcher.d/52-gethome-wifi-credentials}"
+
+  $SUDO install -m 0755 "$HUB_DIR/deploy/wifi-credentials.sh" "$helper" 2>/dev/null || {
+    warn "Could not install the Wi-Fi helper, so the hub will ask for your Wi-Fi password when you pair a Matter accessory."
+    return 0
+  }
+
+  if command -v nmcli >/dev/null 2>&1; then
+    $SUDO mkdir -p "$(dirname "$dispatcher")" 2>/dev/null || true
+    # NM ignores a dispatcher script anybody but root can write, so the
+    # ownership and the mode are part of the fix, exactly as for the power-save
+    # one above.
+    if $SUDO tee "$dispatcher" >/dev/null <<DISPATCH
+#!/bin/sh
+# Installed by GetHome. Records the Wi-Fi this hub is on so it can pass it to a
+# Matter accessory it pairs over Bluetooth. deploy/wifi-credentials.sh says why.
+[ "\$2" = "up" ] || exit 0
+exec ${helper} --conf ${CONF_DIR} --quiet
+DISPATCH
+    then
+      $SUDO chown root:root "$dispatcher" 2>/dev/null || true
+      $SUDO chmod 0755 "$dispatcher" 2>/dev/null || true
+    fi
+  fi
+
+  # And once now, so pairing works on a hub nobody reconnects.
+  $SUDO env GETHOME_GROUP="$SERVICE_USER" "$helper" --conf "$CONF_DIR" || true
+}
+
+matter_bluetooth
+share_wifi_for_matter
+
+
 # ── mDNS ───────────────────────────────────────────────────────────────────
 # avahi answers for this machine's own name; the hub hands it the
 # `_gethome._tcp` service rather than running a second responder of its own.
@@ -1492,6 +1589,14 @@ Type=oneshot
 RemainAfterExit=no
 Environment=GETHOME_CONF=${CONF_DIR}
 ExecStart=/usr/local/lib/gethome-zigbee-detect.sh
+# The detector exits 1 to mean "Zigbee is not the radio here" — no coordinator
+# plugged in, or one that is plugged in on a board the owner has set to Matter.
+# That is an ordinary, correct state and install.sh reads the code to decide
+# what to tell the user, so the exit code stays. But systemd parks a oneshot
+# that exits non-zero in "failed", and a detector sitting there failed is
+# exactly what somebody finds when they go looking for why their Zigbee is
+# quiet — pointing at the detector instead of at the radio switch they used.
+SuccessExitStatus=1
 
 [Install]
 WantedBy=multi-user.target
@@ -1597,6 +1702,16 @@ RestartSec=5
 # system responder instead of running one of its own.
 ReadWritePaths=${DATA_DIR} /etc/avahi/services
 StateDirectory=gethome
+# Bluetooth, for commissioning a Matter accessory that has never been on a
+# network. noble talks to the controller over a raw HCI socket, which needs
+# CAP_NET_RAW and CAP_NET_ADMIN — and the usual advice, setcap on the node
+# binary, would hand raw sockets to every script anybody ever runs with that
+# node. Ambient capabilities are the same grant scoped to this one service,
+# which is why the bounding set names them too: without that line systemd
+# drops them before the ambient set is applied and the radio silently finds
+# nothing, exactly as it does with no capabilities at all.
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full

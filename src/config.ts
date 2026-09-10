@@ -71,6 +71,35 @@ const configSchema = z.object({
   ADAPTER_MQTT: boolFlag,
   ADAPTER_MATTER: boolFlag,
   /**
+   * Whether Matter commissioning may use Bluetooth.
+   *
+   * On by default, and the default is the point: an accessory that has never
+   * been on a network cannot be found on one, so a hub without this can only
+   * take in devices already on the LAN — which is a minority of what people
+   * buy, and was for a long time the whole of what this hub could do. It is a
+   * flag rather than an assumption because the machinery underneath is a
+   * native module and a system radio, and both can be absent for good reasons;
+   * a hub that cannot bring it up says so on `GET /hub` rather than failing to
+   * start.
+   */
+  ADAPTER_MATTER_BLE: boolFlag,
+  /** Which HCI adapter to commission over, on a machine with more than one. */
+  MATTER_BLE_HCI: z.coerce.number().int().min(0).max(15).default(0),
+  /**
+   * The Wi-Fi credentials the hub hands an accessory it is taking on over
+   * Bluetooth — see `core/wifi.ts` for why the hub is given this rather than
+   * reading the system's own network configuration.
+   */
+  WIFI_ENV_FILE: z.string().default('/etc/gethome/wifi.env'),
+  /**
+   * Where `gethome-zigbee-detect` records the coordinator it found.
+   *
+   * Read for one purpose: telling "this hub has no Zigbee stick" apart from
+   * "this hub has one and Matter has the board". Both are `connected: false`,
+   * they need opposite words, and the file is the only thing that knows.
+   */
+  ZIGBEE_ENV_FILE: z.string().default('/etc/gethome/zigbee.env'),
+  /**
    * How many radios this board can afford at once, written by `install.sh`
    * from the machine's memory. `one` means Matter and Zigbee2MQTT do not fit
    * together — a 512 MB board — and something has to choose between them.

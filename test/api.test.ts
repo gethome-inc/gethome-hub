@@ -114,6 +114,7 @@ describe.skipIf(!handle)('hub API', () => {
       // Nothing there to read, which is the ordinary state for a hub with no
       // coordinator — and must stay silent rather than becoming an error.
       z2mDataDir: path.join(dataDir, 'zigbee2mqtt'),
+      zigbeeEnvFile: path.join(dataDir, 'zigbee.env'),
       mqtt: testBroker(),
       // No radio, so it reports a closed window and publishes nothing.
       permitJoin: new PermitJoinService(undefined, log, () => {}),
@@ -1299,7 +1300,29 @@ describe.skipIf(!handle)('hub API', () => {
       // Live, not requested — this hub was built without a Matter adapter.
       matter: false,
       canRunBoth: false,
+      // No switch has been asked for here, and the window is the hub's own
+      // promise about how long one takes — an app draws a bar against it
+      // rather than inventing a number of its own.
+      applying: false,
+      applyingWindowMs: 150_000,
     });
+  });
+
+  it('says nothing about Matter pairing on a hub with no Matter adapter', async () => {
+    // Presence *is* the capability, the way `history` and `portraits` are:
+    // this hub has no Matter, so it must not answer a question about how its
+    // Matter pairing works. `bluetooth: false` there would send somebody with
+    // no Matter at all off to look at their Bluetooth.
+    const info = await app.inject({ method: 'GET', url: '/api/v1/hub' });
+    expect((info.json() as Record<string, unknown>).matter).toBeUndefined();
+  });
+
+  it('tells a stick that is out apart from one Matter has stood down', async () => {
+    // Both are `connected: false`, they need opposite words in an app, and
+    // the detector's own record is the only thing that knows which is which.
+    // Nothing has ever been recorded here, so this hub has never seen one.
+    const info = await app.inject({ method: 'GET', url: '/api/v1/hub' });
+    expect((info.json() as { zigbee: { coordinator: string } }).zigbee.coordinator).toBe('unknown');
   });
 
   it("records the owner's radio choice without applying it itself", async () => {
@@ -1320,6 +1343,19 @@ describe.skipIf(!handle)('hub API', () => {
 
     const info = await app.inject({ method: 'GET', url: '/api/v1/hub' });
     expect((info.json() as { radio: { mode: string } }).radio.mode).toBe('matter');
+
+    // **And the health check says so too, which is the point.** Applying a
+    // radio restarts the hub, so the app that asked is about to lose its
+    // socket and every screen in the house is about to see a hub that does not
+    // answer. It used to read that as "can't reach your hub" over a change
+    // somebody had just made on purpose. The moment is on disk, so it survives
+    // the restart it describes.
+    const status = info.json() as {
+      radio: { applying: boolean; applyingSince: number; applyingWindowMs: number };
+    };
+    expect(status.radio.applying).toBe(true);
+    expect(Math.abs(Date.now() - status.radio.applyingSince)).toBeLessThan(10_000);
+    expect(status.radio.applyingWindowMs).toBeGreaterThan(60_000);
   });
 
   it('refuses a radio it has never heard of', async () => {

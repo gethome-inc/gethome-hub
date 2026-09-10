@@ -16,6 +16,7 @@ import { FavoritesService } from './core/favorites.js';
 import { AccessService } from './core/access.js';
 import { PairingService } from './core/pairing.js';
 import { SettingsService } from './core/settings.js';
+import { readWifiCredentials } from './core/wifi.js';
 import { DeviceRegistry } from './core/registry.js';
 import { AiRunLog } from './core/ai-runs.js';
 import { MqttObserver } from './core/mqtt-observer.js';
@@ -219,7 +220,16 @@ async function main(): Promise<void> {
   }
   if (config.ADAPTER_MATTER) {
     const { MatterAdapter } = await import('./adapters/matter/adapter.js');
-    matter = new MatterAdapter({ dataDir: config.DATA_DIR, log: log.child({ module: 'matter' }) });
+    matter = new MatterAdapter({
+      dataDir: config.DATA_DIR,
+      log: log.child({ module: 'matter' }),
+      ble: config.ADAPTER_MATTER_BLE,
+      hciId: config.MATTER_BLE_HCI,
+      // A function, not a value: the home may retype its Wi-Fi password long
+      // after this hub booted, and the dispatcher that writes the file rewrites
+      // it on every association. Read per pairing, which is once in a while.
+      wifi: () => readWifiCredentials(config.WIFI_ENV_FILE),
+    });
     registry.registerAdapter(matter);
   }
 
@@ -270,6 +280,7 @@ async function main(): Promise<void> {
     dataDir: config.DATA_DIR,
     radioBudget: config.GETHOME_RADIO,
     z2mDataDir: config.Z2M_DATA_DIR,
+    zigbeeEnvFile: config.ZIGBEE_ENV_FILE,
     mqtt: {
       url: config.MQTT_URL,
       username: config.MQTT_USERNAME,

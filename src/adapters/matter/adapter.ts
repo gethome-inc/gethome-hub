@@ -1,13 +1,28 @@
 import path from 'node:path';
 import { CommissioningController } from '@project-chip/matter.js';
 import { NodeStates, type Endpoint, type PairedNode } from '@project-chip/matter.js/device';
-import { Environment } from '@matter/main';
-import { ClusterId, ManualPairingCodeCodec, NodeId, QrPairingCodeCodec } from '@matter/main/types';
+import { Environment, Millis } from '@matter/main';
+import { ActiveDiscoveries } from '@matter/main/node';
+import { ClusterId, NodeId } from '@matter/main/types';
 import type { AdapterBus, ProtocolAdapter } from '../adapter.js';
 import type { EndpointState, HubCommand } from '../../schema/index.js';
 import { descriptorFor, isInfrastructureOnly } from '../../schema/index.js';
 import { reduceReports, type AttributeReport } from './reducer.js';
 import { executeMatterCommand } from './commands.js';
+import { installBle, type BleStatus } from './ble.js';
+import {
+  classifyCommissionError,
+  CommissionError,
+  commissionFailure,
+  type CommissionFailure,
+} from './commission-failures.js';
+import {
+  discoveryCapabilitiesFor,
+  InvalidSetupCodeError,
+  needsBluetooth,
+  parseSetupCode,
+} from './setup-code.js';
+import type { WifiCredentials } from '../../core/wifi.js';
 import type { Logger } from '../../logging.js';
 
 const SWITCH_CLUSTER = 0x003b;
@@ -32,16 +47,82 @@ const SWITCH_EVENT = {
 
 const PRESS_COUNT_GESTURES = ['single', 'double', 'triple', 'quadruple'] as const;
 
+/**
+ * How long the hub looks for an accessory before saying it isn't there.
+ *
+ * Three minutes is the Matter spec's own minimum commissioning window
+ * (§ 5.4.2.3), so it is the longest a correctly-behaved accessory can be
+ * waiting to be found, and matter.js defaults to the same number. It is set
+ * here rather than left to the default for two reasons: the number is a
+ * promise the apps make to somebody watching a spinner, so it has to be a
+ * number this repository owns; and matter.js applies **no timeout at all**
+ * when one is not reached — `Discovery` guards its `withTimeout` on
+ * `!== undefined` — so a version that stopped filling the default in would
+ * turn every failed pairing into a job that never settles. It did exactly
+ * that once, and the screen said "Pairing with your hub" until the app was
+ * force-quit.
+ */
+const DISCOVERY_TIMEOUT_MS = 3 * 60 * 1000;
+
+/**
+ * The whole job's budget, discovery *and* everything after it.
+ *
+ * Finding the accessory is only the first half: PASE, attestation, the
+ * fabric, the network credentials and the first CASE session all follow, and
+ * each of them can stall against a device that has wandered off mid-flow. The
+ * discovery bound says nothing about those, so the job carries its own — half
+ * again, which is enough for a slow Thread join on a small board and short
+ * enough that nobody is left watching.
+ */
+const COMMISSION_TIMEOUT_MS = DISCOVERY_TIMEOUT_MS + 90 * 1000;
+
 export interface MatterAdapterOptions {
   dataDir: string;
   log: Logger;
+  /**
+   * Whether to bring Bluetooth up for commissioning. Off leaves the hub able
+   * to take in only accessories already on the network — which is what it
+   * could do before this existed.
+   */
+  ble?: boolean;
+  /** Which HCI adapter, on a machine with more than one. */
+  hciId?: number;
+  /**
+   * The Wi-Fi to hand an accessory that has none, read afresh each time: the
+   * home may have retyped its password since the hub booted.
+   */
+  wifi?: () => WifiCredentials | undefined;
+}
+
+/** What the caller asked for, beyond the code itself. */
+export interface CommissionRequest {
+  pairingCode: string;
+  /**
+   * Wi-Fi for an accessory being taken on over Bluetooth. Overrides the hub's
+   * own, for the hub that has none to offer — see `core/wifi.ts`.
+   */
+  wifi?: WifiCredentials;
+  /** Reported as the job moves, so a screen can say more than "working…". */
+  onProgress?: (step: CommissionStep) => void;
 }
 
 /**
- * Matter controller on the hub's own fabric, built on matter.js. Devices are
- * commissioned over IP (a device already on the network — Wi-Fi provisioned
- * by a phone, Ethernet, or shared via multi-admin). BLE-assisted
- * commissioning is a documented follow-up (docs/matter.md).
+ * Where a pairing has got to, in the two words that change what somebody
+ * should do. **Looking** is when "hold the button until it blinks" is the
+ * advice; **pairing** is when the accessory has answered and the only correct
+ * advice is to leave it alone.
+ */
+export type CommissionStep = 'looking' | 'pairing';
+
+/**
+ * Matter controller on the hub's own fabric, built on matter.js.
+ *
+ * Accessories are commissioned either **over Bluetooth** — a factory-new or
+ * factory-reset device, which has no network yet and is handed one during the
+ * conversation — or **over IP**, for anything already on the LAN: Ethernet,
+ * Thread behind a border router, or a device shared from another ecosystem
+ * under multi-admin. Which of the two is used is the accessory's own answer,
+ * carried in its QR payload, not a setting (see `setup-code.ts`).
  *
  * Needs the host's own network: Matter is site-local UDP (port 5540) plus
  * mDNS (5353), neither of which survives being NAT-ed. The hub runs directly
@@ -58,13 +139,57 @@ export class MatterAdapter implements ProtocolAdapter {
   private readonly states = new Map<string, EndpointState>();
   /** Switch-cluster features per `${nodeId}/${endpointId}` (buttons). */
   private readonly switchFeatures = new Map<string, { multiPress: boolean }>();
+  /** Whether commissioning may look over Bluetooth, and why not when it can't. */
+  private ble: BleStatus = { enabled: false, reason: 'off' };
+  /** The environment this controller runs in, kept so a job can stop a discovery. */
+  private environment: Environment | null = null;
+  /**
+   * The pairing in flight, if any.
+   *
+   * One at a time, deliberately. Two commissionings share one BLE radio and
+   * one mDNS scanner, and the only way to stop either is to stop *the*
+   * discovery — so a second job would be a job whose cancel button cancelled
+   * somebody else's. A hub takes in one accessory at a time in any case; the
+   * person doing it is standing next to it.
+   */
+  private inFlight: { cancel: (failure: CommissionFailure) => void } | null = null;
 
   constructor(private readonly options: MatterAdapterOptions) {}
+
+  /** Whether Bluetooth pairing is available here, for `GET /hub`. */
+  get bleStatus(): BleStatus {
+    return this.ble;
+  }
+
+  /** Whether the hub can offer an accessory a network of its own. */
+  get hasWifiCredentials(): boolean {
+    return this.options.wifi?.() !== undefined;
+  }
+
+  /** Whether a pairing is running right now. */
+  get isCommissioning(): boolean {
+    return this.inFlight !== null;
+  }
 
   async start(bus: AdapterBus): Promise<void> {
     this.bus = bus;
     const environment = Environment.default;
+    this.environment = environment;
     environment.vars.set('storage.path', path.join(this.options.dataDir, 'matter'));
+
+    // Before the controller is built: the BLE backend registers itself as a
+    // service on the environment, and the controller reads the services it
+    // has when it starts. Installed after that, it is a transport nothing is
+    // holding — which is how "BLE is not enabled on this platform" ends up in
+    // the log of a hub that has perfectly good Bluetooth.
+    this.ble = await installBle(environment, {
+      wanted: this.options.ble === true,
+      ...(this.options.hciId !== undefined ? { hciId: this.options.hciId } : {}),
+      log: this.options.log,
+    });
+    if (!this.ble.enabled && this.ble.detail !== undefined) {
+      this.options.log.warn(this.ble.detail);
+    }
 
     this.controller = new CommissioningController({
       environment: { environment, id: 'gethome-hub' },
@@ -107,39 +232,67 @@ export class MatterAdapter implements ProtocolAdapter {
   /**
    * Commission a device onto the hub fabric using a manual pairing code
    * (e.g. "749701123365521327694") or a QR payload ("MT:..."). Resolves to
-   * the node id once the device is attached.
+   * the node id once the device is attached, and rejects with a
+   * `CommissionError` naming what went wrong.
+   *
+   * Two refusals happen *before* anything is searched for, because in both
+   * cases the answer cannot change while somebody waits for it, and three
+   * minutes of a spinner ending in the same word is worse than the word now:
+   * a code this hub cannot read, and an accessory whose own code says
+   * Bluetooth on a hub that hasn't got any.
    */
-  async commission(pairingCode: string): Promise<string> {
+  async commission(request: CommissionRequest): Promise<string> {
     if (!this.controller) throw new Error('Matter controller is not running');
-
-    const trimmed = pairingCode.trim();
-    let passcode: number;
-    let shortDiscriminator: number | undefined;
-    let longDiscriminator: number | undefined;
-    if (trimmed.startsWith('MT:')) {
-      const payload = QrPairingCodeCodec.decode(trimmed)[0];
-      if (!payload) throw new Error('Invalid QR pairing code');
-      passcode = payload.passcode;
-      longDiscriminator = payload.discriminator;
-    } else {
-      const payload = ManualPairingCodeCodec.decode(trimmed.replace(/[^0-9]/g, ''));
-      passcode = payload.passcode;
-      shortDiscriminator = payload.shortDiscriminator;
+    if (this.inFlight) {
+      throw new CommissionError(
+        commissionFailure('failed', 'This hub is already pairing an accessory. Wait for that to finish.'),
+      );
     }
 
-    const nodeId = await this.controller.commissionNode({
-      commissioning: {},
-      discovery: {
-        identifierData:
-          longDiscriminator !== undefined
-            ? { longDiscriminator }
-            : shortDiscriminator !== undefined
-              ? { shortDiscriminator }
-              : {},
-        discoveryCapabilities: { onIpNetwork: true },
+    let code;
+    try {
+      code = parseSetupCode(request.pairingCode);
+    } catch (error) {
+      if (error instanceof InvalidSetupCodeError) {
+        throw new CommissionError(commissionFailure('bad-code', error.message));
+      }
+      throw error;
+    }
+
+    if (needsBluetooth(code, { ble: this.ble.enabled })) {
+      throw new CommissionError(commissionFailure('needs-bluetooth', this.ble.detail));
+    }
+
+    const capabilities = discoveryCapabilitiesFor(code, { ble: this.ble.enabled });
+    // Handed over only when Bluetooth is in play. An accessory found on the IP
+    // network already has a network, and offering it another is a write it did
+    // not ask for on a device somebody else may also own.
+    const wifi = capabilities.ble ? (request.wifi ?? this.options.wifi?.()) : undefined;
+
+    // The third refusal that belongs before the search rather than after it.
+    // An accessory whose code says Bluetooth and *only* Bluetooth has no
+    // network, and the whole point of the conversation it is waiting for is to
+    // be given one — so a hub with no Wi-Fi password to pass on can start this
+    // and cannot finish it. Saying so now is what lets the app ask for the
+    // password, which is a thing somebody can do; three minutes of a spinner
+    // is not.
+    if (capabilities.ble && !capabilities.onIpNetwork && wifi === undefined) {
+      throw new CommissionError(commissionFailure('needs-wifi'));
+    }
+
+    this.options.log.info(
+      {
+        ble: capabilities.ble,
+        onIpNetwork: capabilities.onIpNetwork,
+        wifi: wifi !== undefined,
+        ...(code.vendorId !== undefined ? { vendorId: code.vendorId } : {}),
       },
-      passcode,
-    });
+      'Matter: looking for an accessory to pair.',
+    );
+    request.onProgress?.('looking');
+
+    const nodeId = await this.runCommissioning(code, capabilities, wifi, request.onProgress);
+
     const externalId = nodeId.toString();
     await this.attachNode(nodeId);
     this.bus?.activity({
@@ -151,7 +304,114 @@ export class MatterAdapter implements ProtocolAdapter {
     return externalId;
   }
 
+  /**
+   * Stop the pairing in flight, if there is one.
+   *
+   * Returns whether there was anything to stop, so a route can answer 404 for
+   * a job that finished while the request was in the air rather than claiming
+   * to have cancelled something.
+   */
+  cancelCommissioning(): boolean {
+    if (!this.inFlight) return false;
+    this.inFlight.cancel(commissionFailure('cancelled'));
+    return true;
+  }
+
   // ── Internals ───────────────────────────────────────────────────────────
+
+  /**
+   * The commissioning call, bounded and interruptible.
+   *
+   * matter.js's `commissionNode` is a plain promise with no signal to abort —
+   * the cancellable object is the `Discovery` underneath it, which the legacy
+   * controller awaits and never hands back. So the race is here: the job
+   * settles on whichever of the pairing, the budget, and a cancel arrives
+   * first, and losing the race **stops the discovery** through the
+   * environment's own registry of live ones rather than leaving a Bluetooth
+   * scan running behind a screen that has moved on.
+   */
+  private async runCommissioning(
+    code: ReturnType<typeof parseSetupCode>,
+    capabilities: { ble: boolean; onIpNetwork: boolean },
+    wifi: WifiCredentials | undefined,
+    onProgress: ((step: CommissionStep) => void) | undefined,
+  ): Promise<NodeId> {
+    let settle: ((failure: CommissionFailure) => void) | undefined;
+    const interrupted = new Promise<never>((_resolve, reject) => {
+      settle = (failure) => reject(new CommissionError(failure));
+    });
+    const budget = setTimeout(
+      () => settle?.(commissionFailure('not-found')),
+      COMMISSION_TIMEOUT_MS,
+    );
+    budget.unref?.();
+    this.inFlight = { cancel: (failure) => settle?.(failure) };
+
+    // **A real signal, not a timer.** A candidate reaches `peers` when
+    // discovery has actually found an accessory matching the identifier, which
+    // is the exact moment the advice changes from "hold its button until it
+    // blinks" to "leave it alone now". A five-second timeout would have said
+    // the same thing about a hub that had found nothing at all, which is the
+    // sort of progress report that teaches people to ignore progress reports.
+    const found = (): void => onProgress?.('pairing');
+    this.controller!.node.peers.added.on(found);
+
+    const pairing = this.controller!.commissionNode({
+      commissioning: {
+        ...(wifi !== undefined
+          ? { wifiNetwork: { wifiSsid: wifi.ssid, wifiCredentials: wifi.passphrase } }
+          : {}),
+      },
+      discovery: {
+        identifierData:
+          code.longDiscriminator !== undefined
+            ? { longDiscriminator: code.longDiscriminator }
+            : code.shortDiscriminator !== undefined
+              ? { shortDiscriminator: code.shortDiscriminator }
+              : {},
+        discoveryCapabilities: capabilities,
+        timeout: Millis(DISCOVERY_TIMEOUT_MS),
+      },
+      passcode: code.passcode,
+    });
+
+    try {
+      return await Promise.race([pairing, interrupted]);
+    } catch (error) {
+      if (error instanceof CommissionError) {
+        // We lost the race, so the discovery is still running. Stopping it is
+        // what makes a cancel a cancel rather than a screen that closed.
+        this.stopDiscoveries();
+        // The pairing may still reject later; nothing is waiting for it, and
+        // an unhandled rejection would take the process down.
+        void pairing.catch(() => undefined);
+        throw error;
+      }
+      throw new CommissionError(classifyCommissionError(error));
+    } finally {
+      clearTimeout(budget);
+      this.controller!.node.peers.added.off(found);
+      this.inFlight = null;
+      settle = undefined;
+    }
+  }
+
+  /**
+   * Ask matter.js to stop looking.
+   *
+   * `ActiveDiscoveries` is the environment's own set of live ones and is the
+   * only handle on a discovery the legacy controller started. Cancelling every
+   * member is right *because* this adapter allows one pairing at a time —
+   * without that rule it would be one screen's Cancel stopping another's.
+   */
+  private stopDiscoveries(): void {
+    try {
+      const discoveries = this.environment?.get(ActiveDiscoveries);
+      for (const discovery of discoveries ?? []) discovery.stop();
+    } catch (error) {
+      this.options.log.warn({ err: error }, 'Could not stop the Matter discovery.');
+    }
+  }
 
   private async attachNode(nodeId: NodeId): Promise<void> {
     if (!this.controller || !this.bus) return;

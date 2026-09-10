@@ -148,6 +148,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
       dataDir,
       radioBudget: 'one',
       z2mDataDir: path.join(dataDir, 'zigbee2mqtt'),
+      zigbeeEnvFile: path.join(dataDir, 'zigbee.env'),
       mqtt: testBroker(),
       permitJoin: new PermitJoinService(undefined, log, () => {}),
       aiRuns: new AiRunLog(db, events),
@@ -355,6 +356,17 @@ describe.skipIf(!handle)('roles and permissions', () => {
       ['PATCH', '/api/v1/home', 'home.rename', { name: 'Not yours' }],
       ['POST', '/api/v1/zigbee/permit-join', 'device.add', { seconds: 60 }],
       ['POST', '/api/v1/matter/commission', 'device.add', { pairingCode: '34970112332' }],
+      // Cancelling is the same permission as starting, because the hub pairs
+      // one accessory at a time: a member who cannot call off somebody else's
+      // abandoned job cannot pair anything either until it times out. The
+      // guard runs before the handler, so a job id that never existed still
+      // proves the refusal.
+      [
+        'POST',
+        '/api/v1/matter/commission/44444444-4444-4444-a444-444444444444/cancel',
+        'device.add',
+        undefined,
+      ],
       ['PUT', '/api/v1/settings/radio', 'hub.radio', { mode: 'matter' }],
       ['DELETE', `/api/v1/devices/${deviceId}`, 'device.remove', undefined],
       ['GET', '/api/v1/settings/ai', 'hub.ai', undefined],
