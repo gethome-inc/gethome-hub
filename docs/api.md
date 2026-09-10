@@ -1584,7 +1584,7 @@ and then:
 {"type":"zigbeeEvent","event":{at,type,ieee,name?}}     joined|announced|interviewing|interviewed|interview-failed|left
 {"type":"aiRun","event":{phase,id,at,kind,exposesHash,vendor?,model?,step?,ok?,costUsd?,error?}}
 {"type":"automationRun","run":{automationId,name,at,trigger,cause,outcome,commands,refused,detail?}}
-{"type":"automationChat","chat":{sessionId,phase,at,text,kind?,detail?}}  phase: thinking | delta | step | turn
+{"type":"automationChat","chat":{sessionId,phase,at,text,kind?,detail?}}  phase: thinking | delta | step | turn | amend
 {"type":"assistantChat","chat":{…the same shape…}}      the assistant, on the same stream
 ```
 
@@ -1600,7 +1600,8 @@ envelope for every frame, so a second shape under a key it already has makes
 every automation frame fail to decode and takes the socket message with it.
 
 `automationChat` has **four phases, because a spinner is not an answer to "what
-is happening"**: one line per thing the agent did (`step`), its own summarized
+is happening"** (and a fifth that is not about a round at all — see `amend`
+below): one line per thing the agent did (`step`), its own summarized
 reasoning as it arrives (`thinking`), the reply as it is produced (`delta`), and
 the end of an exchange (`turn`) — after which the stored transcript is what to
 draw. A round is tens of seconds of the model reading the home and deciding
@@ -1615,6 +1616,18 @@ act* rather than the tool, so a client draws seven tools with five marks and the
 hub can grow an eighth without an app release. Open string, the
 `commandFailed.kind` rule: an unknown word gets a neutral mark and keeps its
 sentence. See [`docs/automations.md`](automations.md) for the vocabulary.
+
+**`amend` is not a round.** The other four are one exchange happening; `amend`
+says a row already *in* this transcript has changed and should be re-read,
+while whatever round is on screen carries on untouched. One thing sends it
+today: a handoff card's status, which is written when the **other** agent
+finishes a turn and can therefore land at any moment, including in the middle
+of a round of this conversation. It goes out on the conversation the *card* is
+in, which is the assistant's — sent under the delegated session's id an app
+re-read the chat where nothing had changed and left the card on "working" until
+the page was closed and reopened; sent as `turn` it took the live round's trail
+down with it. A client too old to know the word falls through to re-read and
+clear, which is where it was before.
 
 **A stored round carries one kind the socket never sends.** `data.steps` on a
 transcript row can hold `kind: "said"` — prose from a round that then went on to

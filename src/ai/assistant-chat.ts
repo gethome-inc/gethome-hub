@@ -96,7 +96,23 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
    * session id, so a hub that restarts loses only the live status updates —
    * the card still names the conversation and the app can read it directly.
    */
-  private readonly delegated = new Map<string, { messageId: string; payload: HandoffPayload }>();
+  private readonly delegated = new Map<
+    string,
+    {
+      messageId: string;
+      payload: HandoffPayload;
+      /**
+       * **Which of *this* agent's conversations the card is in.**
+       *
+       * Absent, and the frame saying the card had moved went out under the
+       * delegated session's id — so an app dutifully re-read the *other*
+       * conversation, where nothing had changed, and the card sat on "working"
+       * until somebody closed the page and came back. The row is on this
+       * transcript; this is the transcript to say so about.
+       */
+      chatId: string;
+    }
+  >();
 
   constructor(private readonly options: AssistantChatOptions) {
     super(options);
@@ -121,7 +137,14 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
    * model insisting it cannot help with no reason it could give. The
    * `RoleNotice` rule, one layer down.
    */
-  private async delegate(memberId: string, agentKey: string, brief: string): Promise<DelegateOutcome> {
+  private async delegate(input: {
+    memberId: string;
+    sessionId: string;
+    agentKey: string;
+    brief: string;
+    fresh?: boolean | undefined;
+  }): Promise<DelegateOutcome> {
+    const { memberId, sessionId, agentKey, brief } = input;
     const agent = this.delegates.find((entry) => entry.key === agentKey);
     if (!agent) {
       return {
@@ -139,6 +162,35 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
           'somebody who manages the home can change it in People & access.',
       };
     }
+
+    /**
+     * **A follow-up goes back to the conversation that did the work.**
+     *
+     * Every handover used to open a fresh one, so "now make it 11:30 instead"
+     * reached an agent that had never heard of the rule it had written five
+     * seconds earlier — and paid to read the home again to work out what was
+     * being talked about. Carrying on is the default for that reason: the
+     * failure it prevents (an agent with no idea what "it" is) is worse than
+     * the one it risks (an agent carrying a little history it does not need),
+     * and the model says `fresh` for a job that genuinely starts over.
+     *
+     * The session is **read back off this conversation's own rows** rather
+     * than remembered in a map — the `standingOf` rule: the transcript is the
+     * truth about what was handed over, and it survives the restart that a map
+     * would not.
+     */
+    const carryOn = input.fresh === true ? undefined : await this.lastHandedTo(sessionId, agentKey);
+    if (carryOn !== undefined && (await agent.resume({ memberId, sessionId: carryOn, brief }))) {
+      return {
+        sessionId: carryOn,
+        text:
+          `Passed on to the ${agent.title}, which already had this job and still has ` +
+          'everything it learned. It is working on it now, in the same conversation — the ' +
+          'person can see what it is doing and answer it directly. Tell them briefly what you ' +
+          'passed on, and do not describe the result: you will not see one.',
+      };
+    }
+
     const started = await agent.start({ memberId, brief });
     return {
       sessionId: started.sessionId,
@@ -147,6 +199,24 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
         'person can see what it is doing and answer it directly. Tell them briefly what you ' +
         'passed on, and do not describe the result: you will not see one.',
     };
+  }
+
+  /**
+   * The conversation this chat last handed to that agent, if it has.
+   *
+   * Off the transcript, newest first. A `handoff` row is the only record of a
+   * handover and it carries both halves — which agent, and which session — so
+   * there is nothing to keep in step.
+   */
+  private async lastHandedTo(sessionId: string, agentKey: string): Promise<string | undefined> {
+    const rows = await this.transcript(sessionId);
+    for (let index = rows.length - 1; index >= 0; index -= 1) {
+      const row = rows[index];
+      if (row?.role !== 'handoff') continue;
+      const data = row.data as { agent?: string; sessionId?: string } | undefined;
+      if (data?.agent === agentKey && typeof data.sessionId === 'string') return data.sessionId;
+    }
+    return undefined;
   }
 
   /**
@@ -190,13 +260,23 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
     if (status === tracked.payload.status && automationIds.length === tracked.payload.automationIds.length) {
       return;
     }
-    this.delegated.set(sessionId, { messageId: tracked.messageId, payload });
+    this.delegated.set(sessionId, { ...tracked, payload });
     await this.amend(tracked.messageId, payload);
-    // The card is on the assistant's transcript, so it is the assistant's
-    // socket that has to say it moved.
+    /**
+     * The card is on **this** conversation's transcript, so this is the
+     * conversation to say it moved about — and `amend` rather than `turn`,
+     * because nothing here is a round of it ending.
+     *
+     * Both halves were wrong and each on its own was enough to break it. The
+     * id was the delegated session's, so an app re-read the conversation where
+     * nothing had changed and left the card on "working" until the page was
+     * closed and reopened. And `turn` means "a round finished": this can land
+     * at any moment, including while somebody is mid-question here, and it
+     * would have taken that round's trail down with it.
+     */
     this.emit({
-      sessionId: tracked.payload.sessionId,
-      phase: 'turn',
+      sessionId: tracked.chatId,
+      phase: 'amend',
       at: new Date().toISOString(),
       text: 'handoff',
     });
@@ -233,7 +313,15 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
         ...standing,
       };
       const row = await this.write(session, 'handoff', handoff.brief, payload);
-      this.delegated.set(handoff.sessionId, { messageId: row.id, payload });
+      // **The newest row for that session wins**, which is what makes a
+      // follow-up work: a second handover to the same conversation writes a
+      // second card, and the status belongs to the one somebody is looking at
+      // rather than to the one scrolled off the top.
+      this.delegated.set(handoff.sessionId, {
+        messageId: row.id,
+        payload,
+        chatId: session.id,
+      });
       messages.push(row);
       session.produced += 1;
     }
@@ -256,6 +344,7 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
   protected async openConversation(input: {
     memberId: string;
     topic: string | undefined;
+    sessionId: string;
   }): Promise<AgentConversation<AssistantTurn>> {
     const ai = await this.options.settings.getAiSettings();
     if (!ai.enabled) throw new AgentNotConfiguredError('ai_disabled');
@@ -305,7 +394,7 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
       systemPrompt,
       taskPrompt,
       log: this.options.log,
-      tools: this.toolContext(input.memberId),
+      tools: this.toolContext(input.memberId, input.sessionId),
     });
   }
 
@@ -318,7 +407,7 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
    * feed is read a week later. And a handover is refused or allowed by *that
    * member's* role, which is a question only this conversation can answer.
    */
-  private toolContext(memberId: string): AssistantToolContext {
+  private toolContext(memberId: string, sessionId: string): AssistantToolContext {
     return {
       home: () => this.options.engine.homeView(),
       timezone: () => this.options.settings.timezone,
@@ -328,7 +417,8 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
       },
       runAutomation: async (id) =>
         this.options.engine.runManually(id, (await this.memberName(memberId)) ?? 'the assistant'),
-      delegate: async (agent, brief) => this.delegate(memberId, agent, brief),
+      delegate: async (agent, brief, fresh) =>
+        this.delegate({ memberId, sessionId, agentKey: agent, brief, fresh }),
       delegates: this.delegates.map((agent) => ({
         key: agent.key,
         title: agent.title,

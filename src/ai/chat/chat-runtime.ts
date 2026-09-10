@@ -417,6 +417,17 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
   protected abstract openConversation(input: {
     memberId: string;
     topic: string | undefined;
+    /**
+     * Which conversation this is, for a tool that has to know.
+     *
+     * The assistant's `delegate` is the one that does: handing a *follow-up*
+     * to the agent that already has the job means finding what this
+     * conversation handed over before, and a tool context closed over the
+     * member alone cannot ask that question. So the id is minted before the
+     * conversation rather than after it — the only reason `start` no longer
+     * takes `randomUUID()` inline.
+     */
+    sessionId: string;
   }): Promise<AgentConversation<Turn>>;
 
   /**
@@ -457,12 +468,16 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       if (oldest) await this.close(oldest.id);
     }
 
+    // Minted before the conversation, because a tool context is built with it
+    // — see `openConversation`.
+    const sessionId = randomUUID();
     const conversation = await this.openConversation({
       memberId: input.memberId,
       topic: input.topic,
+      sessionId,
     });
     const session: ChatSession<Turn> = {
-      id: randomUUID(),
+      id: sessionId,
       memberId: input.memberId,
       conversation,
       lastAt: Date.now(),
@@ -523,7 +538,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     if (owner === null || owner !== memberId) return null;
 
     const topic = this.topicFromRows(rows);
-    const conversation = await this.openConversation({ memberId, topic });
+    const conversation = await this.openConversation({ memberId, topic, sessionId });
     const session: ChatSession<Turn> = {
       id: sessionId,
       memberId,

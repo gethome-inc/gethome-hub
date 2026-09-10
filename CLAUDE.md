@@ -1155,7 +1155,7 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   rollback cost is named rather than discovered: an older build ignores the
   column and would list assistant chats among the automations ones, which is a
   confusing row on a build that has already failed its health check.
-  **The handoff is the design, and it is two rules.** The *brief* is the whole
+  **The handoff is the design, and it is three rules.** The *brief* is the whole
   interface — a self-contained task in the person's language, and the only
   thing that crosses — so the assistant never receives the other agent's tool
   calls, reasoning or transcript, which is what keeps its context the size of a
@@ -1167,7 +1167,25 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   questions and the rules are read from the sub-agent's own conversation, over
   the frames an app already draws. Its `status` moves as that agent's turns
   land, written by reading its transcript rather than by a second round with
-  the model: the assistant is never re-entered for a job it has handed on.
+  the model: the assistant is never re-entered for a job it has handed on —
+  and said as **`amend` on the assistant's own session**, because the card is
+  on that transcript and nothing here is a round ending. Both halves were
+  wrong and each alone broke it: under the *delegated* session's id an app
+  re-read the chat where nothing had changed and the card sat on "working"
+  until the page was closed and reopened, and as `turn` it would have taken a
+  live round's trail down with it whenever the other agent happened to move.
+  **And a follow-up goes back to the conversation that did the work.** Every
+  handover used to open a fresh one, so "now make it 11:30 instead" reached an
+  agent that had never heard of the rule it had written five seconds earlier
+  and paid to read the home again to find out what "it" was. `delegate` reads
+  the last `handoff` row in *this* conversation for that agent and continues
+  that session (`DelegateAgent.resume`, falling back to a fresh one for a
+  session that can no longer be carried on). Continuing is the **default**,
+  because the two failures are not the same size — no idea what is being
+  talked about, against a little history nobody needed — and `fresh: true` is
+  how the model says a job genuinely starts over. Read off the rows rather than
+  remembered in a map, the `standingOf` rule; a second handover writes a second
+  card and the **newest** one is the live one.
   **The registry is a table because of the third agent, not the second**
   (`src/ai/agents/registry.ts`): `delegate`'s description is *generated* from
   it, so adding an agent is one entry rather than a new tool, a new prompt

@@ -231,6 +231,7 @@ export class AutomationChat extends ChatRuntime<AutomationTurn> {
   protected async openConversation(input: {
     memberId: string;
     topic: string | undefined;
+    sessionId: string;
   }): Promise<AutomationConversation> {
     const automationId = input.topic;
     const ai = await this.options.settings.getAiSettings();

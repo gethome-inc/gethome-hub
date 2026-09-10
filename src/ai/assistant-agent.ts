@@ -224,7 +224,11 @@ export function createAssistantConversation(
               });
               continue;
             }
-            const outcome = await tools.delegate(parsed.data.agent, parsed.data.brief);
+            const outcome = await tools.delegate(
+              parsed.data.agent,
+              parsed.data.brief,
+              parsed.data.fresh,
+            );
             if (outcome.refused !== undefined) {
               context?.onStep?.('Could not hand that over', 'writing', outcome.refused);
               results.push({

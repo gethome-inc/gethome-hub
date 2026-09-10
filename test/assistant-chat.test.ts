@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { pino } from 'pino';
 import { HubEventBus } from '../src/core/bus.js';
 import { ActivityService } from '../src/core/activity.js';
@@ -210,8 +210,10 @@ describe('the assistant', () => {
     // The tool context is what the agent is handed; the scripted conversation
     // never calls it, so this exercises the same path the loop would.
     const tools = (
-      assistant as unknown as { toolContext: (id: string) => { control: (...args: never[]) => Promise<void> } }
-    ).toolContext(memberId);
+      assistant as unknown as {
+        toolContext: (id: string, sessionId: string) => { control: (...args: never[]) => Promise<void> };
+      }
+    ).toolContext(memberId, started.sessionId);
     const deviceId = randomUUID();
     await (tools.control as unknown as (
       d: string,
@@ -239,11 +241,22 @@ describe('the assistant', () => {
     const brief = 'switch the hall lamp on at sunset';
     const tools = (
       assistant as unknown as {
-        toolContext: (id: string) => {
-          delegate: (agent: string, brief: string) => Promise<{ sessionId: string; refused?: string }>;
+        toolContext: (
+          id: string,
+          sessionId: string,
+        ) => {
+          delegate: (
+            agent: string,
+            brief: string,
+            fresh?: boolean,
+          ) => Promise<{ sessionId: string; refused?: string }>;
         };
       }
-    ).toolContext(memberId);
+      // No conversation of its own here: this drives the tool directly, and
+      // "what did *this* chat hand over before" has no answer for a chat that
+      // does not exist — which is the same as never having handed anything
+      // over, and so a fresh conversation.
+    ).toolContext(memberId, randomUUID());
 
     // **The whole contract in one line: this returns before the other agent
     // has done anything.** A `delegate` that awaited the sub-agent's turn
@@ -298,11 +311,14 @@ describe('the assistant', () => {
     });
     const tools = (
       assistant as unknown as {
-        toolContext: (id: string) => {
-          delegate: (agent: string, brief: string) => Promise<{ sessionId: string }>;
+        toolContext: (
+          id: string,
+          sessionId: string,
+        ) => {
+          delegate: (agent: string, brief: string, fresh?: boolean) => Promise<{ sessionId: string }>;
         };
       }
-    ).toolContext(memberId);
+    ).toolContext(memberId, randomUUID());
     const handed = await tools.delegate('automations', brief);
     await automationChat.idle();
 
@@ -341,6 +357,131 @@ describe('the assistant', () => {
       'agent',
       'handoff',
     ]);
+  });
+
+  it('says the card moved on its own conversation, and not as a round ending', async () => {
+    const brief = 'switch the hall lamp on at sunset';
+    const { assistant, automationChat } = await assistantFor([], {
+      delegated: [
+        {
+          kind: 'question',
+          question: { question: 'Which hall lamp?', options: [{ id: 'a', label: 'The tall one' }] },
+        },
+      ],
+    });
+    const tools = (
+      assistant as unknown as {
+        toolContext: (id: string, sessionId: string) => {
+          delegate: (agent: string, brief: string) => Promise<{ sessionId: string }>;
+        };
+      }
+    ).toolContext(memberId, randomUUID());
+    const handed = await tools.delegate('automations', brief);
+    await automationChat.idle();
+
+    const { assistant: second } = await assistantFor([
+      {
+        kind: 'handed',
+        text: 'Handed that over.',
+        handoffs: [{ agent: 'automations', brief, sessionId: handed.sessionId }],
+      },
+    ]);
+    const started = await second.start({ memberId, message: 'sunset lamp please' });
+    await second.idle();
+
+    const frames: { sessionId: string; phase: string }[] = [];
+    events.on('assistantChat', (event) => {
+      frames.push({ sessionId: event.sessionId, phase: event.phase });
+    });
+
+    // The other agent moves, which is what changes the card.
+    await automationChat.reply(handed.sessionId, memberId, 'the tall one');
+    await automationChat.idle();
+
+    // **Waited for rather than assumed present.** Following the other agent is
+    // deliberately not awaited by anything — it hangs off its `turn` frame and
+    // reads that conversation's rows — so `idle()` on the delegated chat says
+    // nothing about whether this has happened yet.
+    const moved: { sessionId: string; phase: string }[] = [];
+    await vi.waitFor(() => {
+      moved.splice(0, moved.length, ...frames.filter((frame) => frame.phase === 'amend'));
+      expect(moved).toHaveLength(1);
+    });
+    // **This** conversation, because the card is on this transcript. Under the
+    // delegated session's id an app re-read the chat where nothing had changed
+    // and left the card on "working" until the page was closed and reopened.
+    expect(moved[0]?.sessionId).toBe(started.sessionId);
+    // And never as `turn`: this can land while somebody is mid-round here, and
+    // "a round finished" would take that round's trail down with it.
+    expect(frames.some((frame) => frame.phase === 'turn')).toBe(false);
+  });
+
+  it('gives a follow-up back to the conversation that already has the job', async () => {
+    const brief = 'switch the hall lamp on at sunset';
+    const { assistant, automationChat } = await assistantFor([
+      {
+        kind: 'handed',
+        text: 'On it.',
+        handoffs: [],
+      },
+    ]);
+    const first = await automationChat.start({ memberId, message: brief });
+    await automationChat.idle();
+
+    // A conversation of this agent's that has genuinely handed that job over —
+    // the row is what `delegate` reads back, so it has to be a real one.
+    const { assistant: talking } = await assistantFor([
+      {
+        kind: 'handed',
+        text: 'Handed that over.',
+        handoffs: [{ agent: 'automations', brief, sessionId: first.sessionId }],
+      },
+    ]);
+    const chat = await talking.start({ memberId, message: 'sunset lamp please' });
+    await talking.idle();
+
+    const tools = (
+      talking as unknown as {
+        toolContext: (id: string, sessionId: string) => {
+          delegate: (agent: string, brief: string, fresh?: boolean) => Promise<{ sessionId: string }>;
+        };
+      }
+    ).toolContext(memberId, chat.sessionId);
+
+    const again = await tools.delegate('automations', 'make it 11:30 instead');
+    await automationChat.idle();
+    // The same conversation, so it still has everything it learned — where a
+    // fresh one would have met "make it 11:30 instead" with no idea what "it"
+    // was, and paid to read the home again to find out.
+    expect(again.sessionId).toBe(first.sessionId);
+    expect((await automationChat.transcript(first.sessionId)).map((row) => row.text)).toContain(
+      'make it 11:30 instead',
+    );
+
+    // And a job that genuinely starts over says so.
+    const unrelated = await tools.delegate('automations', 'something else entirely', true);
+    await automationChat.idle();
+    expect(unrelated.sessionId).not.toBe(first.sessionId);
+  });
+
+  it('starts a fresh conversation when this chat has handed that agent nothing', async () => {
+    const { assistant, automationChat } = await assistantFor([{ kind: 'said', text: 'Hello.' }]);
+    const chat = await assistant.start({ memberId, message: 'hello' });
+    await assistant.idle();
+
+    const tools = (
+      assistant as unknown as {
+        toolContext: (id: string, sessionId: string) => {
+          delegate: (agent: string, brief: string) => Promise<{ sessionId: string }>;
+        };
+      }
+    ).toolContext(memberId, chat.sessionId);
+
+    const handed = await tools.delegate('automations', 'switch the hall lamp on at sunset');
+    await automationChat.idle();
+    expect((await automationChat.transcript(handed.sessionId))[0]?.text).toBe(
+      'switch the hall lamp on at sunset',
+    );
   });
 
   it('refuses a handover the member’s role cannot make, in a sentence', async () => {
