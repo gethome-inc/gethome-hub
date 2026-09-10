@@ -164,7 +164,7 @@ newest one is the live one: `AssistantChat` tracks a delegated session by the
 row it should amend, and the later row replaces the earlier. So the status
 belongs to the card somebody is looking at rather than to the one that has
 scrolled off the top, and an app draws the trail and the rules against the
-newest card for a session — see the iOS side's `supersededHandoffs`.
+newest card for a session — see the iOS side's `overtakenHandoffRows`.
 
 What the app draws is a `handoff` row on the assistant's transcript:
 
