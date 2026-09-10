@@ -218,8 +218,35 @@ rather than a capability that is silently absent for reasons nobody explains.
 
 ## Refusals
 
-The same three as the automations agent, carrying the same codes because both
-apps already branch on them: `ai_not_configured`, `ai_disabled`,
+**Two kinds, and they are not the same thing.** A *classifier* refusal is the
+model declining a request: HTTP 200, `stop_reason: "refusal"`, and a
+`stop_details` category. It is a content outcome, not an error — code that
+reads `content[0]` without checking the stop reason breaks on it, which is why
+both pumps check first. `refusalSentence` (`chat/agent-loop.ts`) turns the
+category into words: `reasoning_extraction` is somebody asking the assistant to
+show its own thinking, and `cyber` fires on benign security work, which for a
+hub means questions about its own network — the two a home can plausibly trip
+and the two a generic "try asking differently" helps least with. **The stop
+reason decides *that* it was refused and the category decides only the
+sentence**: `stop_details` is informational, is `null` on plenty of real
+refusals, and its `explanation` is not guaranteed present.
+
+Server-side `fallbacks` — where the API re-runs a declined request on another
+model inside the same call — is **deliberately not enabled.** It would recover
+a refusal rather than relabel it, and Anthropic's guidance is to opt in by
+default on Opus-5-class models. Two things argue the other way here. The
+workload is domestic: this agent answers "is the kitchen light on" and writes
+schedules, so the classifiers it could trip are close to never. And the
+parameter is beta with a churn record — `fallback: {model, on_partial}` →
+`fallbacks: [...]` → `fallbacks: "default"`, across three superseded beta
+headers — while this is firmware on a board in somebody's house that updates on
+its own schedule. Enabling it is a two-line change (`client.beta.messages.stream`,
+`betas: ['server-side-fallback-2026-07-01']`, `fallbacks: 'default'`, and the
+`Beta*` request types) and worth revisiting if refusals ever show up in the run
+log.
+
+The other three refusals are the automations agent's, carrying the same codes
+because both apps already branch on them: `ai_not_configured`, `ai_disabled`,
 `automation_needs_anthropic`. Each carries a sentence, so an app that has never
 met a code a later build adds still shows something true.
 

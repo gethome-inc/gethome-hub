@@ -17,6 +17,7 @@ import { AssistantChat } from '../src/ai/assistant-chat.js';
 import { AutomationNotConfiguredError } from '../src/ai/automation-chat.js';
 import type { AssistantTurn } from '../src/ai/assistant-agent.js';
 import type { AgentConversation, ChatTurnContext } from '../src/ai/chat/chat-runtime.js';
+import { refusalSentence } from '../src/ai/chat/agent-loop.js';
 import type { AutomationConversation, AutomationTurn } from '../src/ai/automation-conversation.js';
 import { AGENT_MODELS, effectiveAgentModel } from '../src/ai/models.js';
 
@@ -230,6 +231,22 @@ describe('the assistant', () => {
     expect(ai.anthropic.model).toBe('claude-opus-5');
     expect(ai.assistant.model).toBe(AGENT_MODELS.default);
     expect(ai.automations.model).toBe('claude-sonnet-5');
+  });
+
+  it('says which class of refusal it was, where the category is one a home can trip', async () => {
+    // `stop_details` is informational and is null on plenty of real refusals,
+    // so `stop_reason` decides *that* a round was refused and this decides only
+    // the sentence — a category the build has never met, and a null one, both
+    // keep the generic wording rather than falling through to nothing.
+    expect(refusalSentence({ stop_details: { type: 'refusal', category: 'reasoning_extraction', explanation: null } }))
+      .toContain('my own reasoning');
+    expect(refusalSentence({ stop_details: { type: 'refusal', category: 'cyber', explanation: null } }))
+      .toContain('security work');
+    expect(refusalSentence({ stop_details: { type: 'refusal', category: null, explanation: null } }))
+      .toBe('The model declined to answer that. Try asking for it differently.');
+    expect(refusalSentence({})).toBe(
+      'The model declined to answer that. Try asking for it differently.',
+    );
   });
 
   it('works a device through the registry and names the person in the log', async () => {

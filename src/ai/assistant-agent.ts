@@ -2,7 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import type { Logger } from '../logging.js';
 import { type AgentAuth } from './agent-core.js';
 import { isSupportedModel, supportedModelIds } from './models.js';
-import { QuestionGate, RunUsage, streamTurn } from './chat/agent-loop.js';
+import { QuestionGate, RunUsage, refusalSentence, streamTurn } from './chat/agent-loop.js';
 import type { AgentConversation, ChatTurnContext } from './chat/chat-runtime.js';
 import { askUserInput, type AskUser } from './automation-tools.js';
 import {
@@ -149,7 +149,7 @@ export function createAssistantConversation(
         if (round.response.stop_reason === 'refusal') {
           return {
             kind: 'stopped',
-            reason: 'The model declined to answer that. Try asking for it differently.',
+            reason: refusalSentence(round.response),
           };
         }
 

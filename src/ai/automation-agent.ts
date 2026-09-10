@@ -4,7 +4,7 @@ import { automationDocumentSchema } from '../automations/schema.js';
 import { sanityCheckAutomation } from '../automations/sanity.js';
 import { type AgentAuth } from './agent-core.js';
 import { isSupportedModel, supportedModelIds } from './models.js';
-import { QuestionGate, RunUsage, streamTurn } from './chat/agent-loop.js';
+import { QuestionGate, RunUsage, refusalSentence, streamTurn } from './chat/agent-loop.js';
 import {
   AUTOMATION_MAX_BUDGET_USD,
   AUTOMATION_MAX_RULES_PER_TURN,
@@ -185,7 +185,7 @@ export function createAutomationConversation(
         if (response.stop_reason === 'refusal') {
           return {
             kind: 'stopped',
-            reason: 'The model declined to answer that. Try asking for it differently.',
+            reason: refusalSentence(response),
           };
         }
 

@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
+import type { RefusalStopDetails } from '@anthropic-ai/sdk/resources/messages';
 import type { Logger } from '../../logging.js';
 import { AiUnavailableError, classifyApiError } from '../errors.js';
 import { EFFORT, MAX_OUTPUT_TOKENS } from '../agent-core.js';
@@ -169,6 +170,34 @@ export async function streamTurn(request: TurnRequest): Promise<{
   if (said.length > 0 && calls.length > 0) context?.onSaid?.(said);
 
   return { response, said, calls };
+}
+
+/**
+ * Why a round was declined, in the words the person who asked it can use.
+ *
+ * **Branch on `stop_reason`, never on this.** `stop_details` is informational
+ * and is `null` on plenty of real refusals, and its `explanation` is not
+ * guaranteed present — so the caller decides *that* a round was refused from
+ * the stop reason and asks this only for the sentence.
+ *
+ * The category is worth the read because the two that a *home* can plausibly
+ * trip are the two a generic "try asking differently" is least useful for.
+ * `reasoning_extraction` is somebody asking the assistant to show its
+ * thinking, which is a thing to say plainly rather than a failure; `cyber`
+ * fires on benign security work, which for this hub means questions about its
+ * own network. Everything else keeps the generic sentence, including a `null`
+ * category, which is a permanent valid state rather than a gap.
+ */
+export function refusalSentence(response: { stop_details?: RefusalStopDetails | null }): string {
+  switch (response.stop_details?.category) {
+    case 'reasoning_extraction':
+      return 'I can’t show you my own reasoning, but ask me the question itself and I’ll answer it.';
+    case 'cyber':
+      return 'That one is close enough to security work that the model declined it. Asking about '
+        + 'your own devices and what they do is fine — try it in those terms.';
+    default:
+      return 'The model declined to answer that. Try asking for it differently.';
+  }
 }
 
 /**
