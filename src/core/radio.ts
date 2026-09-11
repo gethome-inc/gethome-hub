@@ -173,6 +173,37 @@ export type StandDownReason =
   /** Something in the hub's own slice was killed for memory. Unambiguous. */
   | 'out-of-memory';
 
+/**
+ * How many times the hub will put both radios back on its own before it stops
+ * and leaves the decision to a person.
+ *
+ * **A retry is a trial, not a measurement**, and that is the honest heart of
+ * this: once a radio has been handed back, the board is no longer running the
+ * configuration that failed, so nothing it reports can say whether that
+ * configuration would fit *now*. The pressure is gone because the second radio
+ * is gone. There is no reading that answers the question, and pretending
+ * otherwise would be a number that only ever says yes.
+ *
+ * So the hub tries, twice, and each try costs a restart. Two is chosen against
+ * what actually changes a board's answer — a reboot, a desktop switched off,
+ * devices removed — all of which are things a person does, and a person who
+ * does one of them can press the switch. What the two retries are really for
+ * is the case nobody would think to press it for: a stand-down that was caused
+ * by something passing.
+ */
+export const MAX_AUTO_RETRIES = 2;
+
+/**
+ * How long after a stand-down the hub is willing to try again on its own, when
+ * the machine has not been restarted in the meantime.
+ *
+ * A week, because a retry that fails costs a restart and the thing it is
+ * waiting for is somebody changing their home. It is also the window that
+ * decides a stand-down is a *fresh* situation rather than flapping: two of them
+ * a week apart are two bad afternoons, and the retry budget starts over.
+ */
+export const RETRY_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+
 export interface RadioStandDown {
   /** Epoch ms. */
   at: number;
@@ -199,6 +230,29 @@ export interface RadioStandDown {
    * write would reset the count precisely when it had just become interesting.
    */
   acknowledgedAt?: number;
+  /**
+   * What the owner actually asked for, kept while the hub is not doing it.
+   *
+   * **Suspended, never revoked**, and this field is the whole difference. The
+   * stand-down writes `auto` into `radio-mode` because that is the only way a
+   * hub can change its own radios — so without somewhere else to keep it, the
+   * act of protecting the board silently threw away the decision it was
+   * protecting, and the owner's only route back was to notice and press the
+   * switch again. Here, the hub knows it owes them a second radio.
+   */
+  wish?: RadioMode;
+  /**
+   * The machine's boot at the moment it happened.
+   *
+   * A reboot is the single best evidence that the board is not the board that
+   * failed: it is what puts a memory cgroup into force, what a desktop being
+   * switched off needs, what clears a process that had wandered off, and what
+   * happens when somebody moves the card into a bigger Pi. Comparing boot ids
+   * costs one file read and needs no state of our own.
+   */
+  bootId?: string;
+  /** How many times the hub has retried since the owner last chose. */
+  autoRetries: number;
 }
 
 function standDownFile(dataDir: string): string {
@@ -235,6 +289,16 @@ export function readRadioStandDown(dataDir: string): RadioStandDown | undefined 
     typeof record.count === 'number' && Number.isFinite(record.count) && record.count > 0
       ? Math.floor(record.count)
       : 1;
+  const autoRetries =
+    typeof record.autoRetries === 'number' &&
+    Number.isFinite(record.autoRetries) &&
+    record.autoRetries > 0
+      ? Math.floor(record.autoRetries)
+      : 0;
+  const wish =
+    typeof record.wish === 'string' && (RADIO_MODES as readonly string[]).includes(record.wish)
+      ? (record.wish as RadioMode)
+      : undefined;
   return {
     at: record.at,
     reason: record.reason,
@@ -243,7 +307,59 @@ export function readRadioStandDown(dataDir: string): RadioStandDown | undefined 
     ...(typeof record.acknowledgedAt === 'number' && record.acknowledgedAt > 0
       ? { acknowledgedAt: record.acknowledgedAt }
       : {}),
+    ...(wish !== undefined ? { wish } : {}),
+    ...(typeof record.bootId === 'string' && record.bootId !== '' ? { bootId: record.bootId } : {}),
+    autoRetries,
   };
+}
+
+/**
+ * This boot, as the kernel names it.
+ *
+ * `/proc/sys/kernel/random/boot_id` is a fresh UUID per boot of the *machine*
+ * — a service restart does not change it, which is exactly the distinction
+ * that matters here: the hub restarts itself several times in the course of
+ * one stand-down, and none of those is evidence of anything. Absent off Linux,
+ * where the answer is simply that we have no reboot evidence rather than that
+ * nothing has rebooted.
+ */
+export function readBootId(): string | undefined {
+  try {
+    const raw = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+    return raw === '' ? undefined : raw;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether the hub should put both radios back by itself.
+ *
+ * Three gates, and the middle one is the only interesting one. There has to be
+ * something left to restore (`wish`), there has to be retry budget, and
+ * **something about the machine has to have changed** — because a retry is a
+ * trial that costs a restart, and repeating it against an unchanged board is
+ * flapping with a nicer name.
+ *
+ * A reboot is the strong evidence and is preferred; time is the weak one, and
+ * it is here only for the hub that runs for months without one. A clock that
+ * has gone backwards (a board with no RTC catching up with NTP) is not
+ * evidence at all, so a record dated in the future falls back to the reboot
+ * test alone rather than reading as a week having passed.
+ */
+export function shouldRestoreBoth(
+  record: RadioStandDown | undefined,
+  options: { now?: number; bootId?: string | undefined } = {},
+): boolean {
+  if (record?.wish !== 'both') return false;
+  if (record.autoRetries >= MAX_AUTO_RETRIES) return false;
+  const now = options.now ?? Date.now();
+  const rebooted =
+    record.bootId !== undefined &&
+    options.bootId !== undefined &&
+    options.bootId !== record.bootId;
+  const waited = record.at <= now && now - record.at >= RETRY_AFTER_MS;
+  return rebooted || waited;
 }
 
 /**
@@ -257,38 +373,81 @@ export function readRadioStandDown(dataDir: string): RadioStandDown | undefined 
  */
 export function writeRadioStandDown(
   dataDir: string,
-  entry: { reason: StandDownReason; detail?: string },
+  entry: { reason: StandDownReason; detail?: string; wish?: RadioMode; bootId?: string },
 ): RadioStandDown {
   const previous = readRadioStandDown(dataDir);
+  const now = Date.now();
+  // **A stand-down a week after the last one is a fresh situation, not
+  // flapping.** Without this the budget would be spent for good by two bad
+  // afternoons a year apart, and a hub that had run both radios happily for
+  // months would never try again after one failure.
+  const settled = previous === undefined || now - previous.at >= RETRY_AFTER_MS;
+  const bootId = entry.bootId ?? readBootId();
   const record: RadioStandDown = {
-    at: Date.now(),
+    at: now,
     reason: entry.reason,
     ...(entry.detail !== undefined ? { detail: entry.detail } : {}),
     count: (previous?.count ?? 0) + 1,
+    ...(entry.wish !== undefined ? { wish: entry.wish } : {}),
+    ...(bootId !== undefined ? { bootId } : {}),
+    autoRetries: settled ? 0 : (previous?.autoRetries ?? 0),
   };
   mkdirSync(dataDir, { recursive: true });
   writeFileSync(standDownFile(dataDir), `${JSON.stringify(record)}\n`, { mode: 0o644 });
   return record;
 }
 
-/**
- * Mark the notice answered, keeping the history.
- *
- * Called from `PUT /settings/radio`, because somebody choosing a radio — any
- * radio, `both` included — has by definition seen where the hub left them.
- * A no-op when there is nothing recorded, and when it is already answered.
- */
-export function acknowledgeRadioStandDown(dataDir: string): void {
-  const record = readRadioStandDown(dataDir);
-  if (record === undefined || record.acknowledgedAt !== undefined) return;
+function rewrite(dataDir: string, record: RadioStandDown): void {
   try {
-    writeFileSync(
-      standDownFile(dataDir),
-      `${JSON.stringify({ ...record, acknowledgedAt: Date.now() })}\n`,
-      { mode: 0o644 },
-    );
+    writeFileSync(standDownFile(dataDir), `${JSON.stringify(record)}\n`, { mode: 0o644 });
   } catch {
-    // The owner has made a choice either way. A notice that outstays its
-    // welcome is worth less than failing the request they actually made.
+    // Every caller here is doing something more important than this file. A
+    // notice that outstays its welcome, or a retry counted twice, is worth far
+    // less than the request that was actually being served.
   }
+}
+
+/**
+ * Somebody in the home chose a radio. Three things follow from that.
+ *
+ * The **notice** is answered, because choosing means having seen where the hub
+ * left them. The **wish** becomes what they chose, so a hub that had been
+ * holding a second radio for them stops if they have asked for one — and
+ * starts holding it if they have just asked for both. And the **retry budget
+ * starts over** when they ask for both, because a person deciding is not the
+ * hub flapping: whatever they know that the hub does not — devices removed, a
+ * desktop switched off, a bigger board — the two automatic tries are theirs
+ * again.
+ *
+ * The lifetime `count` is deliberately untouched by all of it. It is this
+ * board's history with running two radios, and it is what an app says when it
+ * offers the switch for the fourth time.
+ *
+ * A no-op when nothing has ever been recorded: there is no notice to answer
+ * and no radio being held, and writing a record here would invent a
+ * stand-down that never happened.
+ */
+export function recordRadioChoice(dataDir: string, mode: RadioMode): void {
+  const record = readRadioStandDown(dataDir);
+  if (record === undefined) return;
+  rewrite(dataDir, {
+    ...record,
+    acknowledgedAt: record.acknowledgedAt ?? Date.now(),
+    wish: mode,
+    autoRetries: mode === 'both' ? 0 : record.autoRetries,
+  });
+}
+
+/**
+ * The hub is about to try both radios again by itself.
+ *
+ * Written **before** the mode, like everything else on this path — the mode
+ * write is what wakes the unit that restarts this process, so a counter
+ * incremented afterwards is a counter that may never be incremented at all,
+ * and the failure mode of that is a hub that retries for ever.
+ */
+export function recordBothRetry(dataDir: string): void {
+  const record = readRadioStandDown(dataDir);
+  if (record === undefined) return;
+  rewrite(dataDir, { ...record, autoRetries: record.autoRetries + 1 });
 }

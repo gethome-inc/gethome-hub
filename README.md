@@ -233,7 +233,17 @@ Before you do, the honest version:
   your house stops working, at night.
 - **It catches trouble before anything dies.** The signal it acts on first is
   *throttling* — the kernel holding the hub at its ceiling — which happens long
-  before anything is killed. Nothing is lost when it fires.
+  before anything is killed. Nothing is lost when it fires, and it warns before
+  it acts: there is about a minute and a half in which you can make the choice
+  yourself rather than have it made.
+- **It gives the radio back.** Turning both on is remembered even while the hub
+  is not doing it, so a stand-down parks your choice rather than cancelling it.
+  The hub tries again by itself — twice — when the Pi has been restarted, or
+  after a week. It cannot *tell* whether both would fit now (the board is no
+  longer running the configuration that failed, so there is nothing to
+  measure), so each try is exactly that: a try, announced like any other radio
+  switch. After the second it stops and says so, and turning it back on
+  yourself hands it two more.
 - **Two things make the margin thinner**: running the desktop version of
   Raspberry Pi OS (about 75 MB), and a board that has not been restarted since
   the installer switched the kernel's memory accounting back on — until it has,

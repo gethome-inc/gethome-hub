@@ -9,9 +9,12 @@ import {
   type RadioPressureDeps,
 } from '../src/core/radio-pressure.js';
 import {
-  acknowledgeRadioStandDown,
+  MAX_AUTO_RETRIES,
+  RETRY_AFTER_MS,
   readRadioMode,
   readRadioStandDown,
+  recordRadioChoice,
+  shouldRestoreBoth,
   writeRadioStandDown,
 } from '../src/core/radio.js';
 
@@ -59,10 +62,14 @@ function watcher(
   samples: MemorySample[],
   options: {
     mode?: string;
+    budget?: 'both' | 'one';
     zigbee?: boolean;
     matter?: boolean;
     settleMs?: number;
     onStandDown?: RadioPressureDeps['onStandDown'];
+    onRestore?: RadioPressureDeps['onRestore'];
+    onPressure?: RadioPressureDeps['onPressure'];
+    bootId?: string;
   } = {},
 ) {
   writeFileSync(path.join(dir, 'radio-mode'), `${options.mode ?? 'both'}\n`);
@@ -70,9 +77,13 @@ function watcher(
   const read = (): MemorySample => samples[Math.min(index++, samples.length - 1)]!;
   return createRadioPressureWatch({
     dataDir: dir,
+    radioBudget: options.budget ?? 'one',
     radiosLive: () => ({ zigbee: options.zigbee ?? true, matter: options.matter ?? true }),
     log,
     onStandDown: options.onStandDown ?? (() => {}),
+    ...(options.onRestore !== undefined ? { onRestore: options.onRestore } : {}),
+    ...(options.onPressure !== undefined ? { onPressure: options.onPressure } : {}),
+    bootId: () => options.bootId,
     read,
     // Never fires: every test drives `tick()` itself, because a watch that
     // needs a real clock to be tested is a watch nobody tests the edges of.
@@ -91,11 +102,15 @@ async function run(watch: { tick(): Promise<void> }, times: number): Promise<voi
 }
 
 describe('a hub that has nothing to hand back', () => {
-  it('watches nothing on a hub that was never asked for both', async () => {
+  it('watches what is running, not what was asked for', async () => {
+    // **Two live radios is the condition, whatever route the board took to
+    // them.** Keying on `mode === 'both'` looked equivalent and is not: a hub
+    // whose `GETHOME_RADIO` was edited by hand runs two radios on `auto`, and
+    // so does one in the seconds between a stand-down writing the mode and the
+    // detector acting on it. Both were unwatched.
     const watch = watcher(throttling(40), { mode: 'auto' });
     await run(watch, 30);
-    expect(readRadioStandDown(dir)).toBeUndefined();
-    expect(readRadioMode(dir)).toBe('auto');
+    expect(readRadioStandDown(dir)?.reason).toBe('memory-pressure');
   });
 
   it('watches nothing while only one radio is actually up', async () => {
@@ -117,6 +132,7 @@ describe('a hub that has nothing to hand back', () => {
     const readings = throttling(40);
     const watch = createRadioPressureWatch({
       dataDir: dir,
+      radioBudget: 'one',
       radiosLive: () => ({ zigbee, matter: true }),
       log,
       onStandDown: () => {},
@@ -138,6 +154,7 @@ describe('the start-up peak, which is the peak', () => {
     writeFileSync(path.join(dir, 'radio-mode'), 'both\n');
     const watch = createRadioPressureWatch({
       dataDir: dir,
+      radioBudget: 'one',
       radiosLive: () => ({ zigbee: true, matter: true }),
       log,
       onStandDown: () => {},
@@ -269,7 +286,7 @@ describe('the record this leaves behind', () => {
   it('keeps the count when somebody answers the notice', () => {
     writeRadioStandDown(dir, { reason: 'memory-pressure' });
     writeRadioStandDown(dir, { reason: 'out-of-memory' });
-    acknowledgeRadioStandDown(dir);
+    recordRadioChoice(dir, 'matter');
     const record = readRadioStandDown(dir);
     expect(record?.count).toBe(2);
     expect(record?.acknowledgedAt).toBeGreaterThan(0);
@@ -277,9 +294,9 @@ describe('the record this leaves behind', () => {
 
   it('does not re-answer a notice that was already answered', () => {
     writeRadioStandDown(dir, { reason: 'memory-pressure' });
-    acknowledgeRadioStandDown(dir);
+    recordRadioChoice(dir, 'matter');
     const first = readRadioStandDown(dir)?.acknowledgedAt;
-    acknowledgeRadioStandDown(dir);
+    recordRadioChoice(dir, 'matter');
     expect(readRadioStandDown(dir)?.acknowledgedAt).toBe(first);
   });
 
@@ -294,7 +311,7 @@ describe('the record this leaves behind', () => {
 
   it('answers nothing at all on a hub this has never happened to', () => {
     expect(readRadioStandDown(dir)).toBeUndefined();
-    acknowledgeRadioStandDown(dir);
+    recordRadioChoice(dir, 'matter');
     expect(readRadioStandDown(dir)).toBeUndefined();
   });
 });
@@ -324,5 +341,273 @@ describe('the unit Zigbee2MQTT is actually installed as', () => {
     // The line that writes the unit file is the definition; anything else in
     // the script referring to it is downstream of this.
     expect(installer).toContain(`/etc/systemd/system/${Z2M_UNIT}`);
+  });
+});
+
+/**
+ * Getting the radio back, which is the half that decides whether any of this
+ * was worth doing.
+ *
+ * **A retry is a trial, not a measurement**, and everything here follows from
+ * that one fact. Once a radio has been handed back, the board is no longer
+ * running the configuration that failed — the pressure is gone *because* the
+ * second radio is gone — so no reading the hub can take says whether both
+ * would fit now. There is no such number, and a watch that invented one would
+ * have it answer yes for ever.
+ *
+ * So the hub asks about the **machine** instead: has it restarted, has a week
+ * passed. Neither proves anything; both are the things that actually change a
+ * board's answer, and the cost of being wrong is bounded to two tries.
+ */
+describe('putting both radios back', () => {
+  /** Stand a hub down, then leave it running one radio. */
+  function stoodDown(extra: Partial<Parameters<typeof writeRadioStandDown>[1]> = {}) {
+    writeRadioStandDown(dir, {
+      reason: 'memory-pressure',
+      detail: 'the hub was held at its memory limit in 7 of the last 10 checks',
+      wish: 'both',
+      bootId: 'boot-a',
+      ...extra,
+    });
+    writeFileSync(path.join(dir, 'radio-mode'), 'auto\n');
+  }
+
+  it('tries again once the machine has restarted', async () => {
+    stoodDown();
+    const onRestore = vi.fn();
+    const watch = watcher([healthy], { mode: 'auto', zigbee: false, bootId: 'boot-b', onRestore });
+    await run(watch, 3);
+    expect(readRadioMode(dir)).toBe('both');
+    expect(onRestore).toHaveBeenCalledTimes(1);
+    // Counted **before** the mode is written, because the mode write is what
+    // restarts this process — a counter reached afterwards is a hub that
+    // retries for ever.
+    expect(readRadioStandDown(dir)?.autoRetries).toBe(1);
+  });
+
+  it('waits on a machine that has not restarted', async () => {
+    // The hub restarts itself several times in the course of one stand-down
+    // and none of those is evidence of anything, which is exactly why this
+    // reads the *machine's* boot rather than counting its own starts.
+    stoodDown();
+    const watch = watcher([healthy], { mode: 'auto', zigbee: false, bootId: 'boot-a' });
+    await run(watch, 20);
+    expect(readRadioMode(dir)).toBe('auto');
+    expect(readRadioStandDown(dir)?.autoRetries).toBe(0);
+  });
+
+  it('tries again after a week on a hub that never restarts', async () => {
+    // The weak evidence, and the only thing that reaches a Pi which has been
+    // up for months. It costs one restart, which is why it is a week.
+    stoodDown({ bootId: 'boot-a' });
+    const record = readRadioStandDown(dir)!;
+    writeFileSync(
+      path.join(dir, 'radio-stand-down'),
+      `${JSON.stringify({ ...record, at: Date.now() - RETRY_AFTER_MS - 1000 })}\n`,
+    );
+    const watch = watcher([healthy], { mode: 'auto', zigbee: false, bootId: 'boot-a' });
+    await run(watch, 3);
+    expect(readRadioMode(dir)).toBe('both');
+  });
+
+  it('stops trying once the tries are spent', async () => {
+    stoodDown();
+    const record = readRadioStandDown(dir)!;
+    writeFileSync(
+      path.join(dir, 'radio-stand-down'),
+      `${JSON.stringify({ ...record, autoRetries: MAX_AUTO_RETRIES })}\n`,
+    );
+    const watch = watcher([healthy], { mode: 'auto', zigbee: false, bootId: 'boot-b' });
+    await run(watch, 20);
+    expect(readRadioMode(dir)).toBe('auto');
+  });
+
+  it('holds nothing for somebody who asked for one radio', async () => {
+    // The wish is what the hub owes them, and choosing a radio replaces it.
+    // Without this the hub would put `both` back over a decision somebody had
+    // made *after* the stand-down, which is the same silent overruling the
+    // wish exists to prevent, pointed the other way.
+    stoodDown();
+    recordRadioChoice(dir, 'matter');
+    const watch = watcher([healthy], { mode: 'matter', zigbee: false, bootId: 'boot-b' });
+    await run(watch, 20);
+    expect(readRadioMode(dir)).toBe('matter');
+  });
+
+  it('hands the tries back when somebody asks for both themselves', () => {
+    // A person deciding is not the hub flapping. Whatever they know that the
+    // hub does not — devices removed, a desktop switched off, a bigger board —
+    // the two automatic tries are theirs again.
+    stoodDown();
+    const record = readRadioStandDown(dir)!;
+    writeFileSync(
+      path.join(dir, 'radio-stand-down'),
+      `${JSON.stringify({ ...record, autoRetries: MAX_AUTO_RETRIES })}\n`,
+    );
+    recordRadioChoice(dir, 'both');
+    expect(readRadioStandDown(dir)?.autoRetries).toBe(0);
+    // And the lifetime count is untouched by any of it — that is this board's
+    // history, and it is what an app says when it offers the switch again.
+    expect(readRadioStandDown(dir)?.count).toBe(1);
+  });
+
+  it('does nothing at all on a hub this has never happened to', async () => {
+    const watch = watcher([healthy], { mode: 'auto', zigbee: false, bootId: 'boot-b' });
+    await run(watch, 20);
+    expect(readRadioMode(dir)).toBe('auto');
+    expect(readRadioStandDown(dir)).toBeUndefined();
+  });
+
+  it('will not retry into a hub that is already asking for both', async () => {
+    // **The loop guard.** A retry writes `both`, which restarts the hub, which
+    // runs this check again — and the record it finds still says a radio is
+    // owed, because nothing clears it until the stand-down is superseded. What
+    // stops the second write is the mode, so this drives the real tick rather
+    // than asserting on the predicate: `shouldRestoreBoth` is deliberately
+    // *true* here, and is deliberately not the whole gate.
+    stoodDown();
+    writeFileSync(path.join(dir, 'radio-mode'), 'both\n');
+    expect(shouldRestoreBoth(readRadioStandDown(dir), { bootId: 'boot-b' })).toBe(true);
+
+    const onRestore = vi.fn();
+    // One radio live — the hub asked for both and the coordinator has not come
+    // back yet, which is exactly the state a retry lands in.
+    const watch = watcher([healthy], { mode: 'both', zigbee: false, bootId: 'boot-b', onRestore });
+    await run(watch, 20);
+    expect(onRestore).not.toHaveBeenCalled();
+    expect(readRadioStandDown(dir)?.autoRetries).toBe(0);
+  });
+
+  it('starts the tries over when a stand-down is a fresh situation', () => {
+    // Two bad afternoons a year apart are not flapping, and a hub that had run
+    // both radios happily for months should not be out of tries because of
+    // something that happened last spring.
+    writeRadioStandDown(dir, { reason: 'memory-pressure', wish: 'both', bootId: 'boot-a' });
+    const first = readRadioStandDown(dir)!;
+    writeFileSync(
+      path.join(dir, 'radio-stand-down'),
+      `${JSON.stringify({ ...first, autoRetries: 2, at: Date.now() - RETRY_AFTER_MS - 1000 })}\n`,
+    );
+    writeRadioStandDown(dir, { reason: 'memory-pressure', wish: 'both', bootId: 'boot-a' });
+    expect(readRadioStandDown(dir)).toMatchObject({ autoRetries: 0, count: 2 });
+  });
+});
+
+describe('whether the machine has changed', () => {
+  const record = (extra: object = {}) => ({
+    at: Date.now(),
+    reason: 'memory-pressure' as const,
+    count: 1,
+    autoRetries: 0,
+    wish: 'both' as const,
+    bootId: 'boot-a',
+    ...extra,
+  });
+
+  it('is nothing to decide with no record', () => {
+    expect(shouldRestoreBoth(undefined, { bootId: 'boot-b' })).toBe(false);
+  });
+
+  it('needs a wish to restore', () => {
+    expect(shouldRestoreBoth(record({ wish: 'matter' }), { bootId: 'boot-b' })).toBe(false);
+    expect(shouldRestoreBoth(record({ wish: undefined }), { bootId: 'boot-b' })).toBe(false);
+  });
+
+  it('reads an unknown boot as no evidence, not as a reboot', () => {
+    // Off Linux, and on any kernel that does not publish one. "We cannot tell"
+    // must not read as "it has restarted", or every non-Linux hub retries on
+    // its first tick for ever.
+    expect(shouldRestoreBoth(record(), { bootId: undefined })).toBe(false);
+    expect(shouldRestoreBoth(record({ bootId: undefined }), { bootId: 'boot-b' })).toBe(false);
+  });
+
+  it('does not read a clock that went backwards as a week', () => {
+    // A board with no real-time clock catching up with NTP writes a record
+    // dated in the future. `now - at` is then negative, and the only thing
+    // that must not happen is it reading as time having passed.
+    const future = record({ at: Date.now() + RETRY_AFTER_MS * 2 });
+    expect(shouldRestoreBoth(future, { bootId: 'boot-a' })).toBe(false);
+    // The reboot test still works, because it has nothing to do with time.
+    expect(shouldRestoreBoth(future, { bootId: 'boot-b' })).toBe(true);
+  });
+});
+
+/**
+ * A board that was measured for both radios.
+ *
+ * It should never need any of this, which is exactly why it is worth checking:
+ * the insurance on a Pi 4 or 5 is that the hub **says** something and does
+ * nothing. There is no second radio to hand back — the board is supposed to
+ * run them — so acting would be the hub making a working home smaller to fix a
+ * problem that is somewhere else entirely.
+ */
+describe('a board measured for both', () => {
+  it('says the board is short of memory and takes nothing away', async () => {
+    const seen: Array<{ detail: string; willStandDown: boolean } | undefined> = [];
+    const watch = watcher(throttling(40), {
+      budget: 'both',
+      onPressure: (next) => seen.push(next),
+    });
+    await run(watch, 30);
+    expect(readRadioStandDown(dir)).toBeUndefined();
+    expect(readRadioMode(dir)).toBe('both');
+    expect(watch.pressure()?.detail).toContain('memory limit');
+    // The field that separates "something is about to happen" from "somebody
+    // should look at this". Getting it wrong on a Pi 5 means an app promising
+    // a stand-down that is never coming.
+    expect(watch.pressure()?.willStandDown).toBe(false);
+    expect(seen.filter(Boolean)).toHaveLength(1);
+  });
+
+  it('does not act on an out-of-memory kill either, but never hides one', async () => {
+    const watch = watcher(
+      [
+        { ...healthy, oomKills: 0 },
+        { ...healthy, oomKills: 1 },
+      ],
+      { budget: 'both' },
+    );
+    await run(watch, 2);
+    expect(readRadioStandDown(dir)).toBeUndefined();
+    expect(watch.pressure()?.detail).toContain('kill');
+    expect(watch.pressure()?.willStandDown).toBe(false);
+  });
+});
+
+describe('what the hub says while it is still deciding', () => {
+  it('warns before it acts, which is the only warning a small board gets', async () => {
+    // Three checks out of ten is worth telling somebody about; six is a board
+    // that cannot go on. The gap between them is a minute and a half in which
+    // the owner can make the choice themselves rather than have it made.
+    const readings: MemorySample[] = [];
+    for (let index = 0; index < 30; index += 1) {
+      readings.push({ ...healthy, high: Math.floor(index / 10) * 4 + Math.min(index % 10, 4) });
+    }
+    const watch = watcher(readings);
+    await run(watch, 30);
+    expect(readRadioStandDown(dir)).toBeUndefined();
+    expect(watch.pressure()).toBeDefined();
+    expect(watch.pressure()?.willStandDown).toBe(false);
+  });
+
+  it('says nothing at all about a board that is fine', async () => {
+    const watch = watcher([healthy]);
+    await run(watch, 40);
+    expect(watch.pressure()).toBeUndefined();
+  });
+
+  it('stops saying it once the board recovers', async () => {
+    // Live state, not a record: pressure is something that is happening rather
+    // than something that happened, and an app that was warning has to be able
+    // to stop. Four bad checks, then a long calm — the window rolls the bad
+    // ones out and the warning goes with them.
+    const readings: MemorySample[] = [];
+    for (let index = 0; index < 5; index += 1) readings.push({ ...healthy, high: index });
+    for (let index = 0; index < 40; index += 1) readings.push({ ...healthy, high: 4 });
+    const watch = watcher(readings);
+    await run(watch, 12);
+    expect(watch.pressure()).toBeDefined();
+    await run(watch, 12);
+    expect(watch.pressure()).toBeUndefined();
   });
 });

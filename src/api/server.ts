@@ -57,7 +57,8 @@ import { automationOutline } from '../automations/outline.js';
 import { automationShape, describeAutomation } from '../automations/summarize.js';
 import { automationRoom } from '../automations/scope.js';
 import type { AutomationHomeView } from '../automations/targets.js';
-import { acknowledgeRadioStandDown, RADIO_MODES, writeRadioMode, type RadioBudget, type RadioMode } from '../core/radio.js';
+import type { MemoryPressure } from '../core/radio-pressure.js';
+import { recordRadioChoice, RADIO_MODES, writeRadioMode, type RadioBudget, type RadioMode } from '../core/radio.js';
 import {
   canApplyUpdate,
   checkForUpdate,
@@ -117,6 +118,15 @@ export interface ApiDeps {
   /** Where the owner's radio choice is stored, and how many radios fit. */
   dataDir: string;
   radioBudget: RadioBudget;
+  /**
+   * The memory watch, for what it is seeing right now.
+   *
+   * Structurally typed and optional so a suite can leave it out — and so this
+   * module pulls nothing from `core/radio-pressure.ts` at runtime. The
+   * *record* of a stand-down is on disk and read from there; this is the live
+   * half, which only exists in the process doing the watching.
+   */
+  radioPressure?: { pressure(): MemoryPressure | undefined };
   /**
    * Where the coordinator detector records what it found — read only to tell
    * "no Zigbee stick" apart from "the stick is here and Matter has the board".
@@ -2363,10 +2373,11 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // **Before** the mode, for the reason every write on this path is ordered:
     // writing the mode wakes the unit that restarts this process. Somebody
     // choosing a radio — `both` included — has by definition seen where the
-    // hub left them, so the notice is answered; the *count* of how often this
-    // board has had to hand a radio back survives, because that is what an app
-    // offering `both` again should be able to say.
-    acknowledgeRadioStandDown(deps.dataDir);
+    // hub left them, so the notice is answered, the hub stops or starts
+    // holding a second radio for them, and asking for both hands back the two
+    // automatic tries. The lifetime *count* survives all of it, because that
+    // is what an app offering `both` again should be able to say.
+    recordRadioChoice(deps.dataDir, body.mode);
     writeRadioMode(deps.dataDir, body.mode);
     deps.log.info({ mode: body.mode }, 'Radio mode requested');
     // Tell every other client, now. The hub restarts a moment later *only* if

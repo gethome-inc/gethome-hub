@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createHubStatusReader } from '../src/core/hub-status.js';
-import { writeRadioStandDown, acknowledgeRadioStandDown } from '../src/core/radio.js';
+import { writeRadioStandDown, recordRadioChoice } from '../src/core/radio.js';
 import type { ApiDeps } from '../src/api/server.js';
 
 /**
@@ -44,12 +44,14 @@ function reader(options: {
   zigbeeConnected: boolean;
   matter: boolean;
   coordinatorPath?: string;
+  pressure?: { since: number; detail: string; willStandDown: boolean };
 }) {
   const deps = {
     dataDir: dir,
     z2mDataDir: path.join(dir, 'zigbee2mqtt'),
     zigbeeEnvFile: path.join(dir, 'zigbee.env'),
     radioBudget: options.budget,
+    radioPressure: { pressure: () => options.pressure },
     permitJoin: { state: { active: false, remainingSeconds: 0 } },
     ...(options.zigbeeConnected !== undefined
       ? { zigbee: { connected: options.zigbeeConnected } }
@@ -189,6 +191,35 @@ describe('a board measured for one, asked for both', () => {
       .toBeUndefined();
   });
 
+  it('says a radio is owed, and whether the hub will get it back itself', () => {
+    // **Suspended, not revoked.** The stand-down writes `auto` into the mode,
+    // because that is the only way a hub can change its own radios — so an app
+    // reading the mode alone would have to draw the switch as untouched, which
+    // is the hub silently undoing a decision rather than parking it.
+    writeRadioStandDown(dir, { reason: 'memory-pressure', wish: 'both', bootId: 'boot-a' });
+    const owed = reader({ budget: 'one', zigbeeConnected: true, matter: false }).snapshot();
+    expect(owed.radio.standDown).toMatchObject({ suspended: true, willRetry: true });
+
+    // And nothing is owed to a hub that is already running both, whatever its
+    // history — the question is about now.
+    writeFileSync(path.join(dir, 'radio-mode'), 'both\n');
+    const running = reader({ budget: 'one', zigbeeConnected: true, matter: true }).snapshot();
+    expect(running.radio.standDown).toMatchObject({ suspended: false, willRetry: false });
+  });
+
+  it('stops promising a retry once the tries are spent', () => {
+    // The sentence somebody needs at that point is *the hub has stopped
+    // trying, and you can still turn it on* — and an app can only say it if
+    // the hub distinguishes "will try" from "is stood down".
+    const record = writeRadioStandDown(dir, { reason: 'memory-pressure', wish: 'both' });
+    writeFileSync(
+      path.join(dir, 'radio-stand-down'),
+      `${JSON.stringify({ ...record, autoRetries: 2 })}\n`,
+    );
+    const snapshot = reader({ budget: 'one', zigbeeConnected: true, matter: false }).snapshot();
+    expect(snapshot.radio.standDown).toMatchObject({ suspended: true, willRetry: false });
+  });
+
   it('reports the stand-down, and whether it still needs saying', () => {
     writeRadioStandDown(dir, {
       reason: 'memory-pressure',
@@ -204,8 +235,51 @@ describe('a board measured for one, asked for both', () => {
     // Answering the notice does not erase the history. The two have different
     // lifetimes on purpose: the notice is over the moment somebody chooses a
     // radio, and the count is what an app says when it offers `both` again.
-    acknowledgeRadioStandDown(dir);
+    recordRadioChoice(dir, 'matter');
     const answered = reader({ budget: 'one', zigbeeConnected: true, matter: false }).snapshot();
     expect(answered.radio.standDown).toMatchObject({ count: 1, acknowledged: true });
+  });
+});
+
+/**
+ * Memory trouble, which is not only a small board's problem.
+ *
+ * A Pi 5 whose memory is being eaten has the same symptom and a completely
+ * different answer: there is no second radio to hand back, because the board
+ * is supposed to run both. Saying nothing there — because the hub has no move
+ * to make — is how a home degrades quietly, so the reading is reported on
+ * every board and `willStandDown` is what separates *something is about to
+ * happen* from *somebody should look at this*.
+ */
+describe('what the hub says about its memory', () => {
+  const pressure = {
+    since: Date.now(),
+    detail: 'the hub was held at its memory limit in 4 of the last 10 checks',
+    willStandDown: false,
+  };
+
+  it('says nothing on a board that is fine', () => {
+    expect(reader({ budget: 'both', zigbeeConnected: true, matter: true }).snapshot().radio.pressure)
+      .toBeUndefined();
+  });
+
+  it('reports it on a board measured for both, with nothing about to happen', () => {
+    const snapshot = reader({
+      budget: 'both',
+      zigbeeConnected: true,
+      matter: true,
+      pressure,
+    }).snapshot();
+    expect(snapshot.radio.pressure).toEqual(pressure);
+  });
+
+  it('reports it on a small board with the warning that it will act', () => {
+    const snapshot = reader({
+      budget: 'one',
+      zigbeeConnected: true,
+      matter: true,
+      pressure: { ...pressure, willStandDown: true },
+    }).snapshot();
+    expect(snapshot.radio.pressure?.willStandDown).toBe(true);
   });
 });

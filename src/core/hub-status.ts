@@ -10,6 +10,7 @@
 // `core/zigbee-events.ts` follows for the Zigbee adapter.
 import type { ApiDeps } from '../api/server.js';
 import {
+  MAX_AUTO_RETRIES,
   RADIO_APPLY_WINDOW_MS,
   RADIO_MODES,
   readRadioMode,
@@ -76,7 +77,38 @@ export interface HubStatusSnapshot {
       detail?: string;
       count: number;
       acknowledged: boolean;
+      /**
+       * The owner asked for both radios and the hub is not running them.
+       *
+       * **Suspended, not revoked** — the choice is still recorded, and this is
+       * what says so. An app that only knew the mode had gone back to `auto`
+       * would have to present the switch as untouched, which reads as the hub
+       * having quietly undone a decision rather than having parked it.
+       */
+      suspended: boolean;
+      /**
+       * The hub will try both again by itself.
+       *
+       * False once the tries are spent, which is the sentence somebody needs:
+       * *the hub has stopped trying, and you can still turn it on.* It says
+       * nothing about **when** — the answer is "next time this board
+       * restarts, or within a week" — because a countdown to a restart that
+       * has to happen anyway is a number nobody can use.
+       */
+      willRetry: boolean;
     };
+    /**
+     * The board running short of memory, right now, on any hardware.
+     *
+     * Deliberately **not** only a small-board concern: a Pi 5 whose memory is
+     * being eaten has exactly the same symptom and a completely different
+     * answer, and saying nothing there because the hub has no move to make is
+     * how a home degrades quietly. `willStandDown` is the difference —
+     * *something is about to happen* against *somebody should look at this*.
+     *
+     * Live, so it clears on its own; a stand-down is what is left behind.
+     */
+    pressure?: { since: number; detail: string; willStandDown: boolean };
     /**
      * Whether a switch asked for a moment ago is still landing.
      *
@@ -206,6 +238,9 @@ export function createHubStatusReader(deps: ApiDeps): HubStatusReader {
       // this very snapshot, so a TTL of any length would hand the app that
       // just dismissed it an `acknowledged: false`.
       const standDown = readRadioStandDown(deps.dataDir);
+      // In memory, not on disk — pressure is a thing that is happening rather
+      // than a thing that happened, and it has to be able to stop.
+      const pressure = deps.radioPressure?.pressure();
       return {
         zigbee: zigbeeNow,
         // What this hub can actually talk to is not the same on every machine: a
@@ -233,9 +268,18 @@ export function createHubStatusReader(deps: ApiDeps): HubStatusReader {
                   ...(standDown.detail !== undefined ? { detail: standDown.detail } : {}),
                   count: standDown.count,
                   acknowledged: standDown.acknowledgedAt !== undefined,
+                  // Both computed from the mode as well as the record, because
+                  // the question is about *now*: a hub that has since been put
+                  // back on both owes nobody anything, whatever its history.
+                  suspended: standDown.wish === 'both' && mode !== 'both',
+                  willRetry:
+                    standDown.wish === 'both' &&
+                    mode !== 'both' &&
+                    standDown.autoRetries < MAX_AUTO_RETRIES,
                 },
               }
             : {}),
+          ...(pressure !== undefined ? { pressure } : {}),
         },
         ...(deps.matter !== undefined
           ? {

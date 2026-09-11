@@ -25,7 +25,7 @@ import { PermitJoinService } from './core/permit-join.js';
 import { activityForLifecycleEvent, normalizeBridgeEvent } from './core/zigbee-events.js';
 import { buildServer } from './api/server.js';
 import { MdnsAdvertiser } from './mdns/advertiser.js';
-import { createRadioPressureWatch } from './core/radio-pressure.js';
+import { createRadioPressureWatch, type RadioPressureWatch } from './core/radio-pressure.js';
 import { lazyAiAssist } from './ai/lazy.js';
 import { MappingLibrary } from './ai/library.js';
 import { AutomationStore } from './automations/store.js';
@@ -263,6 +263,8 @@ async function main(): Promise<void> {
     log: log.child({ module: 'ai' }),
   });
 
+  let radioPressure: RadioPressureWatch | undefined;
+
   const app = await buildServer({
     db,
     log,
@@ -280,6 +282,10 @@ async function main(): Promise<void> {
     version,
     dataDir: config.DATA_DIR,
     radioBudget: config.GETHOME_RADIO,
+    // Late-bound on purpose: the API listens *before* the adapters start (so a
+    // slow radio cannot hold port 8420 closed), and the watch needs to know
+    // which radios came up. One indirection is cheaper than moving either.
+    radioPressure: { pressure: () => radioPressure?.pressure() },
     z2mDataDir: config.Z2M_DATA_DIR,
     zigbeeEnvFile: config.ZIGBEE_ENV_FILE,
     mqtt: {
@@ -383,8 +389,9 @@ async function main(): Promise<void> {
   // alternative is deciding here, once, something that changes while the
   // process runs: a coordinator plugged in an hour from now is exactly how a
   // hub arrives at running two radios without anybody restarting it.
-  const radioPressure = createRadioPressureWatch({
+  radioPressure = createRadioPressureWatch({
     dataDir: config.DATA_DIR,
+    radioBudget: config.GETHOME_RADIO,
     radiosLive: () => ({ zigbee: zigbee?.connected ?? false, matter: matter !== undefined }),
     log: log.child({ module: 'radio' }),
     onStandDown: async (record) => {
@@ -406,6 +413,21 @@ async function main(): Promise<void> {
       });
       events.emit('hubStatusChanged');
     },
+    onRestore: async (record) => {
+      // Its own row and its own kind, because it is the opposite news: the
+      // stand-down row says the home got smaller and nobody asked, and this
+      // one says the hub is giving back what it took. A feed that showed only
+      // the first would read as a hub that keeps taking things away.
+      await activity.record({
+        kind: 'hub.radio-restored',
+        message: 'The hub is trying both radios again — this board has restarted since it stopped.',
+        data: { attempt: record.autoRetries, count: record.count },
+      });
+      events.emit('hubStatusChanged');
+    },
+    // Pressure is news on every board, so this reaches every app whatever the
+    // hardware — on a Pi 5 it is the *whole* of what the hub does about it.
+    onPressure: () => events.emit('hubStatusChanged'),
   });
   radioPressure.start();
 
@@ -415,7 +437,7 @@ async function main(): Promise<void> {
     stopping.value = true;
     log.info(`${signal} received, shutting down…`);
     permitJoin.stop();
-    radioPressure.stop();
+    radioPressure?.stop();
     await automations.stop().catch(() => {});
     await mdns?.stop().catch(() => {});
     await app.close().catch(() => {});

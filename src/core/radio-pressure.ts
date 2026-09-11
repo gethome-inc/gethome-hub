@@ -1,8 +1,11 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
+  readBootId,
   readRadioMode,
   readRadioStandDown,
+  recordBothRetry,
+  shouldRestoreBoth,
   writeRadioMode,
   writeRadioStandDown,
   type RadioStandDown,
@@ -59,8 +62,23 @@ const SAMPLE_MS = 30_000;
  */
 const SETTLE_MS = 120_000;
 
-/** How many samples are kept, and how many of them must be bad to trip. */
+/**
+ * How many samples are kept, how many must be bad before the hub *says* so,
+ * and how many before it *acts*.
+ *
+ * Two thresholds rather than one, because they answer to different people. A
+ * board in trouble three checks out of ten is worth telling somebody about on
+ * **any** hardware — a Pi 5 included, where handing a radio back would be the
+ * wrong move and the right one is a person looking at what is eating the
+ * memory. Six of ten is a board that cannot go on, and only there does the hub
+ * take something away.
+ *
+ * The gap between them is also the one warning a small board gets *before*
+ * anything happens to it: a minute and a half in which somebody watching their
+ * phone can make the choice themselves rather than having it made.
+ */
 const WINDOW = 10;
+const WARN_AT = 3;
 const TRIP_AT = 6;
 
 /**
@@ -102,15 +120,44 @@ interface Logger {
   warn(obj: object, message: string): void;
 }
 
+/** What the hub is saying about its memory right now, if anything. */
+export interface MemoryPressure {
+  /** Epoch ms the board first looked like this. */
+  since: number;
+  /** One sentence naming what was measured. */
+  detail: string;
+  /**
+   * Whether the hub is about to do something about it.
+   *
+   * False on a board measured for both radios, where there is nothing to hand
+   * back — the board is supposed to run them, so the answer is a person
+   * looking at what is using the memory, and taking a radio away would be the
+   * hub making a working home worse.
+   */
+  willStandDown: boolean;
+}
+
 export interface RadioPressureDeps {
   dataDir: string;
   /**
+   * How many radios this board was measured for.
+   *
+   * The one thing that decides whether pressure is *acted* on. On a board
+   * measured for one, two live radios are an override and handing one back
+   * restores what was measured. On a board measured for both, they are the
+   * design — so the same reading gets the same sentence and no action.
+   */
+  radioBudget: 'both' | 'one';
+  /**
    * Which radios are up **right now**, asked every tick rather than captured.
    *
-   * The mode says what was wanted; this says what happened. A hub set to
-   * `both` on a board whose coordinator is unplugged is running one radio and
-   * has nothing to stand down, so it must not be watched — and that can change
-   * under us at any moment, because plugging a stick in is a thing people do.
+   * The mode says what was wanted; this says what happened, and this is what
+   * decides whether there is anything to watch. A hub set to `both` whose
+   * coordinator is unplugged is running one radio and has nothing to stand
+   * down — and that changes under us at any moment, because plugging a stick
+   * in is a thing people do. Deliberately **not** read from the mode: a board
+   * can arrive at two live radios by more than one route (`GETHOME_RADIO` set
+   * by hand is the other), and every one of them wants watching.
    */
   radiosLive: () => { zigbee: boolean; matter: boolean };
   log: Logger;
@@ -124,7 +171,25 @@ export interface RadioPressureDeps {
    * writes, and `endMembership` for sockets before the log.
    */
   onStandDown: (record: RadioStandDown) => Promise<void> | void;
+  /**
+   * The hub is putting both radios back by itself. Same ordering rule.
+   *
+   * Separate from `onStandDown` because it is the opposite news and reads as
+   * the opposite news: one is "your home just got smaller and nobody asked
+   * for that", and this one is "the thing you asked for is being tried again".
+   */
+  onRestore?: (record: RadioStandDown) => Promise<void> | void;
+  /** Pressure appeared, changed, or passed. Called with `undefined` when it
+   * passes, so an app that was warning stops. */
+  onPressure?: (pressure: MemoryPressure | undefined) => void;
   read?: ReadMemory;
+  /**
+   * This boot, as the kernel names it. Injectable for the same reason `read`
+   * is: the real one lives at an absolute path that does not exist on the Mac
+   * most of this is written on, and a reboot is the main evidence the retry
+   * turns on — so untestable here would mean untested everywhere.
+   */
+  bootId?: () => string | undefined;
   intervalMs?: number;
   settleMs?: number;
 }
@@ -132,6 +197,8 @@ export interface RadioPressureDeps {
 export interface RadioPressureWatch {
   start(): void;
   stop(): void;
+  /** What the board looks like right now, for `GET /hub`. */
+  pressure(): MemoryPressure | undefined;
   /** One pass, exposed so a test can drive this without a clock. */
   tick(): Promise<void>;
 }
@@ -242,24 +309,55 @@ export function createRadioPressureWatch(deps: RadioPressureDeps): RadioPressure
   const read = deps.read ?? readSystemMemory;
   const intervalMs = deps.intervalMs ?? SAMPLE_MS;
   const settleMs = deps.settleMs ?? SETTLE_MS;
+  const bootId = deps.bootId ?? readBootId;
   const startedAt = Date.now();
+  /** Two live radios on a board measured for one: the only case with a move. */
+  const overCommitted = deps.radioBudget === 'one';
 
   let timer: NodeJS.Timeout | undefined;
   let previous: MemorySample | undefined;
   let window: Verdict[] = [];
-  /** Set once a stand-down has been written, so a tick already in flight during
-   * the restart cannot write a second one. */
-  let stoodDown = false;
+  let pressure: MemoryPressure | undefined;
+  /**
+   * Set once this process has written a mode, so a tick already in flight
+   * cannot write a second one. It covers both directions — standing a radio
+   * down and putting one back — because both end the same way: the path unit
+   * wakes and this process is restarted out from under whatever runs next.
+   */
+  let acted = false;
 
   const forget = (): void => {
     previous = undefined;
     window = [];
+    report(undefined);
   };
 
+  /** Say it once, and say when it stops. */
+  function report(next: MemoryPressure | undefined): void {
+    const was = pressure?.detail;
+    if (was === next?.detail) return;
+    pressure = next;
+    deps.onPressure?.(next);
+    if (next !== undefined) {
+      deps.log.warn({ detail: next.detail, willStandDown: next.willStandDown }, 'Memory pressure');
+    } else if (was !== undefined) {
+      deps.log.info({}, 'Memory pressure has passed');
+    }
+  }
+
   const standDown = async (reason: StandDownReason, detail: string): Promise<void> => {
-    stoodDown = true;
+    acted = true;
     stop();
-    const record = writeRadioStandDown(deps.dataDir, { reason, detail });
+    // **The wish, recorded at the moment it is taken away.** Without it the
+    // act of protecting the board throws away the decision it was protecting,
+    // and the owner's only way back is to notice and press the switch again.
+    const currentBoot = bootId();
+    const record = writeRadioStandDown(deps.dataDir, {
+      reason,
+      detail,
+      wish: 'both',
+      ...(currentBoot !== undefined ? { bootId: currentBoot } : {}),
+    });
     deps.log.warn(
       { reason, detail, count: record.count },
       'Standing a radio down: this board cannot hold both',
@@ -281,17 +379,58 @@ export function createRadioPressureWatch(deps: RadioPressureDeps): RadioPressure
     writeRadioMode(deps.dataDir, 'auto');
   };
 
-  const tick = async (): Promise<void> => {
-    if (stoodDown) return;
+  /**
+   * Put both radios back, because the machine is not the machine that failed.
+   *
+   * **A trial, not a measurement.** Once a radio has been handed back the
+   * board is no longer running the configuration that failed, so nothing it
+   * reports can say whether that configuration would fit now — the pressure is
+   * gone *because* the second radio is gone. `shouldRestoreBoth` therefore
+   * asks about the machine (has it rebooted, has a week passed) rather than
+   * about the memory, and the budget for being wrong is two.
+   */
+  const restore = async (record: RadioStandDown): Promise<void> => {
+    acted = true;
+    stop();
+    // Before the mode, like everything else here: counted afterwards, a
+    // counter this process never reaches is a hub that retries for ever.
+    recordBothRetry(deps.dataDir);
+    deps.log.info(
+      { count: record.count, autoRetries: record.autoRetries + 1 },
+      'Trying both radios again',
+    );
+    try {
+      await deps.onRestore?.({ ...record, autoRetries: record.autoRetries + 1 });
+    } catch {
+      // As above: the trial matters more than the announcement of it.
+    }
+    writeRadioMode(deps.dataDir, 'both');
+  };
 
-    // Only a hub asked to run both, that really is running both, has anything
-    // to give back. Read per tick: the mode can be changed from another app
-    // and a coordinator can be plugged in while this is running.
+  const tick = async (): Promise<void> => {
+    if (acted) return;
     const live = deps.radiosLive();
-    if (readRadioMode(deps.dataDir) !== 'both' || !live.zigbee || !live.matter) {
+
+    // ── One radio running ────────────────────────────────────────────────
+    // Nothing to watch and possibly something to give back. This is the only
+    // path that can restore, and it is deliberately behind the same settle
+    // window as the sampling: a restart two seconds into a boot races the
+    // detector's own boot run for no gain, and the whole point of riding a
+    // reboot is that the owner is already expecting the hub to be starting.
+    if (!live.zigbee || !live.matter) {
       forget();
+      if (Date.now() - startedAt < settleMs) return;
+      const record = readRadioStandDown(deps.dataDir);
+      if (
+        readRadioMode(deps.dataDir) !== 'both' &&
+        shouldRestoreBoth(record, { bootId: bootId() })
+      ) {
+        await restore(record!);
+      }
       return;
     }
+
+    // ── Two radios running ───────────────────────────────────────────────
     if (Date.now() - startedAt < settleMs) return;
 
     const sample = read();
@@ -307,10 +446,9 @@ export function createRadioPressureWatch(deps: RadioPressureDeps): RadioPressure
       before.oomKills !== undefined &&
       sample.oomKills > before.oomKills
     ) {
-      await standDown(
-        'out-of-memory',
-        'the operating system had to kill something in this hub to free memory',
-      );
+      const detail = 'the operating system had to kill something in this hub to free memory';
+      report({ since: Date.now(), detail, willStandDown: overCommitted });
+      if (overCommitted) await standDown('out-of-memory', detail);
       return;
     }
 
@@ -330,18 +468,26 @@ export function createRadioPressureWatch(deps: RadioPressureDeps): RadioPressure
 
     const throttles = window.filter((entry) => entry.throttled).length;
     const starvations = window.filter((entry) => entry.starved).length;
-    if (throttles >= TRIP_AT) {
-      await standDown(
-        'memory-pressure',
-        `the hub was held at its memory limit in ${throttles} of the last ${WINDOW} checks`,
-      );
+    const worst = Math.max(throttles, starvations);
+    if (worst < WARN_AT) {
+      report(undefined);
       return;
     }
-    if (starvations >= TRIP_AT) {
-      await standDown(
-        'memory-pressure',
-        `this board had almost no free memory left in ${starvations} of the last ${WINDOW} checks`,
-      );
+
+    const detail =
+      throttles >= starvations
+        ? `the hub was held at its memory limit in ${throttles} of the last ${WINDOW} checks`
+        : `this board had almost no free memory left in ${starvations} of the last ${WINDOW} checks`;
+    // Said on every board, acted on only where there is something to hand
+    // back. A Pi 5 under real memory pressure is a person's problem to look
+    // at; taking a radio off it would be the hub making a working home worse.
+    report({
+      since: pressure?.since ?? Date.now(),
+      detail,
+      willStandDown: overCommitted && worst >= TRIP_AT,
+    });
+    if (overCommitted && worst >= TRIP_AT) {
+      await standDown('memory-pressure', detail);
     }
   };
 
@@ -356,7 +502,13 @@ export function createRadioPressureWatch(deps: RadioPressureDeps): RadioPressure
       const existing = readRadioStandDown(deps.dataDir);
       if (existing !== undefined) {
         deps.log.info(
-          { at: existing.at, reason: existing.reason, count: existing.count },
+          {
+            at: existing.at,
+            reason: existing.reason,
+            count: existing.count,
+            wish: existing.wish,
+            autoRetries: existing.autoRetries,
+          },
           'This hub has stood a radio down before',
         );
       }
@@ -368,6 +520,7 @@ export function createRadioPressureWatch(deps: RadioPressureDeps): RadioPressure
       timer.unref();
     },
     stop,
+    pressure: () => pressure,
     tick,
   };
 }

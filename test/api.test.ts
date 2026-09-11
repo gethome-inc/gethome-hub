@@ -1375,7 +1375,18 @@ describe.skipIf(!handle)('hub API', () => {
    * route is the one place that ends.
    */
   it('takes both radios on a board measured for one, and ends the notice', async () => {
-    writeRadioStandDown(dataDir, { reason: 'memory-pressure', detail: 'the last time' });
+    writeRadioStandDown(dataDir, {
+      reason: 'memory-pressure',
+      detail: 'the last time',
+      wish: 'both',
+    });
+    // Spent, so the assertion below proves the choice hands them back rather
+    // than finding a counter that was already zero.
+    const spent = readFileSync(path.join(dataDir, 'radio-stand-down'), 'utf8');
+    writeFileSync(
+      path.join(dataDir, 'radio-stand-down'),
+      spent.replace('"autoRetries":0', '"autoRetries":2'),
+    );
 
     const put = await app.inject({
       method: 'PUT',
@@ -1392,9 +1403,18 @@ describe.skipIf(!handle)('hub API', () => {
     // app about to offer this switch for the third time should be able to say
     // that this board has handed a radio back twice already.
     const info = await app.inject({ method: 'GET', url: '/api/v1/hub' });
-    const radio = (info.json() as { radio: { standDown?: { count: number; acknowledged: boolean } } })
-      .radio;
+    const radio = (
+      info.json() as {
+        radio: { mode: string; standDown?: { count: number; acknowledged: boolean; suspended: boolean } };
+      }
+    ).radio;
     expect(radio.standDown).toMatchObject({ count: 1, acknowledged: true });
+    // Nothing is owed to a hub that is running what was asked for — the mode
+    // is `both` now, so there is no suspended second radio to restore.
+    expect(radio.standDown?.suspended).toBe(false);
+    // And the tries are handed back: a person deciding is not the hub
+    // flapping, whatever they know that the hub does not.
+    expect(readFileSync(path.join(dataDir, 'radio-stand-down'), 'utf8')).toContain('"autoRetries":0');
 
     // It reads as a sentence rather than as a value: `both` is not a radio, so
     // it cannot be set *to* one.

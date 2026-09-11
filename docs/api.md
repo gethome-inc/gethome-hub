@@ -155,7 +155,7 @@ than no button.
 | `PUT /device-mappings/:exposesHash` | `hub.ai` | the upload. Accepts the envelope or a bare descriptor. `422 {error:"invalid_mapping", problems, issues?}` when the hub can't use it — and it is **kept**, so `…/repair` can work from it |
 | `DELETE /device-mappings/:exposesHash` | `hub.ai` | forget it; devices of that model fall back to their static mapping, and **nothing is asked of the agent** — a delete that re-consulted the library would miss the row it had just removed and start a fresh paid run inside the request, so Forget cost a replacement for the mapping being forgotten. The next genuine trigger asks |
 | `POST /device-mappings/:exposesHash/repair` | `hub.ai` | hand a rejected descriptor to the agent with the complaints. `409 ai_not_configured` / `409 ai_disabled` / `409 nothing_to_repair`, `422 no_device` |
-| `PUT /settings/radio` | `hub.radio` | `{mode: "auto"\|"zigbee"\|"matter"\|"both"}` → `{budget, mode, matter, canRunBoth, modes, applying: true}`. Records a *request*; see below. `both` is accepted on **any** board — `budget` is advice, not a ceiling — and is refused with 400 by a hub too old for it, which is why `radio.modes` exists |
+| `PUT /settings/radio` | `hub.radio` | `{mode: "auto"\|"zigbee"\|"matter"\|"both"}` → `{budget, mode, matter, canRunBoth, modes, applying: true}`. Records a *request*; see below. It also hands back the hub's two automatic retries when `mode` is `"both"`. `both` is accepted on **any** board — `budget` is advice, not a ceiling — and is refused with 400 by a hub too old for it, which is why `radio.modes` exists |
 | `GET /settings/mqtt` | `hub.mqtt` | the broker's credentials: `{requiresPassword, host, port, baseTopic, accounts[]}`. Each account is `{id, username, password, recommended, title, summary, publish[], subscribe[]}`. `hub.mqtt.admin` **adds** the hub's own full-access account; without it only the limited one is returned. See [below](#the-mqtt-broker-asks-for-a-password) |
 | `GET /me` | floor | `{id, name, role: {id, key, name}, permissions, isOwner}` — who this token belongs to and what it may do. See [below](#roles-and-permissions-in-full) |
 | `GET /permissions` | floor | the catalog: `{key, group, title, summary}` per permission. The hub owns the wording |
@@ -598,7 +598,8 @@ hub is in:
 | `matter` | whether the Matter adapter is **live right now** |
 | `canRunBoth` | `budget === "both"`, restated so an app can hide the switch without parsing the enum. It says the board was *measured* for both, never that `both` may not be asked for |
 | `modes` | every mode this build understands. Feature detection, never a version number: an app that does not find `"both"` here is talking to a hub too old to run both radios and must not offer it |
-| `standDown` | `{at, reason, detail?, count, acknowledged}` — present once this hub has ever handed a radio back by itself. See [below](#running-both-radios-on-a-board-measured-for-one) |
+| `standDown` | `{at, reason, detail?, count, acknowledged, suspended, willRetry}` — present once this hub has ever handed a radio back by itself. See [below](#running-both-radios-on-a-board-measured-for-one) |
+| `pressure` | `{since, detail, willStandDown}` — the board running short of memory **right now**, on any hardware. Live, so it clears on its own |
 | `applying` | a switch asked for a moment ago is still landing — see [below](#a-radio-switch-in-flight-radioapplying) |
 | `applyingSince` | epoch ms of the request, present only while `applying`, so a screen draws a bar rather than a spinner |
 | `applyingWindowMs` | how long the hub is prepared to claim it (150 s), so no app has to invent the number |
@@ -674,7 +675,30 @@ read once votes on nothing, because these are totals since boot. And a kernel
 that answers none of them — no memory controller, or not Linux — abstains
 rather than being guessed at.
 
-When it happens, `radio.standDown` appears and stays:
+**The watch runs on every board; only a small one is acted on.** Two live
+radios is the condition, whatever route the board took to them — a hub whose
+`GETHOME_RADIO` was edited by hand runs two on `auto`, and so does one in the
+seconds between a stand-down writing the mode and the detector applying it. On
+a board measured for **both**, a reading that would stand a radio down on a
+Zero 2 W instead only *reports*: there is no second radio to hand back, the
+board is supposed to run them, and taking one off a Pi 5 would be the hub
+making a working home smaller to fix a problem that is somewhere else.
+
+That report is `radio.pressure`, and it is present on any hardware:
+
+| Field | Meaning |
+|---|---|
+| `since` | epoch ms the board first looked like this |
+| `detail` | one sentence naming what was measured |
+| `willStandDown` | whether the hub is about to do something about it — *something is about to happen* against *somebody should look at this* |
+
+It is **live**, not a record: it clears on its own when the board recovers, so
+an app that was warning stops. The threshold to say it is lower than the
+threshold to act (three of ten checks against six), which is also the only
+warning a small board gets *before* anything happens to it — about ninety
+seconds in which somebody watching their phone can make the choice themselves.
+
+When a radio is actually handed back, `radio.standDown` appears and stays:
 
 | Field | Meaning |
 |---|---|
@@ -683,6 +707,8 @@ When it happens, `radio.standDown` appears and stays:
 | `detail` | one sentence naming what was measured, e.g. *the hub was held at its memory limit in 7 of the last 10 checks* |
 | `count` | how many times this hub has ever had to do it |
 | `acknowledged` | whether somebody has set a radio deliberately since |
+| `suspended` | the owner asked for both and the hub is not running them — the choice is **parked, not cancelled** |
+| `willRetry` | the hub will try both again by itself |
 
 `count` and `acknowledged` have different lifetimes on purpose. The **notice**
 is over the moment somebody chooses a radio — any radio, `both` included, since
@@ -701,6 +727,43 @@ house went quiet on Tuesday.
 choice about which radio wins so much as a refusal to invent a second rule for
 it: `auto` already means *follow the hardware* — a coordinator somebody went
 out and bought takes the board, and Matter takes it where there is none.
+
+#### Getting the radio back
+
+**The hub cannot tell whether both would fit now, and does not pretend to.**
+Once a radio has been handed back, the board is no longer running the
+configuration that failed — the pressure is gone *because* the second radio is
+gone — so no reading it can take answers the question. There is no such number,
+and a watch that invented one would have it say yes for ever.
+
+So `suspended` is the hub owing somebody a radio, and a retry is a **trial**
+rather than a measurement. It asks about the *machine* instead:
+
+- **the board has restarted** since the stand-down (`/proc/sys/kernel/random/boot_id`
+  differs — a service restart does not change it, and the hub restarts itself
+  several times in the course of one stand-down). This is the strong evidence:
+  a reboot is what puts a memory cgroup into force, what a desktop being
+  switched off needs, what clears a process that had wandered off, and what
+  happens when somebody moves the card into a bigger Pi;
+- **or a week has passed**, which is the weak one and reaches a hub that runs
+  for months without a restart. A clock that went backwards is not evidence at
+  all, so a record dated in the future falls back to the reboot test.
+
+The budget is **two** automatic tries, because each costs a restart. When they
+are spent, `willRetry` goes false and the sentence an app owes somebody is
+*the hub has stopped trying, and you can still turn it on*. `PUT /settings/radio`
+with `mode: "both"` hands the two tries back — a person deciding is not the hub
+flapping, and whatever they know that the hub does not (devices removed, a
+desktop switched off, a bigger board) is worth a fresh trial. So is time: a
+stand-down more than a week after the previous one starts the budget over,
+since two bad afternoons a year apart are not flapping.
+
+A retry writes `both` and is announced like any other switch — `applying`,
+`applyingSince`, and a `hub.radio-restored` activity row — so it is a change
+with an explanation rather than an unexplained outage. There is deliberately
+**no countdown**: the answer to *when* is "next time this board restarts, or
+within a week", and a timer to a restart that has to happen anyway is a number
+nobody can use.
 
 #### A radio switch in flight (`radio.applying`)
 
@@ -1471,7 +1534,7 @@ The kinds: `device.command`, `device.added`, `device.removed`,
 `member.left`, `member.removed`,
 `member.renamed`, `member.role-changed`, `role.added`, `role.renamed`,
 `role.changed`, `role.removed`, `home.renamed`, `hub.radio`,
-`hub.radio-stood-down`, `hub.mqtt`, `adapter.error`,
+`hub.radio-stood-down`, `hub.radio-restored`, `hub.mqtt`, `adapter.error`,
 `zigbee.interview-failed`, `zigbee.left`, `zigbee.permit-join`,
 `zigbee.permit-join-closed`, `matter.commission`. Treat the list as open — a
 client must render an unknown kind from `message` rather than drop it.
@@ -1494,10 +1557,12 @@ for the two things that are deliberately *not* logged.
 
 The last three, plus `hub.radio`, all carry `data.memberName`: they are the
 things any member may do to the whole home, so the log is where it says which
-phone did. `hub.radio-stood-down` is the one entry here with **no member at
-all** — the hub handed a radio back by itself, and naming somebody would be
-attributing a decision nobody made; it carries `reason`, `detail` and `count`
-instead, and is [described above](#running-both-radios-on-a-board-measured-for-one). `zigbee.permit-join` also carries `data.seconds` — the **live**
+phone did. `hub.radio-stood-down` and `hub.radio-restored` are the two entries here with
+**no member at all** — the hub handed a radio back by itself and later gave it
+another go, and naming somebody would be attributing a decision nobody made.
+They carry `reason`/`detail`/`count` and `attempt`/`count` instead. A feed that
+showed only the first would read as a hub that keeps taking things away; both
+are [described above](#running-both-radios-on-a-board-measured-for-one). `zigbee.permit-join` also carries `data.seconds` — the **live**
 window the hub ended up with, not the number that was asked for.
 `matter.commission` is written when pairing *starts* and never carries the
 pairing code: that is the accessory's credential, and every member reads this

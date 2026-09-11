@@ -488,9 +488,9 @@ mistakes in the common case, and allowing it unwatched the worse one in the
 rare case** — the kernel picking which half of somebody's house stops, at
 night, with nothing on screen to say why.
 
-`src/core/radio-pressure.ts` is the watch. While the mode is `both` **and both
-radios are genuinely up**, it reads three of the kernel's own counters every
-30 seconds:
+`src/core/radio-pressure.ts` is the watch. While **both radios are genuinely
+up** — whatever route the board took to them — it reads three of the kernel's
+own counters every 30 seconds:
 
 | Signal | Where | Why this one |
 |---|---|---|
@@ -498,10 +498,21 @@ radios are genuinely up**, it reads three of the kernel's own counters every
 | `oom_kill` | the hub's cgroup and Zigbee2MQTT's | something was killed. The backstop, not the mechanism |
 | `MemAvailable` | `/proc/meminfo` | works with no memory cgroup at all — which is every board that has not rebooted since the installer turned it on |
 
-A stand-down needs the board to be in trouble in **six of the last ten checks**
-— five minutes — except for `oom_kill`, which acts at once because by then
-something has already gone. Pairing eight bulbs at once is supposed to cost
-memory; that is the difference this threshold is drawing.
+Two thresholds. The hub **says** something at three of the last ten checks and
+**acts** at six — five minutes — except for `oom_kill`, which acts at once
+because by then something has already gone. Pairing eight bulbs at once is
+supposed to cost memory; that is the difference the second threshold is
+drawing, and the gap between the two is the only warning a small board gets
+before anything happens to it.
+
+**The saying is for every board; the acting is only for a small one.** A Pi 4
+or 5 under real memory pressure has the same symptom and a completely
+different answer — there is no second radio to hand back, because the board is
+supposed to run both — so the hub reports it and does nothing. Taking a radio
+off a board that was measured for two would be making a working home smaller
+to fix a problem that is somewhere else entirely. `radio.pressure` carries it,
+with `willStandDown` separating *something is about to happen* from *somebody
+should look at this*.
 
 Three deliberate silences, each of which would otherwise be a false alarm:
 
@@ -524,6 +535,37 @@ a `hubStatus` frame — all three **before** the mode, since the mode write is
 what kills this process. `GET /hub` reports it as `radio.standDown`; see
 [api.md](api.md#running-both-radios-on-a-board-measured-for-one) for the
 wire shape and the `count` / `acknowledged` split.
+
+### The radio is suspended, not taken away
+
+Writing `auto` is the only way a hub can change its own radios, so on its own
+it would mean that protecting the board silently threw away the decision being
+protected — and the owner's route back was to notice and press the switch
+again. `wish` in the stand-down record is what stops that: the hub knows it
+owes them a second radio.
+
+**It cannot tell whether both would fit now, and does not pretend to.** The
+board is no longer running the configuration that failed, so the pressure is
+gone *because* the second radio is gone. No reading answers the question; a
+watch that invented one would have it say yes for ever. So a retry is a
+**trial**, and it turns on the machine rather than the memory:
+
+| Evidence | Why it is the thing to ask about |
+|---|---|
+| the board has **restarted** (`/proc/sys/kernel/random/boot_id` differs) | a reboot is what puts a memory cgroup into force, what a desktop being switched off needs, what clears a process that had wandered off, and what happens when the card moves into a bigger Pi. A service restart does **not** change it, which matters because the hub restarts itself several times during one stand-down |
+| **a week** has passed | the weak one, and the only thing that reaches a Pi up for months. A clock that went backwards is not evidence, so a record dated in the future falls back to the reboot test |
+
+The budget is **two** automatic tries, because each costs a restart. When they
+are spent the hub stops and says so, and `PUT /settings/radio` with `both`
+hands them back — a person deciding is not the hub flapping, and whatever they
+know that the hub does not is worth a fresh trial. So is time: a stand-down
+more than a week after the previous one starts the budget over, since two bad
+afternoons a year apart are not flapping.
+
+A retry writes `both`, is announced as `applying` like any other switch, and
+writes a `hub.radio-restored` row — a change with an explanation rather than an
+unexplained outage. There is no countdown, because the answer to *when* is
+"next time this board restarts, or within a week".
 
 Applying a mode is root work — editing `hub.env`, starting or stopping a unit,
 restarting the hub — and the hub deliberately cannot do any of it. It writes one

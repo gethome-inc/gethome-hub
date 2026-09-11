@@ -505,6 +505,30 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `acknowledged` ends the *notice* (any `PUT /settings/radio` answers it) and
   `count` outlives every acknowledgement — one stand-down is a board having a
   bad minute, a fourth is the board answering the question.
+- **A radio is suspended, not taken away — and the hub cannot tell whether both
+  would fit again, so a retry is a *trial*.** Writing `auto` is the only way a
+  hub can change its own radios, so on its own it meant that protecting the
+  board threw away the decision being protected; `wish` in the record is the
+  hub knowing it owes somebody a second radio, and `standDown.suspended` is how
+  an app draws a parked choice rather than an untouched switch. The reason
+  there is no measurement is worth stating plainly: after a stand-down the
+  board is no longer running the configuration that failed, so the pressure is
+  gone **because** the second radio is gone, and any signal derived from that
+  would say yes for ever. So `shouldRestoreBoth` asks about the *machine* — has
+  it rebooted (`/proc/sys/kernel/random/boot_id`, which a service restart does
+  **not** change, and the hub restarts itself several times during one
+  stand-down), or has a week passed — with a budget of two, because each try
+  costs a restart. A person choosing `both` hands the tries back, and so does a
+  stand-down a week after the last one: neither is flapping. And **the watch
+  runs on every board while two radios are live, but only a small one is acted
+  on**: two live radios is the condition rather than `mode === 'both'` (a
+  hand-edited `GETHOME_RADIO` reaches it on `auto`, and so does the gap between
+  a stand-down writing the mode and the detector applying it), the report
+  threshold is lower than the action threshold so a small board gets one
+  warning first, and on a board measured for both the hub only ever reports —
+  taking a radio off a Pi 5 would be making a working home smaller to fix
+  something that is somewhere else. `radio.pressure` carries that, live, so it
+  clears itself.
 - **The AI subsystem's own conventions live in `src/ai/CLAUDE.md`**, which
   loads when you work under `src/ai/`: the mapping library and its five
   routes, the retry path and the backoff gate, `ai_run_exchanges`, the five
