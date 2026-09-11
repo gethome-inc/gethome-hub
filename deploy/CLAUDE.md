@@ -38,12 +38,14 @@ in `deploy/install.sh` must stay accurate.
   choice. Claiming support for hardware nobody has tried is the misleading half
   of that choice; refusing a Pi 3 that has twice a Zero 2 W's memory is the
   other.
-- **A small board runs one radio; which one is decided by what is plugged in,
-  not at install time.** 512 MB fits the OS, the hub, and *either* Matter
-  (~60 MB in-process) *or* Zigbee2MQTT (~150 MB, its own process). `install.sh`
-  writes that as a **budget** (`GETHOME_RADIO=one|both`, measured from RAM);
-  the home's **mode** (`auto|zigbee|matter`) lives in `<data>/radio-mode` and
-  reaches it through `PUT /settings/radio`. `gethome-zigbee-detect` is where the
+- **A small board is *recommended* one radio; which one is decided by what is
+  plugged in, not at install time.** 512 MB fits the OS, the hub, and *either*
+  Matter (~60 MB in-process) *or* Zigbee2MQTT (~150 MB, its own process).
+  `install.sh` writes that as a **budget** (`GETHOME_RADIO=one|both`, measured
+  from RAM) and prints it as `@@RADIO_BUDGET:<one|both>@@` early, because
+  Studio draws the choice before there is a hub to ask; the home's **mode**
+  (`auto|zigbee|matter|both`) lives in `<data>/radio-mode` and reaches it
+  through `PUT /settings/radio`. `gethome-zigbee-detect` is where the
   two meet, because it is the only thing that knows whether a coordinator is
   actually there. **Matter gives way only to Zigbee that is genuinely going to
   run** — the installer used to switch it off on every small board, so a
@@ -54,6 +56,21 @@ in `deploy/install.sh` must stay accurate.
   install ends with an additive `@@CAPABILITIES:<list>@@` marker naming what the
   hub actually ended up able to talk to, and Studio shows the same list on the
   hub page.
+  **The budget is advice, not a ceiling, and `one:both` is the arm that says
+  so.** It measures a *full* home — the OS, the hub with Matter, and a
+  Zigbee2MQTT holding a hundred devices' state — and a home with four devices
+  is nowhere near it, so refusing `both` on a Zero 2 W took Matter away from
+  somebody to prevent a problem they did not have. It is allowed, the detector
+  has a `one:both` arm **above** `one:*` (most-specific-first, and here that
+  ordering is the feature: a `one:*` placed first swallows the override and the
+  only symptom is Matter quietly staying off), and what makes it safe lives in
+  `src/` — `core/radio-pressure.ts` watches `memory.events` and `MemAvailable`
+  and writes `auto` back here if the board really does run short. So **the two
+  things that watch depends on are named at the end of the install**: the
+  memory cgroup actually being in force (it needs a reboot after the installer
+  turns it on) and swap existing at all. Without the first the hub cannot see
+  trouble coming, which is the one case where `both` is a genuinely bad idea
+  rather than a thin one.
   **Follow a coordinator *in*; never follow one *out*.** Plugging a stick in is
   an unambiguous instruction and the detector acts on it in seconds. Pulling one
   out is not — it is equally "done with Zigbee" and "two minutes into flashing

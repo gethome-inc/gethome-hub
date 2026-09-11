@@ -475,6 +475,36 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   **bound, not a wait for the radios to agree** — asking for Zigbee on a hub
   with no coordinator is reasonable, correctly changes nothing, and would spin
   for ever.
+- **The radio budget is a measurement of a *full* home, so it is advice and not
+  a ceiling — and what replaces the refusal is a watch.** `GETHOME_RADIO=one`
+  is measured against the OS plus the hub with Matter plus a Zigbee2MQTT
+  holding a hundred devices' state; a home with four devices is nowhere near
+  it, and refusing `mode: both` there took Matter away from somebody to prevent
+  a problem they did not have. So `both` is a fourth `RadioMode`, accepted on
+  any board, and `core/radio-pressure.ts` is the half that makes that safe:
+  while the mode is `both` **and both radios are genuinely up**, it samples the
+  cgroup's `memory.events` (`high`, `oom_kill`) and `MemAvailable` every 30 s
+  and writes `auto` back if the board is in trouble across six of ten checks.
+  Five rules. **It watches throttling, not deaths** — `memory.high` holds a
+  cgroup at its limit for a long time before anything is killed, so acting on
+  it means nothing is lost; `oom_kill` is a backstop and acts at once, because
+  by then something has gone. **The peak is the *start*** — a cold boot reached
+  170 MB of a 200 MB ceiling loading `@matter/main` while a six-second BLE scan
+  moved `memory.peak` by zero — so nothing is sampled for the first two
+  minutes, or every boot would stand a radio down. **A counter read once votes
+  on nothing**, since these are totals since boot, and **a kernel that cannot
+  answer abstains**: every field is optional, so a board with the memory
+  controller off and a developer's Mac both trip nothing. And **it says so
+  before it does it** — the stand-down record, the `hub.radio-stood-down`
+  activity row (the one entry with *no* member on it: nobody did this) and the
+  `hubStatus` frame all go out before the mode is written, because the mode
+  write is what wakes the path unit that kills this process. `auto` is what
+  gets written rather than a named radio, because "follow the hardware" is a
+  rule this hub already has and a second one for this case would be the policy
+  nobody had read. `radio.standDown` carries it to the apps, where
+  `acknowledged` ends the *notice* (any `PUT /settings/radio` answers it) and
+  `count` outlives every acknowledgement — one stand-down is a board having a
+  bad minute, a fourth is the board answering the question.
 - **The AI subsystem's own conventions live in `src/ai/CLAUDE.md`**, which
   loads when you work under `src/ai/`: the mapping library and its five
   routes, the retry path and the backoff gate, `ai_run_exchanges`, the five

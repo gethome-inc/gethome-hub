@@ -25,6 +25,7 @@ import { PermitJoinService } from './core/permit-join.js';
 import { activityForLifecycleEvent, normalizeBridgeEvent } from './core/zigbee-events.js';
 import { buildServer } from './api/server.js';
 import { MdnsAdvertiser } from './mdns/advertiser.js';
+import { createRadioPressureWatch } from './core/radio-pressure.js';
 import { lazyAiAssist } from './ai/lazy.js';
 import { MappingLibrary } from './ai/library.js';
 import { AutomationStore } from './automations/store.js';
@@ -375,12 +376,46 @@ async function main(): Promise<void> {
       log.error({ err: error }, 'Device registry failed to start.');
     });
 
+  // A hub asked to run both radios on a board measured for one is watched, and
+  // hands a radio back itself if the board really does run out. Started
+  // unconditionally and idle on every hub that is not in that position — the
+  // tick is a mode read and returns, and the timer is `unref`ed — because the
+  // alternative is deciding here, once, something that changes while the
+  // process runs: a coordinator plugged in an hour from now is exactly how a
+  // hub arrives at running two radios without anybody restarting it.
+  const radioPressure = createRadioPressureWatch({
+    dataDir: config.DATA_DIR,
+    radiosLive: () => ({ zigbee: zigbee?.connected ?? false, matter: matter !== undefined }),
+    log: log.child({ module: 'radio' }),
+    onStandDown: async (record) => {
+      // Both, in this order, and both before the mode is written: the frame is
+      // what the app on the sofa finds out from, and the row is what somebody
+      // reads on Thursday wondering why half the house went quiet on Tuesday.
+      // `memberId` is deliberately absent — nobody did this.
+      await activity.record({
+        kind: 'hub.radio-stood-down',
+        message:
+          record.reason === 'out-of-memory'
+            ? 'The hub went back to one radio: this board ran out of memory running both.'
+            : 'The hub went back to one radio: this board was running short of memory.',
+        data: {
+          reason: record.reason,
+          ...(record.detail !== undefined ? { detail: record.detail } : {}),
+          count: record.count,
+        },
+      });
+      events.emit('hubStatusChanged');
+    },
+  });
+  radioPressure.start();
+
   const stopping = { value: false };
   const shutdown = async (signal: string) => {
     if (stopping.value) return;
     stopping.value = true;
     log.info(`${signal} received, shutting down…`);
     permitJoin.stop();
+    radioPressure.stop();
     await automations.stop().catch(() => {});
     await mdns?.stop().catch(() => {});
     await app.close().catch(() => {});

@@ -14,6 +14,7 @@ import { DeviceRegistry } from '../src/core/registry.js';
 import { FavoritesService } from '../src/core/favorites.js';
 import { PermitJoinService } from '../src/core/permit-join.js';
 import { AiRunLog } from '../src/core/ai-runs.js';
+import { writeRadioStandDown } from '../src/core/radio.js';
 import { MappingLibrary } from '../src/ai/library.js';
 import type { AdapterBus, ProtocolAdapter } from '../src/adapters/adapter.js';
 import type { HubCommand } from '../src/schema/index.js';
@@ -1305,6 +1306,11 @@ describe.skipIf(!handle)('hub API', () => {
       // rather than inventing a number of its own.
       applying: false,
       applyingWindowMs: 150_000,
+      // What this build can be *asked* for, which is a different question
+      // from what the board affords: `budget: 'one'` is the recommendation
+      // and this is the vocabulary. An app finding no `both` here is looking
+      // at a hub too old to run both radios and must not offer it.
+      modes: ['auto', 'zigbee', 'matter', 'both'],
     });
   });
 
@@ -1356,6 +1362,56 @@ describe.skipIf(!handle)('hub API', () => {
     expect(status.radio.applying).toBe(true);
     expect(Math.abs(Date.now() - status.radio.applyingSince)).toBeLessThan(10_000);
     expect(status.radio.applyingWindowMs).toBeGreaterThan(60_000);
+  });
+
+  /**
+   * Running both on a board measured for one.
+   *
+   * The refusal that used to be implied by `budget: 'one'` is gone, because
+   * the budget is measured against a *full* home — the OS, the hub with Matter
+   * loaded, and a Zigbee2MQTT holding a hundred devices' state — and a home
+   * with four devices is nowhere near it. What replaces it is a hub that
+   * watches its own memory and hands a radio back itself, and a notice this
+   * route is the one place that ends.
+   */
+  it('takes both radios on a board measured for one, and ends the notice', async () => {
+    writeRadioStandDown(dataDir, { reason: 'memory-pressure', detail: 'the last time' });
+
+    const put = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/settings/radio',
+      headers: auth(ownerToken),
+      payload: { mode: 'both' },
+    });
+    expect(put.statusCode).toBe(200);
+    expect(put.json()).toMatchObject({ mode: 'both', budget: 'one', applying: true });
+    expect(readFileSync(path.join(dataDir, 'radio-mode'), 'utf8').trim()).toBe('both');
+
+    // Choosing a radio — `both` included — is somebody having seen where the
+    // hub left them, so the notice is answered. The **count** survives it: an
+    // app about to offer this switch for the third time should be able to say
+    // that this board has handed a radio back twice already.
+    const info = await app.inject({ method: 'GET', url: '/api/v1/hub' });
+    const radio = (info.json() as { radio: { standDown?: { count: number; acknowledged: boolean } } })
+      .radio;
+    expect(radio.standDown).toMatchObject({ count: 1, acknowledged: true });
+
+    // It reads as a sentence rather than as a value: `both` is not a radio, so
+    // it cannot be set *to* one.
+    const feed = await app.inject({
+      method: 'GET',
+      url: '/api/v1/activity',
+      headers: auth(ownerToken),
+    });
+    const rows = feed.json() as Array<{ kind: string; message: string }>;
+    expect(rows.find((entry) => entry.kind === 'hub.radio')?.message).toContain('both radios');
+
+    await app.inject({
+      method: 'PUT',
+      url: '/api/v1/settings/radio',
+      headers: auth(ownerToken),
+      payload: { mode: 'matter' },
+    });
   });
 
   it('refuses a radio it has never heard of', async () => {

@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createHubStatusReader } from '../src/core/hub-status.js';
+import { writeRadioStandDown, acknowledgeRadioStandDown } from '../src/core/radio.js';
 import type { ApiDeps } from '../src/api/server.js';
 
 /**
@@ -142,5 +143,69 @@ describe('a hub that runs both radios', () => {
     // the capability, and `bluetooth: false` here would send somebody with no
     // Matter at all off to look at their Bluetooth.
     expect(snapshot.matter).toBeUndefined();
+  });
+});
+
+/**
+ * A board measured for one radio, asked for two.
+ *
+ * The budget is measured against a **full** home and most homes are nowhere
+ * near it, so `both` is allowed on a `one` board and the hub watches instead
+ * of refusing. What the snapshot owes an app is the two things it cannot work
+ * out for itself: whether this hub is new enough to be asked at all, and
+ * whether it has ever had to take the offer back.
+ */
+describe('a board measured for one, asked for both', () => {
+  it('says what it can be asked for, which is not what it recommends', () => {
+    const snapshot = reader({ budget: 'one', zigbeeConnected: true, matter: true }).snapshot();
+    // Both, together, on one hub: `budget` is the advice an app warns from and
+    // `modes` is the vocabulary it offers. A hub that answered only the first
+    // would leave an app guessing, and the guess it makes on a hub too old for
+    // `both` is a button whose only outcome is a 400.
+    expect(snapshot.radio.budget).toBe('one');
+    expect(snapshot.radio.modes).toContain('both');
+  });
+
+  it('stops claiming to be switching only once *both* radios are there', () => {
+    // The one mode that lands in two stages. `matter` and `zigbee` each name a
+    // single target, so the existing rule reads one boolean; `both` is over
+    // when the slower of the two arrives, and treating it like the others left
+    // every app drawing "switching radios" over a hub that had finished.
+    writeFileSync(path.join(dir, 'radio-mode'), 'both\n');
+    writeFileSync(path.join(dir, 'radio-requested'), `${Date.now()}\n`);
+
+    const half = reader({ budget: 'one', zigbeeConnected: false, matter: true }).snapshot();
+    expect(half.radio.applying).toBe(true);
+
+    const whole = reader({ budget: 'one', zigbeeConnected: true, matter: true }).snapshot();
+    expect(whole.radio.applying).toBe(false);
+  });
+
+  it('says nothing about standing down on a hub it has never happened to', () => {
+    // Absence is the answer, the way it is for `matter`, `history` and
+    // `portraits`. A zeroed record would have every app drawing a reassurance
+    // nobody asked for.
+    expect(reader({ budget: 'one', zigbeeConnected: true, matter: true }).snapshot().radio.standDown)
+      .toBeUndefined();
+  });
+
+  it('reports the stand-down, and whether it still needs saying', () => {
+    writeRadioStandDown(dir, {
+      reason: 'memory-pressure',
+      detail: 'the hub was held at its memory limit in 7 of the last 10 checks',
+    });
+    const raised = reader({ budget: 'one', zigbeeConnected: true, matter: false }).snapshot();
+    expect(raised.radio.standDown).toMatchObject({
+      reason: 'memory-pressure',
+      count: 1,
+      acknowledged: false,
+    });
+
+    // Answering the notice does not erase the history. The two have different
+    // lifetimes on purpose: the notice is over the moment somebody chooses a
+    // radio, and the count is what an app says when it offers `both` again.
+    acknowledgeRadioStandDown(dir);
+    const answered = reader({ budget: 'one', zigbeeConnected: true, matter: false }).snapshot();
+    expect(answered.radio.standDown).toMatchObject({ count: 1, acknowledged: true });
   });
 });

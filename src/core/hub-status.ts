@@ -9,7 +9,15 @@
 // pulls nothing from the API layer at runtime, the same rule
 // `core/zigbee-events.ts` follows for the Zigbee adapter.
 import type { ApiDeps } from '../api/server.js';
-import { readRadioMode, readRadioRequest, RADIO_APPLY_WINDOW_MS } from './radio.js';
+import {
+  RADIO_APPLY_WINDOW_MS,
+  RADIO_MODES,
+  readRadioMode,
+  readRadioRequest,
+  readRadioStandDown,
+  type RadioMode,
+  type StandDownReason,
+} from './radio.js';
 import { readZigbeeProblem, type ZigbeeProblem } from '../adapters/zigbee/diagnosis.js';
 import { readCoordinatorPresence, type CoordinatorPresence } from '../adapters/zigbee/coordinator.js';
 import type { BleUnavailableReason } from '../adapters/matter/ble.js';
@@ -40,9 +48,35 @@ export interface HubStatusSnapshot {
   };
   radio: {
     budget: 'both' | 'one';
-    mode: 'auto' | 'zigbee' | 'matter';
+    mode: RadioMode;
     matter: boolean;
     canRunBoth: boolean;
+    /**
+     * Every mode this hub understands.
+     *
+     * Feature detection rather than a version number, the way `history`,
+     * `portraits` and `matter` are — and here it is the difference between an
+     * app offering "run both radios" and an app whose only way to find out is
+     * a 400. `both` arrived after the other three, so a hub older than it
+     * answers a list without it and an app reads that as "don't offer".
+     */
+    modes: readonly RadioMode[];
+    /**
+     * The hub having taken a radio back off this board by itself.
+     *
+     * Present once it has ever happened, which is deliberately longer than the
+     * notice it raises: `acknowledged` is what ends the notice — somebody set
+     * a radio deliberately, so they have seen where they were left — while
+     * `count` is this board's history with running both and outlives every
+     * acknowledgement. An app about to offer the switch again should say it.
+     */
+    standDown?: {
+      at: number;
+      reason: StandDownReason;
+      detail?: string;
+      count: number;
+      acknowledged: boolean;
+    };
     /**
      * Whether a switch asked for a moment ago is still landing.
      *
@@ -152,10 +186,18 @@ export function createHubStatusReader(deps: ApiDeps): HubStatusReader {
       // answers by restarting nothing) left every app drawing "switching
       // radios" for two and a half minutes over a hub that was never going
       // anywhere. `auto` keeps the window, because it names no single target
-      // to check against.
+      // to check against — and `both` names two, so it is only over once they
+      // are *both* there, which is the one mode that can land in two stages.
       const landed =
-        (mode === 'matter' && matterNow) || (mode === 'zigbee' && zigbeeNow.connected);
+        (mode === 'matter' && matterNow) ||
+        (mode === 'zigbee' && zigbeeNow.connected) ||
+        (mode === 'both' && matterNow && zigbeeNow.connected);
       const request = landed ? undefined : readRadioRequest(deps.dataDir);
+      // Read every time rather than cached: it changes at most a handful of
+      // times in a hub's life, the file is absent on nearly every hub that
+      // ever runs, and an absent file is one failed `open` — cheaper than the
+      // cache entry that would avoid it.
+      const standDown = readRadioStandDown(deps.dataDir);
       return {
         zigbee: zigbeeNow,
         // What this hub can actually talk to is not the same on every machine: a
@@ -173,6 +215,19 @@ export function createHubStatusReader(deps: ApiDeps): HubStatusReader {
           applying: request !== undefined,
           ...(request !== undefined ? { applyingSince: request.at } : {}),
           applyingWindowMs: RADIO_APPLY_WINDOW_MS,
+          /** What this build can be asked for — never a version number. */
+          modes: RADIO_MODES,
+          ...(standDown !== undefined
+            ? {
+                standDown: {
+                  at: standDown.at,
+                  reason: standDown.reason,
+                  ...(standDown.detail !== undefined ? { detail: standDown.detail } : {}),
+                  count: standDown.count,
+                  acknowledged: standDown.acknowledgedAt !== undefined,
+                },
+              }
+            : {}),
         },
         ...(deps.matter !== undefined
           ? {

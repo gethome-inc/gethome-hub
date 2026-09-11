@@ -297,7 +297,10 @@ Four rules hold this together:
 
 A 512 MB board fits the operating system (~70 MB), the hub (~119 MB), and
 **one** of Zigbee2MQTT (~150 MB, its own process) or Matter (~60 MB inside the
-hub). Not both. Two separate things decide which:
+hub). Not both — in a *full* home. That qualification is the whole of
+[running both anyway](#running-both-on-a-board-measured-for-one), and it is
+why the budget below is a recommendation rather than a refusal. Two separate
+things decide which radio runs:
 
 > **Those figures have been measured again, and they are conservative.** On a
 > Zero 2 W with the desktop switched off, the memory cgroup finally enforcing,
@@ -403,8 +406,8 @@ hub). Not both. Two separate things decide which:
 
 | | Who sets it | Where it lives | What it means |
 |---|---|---|---|
-| **Budget** | `install.sh`, from the board's RAM | `GETHOME_RADIO` in `/etc/gethome/hub.env` | `both` (> 1 GB) or `one` (≤ 1 GB). Measured, not a preference. |
-| **Mode** | any member, from the GetHome app | `<data>/radio-mode` | `auto` (default), `zigbee` or `matter`. |
+| **Budget** | `install.sh`, from the board's RAM | `GETHOME_RADIO` in `/etc/gethome/hub.env` | `both` (> 1 GB) or `one` (≤ 1 GB). Measured, not a preference — and **advice, not a ceiling**. |
+| **Mode** | any member, from the GetHome app | `<data>/radio-mode` | `auto` (default), `zigbee`, `matter` or `both`. |
 
 `gethome-zigbee-detect` is where the two meet, because it is the only thing
 that knows whether a coordinator is *actually plugged in* — it runs at boot, on
@@ -425,9 +428,12 @@ deleted.
 | `one` | `zigbee` | never any | Matter runs — see below |
 | `one` | `zigbee` | **unplugged** | **nothing changes** |
 | `one` | `matter` | any | Matter runs; a plugged-in coordinator is recorded but Z2M stays down |
+| `one` | `both` | plugged in | **both run** — the owner overriding the measurement, and the hub watches its own memory from then on |
+| `one` | `both` | never any / unplugged | Matter runs; there is no second radio to run |
 | `both` | `auto` | any | both run |
 | `both` | `zigbee` | plugged in | Zigbee runs, Matter off (the owner asked for it) |
 | `both` | `matter` | any | Matter runs, Z2M stays down |
+| `both` | `both` | any | both run — the default written down, not a special case |
 
 **Matter only ever gives way to Zigbee that is genuinely going to run.** That
 is the row worth reading twice: `mode=zigbee` with no stick ever plugged in
@@ -465,6 +471,59 @@ change `ADAPTER_MATTER` and restart the hub, and the apps re-sync on the
 **zero** hub restarts instead of two. The cost of the rule is that a hub whose
 coordinator is gone for good keeps Matter off until somebody says so; the app
 is what says so, and `test/deploy-radio.test.ts` pins every row above.
+
+### Running both on a board measured for one
+
+The budget is a measurement of a **full** home: the operating system, the hub
+with Matter loaded, and a Zigbee2MQTT holding a hundred devices' state. Most
+homes are nowhere near it. A Zero 2 W with three Zigbee devices and one Matter
+plug ran both radios for an hour at `high 0` and `oom_kill 0`, the hub peaking
+at 170 MB against a 200 MB ceiling — about 30 MB of headroom, which is real and
+far too little to *promise*, but is not a reason to take Matter away from
+somebody who has four devices.
+
+So `mode: both` is accepted on any board, and the answer to the 30 MB is to
+watch rather than to refuse. **Refusing would have been the worse of the two
+mistakes in the common case, and allowing it unwatched the worse one in the
+rare case** — the kernel picking which half of somebody's house stops, at
+night, with nothing on screen to say why.
+
+`src/core/radio-pressure.ts` is the watch. While the mode is `both` **and both
+radios are genuinely up**, it reads three of the kernel's own counters every
+30 seconds:
+
+| Signal | Where | Why this one |
+|---|---|---|
+| `high` | the hub's cgroup `memory.events` | how often systemd's `MemoryHigh` **throttled** the hub. Rises long before anything dies |
+| `oom_kill` | the hub's cgroup and Zigbee2MQTT's | something was killed. The backstop, not the mechanism |
+| `MemAvailable` | `/proc/meminfo` | works with no memory cgroup at all — which is every board that has not rebooted since the installer turned it on |
+
+A stand-down needs the board to be in trouble in **six of the last ten checks**
+— five minutes — except for `oom_kill`, which acts at once because by then
+something has already gone. Pairing eight bulbs at once is supposed to cost
+memory; that is the difference this threshold is drawing.
+
+Three deliberate silences, each of which would otherwise be a false alarm:
+
+- **Nothing is sampled for the first two minutes.** The peak *is* the start — a
+  cold boot reached 170 MB loading `@matter/main` and bringing Bluetooth up,
+  and a six-second BLE scan afterwards moved `memory.peak` by zero. Sampling
+  through it would stand a radio down on every single boot.
+- **One reading votes on nothing.** `high` and `oom_kill` are totals since
+  boot, so the first sample after the settle window is a baseline.
+- **A kernel that cannot answer abstains.** Every field is optional; a board
+  with the memory controller off, or a developer's Mac, trips nothing.
+
+When it fires, the hub writes `auto` to `<data>/radio-mode` and the path unit
+applies it exactly as if somebody had pressed it in the app — `auto` rather
+than a named radio, because that rule already exists and inventing a second one
+for this case would be the policy nobody had read. It also writes
+`<data>/radio-stand-down` (on disk, because this **restarts the process that
+decided to**), a `hub.radio-stood-down` activity row with no member on it, and
+a `hubStatus` frame — all three **before** the mode, since the mode write is
+what kills this process. `GET /hub` reports it as `radio.standDown`; see
+[api.md](api.md#running-both-radios-on-a-board-measured-for-one) for the
+wire shape and the `count` / `acknowledged` split.
 
 Applying a mode is root work — editing `hub.env`, starting or stopping a unit,
 restarting the hub — and the hub deliberately cannot do any of it. It writes one

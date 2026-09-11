@@ -86,8 +86,8 @@ run on it.
 | | Board | What you get |
 |---|---|---|
 | **Recommended** | Raspberry Pi 5, Pi 4 (2 GB or more) | Everything: Matter, Zigbee, MQTT, room to spare |
-| **Tested, with one limit** | Raspberry Pi Zero 2 W (512 MB) | Matter, Wi-Fi and MQTT, **or** Zigbee — one radio at a time, see below |
-| **Should work, not routinely tested** | Pi 3 / 3B+, 400, 500, CM4, CM5, and any other 64-bit ARM or x86-64 Linux machine | Everything above 1 GB; one radio at a time at 1 GB or below |
+| **Tested, with one limit** | Raspberry Pi Zero 2 W (512 MB) | Matter, Wi-Fi and MQTT, **or** Zigbee — one radio at a time recommended, both available, see below |
+| **Should work, not routinely tested** | Pi 3 / 3B+, 400, 500, CM4, CM5, and any other 64-bit ARM or x86-64 Linux machine | Everything above 1 GB; one radio at a time recommended at 1 GB or below |
 | **Cannot work** | Pi 1, Pi Zero, Pi Zero W | Nothing — these are ARMv6, and Node.js has published no ARMv6 build since Node 12 |
 
 The tested operating system is **Raspberry Pi OS Lite (64-bit)**. Debian and
@@ -197,15 +197,50 @@ closes were found.
 Zigbee. That is a real limitation rather than a temporary one, so it is worth
 deciding before you buy a board:
 
-> **A Raspberry Pi Zero 2 W runs one radio at a time.** 512 MB is not enough for
-> Matter *and* Zigbee at once — measured, the hub is ~120 MB, Matter adds
-> ~60 MB, and Zigbee2MQTT another ~150 MB on top of the operating system's
-> ~70 MB. So that board gets whichever one you are actually using: plug a
-> coordinator in and it runs Zigbee, leave it out and it runs Matter. Nothing to
-> configure either way, and the installer says which one you ended up with. You
-> can switch it in the GetHome app at any time — the coordinator stays
-> configured, and Zigbee devices come back when you switch back (they show as
-> offline meanwhile). A Pi 4 or Pi 5 runs both together and never asks.
+> **A Raspberry Pi Zero 2 W is set up for one radio at a time.** 512 MB is not
+> comfortably enough for Matter *and* Zigbee at once — measured, the hub is
+> ~120 MB, Matter adds ~60 MB, and Zigbee2MQTT another ~150 MB on top of the
+> operating system's ~70 MB. So that board starts with whichever one you are
+> actually using: plug a coordinator in and it runs Zigbee, leave it out and it
+> runs Matter. Nothing to configure either way, and the installer says which one
+> you ended up with. You can switch it in the GetHome app at any time — the
+> coordinator stays configured, and Zigbee devices come back when you switch
+> back (they show as offline meanwhile). A Pi 4 or Pi 5 runs both together and
+> never asks.
+
+#### You can run both on a Zero 2 W, and here is what that costs
+
+Those figures are for a *full* home, and most homes are nowhere near one. A
+Zero 2 W with three Zigbee devices and one Matter plug ran both radios for an
+hour with no throttling, no restarts and nothing killed — the hub peaking at
+170 MB against its 200 MB ceiling. So **"Run both radios" is an option in the
+GetHome app on every board**, including this one. What `one` now means is
+*recommended one at a time*, and the app says so where you turn it on.
+
+Before you do, the honest version:
+
+- **The margin is about 30 MB.** That is real and it is not much. The thing
+  that eats it is a growing Zigbee network: Zigbee2MQTT holds every paired
+  device's state, so the board that copes today is not the board you have after
+  twenty more bulbs.
+- **The hub watches for it rather than waiting to be told.** With both radios
+  on, it samples the kernel's own memory counters every 30 seconds — how often
+  the hub is being throttled at its limit, whether anything has been killed,
+  and how much memory is actually free. If the board is in trouble across most
+  of a five-minute window, the hub hands a radio back by itself, writes it to
+  the activity log and says so in the app. You are told what happened and can
+  put it back; what you are not left with is the system choosing which half of
+  your house stops working, at night.
+- **It catches trouble before anything dies.** The signal it acts on first is
+  *throttling* — the kernel holding the hub at its ceiling — which happens long
+  before anything is killed. Nothing is lost when it fires.
+- **Two things make the margin thinner**: running the desktop version of
+  Raspberry Pi OS (about 75 MB), and a board that has not been restarted since
+  the installer switched the kernel's memory accounting back on — until it has,
+  the hub cannot see the board running short and cannot hand a radio back. The
+  installer says so if either applies to you.
+- **A Pi 4 or Pi 5 has none of these questions.** If you know you want both
+  radios and a large network, that is the board to buy.
 
 ## Quick start
 

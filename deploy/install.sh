@@ -42,6 +42,11 @@
 #                       exists: without it "rolled back and healthy" and "the
 #                       hub is down" are the same two signals.
 #   @@PAIRING:<code>@@  the pairing code, when the hub is unclaimed
+#   @@RADIO_BUDGET:<one|both>@@  how many radios this board was measured for.
+#                       Advice, not a ceiling: `one` is the board on which
+#                       running both is an owner's informed choice, and it is
+#                       printed early so an installer UI can say so before the
+#                       hub exists to be asked.
 #   @@CAPABILITIES:<list>@@  what this hub ended up able to talk to, e.g.
 #                            "Zigbee, Wi-Fi and MQTT" — a 512 MB board runs one
 #                            radio at a time, so this is not the same on every
@@ -219,9 +224,17 @@ HUB_MEM_HIGH=""
 Z2M_MEM_HIGH=""
 Z2M_MEM_MAX=""
 HUB_V8_FLAGS=""
-# How many radios this board can afford at once — measured, not chosen. The
-# owner's preference between them, when only one fits, is a separate thing and
-# lives in <DATA_DIR>/radio-mode; gethome-zigbee-detect is where the two meet.
+# How many radios this board was measured for — measured, not chosen. The
+# owner's preference is a separate thing and lives in <DATA_DIR>/radio-mode;
+# gethome-zigbee-detect is where the two meet.
+#
+# **Advice, not a ceiling.** This number is measured against a *full* home —
+# the OS, the hub with Matter loaded, and a Zigbee2MQTT holding a hundred
+# devices' state — and most homes are nowhere near it. An owner may set
+# `radio-mode` to `both` on a board that says `one`, and the hub then watches
+# its own memory and hands a radio back by itself if the board really does run
+# short (src/core/radio-pressure.ts). What this value decides is what is
+# *recommended*, and what every app warns from.
 RADIO_BUDGET=both
 if [[ "$RAM_MB" -gt 0 && "$RAM_MB" -le 1024 ]]; then
   SMALL_BOARD=1
@@ -246,6 +259,12 @@ if [[ "$RAM_MB" -gt 0 && "$RAM_MB" -le 1024 ]]; then
   # --optimize-for-size outright ("not allowed in NODE_OPTIONS").
   HUB_V8_FLAGS="--optimize-for-size --max-semi-space-size=1"
 fi
+
+# Said out loud, and early. GetHome Studio draws the choice between one radio
+# and both on its install screen, which is well before there is a hub to ask —
+# and the question is one somebody should meet while they are still deciding
+# what to plug in, not after the install has already picked for them.
+printf '@@RADIO_BUDGET:%s@@\n' "$RADIO_BUDGET"
 
 # ── System packages ────────────────────────────────────────────────────────
 # Only what is actually missing. Raspberry Pi OS Lite already ships
@@ -413,7 +432,11 @@ if [[ -n "$SMALL_BOARD" ]]; then
   # — what they can act on is "it takes memory the hub needs" plus the command.
   # And it must not promise a second radio: RADIO_BUDGET is computed from the
   # board's RAM above and a desktop makes no difference to it, so "turn it off
-  # and get Matter too" would simply be untrue.
+  # and get Matter too" would simply be untrue. It is not untrue that the
+  # desktop is 75 MB of the margin an owner who turns both radios on is
+  # spending — but that offer is made at the end of the install, in one place,
+  # where it can be answered rather than being an aside in a warning about
+  # something else.
   if [[ "$(systemctl get-default 2>/dev/null || true)" == "graphical.target" ]]; then
     warn "This Pi is running the desktop version of Raspberry Pi OS. On a board this small the desktop uses up a good part of the memory the hub needs, for a screen that isn't attached. The hub works either way, it just has less room. If nobody uses a screen on this Pi, run \`sudo systemctl set-default multi-user.target\` and restart it to give that memory back; Raspberry Pi OS Lite is the version that never takes it in the first place."
   fi
@@ -2122,7 +2145,19 @@ fi
 printf '@@CAPABILITIES:%s@@\n' "$CAPS"
 say "This hub can talk to: ${CAPS}."
 
-if [[ "$RADIO_BUDGET" == "one" ]]; then
+RADIO_MODE=auto
+if [[ -r "$DATA_DIR/radio-mode" ]]; then
+  RADIO_MODE=$(tr -d '[:space:]' < "$DATA_DIR/radio-mode" 2>/dev/null || echo auto)
+fi
+
+if [[ "$RADIO_BUDGET" == "one" && "$RADIO_MODE" == "both" ]]; then
+  # The owner has already overridden the measurement, on this board, before
+  # this run. Falling through to the branches below would tell them their
+  # coordinator has the board and Matter is off — which is what the detector
+  # was *told not to do* twenty lines earlier, and reads as the install having
+  # quietly reverted a setting they made on purpose.
+  say "This board was measured for one radio at a time and you have asked it to run both, which it is doing. The hub watches its own memory from here: if this board really does run short — a bigger Zigbee network is what usually does it — the hub hands a radio back by itself rather than letting the system pick, and says so in the GetHome app. You can go back to one radio there at any time."
+elif [[ "$RADIO_BUDGET" == "one" ]]; then
   # One radio at a time, so say which one has it and how to change that — and
   # keep `ZIGBEE_CONFIGURED` (the board went to the coordinator) apart from
   # `ZIGBEE_READY` (Zigbee2MQTT actually reached it), because on a small board
@@ -2159,6 +2194,27 @@ if [[ "$RADIO_BUDGET" == "one" ]]; then
   fi
 elif [[ -z "$ZIGBEE_CONFIGURED" ]]; then
   say "No Zigbee coordinator is plugged in, so this hub starts with Matter, Wi-Fi and MQTT devices. Plug one in whenever you like — Zigbee starts by itself, with no reboot."
+fi
+
+# The offer, and its price, said once on the board where it is a real decision.
+#
+# Deliberately **after** the sentence naming which radio ended up with the
+# board, because it only makes sense as an answer to that — and deliberately
+# not said on a hub already running both, where the branch above has covered
+# it. `say` rather than `warn`: nothing is wrong, and an amber line here would
+# read as the install having gone badly on every 512 MB board there is.
+if [[ "$RADIO_BUDGET" == "one" && "$RADIO_MODE" != "both" ]]; then
+  say "If you would rather have both radios at once, you can turn that on in the GetHome app. The recommendation stays one at a time on this board — 512 MB is measured against a full home, and a big Zigbee network is what runs it out — but a home with a handful of devices is nowhere near that, and going without Matter to prevent a problem you do not have is the worse trade. The hub watches its own memory when you do: if the board runs short it hands a radio back by itself and tells you, rather than leaving the system to pick which half of the house stops."
+  # Two things the watch depends on, and both are worth naming *here* rather
+  # than where they were set up: they were noise on a hub running one radio and
+  # they are the difference between "hands a radio back" and "something dies"
+  # on a hub running two.
+  if ! memory_cgroup_live; then
+    say "One caveat if you do: the kernel's memory accounting is not in force on this board yet, so the hub cannot see the board running short and cannot hand a radio back. Restart this Pi first — the installer has already switched it on for the next boot."
+  fi
+  if [[ -z "$(swapon --show=NAME --noheadings 2>/dev/null)" ]]; then
+    say "One caveat if you do: this board has no swap of any kind, so there is no compressed memory to fall back on and the margin for running both radios is a good deal thinner than the numbers above assume."
+  fi
 fi
 
 # ── The broker asks for a password now ─────────────────────────────────────

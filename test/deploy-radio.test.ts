@@ -66,7 +66,7 @@ const CERTAIN_NAME = 'usb-ITEAD_SONOFF_Zigbee_3.0_USB_Dongle_Plus_V2_20240122183
 
 function decide(options: {
   budget: 'one' | 'both';
-  mode?: 'auto' | 'zigbee' | 'matter';
+  mode?: 'auto' | 'zigbee' | 'matter' | 'both';
   coordinator: boolean;
   /** Stage it as an explicit `--zigbee` pin instead of a detected device. */
   pinned?: boolean;
@@ -157,6 +157,54 @@ describe('a board that affords one radio', () => {
     expect(decide({ budget: 'one', mode: 'zigbee', coordinator: false })).toMatchObject({
       matter: '1',
       exitCode: 1,
+    });
+  });
+});
+
+/**
+ * The owner overriding the board's own measurement.
+ *
+ * The budget is measured against a **full** home — the OS, the hub with Matter
+ * loaded, and a Zigbee2MQTT holding a hundred devices' state — and a home with
+ * four devices is nowhere near it. Refusing `both` there takes Matter away
+ * from somebody to prevent a problem they do not have; the answer is to allow
+ * it and *watch*, which `src/core/radio-pressure.ts` does.
+ *
+ * This is the half of that which has to be right in a shell script somebody
+ * will read a year from now, and the half a wrong `case` arm breaks silently:
+ * `one:*` sitting above `one:both` swallows the override, and the only symptom
+ * is Matter quietly staying off on a hub whose owner turned it on.
+ */
+describe('a board measured for one, asked for both', () => {
+  it('runs Matter beside a plugged-in coordinator when asked to', () => {
+    expect(decide({ budget: 'one', mode: 'both', coordinator: true })).toMatchObject({
+      matter: '1',
+    });
+  });
+
+  it('still runs Zigbee — `both` is the opposite request from `matter`', () => {
+    // `matter` is the one mode that means "don't use the stick even though it
+    // is here", and `both` shares three of its four letters. Getting these
+    // confused would leave a hub that had asked for two radios running one.
+    const outcome = decide({ budget: 'one', mode: 'both', coordinator: true });
+    expect(outcome.serialPort).not.toBe('');
+    expect(outcome.zigbeeEnv).toContain('ZIGBEE_ADAPTER=');
+  });
+
+  it('runs Matter alone when both were asked for and no stick is here', () => {
+    // Nothing to run two of. The mode is a request, not a claim about the
+    // hardware, and a board with no coordinator answers it the same way `auto`
+    // does rather than by failing.
+    expect(decide({ budget: 'one', mode: 'both', coordinator: false })).toMatchObject({
+      matter: '1',
+    });
+  });
+
+  it('leaves a board that affords both exactly where it was', () => {
+    // `both:both` is not an override of anything — it is the default written
+    // down. It must not read as a special case and change something.
+    expect(decide({ budget: 'both', mode: 'both', coordinator: true })).toMatchObject({
+      matter: '1',
     });
   });
 });

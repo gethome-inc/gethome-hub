@@ -57,7 +57,7 @@ import { automationOutline } from '../automations/outline.js';
 import { automationShape, describeAutomation } from '../automations/summarize.js';
 import { automationRoom } from '../automations/scope.js';
 import type { AutomationHomeView } from '../automations/targets.js';
-import { RADIO_MODES, writeRadioMode, type RadioBudget, type RadioMode } from '../core/radio.js';
+import { acknowledgeRadioStandDown, RADIO_MODES, writeRadioMode, type RadioBudget, type RadioMode } from '../core/radio.js';
 import {
   canApplyUpdate,
   checkForUpdate,
@@ -2360,6 +2360,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // `core/radio.ts` cannot be one the API silently rejects.
     const modes = RADIO_MODES as readonly [RadioMode, ...RadioMode[]];
     const body = z.object({ mode: z.enum(modes) }).parse(request.body);
+    // **Before** the mode, for the reason every write on this path is ordered:
+    // writing the mode wakes the unit that restarts this process. Somebody
+    // choosing a radio — `both` included — has by definition seen where the
+    // hub left them, so the notice is answered; the *count* of how often this
+    // board has had to hand a radio back survives, because that is what an app
+    // offering `both` again should be able to say.
+    acknowledgeRadioStandDown(deps.dataDir);
     writeRadioMode(deps.dataDir, body.mode);
     deps.log.info({ mode: body.mode }, 'Radio mode requested');
     // Tell every other client, now. The hub restarts a moment later *only* if
@@ -2373,7 +2380,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     deps.events.emit('hubStatusChanged');
     await deps.activity.record({
       kind: 'hub.radio',
-      message: `${request.member!.name} set the radio to ${body.mode}.`,
+      // `both` is not a radio, so it cannot be set *to* one: on a board
+      // measured for one this is the sentence somebody re-reads later, when
+      // they are working out why the hub started handing radios back.
+      message:
+        body.mode === 'both'
+          ? `${request.member!.name} set the hub to run both radios at once.`
+          : `${request.member!.name} set the radio to ${body.mode}.`,
       memberId: request.member!.id,
       data: { memberName: request.member!.name, mode: body.mode },
     });
