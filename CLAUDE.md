@@ -479,6 +479,21 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   reason `reducer.ts` and `setup-code.ts` are their own files: reading it
   through `adapter.ts` loads `@matter/main`, so a rule both apps draw every
   Matter device from would be a rule no test could reach.
+  **And nothing `GET /hub` reads may throw**, which that first version learned
+  the hard way. It asked the controller what it was commissioned to *before*
+  deciding the phase, and matter.js refuses that question until `start()` has
+  finished (`getCommissionedNodes` asserts an instance) — while the controller
+  *object* exists for the tens of seconds `start()` spends loading and opening
+  its storage on a Zero 2 W. So every `GET /hub` in that window threw straight
+  out of the route, and that route is the health check `install.sh` gates on:
+  `curl -fsS` exited 22 and a real install aborted against a hub that was
+  coming up perfectly well and answered fine a minute later. The commissioned
+  list is a **function** on `SettlingPhase` now, called only in the one phase
+  that can answer it — which also means the health check asks matter.js nothing
+  at all in the steady state — with a `catch` behind it as the second layer,
+  because the cost of being wrong here is a failed install rather than a wrong
+  number. Every other read behind that route already obeys this (each file read
+  is `try`/`catch` with a documented fallback); a new one has to.
   **And the hub can be asked what it can hear** (`GET /matter/discoverable`),
   because Bluetooth range is the one part of pairing nobody can see and
   `not-found` is the same word for "two rooms away" and "never went into

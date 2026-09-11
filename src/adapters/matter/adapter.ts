@@ -249,11 +249,38 @@ export class MatterAdapter implements ProtocolAdapter {
         // read off the stamps alone and there is one condition to be wrong
         // about rather than two.
         startedAt: this.controller === null ? 0 : this.startedAt,
-        commissioned: this.controller?.getCommissionedNodes().map((nodeId) => nodeId.toString()) ?? [],
+        commissioned: () => this.commissionedIds(),
         connected: this.connectedOnce,
       },
       Date.now(),
     );
+  }
+
+  /**
+   * What the controller says it owns, or nothing if it will not say.
+   *
+   * **`GET /hub` is the health check `install.sh` gates on, so nothing it
+   * reads may throw.** matter.js refuses `getCommissionedNodes()` until the
+   * controller has started — and the controller *object* exists for the tens
+   * of seconds `start()` spends loading and opening its storage on a small
+   * board, which is exactly the window the installer polls in. Asking there
+   * threw `ImplementationError` straight out of the route: a 500, `curl -fsS`
+   * exiting 22, and an install aborting against a hub that was coming up
+   * perfectly well and answered fine a minute later.
+   *
+   * `settlingUntil` already decides the phase before asking, so this should
+   * never be reached in that state. The catch is the second layer, because the
+   * cost of being wrong is a failed install rather than a wrong number: an
+   * empty list reads as "settled", which is what this adapter answered before
+   * it could ever be asked at all.
+   */
+  private commissionedIds(): readonly string[] {
+    try {
+      return this.controller?.getCommissionedNodes().map((nodeId) => nodeId.toString()) ?? [];
+    } catch (error) {
+      this.options.log.debug({ err: error }, 'Matter would not say what it is commissioned to yet.');
+      return [];
+    }
   }
 
   async start(bus: AdapterBus): Promise<void> {

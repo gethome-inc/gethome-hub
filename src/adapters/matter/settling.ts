@@ -46,8 +46,20 @@ export interface SettlingPhase {
   startingAt: number;
   /** When the controller was up and the nodes had been told to connect. */
   startedAt: number;
-  /** The nodes this controller is commissioned to, by external id. */
-  commissioned: readonly string[];
+  /**
+   * The nodes this controller is commissioned to, by external id — **asked
+   * for, not handed over.**
+   *
+   * matter.js refuses this question until the controller has started
+   * (`getCommissionedNodes` asserts an instance and throws
+   * `ImplementationError` otherwise), and the controller *object* exists for
+   * the tens of seconds `start()` takes on a small board. Reading it eagerly
+   * therefore threw on every `GET /hub` in that window — which is the health
+   * check `install.sh` gates on, so an install aborted at `exit 22` against a
+   * hub that was coming up perfectly well. A function means the phase is
+   * decided first and the question is only asked where it can be answered.
+   */
+  commissioned: () => readonly string[];
   /** Those it has reached at least once since it started. */
   connected: ReadonlySet<string>;
 }
@@ -78,9 +90,15 @@ export function settlingUntil(phase: SettlingPhase, now: number): number | undef
   }
   const until = phase.startedAt + NODE_SETTLE_MS;
   if (now >= until) return undefined;
+  // **Only here**, which is the whole reason it is a function: both returns
+  // above are reached while the controller cannot answer, and the second is
+  // the steady state of every hub that has been up for a minute — so the
+  // health check asks matter.js nothing at all on the overwhelming majority
+  // of its calls.
+  const commissioned = phase.commissioned();
   // Nothing owned, nothing to look for. A hub that has never paired an
   // accessory must not spend its first minute explaining an empty home.
-  if (phase.commissioned.length === 0) return undefined;
-  if (phase.commissioned.every((nodeId) => phase.connected.has(nodeId))) return undefined;
+  if (commissioned.length === 0) return undefined;
+  if (commissioned.every((nodeId) => phase.connected.has(nodeId))) return undefined;
   return until;
 }

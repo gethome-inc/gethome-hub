@@ -29,10 +29,16 @@ function phase(overrides: Partial<SettlingPhase> = {}): SettlingPhase {
   return {
     startingAt: 0,
     startedAt: 0,
-    commissioned: [],
+    commissioned: () => [],
     connected: new Set<string>(),
     ...overrides,
   };
+}
+
+/** A controller that refuses the question, the way matter.js does before it
+ *  has started — see `refuses to ask matter.js anything it cannot answer`. */
+function refuses(): never {
+  throw new Error('Controller instance not yet started. Please call start() first.');
 }
 
 describe('a controller that has not started yet', () => {
@@ -75,7 +81,7 @@ describe('a controller that has not started yet', () => {
 describe('a controller that is up and reaching its nodes', () => {
   it('carries the moment it stops making excuses for a silent device', () => {
     const until = settlingUntil(
-      phase({ startingAt: now - 5_000, startedAt: now, commissioned: ['1', '2'] }),
+      phase({ startingAt: now - 5_000, startedAt: now, commissioned: () => ['1', '2'] }),
       now,
     );
     expect(until).toBe(now + NODE_SETTLE_MS);
@@ -87,7 +93,7 @@ describe('a controller that is up and reaching its nodes', () => {
     // answer in four seconds stops making excuses after four seconds.
     const reached = phase({
       startedAt: now,
-      commissioned: ['1', '2'],
+      commissioned: () => ['1', '2'],
       connected: new Set(['1', '2']),
     });
     expect(settlingUntil(reached, now + 4_000)).toBeUndefined();
@@ -97,7 +103,7 @@ describe('a controller that is up and reaching its nodes', () => {
   });
 
   it('runs out, so a node that never answers is offline in the end', () => {
-    const silent = phase({ startedAt: now, commissioned: ['1'] });
+    const silent = phase({ startedAt: now, commissioned: () => ['1'] });
     expect(settlingUntil(silent, now + NODE_SETTLE_MS)).toBeUndefined();
   });
 
@@ -112,7 +118,60 @@ describe('a controller that is up and reaching its nodes', () => {
     // apps schedule a rebuild *at* the deadline: one in the past is a timer
     // that fires immediately, for ever.
     const past = now + NODE_SETTLE_MS + 1;
-    expect(settlingUntil(phase({ startedAt: now, commissioned: ['1'] }), past)).toBeUndefined();
+    expect(settlingUntil(phase({ startedAt: now, commissioned: () => ['1'] }), past)).toBeUndefined();
     expect(settlingUntil(phase({ startingAt: now }), past + CONTROLLER_START_MS)).toBeUndefined();
+  });
+});
+
+/**
+ * The question matter.js refuses, and where it may be asked.
+ *
+ * `CommissioningController.getCommissionedNodes()` asserts a started
+ * controller and throws `ImplementationError` otherwise — and the controller
+ * *object* exists for the tens of seconds `start()` spends loading matter.js
+ * and opening its storage on a Zero 2 W. Reading it eagerly meant every
+ * `GET /hub` in that window threw straight out of the route.
+ *
+ * That route is the health check `install.sh` gates on, so the cost was not a
+ * wrong number: `curl -fsS` exited 22 and a real install aborted against a hub
+ * that was coming up perfectly well and answered fine a minute later. Found on
+ * a Pi, by the install that shipped the change above.
+ */
+describe('when the commissioned list may be asked for', () => {
+  it('refuses to ask matter.js anything while the controller is starting', () => {
+    // The window the installer polls in: `start()` entered, controller object
+    // constructed, `start()` not finished. Nothing here may reach it.
+    expect(settlingUntil(phase({ startingAt: now, commissioned: refuses }), now)).toBe(
+      now + CONTROLLER_START_MS + NODE_SETTLE_MS,
+    );
+  });
+
+  it('asks nothing before the adapter has been asked to run', () => {
+    expect(settlingUntil(phase({ commissioned: refuses }), now)).toBeUndefined();
+  });
+
+  it('asks nothing once the window has passed, which is a hub uptime', () => {
+    // The steady state of every hub that has been up a minute, and the one
+    // `GET /hub` is answered from all day. Paying matter.js a question there
+    // would be the same fault with a longer fuse.
+    const settled = phase({ startedAt: now, commissioned: refuses });
+    expect(settlingUntil(settled, now + NODE_SETTLE_MS)).toBeUndefined();
+    expect(settlingUntil(phase({ startingAt: now, commissioned: refuses }), now + 10 * 60_000))
+      .toBeUndefined();
+  });
+
+  it('asks exactly once inside the window, where the controller can answer', () => {
+    // `startedAt` is stamped only after `start()` resolved, so this is the one
+    // phase in which the question is safe — and it is asked once, not per node.
+    let asked = 0;
+    const counted = phase({
+      startedAt: now,
+      commissioned: () => {
+        asked += 1;
+        return ['1'];
+      },
+    });
+    expect(settlingUntil(counted, now + 1_000)).toBe(now + NODE_SETTLE_MS);
+    expect(asked).toBe(1);
   });
 });
