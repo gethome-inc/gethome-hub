@@ -70,6 +70,7 @@ function watcher(
     onRestore?: RadioPressureDeps['onRestore'];
     onPressure?: RadioPressureDeps['onPressure'];
     bootId?: string;
+    busy?: boolean;
   } = {},
 ) {
   writeFileSync(path.join(dir, 'radio-mode'), `${options.mode ?? 'both'}\n`);
@@ -84,6 +85,7 @@ function watcher(
     ...(options.onRestore !== undefined ? { onRestore: options.onRestore } : {}),
     ...(options.onPressure !== undefined ? { onPressure: options.onPressure } : {}),
     bootId: () => options.bootId,
+    busy: () => options.busy === true,
     read,
     // Never fires: every test drives `tick()` itself, because a watch that
     // needs a real clock to be tested is a watch nobody tests the edges of.
@@ -228,6 +230,17 @@ describe('a board that really is running out', () => {
     });
     await run(watch, 12);
     expect(modeAtAnnouncement).toBe('both');
+    expect(readRadioMode(dir)).toBe('auto');
+  });
+
+  it('hands a radio back even while somebody is pairing', async () => {
+    // The other half of the asymmetry, and the one that would be tempting to
+    // "fix" for consistency. A stand-down is the board being rescued: waiting
+    // for a convenient moment risks the kill it exists to prevent, and the
+    // pairing was going to be lost either way if the hub is killed for memory.
+    const watch = watcher(throttling(40), { busy: true });
+    await run(watch, 12);
+    expect(readRadioStandDown(dir)?.reason).toBe('memory-pressure');
     expect(readRadioMode(dir)).toBe('auto');
   });
 
@@ -449,6 +462,25 @@ describe('putting both radios back', () => {
     // And the lifetime count is untouched by any of it — that is this board's
     // history, and it is what an app says when it offers the switch again.
     expect(readRadioStandDown(dir)?.count).toBe(1);
+  });
+
+  it('waits while somebody is standing in front of a device', async () => {
+    // **Only the retry waits, and never the stand-down.** A retry is
+    // opportunistic and can always happen in an hour; a hub that restarted
+    // itself in the middle of a pairing would take the pairing with it, for a
+    // trial that had no reason to happen in that particular minute.
+    stoodDown();
+    const onRestore = vi.fn();
+    const watch = watcher([healthy], {
+      mode: 'auto',
+      zigbee: false,
+      bootId: 'boot-b',
+      busy: true,
+      onRestore,
+    });
+    await run(watch, 20);
+    expect(onRestore).not.toHaveBeenCalled();
+    expect(readRadioMode(dir)).toBe('auto');
   });
 
   it('does nothing at all on a hub this has never happened to', async () => {

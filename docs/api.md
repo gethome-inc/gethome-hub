@@ -765,6 +765,11 @@ with an explanation rather than an unexplained outage. There is deliberately
 within a week", and a timer to a restart that has to happen anyway is a number
 nobody can use.
 
+It also **waits while somebody is pairing** — a Matter commissioning in flight,
+or an open Zigbee join window — because a hub that restarted itself mid-pairing
+would take the pairing with it. The stand-down never waits: it is the board
+being rescued, and deferring it risks the kill it exists to prevent.
+
 #### A radio switch in flight (`radio.applying`)
 
 Applying a radio **restarts the hub** — around seventy seconds of a closed port

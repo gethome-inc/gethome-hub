@@ -160,6 +160,20 @@ export interface RadioPressureDeps {
    * by hand is the other), and every one of them wants watching.
    */
   radiosLive: () => { zigbee: boolean; matter: boolean };
+  /**
+   * Whether somebody is in the middle of something, right now.
+   *
+   * **Only the retry waits for this, and never the stand-down**, which is the
+   * asymmetry worth keeping: a retry is opportunistic and can always happen
+   * later, while a stand-down is the board being rescued and deferring it
+   * risks the kill it exists to prevent.
+   *
+   * What it covers is a person standing in front of a device — a Matter
+   * commissioning in flight, or a Zigbee network open for joining. A hub that
+   * restarted itself in the middle of either would take the pairing with it,
+   * for a trial that had no particular reason to happen in that minute.
+   */
+  busy?: () => boolean;
   log: Logger;
   /**
    * Say so, before the radio is written.
@@ -420,6 +434,7 @@ export function createRadioPressureWatch(deps: RadioPressureDeps): RadioPressure
     if (!live.zigbee || !live.matter) {
       forget();
       if (Date.now() - startedAt < settleMs) return;
+      if (deps.busy?.() === true) return;
       const record = readRadioStandDown(deps.dataDir);
       if (
         readRadioMode(deps.dataDir) !== 'both' &&

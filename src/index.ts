@@ -393,6 +393,10 @@ async function main(): Promise<void> {
     dataDir: config.DATA_DIR,
     radioBudget: config.GETHOME_RADIO,
     radiosLive: () => ({ zigbee: zigbee?.connected ?? false, matter: matter !== undefined }),
+    // Somebody standing in front of a device. Only the retry waits for it: a
+    // hub that restarted itself mid-pairing would take the pairing with it,
+    // for a trial that had no reason to happen in that particular minute.
+    busy: () => matter?.isCommissioning === true || permitJoin.state.active,
     log: log.child({ module: 'radio' }),
     onStandDown: async (record) => {
       // Both, in this order, and both before the mode is written: the frame is

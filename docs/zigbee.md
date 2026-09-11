@@ -567,6 +567,32 @@ writes a `hub.radio-restored` row — a change with an explanation rather than a
 unexplained outage. There is no countdown, because the answer to *when* is
 "next time this board restarts, or within a week".
 
+**It waits while somebody is standing in front of a device** — a Matter
+commissioning in flight, or the Zigbee network open for joining — because a hub
+that restarted itself mid-pairing would take the pairing with it, for a trial
+that had no reason to happen in that particular minute. The **stand-down never
+waits**, and keeping that asymmetry is the point: a retry is opportunistic and
+can always happen in an hour, while a stand-down is the board being rescued and
+deferring it risks the kill it exists to prevent.
+
+### What this watch cannot see
+
+**The hub being killed outright.** `memory.events` lives in the service's own
+cgroup, and systemd recreates that on every restart, so a hub that is OOM-killed
+comes back to counters at zero with no memory of it. Nothing here would notice.
+
+That is a real gap and it is bounded by design rather than by luck:
+`MemoryHigh=200M` *throttles* the hub long before the kernel kills anything, and
+the watch samples every 30 seconds — so getting from a healthy board to a dead
+process without six throttled samples in between takes a very sudden change.
+The signal is deliberately the slow one.
+
+Two things were considered and left out. Reading systemd's own `NRestarts`
+would catch it, at the cost of spawning `systemctl` on a 1 GHz board and a
+counter that rises for every kind of crash. And treating an unclean shutdown as
+evidence is worse than useless on a Raspberry Pi, where the commonest unclean
+shutdown by far is somebody pulling the plug.
+
 Applying a mode is root work — editing `hub.env`, starting or stopping a unit,
 restarting the hub — and the hub deliberately cannot do any of it. It writes one
 word to `<data>/radio-mode`, a file it already owns; `gethome-radio.path`
