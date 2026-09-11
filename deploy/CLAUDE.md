@@ -551,6 +551,25 @@ in `deploy/install.sh` must stay accurate.
   extrapolation from one point, because it is. **`memory.events`' `high` is the
   number that settles it** — while it reads 0 the kernel has never once had to
   hold the hub back, and it is one `cat` away.
+  **Then it ran seven hours, and that is the run to quote.** Sampled every ten
+  minutes on the same board with both radios: hub 156-165 MB resident and **0
+  in swap**, `memory.peak` **175 MB against the 200 MB ceiling and flat for the
+  last six of those hours**, Z2M 17-22 MB resident with 67-72 MB in zram,
+  `MemAvailable` 85-95 MB, and `high 0` / `oom_kill 0` on **both** units
+  throughout. **It plateaus.** A fresh start with both radios is 141 MB, climbs
+  to about 160 over the first hour and then stops — so the slow growth people
+  reach for to explain a board falling over after a week is not what happens
+  here, and the hub was never throttled once. Two corrections come with it.
+  **Matter costs about 55 MB**, not the 80-90 an earlier reading suggested:
+  that one compared a both-radio process which had been up for hours against a
+  freshly started Zigbee-only one, so it was measuring the plateau climb and
+  calling it Matter — a mistake worth naming because it is easy to repeat.
+  And **the boot peak is not the number to watch after all** — the plateau is
+  five megabytes above the 170 MB boot peak, so on this board the ceiling is
+  approached by a hub that has been *running*, not by one starting.
+  The one-radio recommendation is unchanged all the same, for the only reason
+  that ever mattered: three Zigbee devices is not a Zigbee network, and Z2M's
+  working set is already 90 MB.
   **And the hub is not where that headroom comes from** (`MemorySwapMax=0`).
   The sentence above — the board affords both radios by keeping two thirds of
   them cold — is true and is also the whole of a fault that reads as a dead
