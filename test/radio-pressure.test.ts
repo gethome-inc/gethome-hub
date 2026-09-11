@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createRadioPressureWatch,
+  Z2M_UNIT,
   type MemorySample,
   type RadioPressureDeps,
 } from '../src/core/radio-pressure.js';
@@ -295,5 +296,33 @@ describe('the record this leaves behind', () => {
     expect(readRadioStandDown(dir)).toBeUndefined();
     acknowledgeRadioStandDown(dir);
     expect(readRadioStandDown(dir)).toBeUndefined();
+  });
+});
+
+/**
+ * The one thing in here that cannot be tested by injecting a reader, and the
+ * one that got it wrong first time.
+ *
+ * `readSystemMemory` reaches absolute paths — `/proc/self/cgroup`,
+ * `/sys/fs/cgroup` — so the parts that matter on a Pi are unreachable from a
+ * suite that runs on a Mac. The half that is still checkable is the **name**,
+ * and it is the half that broke: the unit is `gethome-zigbee2mqtt`, not
+ * `zigbee2mqtt`, because the hub installs its own rather than adopting a
+ * distribution's. Reading the shorter one opens a path that does not exist,
+ * which from here is indistinguishable from "this unit has never been killed"
+ * — a missing signal failing in the one direction it must not.
+ *
+ * So this asserts against the installer itself, the way
+ * `test/deploy-radio.test.ts` runs the real detector rather than a copy of it.
+ */
+describe('the unit Zigbee2MQTT is actually installed as', () => {
+  it('is the name this watch reads its counters from', () => {
+    const installer = readFileSync(
+      path.join(import.meta.dirname, '..', 'deploy', 'install.sh'),
+      'utf8',
+    );
+    // The line that writes the unit file is the definition; anything else in
+    // the script referring to it is downstream of this.
+    expect(installer).toContain(`/etc/systemd/system/${Z2M_UNIT}`);
   });
 });

@@ -2212,7 +2212,12 @@ if [[ "$RADIO_BUDGET" == "one" && "$RADIO_MODE" != "both" ]]; then
   if ! memory_cgroup_live; then
     say "One caveat if you do: the kernel's memory accounting is not in force on this board yet, so the hub cannot see the board running short and cannot hand a radio back. Restart this Pi first — the installer has already switched it on for the next boot."
   fi
-  if [[ -z "$(swapon --show=NAME --noheadings 2>/dev/null)" ]]; then
+  # `/proc/swaps` rather than `swapon`, which lives in /sbin and is not on a
+  # non-root PATH on Raspberry Pi OS — so the command fails, the output is
+  # empty, and the check reports "no swap" on a board that has zram running.
+  # A false warning about the one thing that makes this offer thinner is worse
+  # than no warning: it argues against a choice the numbers actually support.
+  if [[ "$(grep -c '^/' /proc/swaps 2>/dev/null || echo 0)" == "0" ]]; then
     say "One caveat if you do: this board has no swap of any kind, so there is no compressed memory to fall back on and the margin for running both radios is a good deal thinner than the numbers above assume."
   fi
 fi

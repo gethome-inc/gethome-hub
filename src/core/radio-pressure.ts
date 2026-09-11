@@ -191,6 +191,18 @@ function readMeminfo(): { available?: number; total?: number } {
 }
 
 /**
+ * Zigbee2MQTT's unit, which `deploy/install.sh` writes and
+ * `deploy/zigbee-detect.sh` starts and stops.
+ *
+ * A cross-file contract, and one worth stating rather than guessing: the unit
+ * is **`gethome-zigbee2mqtt`**, not `zigbee2mqtt`, because the hub installs its
+ * own rather than adopting a distribution's. Guessing the shorter name reads a
+ * path that does not exist, which is indistinguishable here from "this unit has
+ * never been killed" — the one direction a missing signal must not fail in.
+ */
+export const Z2M_UNIT = 'gethome-zigbee2mqtt.service';
+
+/**
  * The real reader: this process's own cgroup, Zigbee2MQTT's beside it, and
  * `/proc/meminfo`.
  *
@@ -208,7 +220,7 @@ export const readSystemMemory: ReadMemory = () => {
   const high = readCounter(path.join(own, 'memory.events'), 'high');
   const ownKills = readCounter(path.join(own, 'memory.events'), 'oom_kill');
   const z2mKills = readCounter(
-    path.join(path.dirname(own), 'zigbee2mqtt.service', 'memory.events'),
+    path.join(path.dirname(own), Z2M_UNIT, 'memory.events'),
     'oom_kill',
   );
   const kills =
