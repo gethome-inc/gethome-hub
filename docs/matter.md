@@ -142,6 +142,13 @@ what makes a single cancel unambiguous.
 
 ## How devices map
 
+- **Mode is nine clusters, not one.** `ModeSelect` (0x0050) predates Mode
+  Base; every other mode cluster derives from it — laundry washer, dishwasher,
+  oven, fridge, microwave, EV charger, water heater, vacuum run and clean — and
+  they all keep `CurrentMode` at 0x0001 where `ModeSelect` keeps it at 0x0003.
+  One shape, so one branch in the reducer: listing the ids *is* supporting
+  them. Until they were listed, every appliance in the catalog announced a
+  `mode` capability from its device type that nothing could ever fill.
 - Endpoint device types (Descriptor cluster `DeviceTypeList`) are looked up in
   the catalog (`src/schema/catalog.ts`) → `deviceKind` + capabilities;
   infrastructure endpoints (root node, bridge plumbing, OTA) are filtered.
@@ -154,6 +161,14 @@ what makes a single cancel unambiguous.
   Announcing the type's list wholesale meant claiming capabilities the
   accessory had already said it hasn't got, and the apps drew a reading slot
   that could never fill.
+  **The table is pinned by tests rather than by reading**, because a wrong
+  cluster id here does not fail — it silently means a washing machine arrives
+  without its programme, on hardware nobody here owns. Three invariants:
+  every id is checked against matter.js's spec-generated model; every cluster
+  the reducer can read must be claimed by some capability (this is what caught
+  `mode`, which listed `ModeSelect` alone while every appliance carries its own
+  Mode Base cluster); and every entry in the catalog must survive narrowing
+  against an endpoint implementing exactly what its type describes.
   Two rules. **The primary survives whatever happens**: it is what a device
   card leads with, and an endpoint missing its primary cluster is malformed —
   quietly picking a different one would hide that behind a card that looks fine

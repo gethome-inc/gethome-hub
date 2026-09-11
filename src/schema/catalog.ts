@@ -169,7 +169,7 @@ export function descriptorFor(deviceTypeIds: number[]): DeviceTypeDescriptor {
  * capability added to the catalog and forgotten here would silently vanish
  * from every device, which is a far worse failure than an over-claim.
  */
-const CAPABILITY_CLUSTERS: Partial<Record<CapabilityKind, readonly number[]>> = {
+export const CAPABILITY_CLUSTERS: Partial<Record<CapabilityKind, readonly number[]>> = {
   onOff: [0x0006],
   level: [0x0008],
   // One cluster for both, and that is right: a colour-temperature light and a
@@ -200,7 +200,13 @@ const CAPABILITY_CLUSTERS: Partial<Record<CapabilityKind, readonly number[]>> = 
   co2: [0x040d],
   smokeCOAlarm: [0x005c],
   mediaPlayback: [0x0506],
-  mode: [0x0050],
+  // **Every mode cluster Matter has, not just the oldest one.** `ModeSelect`
+  // (0x0050) predates Mode Base; a washing machine, a dishwasher, an oven, a
+  // fridge, a microwave, an EV charger, a water heater and a vacuum each carry
+  // their *own* derived cluster instead. Listing only 0x0050 would have
+  // dropped `mode` from every one of them — the silent direction, and the
+  // reason this table is pinned against the reducer by a test.
+  mode: [0x0050, 0x0054, 0x0055, 0x0051, 0x0052, 0x0059, 0x0049, 0x005e, 0x009d, 0x009e],
   rvcRun: [0x0061],
 };
 

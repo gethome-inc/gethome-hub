@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { descriptorFor, restrictToClusters, type CapabilityKind } from '../src/schema/index.js';
+import {
+  CAPABILITY_CLUSTERS,
+  DEVICE_TYPE_CATALOG,
+  descriptorFor,
+  restrictToClusters,
+  type CapabilityKind,
+} from '../src/schema/index.js';
 
 /**
  * A device type says what an endpoint **may** implement; the clusters on the
@@ -86,5 +92,104 @@ describe('narrowing a device type to what an endpoint really implements', () => 
     // a far worse failure than an over-claim, and a silent one.
     const withUnmapped = { ...smartPlug, capabilities: ['onOff', 'custom'] as CapabilityKind[] };
     expect(restrictToClusters(withUnmapped, [0x0006]).capabilities).toEqual(['onOff', 'custom']);
+  });
+});
+
+/**
+ * The two invariants that keep the narrowing from quietly costing somebody a
+ * feature.
+ *
+ * Dropping is the destructive direction, and it is silent: a wrong cluster id
+ * here does not fail, it just means a washing machine arrives without its
+ * programme. Eyeballing the table caught the plug and missed the vacuum —
+ * `mode` was listed as ModeSelect alone, while every appliance in the catalog
+ * carries its *own* Mode Base cluster instead. These are what caught that.
+ */
+describe('the capability → cluster table', () => {
+  it('names clusters that exist, checked against the spec itself', async () => {
+    // matter.js's model is generated from the Matter specification, so this is
+    // the real thing rather than a second copy of my reading of it. It lives
+    // in the adapter's dependency rather than in `src/schema/` — which is
+    // dependency-free by design — so the check belongs here, in a test.
+    const { MatterModel } = await import('@matter/main/model');
+    const known = new Set(
+      MatterModel.standard.clusters
+        .map((cluster) => cluster.id)
+        .filter((id): id is number => id !== undefined),
+    );
+    // The Switch cluster is read by the adapter rather than the reducer, so it
+    // is in the table and not in `Cluster` below; it still has to be real.
+    for (const [capability, clusters] of Object.entries(CAPABILITY_CLUSTERS)) {
+      for (const cluster of clusters ?? []) {
+        expect.soft(known.has(cluster), `${capability} → 0x${cluster.toString(16)}`).toBe(true);
+      }
+    }
+  });
+
+  it('claims every cluster the reducer can actually read', async () => {
+    // **The invariant that matters.** If the reducer populates state from a
+    // cluster and no capability lists it, then an endpoint carrying only that
+    // cluster loses the capability — silently, at announce time, on hardware
+    // nobody here owns. This is what would have caught `mode`: the reducer has
+    // read `RvcRunMode` since long before this table existed, and the table
+    // listed only `ModeSelect`.
+    const { Cluster } = await import('../src/adapters/matter/reducer.js');
+    const claimed = new Set(Object.values(CAPABILITY_CLUSTERS).flatMap((ids) => [...(ids ?? [])]));
+    for (const [name, id] of Object.entries(Cluster)) {
+      // Descriptor is plumbing — it is how endpoints are found, and it fills
+      // no capability of its own.
+      if (name === 'descriptor') continue;
+      expect.soft(claimed.has(id), `reducer reads ${name} (0x${id.toString(16)}) for nothing`).toBe(true);
+    }
+  });
+
+  it('gives every appliance in the catalog a mode it can really report', () => {
+    // The catalog hands `mode` to nine device types. Each implements its own
+    // Mode Base cluster and nothing else, so before this table learned them
+    // all, every one of them would have lost it.
+    const modes: Array<[number, number]> = [
+      [0x0074, 0x0054], // Robotic Vacuum Cleaner → RvcRunMode
+      [0x0073, 0x0051], // Laundry Washer         → LaundryWasherMode
+      [0x0075, 0x0059], // Dishwasher             → DishwasherMode
+      [0x007b, 0x0049], // Oven                   → OvenMode
+      [0x0070, 0x0052], // Refrigerator           → RefrigeratorAndTemperatureControlledCabinetMode
+      [0x0079, 0x005e], // Microwave Oven         → MicrowaveOvenMode
+      [0x050c, 0x009d], // EVSE                   → EnergyEvseMode
+      [0x050f, 0x009e], // Water Heater           → WaterHeaterMode
+    ];
+    for (const [deviceTypeId, clusterId] of modes) {
+      const descriptor = descriptorFor([deviceTypeId]);
+      expect(descriptor.capabilities).toContain('mode');
+      const narrowed = restrictToClusters(descriptor, [clusterId, 0x0006, 0x0402]);
+      expect.soft(narrowed.capabilities, `device type 0x${deviceTypeId.toString(16)}`).toContain('mode');
+    }
+  });
+});
+
+describe('every device type in the catalog', () => {
+  it('keeps all of its capabilities when the accessory implements them', () => {
+    // The universal check, and the one that covers the device types nobody
+    // here owns. For each entry: build the endpoint its own type describes —
+    // every cluster the table maps its capabilities to — and assert nothing is
+    // dropped. A wrong id anywhere in the table fails here for that device
+    // type by name, rather than on somebody's oven a year from now.
+    for (const entry of DEVICE_TYPE_CATALOG) {
+      const clusters = entry.capabilities.flatMap((capability) => [
+        ...(CAPABILITY_CLUSTERS[capability] ?? []),
+      ]);
+      const narrowed = restrictToClusters(entry, clusters);
+      expect
+        .soft(narrowed.capabilities, `${entry.name} (0x${entry.id.toString(16)})`)
+        .toEqual(entry.capabilities);
+    }
+  });
+
+  it('has a primary that is one of its own capabilities', () => {
+    // Not about narrowing, but it is what makes the "primary always survives"
+    // rule safe: a primary outside the list would be kept as a capability the
+    // device never had.
+    for (const entry of DEVICE_TYPE_CATALOG) {
+      expect.soft(entry.capabilities, entry.name).toContain(entry.primary);
+    }
   });
 });

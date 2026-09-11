@@ -42,11 +42,49 @@ export const Cluster = {
   electricalPowerMeasurement: 0x0090,
   electricalEnergyMeasurement: 0x0091,
   mediaPlayback: 0x0506,
+  /**
+   * The older, standalone mode cluster — `CurrentMode` at 0x0003.
+   */
   modeSelect: 0x0050,
+  /**
+   * Everything derived from **Mode Base**, which is every other mode cluster
+   * Matter has. They share one shape — `CurrentMode` at 0x0001 — so they share
+   * one branch, and listing them is the whole of supporting them.
+   *
+   * They were missing, and a washing machine, a dishwasher, an oven, a fridge,
+   * a microwave, an EV charger and a water heater all carry one: their `mode`
+   * capability was announced from the device type and could never be filled,
+   * exactly like the plug that started this.
+   */
   rvcRunMode: 0x0054,
+  rvcCleanMode: 0x0055,
+  laundryWasherMode: 0x0051,
+  refrigeratorMode: 0x0052,
+  dishwasherMode: 0x0059,
+  ovenMode: 0x0049,
+  microwaveOvenMode: 0x005e,
+  energyEvseMode: 0x009d,
+  waterHeaterMode: 0x009e,
   rvcOperationalState: 0x0061,
   descriptor: 0x001d,
 } as const;
+
+/**
+ * The mode clusters that follow Mode Base, and so keep `CurrentMode` at
+ * 0x0001. `modeSelect` is deliberately not among them: it predates Mode Base
+ * and puts the same attribute at 0x0003.
+ */
+const MODE_BASE_CLUSTERS: readonly number[] = [
+  Cluster.rvcRunMode,
+  Cluster.rvcCleanMode,
+  Cluster.laundryWasherMode,
+  Cluster.refrigeratorMode,
+  Cluster.dishwasherMode,
+  Cluster.ovenMode,
+  Cluster.microwaveOvenMode,
+  Cluster.energyEvseMode,
+  Cluster.waterHeaterMode,
+];
 
 const THERMOSTAT_NULL = -32_768; // 0x8000 as Int16
 
@@ -367,8 +405,18 @@ function route(report: AttributeReport, state: EndpointState): void {
     }
 
     case Cluster.modeSelect:
-    case Cluster.rvcRunMode: {
-      const modeAttribute = clusterId === Cluster.modeSelect ? 0x0003 : 0x0001;
+    case Cluster.rvcRunMode:
+    case Cluster.rvcCleanMode:
+    case Cluster.laundryWasherMode:
+    case Cluster.refrigeratorMode:
+    case Cluster.dishwasherMode:
+    case Cluster.ovenMode:
+    case Cluster.microwaveOvenMode:
+    case Cluster.energyEvseMode:
+    case Cluster.waterHeaterMode: {
+      // One branch for all of them, because Mode Base is one shape. Only the
+      // pre-Mode-Base `ModeSelect` puts `CurrentMode` somewhere else.
+      const modeAttribute = MODE_BASE_CLUSTERS.includes(clusterId) ? 0x0001 : 0x0003;
       const raw = asInt(value);
       if (attributeId === modeAttribute && raw !== undefined) state.currentMode = clampByte(raw);
       return;
