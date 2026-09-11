@@ -528,7 +528,16 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   warning first, and on a board measured for both the hub only ever reports —
   taking a radio off a Pi 5 would be making a working home smaller to fix
   something that is somewhere else. `radio.pressure` carries that, live, so it
-  clears itself.
+  clears itself. **Only the retry waits for a quiet moment** (a Matter
+  commissioning in flight, or an open Zigbee join window) — a hub that
+  restarted itself mid-pairing would take the pairing with it, for a trial that
+  had no reason to happen in that minute; the stand-down never waits, because
+  it is the board being rescued and deferring it risks the kill it exists to
+  prevent. The one thing this cannot see is **the hub being killed outright** —
+  `memory.events` is in the service's own cgroup and systemd recreates it on
+  every restart — which is bounded by `MemoryHigh` throttling long before
+  anything is killed rather than by luck; `docs/zigbee.md` records the two
+  alternatives that were considered and left out.
 - **The AI subsystem's own conventions live in `src/ai/CLAUDE.md`**, which
   loads when you work under `src/ai/`: the mapping library and its five
   routes, the retry path and the backoff gate, `ai_run_exchanges`, the five
