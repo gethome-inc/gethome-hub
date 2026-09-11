@@ -76,6 +76,17 @@ const DISCOVERY_TIMEOUT_MS = 3 * 60 * 1000;
  */
 const COMMISSION_TIMEOUT_MS = DISCOVERY_TIMEOUT_MS + 90 * 1000;
 
+/**
+ * How long a just-started controller is given to reach the nodes it owns.
+ *
+ * Measured at twenty to thirty seconds on a Raspberry Pi Zero 2 W for one
+ * node — a CASE session per accessory, over Wi-Fi, on a 1 GHz A53 — so a
+ * minute is the bound rather than the expectation. It is only ever *reached*
+ * by a node that is genuinely not there: `settlingUntil` clears itself as soon
+ * as the last one connects.
+ */
+const NODE_SETTLE_MS = 60 * 1000;
+
 export interface MatterAdapterOptions {
   dataDir: string;
   log: Logger;
@@ -166,6 +177,17 @@ export class MatterAdapter implements ProtocolAdapter {
   private controller: CommissioningController | null = null;
   private bus: AdapterBus | null = null;
   private readonly nodes = new Map<string, PairedNode>();
+  /**
+   * Nodes that have reached `Connected` since this controller started.
+   *
+   * The set is what makes `settlingUntil` an *answer* rather than a blind
+   * timer: the controller knows exactly which accessories it is commissioned
+   * to and exactly which of them it has reached, so "still looking" can end
+   * the moment the last one arrives instead of when a clock runs out.
+   */
+  private readonly connectedOnce = new Set<string>();
+  /** When `start()` finished, for the settling window below. 0 until then. */
+  private startedAt = 0;
   /** Working states for the reducer, keyed `${nodeId}/${endpointId}`. */
   private readonly states = new Map<string, EndpointState>();
   /** Switch-cluster features per `${nodeId}/${endpointId}` (buttons). */
@@ -207,6 +229,36 @@ export class MatterAdapter implements ProtocolAdapter {
     return this.inFlight !== null;
   }
 
+  /**
+   * Until when this controller is still finding the devices it already owns.
+   *
+   * **A Matter device is not offline because the hub has only just started
+   * looking for it.** Zigbee2MQTT hands its whole device list over in one
+   * retained message, so a Zigbee home is complete a second after the radio
+   * is; a Matter controller has to open a CASE session with every node in
+   * turn, over Wi-Fi, and on a Zero 2 W that is twenty to thirty seconds. The
+   * devices were read back from the database with the `online: false` they
+   * were given when Matter was last switched *off*, so for that whole window
+   * a working home read "1 device offline · needs attention" — about an
+   * accessory that was about to answer.
+   *
+   * Absent means settled, and it becomes absent **the moment the last node
+   * connects** rather than when the window runs out: the controller knows
+   * what it is commissioned to and what it has reached, so there is no need
+   * to guess. The window is only the bound for the node that never answers —
+   * which is the one genuinely offline device, and which must not be hidden
+   * for ever behind a "still looking".
+   */
+  get settlingUntil(): number | undefined {
+    if (this.controller === null || this.startedAt === 0) return undefined;
+    const until = this.startedAt + NODE_SETTLE_MS;
+    if (Date.now() >= until) return undefined;
+    const commissioned = this.controller.getCommissionedNodes();
+    if (commissioned.length === 0) return undefined;
+    if (commissioned.every((nodeId) => this.connectedOnce.has(nodeId.toString()))) return undefined;
+    return until;
+  }
+
   async start(bus: AdapterBus): Promise<void> {
     this.bus = bus;
     const environment = Environment.default;
@@ -240,6 +292,10 @@ export class MatterAdapter implements ProtocolAdapter {
         this.options.log.warn({ err: error }, `Could not attach Matter node ${nodeId}`);
       });
     }
+    // **After** the nodes are attached, not before: `attachNode` is what
+    // subscribes to the state changes that end the settling window, so a
+    // stamp taken earlier would be counting time nothing could report in.
+    this.startedAt = Date.now();
     this.options.log.info(
       `Matter controller started with ${this.controller.getCommissionedNodes().length} commissioned node(s).`,
     );
@@ -249,6 +305,8 @@ export class MatterAdapter implements ProtocolAdapter {
     await this.controller?.close();
     this.controller = null;
     this.nodes.clear();
+    this.connectedOnce.clear();
+    this.startedAt = 0;
   }
 
   async execute(externalId: string, endpointId: number, command: HubCommand): Promise<void> {
@@ -519,7 +577,13 @@ export class MatterAdapter implements ProtocolAdapter {
     node.events.initializedFromRemote.on(() => this.announceNode(externalId, node));
     node.events.structureChanged.on(() => this.announceNode(externalId, node));
     node.events.stateChanged.on((nodeState) => {
-      this.bus?.reachabilityChanged('matter', externalId, nodeState === NodeStates.Connected);
+      const connected = nodeState === NodeStates.Connected;
+      // Once, and never unset: this records that the controller *has reached*
+      // this node since it started, which is what ends the settling window.
+      // A node that connects and later drops is a device that genuinely went
+      // offline, and saying so is the whole point of the window ending.
+      if (connected) this.connectedOnce.add(externalId);
+      this.bus?.reachabilityChanged('matter', externalId, connected);
     });
     node.events.attributeChanged.on(({ path: attributePath, value }) => {
       const report: AttributeReport = {

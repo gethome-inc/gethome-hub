@@ -45,6 +45,7 @@ function reader(options: {
   matter: boolean;
   coordinatorPath?: string;
   pressure?: { since: number; detail: string; willStandDown: boolean };
+  settlingUntil?: number;
 }) {
   const deps = {
     dataDir: dir,
@@ -62,6 +63,7 @@ function reader(options: {
             bleStatus: { enabled: true },
             hasWifiCredentials: true,
             isCommissioning: false,
+            settlingUntil: options.settlingUntil,
           },
         }
       : {}),
@@ -281,5 +283,99 @@ describe('what the hub says about its memory', () => {
       pressure: { ...pressure, willStandDown: true },
     }).snapshot();
     expect(snapshot.radio.pressure?.willStandDown).toBe(true);
+  });
+});
+
+/**
+ * A switch that turns a radio **off**.
+ *
+ * `applying` used to ask only whether the radio somebody asked for was up,
+ * which is right for every switch that turns one on and wrong for every switch
+ * that turns one off. Leaving `both` for `zigbee` left Zigbee already
+ * connected, so the hub reported the switch as landed the instant it was
+ * recorded — no progress bar, no planned downtime — and then went off the
+ * network for seventy seconds with nothing on any screen to say why.
+ *
+ * Found on a real hub, on video. `both` → `matter` had exactly the same defect
+ * and nobody had noticed, which is the reason both directions are pinned here.
+ */
+describe('leaving both radios for one', () => {
+  beforeEach(() => {
+    writeFileSync(path.join(dir, 'radio-requested'), `${Date.now()}\n`);
+  });
+
+  it('is still applying while Matter has not gone yet', () => {
+    writeFileSync(path.join(dir, 'radio-mode'), 'zigbee\n');
+    const midFlight = reader({ budget: 'one', zigbeeConnected: true, matter: true }).snapshot();
+    expect(midFlight.radio.applying).toBe(true);
+  });
+
+  it('is done once Matter has actually gone', () => {
+    writeFileSync(path.join(dir, 'radio-mode'), 'zigbee\n');
+    const landed = reader({ budget: 'one', zigbeeConnected: true, matter: false }).snapshot();
+    expect(landed.radio.applying).toBe(false);
+  });
+
+  it('is still applying while Zigbee has not gone yet', () => {
+    writeFileSync(path.join(dir, 'radio-mode'), 'matter\n');
+    const midFlight = reader({ budget: 'one', zigbeeConnected: true, matter: true }).snapshot();
+    expect(midFlight.radio.applying).toBe(true);
+  });
+
+  it('is done once Zigbee has actually gone', () => {
+    writeFileSync(path.join(dir, 'radio-mode'), 'matter\n');
+    const landed = reader({ budget: 'one', zigbeeConnected: false, matter: true }).snapshot();
+    expect(landed.radio.applying).toBe(false);
+  });
+
+  it('still bounds a request that can never be satisfied', () => {
+    // The half the window exists for, and the half this must not break:
+    // asking for Zigbee on a hub with no coordinator is reasonable, correctly
+    // changes nothing, and has to end by *timing out* rather than by a target
+    // that is never going to arrive.
+    writeFileSync(path.join(dir, 'radio-mode'), 'zigbee\n');
+    const stuck = reader({ budget: 'one', zigbeeConnected: false, matter: true }).snapshot();
+    expect(stuck.radio.applying).toBe(true);
+    expect(stuck.radio.applyingSince).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * Matter still looking for the devices it already owns.
+ *
+ * Zigbee2MQTT hands its whole device list over in one retained message, so a
+ * Zigbee home is complete a second after the radio is. A Matter controller
+ * opens a CASE session per node — twenty to thirty seconds on a Zero 2 W — and
+ * those devices were read back from the database with the `online: false` they
+ * were given when Matter was last switched *off*. So a working home read
+ * "1 offline · needs attention" for half a minute after every switch to
+ * Matter, about an accessory that was about to answer.
+ */
+describe('the window where Matter has not found its devices yet', () => {
+  it('says nothing once the controller has reached everything it owns', () => {
+    const snapshot = reader({ budget: 'one', zigbeeConnected: false, matter: true }).snapshot();
+    expect(snapshot.matter).toBeDefined();
+    expect(snapshot.matter?.settlingUntil).toBeUndefined();
+  });
+
+  it('carries the moment it stops making excuses for a silent device', () => {
+    // A bound, not a promise. The window is only ever *reached* by a node that
+    // is genuinely not there — which is the one real offline device, and it
+    // must not stay hidden behind "still looking" for ever.
+    const until = Date.now() + 45_000;
+    const snapshot = reader({
+      budget: 'one',
+      zigbeeConnected: false,
+      matter: true,
+      settlingUntil: until,
+    }).snapshot();
+    expect(snapshot.matter?.settlingUntil).toBe(until);
+  });
+
+  it('says nothing at all on a hub with no Matter running', () => {
+    // Presence is the capability, as everywhere else here: a hub without
+    // Matter has nothing to say about how long its Matter takes to wake up.
+    const snapshot = reader({ budget: 'one', zigbeeConnected: true, matter: false }).snapshot();
+    expect(snapshot.matter).toBeUndefined();
   });
 });

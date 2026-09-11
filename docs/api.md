@@ -100,7 +100,7 @@ than no button.
 
 | Method & path | Needs | Notes |
 |---|---|---|
-| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `matter: {bluetooth, bluetoothReason?, wifi, commissioning}` is present only while Matter is running and says what pairing this hub can actually do — see [below](#pairing-a-matter-accessory). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid) |
+| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `matter: {bluetooth, bluetoothReason?, wifi, commissioning, settlingUntil?}` is present only while Matter is running and says what pairing this hub can actually do — and, in `settlingUntil`, whether it has finished finding the devices it already owns — see [below](#pairing-a-matter-accessory). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid) |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
 | `GET /home` · `PATCH /home` | floor · `home.rename` | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name) |
 | `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | floor · `home.structure` | `{id, name, zoneId, icon, accent, sortOrder}`. `POST` takes `{name, zoneId?, icon?, accent?, sortOrder?}` — the name is the only required field anywhere here — and `PATCH` takes the same set with every field optional; `zoneId: null` means "in no zone", and `icon: null` / `accent: null` mean "back to the look the app derives" — each different from leaving the field out. `icon`/`accent` are opaque app tokens (1–40 chars, see [below](#rooms-and-zones)). Names are trimmed before they are measured (1–80), an unknown `zoneId` is `404 unknown_zone`, and a new room goes to the *end* of the order. Deleting a room does not delete its devices — they are simply in no room. Every write broadcasts the [`structure` frame](#rooms-and-zones) |
@@ -466,6 +466,7 @@ should read it before offering the flow:
 | `bluetooth` | whether a factory-new accessory can be found at all |
 | `bluetoothReason` | why not: `starting`, `off`, `unsupported-platform`, `not-installed`, `no-adapter`. Each has a different fix, which is why it is not one boolean. **`starting` is not a fault** — the API listens before the adapters do, so for about thirty seconds after every restart the hub has not decided yet; it used to answer `off` there, which means *nobody asked for it* and sends somebody to turn on a radio that is already coming up |
 | `wifi` | whether the hub already has a Wi-Fi password to hand the accessory |
+| `settlingUntil` | epoch ms until which Matter is still **finding the devices it already owns** — absent once settled. See [below](#a-matter-device-is-not-offline-because-the-hub-has-just-started-looking) |
 | `commissioning` | a pairing is running right now, so a second `POST` would be `409` |
 
 **`wifi: false` is what the request's `wifi` field is for.** Taking an accessory
@@ -770,6 +771,36 @@ or an open Zigbee join window — because a hub that restarted itself mid-pairin
 would take the pairing with it. The stand-down never waits: it is the board
 being rescued, and deferring it risks the kill it exists to prevent.
 
+#### A Matter device is not offline because the hub has just started looking
+
+Zigbee2MQTT hands its whole device list over in one retained message, so a
+Zigbee home is complete a second after the radio is. A Matter controller has to
+open a CASE session with every node it owns, in turn, over Wi-Fi — twenty to
+thirty seconds on a Raspberry Pi Zero 2 W. And those devices were read back
+from the database with the `online: false` they were given when Matter was last
+switched *off*, so for that whole window a perfectly healthy home reported
+*"1 device offline · needs attention"* about an accessory that was about to
+answer.
+
+`matter.settlingUntil` is the hub saying **"I have not finished looking"**. An
+app should treat a device on that transport as *connecting* rather than offline
+while it is present and in the future: not counted in a needs-attention total,
+not drawn with an offline badge.
+
+Two properties matter more than the number:
+
+- **It clears when the last node connects, not when the clock runs out.** The
+  controller knows what it is commissioned to and what it has reached, so there
+  is nothing to guess — a hub whose devices all answer in four seconds stops
+  making excuses after four seconds.
+- **The clock is a bound, not a promise.** It is only ever *reached* by a node
+  that is genuinely not there — which is the one real offline device, and it
+  must not stay hidden behind "still looking" for ever.
+
+Absent means settled. The whole `matter` block is absent on a hub with no
+Matter running, which is the same presence-is-the-capability rule as
+everywhere else here.
+
 #### A radio switch in flight (`radio.applying`)
 
 Applying a radio **restarts the hub** — around seventy seconds of a closed port
@@ -785,9 +816,16 @@ restart it is describing. An app that finds `applying: true` should say the hub
 is switching radios and treat an unreachable hub as *expected* until
 `applyingSince + applyingWindowMs`, rather than as a fault.
 
-**It ends when the asked-for radio is live, or when the window runs out** —
-whichever comes first, and both halves are load-bearing. `both` is the one mode
-that lands in two stages, so it is over only when *both* radios are up. A mode change that
+**It ends when the hub is in the arrangement that was asked for, or when the
+window runs out** — whichever comes first, and both halves are load-bearing.
+A mode names the *whole* arrangement, so each one asserts what must be **off**
+as well as what must be on: asking only whether the wanted radio was up was
+right for every switch that turns one on and wrong for every switch that turns
+one off. Leaving `both` for `zigbee` left Zigbee already connected, so the
+switch read as landed the instant it was recorded — no progress bar, no planned
+downtime — and the hub then went off the network for seventy seconds with
+nothing on screen to say why. `both` → `matter` had it too. `both` is still the
+one mode that lands in two stages, and is over only when both radios are up. A mode change that
 resolves to the radio already running (`auto` → `matter` on a hub already on
 Matter) is one the detector correctly answers by restarting nothing, and the
 window alone left every app drawing "switching radios" over a hub that was

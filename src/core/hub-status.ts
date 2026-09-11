@@ -143,6 +143,24 @@ export interface HubStatusSnapshot {
     wifi: boolean;
     /** A pairing is running right now, so a second one would be refused. */
     commissioning: boolean;
+    /**
+     * Epoch ms until which Matter is still finding the devices it owns.
+     *
+     * **A device is not offline because the hub has only just started looking
+     * for it.** Zigbee2MQTT hands its whole device list over in one retained
+     * message; a Matter controller opens a CASE session per node, which is
+     * twenty to thirty seconds on a Zero 2 W — and those devices were read
+     * back from the database with the `online: false` they were given when
+     * Matter was last switched off. So a working home read "1 offline · needs
+     * attention" for half a minute after every switch to Matter, about an
+     * accessory that was about to answer.
+     *
+     * Absent means settled, and it goes absent **when the last node connects**
+     * rather than when the clock runs out. What the clock bounds is the node
+     * that never answers — the one genuinely offline device, which must not
+     * be hidden behind "still looking" for ever.
+     */
+    settlingUntil?: number;
   };
 }
 
@@ -220,9 +238,17 @@ export function createHubStatusReader(deps: ApiDeps): HubStatusReader {
       // anywhere. `auto` keeps the window, because it names no single target
       // to check against — and `both` names two, so it is only over once they
       // are *both* there, which is the one mode that can land in two stages.
+      // **A mode names the whole arrangement, not one radio.** Asking whether
+      // the wanted radio is up was right for every switch that turns one on
+      // and wrong for every switch that turns one *off*: leaving `both` for
+      // `zigbee` left Zigbee already connected, so this read as landed the
+      // instant the request was recorded — no progress bar, no planned
+      // downtime, and then the hub went off the network for seventy seconds
+      // with nothing on screen to say why. `both` → `matter` had it too. So
+      // each mode asserts what must be *off* as well as what must be on.
       const landed =
-        (mode === 'matter' && matterNow) ||
-        (mode === 'zigbee' && zigbeeNow.connected) ||
+        (mode === 'matter' && matterNow && !zigbeeNow.connected) ||
+        (mode === 'zigbee' && zigbeeNow.connected && !matterNow) ||
         (mode === 'both' && matterNow && zigbeeNow.connected);
       const request = landed ? undefined : readRadioRequest(deps.dataDir);
       // **Deliberately not cached, unlike the two reads above it.** The rule
@@ -290,6 +316,9 @@ export function createHubStatusReader(deps: ApiDeps): HubStatusReader {
                   : {}),
                 wifi: deps.matter.hasWifiCredentials,
                 commissioning: deps.matter.isCommissioning,
+                ...(deps.matter.settlingUntil !== undefined
+                  ? { settlingUntil: deps.matter.settlingUntil }
+                  : {}),
               },
             }
           : {}),

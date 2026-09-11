@@ -451,6 +451,19 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   somebody has *before* they pair anything), and pairing from the phone when
   the hub is out of Bluetooth range. Both carry the detail and the open
   questions; neither is started.
+  **A device is not offline because the hub has only just started looking for
+  it.** Zigbee2MQTT hands its whole list over in one retained message; a Matter
+  controller opens a CASE session per node, which is twenty to thirty seconds
+  on a Zero 2 W — and those devices are read back from the database with the
+  `online: false` they were given when Matter was last switched *off*. So every
+  switch to Matter reported "1 offline · needs attention" for half a minute
+  about an accessory that was about to answer. `matter.settlingUntil` is the
+  hub saying it has not finished looking, and an app draws those devices as
+  *connecting*. It **clears when the last node connects, not when the clock
+  runs out** — the controller knows what it owns and what it has reached, so
+  there is nothing to guess — and the clock is a bound rather than a promise,
+  because the node that never answers is the one genuinely offline device and
+  must not hide behind "still looking" for ever.
   **And the hub can be asked what it can hear** (`GET /matter/discoverable`),
   because Bluetooth range is the one part of pairing nobody can see and
   `not-found` is the same word for "two rooms away" and "never went into
@@ -468,6 +481,14 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `maybe` tier, and a second dumber copy in the hub would eventually disagree
   with the first. It reads the **by-id name**, never the `/dev/ttyACM0` beside
   it, or a 3D printer taking that number reports a coordinator present.
+  **A mode names the whole arrangement, so `applying` asserts what must be
+  *off* as well as what must be on.** Asking only whether the wanted radio was
+  up was right for every switch that turns one on and wrong for every switch
+  that turns one off: leaving `both` for `zigbee` left Zigbee already
+  connected, so the hub reported the switch as landed the instant it was
+  recorded — no progress bar, no planned downtime — and then went off the
+  network for seventy seconds with nothing on any screen to say why.
+  `both` → `matter` had the same defect and nobody had noticed.
   **And `radio.applying` is on disk rather than in memory**, because applying a
   radio *restarts the process that recorded it*: the only useful answer is one
   that survives the restart it describes, and without it every app drew "can't
