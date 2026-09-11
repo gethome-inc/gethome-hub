@@ -1,0 +1,177 @@
+import { describe, expect, it } from 'vitest';
+import {
+  CONTROLLER_START_MS,
+  NODE_SETTLE_MS,
+  settlingUntil,
+  type SettlingPhase,
+} from '../src/adapters/matter/settling.js';
+
+/**
+ * "This device is offline" against "the hub has not found it yet".
+ *
+ * Caught on a real hub, on video: a switch to Matter put *Needs attention · 3
+ * of 4 online · 1 offline* on a dashboard for half a minute, about an
+ * accessory that was about to answer. Zigbee2MQTT hands its whole device list
+ * over in one retained message, so a Zigbee home is complete a second after
+ * the radio is; a Matter controller opens a CASE session per node, which is
+ * twenty to thirty seconds on a Zero 2 W — and the devices come back from the
+ * database with the `online: false` they were given when Matter was last
+ * switched off.
+ *
+ * The rule lives in its own module because reading it through `adapter.ts`
+ * would load `@matter/main`, by far the largest thing in the graph. Both apps
+ * draw every Matter device off the answer, so it is worth a test that can run.
+ */
+
+const now = 1_800_000_000_000;
+
+function phase(overrides: Partial<SettlingPhase> = {}): SettlingPhase {
+  return {
+    startingAt: 0,
+    startedAt: 0,
+    commissioned: () => [],
+    connected: new Set<string>(),
+    ...overrides,
+  };
+}
+
+/** A controller that refuses the question, the way matter.js does before it
+ *  has started — see `refuses to ask matter.js anything it cannot answer`. */
+function refuses(): never {
+  throw new Error('Controller instance not yet started. Please call start() first.');
+}
+
+describe('a controller that has not started yet', () => {
+  it('says nothing before the adapter has even been asked to run', () => {
+    // Matter is off, or the hub is still building the adapter. There is
+    // nothing to be patient about, and claiming otherwise would hide a home
+    // that genuinely has no Matter behind "still looking".
+    expect(settlingUntil(phase(), now)).toBeUndefined();
+  });
+
+  it('says it is still looking from the moment start() is entered', () => {
+    // **The case the first version of this missed.** `start()` runs after the
+    // API is listening — deliberately, so matter.js opening its storage on a
+    // slow card cannot hold the health check closed — so every `GET /hub` in
+    // those seconds was answered by an adapter that had not begun looking,
+    // reporting a settled home while `radio.matter` already said `true`.
+    const until = settlingUntil(phase({ startingAt: now }), now);
+    expect(until).toBe(now + CONTROLLER_START_MS + NODE_SETTLE_MS);
+  });
+
+  it('does not spend the node budget on the controller coming up', () => {
+    // The two phases are bounded separately on purpose: a clock running while
+    // matter.js loads is a clock counting time in which no node *could* have
+    // reported in, so charging it to the nodes shortens the window they
+    // actually get — on precisely the boards slow enough to need all of it.
+    const starting = settlingUntil(phase({ startingAt: now }), now)!;
+    expect(starting - now).toBeGreaterThan(NODE_SETTLE_MS);
+  });
+
+  it('stops making excuses for a start() that never returns', () => {
+    // A bound rather than a promise, here as everywhere else in this rule: a
+    // controller that is not coming must not hide a genuinely unreachable
+    // device for ever, and the registry has already marked those devices
+    // offline by now.
+    const late = now + CONTROLLER_START_MS + NODE_SETTLE_MS;
+    expect(settlingUntil(phase({ startingAt: now }), late)).toBeUndefined();
+  });
+});
+
+describe('a controller that is up and reaching its nodes', () => {
+  it('carries the moment it stops making excuses for a silent device', () => {
+    const until = settlingUntil(
+      phase({ startingAt: now - 5_000, startedAt: now, commissioned: () => ['1', '2'] }),
+      now,
+    );
+    expect(until).toBe(now + NODE_SETTLE_MS);
+  });
+
+  it('is over the moment the last node connects, not when the clock runs out', () => {
+    // The whole reason this is an answer rather than a timer: the controller
+    // knows what it owns and what it has reached, so a hub whose devices all
+    // answer in four seconds stops making excuses after four seconds.
+    const reached = phase({
+      startedAt: now,
+      commissioned: () => ['1', '2'],
+      connected: new Set(['1', '2']),
+    });
+    expect(settlingUntil(reached, now + 4_000)).toBeUndefined();
+
+    const half = { ...reached, connected: new Set(['1']) };
+    expect(settlingUntil(half, now + 4_000)).toBe(now + NODE_SETTLE_MS);
+  });
+
+  it('runs out, so a node that never answers is offline in the end', () => {
+    const silent = phase({ startedAt: now, commissioned: () => ['1'] });
+    expect(settlingUntil(silent, now + NODE_SETTLE_MS)).toBeUndefined();
+  });
+
+  it('says nothing on a hub that owns no Matter devices at all', () => {
+    // A hub that has never paired an accessory must not spend its first
+    // minute explaining an empty home.
+    expect(settlingUntil(phase({ startedAt: now }), now)).toBeUndefined();
+  });
+
+  it('never hands back a deadline that has already passed', () => {
+    // Both phases answer `undefined` rather than a stale number, because the
+    // apps schedule a rebuild *at* the deadline: one in the past is a timer
+    // that fires immediately, for ever.
+    const past = now + NODE_SETTLE_MS + 1;
+    expect(settlingUntil(phase({ startedAt: now, commissioned: () => ['1'] }), past)).toBeUndefined();
+    expect(settlingUntil(phase({ startingAt: now }), past + CONTROLLER_START_MS)).toBeUndefined();
+  });
+});
+
+/**
+ * The question matter.js refuses, and where it may be asked.
+ *
+ * `CommissioningController.getCommissionedNodes()` asserts a started
+ * controller and throws `ImplementationError` otherwise — and the controller
+ * *object* exists for the tens of seconds `start()` spends loading matter.js
+ * and opening its storage on a Zero 2 W. Reading it eagerly meant every
+ * `GET /hub` in that window threw straight out of the route.
+ *
+ * That route is the health check `install.sh` gates on, so the cost was not a
+ * wrong number: `curl -fsS` exited 22 and a real install aborted against a hub
+ * that was coming up perfectly well and answered fine a minute later. Found on
+ * a Pi, by the install that shipped the change above.
+ */
+describe('when the commissioned list may be asked for', () => {
+  it('refuses to ask matter.js anything while the controller is starting', () => {
+    // The window the installer polls in: `start()` entered, controller object
+    // constructed, `start()` not finished. Nothing here may reach it.
+    expect(settlingUntil(phase({ startingAt: now, commissioned: refuses }), now)).toBe(
+      now + CONTROLLER_START_MS + NODE_SETTLE_MS,
+    );
+  });
+
+  it('asks nothing before the adapter has been asked to run', () => {
+    expect(settlingUntil(phase({ commissioned: refuses }), now)).toBeUndefined();
+  });
+
+  it('asks nothing once the window has passed, which is a hub uptime', () => {
+    // The steady state of every hub that has been up a minute, and the one
+    // `GET /hub` is answered from all day. Paying matter.js a question there
+    // would be the same fault with a longer fuse.
+    const settled = phase({ startedAt: now, commissioned: refuses });
+    expect(settlingUntil(settled, now + NODE_SETTLE_MS)).toBeUndefined();
+    expect(settlingUntil(phase({ startingAt: now, commissioned: refuses }), now + 10 * 60_000))
+      .toBeUndefined();
+  });
+
+  it('asks exactly once inside the window, where the controller can answer', () => {
+    // `startedAt` is stamped only after `start()` resolved, so this is the one
+    // phase in which the question is safe — and it is asked once, not per node.
+    let asked = 0;
+    const counted = phase({
+      startedAt: now,
+      commissioned: () => {
+        asked += 1;
+        return ['1'];
+      },
+    });
+    expect(settlingUntil(counted, now + 1_000)).toBe(now + NODE_SETTLE_MS);
+    expect(asked).toBe(1);
+  });
+});

@@ -893,10 +893,21 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         name: z.string().trim().min(1).max(80).optional(),
         roomId: z.uuid().nullable().optional(),
         favorite: z.boolean().optional(),
+        /**
+         * "This one being offline is fine" — or, false, taking that back.
+         *
+         * A boolean in and a moment back out, because what an app sends is a
+         * decision and what it draws is *since when*. It is the house's, so it
+         * sits with `name` and `roomId` under `device.edit` rather than beside
+         * `favorite`: silencing the home's own alarm for everybody is not
+         * something a guest staying the weekend should be able to do.
+         */
+        offlineExpected: z.boolean().optional(),
       })
       .parse(request.body);
     const memberId = request.member!.id;
-    const touchesTheHouse = body.name !== undefined || body.roomId !== undefined;
+    const touchesTheHouse =
+      body.name !== undefined || body.roomId !== undefined || body.offlineExpected !== undefined;
     if (touchesTheHouse && !deps.access.can(memberId, 'device.edit')) {
       return reply.code(403).send({ error: 'forbidden', permission: 'device.edit' });
     }
@@ -910,9 +921,35 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // and the "did anything change?" tests below would all answer no.
     const previousName = before.name;
     const previousRoomId = before.roomId;
+    const wasExcused = before.offlineExpectedAt !== null;
 
     if (body.favorite !== undefined) {
       await deps.favorites.set(memberId, id, body.favorite);
+    }
+
+    if (body.offlineExpected !== undefined && body.offlineExpected !== wasExcused) {
+      await deps.registry.setOfflineExpected(
+        id,
+        body.offlineExpected ? { id: memberId, name: request.member!.name } : undefined,
+      );
+      // One row per decision, and only when it *is* one — an app re-sending
+      // what the hub already holds says nothing worth reading in a week. The
+      // automatic clear writes nothing of its own: the device coming back
+      // already writes `device.online`, and two lines for one event is the
+      // burst the feed's whole shape exists to avoid.
+      await deps.activity.record({
+        kind: 'device.offline-expected',
+        message: body.offlineExpected
+          ? `${request.member!.name} said ${before.name} being offline is expected.`
+          : `${request.member!.name} said ${before.name} being offline is not expected after all.`,
+        deviceId: id,
+        memberId,
+        data: {
+          deviceName: before.name,
+          memberName: request.member!.name,
+          expected: body.offlineExpected,
+        },
+      });
     }
 
     const device =

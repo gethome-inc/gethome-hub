@@ -106,7 +106,7 @@ than no button.
 | `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | floor · `home.structure` | `{id, name, zoneId, icon, accent, sortOrder}`. `POST` takes `{name, zoneId?, icon?, accent?, sortOrder?}` — the name is the only required field anywhere here — and `PATCH` takes the same set with every field optional; `zoneId: null` means "in no zone", and `icon: null` / `accent: null` mean "back to the look the app derives" — each different from leaving the field out. `icon`/`accent` are opaque app tokens (1–40 chars, see [below](#rooms-and-zones)). Names are trimmed before they are measured (1–80), an unknown `zoneId` is `404 unknown_zone`, and a new room goes to the *end* of the order. Deleting a room does not delete its devices — they are simply in no room. Every write broadcasts the [`structure` frame](#rooms-and-zones) |
 | `GET /zones` · `POST /zones` · `PATCH /zones/:id` · `DELETE /zones/:id` | floor · `home.structure` | `{id, name, sortOrder}` — the optional layer above rooms, see [below](#rooms-and-zones). `POST {name, sortOrder?}`, `PATCH {name?, sortOrder?}`; a zone carries no look of its own, since nothing draws a zone as a thing. Deleting a zone keeps its rooms and leaves them in none |
 | `GET /devices` | floor | full device list (wire shape below) |
-| `PATCH /devices/:id` | `device.edit` / floor | `{name?, roomId?, favorite?}`. Name and room describe the house and everybody sees the same ones; **`favorite` is the caller's own** and nobody else's — see [below](#favorites-are-per-member). `roomId: null` takes a device out of its room; an unknown one is `404 unknown_room`. The response is this caller's view of the device |
+| `PATCH /devices/:id` | `device.edit` / floor | `{name?, roomId?, favorite?, offlineExpected?}`. Name, room and `offlineExpected` describe the house and everybody sees the same ones; **`favorite` is the caller's own** and nobody else's — see [below](#favorites-are-per-member). `roomId: null` takes a device out of its room; an unknown one is `404 unknown_room`. `offlineExpected` is a boolean in and a moment back out — see [below](#a-device-that-is-meant-to-be-offline). The response is this caller's view of the device |
 | `DELETE /devices/:id` | `device.remove` | also unpairs at the protocol level |
 | `POST /devices/:id/endpoints/:endpointId/commands` | floor | body = canonical command; `202`. IR-remote intents (`irLearn`/`irSaveLearned`/`irSend`/`irDeleteCommand`/`irRenameCommand`) are resolved against the endpoint's stored code library (see [device-schema.md](device-schema.md)) |
 | `GET /devices/:id/history?from=&to=&points=&series=` | floor | what this device's readings did over a window, already thinned to a drawable size — see [below](#recorded-readings-get-devicesidhistory). `from`/`to` are epoch ms and default to the last day; `from >= to` is `400 invalid_range`; an unknown device is `404` |
@@ -787,19 +787,116 @@ app should treat a device on that transport as *connecting* rather than offline
 while it is present and in the future: not counted in a needs-attention total,
 not drawn with an offline badge.
 
-Two properties matter more than the number:
+Three properties matter more than the number:
 
+- **It covers the controller coming up as well as the nodes connecting**, and
+  that half was the one this first shipped without. The adapters start *after*
+  the API is listening — deliberately, so matter.js opening its storage on a
+  slow card cannot hold the health check and the claim closed — so every
+  `GET /hub` in those seconds was answered by an adapter that had not begun
+  looking at all, reporting a settled home while `radio.matter` already said
+  `true` because the adapter had been constructed. The two phases are bounded
+  separately, because a clock running while matter.js loads is a clock counting
+  time in which no node *could* have reported in: charging it to the nodes
+  would shorten the window they actually get, on precisely the boards slow
+  enough to need all of it.
 - **It clears when the last node connects, not when the clock runs out.** The
   controller knows what it is commissioned to and what it has reached, so there
   is nothing to guess — a hub whose devices all answer in four seconds stops
   making excuses after four seconds.
-- **The clock is a bound, not a promise.** It is only ever *reached* by a node
-  that is genuinely not there — which is the one real offline device, and it
-  must not stay hidden behind "still looking" for ever.
+- **Every clock here is a bound, not a promise.** The node window is only ever
+  *reached* by a node that is genuinely not there — the one real offline
+  device — and the start-up window only by a `start()` that never returns.
+  Neither may hide an unreachable device behind "still looking" for ever.
 
 Absent means settled. The whole `matter` block is absent on a hub with no
 Matter running, which is the same presence-is-the-capability rule as
 everywhere else here.
+
+#### And how long it takes to notice one has gone
+
+The mirror of the section above, and the question a real hub provokes: a
+mains-powered Matter socket pulled out of the wall reads offline **two to four
+minutes later**, not at once. That is the protocol working rather than a fault,
+and it is worth writing down because it looks exactly like a fault.
+
+Matter has no ping. A controller learns a node is gone when the node stops
+feeding a **subscription**, and how long that takes is a device-type decision
+matter.js makes for us. It asks for a maximum report interval of one minute for
+a mains-powered Wi-Fi or Thread node, three minutes for a Thread sleepy end
+device, **ten minutes for a battery-powered one**, or an intermittently
+connected device's own idle-mode duration — plus up to ten per cent of jitter,
+so a home's accessories do not all report on the same second. The subscription
+is then declared timed out at that interval *plus twice the MRP peer-response
+budget*, which is itself tens of seconds. Only after that does matter.js probe
+the peer's address, close the session, and try once to re-subscribe; when that
+attempt fails it reports the node not-live, which is the `stateChanged` the
+adapter turns into `reachabilityChanged('matter', id, false)` and the registry
+writes to `devices.online`.
+
+So the sum for an unplugged mains socket is roughly: ~70 s of keepalive window,
+~35 s of response budget, a failed probe, and a failed re-subscribe.
+
+**The case where the delay would actually matter is already fast.** Any
+exchange whose MRP retransmissions are exhausted calls `peerLost`, the CASE
+session is deleted, and the node drops to *Reconnecting* immediately — so a
+**command** sent to a device that is no longer there marks it offline within one
+MRP budget, seconds rather than minutes. The slow path is only the passive one,
+where nobody has touched the device and the hub is waiting on a keepalive.
+
+**Do not reach for `subscribeMaxIntervalCeilingSeconds` to shorten it.** It is
+one number for every node the hub connects, applied at `connect()` — before the
+hub knows whether it is talking to a mains plug or a door sensor — so a 30 s
+ceiling to make one socket prompt would take the battery default from ten
+minutes to thirty seconds and pay for that impatience out of somebody's sensor
+batteries, for ever. matter.js says the same thing in its own API docs: it
+"tries to set meaningful values based on the device type, connection type, and
+other details", so do not set it unless you know better than that.
+
+For scale: Zigbee2MQTT ships with per-device availability tracking **off** and
+the config `install.sh` writes leaves it off, so a Zigbee device that dies is
+not marked offline at all until the bridge itself goes down. Two to four
+minutes is the *tightest* answer this hub currently gives about a device that
+has silently stopped answering.
+
+#### A device that is meant to be offline
+
+Somebody unplugs a heater for the summer. It is offline, and it is not a fault
+— but nothing could say so, so the dashboard counted it, put *Needs attention*
+over the home and went on doing it until the thing was plugged back in. The
+person who unplugged it is the only one who knows, and the only thing they
+could do about it was ignore a warning for four months.
+
+`PATCH /devices/:id { offlineExpected: true }` is them saying it. The device
+comes back carrying `offlineExpected: { at, by? }` — the moment, and who said
+it — and an app draws it as offline **without counting it as something needing
+attention**. `false` takes it back, which is what somebody does after plugging
+the socket back in and finding it still does not answer.
+
+It is the **house's**, not a phone's dismissal, and that is the whole of why it
+is a column on the device row rather than something each app remembers. One
+person unplugs the heater; nobody else in the home should go on being told the
+home needs looking at. It is under `device.edit` for the same reason: silencing
+the home's own alarm for everybody is not something a guest staying the weekend
+should be able to do — unlike `favorite`, which sits in the same body and needs
+nothing.
+
+**It is an excuse for *this* absence, not for the device.** The hub clears it
+the moment the device is reachable again, so a socket excused in May, plugged
+back in and pulled out again in September is a new thing to be told about. That
+is a per-device report doing the clearing, never the *radio* coming back up:
+`radioReachabilityChanged` speaks for everything behind it and is an assumption
+rather than a report, and Zigbee2MQTT's bridge says `online` on every hub
+restart — which would have cleared every excuse in the home overnight, on a hub
+nobody had touched. Nothing is hidden by holding them across that: while a radio
+is down its devices are already explained by the resting-radio rule in both
+apps, and the first real report that the device is back ends it properly.
+
+Setting it writes one `device.offline-expected` activity row, and only when it
+is a change — an app re-sending what the hub already holds says nothing worth
+reading a week later. The automatic clear writes nothing of its own: the device
+coming back already writes `device.online`, and two lines for one event is the
+burst the feed's whole shape exists to avoid.
 
 #### A radio switch in flight (`radio.applying`)
 

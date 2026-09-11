@@ -33,6 +33,17 @@ export interface RegistryDevice {
   needsReview: boolean;
   /** How this device was placed, and what was left over — see AdapterBus. */
   recognition: DeviceRecognition | null;
+  /**
+   * Somebody having said this one being offline is fine — epoch ms, and null
+   * for every device nobody has said it about.
+   *
+   * Set through `setOfflineExpected`, cleared by `reachabilityChanged` when
+   * the device answers again. See `db/schema.ts` for why it is a fact about
+   * the house rather than a per-phone dismissal.
+   */
+  offlineExpectedAt: number | null;
+  offlineExpectedBy: string | null;
+  offlineExpectedByName: string | null;
   endpoints: RegistryEndpoint[];
 }
 
@@ -149,6 +160,9 @@ export class DeviceRegistry implements AdapterBus {
         online: row.online,
         needsReview: row.needsReview,
         recognition: (row.recognition as DeviceRecognition | null) ?? null,
+        offlineExpectedAt: row.offlineExpectedAt,
+        offlineExpectedBy: row.offlineExpectedBy,
+        offlineExpectedByName: row.offlineExpectedByName,
         endpoints: (byDevice.get(row.id) ?? []).map((endpoint) => ({
           endpointId: endpoint.endpointId,
           deviceKind: endpoint.deviceKind as DeviceKind,
@@ -285,6 +299,20 @@ export class DeviceRegistry implements AdapterBus {
   }
 
   reachabilityChanged(adapter: AdapterId, externalId: string, reachable: boolean): void {
+    this.applyReachability(adapter, externalId, reachable, { fromRadio: false });
+  }
+
+  /**
+   * @param fromRadio Whether this is the radio speaking for every device
+   *   behind it rather than a report about *this* one. It decides one thing:
+   *   whether a person's "that one being offline is fine" survives.
+   */
+  private applyReachability(
+    adapter: AdapterId,
+    externalId: string,
+    reachable: boolean,
+    { fromRadio }: { fromRadio: boolean },
+  ): void {
     this.enqueue(this.key(adapter, externalId), async () => {
       const cached = this.cache.get(this.key(adapter, externalId));
       if (!cached) return;
@@ -305,7 +333,9 @@ export class DeviceRegistry implements AdapterBus {
       // no per-device message could ever have corrected it either.
       const flipped = cached.online !== reachable;
       const stale = cached.endpoints.filter((endpoint) => endpoint.state.reachable !== reachable);
-      if (!flipped && stale.length === 0) return;
+      if (!flipped && stale.length === 0 && !(reachable && !fromRadio && cached.offlineExpectedAt !== null)) {
+        return;
+      }
       cached.online = reachable;
       for (const endpoint of stale) {
         endpoint.state = mergeState(endpoint.state, { reachable });
@@ -316,8 +346,36 @@ export class DeviceRegistry implements AdapterBus {
         // chatty one persisted its `false` and then met the guard above.
         this.markStateDirty(cached.id, endpoint.endpointId);
       }
-      if (flipped) {
-        await this.db.update(devices).set({ online: reachable }).where(eq(devices.id, cached.id));
+      // **The device answering is what retires the excuse**, and that is the
+      // whole of what ties it to *this* absence rather than to the device: a
+      // socket somebody unplugged in May and said was fine, plugged back in
+      // and pulled out again in September, is a new thing to be told about.
+      //
+      // **A radio is not a device, though.** `radioReachabilityChanged` speaks
+      // for everything behind it and is an assumption rather than a report —
+      // and it says `true` on every hub restart the moment Zigbee2MQTT's
+      // bridge comes up, which would have quietly cleared every excuse in the
+      // home overnight, on a hub nobody touched. Nothing is hidden by holding
+      // them: while a radio is down its devices are already explained by the
+      // resting-radio rule in both apps, and the first per-device report that
+      // says this one is back clears it properly.
+      const excused = cached.offlineExpectedAt !== null;
+      const forgive = excused && reachable && !fromRadio;
+      if (forgive) {
+        cached.offlineExpectedAt = null;
+        cached.offlineExpectedBy = null;
+        cached.offlineExpectedByName = null;
+      }
+      if (flipped || forgive) {
+        await this.db
+          .update(devices)
+          .set({
+            ...(flipped ? { online: reachable } : {}),
+            ...(forgive
+              ? { offlineExpectedAt: null, offlineExpectedBy: null, offlineExpectedByName: null }
+              : {}),
+          })
+          .where(eq(devices.id, cached.id));
       }
       this.events.emit('deviceUpserted', cached.id);
       // A repair is not a transition: the device's reachability did not
@@ -365,7 +423,7 @@ export class DeviceRegistry implements AdapterBus {
     this.events.emit('radioChanged', adapter, reachable);
     for (const device of this.cache.values()) {
       if (device.adapter !== adapter) continue;
-      this.reachabilityChanged(adapter, device.externalId, reachable);
+      this.applyReachability(adapter, device.externalId, reachable, { fromRadio: true });
     }
   }
 
@@ -552,6 +610,37 @@ export class DeviceRegistry implements AdapterBus {
   }
 
   /**
+   * Somebody saying this device being offline is fine, or taking that back.
+   *
+   * Deliberately its own method rather than a field on `updateDevice`: that
+   * one is the *house's* description of a device — its name and its room — and
+   * this is a statement about a moment, written by a different route check and
+   * retired by something nobody presses. Passing `undefined` is the person
+   * taking it back, which is an ordinary thing to want after plugging the
+   * socket back in and finding it still does not answer.
+   */
+  async setOfflineExpected(
+    deviceId: string,
+    by: { id: string; name: string } | undefined,
+  ): Promise<RegistryDevice | undefined> {
+    const device = this.getDevice(deviceId);
+    if (!device) return undefined;
+    device.offlineExpectedAt = by ? Date.now() : null;
+    device.offlineExpectedBy = by?.id ?? null;
+    device.offlineExpectedByName = by?.name ?? null;
+    await this.db
+      .update(devices)
+      .set({
+        offlineExpectedAt: device.offlineExpectedAt,
+        offlineExpectedBy: device.offlineExpectedBy,
+        offlineExpectedByName: device.offlineExpectedByName,
+      })
+      .where(eq(devices.id, deviceId));
+    this.events.emit('deviceUpserted', deviceId);
+    return device;
+  }
+
+  /**
    * A room was deleted: every device that was in it is now in none.
    *
    * The database has already done this (`rooms.id` is `ON DELETE SET NULL`),
@@ -642,6 +731,10 @@ export class DeviceRegistry implements AdapterBus {
       online: row.online,
       needsReview: row.needsReview,
       recognition: descriptor.recognition ?? null,
+      // A device nobody has met yet is one nobody has excused.
+      offlineExpectedAt: null,
+      offlineExpectedBy: null,
+      offlineExpectedByName: null,
       endpoints: [],
     };
     for (const endpoint of descriptor.endpoints) {

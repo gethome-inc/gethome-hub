@@ -31,6 +31,21 @@ export function deviceWire(device: RegistryDevice, favorite: boolean) {
     // Additive, and absent on a device adopted before the hub recorded it —
     // which an app must read as "not known", never as "recognised by nothing".
     ...(device.recognition ? { recognition: device.recognition } : {}),
+    // **Presence is the answer**, as everywhere else on this wire: absent means
+    // nobody has said this one being offline is fine, which is the state of
+    // nearly every device in every home. `by` is dropped when the name is —
+    // `drawnBy`'s rule — since the id may point at somebody long removed and
+    // the name is the only half an app draws.
+    ...(device.offlineExpectedAt !== null
+      ? {
+          offlineExpected: {
+            at: device.offlineExpectedAt,
+            ...(device.offlineExpectedByName !== null
+              ? { by: { id: device.offlineExpectedBy, name: device.offlineExpectedByName } }
+              : {}),
+          },
+        }
+      : {}),
     endpoints: device.endpoints.map((endpoint) => ({
       endpointId: endpoint.endpointId,
       deviceKind: endpoint.deviceKind,

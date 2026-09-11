@@ -464,6 +464,36 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   there is nothing to guess — and the clock is a bound rather than a promise,
   because the node that never answers is the one genuinely offline device and
   must not hide behind "still looking" for ever.
+  **It covers the controller coming up as well**, which is the same bug one
+  step earlier and the half this first shipped without. The adapters start
+  after the API is listening, so every `GET /hub` in the seconds matter.js
+  spends loading and opening its storage was answered by an adapter that had
+  not begun looking — reporting a settled home, while `radio.matter` already
+  said `true` because the adapter had been *constructed*. That is the window
+  every switch to Matter lands in, so the fix for the paragraph above did not
+  reach the case it was written for. The two phases are bounded separately: a
+  clock running while matter.js loads counts time in which no node could have
+  reported in, so charging it to the nodes shortens the window they actually
+  get on precisely the boards slow enough to need all of it. The arithmetic is
+  `adapters/matter/settling.ts` rather than a getter in the adapter, for the
+  reason `reducer.ts` and `setup-code.ts` are their own files: reading it
+  through `adapter.ts` loads `@matter/main`, so a rule both apps draw every
+  Matter device from would be a rule no test could reach.
+  **And nothing `GET /hub` reads may throw**, which that first version learned
+  the hard way. It asked the controller what it was commissioned to *before*
+  deciding the phase, and matter.js refuses that question until `start()` has
+  finished (`getCommissionedNodes` asserts an instance) — while the controller
+  *object* exists for the tens of seconds `start()` spends loading and opening
+  its storage on a Zero 2 W. So every `GET /hub` in that window threw straight
+  out of the route, and that route is the health check `install.sh` gates on:
+  `curl -fsS` exited 22 and a real install aborted against a hub that was
+  coming up perfectly well and answered fine a minute later. The commissioned
+  list is a **function** on `SettlingPhase` now, called only in the one phase
+  that can answer it — which also means the health check asks matter.js nothing
+  at all in the steady state — with a `catch` behind it as the second layer,
+  because the cost of being wrong here is a failed install rather than a wrong
+  number. Every other read behind that route already obeys this (each file read
+  is `try`/`catch` with a documented fallback); a new one has to.
   **And the hub can be asked what it can hear** (`GET /matter/discoverable`),
   because Bluetooth range is the one part of pairing nobody can see and
   `not-found` is the same word for "two rooms away" and "never went into
@@ -618,6 +648,30 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   at boot, `forgetDevice` is wired to the `deviceRemoved` event and
   `forgetMember` to `endMembership`, because both deletes are done by the
   cascade and the map would otherwise hold pins on things that are gone.
+- **A device being offline is sometimes the plan, and only a person knows.**
+  Somebody unplugs a heater for the summer: the device is unreachable, the home
+  is fine, and nothing could say so — so the dashboard counted it, put *Needs
+  attention* over the home and went on doing it for four months.
+  `PATCH /devices/:id { offlineExpected }` is them saying it, and the device
+  carries `offlineExpected: { at, by? }` back. Four rules. **It is the house's**
+  — a column on the device row, not a dismissal each phone remembers — because
+  one person unplugs the heater and nobody else should go on being told the
+  home needs looking at; that is the same split `name` and `roomId` are on, and
+  it is why the field sits under `device.edit` while `favorite`, in the same
+  body, needs nothing. **It excuses *this* absence, not the device**: the
+  registry clears it the moment the device is reachable again, so a socket
+  excused in May, plugged back in and pulled out again in September is a new
+  thing to be told about. **A radio is not a device**, so
+  `radioReachabilityChanged` deliberately does *not* clear it — it speaks for
+  everything behind it and is an assumption rather than a report, and Z2M's
+  bridge says `online` on every hub restart, which would have wiped every
+  excuse in the home overnight on a hub nobody touched; nothing is hidden by
+  holding them, since a down radio's devices are already explained by the
+  resting-radio rule in both apps and the first real per-device report ends it
+  properly. That is what `applyReachability`'s `fromRadio` exists for, and it
+  is the only thing it decides. And **one activity row per decision, none for
+  the clear** — the device coming back already writes `device.online`.
+  `docs/api.md` is canonical.
 - **Zones are the layer above rooms, and are deliberately not floors.** A room
   belongs to one zone or to none, and none is the ordinary case — which is the
   whole argument: a flat has no floors and a garage is not one, so a *floor*
@@ -1043,8 +1097,18 @@ outside `deploy/`, so they stay here:
   whether the new build is any good — so by the time `install.sh` rolls back,
   the database has already moved on. A migration that drops or renames turns a
   failed health check into a hub neither build can start.
-  `test/migrations.test.ts` enforces that, and the journal's four invariants
-  with it; `-- gethome:destructive: <why>` is the deliberate way past.
+  `test/migrations.test.ts` enforces that, and the journal's invariants with
+  it; `-- gethome:destructive: <why>` is the deliberate way past.
+  **A migration's drizzle *snapshot* has to be committed with it**, and that is
+  now one of those invariants rather than a habit. The snapshots are not read at
+  boot, so a missing one breaks nothing until the next person runs
+  `db:generate` — and then it breaks badly: `0014_snapshot.json` was never
+  committed, so drizzle diffed the schema against `0013` and generated a
+  migration that re-emitted `0014`'s three `ALTER TABLE … ADD`s on top of its
+  own. On any hub that had already run `0014` that is `duplicate column name`
+  at boot, which is a hub that does not start and a rollback that lands on one
+  that doesn't either. The SQL was well formed, the journal was complete and
+  the file was additive, so nothing else here would have said a word.
 
 ## Keep the docs in sync
 

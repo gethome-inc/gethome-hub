@@ -130,6 +130,17 @@ and each can stall. A pairing can be cancelled, which stops the discovery
 rather than only closing the screen; the hub runs **one at a time**, which is
 what makes a single cancel unambiguous.
 
+## Knowing a device has gone
+
+Matter has no ping: a controller learns a node is gone when it stops feeding a
+subscription, and matter.js picks that report interval per device type — one
+minute for a mains Wi-Fi node, ten for a battery one. So an unplugged
+mains-powered socket reads offline two to four minutes later, while a *command*
+against a dead node marks it offline in seconds, because the exhausted exchange
+kills the CASE session outright. Both halves, and why the interval is not ours
+to shorten, are in
+[`api.md`](api.md#and-how-long-it-takes-to-notice-one-has-gone).
+
 ## Runtime requirements
 
 - **Host networking.** Matter uses site-local UDP (port 5540) and mDNS
