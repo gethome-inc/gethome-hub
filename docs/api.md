@@ -813,6 +813,52 @@ Absent means settled. The whole `matter` block is absent on a hub with no
 Matter running, which is the same presence-is-the-capability rule as
 everywhere else here.
 
+#### And how long it takes to notice one has gone
+
+The mirror of the section above, and the question a real hub provokes: a
+mains-powered Matter socket pulled out of the wall reads offline **two to four
+minutes later**, not at once. That is the protocol working rather than a fault,
+and it is worth writing down because it looks exactly like a fault.
+
+Matter has no ping. A controller learns a node is gone when the node stops
+feeding a **subscription**, and how long that takes is a device-type decision
+matter.js makes for us. It asks for a maximum report interval of one minute for
+a mains-powered Wi-Fi or Thread node, three minutes for a Thread sleepy end
+device, **ten minutes for a battery-powered one**, or an intermittently
+connected device's own idle-mode duration — plus up to ten per cent of jitter,
+so a home's accessories do not all report on the same second. The subscription
+is then declared timed out at that interval *plus twice the MRP peer-response
+budget*, which is itself tens of seconds. Only after that does matter.js probe
+the peer's address, close the session, and try once to re-subscribe; when that
+attempt fails it reports the node not-live, which is the `stateChanged` the
+adapter turns into `reachabilityChanged('matter', id, false)` and the registry
+writes to `devices.online`.
+
+So the sum for an unplugged mains socket is roughly: ~70 s of keepalive window,
+~35 s of response budget, a failed probe, and a failed re-subscribe.
+
+**The case where the delay would actually matter is already fast.** Any
+exchange whose MRP retransmissions are exhausted calls `peerLost`, the CASE
+session is deleted, and the node drops to *Reconnecting* immediately — so a
+**command** sent to a device that is no longer there marks it offline within one
+MRP budget, seconds rather than minutes. The slow path is only the passive one,
+where nobody has touched the device and the hub is waiting on a keepalive.
+
+**Do not reach for `subscribeMaxIntervalCeilingSeconds` to shorten it.** It is
+one number for every node the hub connects, applied at `connect()` — before the
+hub knows whether it is talking to a mains plug or a door sensor — so a 30 s
+ceiling to make one socket prompt would take the battery default from ten
+minutes to thirty seconds and pay for that impatience out of somebody's sensor
+batteries, for ever. matter.js says the same thing in its own API docs: it
+"tries to set meaningful values based on the device type, connection type, and
+other details", so do not set it unless you know better than that.
+
+For scale: Zigbee2MQTT ships with per-device availability tracking **off** and
+the config `install.sh` writes leaves it off, so a Zigbee device that dies is
+not marked offline at all until the bridge itself goes down. Two to four
+minutes is the *tightest* answer this hub currently gives about a device that
+has silently stopped answering.
+
 #### A device that is meant to be offline
 
 Somebody unplugs a heater for the summer. It is offline, and it is not a fault
