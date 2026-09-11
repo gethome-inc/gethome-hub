@@ -171,7 +171,12 @@ export class MatterAdapter implements ProtocolAdapter {
   /** Switch-cluster features per `${nodeId}/${endpointId}` (buttons). */
   private readonly switchFeatures = new Map<string, { multiPress: boolean }>();
   /** Whether commissioning may look over Bluetooth, and why not when it can't. */
-  private ble: BleStatus = { enabled: false, reason: 'off' };
+  /**
+   * Not `off`, which was a claim this adapter had not earned yet. `installBle`
+   * runs in `start()`, and the API is already answering by then — see
+   * `BleUnavailableReason.starting`.
+   */
+  private ble: BleStatus = { enabled: false, reason: 'starting' };
   /** The environment this controller runs in, kept so a job can stop a discovery. */
   private environment: Environment | null = null;
   /**

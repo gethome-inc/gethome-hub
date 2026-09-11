@@ -288,3 +288,27 @@ describe('the Wi-Fi the hub passes on to an accessory', () => {
     expect(run.output).toContain('No NetworkManager');
   });
 });
+
+/**
+ * What the hub says about Bluetooth in the thirty seconds before it knows.
+ *
+ * The API listens **before** the adapters start — deliberately, so a slow
+ * radio cannot hold port 8420 closed — which leaves a window on every boot
+ * where `GET /hub` is answering for a Matter adapter that has not run a line
+ * of its own code. Found on the hub itself: a poll taken during a restart
+ * reported `bluetooth: false, bluetoothReason: "off"`, and `off` means
+ * *nobody asked for it*. Specific, actionable and wrong — the app's advice for
+ * it is to go and turn Bluetooth on.
+ */
+describe('before the Matter adapter has started', () => {
+  it('says it has not decided yet, rather than saying Bluetooth is off', async () => {
+    const { MatterAdapter } = await import('../src/adapters/matter/adapter.js');
+    const adapter = new MatterAdapter({
+      storagePath: '/nonexistent/never-opened',
+      log: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} },
+    } as unknown as ConstructorParameters<typeof MatterAdapter>[0]);
+    // Constructed and never started, which is exactly the state the API
+    // answers from for the first half-minute of every boot.
+    expect(adapter.bleStatus).toEqual({ enabled: false, reason: 'starting' });
+  });
+});

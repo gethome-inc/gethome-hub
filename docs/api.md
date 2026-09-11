@@ -464,7 +464,7 @@ should read it before offering the flow:
 | Field | Meaning |
 |---|---|
 | `bluetooth` | whether a factory-new accessory can be found at all |
-| `bluetoothReason` | why not: `off`, `unsupported-platform`, `not-installed`, `no-adapter`. Each has a different fix, which is why it is not one boolean |
+| `bluetoothReason` | why not: `starting`, `off`, `unsupported-platform`, `not-installed`, `no-adapter`. Each has a different fix, which is why it is not one boolean. **`starting` is not a fault** — the API listens before the adapters do, so for about thirty seconds after every restart the hub has not decided yet; it used to answer `off` there, which means *nobody asked for it* and sends somebody to turn on a radio that is already coming up |
 | `wifi` | whether the hub already has a Wi-Fi password to hand the accessory |
 | `commissioning` | a pairing is running right now, so a second `POST` would be `409` |
 

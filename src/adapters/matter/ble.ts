@@ -33,6 +33,19 @@ import type { Logger } from '../../logging.js';
  * `src/index.ts`.
  */
 export type BleUnavailableReason =
+  /**
+   * The adapter has not started yet, so nothing has been decided.
+   *
+   * **Not a fault, and the reason this exists is that it was being reported as
+   * one.** The API listens *before* the adapters start — deliberately, so a
+   * slow radio cannot hold port 8420 closed — which leaves a window of about
+   * thirty seconds on every boot where `GET /hub` is answering questions about
+   * a Matter adapter that has not run a line of its own code. The initial
+   * value there was `off`, meaning *nobody asked for it*: specific, actionable
+   * and wrong, so an app polling across a restart told somebody to go and turn
+   * their Bluetooth on.
+   */
+  | 'starting'
   /** Nobody asked for it. */
   | 'off'
   /** Linux only — matter.js's BLE backend is BlueZ, through noble. */
