@@ -106,7 +106,7 @@ than no button.
 | `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | floor · `home.structure` | `{id, name, zoneId, icon, accent, sortOrder}`. `POST` takes `{name, zoneId?, icon?, accent?, sortOrder?}` — the name is the only required field anywhere here — and `PATCH` takes the same set with every field optional; `zoneId: null` means "in no zone", and `icon: null` / `accent: null` mean "back to the look the app derives" — each different from leaving the field out. `icon`/`accent` are opaque app tokens (1–40 chars, see [below](#rooms-and-zones)). Names are trimmed before they are measured (1–80), an unknown `zoneId` is `404 unknown_zone`, and a new room goes to the *end* of the order. Deleting a room does not delete its devices — they are simply in no room. Every write broadcasts the [`structure` frame](#rooms-and-zones) |
 | `GET /zones` · `POST /zones` · `PATCH /zones/:id` · `DELETE /zones/:id` | floor · `home.structure` | `{id, name, sortOrder}` — the optional layer above rooms, see [below](#rooms-and-zones). `POST {name, sortOrder?}`, `PATCH {name?, sortOrder?}`; a zone carries no look of its own, since nothing draws a zone as a thing. Deleting a zone keeps its rooms and leaves them in none |
 | `GET /devices` | floor | full device list (wire shape below) |
-| `PATCH /devices/:id` | `device.edit` / floor | `{name?, roomId?, favorite?}`. Name and room describe the house and everybody sees the same ones; **`favorite` is the caller's own** and nobody else's — see [below](#favorites-are-per-member). `roomId: null` takes a device out of its room; an unknown one is `404 unknown_room`. The response is this caller's view of the device |
+| `PATCH /devices/:id` | `device.edit` / floor | `{name?, roomId?, favorite?, offlineExpected?}`. Name, room and `offlineExpected` describe the house and everybody sees the same ones; **`favorite` is the caller's own** and nobody else's — see [below](#favorites-are-per-member). `roomId: null` takes a device out of its room; an unknown one is `404 unknown_room`. `offlineExpected` is a boolean in and a moment back out — see [below](#a-device-that-is-meant-to-be-offline). The response is this caller's view of the device |
 | `DELETE /devices/:id` | `device.remove` | also unpairs at the protocol level |
 | `POST /devices/:id/endpoints/:endpointId/commands` | floor | body = canonical command; `202`. IR-remote intents (`irLearn`/`irSaveLearned`/`irSend`/`irDeleteCommand`/`irRenameCommand`) are resolved against the endpoint's stored code library (see [device-schema.md](device-schema.md)) |
 | `GET /devices/:id/history?from=&to=&points=&series=` | floor | what this device's readings did over a window, already thinned to a drawable size — see [below](#recorded-readings-get-devicesidhistory). `from`/`to` are epoch ms and default to the last day; `from >= to` is `400 invalid_range`; an unknown device is `404` |
@@ -812,6 +812,45 @@ Three properties matter more than the number:
 Absent means settled. The whole `matter` block is absent on a hub with no
 Matter running, which is the same presence-is-the-capability rule as
 everywhere else here.
+
+#### A device that is meant to be offline
+
+Somebody unplugs a heater for the summer. It is offline, and it is not a fault
+— but nothing could say so, so the dashboard counted it, put *Needs attention*
+over the home and went on doing it until the thing was plugged back in. The
+person who unplugged it is the only one who knows, and the only thing they
+could do about it was ignore a warning for four months.
+
+`PATCH /devices/:id { offlineExpected: true }` is them saying it. The device
+comes back carrying `offlineExpected: { at, by? }` — the moment, and who said
+it — and an app draws it as offline **without counting it as something needing
+attention**. `false` takes it back, which is what somebody does after plugging
+the socket back in and finding it still does not answer.
+
+It is the **house's**, not a phone's dismissal, and that is the whole of why it
+is a column on the device row rather than something each app remembers. One
+person unplugs the heater; nobody else in the home should go on being told the
+home needs looking at. It is under `device.edit` for the same reason: silencing
+the home's own alarm for everybody is not something a guest staying the weekend
+should be able to do — unlike `favorite`, which sits in the same body and needs
+nothing.
+
+**It is an excuse for *this* absence, not for the device.** The hub clears it
+the moment the device is reachable again, so a socket excused in May, plugged
+back in and pulled out again in September is a new thing to be told about. That
+is a per-device report doing the clearing, never the *radio* coming back up:
+`radioReachabilityChanged` speaks for everything behind it and is an assumption
+rather than a report, and Zigbee2MQTT's bridge says `online` on every hub
+restart — which would have cleared every excuse in the home overnight, on a hub
+nobody had touched. Nothing is hidden by holding them across that: while a radio
+is down its devices are already explained by the resting-radio rule in both
+apps, and the first real report that the device is back ends it properly.
+
+Setting it writes one `device.offline-expected` activity row, and only when it
+is a change — an app re-sending what the hub already holds says nothing worth
+reading a week later. The automatic clear writes nothing of its own: the device
+coming back already writes `device.online`, and two lines for one event is the
+burst the feed's whole shape exists to avoid.
 
 #### A radio switch in flight (`radio.applying`)
 

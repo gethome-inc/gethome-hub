@@ -325,7 +325,11 @@ describe.skipIf(!handle)('roles and permissions', () => {
     expect(pinned.statusCode).toBe(200);
     expect(pinned.json()).toMatchObject({ favorite: true });
 
-    for (const payload of [{ name: 'Not yours' }, { roomId }]) {
+    // `offlineExpected` is in this list rather than beside `favorite`: it
+    // silences the home's own "needs attention" for **everybody**, so it is
+    // the house's in exactly the way the name is, and a guest staying the
+    // weekend has no business switching it off.
+    for (const payload of [{ name: 'Not yours' }, { roomId }, { offlineExpected: true }]) {
       const refused = await app.inject({
         method: 'PATCH',
         url: `/api/v1/devices/${deviceId}`,

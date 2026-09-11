@@ -633,6 +633,30 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   at boot, `forgetDevice` is wired to the `deviceRemoved` event and
   `forgetMember` to `endMembership`, because both deletes are done by the
   cascade and the map would otherwise hold pins on things that are gone.
+- **A device being offline is sometimes the plan, and only a person knows.**
+  Somebody unplugs a heater for the summer: the device is unreachable, the home
+  is fine, and nothing could say so — so the dashboard counted it, put *Needs
+  attention* over the home and went on doing it for four months.
+  `PATCH /devices/:id { offlineExpected }` is them saying it, and the device
+  carries `offlineExpected: { at, by? }` back. Four rules. **It is the house's**
+  — a column on the device row, not a dismissal each phone remembers — because
+  one person unplugs the heater and nobody else should go on being told the
+  home needs looking at; that is the same split `name` and `roomId` are on, and
+  it is why the field sits under `device.edit` while `favorite`, in the same
+  body, needs nothing. **It excuses *this* absence, not the device**: the
+  registry clears it the moment the device is reachable again, so a socket
+  excused in May, plugged back in and pulled out again in September is a new
+  thing to be told about. **A radio is not a device**, so
+  `radioReachabilityChanged` deliberately does *not* clear it — it speaks for
+  everything behind it and is an assumption rather than a report, and Z2M's
+  bridge says `online` on every hub restart, which would have wiped every
+  excuse in the home overnight on a hub nobody touched; nothing is hidden by
+  holding them, since a down radio's devices are already explained by the
+  resting-radio rule in both apps and the first real per-device report ends it
+  properly. That is what `applyReachability`'s `fromRadio` exists for, and it
+  is the only thing it decides. And **one activity row per decision, none for
+  the clear** — the device coming back already writes `device.online`.
+  `docs/api.md` is canonical.
 - **Zones are the layer above rooms, and are deliberately not floors.** A room
   belongs to one zone or to none, and none is the ordinary case — which is the
   whole argument: a flat has no floors and a garage is not one, so a *floor*
@@ -1058,8 +1082,18 @@ outside `deploy/`, so they stay here:
   whether the new build is any good — so by the time `install.sh` rolls back,
   the database has already moved on. A migration that drops or renames turns a
   failed health check into a hub neither build can start.
-  `test/migrations.test.ts` enforces that, and the journal's four invariants
-  with it; `-- gethome:destructive: <why>` is the deliberate way past.
+  `test/migrations.test.ts` enforces that, and the journal's invariants with
+  it; `-- gethome:destructive: <why>` is the deliberate way past.
+  **A migration's drizzle *snapshot* has to be committed with it**, and that is
+  now one of those invariants rather than a habit. The snapshots are not read at
+  boot, so a missing one breaks nothing until the next person runs
+  `db:generate` — and then it breaks badly: `0014_snapshot.json` was never
+  committed, so drizzle diffed the schema against `0013` and generated a
+  migration that re-emitted `0014`'s three `ALTER TABLE … ADD`s on top of its
+  own. On any hub that had already run `0014` that is `duplicate column name`
+  at boot, which is a hub that does not start and a rollback that lands on one
+  that doesn't either. The SQL was well formed, the journal was complete and
+  the file was additive, so nothing else here would have said a word.
 
 ## Keep the docs in sync
 
