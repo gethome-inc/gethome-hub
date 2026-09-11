@@ -219,10 +219,17 @@ GetHome app on every board**, including this one. What `one` now means is
 
 Before you do, the honest version:
 
-- **The margin is about 30 MB.** That is real and it is not much. The thing
-  that eats it is a growing Zigbee network: Zigbee2MQTT holds every paired
-  device's state, so the board that copes today is not the board you have after
-  twenty more bulbs.
+- **What decides it is your Zigbee network, not the board.** Measured over
+  seven hours with both radios on a Zero 2 W — one Matter plug, three Zigbee
+  devices — the hub settled at 160 MB against its 200 MB ceiling, flat for the
+  last six of those hours, and was never once throttled. So a small home is
+  comfortable. What uses up the remaining margin is Zigbee2MQTT, which holds
+  state for every device you pair: the board that copes with a handful may not
+  cope with another twenty.
+- **So treat it as a setting to come back to, not one to set and forget.** This
+  is the part worth knowing *before* you start buying: if you already know you
+  want a large Zigbee network alongside Matter, buy a Pi 4 or Pi 5 instead. It
+  never has the question.
 - **The hub watches for it rather than waiting to be told.** With both radios
   on, it samples the kernel's own memory counters every 30 seconds — how often
   the hub is being throttled at its limit, whether anything has been killed,

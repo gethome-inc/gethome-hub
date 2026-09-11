@@ -2204,7 +2204,15 @@ fi
 # it. `say` rather than `warn`: nothing is wrong, and an amber line here would
 # read as the install having gone badly on every 512 MB board there is.
 if [[ "$RADIO_BUDGET" == "one" && "$RADIO_MODE" != "both" ]]; then
-  say "If you would rather have both radios at once, you can turn that on in the GetHome app. The recommendation stays one at a time on this board — 512 MB is measured against a full home, and a big Zigbee network is what runs it out — but a home with a handful of devices is nowhere near that, and going without Matter to prevent a problem you do not have is the worse trade. The hub watches its own memory when you do: if the board runs short it hands a radio back by itself and tells you, rather than leaving the system to pick which half of the house stops."
+  say "If you would rather have both radios at once, you can turn that on in the GetHome app, and on a small home this board handles it comfortably — measured, not assumed."
+  # **The sentence that has to be read before the network exists.** The failure
+  # this is aimed at is not a hub falling over: it is somebody turning both
+  # radios on with four devices, being perfectly happy, spending a year buying
+  # more, and meeting the trade long after the point where a different board
+  # was still an option. So it names what *changes* the answer, and names the
+  # board that never has the question — which is the only part somebody
+  # standing at the start of a setup can act on.
+  say "Worth knowing before you build the network, though: what uses up the margin is Zigbee growing. Zigbee2MQTT holds state for every device you pair, so the board that copes with a handful may not cope with another twenty — this is a setting to come back to rather than one to set and forget. If it does run short the hub notices before anything breaks, hands one radio back by itself and says so in the app; nothing is unpaired. And if you already know you want a large Zigbee network alongside Matter, a Raspberry Pi 4 or 5 is the board that never has to choose."
   # Two things the watch depends on, and both are worth naming *here* rather
   # than where they were set up: they were noise on a hub running one radio and
   # they are the difference between "hands a radio back" and "something dies"
