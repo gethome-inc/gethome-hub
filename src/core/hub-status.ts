@@ -193,10 +193,18 @@ export function createHubStatusReader(deps: ApiDeps): HubStatusReader {
         (mode === 'zigbee' && zigbeeNow.connected) ||
         (mode === 'both' && matterNow && zigbeeNow.connected);
       const request = landed ? undefined : readRadioRequest(deps.dataDir);
-      // Read every time rather than cached: it changes at most a handful of
-      // times in a hub's life, the file is absent on nearly every hub that
-      // ever runs, and an absent file is one failed `open` — cheaper than the
-      // cache entry that would avoid it.
+      // **Deliberately not cached, unlike the two reads above it.** The rule
+      // those obey is that `GET /hub` is the health check every app and
+      // installer polls, so it must not become a *file read* per request — and
+      // the read that rule was written for is `readZigbeeProblem`, which is
+      // sixty-four kilobytes of log. This is one `open` that fails with ENOENT
+      // on every hub this has never happened to, which is nearly all of them.
+      //
+      // And a cache here would buy those microseconds at the price of a
+      // staleness bug on the one route where the value moves:
+      // `PUT /settings/radio` acknowledges the notice and then answers with
+      // this very snapshot, so a TTL of any length would hand the app that
+      // just dismissed it an `acknowledged: false`.
       const standDown = readRadioStandDown(deps.dataDir);
       return {
         zigbee: zigbeeNow,
