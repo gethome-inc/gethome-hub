@@ -145,6 +145,31 @@ what makes a single cancel unambiguous.
 - Endpoint device types (Descriptor cluster `DeviceTypeList`) are looked up in
   the catalog (`src/schema/catalog.ts`) → `deviceKind` + capabilities;
   infrastructure endpoints (root node, bridge plumbing, OTA) are filtered.
+- **Then the capabilities are narrowed to the clusters the endpoint actually
+  has** (`restrictToClusters`). A device type says what an endpoint *may*
+  implement and the clusters on it say what it *does* — a Smart Plug's
+  Electrical Power Measurement is optional, a contact sensor may be
+  mains-powered and carry no Power Source — and Matter is strict and
+  machine-readable about the difference, so there is no reason to guess.
+  Announcing the type's list wholesale meant claiming capabilities the
+  accessory had already said it hasn't got, and the apps drew a reading slot
+  that could never fill.
+  Two rules. **The primary survives whatever happens**: it is what a device
+  card leads with, and an endpoint missing its primary cluster is malformed —
+  quietly picking a different one would hide that behind a card that looks fine
+  and does nothing. And **a capability with no cluster mapped to it is kept**,
+  because dropping is the destructive direction: one added to the catalog and
+  forgotten in the table would silently vanish from every device that has it.
+- **Non-Matter clusters are not adopted, and that is the universal answer
+  rather than a gap.** The plug this was found on (Yandex YNDX-00540) meters
+  perfectly well — through Zigbee's `ElectricalMeasurement` 0x0B04, which is
+  *not a Matter cluster*: matter.js's spec-generated model has no entry for it,
+  which is why its attributes arrive as `attr$505` rather than by name, with
+  vendor-defined multipliers and divisors beside them. Teaching the reducer one
+  vendor's carry-over would put a non-standard special case in the middle of an
+  adapter whose whole value is that Matter is standardised — and the next
+  vendor's carry-over would be a second one. So the capability is dropped and
+  the device is honest about what it does: on/off, which is what it told us.
 - All attributes and events are subscribed; reports run through
   `src/adapters/matter/reducer.ts` — a 1:1 port of the GetHome app's own
   Matter state reducer (same cluster/attribute IDs, same unit transforms:

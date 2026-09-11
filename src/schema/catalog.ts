@@ -148,6 +148,91 @@ export function descriptorFor(deviceTypeIds: number[]): DeviceTypeDescriptor {
   return best ?? GENERIC_DESCRIPTOR;
 }
 
+/**
+ * Which Matter cluster has to be there for a capability to be more than a
+ * claim.
+ *
+ * **A device type says what an endpoint *may* implement; the Descriptor
+ * cluster's `ServerList` says what it *does*.** Matter is strict and
+ * machine-readable about exactly this, and the catalog above is the looser of
+ * the two — a Smart Plug's Electrical Power Measurement is optional, a contact
+ * sensor may be mains-powered and carry no Power Source, a light may implement
+ * only half of what its type allows. Taking the catalog as the answer meant
+ * announcing capabilities the accessory had already told us it did not have,
+ * and the apps drew a reading slot that could never fill: the Yandex plug this
+ * was found on reports `electricalPower` and implements neither 0x0090 nor
+ * 0x0091 (it carries Zigbee's own 0x0B04, which is not a Matter cluster at all
+ * — matter.js's spec-generated model has no entry for it).
+ *
+ * Only the capabilities that *can* be wrong are listed. **A capability with no
+ * entry here is kept**, because the destructive direction is dropping one: a
+ * capability added to the catalog and forgotten here would silently vanish
+ * from every device, which is a far worse failure than an over-claim.
+ */
+const CAPABILITY_CLUSTERS: Partial<Record<CapabilityKind, readonly number[]>> = {
+  onOff: [0x0006],
+  level: [0x0008],
+  // One cluster for both, and that is right: a colour-temperature light and a
+  // full-colour one are told apart by their *device type*, which the catalog
+  // already does. This only asks whether ColorControl is there at all.
+  color: [0x0300],
+  colorTemperature: [0x0300],
+  // Either generation counts. 0x0090/0x0091 are Matter 1.3's; a device with
+  // neither reports no power, whatever its type suggests. (0x0091 also carries
+  // cumulative energy, which the reducer folds into the same capability.)
+  electricalPower: [0x0090, 0x0091],
+  battery: [0x002f],
+  temperature: [0x0402],
+  humidity: [0x0405],
+  illuminance: [0x0400],
+  pressure: [0x0403],
+  flow: [0x0404],
+  occupancy: [0x0406],
+  contact: [0x0045],
+  // Generic Switch's whole purpose; an endpoint without it is not a button.
+  event: [0x003b],
+  doorLock: [0x0101],
+  windowCovering: [0x0102],
+  thermostat: [0x0201],
+  fan: [0x0202],
+  airQuality: [0x005b],
+  pm25: [0x042a],
+  co2: [0x040d],
+  smokeCOAlarm: [0x005c],
+  mediaPlayback: [0x0506],
+  mode: [0x0050],
+  rvcRun: [0x0061],
+};
+
+/**
+ * Narrow a device type's capabilities to the ones this endpoint can actually
+ * report.
+ *
+ * `clusterIds` is what the endpoint implements — in practice the clusters
+ * matter.js built a client for, which is the honest test: a capability whose
+ * cluster has no client is one nothing could ever populate.
+ *
+ * **`primary` is kept whatever happens.** It is the capability the apps lead
+ * with and a device card has to have one; an endpoint whose primary cluster is
+ * missing is a malformed endpoint, and inventing a different primary here
+ * would hide that behind a card that looks fine and does nothing.
+ */
+export function restrictToClusters(
+  descriptor: DeviceTypeDescriptor,
+  clusterIds: Iterable<number>,
+): DeviceTypeDescriptor {
+  const present = new Set(clusterIds);
+  const capabilities = descriptor.capabilities.filter((capability) => {
+    if (capability === descriptor.primary) return true;
+    const required = CAPABILITY_CLUSTERS[capability];
+    if (required === undefined) return true;
+    return required.some((cluster) => present.has(cluster));
+  });
+  return capabilities.length === descriptor.capabilities.length
+    ? descriptor
+    : { ...descriptor, capabilities };
+}
+
 /** True when every listed device type is infrastructure plumbing. */
 export function isInfrastructureOnly(deviceTypeIds: number[]): boolean {
   return deviceTypeIds.length > 0 && deviceTypeIds.every((id) => INFRASTRUCTURE_TYPES.has(id));

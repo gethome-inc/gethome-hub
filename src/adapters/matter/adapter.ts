@@ -6,7 +6,7 @@ import { ActiveDiscoveries } from '@matter/main/node';
 import { ClusterId, NodeId } from '@matter/main/types';
 import type { AdapterBus, ProtocolAdapter } from '../adapter.js';
 import type { EndpointState, HubCommand } from '../../schema/index.js';
-import { descriptorFor, isInfrastructureOnly } from '../../schema/index.js';
+import { descriptorFor, isInfrastructureOnly, restrictToClusters } from '../../schema/index.js';
 import { reduceReports, type AttributeReport } from './reducer.js';
 import { executeMatterCommand } from './commands.js';
 import { installBle, type BleStatus } from './ble.js';
@@ -547,7 +547,16 @@ export class MatterAdapter implements ProtocolAdapter {
     for (const device of node.getDevices()) {
       const typeIds = device.getDeviceTypes().map((deviceType) => deviceType.code);
       if (isInfrastructureOnly(typeIds)) continue;
-      const descriptor = descriptorFor(typeIds);
+      // **The device type is the looser of the two answers.** It says what an
+      // endpoint *may* implement; the clusters actually on it say what it
+      // does, and Matter is strict and machine-readable about the difference.
+      // Announcing the type's list wholesale meant claiming capabilities the
+      // accessory had already said it hasn't got — a reading slot in the apps
+      // that could never fill.
+      const descriptor = restrictToClusters(
+        descriptorFor(typeIds),
+        device.getAllClusterClients().map((client) => Number(client.id)),
+      );
       endpoints.push({
         endpointId: device.number ?? 0,
         deviceKind: descriptor.kind,
