@@ -787,15 +787,27 @@ app should treat a device on that transport as *connecting* rather than offline
 while it is present and in the future: not counted in a needs-attention total,
 not drawn with an offline badge.
 
-Two properties matter more than the number:
+Three properties matter more than the number:
 
+- **It covers the controller coming up as well as the nodes connecting**, and
+  that half was the one this first shipped without. The adapters start *after*
+  the API is listening — deliberately, so matter.js opening its storage on a
+  slow card cannot hold the health check and the claim closed — so every
+  `GET /hub` in those seconds was answered by an adapter that had not begun
+  looking at all, reporting a settled home while `radio.matter` already said
+  `true` because the adapter had been constructed. The two phases are bounded
+  separately, because a clock running while matter.js loads is a clock counting
+  time in which no node *could* have reported in: charging it to the nodes
+  would shorten the window they actually get, on precisely the boards slow
+  enough to need all of it.
 - **It clears when the last node connects, not when the clock runs out.** The
   controller knows what it is commissioned to and what it has reached, so there
   is nothing to guess — a hub whose devices all answer in four seconds stops
   making excuses after four seconds.
-- **The clock is a bound, not a promise.** It is only ever *reached* by a node
-  that is genuinely not there — which is the one real offline device, and it
-  must not stay hidden behind "still looking" for ever.
+- **Every clock here is a bound, not a promise.** The node window is only ever
+  *reached* by a node that is genuinely not there — the one real offline
+  device — and the start-up window only by a `start()` that never returns.
+  Neither may hide an unreachable device behind "still looking" for ever.
 
 Absent means settled. The whole `matter` block is absent on a hub with no
 Matter running, which is the same presence-is-the-capability rule as

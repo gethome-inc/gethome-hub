@@ -10,6 +10,7 @@ import { descriptorFor, isInfrastructureOnly, restrictToClusters } from '../../s
 import { reduceReports, type AttributeReport } from './reducer.js';
 import { executeMatterCommand } from './commands.js';
 import { installBle, type BleStatus } from './ble.js';
+import { settlingUntil } from './settling.js';
 import {
   classifyCommissionError,
   CommissionError,
@@ -75,17 +76,6 @@ const DISCOVERY_TIMEOUT_MS = 3 * 60 * 1000;
  * enough that nobody is left watching.
  */
 const COMMISSION_TIMEOUT_MS = DISCOVERY_TIMEOUT_MS + 90 * 1000;
-
-/**
- * How long a just-started controller is given to reach the nodes it owns.
- *
- * Measured at twenty to thirty seconds on a Raspberry Pi Zero 2 W for one
- * node — a CASE session per accessory, over Wi-Fi, on a 1 GHz A53 — so a
- * minute is the bound rather than the expectation. It is only ever *reached*
- * by a node that is genuinely not there: `settlingUntil` clears itself as soon
- * as the last one connects.
- */
-const NODE_SETTLE_MS = 60 * 1000;
 
 export interface MatterAdapterOptions {
   dataDir: string;
@@ -188,6 +178,18 @@ export class MatterAdapter implements ProtocolAdapter {
   private readonly connectedOnce = new Set<string>();
   /** When `start()` finished, for the settling window below. 0 until then. */
   private startedAt = 0;
+  /**
+   * When `start()` was *entered*. 0 before that, and 0 again if it failed.
+   *
+   * The two stamps are different questions and the gap between them is real
+   * seconds on a small board: this one is "the hub has been asked to run
+   * Matter", the other is "the controller is up and the nodes have been told
+   * to connect". Only the second may start the node budget — a clock running
+   * while matter.js loads is a clock counting time no node could report in —
+   * and only the first can answer the seconds before it, which is where every
+   * `GET /hub` during a boot lands.
+   */
+  private startingAt = 0;
   /** Working states for the reducer, keyed `${nodeId}/${endpointId}`. */
   private readonly states = new Map<string, EndpointState>();
   /** Switch-cluster features per `${nodeId}/${endpointId}` (buttons). */
@@ -230,75 +232,85 @@ export class MatterAdapter implements ProtocolAdapter {
   }
 
   /**
-   * Until when this controller is still finding the devices it already owns.
+   * Until when this hub is still finding the Matter devices it already owns,
+   * or absent once there is nothing left to wait for.
    *
-   * **A Matter device is not offline because the hub has only just started
-   * looking for it.** Zigbee2MQTT hands its whole device list over in one
-   * retained message, so a Zigbee home is complete a second after the radio
-   * is; a Matter controller has to open a CASE session with every node in
-   * turn, over Wi-Fi, and on a Zero 2 W that is twenty to thirty seconds. The
-   * devices were read back from the database with the `online: false` they
-   * were given when Matter was last switched *off*, so for that whole window
-   * a working home read "1 device offline · needs attention" — about an
-   * accessory that was about to answer.
-   *
-   * Absent means settled, and it becomes absent **the moment the last node
-   * connects** rather than when the window runs out: the controller knows
-   * what it is commissioned to and what it has reached, so there is no need
-   * to guess. The window is only the bound for the node that never answers —
-   * which is the one genuinely offline device, and which must not be hidden
-   * for ever behind a "still looking".
+   * The rule and the reasoning are in `settling.ts` — a pure module because
+   * importing this one loads `@matter/main`, so anything that can only be read
+   * through the adapter is a rule no test can reach. This end of it is the two
+   * stamps and what the controller says it owns.
    */
   get settlingUntil(): number | undefined {
-    if (this.controller === null || this.startedAt === 0) return undefined;
-    const until = this.startedAt + NODE_SETTLE_MS;
-    if (Date.now() >= until) return undefined;
-    const commissioned = this.controller.getCommissionedNodes();
-    if (commissioned.length === 0) return undefined;
-    if (commissioned.every((nodeId) => this.connectedOnce.has(nodeId.toString()))) return undefined;
-    return until;
+    return settlingUntil(
+      {
+        startingAt: this.startingAt,
+        // The controller being null is `startedAt === 0` by another route —
+        // that stamp is only ever written once it exists — so the phase is
+        // read off the stamps alone and there is one condition to be wrong
+        // about rather than two.
+        startedAt: this.controller === null ? 0 : this.startedAt,
+        commissioned: this.controller?.getCommissionedNodes().map((nodeId) => nodeId.toString()) ?? [],
+        connected: this.connectedOnce,
+      },
+      Date.now(),
+    );
   }
 
   async start(bus: AdapterBus): Promise<void> {
     this.bus = bus;
-    const environment = Environment.default;
-    this.environment = environment;
-    environment.vars.set('storage.path', path.join(this.options.dataDir, 'matter'));
+    // First line of the method, because the point of it is to cover what
+    // happens *during* the rest: from here on the hub is looking, and every
+    // `GET /hub` answered before the controller exists says so instead of
+    // calling a home half-offline. Cleared again if this throws — see the
+    // catch below, where the registry has already decided to run without us.
+    this.startingAt = Date.now();
+    try {
+      const environment = Environment.default;
+      this.environment = environment;
+      environment.vars.set('storage.path', path.join(this.options.dataDir, 'matter'));
 
-    // Before the controller is built: the BLE backend registers itself as a
-    // service on the environment, and the controller reads the services it
-    // has when it starts. Installed after that, it is a transport nothing is
-    // holding — which is how "BLE is not enabled on this platform" ends up in
-    // the log of a hub that has perfectly good Bluetooth.
-    this.ble = await installBle(environment, {
-      wanted: this.options.ble === true,
-      ...(this.options.hciId !== undefined ? { hciId: this.options.hciId } : {}),
-      log: this.options.log,
-    });
-    if (!this.ble.enabled && this.ble.detail !== undefined) {
-      this.options.log.warn(this.ble.detail);
-    }
-
-    this.controller = new CommissioningController({
-      environment: { environment, id: 'gethome-hub' },
-      autoConnect: false,
-      adminFabricLabel: 'GetHome Hub',
-    });
-    await this.controller.start();
-
-    for (const nodeId of this.controller.getCommissionedNodes()) {
-      // Attach in the background — an unreachable device must not stall boot.
-      void this.attachNode(nodeId).catch((error) => {
-        this.options.log.warn({ err: error }, `Could not attach Matter node ${nodeId}`);
+      // Before the controller is built: the BLE backend registers itself as a
+      // service on the environment, and the controller reads the services it
+      // has when it starts. Installed after that, it is a transport nothing is
+      // holding — which is how "BLE is not enabled on this platform" ends up in
+      // the log of a hub that has perfectly good Bluetooth.
+      this.ble = await installBle(environment, {
+        wanted: this.options.ble === true,
+        ...(this.options.hciId !== undefined ? { hciId: this.options.hciId } : {}),
+        log: this.options.log,
       });
+      if (!this.ble.enabled && this.ble.detail !== undefined) {
+        this.options.log.warn(this.ble.detail);
+      }
+
+      this.controller = new CommissioningController({
+        environment: { environment, id: 'gethome-hub' },
+        autoConnect: false,
+        adminFabricLabel: 'GetHome Hub',
+      });
+      await this.controller.start();
+
+      for (const nodeId of this.controller.getCommissionedNodes()) {
+        // Attach in the background — an unreachable device must not stall boot.
+        void this.attachNode(nodeId).catch((error) => {
+          this.options.log.warn({ err: error }, `Could not attach Matter node ${nodeId}`);
+        });
+      }
+      // **After** the nodes are attached, not before: `attachNode` is what
+      // subscribes to the state changes that end the settling window, so a
+      // stamp taken earlier would be counting time nothing could report in.
+      this.startedAt = Date.now();
+      this.options.log.info(
+        `Matter controller started with ${this.controller.getCommissionedNodes().length} commissioned node(s).`,
+      );
+    } catch (error) {
+      // The registry isolates this and carries on without Matter, marking
+      // every Matter device unreachable as it does — so the one thing this
+      // adapter must not go on doing is asking for patience. A controller
+      // that failed to start is not one that is still looking.
+      this.startingAt = 0;
+      throw error;
     }
-    // **After** the nodes are attached, not before: `attachNode` is what
-    // subscribes to the state changes that end the settling window, so a
-    // stamp taken earlier would be counting time nothing could report in.
-    this.startedAt = Date.now();
-    this.options.log.info(
-      `Matter controller started with ${this.controller.getCommissionedNodes().length} commissioned node(s).`,
-    );
   }
 
   async stop(): Promise<void> {
@@ -307,6 +319,7 @@ export class MatterAdapter implements ProtocolAdapter {
     this.nodes.clear();
     this.connectedOnce.clear();
     this.startedAt = 0;
+    this.startingAt = 0;
   }
 
   async execute(externalId: string, endpointId: number, command: HubCommand): Promise<void> {

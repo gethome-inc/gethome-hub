@@ -464,6 +464,21 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   there is nothing to guess — and the clock is a bound rather than a promise,
   because the node that never answers is the one genuinely offline device and
   must not hide behind "still looking" for ever.
+  **It covers the controller coming up as well**, which is the same bug one
+  step earlier and the half this first shipped without. The adapters start
+  after the API is listening, so every `GET /hub` in the seconds matter.js
+  spends loading and opening its storage was answered by an adapter that had
+  not begun looking — reporting a settled home, while `radio.matter` already
+  said `true` because the adapter had been *constructed*. That is the window
+  every switch to Matter lands in, so the fix for the paragraph above did not
+  reach the case it was written for. The two phases are bounded separately: a
+  clock running while matter.js loads counts time in which no node could have
+  reported in, so charging it to the nodes shortens the window they actually
+  get on precisely the boards slow enough to need all of it. The arithmetic is
+  `adapters/matter/settling.ts` rather than a getter in the adapter, for the
+  reason `reducer.ts` and `setup-code.ts` are their own files: reading it
+  through `adapter.ts` loads `@matter/main`, so a rule both apps draw every
+  Matter device from would be a rule no test could reach.
   **And the hub can be asked what it can hear** (`GET /matter/discoverable`),
   because Bluetooth range is the one part of pairing nobody can see and
   `not-found` is the same word for "two rooms away" and "never went into
