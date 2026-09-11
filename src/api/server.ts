@@ -1324,6 +1324,47 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     return reply.code(202).send({ jobId: job.id, deadline: job.deadline });
   });
 
+  /**
+   * What the hub can hear right now.
+   *
+   * **The question this answers is asked before the code is typed, not after
+   * the pairing fails.** Bluetooth range is the one part of this whole flow
+   * nobody can see, and `not-found` is the same sentence for "too far from the
+   * hub" and "never went into pairing mode" — two problems with completely
+   * different fixes, and an app that cannot tell them apart sends half the
+   * people who meet it to do the wrong thing.
+   *
+   * `device.add`, because it *is* adding a device: the same permission, the
+   * same act, one step earlier. And it drives a radio for a few seconds, which
+   * is reason enough not to put it behind the floor where anything could poll
+   * it.
+   */
+  app.get('/api/v1/matter/discoverable', needs('device.add'), async (request, reply) => {
+    if (!deps.matter) return reply.code(409).send({ error: 'matter_disabled' });
+    // Bounded low deliberately: this holds the request open for its whole
+    // length. Long enough for an accessory advertising on the usual cadence to
+    // be heard at least once, short enough that a screen can ask on arrival.
+    const { seconds } = z
+      .object({ seconds: z.coerce.number().int().min(2).max(15).default(6) })
+      .parse(request.query ?? {});
+    if (deps.matter.isCommissioning) {
+      return reply.code(409).send({ error: 'already_commissioning' });
+    }
+    try {
+      const devices = await deps.matter.discoverable(seconds);
+      return {
+        /** So a client can say how long it listened rather than guessing. */
+        scannedMs: seconds * 1000,
+        /** Whether Bluetooth was part of the listening — see `GET /hub`. */
+        bluetooth: deps.matter.bleStatus.enabled,
+        devices,
+      };
+    } catch (error) {
+      deps.log.warn({ err: error }, 'Matter: could not look for accessories.');
+      return reply.code(409).send({ error: 'already_commissioning' });
+    }
+  });
+
   app.get('/api/v1/matter/commission/:jobId', authed, async (request, reply) => {
     const { jobId } = z.object({ jobId: z.uuid() }).parse(request.params);
     const job = commissionJobs.get(jobId);

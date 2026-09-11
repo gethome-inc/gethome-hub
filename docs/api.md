@@ -119,6 +119,7 @@ than no button.
 | `POST /matter/commission` | `device.add` | `{pairingCode, wifi?: {ssid, passphrase}}` → `202 {jobId, deadline}` (async). `wifi` is only for a hub that cannot read its own — see [below](#pairing-a-matter-accessory). `409 already_commissioning` when one is already running, `409 matter_disabled` when this hub has no Matter |
 | `GET /matter/commission/:jobId` | floor | `{status: running\|done\|failed, step?, nodeId?, error?, failure?, startedAt, deadline}` — see [below](#pairing-a-matter-accessory) |
 | `POST /matter/commission/:jobId/cancel` | `device.add` | stop looking → the job as it now stands. `404` for a job the hub has forgotten; a job that has already finished is answered, not refused |
+| `GET /matter/discoverable?seconds=` | `device.add` | what the hub can hear **right now** → `{scannedMs, bluetooth, devices: [{discriminator, vendorId?, productId?, name?, transport, pairingHint?, pairingInstruction?}]}`. `seconds` is 2–15, default 6, and the request is held open for all of it. `409 already_commissioning` — see [below](#what-the-hub-can-hear-get-matterdiscoverable) |
 | `POST /zigbee/permit-join` | `device.add` | `{seconds}`, 0–900 (0 = close the network) → `{permitJoin, seconds}` describing the **live** window, which is not always what was asked for. See [below](#the-zigbee-join-window) |
 | `GET /members` · `PATCH /members/me` · `DELETE /members/me` · `DELETE /members/:id` | floor · floor (itself) · floor (itself) · `member.remove` | rows carry `isSelf`, `roleId` and `roleName`; `PATCH` takes `{name}` and renames **the caller**; `DELETE` on either route answers `204` and revokes that member's tokens; the owner cannot be removed, by anyone or by itself. See [below](#which-member-you-are-isself-and-patch-membersme) |
 | `GET /invites` · `POST /invites` | `member.invite` · see notes | `POST {roleId?}` → `201 {code, expiresAt, roleId, roleName, memberId: null, memberName: null}`. Omitting `roleId` mints a **Member** invite, which is what every invite this hub has ever made was. An **owner** invite is allowed and needs the caller to be one (`403 not_owner`). **`POST {memberId}` mints a sign-in code** for somebody already here — `roleId` beside it is `400 invalid_target`, an unknown one is `404 unknown_member`, and the answer carries `memberId`/`memberName` with `roleId: null`. Who may ask is asked of the body: your own (`memberId: "me"` is accepted) is the **floor**, somebody else's is `member.invite`, an **owner's** needs an owner. `GET` lists the live codes, each with `memberId` — null for an invite — and `memberName`. See [below](#signing-in-again-post-invites-with-a-memberid) |
@@ -477,6 +478,61 @@ happened (an Ethernet hub, a machine with no NetworkManager, a hub installed
 before this existed) the app should ask for the password and send it. It is
 never logged and never stored — it goes into the commissioning conversation and
 is forgotten with the job.
+
+#### What the hub can hear (`GET /matter/discoverable`)
+
+**Bluetooth range is the one part of pairing nobody can see**, and
+`failure.kind: "not-found"` is the same sentence for *"too far from the hub"*
+and *"never went into pairing mode"* — two problems with completely different
+fixes. An app that cannot tell them apart sends half the people who meet it to
+do the wrong thing, after three minutes of waiting to find out.
+
+So the hub can be asked directly, and it is worth asking **before** the code is
+committed rather than after the pairing fails:
+
+```json
+{ "scannedMs": 6000, "bluetooth": true,
+  "devices": [ { "discriminator": 1938, "vendorId": 5130, "productId": 540,
+                 "transport": "ble" } ] }
+```
+
+`transport` is `ble` or `ip`, and the difference is the accessory's own
+situation rather than a detail of the scan: **`ble` means it has no network
+yet** (factory-new, or just reset), `ip` means it is already on the LAN and
+waiting to be taken on by a second admin. One entry per accessory, and a device
+answering on both is reported as `ble`, because that is the half that says what
+it still needs.
+
+Two things an app can do with this that it could not do before:
+
+- **Say whether pairing can work, before asking for a code.** "The hub can hear
+  an accessory nearby" / "The hub can't hear anything — bring the accessory
+  closer to the hub, or plug it in beside the hub to set it up." A Wi-Fi
+  accessory only needs Bluetooth range *while it is being paired*; afterwards
+  it lives on Wi-Fi and works anywhere in the house, so "set it up next to the
+  hub and then move it" is a real answer rather than a fudge.
+- **Match a scanned code to what is actually there.** The QR's discriminator
+  and one of these are the same number when they are the same accessory — so an
+  app can confirm *this* is the device in somebody's hand, or say that the hub
+  can hear a different one.
+
+`pairingHint` and `pairingInstruction` are the accessory's own answer to "how
+do I put this into pairing mode" (core spec § 5.4.2.4, Table 71), passed
+through rather than interpreted: it is the manufacturer talking, and an app
+rendering their sentence is right more often than a hub inventing one from the
+bitmap.
+
+**It is refused while a pairing is running** (`409 already_commissioning`), and
+that is not tidiness. The two would contend for one Bluetooth controller, and a
+starved scan does not fail — it reports an empty list. Measured on a Raspberry
+Pi Zero 2 W: a second scanner running beside the hub's own took fifteen seconds
+of neighbourhood advertisements from **231 down to 2**. An empty list is the
+wrong answer in the one direction that matters, because somebody acts on it by
+concluding their accessory is broken.
+
+The request is held open for `seconds` and drives a radio, which is why it is
+`device.add` rather than the floor: it is the same act as adding a device, one
+step earlier, and not something anything should poll.
 
 #### Watching a job
 

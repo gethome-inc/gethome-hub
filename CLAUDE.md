@@ -445,6 +445,13 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   the advice changes from "hold its button" to "leave it alone", and a
   five-second timeout would say the same thing about a hub that had found
   nothing.
+  **And the hub can be asked what it can hear** (`GET /matter/discoverable`),
+  because Bluetooth range is the one part of pairing nobody can see and
+  `not-found` is the same word for "two rooms away" and "never went into
+  pairing mode". It is refused while a pairing runs, and that is a measurement:
+  a second scanner beside the hub's own took fifteen seconds of neighbourhood
+  advertisements from 231 down to 2 on a Zero 2 W, and a starved scan reports
+  an *empty list* — the wrong answer in the one direction somebody acts on.
 - **A radio that is off and a radio that is missing need opposite words, and
   both were `connected: false`.** Switching a one-radio board to Matter made the
   app say *"Zigbee · no stick"* about a coordinator the owner could see from

@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { CommissioningController } from '@project-chip/matter.js';
 import { NodeStates, type Endpoint, type PairedNode } from '@project-chip/matter.js/device';
-import { Environment, Millis } from '@matter/main';
+import { Environment, Millis, ServerAddress } from '@matter/main';
 import { ActiveDiscoveries } from '@matter/main/node';
 import { ClusterId, NodeId } from '@matter/main/types';
 import type { AdapterBus, ProtocolAdapter } from '../adapter.js';
@@ -92,6 +92,37 @@ export interface MatterAdapterOptions {
    * home may have retyped its password since the hub booted.
    */
   wifi?: () => WifiCredentials | undefined;
+}
+
+/**
+ * A commissionable accessory the hub can hear right now.
+ *
+ * The point is not the list — it is the *answer to a yes/no question asked
+ * before committing to a three-minute wait*: can this hub reach the thing in
+ * somebody's hand at all? Bluetooth range is the one part of pairing nobody
+ * can see, and until the hub could be asked, the only way to find out was to
+ * try, wait out the whole discovery budget, and read "not found" — which is
+ * the same sentence for "too far away" and "not in pairing mode", two problems
+ * with completely different fixes.
+ */
+export interface DiscoverableAccessory {
+  /** The 12-bit discriminator, which is what a scanned code can be matched to. */
+  discriminator: number;
+  vendorId?: number;
+  productId?: number;
+  /** The accessory's own advertised name, when it publishes one. */
+  name?: string;
+  /** How the hub can hear it — Bluetooth means it is not on a network yet. */
+  transport: 'ble' | 'ip';
+  /**
+   * The accessory's own hint about how it was put into pairing mode (Matter
+   * core spec § 5.4.2.4, Table 71) and, where it publishes one, the sentence
+   * that goes with it. Passed through rather than interpreted: it is the
+   * manufacturer talking, and an app that renders the sentence is right more
+   * often than a hub that invents one from the bitmap.
+   */
+  pairingHint?: number;
+  pairingInstruction?: string;
 }
 
 /** What the caller asked for, beyond the code itself. */
@@ -302,6 +333,67 @@ export class MatterAdapter implements ProtocolAdapter {
       externalId,
     });
     return externalId;
+  }
+
+  /**
+   * Listen for a moment and report every commissionable accessory the hub can
+   * reach.
+   *
+   * **Short and explicit.** This holds an HTTP request open and it drives a
+   * radio, so it is seconds rather than minutes and it is asked for rather
+   * than run in the background: a hub nobody is pairing with should not be
+   * scanning for accessories nobody is holding.
+   *
+   * **Refused while a pairing is running.** The two would be contending for
+   * one Bluetooth controller, and a starved scan does not fail — it reports an
+   * empty list, which is the wrong answer in the one direction that matters,
+   * because somebody acts on it by concluding their accessory is broken. (That
+   * is not a theory: running a second scanner beside this hub's own took
+   * fifteen seconds of neighbourhood advertisements from 231 down to 2.)
+   */
+  async discoverable(seconds: number): Promise<DiscoverableAccessory[]> {
+    if (!this.controller) throw new Error('Matter controller is not running');
+    if (this.inFlight) {
+      throw new CommissionError(
+        commissionFailure('failed', 'This hub is pairing an accessory, so it cannot look around at the same time.'),
+      );
+    }
+
+    const found = await this.controller.discoverCommissionableDevices(
+      {},
+      { ble: this.ble.enabled, onIpNetwork: true },
+      undefined,
+      Millis(seconds * 1000),
+    );
+
+    const accessories = new Map<number, DiscoverableAccessory>();
+    for (const device of found) {
+      // `VP` is "<vendor>+<product>", and the product half is optional.
+      const [vendor, product] = (device.VP ?? '').split('+');
+      const vendorId = Number(vendor);
+      const productId = Number(product);
+      // matter.js's own type guard rather than reading a field: an IP
+      // address carries no discriminant, so `address.type === 'ble'` does not
+      // even type-check against the union.
+      const overBle = device.addresses.some((address) => ServerAddress.isBle(address));
+      const accessory: DiscoverableAccessory = {
+        discriminator: device.D,
+        ...(Number.isFinite(vendorId) && vendor ? { vendorId } : {}),
+        ...(Number.isFinite(productId) && product ? { productId } : {}),
+        ...(device.DN !== undefined && device.DN.length > 0 ? { name: device.DN } : {}),
+        transport: overBle ? 'ble' : 'ip',
+        ...(device.PH !== undefined ? { pairingHint: device.PH } : {}),
+        ...(device.PI !== undefined && device.PI.length > 0 ? { pairingInstruction: device.PI } : {}),
+      };
+      // One entry per accessory, and Bluetooth wins a tie: a device answering
+      // on both is one device, and the Bluetooth answer is the one that says
+      // it has not got a network yet.
+      const existing = accessories.get(device.D);
+      if (existing === undefined || (existing.transport === 'ip' && overBle)) {
+        accessories.set(device.D, accessory);
+      }
+    }
+    return [...accessories.values()];
   }
 
   /**

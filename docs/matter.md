@@ -98,6 +98,28 @@ Bluetooth needs a Thread operational dataset, which means a border router the
 hub is part of; a Thread device already on a LAN border router is commissioned
 over IP as normal.
 
+### Asking what the hub can hear
+
+`GET /matter/discoverable` listens for a few seconds and reports every
+commissionable accessory the hub can reach, over Bluetooth and over IP.
+
+It exists because **Bluetooth range is the one part of this flow nobody can
+see**. "Not found" is the same sentence for an accessory two rooms away and one
+that never went into pairing mode, and those have opposite fixes — so an app can
+ask *before* committing somebody to a three-minute wait, and can match a scanned
+code's discriminator against what is actually in earshot.
+
+It is refused while a pairing is running, and that is a measurement rather than
+a preference: a second scanner beside the hub's own took fifteen seconds of
+neighbourhood BLE advertisements from 231 down to 2 on a Zero 2 W. A starved
+scan reports an empty list, which is the wrong answer in the direction somebody
+acts on.
+
+**The range only has to hold while the accessory is being paired.** A Wi-Fi
+accessory joins the network during commissioning and lives on it afterwards, so
+setting one up beside the hub and then moving it where it is wanted is a real
+answer — and it is the one the apps give.
+
 ### Bounds
 
 Discovery is bounded at three minutes — the Matter spec's own minimum

@@ -367,6 +367,10 @@ describe.skipIf(!handle)('roles and permissions', () => {
         'device.add',
         undefined,
       ],
+      // Looking around is the same act as adding, one step earlier — and it
+      // drives a radio for a few seconds, which is on its own reason enough not
+      // to leave it where anything could poll it.
+      ['GET', '/api/v1/matter/discoverable', 'device.add', undefined],
       ['PUT', '/api/v1/settings/radio', 'hub.radio', { mode: 'matter' }],
       ['DELETE', `/api/v1/devices/${deviceId}`, 'device.remove', undefined],
       ['GET', '/api/v1/settings/ai', 'hub.ai', undefined],
