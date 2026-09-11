@@ -360,6 +360,40 @@ things decide which radio runs:
 > is a home with three Zigbee devices in it. The plateau is a fact about this
 > home on this board, and the rule below is unchanged for that reason.
 >
+> #### How this was measured, so it can be measured again
+>
+> Nothing was installed permanently: a shell script on the Pi, a `crontab`
+> line every ten minutes appending one CSV row, and both removed afterwards.
+> The whole of what it read is four files, none of which need root:
+>
+> | | |
+> |---|---|
+> | `/sys/fs/cgroup/system.slice/gethome-hubd.service/memory.{current,peak,swap.current,events}` | the hub |
+> | `…/gethome-zigbee2mqtt.service/memory.…` | the same for Z2M, **under that name** — the unit is `gethome-zigbee2mqtt`, not `zigbee2mqtt` |
+> | `/proc/meminfo` | `MemTotal`, `MemAvailable`, `MemFree`, swap |
+> | `GET /hub` on localhost | which radios were actually live |
+>
+> **Record which radios were up in every row.** It is the one column that
+> cannot be reconstructed afterwards, and without it the rows either side of a
+> radio switch look like an unexplained 80 MB cliff.
+>
+> Two traps, both of which caught this measurement before it was right:
+>
+> - **Never compare an aged process against a fresh one.** The first estimate
+>   of Matter's cost was 80–90 MB and it was wrong by nearly half: it put a
+>   both-radio hub that had been up for hours beside a freshly started
+>   Zigbee-only one, so it measured the plateau climb and called it Matter.
+>   Switch one live hub between modes twenty minutes apart instead, and the
+>   answer is ~55 MB.
+> - **`memory.peak` only rises, and a service restart resets it.** Every radio
+>   switch restarts the hub, so a peak read after one is a peak for the new
+>   process. Watch the *pid* alongside it or the series reads as a collapse.
+>
+> And do the comparing **on the Pi**, not across an `ssh` pipe: a previous
+> attempt at this compared values in a command substitution that lost its word
+> boundaries, and reported "hub restarted (0→)" on a hub that had not
+> restarted.
+>
 > **Bluetooth is what moved the number, not the device.** noble and its native
 > binding cost roughly 30 MB over the 139 MB beside it; the paired node itself
 > costs far less than the radio that found it. And the peak is now firmly the
