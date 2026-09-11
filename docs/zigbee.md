@@ -318,6 +318,48 @@ things decide which radio runs:
 > devices, watched for an hour. `high 0` and `oom_kill 0` throughout, no
 > restarts, both radios live the whole time.
 >
+> **Then it was watched for seven hours, and that run is what settles the
+> question this table kept deferring.** Sampled every ten minutes, both radios
+> live, one Matter plug and three Zigbee devices:
+>
+> | | |
+> |---|---|
+> | hub, resident | 156–165 MB, **0 in swap** |
+> | hub, `memory.peak` | **175 MB** against a 200 MB `MemoryHigh` — **flat for the last six hours** |
+> | Zigbee2MQTT | 17–22 MB resident, 67–72 MB in zram (≈90 MB total) |
+> | `MemAvailable` | 85–95 MB of 415 |
+> | `memory.events`, both units | `high 0`, `oom_kill 0` |
+>
+> **It plateaus, and that is the finding.** A fresh start with both radios is
+> 141 MB resident; it climbs to about 160 over the first hour and then stops.
+> The peak had not moved by as much as 4 MB in six hours. So the growth people
+> reach for to explain a Zero 2 W falling over after a week is not happening
+> here — the board reaches a steady state 25 MB under the ceiling and sits
+> there. **It was never throttled once**, which is the signal the watchdog acts
+> on and the reason it never fired.
+>
+> **Matter's own cost is about 55 MB**, measured cleanly by switching a live
+> hub between modes twenty minutes apart: 87 MB resident on Zigbee alone
+> against 141 MB freshly started on both. That is close to the ~60 MB this
+> table assumed all along. An earlier reading of 80–90 MB was wrong and worth
+> naming, because the mistake is easy to repeat: it compared a both-radio
+> process that had been up for hours against a freshly started Zigbee-only one,
+> so it was measuring the plateau climb and calling it Matter.
+>
+> **What the board gives up to do this is visible, and it is not the hub.**
+> Zigbee2MQTT drifts from 22 MB resident down to 17 as its zram share rises to
+> 72 — the kernel compressing the optional process to make room for the pinned
+> one, exactly as `MemorySwapMax=0` on `gethome-hubd` intends. `sshd` pays too,
+> and noticeably: interactive logins to this board routinely take more than
+> fifteen seconds to answer while `GET /hub` returns instantly. A hub that is
+> healthy on a board that is tight is precisely the designed outcome, and the
+> slow login is what tight looks like from outside.
+>
+> **The one thing seven hours cannot tell you is what four devices cannot tell
+> you.** Z2M's working set grows per device and it is already 90 MB here; this
+> is a home with three Zigbee devices in it. The plateau is a fact about this
+> home on this board, and the rule below is unchanged for that reason.
+>
 > **Bluetooth is what moved the number, not the device.** noble and its native
 > binding cost roughly 30 MB over the 139 MB beside it; the paired node itself
 > costs far less than the radio that found it. And the peak is now firmly the
