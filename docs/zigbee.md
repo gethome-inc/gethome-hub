@@ -304,11 +304,32 @@ hub). Not both. Two separate things decide which:
 > and one zram device rather than two, ten minutes after a restart, with no
 > devices paired:
 >
-> | | assumed above | Zigbee only | both radios |
-> |---|---|---|---|
-> | hub | 119 MB | 56 MB (peak 59) | **139 MB** (peak 144) |
-> | Zigbee2MQTT | 150 MB | 80 MB (peak 86) | 64 MB (peak 86) |
-> | `MemAvailable` | — | 135 MB | **89 MB** |
+> | | assumed above | Zigbee only | both radios | both + BLE + 1 device |
+> |---|---|---|---|---|
+> | hub | 119 MB | 56 MB (peak 59) | **139 MB** (peak 144) | 138–146 MB (**peak 170**) |
+> | Zigbee2MQTT | 150 MB | 80 MB (peak 86) | 64 MB (peak 86) | 30–44 MB |
+> | `MemAvailable` | — | 135 MB | **89 MB** | 100–110 MB |
+>
+> The fourth column is the same board a year of changes later: Bluetooth
+> commissioning switched on, one Matter plug commissioned and three Zigbee
+> devices, watched for an hour. `high 0` and `oom_kill 0` throughout, no
+> restarts, both radios live the whole time.
+>
+> **Bluetooth is what moved the number, not the device.** noble and its native
+> binding cost roughly 30 MB over the 139 MB beside it; the paired node itself
+> costs far less than the radio that found it. And the peak is now firmly the
+> **start**: a cold restart with Z2M already resident reached 170 MB loading
+> `@matter/main` and bringing BLE up, and answered on port 8420 in 35 seconds
+> with both radios live. A six-second BLE discovery scan moved `memory.peak` by
+> **zero** — noble is loaded and powered on at startup, so scanning only turns
+> the radio on. It is boot that has to fit, not commissioning.
+>
+> **And the split of who pays is exactly the designed one**: hubd 146 MB
+> resident with **0 in swap** (`MemorySwapMax=0` holding it there), Z2M 40 MB
+> resident with **70 MB in zram**. What that costs does not appear in any
+> memory figure — it is a page fault and a zstd decompression on a 1 GHz A53
+> every time a Zigbee device reports, so it surfaces as **Zigbee latency**, and
+> that is the thing to measure before trusting `both` on this board.
 >
 > Both radios really did run together: `radio.matter: true` beside
 > `zigbee.connected: true`, *Matter controller started with 0 commissioned

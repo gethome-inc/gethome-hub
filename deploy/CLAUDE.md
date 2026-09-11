@@ -503,6 +503,37 @@ in `deploy/install.sh` must stay accurate.
   rather than at rest, and devices are exactly what keeps a working set hot.
   Changing it needs the same board with devices paired and days of real
   traffic — `docs/zigbee.md` carries the tables and the reasoning.
+  **Re-measured again with BLE and a device paired, which moves two of those
+  numbers.** Same Zero 2 W, one Matter plug commissioned and three Zigbee
+  devices, both radios up for an hour: the hub peaks at **170 MB against the
+  200 MB `MemoryHigh`** and sits at 138–146 MB, Z2M at 30–44 MB, `MemAvailable`
+  100–110 MB, `high 0` and `oom_kill 0` throughout, no restarts. Bluetooth is
+  what moved it — noble and its native binding cost about 30 MB over the 139 MB
+  above — and a **paired node costs far less than the radio that found it**.
+  Three things worth keeping from that hour.
+  **The peak is the *start*, not the pairing.** A cold restart with Z2M already
+  resident reached 170 MB while loading `@matter/main` and bringing BLE up, and
+  answered on 8420 in 35 seconds with both radios live; nothing afterwards came
+  near it. A six-second BLE discovery scan (`GET /matter/discoverable`) moved
+  `memory.peak` by **zero** — noble is loaded and powered on at startup, so
+  scanning only turns the radio on. That inverts the old assumption: it is
+  *boot*, not commissioning, that has to fit.
+  **Who pays is exactly who should.** hubd was 146 MB resident with **0 in
+  swap** (`MemorySwapMax=0` holding), Z2M 40 MB resident with **70 MB in zram**
+  — the optional process giving way, by design. The cost of that does not show
+  in any memory number: it is a page fault and a zstd decompression on a 1 GHz
+  A53 every time a Zigbee device reports, so **the place it surfaces is Zigbee
+  latency**, and that is what to measure before trusting a `both` on this board.
+  **The one-radio rule still stands**, and for the reason it always did rather
+  than a new one: four devices and one hour is not "devices paired and days of
+  real traffic". What the hour does buy is a slope nobody had — roughly 30 MB
+  between the boot peak and the throttle point, against a per-device cost of a
+  few MB for a single-endpoint accessory (matter.js holds cluster clients per
+  cluster per endpoint, a CASE session and a subscription). Call it a dozen or
+  so simple devices before boot reaches the ceiling, and treat that as an
+  extrapolation from one point, because it is. **`memory.events`' `high` is the
+  number that settles it** — while it reads 0 the kernel has never once had to
+  hold the hub back, and it is one `cat` away.
   **And the hub is not where that headroom comes from** (`MemorySwapMax=0`).
   The sentence above — the board affords both radios by keeping two thirds of
   them cold — is true and is also the whole of a fault that reads as a dead
