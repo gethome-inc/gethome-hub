@@ -174,3 +174,85 @@ matter.js's API is still evolving; the dependency is pinned to a minor
 `src/adapters/matter/`. If the adapter cannot start (missing IPv6, port
 conflicts), the hub logs it, records an activity entry, and keeps serving
 Zigbee/MQTT devices.
+
+## Not built yet
+
+Two things the hub cannot do, written down with the detail somebody picking
+them up would otherwise have to rediscover. Neither is started.
+
+### Sharing a device with another ecosystem
+
+**The hub takes devices in and cannot give them away.** A Matter accessory can
+belong to several fabrics at once — the Yandex plug this was tested against
+reports `supportedFabrics: 5` — and every other ecosystem offers this
+("Turn On Pairing Mode" in Apple Home; "add to another app" in a vendor's).
+We don't, so adopting an accessory into a GetHome home currently means giving
+up the app it came with, and there is no way back short of a factory reset.
+
+That is a bigger deal than a missing feature: it is the fear somebody has
+*before* they pair anything.
+
+- **The API exists.** `PairedNode.openEnhancedCommissioningWindow(timeout)`
+  answers `{ manualPairingCode, qrPairingCode }`. `MatterAdapter` already holds
+  the `PairedNode` in `this.nodes`, keyed by external id.
+- **Enhanced, not basic.** `openBasicCommissioningWindow()` re-uses the
+  passcode printed on the device, is optional in the spec, and devices may
+  simply refuse it. Enhanced generates a one-time passcode. matter.js says the
+  same thing in its own doc comment.
+- **Closing it again matters.** `AdministratorCommissioning.revokeCommissioning`
+  is the command; the window is otherwise open for its whole timeout with a
+  code somebody has seen. Cap the timeout at the spec's 900 s.
+- **Check `commissionedFabrics` against `supportedFabrics` first**
+  (OperationalCredentials cluster, already read at attach). A device at its
+  limit refuses, and "this accessory has no room for another home" said
+  *before* the window opens is the `needs-bluetooth` rule again: refuse where
+  the answer cannot change while somebody waits for it.
+- **Permission is a decision, not an obvious call.** Whoever holds the code
+  becomes an admin of that device and could remove *our* fabric. It passes the
+  three-part test for a default (bounded — one device, one timed window;
+  destroys nothing; nameable in the activity log), which argues for
+  `device.add` beside pairing. Make the call deliberately and write it in
+  `docs/api.md`'s two tables.
+- **Log it.** Handing an accessory to another ecosystem is exactly the kind of
+  thing a home should be able to see afterwards.
+- App side: a sheet with the QR, the manual code, and a countdown.
+
+### Pairing from the phone when the hub is out of Bluetooth range
+
+**The one case nothing else covers**: an accessory that is factory-new, cannot
+be carried to the hub (a wall switch, a boiler controller, an outdoor camera),
+and is in no other ecosystem to be shared from. Bluetooth is the only way to
+reach it, the link cannot be relayed over the network, and the phone is the
+thing that is standing next to it.
+
+Apple's `MatterSupport` (iOS 16.1+) is built for exactly this shape:
+
+1. The app raises `MatterAddDeviceRequest`.
+2. **Apple's own system UI** does BLE discovery, PASE and Wi-Fi/Thread
+   provisioning — on the phone, next to the accessory.
+3. It then calls our `MatterAddDeviceExtension` →
+   `commissionDevice(in:onboardingPayload:commissioningID:)`.
+4. We hand the payload to the hub, which commissions **over IP** — the path
+   that already works.
+
+- **Verify this first, before anything is committed to it:** *whose fabric does
+  the accessory land in?* If iOS commissions into Apple's fabric and leaves us
+  a second one, the user needs an Apple home hub (Apple TV / HomePod) and the
+  whole value proposition changes. Apple's documentation is thin here and
+  developers get stuck in precisely this callback
+  ([connectedhomeip#29537](https://github.com/project-chip/connectedhomeip/issues/29537)).
+- `com.apple.developer.matter.allow-setup-payload` needs **no Apple approval**;
+  it is added like any unmanaged entitlement. A separate extension target is
+  required.
+- **Known to be broken for Thread devices**
+  ([connectedhomeip#34974](https://github.com/project-chip/connectedhomeip/issues/34974),
+  [Apple forum 793998](https://developer.apple.com/forums/thread/793998)). Wi-Fi
+  works.
+- **iOS only.** There is no Android equivalent, so this is a fork in the
+  product rather than a feature — worth saying out loud when it is planned.
+- Hub side is small: a route taking an onboarding payload for a device already
+  on the network. `commission()` handles it today; what may be needed is
+  forcing `onIpNetwork` when the caller knows the accessory is already there.
+- **Decide on evidence.** `GET /matter/discoverable` now reports when the hub
+  cannot hear an accessory, which is the measurement that says how often this
+  case actually arises. One plug paired at −48 dBm is not it.

@@ -445,6 +445,12 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   the advice changes from "hold its button" to "leave it alone", and a
   five-second timeout would say the same thing about a hub that had found
   nothing.
+  **Two things it deliberately cannot do yet are written down** under
+  *Not built yet* in `docs/matter.md`: giving an accessory away to another
+  ecosystem (the hub takes devices in and cannot share them, which is the fear
+  somebody has *before* they pair anything), and pairing from the phone when
+  the hub is out of Bluetooth range. Both carry the detail and the open
+  questions; neither is started.
   **And the hub can be asked what it can hear** (`GET /matter/discoverable`),
   because Bluetooth range is the one part of pairing nobody can see and
   `not-found` is the same word for "two rooms away" and "never went into
