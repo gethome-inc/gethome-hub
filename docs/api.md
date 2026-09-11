@@ -659,11 +659,16 @@ restart it is describing. An app that finds `applying: true` should say the hub
 is switching radios and treat an unreachable hub as *expected* until
 `applyingSince + applyingWindowMs`, rather than as a fault.
 
-The window is a **bound, not a wait for the radios to agree**: asking for
-Zigbee on a hub with no coordinator is a reasonable thing to do and correctly
-changes nothing, so a client that waited for the radios to match would wait for
-ever. After the window, `applying` is false whatever happened, and what is live
-is the answer.
+**It ends when the asked-for radio is live, or when the window runs out** —
+whichever comes first, and both halves are load-bearing. A mode change that
+resolves to the radio already running (`auto` → `matter` on a hub already on
+Matter) is one the detector correctly answers by restarting nothing, and the
+window alone left every app drawing "switching radios" over a hub that was
+never going anywhere. The window is what covers the other direction: asking for
+Zigbee on a hub with no coordinator is a reasonable thing to do, correctly
+changes nothing, and has no target that will ever be live — so it has to end by
+timing out. `auto` always uses the window, because it names no single radio to
+check against.
 
 ### Which member you are (`isSelf` and `PATCH /members/me`)
 

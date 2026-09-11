@@ -140,9 +140,24 @@ export function createHubStatusReader(deps: ApiDeps): HubStatusReader {
 
   return {
     snapshot: () => {
-      const request = readRadioRequest(deps.dataDir);
+      const zigbeeNow = zigbee();
+      const matterNow = deps.matter !== undefined;
+      const mode = readRadioMode(deps.dataDir);
+      // **A switch is over when what was asked for is live, not when the
+      // window runs out.** The window is a bound for the requests that can
+      // never be satisfied — asking for Zigbee on a hub with no coordinator
+      // correctly changes nothing — and it was doing duty for both, so a mode
+      // change that resolved to the radio already running (`auto` → `matter`
+      // on a hub already on Matter, which `gethome-zigbee-detect` correctly
+      // answers by restarting nothing) left every app drawing "switching
+      // radios" for two and a half minutes over a hub that was never going
+      // anywhere. `auto` keeps the window, because it names no single target
+      // to check against.
+      const landed =
+        (mode === 'matter' && matterNow) || (mode === 'zigbee' && zigbeeNow.connected);
+      const request = landed ? undefined : readRadioRequest(deps.dataDir);
       return {
-        zigbee: zigbee(),
+        zigbee: zigbeeNow,
         // What this hub can actually talk to is not the same on every machine: a
         // 512 MB board affords one radio, so an app that showed "Matter"
         // unconditionally would be lying on half the hardware.
@@ -150,9 +165,9 @@ export function createHubStatusReader(deps: ApiDeps): HubStatusReader {
           /** 'one' when Matter and Zigbee2MQTT don't fit together on this board. */
           budget: deps.radioBudget,
           /** What the owner asked for; 'auto' means "follow the hardware". */
-          mode: readRadioMode(deps.dataDir),
+          mode,
           /** Live, not requested — a switch takes a moment to apply. */
-          matter: deps.matter !== undefined,
+          matter: matterNow,
           /** True only when the board could run both at once. */
           canRunBoth: deps.radioBudget === 'both',
           applying: request !== undefined,
