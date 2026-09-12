@@ -550,6 +550,24 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   separate decision**: `radio-pressure.ts` gates *acting* on `budget === 'one'`,
   so promoting 1 GB to `both` would remove its safety net as well as its
   warning, and that one wants hardware.
+  **And a budget is a measurement of the machine, so a machine that changes
+  under it has to be re-measured.** `hub.env` is written only when absent —
+  right for the settings in it, wrong for this — and the commonest way a home
+  grows is an SD card moved into a bigger Pi, which carries `/etc/gethome/` and
+  `<data>/` along with it. A card that started in a Zero 2 W therefore told a
+  Pi 5 it had memory for one radio for ever, since re-running the installer does
+  not rewrite an existing file either: the upgrade path this repo's own README
+  recommends ended on a board that still recommended one radio and could still
+  stand one down with gigabytes free. `install.sh` reconciles `GETHOME_RADIO`
+  and the heap now, and **only ever widens** — a stored `both` is the documented
+  hand-edit and the owner's override, so narrowing must never happen. The other
+  half of the same transplant is `<data>/radio-stand-down`, which is a **small
+  board's fact**: on a board measured for both it is history rather than a debt,
+  so `hub-status.ts` gates `suspended`/`willRetry` on the budget and
+  `radio-pressure.ts` gates the restore on it — without both, the apps drew
+  "Your hub went back to one radio" over a hub plainly running two, permanently,
+  because the watch only restores while *one* radio is live and nothing else
+  could clear the record.
   **And every surface that offers `both` on a `one` board owes one sentence
   that is easy to edit away** — *what changes this is your Zigbee network
   growing* — because the failure worth designing against is not a hub falling

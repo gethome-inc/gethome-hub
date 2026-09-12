@@ -364,6 +364,37 @@ describe('deploy/install.sh', () => {
   });
 
   /**
+   * A radio budget is a measurement of the machine, and the machine moves.
+   *
+   * `hub.env` is written only when absent — right for the settings in it, and
+   * wrong for `GETHOME_RADIO`, which is what this script measured from the RAM
+   * it found. Moving the SD card into a bigger Pi is the commonest way a home
+   * grows, and it carries that file along: a card that started in a Zero 2 W
+   * went on telling a Pi 5 it had memory for one radio, for ever, because
+   * re-running the installer does not rewrite an existing file either.
+   *
+   * The direction is the whole of it. Widening a stale `one` removes a
+   * restriction; narrowing a stored `both` would stamp on the documented
+   * hand-edit and on the owner's own override, so it must never happen.
+   */
+  it('widens a stale radio budget when the card has moved to a bigger board, and never narrows one', () => {
+    const block = installer.slice(installer.indexOf('STORED_RADIO='));
+    expect(block, 'the reconcile is gone').not.toBe('');
+
+    // Both halves of the guard, in this order: a stored `one` on a board that
+    // now measures `both`. Either side dropped turns this into something that
+    // can take a radio away from a board that was measured for two.
+    expect(block).toMatch(/\$STORED_RADIO" == "one".*\$RADIO_BUDGET" == "both"/);
+    // Nothing may rewrite the file in the other direction.
+    expect(block.slice(0, block.indexOf('\nfi\n')))
+      .not.toMatch(/GETHOME_RADIO=both\$?\/GETHOME_RADIO=one/);
+
+    // A temp file, never `sed -i`: BSD sed reads the next argument as a backup
+    // suffix, which is the portability trap this repo has already paid for.
+    expect(block.slice(0, 2000), 'sed -i is not portable').not.toMatch(/sed -i /);
+  });
+
+  /**
    * The small tier is two tiers, and the test above cannot tell.
    *
    * That one slices the whole `-le 1024` block, so every assertion in it is

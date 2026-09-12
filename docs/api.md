@@ -653,6 +653,14 @@ the board come back when it is handed back. They read as offline meanwhile.
 
 #### Running both radios on a board measured for one
 
+**`standDown` is a small board's fact, and `suspended` says whether it is still
+one.** The record outlives the board it was written for — an SD card moved into
+a bigger Pi carries `<data>/` with it — so `suspended` and `willRetry` are false
+whenever `budget` is `both`, however the record reads: there `auto` already runs
+both radios, and an app drawing "went back to one radio" over a hub running two
+is the reason the gate exists. The record itself stays (`at`, `reason`, `count`
+are still true), so a client that wants to say *this happened once* still can.
+
 `budget` is a **measurement, not a ceiling**, and the distinction is the whole
 of this section. It is measured against a *full* home — the operating system,
 the hub with Matter loaded, and a Zigbee2MQTT holding a hundred devices' state

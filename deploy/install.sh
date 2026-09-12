@@ -1754,6 +1754,48 @@ ADAPTER_MATTER=1
 ENV
 fi
 
+# **A budget is a measurement of the machine, and the machine can change under
+# it.** `hub.env` is written only when it is absent, which is right for
+# everything else in it — those are settings, and an upgrade must not stamp on
+# them. `GETHOME_RADIO` and the heap are not settings: they are what this
+# script measured from the RAM it found, and the commonest way somebody grows
+# a GetHome home is to move the SD card into a bigger Pi. That carries
+# `/etc/gethome/hub.env` with it, so a card that started life in a Zero 2 W
+# went on telling a Pi 5 it had memory for one radio — for ever, because
+# re-running this installer does not rewrite an existing file either. The
+# upgrade path this project recommends in its own README ended on a board that
+# still recommended one radio, still drew the picker, and still let the hub
+# stand a radio down with gigabytes free.
+#
+# **It only ever widens.** A stored `one` on a board that now measures `both`
+# is a stale measurement and is corrected; a stored `both` is left alone
+# whatever this board measures, because that is the documented hand-edit (see
+# `deploy/CLAUDE.md`) and the owner's own override — and `radio-pressure.ts`
+# is already watching a board running two radios it was not measured for. So
+# this can remove a restriction and can never add one.
+if [[ -f "$CONF_DIR/hub.env" ]]; then
+  STORED_RADIO=$(sed -n 's/^GETHOME_RADIO=//p' "$CONF_DIR/hub.env" | tail -n1)
+  if [[ "$STORED_RADIO" == "one" && "$RADIO_BUDGET" == "both" ]]; then
+    # A temporary file rather than `sed -i`, which takes the next argument as a
+    # backup suffix on BSD and is the portability trap this repo has already
+    # paid for once.
+    HUB_ENV_NEW=$(mktemp)
+    sed 's/^GETHOME_RADIO=one$/GETHOME_RADIO=both/' "$CONF_DIR/hub.env" > "$HUB_ENV_NEW" \
+      && $SUDO cp "$HUB_ENV_NEW" "$CONF_DIR/hub.env"
+    rm -f "$HUB_ENV_NEW"
+    # The heap travels with it for the same reason: 160 MB was this board's
+    # predecessor's number, and nothing else would ever revisit it.
+    if grep -q '^NODE_OPTIONS=--max-old-space-size=' "$CONF_DIR/hub.env"; then
+      HUB_ENV_NEW=$(mktemp)
+      sed "s/^NODE_OPTIONS=--max-old-space-size=.*/NODE_OPTIONS=--max-old-space-size=${HUB_HEAP_MB}/" \
+        "$CONF_DIR/hub.env" > "$HUB_ENV_NEW" \
+        && $SUDO cp "$HUB_ENV_NEW" "$CONF_DIR/hub.env"
+      rm -f "$HUB_ENV_NEW"
+    fi
+    say "This Pi has more memory than the one this hub was first set up on, so it is no longer held to one radio at a time: ${RAM_MB} MB runs Zigbee and Matter together. Nothing else about the hub changed."
+  fi
+fi
+
 $SUDO tee /etc/systemd/system/gethome-hubd.service >/dev/null <<UNIT
 [Unit]
 Description=GetHome Hub
