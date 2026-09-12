@@ -235,6 +235,15 @@ HUB_V8_FLAGS=""
 # its own memory and hands a radio back by itself if the board really does run
 # short (src/core/radio-pressure.ts). What this value decides is what is
 # *recommended*, and what every app warns from.
+#
+# **The test is memory and only memory**, which is what makes the tier below
+# *512 MB and 1 GB together*: a Zero 2 W, a Pi 3, and the 1 GB Pi 4 all land on
+# `one`, because a board sold as "1 GB" reports ~920-950 MB once the GPU has
+# taken its share. Read as a shopping rule that is "2 GB or more runs both" —
+# and never as "a Pi 4 runs both", which is false for every 1 GB Pi 4 there is.
+# The 1 GB half of this tier has never been measured; it inherits the 512 MB
+# board's ceilings below, which are sized for 512 MB. Moving the threshold means
+# measuring on 1 GB hardware and moving those ceilings with it.
 RADIO_BUDGET=both
 if [[ "$RAM_MB" -gt 0 && "$RAM_MB" -le 1024 ]]; then
   SMALL_BOARD=1
@@ -2212,7 +2221,7 @@ if [[ "$RADIO_BUDGET" == "one" && "$RADIO_MODE" != "both" ]]; then
   # was still an option. So it names what *changes* the answer, and names the
   # board that never has the question — which is the only part somebody
   # standing at the start of a setup can act on.
-  say "Worth knowing before you build the network, though: what uses up the margin is Zigbee growing. Zigbee2MQTT holds state for every device you pair, so the board that copes with a handful may not cope with another twenty — this is a setting to come back to rather than one to set and forget. If it does run short the hub notices before anything breaks, hands one radio back by itself and says so in the app; nothing is unpaired. And if you already know you want a large Zigbee network alongside Matter, a Raspberry Pi 4 or 5 is the board that never has to choose."
+  say "Worth knowing before you build the network, though: what uses up the margin is Zigbee growing. Zigbee2MQTT holds state for every device you pair, so the board that copes with a handful may not cope with another twenty — this is a setting to come back to rather than one to set and forget. If it does run short the hub notices before anything breaks, hands one radio back by itself and says so in the app; nothing is unpaired. And if you already know you want a large Zigbee network alongside Matter, a board with 2 GB of memory or more never has to choose — that is a Pi 5, or a Pi 4 in its 2 GB or larger version, and not the 1 GB Pi 4, which is measured exactly like this one."
   # Two things the watch depends on, and both are worth naming *here* rather
   # than where they were set up: they were noise on a hub running one radio and
   # they are the difference between "hands a radio back" and "something dies"

@@ -12,7 +12,7 @@ import type { ApiDeps } from '../src/api/server.js';
  * Every radio surface in the apps was rewritten around a board that can only
  * afford one — the resting-radio rule, the "standing by" wording, the switch,
  * the notice under the dashboard — and all of it keys off facts this snapshot
- * reports. A Pi 4 or 5 never makes the choice, so none of that machinery
+ * reports. A board with 2 GB or more never makes the choice, so none of that
  * should ever fire there, and the way it would go wrong is the quiet way:
  * devices silently excluded from the "needs attention" count on a home where
  * nothing is resting at all.

@@ -568,10 +568,10 @@ describe('whether the machine has changed', () => {
  * A board that was measured for both radios.
  *
  * It should never need any of this, which is exactly why it is worth checking:
- * the insurance on a Pi 4 or 5 is that the hub **says** something and does
- * nothing. There is no second radio to hand back — the board is supposed to
- * run them — so acting would be the hub making a working home smaller to fix a
- * problem that is somewhere else entirely.
+ * the insurance on a board measured for both is that the hub **says**
+ * something and does nothing. There is no second radio to hand back — the
+ * board is supposed to run them — so acting would be the hub making a working
+ * home smaller to fix a problem that is somewhere else entirely.
  */
 describe('a board measured for both', () => {
   it('says the board is short of memory and takes nothing away', async () => {

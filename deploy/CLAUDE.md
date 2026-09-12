@@ -38,6 +38,16 @@ in `deploy/install.sh` must stay accurate.
   choice. Claiming support for hardware nobody has tried is the misleading half
   of that choice; refusing a Pi 3 that has twice a Zero 2 W's memory is the
   other.
+- **"Small" is `MemTotal` against 1024 MB, and nothing here reads the model.**
+  So the tier is *512 MB and 1 GB together* — a Zero 2 W, a Pi 3, and the 1 GB
+  Pi 4 — which reads as *2 GB or more runs both* once the GPU's share is
+  accounted for (a "1 GB" board reports ~920–950). Two consequences to keep in
+  mind when editing anything here or writing copy against it: a board name is
+  never a capability (README, Studio and the iOS app all claimed "a Pi 4 runs
+  both" at once, which is false for every 1 GB Pi 4), and the 1 GB half of the
+  tier is **unmeasured** — it inherits the 512 MB board's `MemoryHigh=200M` and
+  its stand-down behaviour, so it can be throttled with hundreds of megabytes
+  free. Moving the threshold means moving the ceilings with it, on hardware.
 - **A small board is *recommended* one radio; which one is decided by what is
   plugged in, not at install time.** 512 MB fits the OS, the hub, and *either*
   Matter (~60 MB in-process) *or* Zigbee2MQTT (~150 MB, its own process).
