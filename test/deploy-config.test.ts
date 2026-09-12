@@ -364,6 +364,114 @@ describe('deploy/install.sh', () => {
   });
 
   /**
+   * A radio budget is a measurement of the machine, and the machine moves.
+   *
+   * `hub.env` is written only when absent — right for the settings in it, and
+   * wrong for `GETHOME_RADIO`, which is what this script measured from the RAM
+   * it found. Moving the SD card into a bigger Pi is the commonest way a home
+   * grows, and it carries that file along: a card that started in a Zero 2 W
+   * went on telling a Pi 5 it had memory for one radio, for ever, because
+   * re-running the installer does not rewrite an existing file either.
+   *
+   * The direction is the whole of it. Widening a stale `one` removes a
+   * restriction; narrowing a stored `both` would stamp on the documented
+   * hand-edit and on the owner's own override, so it must never happen.
+   */
+  it('widens a stale radio budget when the card has moved to a bigger board, and never narrows one', () => {
+    const block = installer.slice(installer.indexOf('STORED_RADIO='));
+    expect(block, 'the reconcile is gone').not.toBe('');
+
+    // Both halves of the guard, in this order: a stored `one` on a board that
+    // now measures `both`. Either side dropped turns this into something that
+    // can take a radio away from a board that was measured for two.
+    expect(block).toMatch(/\$STORED_RADIO" == "one".*\$RADIO_BUDGET" == "both"/);
+    // Nothing may rewrite the file in the other direction.
+    expect(block.slice(0, block.indexOf('\nfi\n')))
+      .not.toMatch(/GETHOME_RADIO=both\$?\/GETHOME_RADIO=one/);
+
+    // A temp file, never `sed -i`: BSD sed reads the next argument as a backup
+    // suffix, which is the portability trap this repo has already paid for.
+    expect(block.slice(0, 2000), 'sed -i is not portable').not.toMatch(/sed -i /);
+  });
+
+  /**
+   * The small tier is two tiers, and the test above cannot tell.
+   *
+   * That one slices the whole `-le 1024` block, so every assertion in it is
+   * satisfied by *either* branch — it would stay green if the 512 MB values
+   * were deleted outright. This pins the split: that a 1 GB board gets its own,
+   * larger ceilings, and that the 512 MB ones are still there to be inherited
+   * by nothing.
+   *
+   * The fault it exists to prevent is the one that was shipped: a 1 GB board
+   * ran on `MemoryHigh=200M`, sized for a board with ~415 MB of MemTotal, so
+   * the hub was throttled with hundreds of megabytes free — and throttling is
+   * what `radio-pressure.ts` acts on, which means a radio could be handed back
+   * on a board whose memory was never the problem.
+   */
+  it('gives a 1 GB board its own ceilings rather than a 512 MB board\'s', () => {
+    const smallTier = installer.slice(
+      installer.indexOf('if [[ "$RAM_MB" -gt 0 && "$RAM_MB" -le 1024 ]]'),
+      installer.indexOf('# ── System packages'),
+    );
+    const splitAt = smallTier.indexOf('if [[ "$RAM_MB" -le "$TIGHT_BOARD_MAX_MB" ]]');
+    expect(splitAt, 'the small tier no longer splits on memory').toBeGreaterThan(-1);
+    const tight = smallTier.slice(splitAt, smallTier.indexOf('  else', splitAt));
+    const roomy = smallTier.slice(smallTier.indexOf('  else', splitAt));
+
+    // The measured 512 MB values, which are the ones that cannot be reproduced
+    // on a build machine and so can only be pinned here.
+    expect(tight).toContain('TIGHT_BOARD=1');
+    expect(tight).toContain('HUB_MEM_HIGH="MemoryHigh=200M"');
+    expect(tight).toContain('Z2M_MEM_MAX="MemoryMax=230M"');
+
+    // A 1 GB board raises every one of them. Compared as numbers rather than
+    // pinned to a literal: what matters is that the roomier tier is roomier,
+    // not which round number it landed on.
+    const ceiling = (block: string, name: string): number => {
+      const found = block.match(new RegExp(`${name}="Memory(?:High|Max)=(\\d+)M"`));
+      expect(found, `${name} missing from the 1 GB tier`).not.toBeNull();
+      return Number(found![1]);
+    };
+    expect(ceiling(roomy, 'HUB_MEM_HIGH')).toBeGreaterThan(ceiling(tight, 'HUB_MEM_HIGH'));
+    expect(ceiling(roomy, 'Z2M_MEM_HIGH')).toBeGreaterThan(ceiling(tight, 'Z2M_MEM_HIGH'));
+    expect(ceiling(roomy, 'Z2M_MEM_MAX')).toBeGreaterThan(ceiling(tight, 'Z2M_MEM_MAX'));
+
+    // Still no hard cap on the hub, on either side of the split: that is what
+    // turned a busy minute into a restart.
+    expect(smallTier).not.toMatch(/HUB_MEM_MAX=/);
+    // And --optimize-for-size on both, since NODE_OPTIONS refuses it and the
+    // unit's command line is the only way it reaches the hub. Only the
+    // semi-space pin — memory bought with GC throughput — is the tight tier's.
+    //
+    // Matched against the *assignment*, never the block: the comment beside it
+    // names the flag to explain why it is gone, and asserting on prose is how a
+    // test becomes unfixable (the `MemoryMax` check above says the same).
+    const v8Flags = (block: string): string => {
+      const found = block.match(/HUB_V8_FLAGS="([^"]*)"/);
+      expect(found, 'HUB_V8_FLAGS missing').not.toBeNull();
+      return found![1]!;
+    };
+    expect(v8Flags(roomy)).toContain('--optimize-for-size');
+    expect(v8Flags(roomy), 'the semi-space pin is a scarcity trade')
+      .not.toContain('--max-semi-space-size');
+    expect(v8Flags(tight)).toContain('--max-semi-space-size=1');
+
+    // The threshold has to separate two families of hardware with nothing near
+    // it: a Zero 2 W reports 415-490 MB of MemTotal, a "1 GB" Pi 920-970.
+    const split = installer.match(/TIGHT_BOARD_MAX_MB=(\d+)/);
+    expect(split).not.toBeNull();
+    const value = Number(split![1]);
+    expect(value).toBeGreaterThan(490);
+    expect(value).toBeLessThan(920);
+
+    // Both halves are still one radio: raising a ceiling is not promoting a
+    // board, and the 1 GB tier has never been measured.
+    expect(smallTier).toContain('RADIO_BUDGET=one');
+    expect(roomy, 'the budget is decided once, above the split').not.toContain('RADIO_BUDGET=');
+  });
+
+  /**
    * `StartLimitIntervalSec=` and `StartLimitBurst=` are [Unit] options —
    * systemd moved them there in v230 and answers the old [Service] placement
    * with "Unknown key 'StartLimitIntervalSec' in section [Service], ignoring".

@@ -181,15 +181,16 @@ done
 # ── Which radio this board runs ────────────────────────────────────────────
 # Two separate things, easy to confuse:
 #
-#   the *budget*     — how many radios the board can afford at once. Measured,
-#                      not chosen: a 512 MB board fits the OS, the hub and one
-#                      of {Zigbee2MQTT ~150 MB, Matter ~60-90 MB inside the
-#                      hub}, not both. install.sh writes GETHOME_RADIO=one
-#                      there and GETHOME_RADIO=both on anything larger.
-#   the *preference* — which one the owner wants when only one fits. Written
-#                      by the hub to <DATA_DIR>/radio-mode when the owner
-#                      switches in the app, so the hub never needs sudo; a
-#                      .path unit wakes this script to apply it.
+#   the *budget*     — how many radios the board was measured for. Measured,
+#                      not chosen: a *full* 512 MB board fits the OS, the hub
+#                      and one of {Zigbee2MQTT ~150 MB, Matter ~60-90 MB inside
+#                      the hub}, not both. install.sh writes GETHOME_RADIO=one
+#                      there and GETHOME_RADIO=both on anything larger. It is
+#                      advice, not a ceiling — see `one:both` below.
+#   the *preference* — which one the owner wants, or `both`. Written by the hub
+#                      to <DATA_DIR>/radio-mode when the owner switches in the
+#                      app, so the hub never needs sudo; a .path unit wakes
+#                      this script to apply it.
 #
 # This script is where they meet, because it already runs at boot, on every
 # plug and unplug, and at the end of the install — it is the only thing that
@@ -208,7 +209,8 @@ if [[ -r "$DATA_DIR/radio-mode" ]]; then
 fi
 
 # Only `matter` stops Zigbee outright; it is the one choice that means "do not
-# use the stick even though it is here".
+# use the stick even though it is here". `both` deliberately does not — it is
+# the opposite request.
 ZIGBEE_ALLOWED=1
 [[ "$MODE" == "matter" ]] && ZIGBEE_ALLOWED=0
 
@@ -226,9 +228,17 @@ grep -q '^ZIGBEE_ADAPTER=' "$ENV_FILE" 2>/dev/null && ZIGBEE_KNOWN=1
 # would be a poor way to reintroduce it.
 MATTER_WANTED=1
 if [[ "$ZIGBEE_ALLOWED" == "1" && -n "$FOUND" ]]; then
+  # Most specific first — the diagnosis.ts rule, and load-bearing rather than
+  # tidy here: `one:both` is the owner overriding the board's own measurement,
+  # and a `one:*` placed above it would swallow the one answer that has to get
+  # through. The override is allowed because the budget is measured against a
+  # *full* home, and a home with four devices is nowhere near it; what makes it
+  # safe is that the hub watches its own memory and writes `auto` back here if
+  # the board really does run out (src/core/radio-pressure.ts).
   case "$BUDGET:$MODE" in
+    one:both)    MATTER_WANTED=1 ;;  # measured for one, asked for both anyway
     one:*)       MATTER_WANTED=0 ;;  # one radio's memory, and Zigbee has it
-    both:zigbee) MATTER_WANTED=0 ;;  # room for both, owner asked for Zigbee alone
+    *:zigbee)    MATTER_WANTED=0 ;;  # owner asked for Zigbee alone
   esac
 elif [[ "$ZIGBEE_ALLOWED" == "1" && -n "$ZIGBEE_KNOWN" ]]; then
   # **Follow a coordinator in; never follow one out.**
@@ -288,7 +298,11 @@ apply_matter() {
     printf 'ADAPTER_MATTER=%s\n' "$MATTER_WANTED" >> "$HUB_ENV" || return 0
   fi
   if [[ "$MATTER_WANTED" == "1" ]]; then
-    say "Turning Matter on: this board has room for it."
+    if [[ "$BUDGET" == "one" && "$MODE" == "both" ]]; then
+      say "Turning Matter on beside Zigbee, as asked. This board was measured for one radio at a time, so the hub watches its own memory from here and hands a radio back by itself if it runs short — it will say so in the app when it does."
+    else
+      say "Turning Matter on: this board has room for it."
+    fi
   else
     say "Turning Matter off: this board affords one radio and Zigbee has it."
   fi

@@ -8,7 +8,7 @@ import type {
   ZigbeeLifecycleEvent,
 } from '../core/bus.js';
 import type { AiRunEvent } from '../core/ai-runs.js';
-import type { AutomationChatEvent, AutomationRunEvent } from '../core/bus.js';
+import type { AutomationChatEvent, AutomationRunEvent, CommissioningUpdate } from '../core/bus.js';
 import { deviceWire } from './dto.js';
 import type { HubStatusReader } from '../core/hub-status.js';
 
@@ -266,8 +266,24 @@ export function attachWebSocket(
   const onAccessChanged = () => notifyAccess();
   const onPermitJoin = (active: boolean, remainingSeconds: number) =>
     send({ type: 'permitJoin', active, remainingSeconds });
-  const onCommissioning = (jobId: string, status: string, detail?: string) =>
-    send({ type: 'commissioning', jobId, status, ...(detail !== undefined ? { detail } : {}) });
+  /**
+   * `detail` is still the node id on success and the sentence on failure,
+   * which is what every client built before this reads. The named reason and
+   * the step ride beside it — additive, so an app that has never heard of
+   * either draws exactly what it drew before.
+   */
+  const onCommissioning = (update: CommissioningUpdate) => {
+    const detail = update.nodeId ?? update.failure?.summary;
+    send({
+      type: 'commissioning',
+      jobId: update.jobId,
+      status: update.status,
+      ...(detail !== undefined ? { detail } : {}),
+      ...(update.step !== undefined ? { step: update.step } : {}),
+      ...(update.failure !== undefined ? { failure: update.failure } : {}),
+      ...(update.deadline !== undefined ? { deadline: update.deadline } : {}),
+    });
+  };
   /**
    * A radio came up or went down, so what this hub can talk to has changed.
    *

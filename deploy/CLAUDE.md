@@ -38,12 +38,30 @@ in `deploy/install.sh` must stay accurate.
   choice. Claiming support for hardware nobody has tried is the misleading half
   of that choice; refusing a Pi 3 that has twice a Zero 2 W's memory is the
   other.
-- **A small board runs one radio; which one is decided by what is plugged in,
-  not at install time.** 512 MB fits the OS, the hub, and *either* Matter
-  (~60 MB in-process) *or* Zigbee2MQTT (~150 MB, its own process). `install.sh`
-  writes that as a **budget** (`GETHOME_RADIO=one|both`, measured from RAM);
-  the home's **mode** (`auto|zigbee|matter`) lives in `<data>/radio-mode` and
-  reaches it through `PUT /settings/radio`. `gethome-zigbee-detect` is where the
+- **"Small" is `MemTotal` against 1024 MB, and nothing here reads the model.**
+  So the tier is *512 MB and 1 GB together* — a Zero 2 W, a Pi 3, and the 1 GB
+  Pi 4 — which reads as *2 GB or more runs both* once the GPU's share is
+  accounted for (a "1 GB" board reports ~920–950). Two consequences to keep in
+  mind when editing anything here or writing copy against it: a board name is
+  never a capability (README, Studio and the iOS app all claimed "a Pi 4 runs
+  both" at once, which is false for every 1 GB Pi 4), and the 1 GB half of the
+  tier is **unmeasured**. It no longer shares the *ceilings*, though, and that
+  split is a fix rather than tidying: on the 512 MB board's `MemoryHigh=200M` a
+  1 GB board is throttled against ~920 MB of `MemTotal`, and throttling is what
+  `radio-pressure.ts` acts on — so it could have a radio handed back with
+  hundreds of megabytes free. `TIGHT_BOARD_MAX_MB` (768) is the split, `SMALL_BOARD`
+  still gates everything about scarcity (zram, the memory cgroup, no building
+  from source, one radio recommended), and `TIGHT_BOARD` gates only the 512 MB
+  numbers. Moving the **budget** is the separate decision and still wants
+  hardware — a board on `both` is one the watch only reports on.
+- **A small board is *recommended* one radio; which one is decided by what is
+  plugged in, not at install time.** 512 MB fits the OS, the hub, and *either*
+  Matter (~60 MB in-process) *or* Zigbee2MQTT (~150 MB, its own process).
+  `install.sh` writes that as a **budget** (`GETHOME_RADIO=one|both`, measured
+  from RAM) and prints it as `@@RADIO_BUDGET:<one|both>@@` early, because
+  Studio draws the choice before there is a hub to ask; the home's **mode**
+  (`auto|zigbee|matter|both`) lives in `<data>/radio-mode` and reaches it
+  through `PUT /settings/radio`. `gethome-zigbee-detect` is where the
   two meet, because it is the only thing that knows whether a coordinator is
   actually there. **Matter gives way only to Zigbee that is genuinely going to
   run** — the installer used to switch it off on every small board, so a
@@ -54,6 +72,21 @@ in `deploy/install.sh` must stay accurate.
   install ends with an additive `@@CAPABILITIES:<list>@@` marker naming what the
   hub actually ended up able to talk to, and Studio shows the same list on the
   hub page.
+  **The budget is advice, not a ceiling, and `one:both` is the arm that says
+  so.** It measures a *full* home — the OS, the hub with Matter, and a
+  Zigbee2MQTT holding a hundred devices' state — and a home with four devices
+  is nowhere near it, so refusing `both` on a Zero 2 W took Matter away from
+  somebody to prevent a problem they did not have. It is allowed, the detector
+  has a `one:both` arm **above** `one:*` (most-specific-first, and here that
+  ordering is the feature: a `one:*` placed first swallows the override and the
+  only symptom is Matter quietly staying off), and what makes it safe lives in
+  `src/` — `core/radio-pressure.ts` watches `memory.events` and `MemAvailable`
+  and writes `auto` back here if the board really does run short. So **the two
+  things that watch depends on are named at the end of the install**: the
+  memory cgroup actually being in force (it needs a reboot after the installer
+  turns it on) and swap existing at all. Without the first the hub cannot see
+  trouble coming, which is the one case where `both` is a genuinely bad idea
+  rather than a thin one.
   **Follow a coordinator *in*; never follow one *out*.** Plugging a stick in is
   an unambiguous instruction and the detector acts on it in seconds. Pulling one
   out is not — it is equally "done with Zigbee" and "two minutes into flashing
@@ -390,6 +423,59 @@ in `deploy/install.sh` must stay accurate.
   reaches it; and the hub exchanging traffic with the gateway throughout rules
   out its own radio, its power save and anything the *hub* buffers. Those two
   fixes are real and stand on their own measurements. Neither was this.
+- **A Matter accessory out of its box needs Bluetooth, and a Raspberry Pi ships
+  with it off.** A factory-new — or factory-reset — Wi-Fi Matter accessory
+  advertises over BLE and nowhere else: it has no network to be found on yet.
+  Without this the hub could only take in accessories already on the LAN, which
+  is a minority of what people buy, and the app searched the network for a
+  device that was never going to be there. Two things stand between a Pi and
+  working Bluetooth and **both are invisible from every surface the product
+  has**. Raspberry Pi OS's headless image leaves the radio **soft-blocked in
+  rfkill**, where `hciconfig` lists the adapter perfectly happily and bringing
+  it up fails with an errno nothing logs — found on a Zero 2 W, where `soft=1`
+  was the whole of it. And noble reaches the controller over a **raw HCI
+  socket**, so the unit carries `AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN`
+  with a matching `CapabilityBoundingSet` (without the second line systemd
+  drops them before the ambient set is applied and the radio silently finds
+  nothing, exactly as with no capabilities at all). Ambient rather than `setcap`
+  on `node`, which would hand raw sockets to every script anybody ever runs with
+  that binary. `matter_bluetooth()` writes the sysfs byte rather than shelling
+  out to `rfkill`, which is not on a minimal image, and enables `systemd-rfkill`
+  because an unblock does not survive a reboot on its own. **A machine with no
+  adapter is silent** — a Pi with the radio off in `config.txt`, a VM, an x86
+  box are ordinary machines, the hub reports it on `GET /hub` and the app
+  explains it; a warning there would fire on every such install.
+- **The other half of Bluetooth is the network the accessory is then given, and
+  the hub is *given* it rather than reading it.** Commissioning a Wi-Fi
+  accessory over BLE ends in `AddOrUpdateWiFiNetwork(ssid, credentials)`, so a
+  hub that can do the first half and not the second starts a pairing it cannot
+  finish. The PSK is in a root-owned NetworkManager profile and the *point* of
+  the service account is that it cannot read one — so `deploy/wifi-credentials.sh`
+  writes `/etc/gethome/wifi.env`, mode 0640, group `gethome`, and the hub reads
+  the one file it is deliberately allowed to read. That is a real widening
+  bounded to exactly that account and that file, and the app may send a password
+  instead for a hub that has none. **The dispatcher is what keeps it true**:
+  `keep_wifi_awake`'s reasoning exactly — a home that retypes its Wi-Fi password
+  next month gets a fresh profile, and enumerating today's profiles is the one
+  thing that cannot cover that. **An open network writes an empty PSK**, which
+  the hub reads as "no credentials": an accessory handed an empty password for a
+  network it cannot join is worse than being told the hub has none. And the
+  shell-quoting is built into a variable before it is used, because inline
+  inside the `printf` the replacement's backslashes go through a second round of
+  quote removal and `Dave's Wi-Fi` comes out mangled — the sed-program rule from
+  `test/deploy-wifi.test.ts`, in a second place.
+- **The detector exits 1 for an ordinary state, so the unit says
+  `SuccessExitStatus=1`.** "Zigbee is not the radio here" — no coordinator, or
+  one plugged into a board the owner has set to Matter — is correct and
+  expected, and `install.sh` reads the exit code to decide what to tell the
+  user, so the code stays. But systemd parks a non-zero oneshot in `failed`, and
+  `gethome-zigbee-detect.service: failed` is exactly what somebody finds when
+  they go looking for why their Zigbee is quiet: it points at the detector
+  instead of at the radio switch they used. The installer's own closing line had
+  the same bug in words — "with no Zigbee coordinator plugged in" printed four
+  lines under the detector's "A Zigbee coordinator is plugged in", on one
+  screen, about hardware the owner could see. `ZIGBEE_STANDING_BY` is the third
+  state neither `ZIGBEE_CONFIGURED` nor `ZIGBEE_READY` covers.
 - **When a unit won't start, put the reason in the log.** `service_failure()`
   prints `systemctl status` and the last journal lines into the install output.
   The mosquitto bug above was invisible for a whole round because the installer
@@ -405,10 +491,20 @@ in `deploy/install.sh` must stay accurate.
   same arithmetic is what makes a small board a one-radio board: 70 (OS) + 178
   (hub with Matter) + 150 (Z2M) does not fit in 512 MB, while either 70 + 178 or
   70 + 119 + 150 does — see the radio note above for who chooses between them.
-  A small board also gets `--optimize-for-size --max-semi-space-size=1` in
-  `ExecStart`, measured at 176 → 139 MB resident with Matter loaded for about
-  half a second of startup. They have to be **argv**: `NODE_OPTIONS` refuses
-  `--optimize-for-size` outright.
+  A small board also gets `--optimize-for-size` in `ExecStart` — measured, with
+  `--max-semi-space-size=1` beside it, at 176 → 139 MB resident with Matter
+  loaded for about half a second of startup. They have to be **argv**:
+  `NODE_OPTIONS` refuses `--optimize-for-size` outright.
+  **The numbers above are the 512 MB tier's, and a 1 GB board gets its own**
+  (`TIGHT_BOARD`): hub `MemoryHigh=400M` with a 320 MB heap, Z2M `320M`/`400M`,
+  and `--optimize-for-size` without the semi-space pin, which buys memory with
+  GC throughput and is a scarcity trade a board with 500 MB spare need not make.
+  Those are **reasoned from the same full-home arithmetic, not measured**: 70 +
+  180 + 150 against ~920 MB leaves them at ~2.3× the hub's measured peak, and
+  unlike the tier above they are not over-subscribed (400 + 400 + 70 of ~920,
+  where 512 MB promises 200 + 230 + 70 of 415 and leans on zram). Raising a
+  ceiling is **not** promoting a board: `RADIO_BUDGET` is still `one` across the
+  whole tier.
   **None of those cgroup limits were ever in force on a Raspberry Pi.** A Pi
   boots with `cgroup_disable=memory`, so the kernel has no memory controller to
   enforce them with: the units carried the right numbers, `systemctl show` read
@@ -450,6 +546,56 @@ in `deploy/install.sh` must stay accurate.
   rather than at rest, and devices are exactly what keeps a working set hot.
   Changing it needs the same board with devices paired and days of real
   traffic — `docs/zigbee.md` carries the tables and the reasoning.
+  **Re-measured again with BLE and a device paired, which moves two of those
+  numbers.** Same Zero 2 W, one Matter plug commissioned and three Zigbee
+  devices, both radios up for an hour: the hub peaks at **170 MB against the
+  200 MB `MemoryHigh`** and sits at 138–146 MB, Z2M at 30–44 MB, `MemAvailable`
+  100–110 MB, `high 0` and `oom_kill 0` throughout, no restarts. Bluetooth is
+  what moved it — noble and its native binding cost about 30 MB over the 139 MB
+  above — and a **paired node costs far less than the radio that found it**.
+  Three things worth keeping from that hour.
+  **The peak is the *start*, not the pairing.** A cold restart with Z2M already
+  resident reached 170 MB while loading `@matter/main` and bringing BLE up, and
+  answered on 8420 in 35 seconds with both radios live; nothing afterwards came
+  near it. A six-second BLE discovery scan (`GET /matter/discoverable`) moved
+  `memory.peak` by **zero** — noble is loaded and powered on at startup, so
+  scanning only turns the radio on. That inverts the old assumption: it is
+  *boot*, not commissioning, that has to fit.
+  **Who pays is exactly who should.** hubd was 146 MB resident with **0 in
+  swap** (`MemorySwapMax=0` holding), Z2M 40 MB resident with **70 MB in zram**
+  — the optional process giving way, by design. The cost of that does not show
+  in any memory number: it is a page fault and a zstd decompression on a 1 GHz
+  A53 every time a Zigbee device reports, so **the place it surfaces is Zigbee
+  latency**, and that is what to measure before trusting a `both` on this board.
+  **The one-radio rule still stands**, and for the reason it always did rather
+  than a new one: four devices and one hour is not "devices paired and days of
+  real traffic". What the hour does buy is a slope nobody had — roughly 30 MB
+  between the boot peak and the throttle point, against a per-device cost of a
+  few MB for a single-endpoint accessory (matter.js holds cluster clients per
+  cluster per endpoint, a CASE session and a subscription). Call it a dozen or
+  so simple devices before boot reaches the ceiling, and treat that as an
+  extrapolation from one point, because it is. **`memory.events`' `high` is the
+  number that settles it** — while it reads 0 the kernel has never once had to
+  hold the hub back, and it is one `cat` away.
+  **Then it ran seven hours, and that is the run to quote.** Sampled every ten
+  minutes on the same board with both radios: hub 156-165 MB resident and **0
+  in swap**, `memory.peak` **175 MB against the 200 MB ceiling and flat for the
+  last six of those hours**, Z2M 17-22 MB resident with 67-72 MB in zram,
+  `MemAvailable` 85-95 MB, and `high 0` / `oom_kill 0` on **both** units
+  throughout. **It plateaus.** A fresh start with both radios is 141 MB, climbs
+  to about 160 over the first hour and then stops — so the slow growth people
+  reach for to explain a board falling over after a week is not what happens
+  here, and the hub was never throttled once. Two corrections come with it.
+  **Matter costs about 55 MB**, not the 80-90 an earlier reading suggested:
+  that one compared a both-radio process which had been up for hours against a
+  freshly started Zigbee-only one, so it was measuring the plateau climb and
+  calling it Matter — a mistake worth naming because it is easy to repeat.
+  And **the boot peak is not the number to watch after all** — the plateau is
+  five megabytes above the 170 MB boot peak, so on this board the ceiling is
+  approached by a hub that has been *running*, not by one starting.
+  The one-radio recommendation is unchanged all the same, for the only reason
+  that ever mattered: three Zigbee devices is not a Zigbee network, and Z2M's
+  working set is already 90 MB.
   **And the hub is not where that headroom comes from** (`MemorySwapMax=0`).
   The sentence above — the board affords both radios by keeping two thirds of
   them cold — is true and is also the whole of a fault that reads as a dead

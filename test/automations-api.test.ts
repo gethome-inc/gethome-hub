@@ -83,6 +83,7 @@ beforeAll(async () => {
     dataDir: dir,
     radioBudget: 'one',
     z2mDataDir: path.join(dir, 'zigbee2mqtt'),
+    zigbeeEnvFile: path.join(dir, 'zigbee.env'),
     mqtt: testBroker(),
     permitJoin: new PermitJoinService(undefined, log, () => {}),
     aiRuns: new AiRunLog(db, events),

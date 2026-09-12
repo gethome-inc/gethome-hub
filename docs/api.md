@@ -100,13 +100,13 @@ than no button.
 
 | Method & path | Needs | Notes |
 |---|---|---|
-| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid) |
+| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `matter: {bluetooth, bluetoothReason?, wifi, commissioning, settlingUntil?}` is present only while Matter is running and says what pairing this hub can actually do — and, in `settlingUntil`, whether it has finished finding the devices it already owns — see [below](#pairing-a-matter-accessory). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid) |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
 | `GET /home` · `PATCH /home` | floor · `home.rename` | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name) |
 | `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | floor · `home.structure` | `{id, name, zoneId, icon, accent, sortOrder}`. `POST` takes `{name, zoneId?, icon?, accent?, sortOrder?}` — the name is the only required field anywhere here — and `PATCH` takes the same set with every field optional; `zoneId: null` means "in no zone", and `icon: null` / `accent: null` mean "back to the look the app derives" — each different from leaving the field out. `icon`/`accent` are opaque app tokens (1–40 chars, see [below](#rooms-and-zones)). Names are trimmed before they are measured (1–80), an unknown `zoneId` is `404 unknown_zone`, and a new room goes to the *end* of the order. Deleting a room does not delete its devices — they are simply in no room. Every write broadcasts the [`structure` frame](#rooms-and-zones) |
 | `GET /zones` · `POST /zones` · `PATCH /zones/:id` · `DELETE /zones/:id` | floor · `home.structure` | `{id, name, sortOrder}` — the optional layer above rooms, see [below](#rooms-and-zones). `POST {name, sortOrder?}`, `PATCH {name?, sortOrder?}`; a zone carries no look of its own, since nothing draws a zone as a thing. Deleting a zone keeps its rooms and leaves them in none |
 | `GET /devices` | floor | full device list (wire shape below) |
-| `PATCH /devices/:id` | `device.edit` / floor | `{name?, roomId?, favorite?}`. Name and room describe the house and everybody sees the same ones; **`favorite` is the caller's own** and nobody else's — see [below](#favorites-are-per-member). `roomId: null` takes a device out of its room; an unknown one is `404 unknown_room`. The response is this caller's view of the device |
+| `PATCH /devices/:id` | `device.edit` / floor | `{name?, roomId?, favorite?, offlineExpected?}`. Name, room and `offlineExpected` describe the house and everybody sees the same ones; **`favorite` is the caller's own** and nobody else's — see [below](#favorites-are-per-member). `roomId: null` takes a device out of its room; an unknown one is `404 unknown_room`. `offlineExpected` is a boolean in and a moment back out — see [below](#a-device-that-is-meant-to-be-offline). The response is this caller's view of the device |
 | `DELETE /devices/:id` | `device.remove` | also unpairs at the protocol level |
 | `POST /devices/:id/endpoints/:endpointId/commands` | floor | body = canonical command; `202`. IR-remote intents (`irLearn`/`irSaveLearned`/`irSend`/`irDeleteCommand`/`irRenameCommand`) are resolved against the endpoint's stored code library (see [device-schema.md](device-schema.md)) |
 | `GET /devices/:id/history?from=&to=&points=&series=` | floor | what this device's readings did over a window, already thinned to a drawable size — see [below](#recorded-readings-get-devicesidhistory). `from`/`to` are epoch ms and default to the last day; `from >= to` is `400 invalid_range`; an unknown device is `404` |
@@ -116,8 +116,10 @@ than no button.
 | `PATCH /devices/:id/portraits` | `device.edit` | `{selected: id\|null}` — which one the home sees. `null` is a *state*: the procedural sphere, chosen over every picture there is |
 | `DELETE /portraits/:portraitId` | `device.edit` | forget one, file and row |
 | `POST /devices/:id/remap` | `hub.ai` | force-regenerate the AI mapping (Zigbee devices) → `{requested}`. **It answers as soon as the run is under way, never when it ends**: a run is minutes and this is an HTTP request, so what the agent then did arrives on the `ai` stream and in `GET /ai/runs`. `requested: false` means the radio has no published schema for that device right now — a device row can outlive its `bridge/devices` entry — which is a different answer from a run that failed. Being explicit, it also drops a `rejected` mapping and **ignores the backoff gate**, because it is how somebody retries after fixing a key or changing the model. The hub also remaps automatically when a device publishes unknown parameters — see [ai-adaptation.md](ai-adaptation.md). `409 ai_not_configured` with no credential, `409 ai_disabled` when the owner has switched adaptation off |
-| `POST /matter/commission` | `device.add` | `{pairingCode}` → `202 {jobId}` (async) |
-| `GET /matter/commission/:jobId` | floor | `{status: running\|done\|failed, nodeId?, error?}` |
+| `POST /matter/commission` | `device.add` | `{pairingCode, wifi?: {ssid, passphrase}}` → `202 {jobId, deadline}` (async). `wifi` is only for a hub that cannot read its own — see [below](#pairing-a-matter-accessory). `409 already_commissioning` when one is already running, `409 matter_disabled` when this hub has no Matter |
+| `GET /matter/commission/:jobId` | floor | `{status: running\|done\|failed, step?, nodeId?, error?, failure?, startedAt, deadline}` — see [below](#pairing-a-matter-accessory) |
+| `POST /matter/commission/:jobId/cancel` | `device.add` | stop looking → the job as it now stands. `404` for a job the hub has forgotten; a job that has already finished is answered, not refused |
+| `GET /matter/discoverable?seconds=` | `device.add` | what the hub can hear **right now** → `{scannedMs, bluetooth, devices: [{discriminator, vendorId?, productId?, name?, transport, pairingHint?, pairingInstruction?}]}`. `seconds` is 2–15, default 6, and the request is held open for all of it. `409 already_commissioning` — see [below](#what-the-hub-can-hear-get-matterdiscoverable) |
 | `POST /zigbee/permit-join` | `device.add` | `{seconds}`, 0–900 (0 = close the network) → `{permitJoin, seconds}` describing the **live** window, which is not always what was asked for. See [below](#the-zigbee-join-window) |
 | `GET /members` · `PATCH /members/me` · `DELETE /members/me` · `DELETE /members/:id` | floor · floor (itself) · floor (itself) · `member.remove` | rows carry `isSelf`, `roleId` and `roleName`; `PATCH` takes `{name}` and renames **the caller**; `DELETE` on either route answers `204` and revokes that member's tokens; the owner cannot be removed, by anyone or by itself. See [below](#which-member-you-are-isself-and-patch-membersme) |
 | `GET /invites` · `POST /invites` | `member.invite` · see notes | `POST {roleId?}` → `201 {code, expiresAt, roleId, roleName, memberId: null, memberName: null}`. Omitting `roleId` mints a **Member** invite, which is what every invite this hub has ever made was. An **owner** invite is allowed and needs the caller to be one (`403 not_owner`). **`POST {memberId}` mints a sign-in code** for somebody already here — `roleId` beside it is `400 invalid_target`, an unknown one is `404 unknown_member`, and the answer carries `memberId`/`memberName` with `roleId: null`. Who may ask is asked of the body: your own (`memberId: "me"` is accepted) is the **floor**, somebody else's is `member.invite`, an **owner's** needs an owner. `GET` lists the live codes, each with `memberId` — null for an invite — and `memberName`. See [below](#signing-in-again-post-invites-with-a-memberid) |
@@ -153,7 +155,7 @@ than no button.
 | `PUT /device-mappings/:exposesHash` | `hub.ai` | the upload. Accepts the envelope or a bare descriptor. `422 {error:"invalid_mapping", problems, issues?}` when the hub can't use it — and it is **kept**, so `…/repair` can work from it |
 | `DELETE /device-mappings/:exposesHash` | `hub.ai` | forget it; devices of that model fall back to their static mapping, and **nothing is asked of the agent** — a delete that re-consulted the library would miss the row it had just removed and start a fresh paid run inside the request, so Forget cost a replacement for the mapping being forgotten. The next genuine trigger asks |
 | `POST /device-mappings/:exposesHash/repair` | `hub.ai` | hand a rejected descriptor to the agent with the complaints. `409 ai_not_configured` / `409 ai_disabled` / `409 nothing_to_repair`, `422 no_device` |
-| `PUT /settings/radio` | `hub.radio` | `{mode: "auto"\|"zigbee"\|"matter"}` → `{budget, mode, matter, canRunBoth, applying: true}`. Records a *request*; see below |
+| `PUT /settings/radio` | `hub.radio` | `{mode: "auto"\|"zigbee"\|"matter"\|"both"}` → `{budget, mode, matter, canRunBoth, modes, applying: true}`. Records a *request*; see below. It also hands back the hub's two automatic retries when `mode` is `"both"`. `both` is accepted on **any** board — `budget` is advice, not a ceiling — and is refused with 400 by a hub too old for it, which is why `radio.modes` exists |
 | `GET /settings/mqtt` | `hub.mqtt` | the broker's credentials: `{requiresPassword, host, port, baseTopic, accounts[]}`. Each account is `{id, username, password, recommended, title, summary, publish[], subscribe[]}`. `hub.mqtt.admin` **adds** the hub's own full-access account; without it only the limited one is returned. See [below](#the-mqtt-broker-asks-for-a-password) |
 | `GET /me` | floor | `{id, name, role: {id, key, name}, permissions, isOwner}` — who this token belongs to and what it may do. See [below](#roles-and-permissions-in-full) |
 | `GET /permissions` | floor | the catalog: `{key, group, title, summary}` per permission. The hub owns the wording |
@@ -446,19 +448,180 @@ Rotating is `gethome-hubctl mqtt --rotate` on the machine itself — root work,
 like the radio and the update, and the only real answer to "somebody who had
 the password has left".
 
-### Radio (`GET /hub` and `PUT /settings/radio`)
+### Pairing a Matter accessory
 
-A 512 MB board has memory for one radio at a time, so what a hub can talk to is
-not the same on every machine and an app that assumes otherwise shows sections
-that can never fill. The `radio` block on `GET /hub` says which situation this
-hub is in:
+**An accessory that has never been on a network cannot be found on one.** A
+Wi-Fi Matter plug out of its box — or one somebody has just held the button on
+to reset — advertises over Bluetooth LE and nowhere else, because it has no
+network to advertise on yet. Its QR payload says so: the
+`discoveryCapabilities` bitmap carries BLE and not `onIpNetwork`. A manual
+pairing code carries no such field at all, and the hub treats that as *"the
+code did not say"* — looking everywhere it can rather than guessing one place.
+
+`GET /hub` carries a `matter` block whenever Matter is running, and an app
+should read it before offering the flow:
 
 | Field | Meaning |
 |---|---|
-| `budget` | `"both"` or `"one"` — the *board's*, measured at install time. Not a preference and not settable |
-| `mode` | `"auto"` (default), `"zigbee"` or `"matter"` — the choice somebody in the home has made, when one has been made |
+| `bluetooth` | whether a factory-new accessory can be found at all |
+| `bluetoothReason` | why not: `starting`, `off`, `unsupported-platform`, `not-installed`, `no-adapter`. Each has a different fix, which is why it is not one boolean. **`starting` is not a fault** — the API listens before the adapters do, so for about thirty seconds after every restart the hub has not decided yet; it used to answer `off` there, which means *nobody asked for it* and sends somebody to turn on a radio that is already coming up |
+| `wifi` | whether the hub already has a Wi-Fi password to hand the accessory |
+| `settlingUntil` | epoch ms until which Matter is still **finding the devices it already owns** — absent once settled. See [below](#a-matter-device-is-not-offline-because-the-hub-has-just-started-looking) |
+| `commissioning` | a pairing is running right now, so a second `POST` would be `409` |
+
+**`wifi: false` is what the request's `wifi` field is for.** Taking an accessory
+on over Bluetooth means giving it a network — step 11 of the commissioning flow
+is `AddOrUpdateWiFiNetwork` — and the hub cannot read the system's own
+credentials: the PSK lives in a root-owned NetworkManager profile and the point
+of the hub's service account is that it cannot read one. A root dispatcher
+writes `/etc/gethome/wifi.env` for it on every association; where that has not
+happened (an Ethernet hub, a machine with no NetworkManager, a hub installed
+before this existed) the app should ask for the password and send it. It is
+never logged and never stored — it goes into the commissioning conversation and
+is forgotten with the job.
+
+#### What the hub can hear (`GET /matter/discoverable`)
+
+**Bluetooth range is the one part of pairing nobody can see**, and
+`failure.kind: "not-found"` is the same sentence for *"too far from the hub"*
+and *"never went into pairing mode"* — two problems with completely different
+fixes. An app that cannot tell them apart sends half the people who meet it to
+do the wrong thing, after three minutes of waiting to find out.
+
+So the hub can be asked directly, and it is worth asking **before** the code is
+committed rather than after the pairing fails:
+
+```json
+{ "scannedMs": 6000, "bluetooth": true,
+  "devices": [ { "discriminator": 1938, "vendorId": 5130, "productId": 540,
+                 "transport": "ble" } ] }
+```
+
+`transport` is `ble` or `ip`, and the difference is the accessory's own
+situation rather than a detail of the scan: **`ble` means it has no network
+yet** (factory-new, or just reset), `ip` means it is already on the LAN and
+waiting to be taken on by a second admin. One entry per accessory, and a device
+answering on both is reported as `ble`, because that is the half that says what
+it still needs.
+
+Two things an app can do with this that it could not do before:
+
+- **Say whether pairing can work, before asking for a code.** "The hub can hear
+  an accessory nearby" / "The hub can't hear anything — bring the accessory
+  closer to the hub, or plug it in beside the hub to set it up." A Wi-Fi
+  accessory only needs Bluetooth range *while it is being paired*; afterwards
+  it lives on Wi-Fi and works anywhere in the house, so "set it up next to the
+  hub and then move it" is a real answer rather than a fudge.
+- **Match a scanned code to what is actually there.** The QR's discriminator
+  and one of these are the same number when they are the same accessory — so an
+  app can confirm *this* is the device in somebody's hand, or say that the hub
+  can hear a different one.
+
+`pairingHint` and `pairingInstruction` are the accessory's own answer to "how
+do I put this into pairing mode" (core spec § 5.4.2.4, Table 71), passed
+through rather than interpreted: it is the manufacturer talking, and an app
+rendering their sentence is right more often than a hub inventing one from the
+bitmap.
+
+**It is refused while a pairing is running** (`409 already_commissioning`), and
+that is not tidiness. The two would contend for one Bluetooth controller, and a
+starved scan does not fail — it reports an empty list. Measured on a Raspberry
+Pi Zero 2 W: a second scanner running beside the hub's own took fifteen seconds
+of neighbourhood advertisements from **231 down to 2**. An empty list is the
+wrong answer in the one direction that matters, because somebody acts on it by
+concluding their accessory is broken.
+
+The request is held open for `seconds` and drives a radio, which is why it is
+`device.add` rather than the floor: it is the same act as adding a device, one
+step earlier, and not something anything should poll.
+
+#### Watching a job
+
+Progress arrives two ways and they cannot disagree, because one function moves
+the job and emits the frame: the WebSocket `commissioning` frame, and
+`GET /matter/commission/:jobId` for a client that missed one.
+
+`status` is `running`, `done` or `failed` — deliberately unchanged, since a
+fourth value is one an existing client would drop on the floor. What grew sits
+beside it:
+
+- **`step`** is `looking` or `pairing`, on a running job. It is the difference
+  between *"hold the accessory's button until the light blinks"* and *"leave it
+  alone now"*, which is the only advice worth giving during the two minutes
+  this takes — a screen that says "working…" through both is a screen somebody
+  unplugs the accessory in the middle of. It moves on a real signal (a
+  candidate reaching the controller's peer set), never on a timer.
+- **`failure`** is `{kind, summary, detail?}` on a failed one. `summary` is a
+  whole sentence, safe to show as-is for a `kind` an app has never met;
+  `detail` is what matter.js actually said, for a disclosure.
+- **`deadline`** is when the hub gives up (epoch ms), so a screen counts down
+  rather than inventing a patience of its own. Discovery is bounded at three
+  minutes — the Matter spec's own minimum commissioning window — and the job at
+  four and a half.
+
+| `failure.kind` | What happened |
+|---|---|
+| `not-found` | nothing answered anywhere the hub could look. Nearly always: the accessory was not in pairing mode |
+| `needs-bluetooth` | the code says Bluetooth and this hub has none. **Refused before searching** |
+| `needs-wifi` | the accessory has no network and the hub has no password to give it. Refused before searching; ask for one and retry |
+| `bad-code` | not a Matter setup code, or its checksum is wrong. Refused before searching |
+| `wrong-code` | it answered and would not accept that passcode |
+| `already-paired` | still commissioned elsewhere, or out of fabric slots |
+| `cancelled` | somebody pressed Cancel |
+| `failed` | anything else, carrying matter.js's own words in `detail` |
+
+The three refusals marked *before searching* are the point: in each case the
+answer cannot change while somebody waits for it, so three minutes of a spinner
+ending in the same word is strictly worse than the word now.
+
+**A cancelled job is `failed` with `kind: "cancelled"`.** That is not laziness —
+it is what lets a client that has never heard of cancelling show its ordinary
+refusal rather than nothing at all. A client that knows the kind should go
+quietly back to its viewfinder instead of drawing a red card for a thing the
+person just chose.
+
+`POST /matter/commission/:jobId/cancel` needs the same permission as starting
+one, because the hub pairs **one accessory at a time**: a member who could not
+call off somebody else's abandoned job could not pair anything either until it
+timed out.
+
+### Radio (`GET /hub` and `PUT /settings/radio`)
+
+A board with 1 GB of memory or less is set up for one radio at a time, so what a
+hub can talk to is not the same on every machine and an app that assumes
+otherwise shows sections that can never fill. **Ask this block; never infer it
+from a board name.** The threshold is `MemTotal` against 1024 MB, so a 1 GB Pi 4
+and a Pi 3 answer `budget: "one"` exactly as a Zero 2 W does — an app that tells
+somebody "a Pi 4 runs both" is wrong for every 1 GB Pi 4 there is. The `radio`
+block on `GET /hub` says which situation this hub is in:
+
+| Field | Meaning |
+|---|---|
+| `budget` | `"both"` or `"one"` — the *board's*, measured at install time. Not a preference and not settable. **Advice, not a ceiling** — see [below](#running-both-radios-on-a-board-measured-for-one) |
+| `mode` | `"auto"` (default), `"zigbee"`, `"matter"` or `"both"` — the choice somebody in the home has made, when one has been made |
 | `matter` | whether the Matter adapter is **live right now** |
-| `canRunBoth` | `budget === "both"`, restated so an app can hide the switch without parsing the enum |
+| `canRunBoth` | `budget === "both"`, restated so an app can hide the switch without parsing the enum. It says the board was *measured* for both, never that `both` may not be asked for |
+| `modes` | every mode this build understands. Feature detection, never a version number: an app that does not find `"both"` here is talking to a hub too old to run both radios and must not offer it |
+| `standDown` | `{at, reason, detail?, count, acknowledged, suspended, willRetry}` — present once this hub has ever handed a radio back by itself. See [below](#running-both-radios-on-a-board-measured-for-one) |
+| `pressure` | `{since, detail, willStandDown}` — the board running short of memory **right now**, on any hardware. Live, so it clears on its own |
+| `applying` | a switch asked for a moment ago is still landing — see [below](#a-radio-switch-in-flight-radioapplying) |
+| `applyingSince` | epoch ms of the request, present only while `applying`, so a screen draws a bar rather than a spinner |
+| `applyingWindowMs` | how long the hub is prepared to claim it (150 s), so no app has to invent the number |
+
+`zigbee.coordinator` is the other half of that question and answers the one an
+app actually has to draw. `connected: false` used to be two completely
+different homes wearing one word:
+
+| Value | What it means | What an app should say |
+|---|---|---|
+| `"unknown"` | no coordinator has ever been recorded on this machine | *no stick* |
+| `"absent"` | one was recorded and its device node is gone right now | *no stick* — it is unplugged, or being reflashed |
+| `"present"` | one is plugged in this second | **never** *no stick*. Either Zigbee is starting, or something has stood it down — usually Matter having the board |
+
+The hub cannot see USB itself; `gethome-zigbee-detect` records what it found in
+`/etc/gethome/zigbee.env` and this reads it back. Without it, switching a
+one-radio Pi to Matter made the app say *"Zigbee · no stick"* about a
+coordinator the owner could see from where they were standing.
 
 `auto` follows the hardware **in one direction**: a coordinator takes the board
 within seconds of being plugged in, and Matter takes it on a board where no
@@ -487,6 +650,307 @@ force restarts nothing at all.
 The switch is cheap to change your mind about: the coordinator's device path and
 Zigbee2MQTT's paired-device list both survive, so devices on the radio that lost
 the board come back when it is handed back. They read as offline meanwhile.
+
+#### Running both radios on a board measured for one
+
+**`standDown` is a small board's fact, and `suspended` says whether it is still
+one.** The record outlives the board it was written for — an SD card moved into
+a bigger Pi carries `<data>/` with it — so `suspended` and `willRetry` are false
+whenever `budget` is `both`, however the record reads: there `auto` already runs
+both radios, and an app drawing "went back to one radio" over a hub running two
+is the reason the gate exists. The record itself stays (`at`, `reason`, `count`
+are still true), so a client that wants to say *this happened once* still can.
+
+`budget` is a **measurement, not a ceiling**, and the distinction is the whole
+of this section. It is measured against a *full* home — the operating system,
+the hub with Matter loaded, and a Zigbee2MQTT holding a hundred devices' state
+— and a home with four devices is nowhere near it. Refusing `both` on a 512 MB
+board therefore took Matter away from somebody to prevent a problem they did
+not have, so the refusal is gone: **`PUT /settings/radio` accepts `"both"` on
+any board.** What `budget: "one"` now means is *recommended one at a time*, and
+it is the fact an app warns from.
+
+**What an app owes the person at that switch is one specific sentence**, and it
+is the one most easily dropped: *what changes this is your Zigbee network
+growing*. Everything else about the offer is reassuring and true — it works now,
+the hub watches itself, nothing is unpaired if it stands down — and an app that
+says only those has described a setting somebody will meet again in a year with
+twenty devices bought on the strength of it. Say what moves the margin, and name
+the board that never has the question as **2 GB or more** rather than as a
+model.
+
+What makes that safe is that the hub watches itself. While the mode is `both`
+**and both radios are actually up**, it samples the kernel's own counters every
+30 seconds — the cgroup's `memory.events` `high` (how often systemd's
+`MemoryHigh` throttled it), its `oom_kill`, and `MemAvailable` — and if the
+board is in trouble across most of a five-minute window it writes `auto` back
+and lets `gethome-zigbee-detect` hand a radio over. Throttling rather than
+deaths is the point: `memory.high` holds a cgroup at its limit for a long time
+before anything is killed, so acting on it means nothing is lost.
+
+Three deliberate silences. Nothing is sampled for the **first two minutes**
+after a start — the peak *is* the start (a cold boot reached 170 MB of a 200 MB
+ceiling loading `@matter/main`, and a BLE scan afterwards moved the peak by
+zero), so sampling through it would stand a radio down on every boot. A counter
+read once votes on nothing, because these are totals since boot. And a kernel
+that answers none of them — no memory controller, or not Linux — abstains
+rather than being guessed at.
+
+**The watch runs on every board; only a small one is acted on.** Two live
+radios is the condition, whatever route the board took to them — a hub whose
+`GETHOME_RADIO` was edited by hand runs two on `auto`, and so does one in the
+seconds between a stand-down writing the mode and the detector applying it. On
+a board measured for **both**, a reading that would stand a radio down on a
+Zero 2 W instead only *reports*: there is no second radio to hand back, the
+board is supposed to run them, and taking one off a 4 GB board would be the hub
+making a working home smaller to fix a problem that is somewhere else.
+
+That report is `radio.pressure`, and it is present on any hardware:
+
+| Field | Meaning |
+|---|---|
+| `since` | epoch ms the board first looked like this |
+| `detail` | one sentence naming what was measured |
+| `willStandDown` | whether the hub is about to do something about it — *something is about to happen* against *somebody should look at this* |
+
+It is **live**, not a record: it clears on its own when the board recovers, so
+an app that was warning stops. The threshold to say it is lower than the
+threshold to act (three of ten checks against six), which is also the only
+warning a small board gets *before* anything happens to it — about ninety
+seconds in which somebody watching their phone can make the choice themselves.
+
+When a radio is actually handed back, `radio.standDown` appears and stays:
+
+| Field | Meaning |
+|---|---|
+| `at` | epoch ms it happened |
+| `reason` | `"memory-pressure"` (throttled or starved — caught **before** anything died) or `"out-of-memory"` (something was killed; the backstop, not the mechanism) |
+| `detail` | one sentence naming what was measured, e.g. *the hub was held at its memory limit in 7 of the last 10 checks* |
+| `count` | how many times this hub has ever had to do it |
+| `acknowledged` | whether somebody has set a radio deliberately since |
+| `suspended` | the owner asked for both and the hub is not running them — the choice is **parked, not cancelled** |
+| `willRetry` | the hub will try both again by itself |
+
+`count` and `acknowledged` have different lifetimes on purpose. The **notice**
+is over the moment somebody chooses a radio — any radio, `both` included, since
+choosing one means having seen where the hub left them — which is why
+`PUT /settings/radio` is what sets `acknowledged`. The **count** outlives every
+acknowledgement, because one stand-down on the afternoon somebody paired eight
+bulbs is a board having a bad minute and a fourth is the board answering the
+question: an app about to offer this switch again should be able to say so.
+
+It also writes one activity row, `hub.radio-stood-down`, with **no**
+`memberId` — nobody did this — carrying `reason`, `detail` and `count` in
+`data`. That row is what somebody reads on Thursday wondering why half the
+house went quiet on Tuesday.
+
+`auto` rather than a named radio is what gets written back, and that is not a
+choice about which radio wins so much as a refusal to invent a second rule for
+it: `auto` already means *follow the hardware* — a coordinator somebody went
+out and bought takes the board, and Matter takes it where there is none.
+
+#### Getting the radio back
+
+**The hub cannot tell whether both would fit now, and does not pretend to.**
+Once a radio has been handed back, the board is no longer running the
+configuration that failed — the pressure is gone *because* the second radio is
+gone — so no reading it can take answers the question. There is no such number,
+and a watch that invented one would have it say yes for ever.
+
+So `suspended` is the hub owing somebody a radio, and a retry is a **trial**
+rather than a measurement. It asks about the *machine* instead:
+
+- **the board has restarted** since the stand-down (`/proc/sys/kernel/random/boot_id`
+  differs — a service restart does not change it, and the hub restarts itself
+  several times in the course of one stand-down). This is the strong evidence:
+  a reboot is what puts a memory cgroup into force, what a desktop being
+  switched off needs, what clears a process that had wandered off, and what
+  happens when somebody moves the card into a bigger Pi;
+- **or a week has passed**, which is the weak one and reaches a hub that runs
+  for months without a restart. A clock that went backwards is not evidence at
+  all, so a record dated in the future falls back to the reboot test.
+
+The budget is **two** automatic tries, because each costs a restart. When they
+are spent, `willRetry` goes false and the sentence an app owes somebody is
+*the hub has stopped trying, and you can still turn it on*. `PUT /settings/radio`
+with `mode: "both"` hands the two tries back — a person deciding is not the hub
+flapping, and whatever they know that the hub does not (devices removed, a
+desktop switched off, a bigger board) is worth a fresh trial. So is time: a
+stand-down more than a week after the previous one starts the budget over,
+since two bad afternoons a year apart are not flapping.
+
+A retry writes `both` and is announced like any other switch — `applying`,
+`applyingSince`, and a `hub.radio-restored` activity row — so it is a change
+with an explanation rather than an unexplained outage. There is deliberately
+**no countdown**: the answer to *when* is "next time this board restarts, or
+within a week", and a timer to a restart that has to happen anyway is a number
+nobody can use.
+
+It also **waits while somebody is pairing** — a Matter commissioning in flight,
+or an open Zigbee join window — because a hub that restarted itself mid-pairing
+would take the pairing with it. The stand-down never waits: it is the board
+being rescued, and deferring it risks the kill it exists to prevent.
+
+#### A Matter device is not offline because the hub has just started looking
+
+Zigbee2MQTT hands its whole device list over in one retained message, so a
+Zigbee home is complete a second after the radio is. A Matter controller has to
+open a CASE session with every node it owns, in turn, over Wi-Fi — twenty to
+thirty seconds on a Raspberry Pi Zero 2 W. And those devices were read back
+from the database with the `online: false` they were given when Matter was last
+switched *off*, so for that whole window a perfectly healthy home reported
+*"1 device offline · needs attention"* about an accessory that was about to
+answer.
+
+`matter.settlingUntil` is the hub saying **"I have not finished looking"**. An
+app should treat a device on that transport as *connecting* rather than offline
+while it is present and in the future: not counted in a needs-attention total,
+not drawn with an offline badge.
+
+Three properties matter more than the number:
+
+- **It covers the controller coming up as well as the nodes connecting**, and
+  that half was the one this first shipped without. The adapters start *after*
+  the API is listening — deliberately, so matter.js opening its storage on a
+  slow card cannot hold the health check and the claim closed — so every
+  `GET /hub` in those seconds was answered by an adapter that had not begun
+  looking at all, reporting a settled home while `radio.matter` already said
+  `true` because the adapter had been constructed. The two phases are bounded
+  separately, because a clock running while matter.js loads is a clock counting
+  time in which no node *could* have reported in: charging it to the nodes
+  would shorten the window they actually get, on precisely the boards slow
+  enough to need all of it.
+- **It clears when the last node connects, not when the clock runs out.** The
+  controller knows what it is commissioned to and what it has reached, so there
+  is nothing to guess — a hub whose devices all answer in four seconds stops
+  making excuses after four seconds.
+- **Every clock here is a bound, not a promise.** The node window is only ever
+  *reached* by a node that is genuinely not there — the one real offline
+  device — and the start-up window only by a `start()` that never returns.
+  Neither may hide an unreachable device behind "still looking" for ever.
+
+Absent means settled. The whole `matter` block is absent on a hub with no
+Matter running, which is the same presence-is-the-capability rule as
+everywhere else here.
+
+#### And how long it takes to notice one has gone
+
+The mirror of the section above, and the question a real hub provokes: a
+mains-powered Matter socket pulled out of the wall reads offline **two to four
+minutes later**, not at once. That is the protocol working rather than a fault,
+and it is worth writing down because it looks exactly like a fault.
+
+Matter has no ping. A controller learns a node is gone when the node stops
+feeding a **subscription**, and how long that takes is a device-type decision
+matter.js makes for us. It asks for a maximum report interval of one minute for
+a mains-powered Wi-Fi or Thread node, three minutes for a Thread sleepy end
+device, **ten minutes for a battery-powered one**, or an intermittently
+connected device's own idle-mode duration — plus up to ten per cent of jitter,
+so a home's accessories do not all report on the same second. The subscription
+is then declared timed out at that interval *plus twice the MRP peer-response
+budget*, which is itself tens of seconds. Only after that does matter.js probe
+the peer's address, close the session, and try once to re-subscribe; when that
+attempt fails it reports the node not-live, which is the `stateChanged` the
+adapter turns into `reachabilityChanged('matter', id, false)` and the registry
+writes to `devices.online`.
+
+So the sum for an unplugged mains socket is roughly: ~70 s of keepalive window,
+~35 s of response budget, a failed probe, and a failed re-subscribe.
+
+**The case where the delay would actually matter is already fast.** Any
+exchange whose MRP retransmissions are exhausted calls `peerLost`, the CASE
+session is deleted, and the node drops to *Reconnecting* immediately — so a
+**command** sent to a device that is no longer there marks it offline within one
+MRP budget, seconds rather than minutes. The slow path is only the passive one,
+where nobody has touched the device and the hub is waiting on a keepalive.
+
+**Do not reach for `subscribeMaxIntervalCeilingSeconds` to shorten it.** It is
+one number for every node the hub connects, applied at `connect()` — before the
+hub knows whether it is talking to a mains plug or a door sensor — so a 30 s
+ceiling to make one socket prompt would take the battery default from ten
+minutes to thirty seconds and pay for that impatience out of somebody's sensor
+batteries, for ever. matter.js says the same thing in its own API docs: it
+"tries to set meaningful values based on the device type, connection type, and
+other details", so do not set it unless you know better than that.
+
+For scale: Zigbee2MQTT ships with per-device availability tracking **off** and
+the config `install.sh` writes leaves it off, so a Zigbee device that dies is
+not marked offline at all until the bridge itself goes down. Two to four
+minutes is the *tightest* answer this hub currently gives about a device that
+has silently stopped answering.
+
+#### A device that is meant to be offline
+
+Somebody unplugs a heater for the summer. It is offline, and it is not a fault
+— but nothing could say so, so the dashboard counted it, put *Needs attention*
+over the home and went on doing it until the thing was plugged back in. The
+person who unplugged it is the only one who knows, and the only thing they
+could do about it was ignore a warning for four months.
+
+`PATCH /devices/:id { offlineExpected: true }` is them saying it. The device
+comes back carrying `offlineExpected: { at, by? }` — the moment, and who said
+it — and an app draws it as offline **without counting it as something needing
+attention**. `false` takes it back, which is what somebody does after plugging
+the socket back in and finding it still does not answer.
+
+It is the **house's**, not a phone's dismissal, and that is the whole of why it
+is a column on the device row rather than something each app remembers. One
+person unplugs the heater; nobody else in the home should go on being told the
+home needs looking at. It is under `device.edit` for the same reason: silencing
+the home's own alarm for everybody is not something a guest staying the weekend
+should be able to do — unlike `favorite`, which sits in the same body and needs
+nothing.
+
+**It is an excuse for *this* absence, not for the device.** The hub clears it
+the moment the device is reachable again, so a socket excused in May, plugged
+back in and pulled out again in September is a new thing to be told about. That
+is a per-device report doing the clearing, never the *radio* coming back up:
+`radioReachabilityChanged` speaks for everything behind it and is an assumption
+rather than a report, and Zigbee2MQTT's bridge says `online` on every hub
+restart — which would have cleared every excuse in the home overnight, on a hub
+nobody had touched. Nothing is hidden by holding them across that: while a radio
+is down its devices are already explained by the resting-radio rule in both
+apps, and the first real report that the device is back ends it properly.
+
+Setting it writes one `device.offline-expected` activity row, and only when it
+is a change — an app re-sending what the hub already holds says nothing worth
+reading a week later. The automatic clear writes nothing of its own: the device
+coming back already writes `device.online`, and two lines for one event is the
+burst the feed's whole shape exists to avoid.
+
+#### A radio switch in flight (`radio.applying`)
+
+Applying a radio **restarts the hub** — around seventy seconds of a closed port
+on a Zero 2 W. That is the whole difficulty of reporting it: the process that
+took the request is killed by the thing it was asked to do, so an app polling
+across the gap saw a refused connection, then a hub reporting the old radios,
+then the new ones, and drew *"can't reach your hub"* over a change somebody had
+just made deliberately.
+
+So the moment is written to the hub's data directory rather than held in
+memory, and `GET /hub` reports it from there — which means it survives the
+restart it is describing. An app that finds `applying: true` should say the hub
+is switching radios and treat an unreachable hub as *expected* until
+`applyingSince + applyingWindowMs`, rather than as a fault.
+
+**It ends when the hub is in the arrangement that was asked for, or when the
+window runs out** — whichever comes first, and both halves are load-bearing.
+A mode names the *whole* arrangement, so each one asserts what must be **off**
+as well as what must be on: asking only whether the wanted radio was up was
+right for every switch that turns one on and wrong for every switch that turns
+one off. Leaving `both` for `zigbee` left Zigbee already connected, so the
+switch read as landed the instant it was recorded — no progress bar, no planned
+downtime — and the hub then went off the network for seventy seconds with
+nothing on screen to say why. `both` → `matter` had it too. `both` is still the
+one mode that lands in two stages, and is over only when both radios are up. A mode change that
+resolves to the radio already running (`auto` → `matter` on a hub already on
+Matter) is one the detector correctly answers by restarting nothing, and the
+window alone left every app drawing "switching radios" over a hub that was
+never going anywhere. The window is what covers the other direction: asking for
+Zigbee on a hub with no coordinator is a reasonable thing to do, correctly
+changes nothing, and has no target that will ever be live — so it has to end by
+timing out. `auto` always uses the window, because it names no single radio to
+check against.
 
 ### Which member you are (`isSelf` and `PATCH /members/me`)
 
@@ -1229,8 +1693,8 @@ The kinds: `device.command`, `device.added`, `device.removed`,
 `zone.removed`, `member.joined`, `member.signed-in`, `member.signin-code`,
 `member.left`, `member.removed`,
 `member.renamed`, `member.role-changed`, `role.added`, `role.renamed`,
-`role.changed`, `role.removed`, `home.renamed`, `hub.radio`, `hub.mqtt`,
-`adapter.error`,
+`role.changed`, `role.removed`, `home.renamed`, `hub.radio`,
+`hub.radio-stood-down`, `hub.radio-restored`, `hub.mqtt`, `adapter.error`,
 `zigbee.interview-failed`, `zigbee.left`, `zigbee.permit-join`,
 `zigbee.permit-join-closed`, `matter.commission`. Treat the list as open — a
 client must render an unknown kind from `message` rather than drop it.
@@ -1253,7 +1717,12 @@ for the two things that are deliberately *not* logged.
 
 The last three, plus `hub.radio`, all carry `data.memberName`: they are the
 things any member may do to the whole home, so the log is where it says which
-phone did. `zigbee.permit-join` also carries `data.seconds` — the **live**
+phone did. `hub.radio-stood-down` and `hub.radio-restored` are the two entries here with
+**no member at all** — the hub handed a radio back by itself and later gave it
+another go, and naming somebody would be attributing a decision nobody made.
+They carry `reason`/`detail`/`count` and `attempt`/`count` instead. A feed that
+showed only the first would read as a hub that keeps taking things away; both
+are [described above](#running-both-radios-on-a-board-measured-for-one). `zigbee.permit-join` also carries `data.seconds` — the **live**
 window the hub ended up with, not the number that was asked for.
 `matter.commission` is written when pairing *starts* and never carries the
 pairing code: that is the accessory's credential, and every member reads this
@@ -1429,8 +1898,10 @@ message. These go to every authorized socket:
 
 {"type":"activity","entry":{id,at,kind,message,deviceId?,memberId?,data?}}
 {"type":"permitJoin","active":true,"remainingSeconds":60}
-{"type":"commissioning","jobId","status","detail"?}     Matter commissioning progress
-{"type":"hubStatus","zigbee":{…},"radio":{…}}           a radio came up, went down, or was switched
+{"type":"commissioning","jobId","status","detail"?,"step"?,"failure"?,"deadline"?}
+                                                        Matter pairing progress — see above
+{"type":"hubStatus","zigbee":{…},"radio":{…},"matter"?:{…}}
+                                                        a radio came up, went down, or was switched
 ```
 
 ### A write that didn't land (`commandFailed`)

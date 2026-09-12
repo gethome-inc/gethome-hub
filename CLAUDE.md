@@ -411,6 +411,234 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   Read **both** `interview_completed` and `interview_state`: Z2M 2.x replaced
   the first with the second, so `interview_completed === false` read
   `undefined === false` on current installs and adopted devices mid-interview.
+- **An accessory that has never been on a network cannot be found on one, and
+  where to look is the accessory's answer rather than a setting.** A
+  factory-new — or factory-reset — Wi-Fi Matter accessory advertises over
+  Bluetooth LE and nowhere else. `MatterAdapter` used to hardcode
+  `discoveryCapabilities: { onIpNetwork: true }` for every setup code, so it
+  searched the LAN for a device that was never going to be there; matter.js
+  applies **no discovery timeout at all** when one is not passed (`Discovery`
+  guards its `withTimeout` on `!== undefined`), so the job never settled and
+  the app read "Pairing with your hub" until somebody force-quit it — thirty-five
+  minutes, on the hub this was found on. `adapters/matter/setup-code.ts` reads
+  the QR's own `discoveryCapabilities` instead, and a **manual code carries
+  none**: `undefined` there means "the code did not say" and is answered by
+  looking everywhere, never by guessing one place. BLE arrives through an
+  **optional** dependency installed into the environment *before* the
+  controller is built (afterwards it is a transport nothing is holding), with
+  every failure resolving to a named reason rather than throwing — see
+  `deploy/CLAUDE.md` for the rfkill and capability halves, and `docs/matter.md`,
+  which is canonical.
+  **Three refusals happen before anything is searched for**, because in each the
+  answer cannot change while somebody waits: a code the hub cannot read, an
+  accessory whose code says Bluetooth on a hub without it, and one with no
+  network that the hub has no Wi-Fi password to give. Everything else is bounded
+  (three minutes' discovery, four and a half for the job), cancellable — which
+  stops the *discovery*, not just the screen, and is why the hub pairs **one
+  accessory at a time** — and classified into words somebody can act on
+  (`commission-failures.ts`, `write-failures.ts`'s shape and both its rules:
+  open `kind`, most-specific-first). **A failed pairing is logged**, which it
+  was not: the only record of one was a WebSocket frame that had already gone,
+  so the journal of a hub whose owner could pair nothing showed a line saying
+  discovery had started and nothing else, ever. And **the step is a real signal,
+  never a timer**: a candidate reaching the controller's peer set is the moment
+  the advice changes from "hold its button" to "leave it alone", and a
+  five-second timeout would say the same thing about a hub that had found
+  nothing.
+  **Two things it deliberately cannot do yet are written down** under
+  *Not built yet* in `docs/matter.md`: giving an accessory away to another
+  ecosystem (the hub takes devices in and cannot share them, which is the fear
+  somebody has *before* they pair anything), and pairing from the phone when
+  the hub is out of Bluetooth range. Both carry the detail and the open
+  questions; neither is started.
+  **A device is not offline because the hub has only just started looking for
+  it.** Zigbee2MQTT hands its whole list over in one retained message; a Matter
+  controller opens a CASE session per node, which is twenty to thirty seconds
+  on a Zero 2 W — and those devices are read back from the database with the
+  `online: false` they were given when Matter was last switched *off*. So every
+  switch to Matter reported "1 offline · needs attention" for half a minute
+  about an accessory that was about to answer. `matter.settlingUntil` is the
+  hub saying it has not finished looking, and an app draws those devices as
+  *connecting*. It **clears when the last node connects, not when the clock
+  runs out** — the controller knows what it owns and what it has reached, so
+  there is nothing to guess — and the clock is a bound rather than a promise,
+  because the node that never answers is the one genuinely offline device and
+  must not hide behind "still looking" for ever.
+  **It covers the controller coming up as well**, which is the same bug one
+  step earlier and the half this first shipped without. The adapters start
+  after the API is listening, so every `GET /hub` in the seconds matter.js
+  spends loading and opening its storage was answered by an adapter that had
+  not begun looking — reporting a settled home, while `radio.matter` already
+  said `true` because the adapter had been *constructed*. That is the window
+  every switch to Matter lands in, so the fix for the paragraph above did not
+  reach the case it was written for. The two phases are bounded separately: a
+  clock running while matter.js loads counts time in which no node could have
+  reported in, so charging it to the nodes shortens the window they actually
+  get on precisely the boards slow enough to need all of it. The arithmetic is
+  `adapters/matter/settling.ts` rather than a getter in the adapter, for the
+  reason `reducer.ts` and `setup-code.ts` are their own files: reading it
+  through `adapter.ts` loads `@matter/main`, so a rule both apps draw every
+  Matter device from would be a rule no test could reach.
+  **And nothing `GET /hub` reads may throw**, which that first version learned
+  the hard way. It asked the controller what it was commissioned to *before*
+  deciding the phase, and matter.js refuses that question until `start()` has
+  finished (`getCommissionedNodes` asserts an instance) — while the controller
+  *object* exists for the tens of seconds `start()` spends loading and opening
+  its storage on a Zero 2 W. So every `GET /hub` in that window threw straight
+  out of the route, and that route is the health check `install.sh` gates on:
+  `curl -fsS` exited 22 and a real install aborted against a hub that was
+  coming up perfectly well and answered fine a minute later. The commissioned
+  list is a **function** on `SettlingPhase` now, called only in the one phase
+  that can answer it — which also means the health check asks matter.js nothing
+  at all in the steady state — with a `catch` behind it as the second layer,
+  because the cost of being wrong here is a failed install rather than a wrong
+  number. Every other read behind that route already obeys this (each file read
+  is `try`/`catch` with a documented fallback); a new one has to.
+  **And the hub can be asked what it can hear** (`GET /matter/discoverable`),
+  because Bluetooth range is the one part of pairing nobody can see and
+  `not-found` is the same word for "two rooms away" and "never went into
+  pairing mode". It is refused while a pairing runs, and that is a measurement:
+  a second scanner beside the hub's own took fifteen seconds of neighbourhood
+  advertisements from 231 down to 2 on a Zero 2 W, and a starved scan reports
+  an *empty list* — the wrong answer in the one direction somebody acts on.
+- **A radio that is off and a radio that is missing need opposite words, and
+  both were `connected: false`.** Switching a one-radio board to Matter made the
+  app say *"Zigbee · no stick"* about a coordinator the owner could see from
+  where they were standing — hardware the hub had detected and deliberately
+  stood down. `zigbee.coordinator` (`present`/`absent`/`unknown`) is the fix,
+  read from the detector's own `/etc/gethome/zigbee.env` rather than by scanning
+  USB: `gethome-zigbee-detect` owns that decision with a device table and a
+  `maybe` tier, and a second dumber copy in the hub would eventually disagree
+  with the first. It reads the **by-id name**, never the `/dev/ttyACM0` beside
+  it, or a 3D printer taking that number reports a coordinator present.
+  **A mode names the whole arrangement, so `applying` asserts what must be
+  *off* as well as what must be on.** Asking only whether the wanted radio was
+  up was right for every switch that turns one on and wrong for every switch
+  that turns one off: leaving `both` for `zigbee` left Zigbee already
+  connected, so the hub reported the switch as landed the instant it was
+  recorded — no progress bar, no planned downtime — and then went off the
+  network for seventy seconds with nothing on any screen to say why.
+  `both` → `matter` had the same defect and nobody had noticed.
+  **And `radio.applying` is on disk rather than in memory**, because applying a
+  radio *restarts the process that recorded it*: the only useful answer is one
+  that survives the restart it describes, and without it every app drew "can't
+  reach your hub" over a change somebody had just made on purpose. It is a
+  **bound, not a wait for the radios to agree** — asking for Zigbee on a hub
+  with no coordinator is reasonable, correctly changes nothing, and would spin
+  for ever.
+- **The radio budget is a memory reading, and a board name is never the claim.**
+  `install.sh` divides `MemTotal` by **1024 MB** and writes `GETHOME_RADIO`;
+  nothing looks at the model. So a **1 GB Pi 4** and a **Pi 3** answer
+  `budget: one` exactly as a Zero 2 W does, which reads in practice as *2 GB or
+  more runs both*. Copy that says "a Pi 4 runs both radios" is wrong for every
+  1 GB Pi 4 in circulation — it was written that way in five user-facing places
+  across the three repos at once, including this repo's own README two
+  paragraphs from a table that said the opposite. Write the memory, not the
+  model, everywhere a person reads it. Two things follow that are **unmeasured
+  rather than decided**: every figure in `docs/zigbee.md` came off a 512 MB
+  board, so the 1 GB tier is grouped with the small ones out of honesty rather
+  than measurement. **The ceilings are not shared, and that split is the fix to
+  a real fault**: `SMALL_BOARD` used to hand a 1 GB board the 512 MB board's
+  `MemoryHigh=200M`, which throttles the hub against ~920 MB of `MemTotal` —
+  and throttling is what `radio-pressure.ts` acts on, so such a board could have
+  a radio taken back with hundreds of megabytes free. `install.sh` now splits at
+  `TIGHT_BOARD_MAX_MB` and gives 1 GB its own (400M/320M/400M, heaps 320, no
+  `--max-semi-space-size` pin), reasoned from the same full-home arithmetic the
+  512 MB numbers came from rather than measured; `test/deploy-config.test.ts`
+  pins that the roomier tier really is roomier, since the older test slices the
+  whole `-le 1024` block and passes on either branch alone. **The budget is the
+  separate decision**: `radio-pressure.ts` gates *acting* on `budget === 'one'`,
+  so promoting 1 GB to `both` would remove its safety net as well as its
+  warning, and that one wants hardware.
+  **And a budget is a measurement of the machine, so a machine that changes
+  under it has to be re-measured.** `hub.env` is written only when absent —
+  right for the settings in it, wrong for this — and the commonest way a home
+  grows is an SD card moved into a bigger Pi, which carries `/etc/gethome/` and
+  `<data>/` along with it. A card that started in a Zero 2 W therefore told a
+  Pi 5 it had memory for one radio for ever, since re-running the installer does
+  not rewrite an existing file either: the upgrade path this repo's own README
+  recommends ended on a board that still recommended one radio and could still
+  stand one down with gigabytes free. `install.sh` reconciles `GETHOME_RADIO`
+  and the heap now, and **only ever widens** — a stored `both` is the documented
+  hand-edit and the owner's override, so narrowing must never happen. The other
+  half of the same transplant is `<data>/radio-stand-down`, which is a **small
+  board's fact**: on a board measured for both it is history rather than a debt,
+  so `hub-status.ts` gates `suspended`/`willRetry` on the budget and
+  `radio-pressure.ts` gates the restore on it — without both, the apps drew
+  "Your hub went back to one radio" over a hub plainly running two, permanently,
+  because the watch only restores while *one* radio is live and nothing else
+  could clear the record.
+  **And every surface that offers `both` on a `one` board owes one sentence
+  that is easy to edit away** — *what changes this is your Zigbee network
+  growing* — because the failure worth designing against is not a hub falling
+  over. It is somebody turning both radios on with four devices, being
+  perfectly happy, buying for a year on the strength of it, and meeting the
+  trade when a different board is no longer the cheap answer. Say it works now,
+  say what changes that, say what the hub does when it stops fitting, and name
+  the board that never has the question as *2 GB or more*.
+- **The radio budget is a measurement of a *full* home, so it is advice and not
+  a ceiling — and what replaces the refusal is a watch.** `GETHOME_RADIO=one`
+  is measured against the OS plus the hub with Matter plus a Zigbee2MQTT
+  holding a hundred devices' state; a home with four devices is nowhere near
+  it, and refusing `mode: both` there took Matter away from somebody to prevent
+  a problem they did not have. So `both` is a fourth `RadioMode`, accepted on
+  any board, and `core/radio-pressure.ts` is the half that makes that safe:
+  while the mode is `both` **and both radios are genuinely up**, it samples the
+  cgroup's `memory.events` (`high`, `oom_kill`) and `MemAvailable` every 30 s
+  and writes `auto` back if the board is in trouble across six of ten checks.
+  Five rules. **It watches throttling, not deaths** — `memory.high` holds a
+  cgroup at its limit for a long time before anything is killed, so acting on
+  it means nothing is lost; `oom_kill` is a backstop and acts at once, because
+  by then something has gone. **The peak is the *start*** — a cold boot reached
+  170 MB of a 200 MB ceiling loading `@matter/main` while a six-second BLE scan
+  moved `memory.peak` by zero — so nothing is sampled for the first two
+  minutes, or every boot would stand a radio down. **A counter read once votes
+  on nothing**, since these are totals since boot, and **a kernel that cannot
+  answer abstains**: every field is optional, so a board with the memory
+  controller off and a developer's Mac both trip nothing. And **it says so
+  before it does it** — the stand-down record, the `hub.radio-stood-down`
+  activity row (the one entry with *no* member on it: nobody did this) and the
+  `hubStatus` frame all go out before the mode is written, because the mode
+  write is what wakes the path unit that kills this process. `auto` is what
+  gets written rather than a named radio, because "follow the hardware" is a
+  rule this hub already has and a second one for this case would be the policy
+  nobody had read. `radio.standDown` carries it to the apps, where
+  `acknowledged` ends the *notice* (any `PUT /settings/radio` answers it) and
+  `count` outlives every acknowledgement — one stand-down is a board having a
+  bad minute, a fourth is the board answering the question.
+- **A radio is suspended, not taken away — and the hub cannot tell whether both
+  would fit again, so a retry is a *trial*.** Writing `auto` is the only way a
+  hub can change its own radios, so on its own it meant that protecting the
+  board threw away the decision being protected; `wish` in the record is the
+  hub knowing it owes somebody a second radio, and `standDown.suspended` is how
+  an app draws a parked choice rather than an untouched switch. The reason
+  there is no measurement is worth stating plainly: after a stand-down the
+  board is no longer running the configuration that failed, so the pressure is
+  gone **because** the second radio is gone, and any signal derived from that
+  would say yes for ever. So `shouldRestoreBoth` asks about the *machine* — has
+  it rebooted (`/proc/sys/kernel/random/boot_id`, which a service restart does
+  **not** change, and the hub restarts itself several times during one
+  stand-down), or has a week passed — with a budget of two, because each try
+  costs a restart. A person choosing `both` hands the tries back, and so does a
+  stand-down a week after the last one: neither is flapping. And **the watch
+  runs on every board while two radios are live, but only a small one is acted
+  on**: two live radios is the condition rather than `mode === 'both'` (a
+  hand-edited `GETHOME_RADIO` reaches it on `auto`, and so does the gap between
+  a stand-down writing the mode and the detector applying it), the report
+  threshold is lower than the action threshold so a small board gets one
+  warning first, and on a board measured for both the hub only ever reports —
+  taking a radio off a Pi 5 would be making a working home smaller to fix
+  something that is somewhere else. `radio.pressure` carries that, live, so it
+  clears itself. **Only the retry waits for a quiet moment** (a Matter
+  commissioning in flight, or an open Zigbee join window) — a hub that
+  restarted itself mid-pairing would take the pairing with it, for a trial that
+  had no reason to happen in that minute; the stand-down never waits, because
+  it is the board being rescued and deferring it risks the kill it exists to
+  prevent. The one thing this cannot see is **the hub being killed outright** —
+  `memory.events` is in the service's own cgroup and systemd recreates it on
+  every restart — which is bounded by `MemoryHigh` throttling long before
+  anything is killed rather than by luck; `docs/zigbee.md` records the two
+  alternatives that were considered and left out.
 - **The AI subsystem's own conventions live in `src/ai/CLAUDE.md`**, which
   loads when you work under `src/ai/`: the mapping library and its five
   routes, the retry path and the backoff gate, `ai_run_exchanges`, the five
@@ -470,6 +698,30 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   at boot, `forgetDevice` is wired to the `deviceRemoved` event and
   `forgetMember` to `endMembership`, because both deletes are done by the
   cascade and the map would otherwise hold pins on things that are gone.
+- **A device being offline is sometimes the plan, and only a person knows.**
+  Somebody unplugs a heater for the summer: the device is unreachable, the home
+  is fine, and nothing could say so — so the dashboard counted it, put *Needs
+  attention* over the home and went on doing it for four months.
+  `PATCH /devices/:id { offlineExpected }` is them saying it, and the device
+  carries `offlineExpected: { at, by? }` back. Four rules. **It is the house's**
+  — a column on the device row, not a dismissal each phone remembers — because
+  one person unplugs the heater and nobody else should go on being told the
+  home needs looking at; that is the same split `name` and `roomId` are on, and
+  it is why the field sits under `device.edit` while `favorite`, in the same
+  body, needs nothing. **It excuses *this* absence, not the device**: the
+  registry clears it the moment the device is reachable again, so a socket
+  excused in May, plugged back in and pulled out again in September is a new
+  thing to be told about. **A radio is not a device**, so
+  `radioReachabilityChanged` deliberately does *not* clear it — it speaks for
+  everything behind it and is an assumption rather than a report, and Z2M's
+  bridge says `online` on every hub restart, which would have wiped every
+  excuse in the home overnight on a hub nobody touched; nothing is hidden by
+  holding them, since a down radio's devices are already explained by the
+  resting-radio rule in both apps and the first real per-device report ends it
+  properly. That is what `applyReachability`'s `fromRadio` exists for, and it
+  is the only thing it decides. And **one activity row per decision, none for
+  the clear** — the device coming back already writes `device.online`.
+  `docs/api.md` is canonical.
 - **Zones are the layer above rooms, and are deliberately not floors.** A room
   belongs to one zone or to none, and none is the ordinary case — which is the
   whole argument: a flat has no floors and a garage is not one, so a *floor*
@@ -895,8 +1147,18 @@ outside `deploy/`, so they stay here:
   whether the new build is any good — so by the time `install.sh` rolls back,
   the database has already moved on. A migration that drops or renames turns a
   failed health check into a hub neither build can start.
-  `test/migrations.test.ts` enforces that, and the journal's four invariants
-  with it; `-- gethome:destructive: <why>` is the deliberate way past.
+  `test/migrations.test.ts` enforces that, and the journal's invariants with
+  it; `-- gethome:destructive: <why>` is the deliberate way past.
+  **A migration's drizzle *snapshot* has to be committed with it**, and that is
+  now one of those invariants rather than a habit. The snapshots are not read at
+  boot, so a missing one breaks nothing until the next person runs
+  `db:generate` — and then it breaks badly: `0014_snapshot.json` was never
+  committed, so drizzle diffed the schema against `0013` and generated a
+  migration that re-emitted `0014`'s three `ALTER TABLE … ADD`s on top of its
+  own. On any hub that had already run `0014` that is `duplicate column name`
+  at boot, which is a hub that does not start and a rollback that lands on one
+  that doesn't either. The SQL was well formed, the journal was complete and
+  the file was additive, so nothing else here would have said a word.
 
 ## Keep the docs in sync
 

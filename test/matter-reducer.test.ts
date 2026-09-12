@@ -105,6 +105,33 @@ describe('Matter attribute reducer (port of the app reducer)', () => {
     expect(next.currentMode).toBe(2);
   });
 
+  it('reads CurrentMode from every Mode Base cluster, not just the vacuum', () => {
+    // All of Matter's mode clusters derive from Mode Base and keep
+    // `CurrentMode` at 0x0001 — only the older, standalone `ModeSelect` puts it
+    // at 0x0003. The reducer knew the vacuum's and none of the rest, so a
+    // washing machine, a dishwasher, an oven, a fridge, a microwave, an EV
+    // charger and a water heater each announced a `mode` capability from their
+    // device type that nothing could ever fill.
+    const modeBase = [
+      Cluster.laundryWasherMode,
+      Cluster.dishwasherMode,
+      Cluster.ovenMode,
+      Cluster.refrigeratorMode,
+      Cluster.microwaveOvenMode,
+      Cluster.energyEvseMode,
+      Cluster.waterHeaterMode,
+      Cluster.rvcCleanMode,
+    ];
+    for (const cluster of modeBase) {
+      const { next } = reduceReports(emptyState(), [report(cluster, 0x0001, 3)]);
+      expect(next.currentMode, `cluster 0x${cluster.toString(16)}`).toBe(3);
+    }
+    // And the odd one out still reads from its own attribute.
+    expect(reduceReports(emptyState(), [report(Cluster.modeSelect, 0x0003, 5)]).next.currentMode).toBe(5);
+    // …while the attribute the others use means nothing to it.
+    expect(reduceReports(emptyState(), [report(Cluster.modeSelect, 0x0001, 5)]).next.currentMode).toBeUndefined();
+  });
+
   it('reports no change for unknown clusters and attributes', () => {
     const { changed } = reduceReports(emptyState(), [
       report(0x9999, 0x0000, 42),

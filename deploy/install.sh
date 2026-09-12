@@ -42,6 +42,11 @@
 #                       exists: without it "rolled back and healthy" and "the
 #                       hub is down" are the same two signals.
 #   @@PAIRING:<code>@@  the pairing code, when the hub is unclaimed
+#   @@RADIO_BUDGET:<one|both>@@  how many radios this board was measured for.
+#                       Advice, not a ceiling: `one` is the board on which
+#                       running both is an owner's informed choice, and it is
+#                       printed early so an installer UI can say so before the
+#                       hub exists to be asked.
 #   @@CAPABILITIES:<list>@@  what this hub ended up able to talk to, e.g.
 #                            "Zigbee, Wi-Fi and MQTT" — a 512 MB board runs one
 #                            radio at a time, so this is not the same on every
@@ -213,23 +218,45 @@ esac
 # Zigbee2MQTT keeps a hard cap: it is the optional process, and it should die
 # on its own rather than take the hub with it.
 SMALL_BOARD=""
+TIGHT_BOARD=""
 HUB_HEAP_MB=512
 Z2M_HEAP_MB=512
 HUB_MEM_HIGH=""
 Z2M_MEM_HIGH=""
 Z2M_MEM_MAX=""
 HUB_V8_FLAGS=""
-# How many radios this board can afford at once — measured, not chosen. The
-# owner's preference between them, when only one fits, is a separate thing and
-# lives in <DATA_DIR>/radio-mode; gethome-zigbee-detect is where the two meet.
+# Where the small tier splits in two. Below this line is a 512 MB board, above
+# it a 1 GB one, and no board lands near it: a Zero 2 W reports 415-490 MB of
+# MemTotal and a "1 GB" Pi reports 920-970 once the GPU has taken its share.
+# The gap is wide on purpose — this has to separate two families of hardware,
+# not measure either of them.
+TIGHT_BOARD_MAX_MB=768
+# How many radios this board was measured for — measured, not chosen. The
+# owner's preference is a separate thing and lives in <DATA_DIR>/radio-mode;
+# gethome-zigbee-detect is where the two meet.
+#
+# **Advice, not a ceiling.** This number is measured against a *full* home —
+# the OS, the hub with Matter loaded, and a Zigbee2MQTT holding a hundred
+# devices' state — and most homes are nowhere near it. An owner may set
+# `radio-mode` to `both` on a board that says `one`, and the hub then watches
+# its own memory and hands a radio back by itself if the board really does run
+# short (src/core/radio-pressure.ts). What this value decides is what is
+# *recommended*, and what every app warns from.
+#
+# **The test is memory and only memory**, which is what makes the tier below
+# *512 MB and 1 GB together*: a Zero 2 W, a Pi 3, and the 1 GB Pi 4 all land on
+# `one`, because a board sold as "1 GB" reports ~920-950 MB once the GPU has
+# taken its share. Read as a shopping rule that is "2 GB or more runs both" —
+# and never as "a Pi 4 runs both", which is false for every 1 GB Pi 4 there is.
+# The 1 GB half of this tier is still **unmeasured** — nobody has run one for a
+# day — which is why it keeps the recommendation while getting ceilings of its
+# own below. Moving the *budget* is the separate decision, and it needs
+# hardware: a board on `both` is one the pressure watch only reports on
+# (src/core/radio-pressure.ts gates acting on `budget === 'one'`), so promoting
+# an unmeasured tier would take away its safety net as well as its warning.
 RADIO_BUDGET=both
 if [[ "$RAM_MB" -gt 0 && "$RAM_MB" -le 1024 ]]; then
   SMALL_BOARD=1
-  HUB_HEAP_MB=160
-  Z2M_HEAP_MB=200
-  HUB_MEM_HIGH="MemoryHigh=200M"
-  Z2M_MEM_HIGH="MemoryHigh=170M"
-  Z2M_MEM_MAX="MemoryMax=230M"
   # One radio, not none. Matter and Zigbee do not both fit — 70 (OS) + 178
   # (hub with Matter) + 150 (Zigbee2MQTT) is more than a Zero 2 W has, while
   # 70 + 119 + 150 fits with room for zram. But this used to be written as
@@ -240,12 +267,61 @@ if [[ "$RAM_MB" -gt 0 && "$RAM_MB" -le 1024 ]]; then
   # is the only thing that knows whether the stick is there — at boot, on
   # every plug and unplug, and at the end of this install.
   RADIO_BUDGET=one
-  # Measured on this hub: with Matter loaded these two take its resident set
-  # from 176 MB to 139 MB, for about half a second of extra startup and no
-  # change in request latency. They have to be argv — NODE_OPTIONS refuses
-  # --optimize-for-size outright ("not allowed in NODE_OPTIONS").
-  HUB_V8_FLAGS="--optimize-for-size --max-semi-space-size=1"
+
+  if [[ "$RAM_MB" -le "$TIGHT_BOARD_MAX_MB" ]]; then
+    # A 512 MB board. Every number here was measured on a Zero 2 W and they
+    # are deliberately tight: 200M is 25 MB above the highest resident set ever
+    # recorded there (175 MB, both radios, one Matter plug, seven hours), which
+    # is the margin that makes throttling the signal the radio watch acts on.
+    TIGHT_BOARD=1
+    HUB_HEAP_MB=160
+    Z2M_HEAP_MB=200
+    HUB_MEM_HIGH="MemoryHigh=200M"
+    Z2M_MEM_HIGH="MemoryHigh=170M"
+    Z2M_MEM_MAX="MemoryMax=230M"
+    # Measured on this hub: with Matter loaded these two take its resident set
+    # from 176 MB to 139 MB, for about half a second of extra startup and no
+    # change in request latency. They have to be argv — NODE_OPTIONS refuses
+    # --optimize-for-size outright ("not allowed in NODE_OPTIONS").
+    HUB_V8_FLAGS="--optimize-for-size --max-semi-space-size=1"
+  else
+    # A 1 GB board — a Pi 3, a Pi 3B+, a 1 GB Pi 4. It shares the tier above
+    # for everything that is about *scarcity* (zram, the memory cgroup, no
+    # building from source here, one radio recommended) and must not share the
+    # ceilings, which are a 512 MB board's arithmetic. It had them, and that was
+    # a real fault rather than an untidiness: `MemoryHigh=200M` on a board with
+    # ~920 MB of MemTotal throttles the hub with hundreds of megabytes free, and
+    # throttling is exactly what `radio-pressure.ts` acts on — so a 1 GB board
+    # running both radios could have one taken back while its memory was fine.
+    #
+    # **These are reasoned, not measured**, and the reasoning is the same
+    # arithmetic the 512 MB tier came from rather than a new claim: a full home
+    # is ~70 (OS) + ~180 (hub with Matter) + ~150 (Zigbee2MQTT), so the ceilings
+    # below sit at roughly 2.3x the hub's measured both-radio peak and 2.5x
+    # Z2M's assumed full-home working set. They are also, unlike the tier above,
+    # **not over-subscribed**: 400 + 400 + 70 is 870 of ~920, where the 512 MB
+    # board deliberately promises 200 + 230 + 70 out of 415 and relies on zram
+    # to make that true. A ceiling is a bound on a leak here, not a squeeze.
+    HUB_HEAP_MB=320
+    Z2M_HEAP_MB=320
+    HUB_MEM_HIGH="MemoryHigh=400M"
+    Z2M_MEM_HIGH="MemoryHigh=320M"
+    Z2M_MEM_MAX="MemoryMax=400M"
+    # `--optimize-for-size` stays: measured, it is most of that 176 -> 139 MB
+    # for half a second of startup and no change in request latency, which is
+    # worth taking on any board. `--max-semi-space-size=1` does not — it pins
+    # the scavenger's young generation to buy memory with garbage-collection
+    # throughput, and buying memory is the trade a board with 500 MB spare has
+    # no reason to make.
+    HUB_V8_FLAGS="--optimize-for-size"
+  fi
 fi
+
+# Said out loud, and early. GetHome Studio draws the choice between one radio
+# and both on its install screen, which is well before there is a hub to ask —
+# and the question is one somebody should meet while they are still deciding
+# what to plug in, not after the install has already picked for them.
+printf '@@RADIO_BUDGET:%s@@\n' "$RADIO_BUDGET"
 
 # ── System packages ────────────────────────────────────────────────────────
 # Only what is actually missing. Raspberry Pi OS Lite already ships
@@ -413,9 +489,24 @@ if [[ -n "$SMALL_BOARD" ]]; then
   # — what they can act on is "it takes memory the hub needs" plus the command.
   # And it must not promise a second radio: RADIO_BUDGET is computed from the
   # board's RAM above and a desktop makes no difference to it, so "turn it off
-  # and get Matter too" would simply be untrue.
+  # and get Matter too" would simply be untrue. It is not untrue that the
+  # desktop is 75 MB of the margin an owner who turns both radios on is
+  # spending — but that offer is made at the end of the install, in one place,
+  # where it can be answered rather than being an aside in a warning about
+  # something else.
+  #
+  # The first clause is the one that has to follow the tier: 75 MB is a good
+  # part of a 512 MB board and about eight per cent of a 1 GB one, so telling a
+  # Pi 3 owner their board is too small to run a desktop is the 512 MB
+  # conclusion applied to twice the hardware. The advice is the same either way,
+  # which is why only the claim changes.
   if [[ "$(systemctl get-default 2>/dev/null || true)" == "graphical.target" ]]; then
-    warn "This Pi is running the desktop version of Raspberry Pi OS. On a board this small the desktop uses up a good part of the memory the hub needs, for a screen that isn't attached. The hub works either way, it just has less room. If nobody uses a screen on this Pi, run \`sudo systemctl set-default multi-user.target\` and restart it to give that memory back; Raspberry Pi OS Lite is the version that never takes it in the first place."
+    if [[ -n "$TIGHT_BOARD" ]]; then
+      DESKTOP_COST="On a board this small the desktop uses up a good part of the memory the hub needs, for a screen that isn't attached."
+    else
+      DESKTOP_COST="The desktop holds about 75 MB for a screen that isn't attached — not a lot on this board, but it is memory the hub could be using."
+    fi
+    warn "This Pi is running the desktop version of Raspberry Pi OS. ${DESKTOP_COST} The hub works either way, it just has less room. If nobody uses a screen on this Pi, run \`sudo systemctl set-default multi-user.target\` and restart it to give that memory back; Raspberry Pi OS Lite is the version that never takes it in the first place."
   fi
 fi
 
@@ -1244,6 +1335,103 @@ UNIT
 keep_wifi_awake
 keep_wifi_reachable
 
+# ── Bluetooth, so a factory-new Matter accessory can be found at all ───────
+# **An accessory that has never been on a network cannot be found on one.** A
+# Wi-Fi Matter plug out of its box — or one somebody has just held the button
+# on to reset — advertises over Bluetooth LE and nowhere else, and the
+# conversation that follows is what gives it the Wi-Fi it lives on afterwards.
+# Without this the hub can only take in accessories already on the LAN, which
+# is a minority of what people buy, and was for a long time the whole of what
+# it could do: the app searched the network for a device that was never going
+# to be there and said "Pairing with your hub" until somebody gave up.
+#
+# The radio is usually present and usually off. Raspberry Pi OS ships a
+# headless image with Bluetooth **soft-blocked** in rfkill, which is invisible
+# from anywhere the product can see: `hciconfig` lists the adapter perfectly
+# happily and bringing it up fails with an errno nothing logs. So this
+# unblocks it, makes that stick across reboots, and starts bluetoothd.
+matter_bluetooth() {
+  local rfkill_dir="${GETHOME_RFKILL_DIR:-/sys/class/rfkill}"
+  local entry name unblocked=""
+
+  # No adapter at all is an ordinary machine, not a fault: a Pi 4 with the
+  # radio disabled in config.txt, a virtual machine, an x86 box. The hub says
+  # so on GET /hub and the app explains it; there is nothing to warn about
+  # here.
+  [[ -d "$rfkill_dir" ]] || return 0
+
+  for entry in "$rfkill_dir"/*; do
+    [[ -r "$entry/name" ]] || continue
+    name="$(cat "$entry/name" 2>/dev/null || true)"
+    case "$name" in hci*) ;; *) continue ;; esac
+    # Writing the sysfs node rather than shelling out to `rfkill`: that binary
+    # is not on a minimal image, and this is one byte.
+    if [[ "$(cat "$entry/soft" 2>/dev/null || echo 0)" == "1" ]]; then
+      printf '0' | $SUDO tee "$entry/soft" >/dev/null 2>&1 || true
+    fi
+    [[ "$(cat "$entry/soft" 2>/dev/null || echo 1)" == "0" ]] && unblocked=1
+    if [[ "$(cat "$entry/hard" 2>/dev/null || echo 0)" == "1" ]]; then
+      warn "This board's Bluetooth is blocked by a hardware switch, so the hub cannot pair a brand-new Matter accessory. Accessories already on your network still pair normally."
+      return 0
+    fi
+  done
+
+  [[ -n "$unblocked" ]] || return 0
+
+  # `rfkill unblock` does not survive a reboot on its own. systemd-rfkill
+  # restores the state it saw at shutdown, so unblocking now and letting it
+  # save is the persistence — but only where it is enabled, so ask for it.
+  $SUDO systemctl enable systemd-rfkill >/dev/null 2>&1 || true
+  $SUDO systemctl enable bluetooth >/dev/null 2>&1 || true
+  if $SUDO systemctl start bluetooth >/dev/null 2>&1; then
+    say "Bluetooth is on, so the hub can pair a Matter accessory straight out of its box."
+  else
+    warn "Bluetooth would not start, so the hub can only pair Matter accessories that are already on your network. 'systemctl status bluetooth' says why."
+  fi
+}
+
+# ── The Wi-Fi the hub passes on ────────────────────────────────────────────
+# The other half of the above: taking an accessory on over Bluetooth means
+# handing it a network, and the hub cannot read the root-owned profile the
+# password lives in. deploy/wifi-credentials.sh says why this is a file the hub
+# is *given*. The dispatcher is what keeps it true — a home that retypes its
+# Wi-Fi password next month gets a fresh profile, and enumerating today's
+# profiles is exactly what cannot cover that.
+share_wifi_for_matter() {
+  local helper="${GETHOME_WIFI_CREDS_BIN:-/usr/local/lib/gethome-wifi-credentials.sh}"
+  local dispatcher="${GETHOME_WIFI_CREDS_DISPATCHER:-/etc/NetworkManager/dispatcher.d/52-gethome-wifi-credentials}"
+
+  $SUDO install -m 0755 "$HUB_DIR/deploy/wifi-credentials.sh" "$helper" 2>/dev/null || {
+    warn "Could not install the Wi-Fi helper, so the hub will ask for your Wi-Fi password when you pair a Matter accessory."
+    return 0
+  }
+
+  if command -v nmcli >/dev/null 2>&1; then
+    $SUDO mkdir -p "$(dirname "$dispatcher")" 2>/dev/null || true
+    # NM ignores a dispatcher script anybody but root can write, so the
+    # ownership and the mode are part of the fix, exactly as for the power-save
+    # one above.
+    if $SUDO tee "$dispatcher" >/dev/null <<DISPATCH
+#!/bin/sh
+# Installed by GetHome. Records the Wi-Fi this hub is on so it can pass it to a
+# Matter accessory it pairs over Bluetooth. deploy/wifi-credentials.sh says why.
+[ "\$2" = "up" ] || exit 0
+exec ${helper} --conf ${CONF_DIR} --quiet
+DISPATCH
+    then
+      $SUDO chown root:root "$dispatcher" 2>/dev/null || true
+      $SUDO chmod 0755 "$dispatcher" 2>/dev/null || true
+    fi
+  fi
+
+  # And once now, so pairing works on a hub nobody reconnects.
+  $SUDO env GETHOME_GROUP="$SERVICE_USER" "$helper" --conf "$CONF_DIR" || true
+}
+
+matter_bluetooth
+share_wifi_for_matter
+
+
 # ── mDNS ───────────────────────────────────────────────────────────────────
 # avahi answers for this machine's own name; the hub hands it the
 # `_gethome._tcp` service rather than running a second responder of its own.
@@ -1492,6 +1680,14 @@ Type=oneshot
 RemainAfterExit=no
 Environment=GETHOME_CONF=${CONF_DIR}
 ExecStart=/usr/local/lib/gethome-zigbee-detect.sh
+# The detector exits 1 to mean "Zigbee is not the radio here" — no coordinator
+# plugged in, or one that is plugged in on a board the owner has set to Matter.
+# That is an ordinary, correct state and install.sh reads the code to decide
+# what to tell the user, so the exit code stays. But systemd parks a oneshot
+# that exits non-zero in "failed", and a detector sitting there failed is
+# exactly what somebody finds when they go looking for why their Zigbee is
+# quiet — pointing at the detector instead of at the radio switch they used.
+SuccessExitStatus=1
 
 [Install]
 WantedBy=multi-user.target
@@ -1558,6 +1754,48 @@ ADAPTER_MATTER=1
 ENV
 fi
 
+# **A budget is a measurement of the machine, and the machine can change under
+# it.** `hub.env` is written only when it is absent, which is right for
+# everything else in it — those are settings, and an upgrade must not stamp on
+# them. `GETHOME_RADIO` and the heap are not settings: they are what this
+# script measured from the RAM it found, and the commonest way somebody grows
+# a GetHome home is to move the SD card into a bigger Pi. That carries
+# `/etc/gethome/hub.env` with it, so a card that started life in a Zero 2 W
+# went on telling a Pi 5 it had memory for one radio — for ever, because
+# re-running this installer does not rewrite an existing file either. The
+# upgrade path this project recommends in its own README ended on a board that
+# still recommended one radio, still drew the picker, and still let the hub
+# stand a radio down with gigabytes free.
+#
+# **It only ever widens.** A stored `one` on a board that now measures `both`
+# is a stale measurement and is corrected; a stored `both` is left alone
+# whatever this board measures, because that is the documented hand-edit (see
+# `deploy/CLAUDE.md`) and the owner's own override — and `radio-pressure.ts`
+# is already watching a board running two radios it was not measured for. So
+# this can remove a restriction and can never add one.
+if [[ -f "$CONF_DIR/hub.env" ]]; then
+  STORED_RADIO=$(sed -n 's/^GETHOME_RADIO=//p' "$CONF_DIR/hub.env" | tail -n1)
+  if [[ "$STORED_RADIO" == "one" && "$RADIO_BUDGET" == "both" ]]; then
+    # A temporary file rather than `sed -i`, which takes the next argument as a
+    # backup suffix on BSD and is the portability trap this repo has already
+    # paid for once.
+    HUB_ENV_NEW=$(mktemp)
+    sed 's/^GETHOME_RADIO=one$/GETHOME_RADIO=both/' "$CONF_DIR/hub.env" > "$HUB_ENV_NEW" \
+      && $SUDO cp "$HUB_ENV_NEW" "$CONF_DIR/hub.env"
+    rm -f "$HUB_ENV_NEW"
+    # The heap travels with it for the same reason: 160 MB was this board's
+    # predecessor's number, and nothing else would ever revisit it.
+    if grep -q '^NODE_OPTIONS=--max-old-space-size=' "$CONF_DIR/hub.env"; then
+      HUB_ENV_NEW=$(mktemp)
+      sed "s/^NODE_OPTIONS=--max-old-space-size=.*/NODE_OPTIONS=--max-old-space-size=${HUB_HEAP_MB}/" \
+        "$CONF_DIR/hub.env" > "$HUB_ENV_NEW" \
+        && $SUDO cp "$HUB_ENV_NEW" "$CONF_DIR/hub.env"
+      rm -f "$HUB_ENV_NEW"
+    fi
+    say "This Pi has more memory than the one this hub was first set up on, so it is no longer held to one radio at a time: ${RAM_MB} MB runs Zigbee and Matter together. Nothing else about the hub changed."
+  fi
+fi
+
 $SUDO tee /etc/systemd/system/gethome-hubd.service >/dev/null <<UNIT
 [Unit]
 Description=GetHome Hub
@@ -1597,6 +1835,16 @@ RestartSec=5
 # system responder instead of running one of its own.
 ReadWritePaths=${DATA_DIR} /etc/avahi/services
 StateDirectory=gethome
+# Bluetooth, for commissioning a Matter accessory that has never been on a
+# network. noble talks to the controller over a raw HCI socket, which needs
+# CAP_NET_RAW and CAP_NET_ADMIN — and the usual advice, setcap on the node
+# binary, would hand raw sockets to every script anybody ever runs with that
+# node. Ambient capabilities are the same grant scoped to this one service,
+# which is why the bounding set names them too: without that line systemd
+# drops them before the ambient set is applied and the radio silently finds
+# nothing, exactly as it does with no capabilities at all.
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full
@@ -1893,6 +2141,19 @@ if [[ -x /usr/local/lib/gethome-zigbee-detect.sh ]]; then
   fi
 fi
 
+# A third state, and neither of the two above. The detector exits non-zero when
+# Zigbee is not the radio here — which includes a board whose owner has *chosen*
+# Matter with a coordinator sitting in its socket. Without asking separately,
+# the install's closing line said "with no Zigbee coordinator plugged in",
+# four lines under the detector's own "A Zigbee coordinator is plugged in", on
+# one screen, about hardware the owner could see. Same read as the hub's, from
+# the same file: the recorded by-id name, and whether it is still there.
+ZIGBEE_STANDING_BY=""
+if [[ -z "$ZIGBEE_CONFIGURED" ]]; then
+  zigbee_recorded=$(sed -n 's/^ZIGBEE_ADAPTER=//p' "$CONF_DIR/zigbee.env" 2>/dev/null | tail -n1)
+  [[ -n "$zigbee_recorded" && -e "$zigbee_recorded" ]] && ZIGBEE_STANDING_BY=1
+fi
+
 # A started service is not a working radio. The detector's success means "a
 # device node is there and I started the unit"; whether Zigbee2MQTT actually
 # reached the stick is a different question, and the hub already answers it —
@@ -1994,7 +2255,19 @@ fi
 printf '@@CAPABILITIES:%s@@\n' "$CAPS"
 say "This hub can talk to: ${CAPS}."
 
-if [[ "$RADIO_BUDGET" == "one" ]]; then
+RADIO_MODE=auto
+if [[ -r "$DATA_DIR/radio-mode" ]]; then
+  RADIO_MODE=$(tr -d '[:space:]' < "$DATA_DIR/radio-mode" 2>/dev/null || echo auto)
+fi
+
+if [[ "$RADIO_BUDGET" == "one" && "$RADIO_MODE" == "both" ]]; then
+  # The owner has already overridden the measurement, on this board, before
+  # this run. Falling through to the branches below would tell them their
+  # coordinator has the board and Matter is off — which is what the detector
+  # was *told not to do* twenty lines earlier, and reads as the install having
+  # quietly reverted a setting they made on purpose.
+  say "This board was measured for one radio at a time and you have asked it to run both, which it is doing. The hub watches its own memory from here: if this board really does run short — a bigger Zigbee network is what usually does it — the hub hands a radio back by itself rather than letting the system pick, and says so in the GetHome app. You can go back to one radio there at any time."
+elif [[ "$RADIO_BUDGET" == "one" ]]; then
   # One radio at a time, so say which one has it and how to change that — and
   # keep `ZIGBEE_CONFIGURED` (the board went to the coordinator) apart from
   # `ZIGBEE_READY` (Zigbee2MQTT actually reached it), because on a small board
@@ -2010,6 +2283,14 @@ if [[ "$RADIO_BUDGET" == "one" ]]; then
     say "This board has memory for one radio at a time, and the Zigbee coordinator you plugged in has it, so Matter is off. You can switch to Matter in the GetHome app — the coordinator stays configured, and Zigbee devices come back when you switch back."
   elif [[ -n "$ZIGBEE_CONFIGURED" ]]; then
     say "This board has memory for one radio at a time and the coordinator has it, so Matter is off — and until the coordinator is talking, this hub is running neither radio. Sort out the warning above and Zigbee starts on its own. If you would rather use Matter meanwhile, switch this board in the GetHome app; the coordinator stays configured and Zigbee devices come back when you switch back."
+  elif [[ "$MATTER_ON" == "1" && -n "$ZIGBEE_STANDING_BY" ]]; then
+    # The coordinator is here and standing down, which is a *choice* somebody
+    # made in the app. Said with the other sentence — "with no Zigbee
+    # coordinator plugged in" — this line contradicted the detector's own
+    # output four lines above it, on the same screen, about hardware the owner
+    # could see. It is the installer's half of the same bug the app had, where
+    # a hub set to Matter reported "Zigbee · no stick".
+    say "This board has memory for one radio at a time, and you have set it to Matter — so the Zigbee coordinator that is plugged in is standing by rather than missing. Switch back in the GetHome app whenever you like; it stays configured, and your Zigbee devices come back with it."
   elif [[ "$MATTER_ON" == "1" ]]; then
     say "This board has memory for one radio at a time, and with no Zigbee coordinator plugged in that radio is Matter. Plug a stick in whenever you like (SONOFF ZBDongle-E/P, ConBee, SkyConnect) and Zigbee takes over by itself, with no reboot."
   else
@@ -2023,6 +2304,40 @@ if [[ "$RADIO_BUDGET" == "one" ]]; then
   fi
 elif [[ -z "$ZIGBEE_CONFIGURED" ]]; then
   say "No Zigbee coordinator is plugged in, so this hub starts with Matter, Wi-Fi and MQTT devices. Plug one in whenever you like — Zigbee starts by itself, with no reboot."
+fi
+
+# The offer, and its price, said once on the board where it is a real decision.
+#
+# Deliberately **after** the sentence naming which radio ended up with the
+# board, because it only makes sense as an answer to that — and deliberately
+# not said on a hub already running both, where the branch above has covered
+# it. `say` rather than `warn`: nothing is wrong, and an amber line here would
+# read as the install having gone badly on every 512 MB board there is.
+if [[ "$RADIO_BUDGET" == "one" && "$RADIO_MODE" != "both" ]]; then
+  say "If you would rather have both radios at once, you can turn that on in the GetHome app, and on a small home this board handles it comfortably — measured, not assumed."
+  # **The sentence that has to be read before the network exists.** The failure
+  # this is aimed at is not a hub falling over: it is somebody turning both
+  # radios on with four devices, being perfectly happy, spending a year buying
+  # more, and meeting the trade long after the point where a different board
+  # was still an option. So it names what *changes* the answer, and names the
+  # board that never has the question — which is the only part somebody
+  # standing at the start of a setup can act on.
+  say "Worth knowing before you build the network, though: what uses up the margin is Zigbee growing. Zigbee2MQTT holds state for every device you pair, so the board that copes with a handful may not cope with another twenty — this is a setting to come back to rather than one to set and forget. If it does run short the hub notices before anything breaks, hands one radio back by itself and says so in the app; nothing is unpaired. And if you already know you want a large Zigbee network alongside Matter, a board with 2 GB of memory or more never has to choose — that is a Pi 5, or a Pi 4 in its 2 GB or larger version, and not the 1 GB Pi 4, which is measured exactly like this one."
+  # Two things the watch depends on, and both are worth naming *here* rather
+  # than where they were set up: they were noise on a hub running one radio and
+  # they are the difference between "hands a radio back" and "something dies"
+  # on a hub running two.
+  if ! memory_cgroup_live; then
+    say "One caveat if you do: the kernel's memory accounting is not in force on this board yet, so the hub cannot see the board running short and cannot hand a radio back. Restart this Pi first — the installer has already switched it on for the next boot."
+  fi
+  # `/proc/swaps` rather than `swapon`, which lives in /sbin and is not on a
+  # non-root PATH on Raspberry Pi OS — so the command fails, the output is
+  # empty, and the check reports "no swap" on a board that has zram running.
+  # A false warning about the one thing that makes this offer thinner is worse
+  # than no warning: it argues against a choice the numbers actually support.
+  if [[ "$(grep -c '^/' /proc/swaps 2>/dev/null || echo 0)" == "0" ]]; then
+    say "One caveat if you do: this board has no swap of any kind, so there is no compressed memory to fall back on and the margin for running both radios is a good deal thinner than the numbers above assume."
+  fi
 fi
 
 # ── The broker asks for a password now ─────────────────────────────────────

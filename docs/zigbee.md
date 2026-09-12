@@ -19,10 +19,13 @@ printer or a UPS, so it is offered to you rather than adopted automatically.
 See [Finding the coordinator](#finding-the-coordinator).
 
 **Without a coordinator the hub runs Matter, Wi-Fi and MQTT devices only.** On a
-Raspberry Pi Zero 2 W there is a second consequence: 512 MB cannot hold Matter
-and Zigbee2MQTT at once, so that board runs *one* of them — see
-[Zigbee or Matter on a small board](#zigbee-or-matter-on-a-small-board). A Pi 4
-or 5 runs both together and never makes the choice.
+board with **1 GB of memory or less** there is a second consequence: a full
+house of Matter *and* Zigbee2MQTT does not comfortably fit, so that board is set
+up to run *one* of them — see
+[Zigbee or Matter on a small board](#zigbee-or-matter-on-a-small-board). A board
+with **2 GB or more** runs both together and never makes the choice. It is the
+memory that decides, not the model: a 1 GB Pi 4 and a Pi 3 are in the small tier
+beside the Zero 2 W.
 
 ## Setup
 
@@ -295,20 +298,174 @@ Four rules hold this together:
 
 ### Zigbee or Matter on a small board
 
-A 512 MB board fits the operating system (~70 MB), the hub (~119 MB), and
-**one** of Zigbee2MQTT (~150 MB, its own process) or Matter (~60 MB inside the
-hub). Not both. Two separate things decide which:
+**"Small" is a memory reading, never a model name.** `install.sh` divides
+`MemTotal` by a single threshold — **1024 MB** — and writes the answer into
+`GETHOME_RADIO`:
+
+| `MemTotal` | `GETHOME_RADIO` | Boards that land here |
+|---|---|---|
+| more than 1024 MB | `both` | Pi 5, Pi 4 (2/4/8 GB), Pi 400, Pi 500, CM4/CM5 at 2 GB+ |
+| 1024 MB or less | `one` | Zero 2 W, Pi 3 A+ (512 MB) · **Pi 3 / 3B+, Pi 4 1 GB, CM4 1 GB** (1 GB) |
+| less than 400 MB | — | refused by the installer |
+
+A board advertised as "1 GB" reports rather less than 1024 MB once the GPU has
+taken its share (~920 MB on a Pi 4, ~950 on a Pi 3), and a 2 GB board reports
+~1900 — so in practice the threshold reads as **2 GB or more runs both**. Two
+consequences that are easy to miss and are the reason the rule is written here
+rather than inferred from the boards:
+
+- **A 1 GB Pi 4 is a one-radio board.** Nothing in the installer looks at the
+  model, so "Pi 4" is not a capability. Never write copy that says a Pi 4 runs
+  both — say *2 GB or more*. The apps had this wrong in five places at once.
+- **1 GB is unmeasured, and it has its own ceilings anyway.** Every figure in
+  this section came off a 512 MB Zero 2 W. A 1 GB board has about twice the room
+  and is very probably fine on both radios; nobody has run it for a day to find
+  out, so it is recommended one at a time and allowed two, exactly like the
+  smaller board. What it no longer shares is the *ceilings*. It ran on the
+  512 MB board's `MemoryHigh=200M`, which was a real fault rather than an
+  untidiness: 200 MB against ~920 MB of `MemTotal` throttles the hub with
+  hundreds of megabytes free, and throttling is exactly what the radio watch
+  acts on — so a 1 GB board running both radios could have one handed back while
+  its memory was fine. `install.sh` splits the tier at `TIGHT_BOARD_MAX_MB`
+  (768 MB, with 490 and 920 either side of it and no board near it):
+
+  | | 512 MB | 1 GB |
+  |---|---|---|
+  | hub `MemoryHigh` | 200M | **400M** |
+  | hub `--max-old-space-size` | 160 | **320** |
+  | Z2M `MemoryHigh` / `MemoryMax` | 170M / 230M | **320M / 400M** |
+  | hub V8 flags | `--optimize-for-size --max-semi-space-size=1` | `--optimize-for-size` |
+
+  **Reasoned from the same arithmetic, not measured.** A full home is ~70 (OS)
+  + ~180 (hub with Matter) + ~150 (Zigbee2MQTT), so the 1 GB ceilings sit at
+  roughly 2.3× the hub's measured both-radio peak and 2.5× Z2M's assumed
+  full-home working set — and, unlike the tier above, they are **not
+  over-subscribed**: 400 + 400 + 70 is 870 of ~920, where the 512 MB board
+  deliberately promises 200 + 230 + 70 out of 415 and leans on zram to make it
+  true. A ceiling is a bound on a leak there, not a squeeze. The semi-space pin
+  is dropped for the same reason: it buys memory with garbage-collection
+  throughput, which is a trade a board with 500 MB spare has no reason to make,
+  while `--optimize-for-size` is measured as most of that 176 → 139 MB for half
+  a second of startup and is worth taking anywhere. **The budget is the
+  separate decision and still wants hardware**: `radio-pressure.ts` gates
+  *acting* on `budget === 'one'`, so promoting this tier to `both` would take
+  away its safety net along with its warning.
+
+The arithmetic behind the threshold: a 512 MB board fits the operating system
+(~70 MB), the hub (~119 MB), and **one** of Zigbee2MQTT (~150 MB, its own
+process) or Matter (~60 MB inside the hub). Not both — in a *full* home. That
+qualification is the whole of
+[running both anyway](#running-both-on-a-board-measured-for-one), and it is
+why the budget below is a recommendation rather than a refusal. Two separate
+things decide which radio runs:
 
 > **Those figures have been measured again, and they are conservative.** On a
 > Zero 2 W with the desktop switched off, the memory cgroup finally enforcing,
 > and one zram device rather than two, ten minutes after a restart, with no
 > devices paired:
 >
-> | | assumed above | Zigbee only | both radios |
-> |---|---|---|---|
-> | hub | 119 MB | 56 MB (peak 59) | **139 MB** (peak 144) |
-> | Zigbee2MQTT | 150 MB | 80 MB (peak 86) | 64 MB (peak 86) |
-> | `MemAvailable` | — | 135 MB | **89 MB** |
+> | | assumed above | Zigbee only | both radios | both + BLE + 1 device |
+> |---|---|---|---|---|
+> | hub | 119 MB | 56 MB (peak 59) | **139 MB** (peak 144) | 138–146 MB (**peak 170**) |
+> | Zigbee2MQTT | 150 MB | 80 MB (peak 86) | 64 MB (peak 86) | 30–44 MB |
+> | `MemAvailable` | — | 135 MB | **89 MB** | 100–110 MB |
+>
+> The fourth column is the same board a year of changes later: Bluetooth
+> commissioning switched on, one Matter plug commissioned and three Zigbee
+> devices, watched for an hour. `high 0` and `oom_kill 0` throughout, no
+> restarts, both radios live the whole time.
+>
+> **Then it was watched for seven hours, and that run is what settles the
+> question this table kept deferring.** Sampled every ten minutes, both radios
+> live, one Matter plug and three Zigbee devices:
+>
+> | | |
+> |---|---|
+> | hub, resident | 156–165 MB, **0 in swap** |
+> | hub, `memory.peak` | **175 MB** against a 200 MB `MemoryHigh` — **flat for the last six hours** |
+> | Zigbee2MQTT | 17–22 MB resident, 67–72 MB in zram (≈90 MB total) |
+> | `MemAvailable` | 85–95 MB of 415 |
+> | `memory.events`, both units | `high 0`, `oom_kill 0` |
+>
+> **It plateaus, and that is the finding.** A fresh start with both radios is
+> 141 MB resident; it climbs to about 160 over the first hour and then stops.
+> The peak had not moved by as much as 4 MB in six hours. So the growth people
+> reach for to explain a Zero 2 W falling over after a week is not happening
+> here — the board reaches a steady state 25 MB under the ceiling and sits
+> there. **It was never throttled once**, which is the signal the watchdog acts
+> on and the reason it never fired.
+>
+> **Matter's own cost is about 55 MB**, measured cleanly by switching a live
+> hub between modes twenty minutes apart: 87 MB resident on Zigbee alone
+> against 141 MB freshly started on both. That is close to the ~60 MB this
+> table assumed all along. An earlier reading of 80–90 MB was wrong and worth
+> naming, because the mistake is easy to repeat: it compared a both-radio
+> process that had been up for hours against a freshly started Zigbee-only one,
+> so it was measuring the plateau climb and calling it Matter.
+>
+> **What the board gives up to do this is visible, and it is not the hub.**
+> Zigbee2MQTT drifts from 22 MB resident down to 17 as its zram share rises to
+> 72 — the kernel compressing the optional process to make room for the pinned
+> one, exactly as `MemorySwapMax=0` on `gethome-hubd` intends. `sshd` pays too,
+> and noticeably: interactive logins to this board routinely take more than
+> fifteen seconds to answer while `GET /hub` returns instantly. A hub that is
+> healthy on a board that is tight is precisely the designed outcome, and the
+> slow login is what tight looks like from outside.
+>
+> **The one thing seven hours cannot tell you is what four devices cannot tell
+> you.** Z2M's working set grows per device and it is already 90 MB here; this
+> is a home with three Zigbee devices in it. The plateau is a fact about this
+> home on this board, and the rule below is unchanged for that reason.
+>
+> #### How this was measured, so it can be measured again
+>
+> Nothing was installed permanently: a shell script on the Pi, a `crontab`
+> line every ten minutes appending one CSV row, and both removed afterwards.
+> The whole of what it read is four files, none of which need root:
+>
+> | | |
+> |---|---|
+> | `/sys/fs/cgroup/system.slice/gethome-hubd.service/memory.{current,peak,swap.current,events}` | the hub |
+> | `…/gethome-zigbee2mqtt.service/memory.…` | the same for Z2M, **under that name** — the unit is `gethome-zigbee2mqtt`, not `zigbee2mqtt` |
+> | `/proc/meminfo` | `MemTotal`, `MemAvailable`, `MemFree`, swap |
+> | `GET /hub` on localhost | which radios were actually live |
+>
+> **Record which radios were up in every row.** It is the one column that
+> cannot be reconstructed afterwards, and without it the rows either side of a
+> radio switch look like an unexplained 80 MB cliff.
+>
+> Two traps, both of which caught this measurement before it was right:
+>
+> - **Never compare an aged process against a fresh one.** The first estimate
+>   of Matter's cost was 80–90 MB and it was wrong by nearly half: it put a
+>   both-radio hub that had been up for hours beside a freshly started
+>   Zigbee-only one, so it measured the plateau climb and called it Matter.
+>   Switch one live hub between modes twenty minutes apart instead, and the
+>   answer is ~55 MB.
+> - **`memory.peak` only rises, and a service restart resets it.** Every radio
+>   switch restarts the hub, so a peak read after one is a peak for the new
+>   process. Watch the *pid* alongside it or the series reads as a collapse.
+>
+> And do the comparing **on the Pi**, not across an `ssh` pipe: a previous
+> attempt at this compared values in a command substitution that lost its word
+> boundaries, and reported "hub restarted (0→)" on a hub that had not
+> restarted.
+>
+> **Bluetooth is what moved the number, not the device.** noble and its native
+> binding cost roughly 30 MB over the 139 MB beside it; the paired node itself
+> costs far less than the radio that found it. And the peak is now firmly the
+> **start**: a cold restart with Z2M already resident reached 170 MB loading
+> `@matter/main` and bringing BLE up, and answered on port 8420 in 35 seconds
+> with both radios live. A six-second BLE discovery scan moved `memory.peak` by
+> **zero** — noble is loaded and powered on at startup, so scanning only turns
+> the radio on. It is boot that has to fit, not commissioning.
+>
+> **And the split of who pays is exactly the designed one**: hubd 146 MB
+> resident with **0 in swap** (`MemorySwapMax=0` holding it there), Z2M 40 MB
+> resident with **70 MB in zram**. What that costs does not appear in any
+> memory figure — it is a page fault and a zstd decompression on a 1 GHz A53
+> every time a Zigbee device reports, so it surfaces as **Zigbee latency**, and
+> that is the thing to measure before trusting `both` on this board.
 >
 > Both radios really did run together: `radio.matter: true` beside
 > `zigbee.connected: true`, *Matter controller started with 0 commissioned
@@ -382,8 +539,8 @@ hub). Not both. Two separate things decide which:
 
 | | Who sets it | Where it lives | What it means |
 |---|---|---|---|
-| **Budget** | `install.sh`, from the board's RAM | `GETHOME_RADIO` in `/etc/gethome/hub.env` | `both` (> 1 GB) or `one` (≤ 1 GB). Measured, not a preference. |
-| **Mode** | any member, from the GetHome app | `<data>/radio-mode` | `auto` (default), `zigbee` or `matter`. |
+| **Budget** | `install.sh`, from the board's RAM | `GETHOME_RADIO` in `/etc/gethome/hub.env` | `both` (> 1 GB) or `one` (≤ 1 GB). Measured, not a preference — and **advice, not a ceiling**. |
+| **Mode** | any member, from the GetHome app | `<data>/radio-mode` | `auto` (default), `zigbee`, `matter` or `both`. |
 
 `gethome-zigbee-detect` is where the two meet, because it is the only thing
 that knows whether a coordinator is *actually plugged in* — it runs at boot, on
@@ -404,9 +561,12 @@ deleted.
 | `one` | `zigbee` | never any | Matter runs — see below |
 | `one` | `zigbee` | **unplugged** | **nothing changes** |
 | `one` | `matter` | any | Matter runs; a plugged-in coordinator is recorded but Z2M stays down |
+| `one` | `both` | plugged in | **both run** — the owner overriding the measurement, and the hub watches its own memory from then on |
+| `one` | `both` | never any / unplugged | Matter runs; there is no second radio to run |
 | `both` | `auto` | any | both run |
 | `both` | `zigbee` | plugged in | Zigbee runs, Matter off (the owner asked for it) |
 | `both` | `matter` | any | Matter runs, Z2M stays down |
+| `both` | `both` | any | both run — the default written down, not a special case |
 
 **Matter only ever gives way to Zigbee that is genuinely going to run.** That
 is the row worth reading twice: `mode=zigbee` with no stick ever plugged in
@@ -444,6 +604,141 @@ change `ADAPTER_MATTER` and restart the hub, and the apps re-sync on the
 **zero** hub restarts instead of two. The cost of the rule is that a hub whose
 coordinator is gone for good keeps Matter off until somebody says so; the app
 is what says so, and `test/deploy-radio.test.ts` pins every row above.
+
+### Running both on a board measured for one
+
+The budget is a measurement of a **full** home: the operating system, the hub
+with Matter loaded, and a Zigbee2MQTT holding a hundred devices' state. Most
+homes are nowhere near it. A Zero 2 W with three Zigbee devices and one Matter
+plug ran both radios for an hour at `high 0` and `oom_kill 0`, the hub peaking
+at 170 MB against a 200 MB ceiling — about 30 MB of headroom, which is real and
+far too little to *promise*, but is not a reason to take Matter away from
+somebody who has four devices.
+
+**What the apps have to say about that, and why it is a copy rule rather than a
+preference.** The failure this is written against is not a hub falling over; it
+is somebody turning both radios on with four devices, being perfectly happy,
+spending a year buying Zigbee devices, and meeting the trade long after the
+point where a different board was the cheap answer. So every surface that offers
+`both` on a `one` board says four things in this order: it works now, **what
+changes it** (the Zigbee network growing, because Z2M holds state per device),
+what the hub does when it stops fitting (stands a radio down, with an
+explanation, nothing unpaired), and which board never has the question (2 GB or
+more). Dropping the second of those turns an informed choice back into a
+surprise, and it is the one most easily lost to editing for length.
+
+So `mode: both` is accepted on any board, and the answer to the 30 MB is to
+watch rather than to refuse. **Refusing would have been the worse of the two
+mistakes in the common case, and allowing it unwatched the worse one in the
+rare case** — the kernel picking which half of somebody's house stops, at
+night, with nothing on screen to say why.
+
+`src/core/radio-pressure.ts` is the watch. While **both radios are genuinely
+up** — whatever route the board took to them — it reads three of the kernel's
+own counters every 30 seconds:
+
+| Signal | Where | Why this one |
+|---|---|---|
+| `high` | the hub's cgroup `memory.events` | how often systemd's `MemoryHigh` **throttled** the hub. Rises long before anything dies |
+| `oom_kill` | the hub's cgroup and Zigbee2MQTT's | something was killed. The backstop, not the mechanism |
+| `MemAvailable` | `/proc/meminfo` | works with no memory cgroup at all — which is every board that has not rebooted since the installer turned it on |
+
+Two thresholds. The hub **says** something at three of the last ten checks and
+**acts** at six — five minutes — except for `oom_kill`, which acts at once
+because by then something has already gone. Pairing eight bulbs at once is
+supposed to cost memory; that is the difference the second threshold is
+drawing, and the gap between the two is the only warning a small board gets
+before anything happens to it.
+
+**The saying is for every board; the acting is only for a small one.** A board
+measured for both radios — 2 GB or more — under real memory pressure has the
+same symptom and a completely different answer: there is no second radio to hand
+back, because the board is supposed to run both, so the hub reports it and does
+nothing. Taking a radio
+off a board that was measured for two would be making a working home smaller
+to fix a problem that is somewhere else entirely. `radio.pressure` carries it,
+with `willStandDown` separating *something is about to happen* from *somebody
+should look at this*.
+
+Three deliberate silences, each of which would otherwise be a false alarm:
+
+- **Nothing is sampled for the first two minutes.** The peak *is* the start — a
+  cold boot reached 170 MB loading `@matter/main` and bringing Bluetooth up,
+  and a six-second BLE scan afterwards moved `memory.peak` by zero. Sampling
+  through it would stand a radio down on every single boot.
+- **One reading votes on nothing.** `high` and `oom_kill` are totals since
+  boot, so the first sample after the settle window is a baseline.
+- **A kernel that cannot answer abstains.** Every field is optional; a board
+  with the memory controller off, or a developer's Mac, trips nothing.
+
+When it fires, the hub writes `auto` to `<data>/radio-mode` and the path unit
+applies it exactly as if somebody had pressed it in the app — `auto` rather
+than a named radio, because that rule already exists and inventing a second one
+for this case would be the policy nobody had read. It also writes
+`<data>/radio-stand-down` (on disk, because this **restarts the process that
+decided to**), a `hub.radio-stood-down` activity row with no member on it, and
+a `hubStatus` frame — all three **before** the mode, since the mode write is
+what kills this process. `GET /hub` reports it as `radio.standDown`; see
+[api.md](api.md#running-both-radios-on-a-board-measured-for-one) for the
+wire shape and the `count` / `acknowledged` split.
+
+### The radio is suspended, not taken away
+
+Writing `auto` is the only way a hub can change its own radios, so on its own
+it would mean that protecting the board silently threw away the decision being
+protected — and the owner's route back was to notice and press the switch
+again. `wish` in the stand-down record is what stops that: the hub knows it
+owes them a second radio.
+
+**It cannot tell whether both would fit now, and does not pretend to.** The
+board is no longer running the configuration that failed, so the pressure is
+gone *because* the second radio is gone. No reading answers the question; a
+watch that invented one would have it say yes for ever. So a retry is a
+**trial**, and it turns on the machine rather than the memory:
+
+| Evidence | Why it is the thing to ask about |
+|---|---|
+| the board has **restarted** (`/proc/sys/kernel/random/boot_id` differs) | a reboot is what puts a memory cgroup into force, what a desktop being switched off needs, what clears a process that had wandered off, and what happens when the card moves into a bigger Pi. A service restart does **not** change it, which matters because the hub restarts itself several times during one stand-down |
+| **a week** has passed | the weak one, and the only thing that reaches a Pi up for months. A clock that went backwards is not evidence, so a record dated in the future falls back to the reboot test |
+
+The budget is **two** automatic tries, because each costs a restart. When they
+are spent the hub stops and says so, and `PUT /settings/radio` with `both`
+hands them back — a person deciding is not the hub flapping, and whatever they
+know that the hub does not is worth a fresh trial. So is time: a stand-down
+more than a week after the previous one starts the budget over, since two bad
+afternoons a year apart are not flapping.
+
+A retry writes `both`, is announced as `applying` like any other switch, and
+writes a `hub.radio-restored` row — a change with an explanation rather than an
+unexplained outage. There is no countdown, because the answer to *when* is
+"next time this board restarts, or within a week".
+
+**It waits while somebody is standing in front of a device** — a Matter
+commissioning in flight, or the Zigbee network open for joining — because a hub
+that restarted itself mid-pairing would take the pairing with it, for a trial
+that had no reason to happen in that particular minute. The **stand-down never
+waits**, and keeping that asymmetry is the point: a retry is opportunistic and
+can always happen in an hour, while a stand-down is the board being rescued and
+deferring it risks the kill it exists to prevent.
+
+### What this watch cannot see
+
+**The hub being killed outright.** `memory.events` lives in the service's own
+cgroup, and systemd recreates that on every restart, so a hub that is OOM-killed
+comes back to counters at zero with no memory of it. Nothing here would notice.
+
+That is a real gap and it is bounded by design rather than by luck: the hub's
+`MemoryHigh` (200M on a 512 MB board, 400M on a 1 GB one) *throttles* it long
+before the kernel kills anything, and
+the watch samples every 30 seconds — so getting from a healthy board to a dead
+process without six throttled samples in between takes a very sudden change.
+The signal is deliberately the slow one.
+
+Two things were considered and left out. Reading systemd's own `NRestarts`
+would catch it, at the cost of spawning `systemctl` on a 1 GHz board and a
+counter that rises for every kind of crash. And treating an unclean shutdown as
+evidence is worse than useless on a Raspberry Pi, where the commonest unclean
+shutdown by far is somebody pulling the plug.
 
 Applying a mode is root work — editing `hub.env`, starting or stopping a unit,
 restarting the hub — and the hub deliberately cannot do any of it. It writes one
@@ -641,6 +936,39 @@ duplicate devices. The hub keeps its own device names — it never renames
 devices inside Z2M. A device whose exposes definition changes (firmware or
 Z2M update) is re-adopted automatically — the adapter fingerprints the
 definition on every `bridge/devices` sync.
+
+## "No stick" is two different homes
+
+`zigbee.connected: false` is one word covering two situations that need
+opposite words in an app, and until `GET /hub` carried
+`zigbee.coordinator` there was no way to tell them apart:
+
+- **This hub has never had a coordinator.** Perfectly normal — most hubs are
+  bought before the stick is. *"No stick"* is exactly right.
+- **A coordinator is plugged in and something has stood it down.** On a
+  one-radio board that is nearly always the owner switching the radio to
+  Matter, which is a deliberate, reversible choice. *"No stick"* here is the
+  hub telling somebody their hardware has gone missing while they are looking
+  at it.
+
+The hub cannot see USB for itself and deliberately does not try:
+`gethome-zigbee-detect` owns that decision, with a device table, a USB-id table
+and a `maybe` tier, and a second dumber copy of it inside the hub would
+eventually disagree with the first. So the detector records what it found in
+`/etc/gethome/zigbee.env` (`ZIGBEE_ADAPTER`, world-readable) and
+`src/adapters/zigbee/coordinator.ts` reads it back and asks whether the device
+node is still there — two file operations, behind a five-second cache, on a
+route that is polled.
+
+It reads the **by-id name**, never the `/dev/ttyACM0` beside it: the by-id name
+says *which device this is* and survives a reboot, while the node moves the
+moment something else is plugged in — so checking the node would report a
+coordinator present because a 3D printer took its number.
+
+Three values, and `absent` is deliberately not folded into `unknown`: a stick
+that was here and is out right now is most often one being reflashed, which is
+[the repair this project tells people to do](#the-coordinators-own-firmware), and an
+app can say "plug it back in" rather than "buy one".
 
 ## The three layers of device support
 
