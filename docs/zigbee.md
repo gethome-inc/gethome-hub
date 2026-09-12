@@ -317,14 +317,39 @@ rather than inferred from the boards:
 - **A 1 GB Pi 4 is a one-radio board.** Nothing in the installer looks at the
   model, so "Pi 4" is not a capability. Never write copy that says a Pi 4 runs
   both — say *2 GB or more*. The apps had this wrong in five places at once.
-- **1 GB is unmeasured.** Every figure in this section came off a 512 MB
-  Zero 2 W. A 1 GB board has about twice the room and is very probably fine on
-  both radios; nobody has run it for seven hours to find out, so it is
-  recommended one at a time and allowed two, exactly like the smaller board.
-  It also inherits the small board's `MemoryHigh=200M` on the hub, which is
-  sized for 512 MB — so on 1 GB the hub is throttled, and the pressure watch can
-  stand a radio down, while the board itself still has hundreds of megabytes
-  free. Revisit both together if 1 GB is ever measured.
+- **1 GB is unmeasured, and it has its own ceilings anyway.** Every figure in
+  this section came off a 512 MB Zero 2 W. A 1 GB board has about twice the room
+  and is very probably fine on both radios; nobody has run it for a day to find
+  out, so it is recommended one at a time and allowed two, exactly like the
+  smaller board. What it no longer shares is the *ceilings*. It ran on the
+  512 MB board's `MemoryHigh=200M`, which was a real fault rather than an
+  untidiness: 200 MB against ~920 MB of `MemTotal` throttles the hub with
+  hundreds of megabytes free, and throttling is exactly what the radio watch
+  acts on — so a 1 GB board running both radios could have one handed back while
+  its memory was fine. `install.sh` splits the tier at `TIGHT_BOARD_MAX_MB`
+  (768 MB, with 490 and 920 either side of it and no board near it):
+
+  | | 512 MB | 1 GB |
+  |---|---|---|
+  | hub `MemoryHigh` | 200M | **400M** |
+  | hub `--max-old-space-size` | 160 | **320** |
+  | Z2M `MemoryHigh` / `MemoryMax` | 170M / 230M | **320M / 400M** |
+  | hub V8 flags | `--optimize-for-size --max-semi-space-size=1` | `--optimize-for-size` |
+
+  **Reasoned from the same arithmetic, not measured.** A full home is ~70 (OS)
+  + ~180 (hub with Matter) + ~150 (Zigbee2MQTT), so the 1 GB ceilings sit at
+  roughly 2.3× the hub's measured both-radio peak and 2.5× Z2M's assumed
+  full-home working set — and, unlike the tier above, they are **not
+  over-subscribed**: 400 + 400 + 70 is 870 of ~920, where the 512 MB board
+  deliberately promises 200 + 230 + 70 out of 415 and leans on zram to make it
+  true. A ceiling is a bound on a leak there, not a squeeze. The semi-space pin
+  is dropped for the same reason: it buys memory with garbage-collection
+  throughput, which is a trade a board with 500 MB spare has no reason to make,
+  while `--optimize-for-size` is measured as most of that 176 → 139 MB for half
+  a second of startup and is worth taking anywhere. **The budget is the
+  separate decision and still wants hardware**: `radio-pressure.ts` gates
+  *acting* on `budget === 'one'`, so promoting this tier to `both` would take
+  away its safety net along with its warning.
 
 The arithmetic behind the threshold: a 512 MB board fits the operating system
 (~70 MB), the hub (~119 MB), and **one** of Zigbee2MQTT (~150 MB, its own
@@ -702,8 +727,9 @@ deferring it risks the kill it exists to prevent.
 cgroup, and systemd recreates that on every restart, so a hub that is OOM-killed
 comes back to counters at zero with no memory of it. Nothing here would notice.
 
-That is a real gap and it is bounded by design rather than by luck:
-`MemoryHigh=200M` *throttles* the hub long before the kernel kills anything, and
+That is a real gap and it is bounded by design rather than by luck: the hub's
+`MemoryHigh` (200M on a 512 MB board, 400M on a 1 GB one) *throttles* it long
+before the kernel kills anything, and
 the watch samples every 30 seconds — so getting from a healthy board to a dead
 process without six throttled samples in between takes a very sudden change.
 The signal is deliberately the slow one.

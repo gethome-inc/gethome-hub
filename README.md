@@ -110,7 +110,9 @@ Two rows are worth reading twice, because both are easy to buy by accident:
   running both radios was measured on a 512 MB Zero 2 W. A 1 GB board has
   roughly twice that to work with, so it is very likely more comfortable — but
   "likely" is the honest word, and it is why 1 GB is grouped with the small
-  boards rather than with the ones that never have the question.
+  boards rather than with the ones that never have the question. It is *sized*
+  for its own memory, though: the installer gives a 1 GB board room to use what
+  it has rather than the ceilings a 512 MB board needs.
 
 Any other 64-bit ARM or x86-64 Linux machine works and follows the same memory
 rule; the installer prints a warning for Raspberry Pis it does not recognise,

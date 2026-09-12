@@ -537,10 +537,19 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   model, everywhere a person reads it. Two things follow that are **unmeasured
   rather than decided**: every figure in `docs/zigbee.md` came off a 512 MB
   board, so the 1 GB tier is grouped with the small ones out of honesty rather
-  than measurement; and `SMALL_BOARD` hands that tier the 512 MB board's
-  `MemoryHigh=200M` and the stand-down behaviour with it, so a 1 GB board can be
-  throttled — and have a radio taken back — with hundreds of megabytes free.
-  Revisit the threshold and the ceiling together, on hardware, or not at all.
+  than measurement. **The ceilings are not shared, and that split is the fix to
+  a real fault**: `SMALL_BOARD` used to hand a 1 GB board the 512 MB board's
+  `MemoryHigh=200M`, which throttles the hub against ~920 MB of `MemTotal` —
+  and throttling is what `radio-pressure.ts` acts on, so such a board could have
+  a radio taken back with hundreds of megabytes free. `install.sh` now splits at
+  `TIGHT_BOARD_MAX_MB` and gives 1 GB its own (400M/320M/400M, heaps 320, no
+  `--max-semi-space-size` pin), reasoned from the same full-home arithmetic the
+  512 MB numbers came from rather than measured; `test/deploy-config.test.ts`
+  pins that the roomier tier really is roomier, since the older test slices the
+  whole `-le 1024` block and passes on either branch alone. **The budget is the
+  separate decision**: `radio-pressure.ts` gates *acting* on `budget === 'one'`,
+  so promoting 1 GB to `both` would remove its safety net as well as its
+  warning, and that one wants hardware.
   **And every surface that offers `both` on a `one` board owes one sentence
   that is easy to edit away** — *what changes this is your Zigbee network
   growing* — because the failure worth designing against is not a hub falling
