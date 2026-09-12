@@ -19,10 +19,13 @@ printer or a UPS, so it is offered to you rather than adopted automatically.
 See [Finding the coordinator](#finding-the-coordinator).
 
 **Without a coordinator the hub runs Matter, Wi-Fi and MQTT devices only.** On a
-Raspberry Pi Zero 2 W there is a second consequence: 512 MB cannot hold Matter
-and Zigbee2MQTT at once, so that board runs *one* of them — see
-[Zigbee or Matter on a small board](#zigbee-or-matter-on-a-small-board). A Pi 4
-or 5 runs both together and never makes the choice.
+board with **1 GB of memory or less** there is a second consequence: a full
+house of Matter *and* Zigbee2MQTT does not comfortably fit, so that board is set
+up to run *one* of them — see
+[Zigbee or Matter on a small board](#zigbee-or-matter-on-a-small-board). A board
+with **2 GB or more** runs both together and never makes the choice. It is the
+memory that decides, not the model: a 1 GB Pi 4 and a Pi 3 are in the small tier
+beside the Zero 2 W.
 
 ## Setup
 
@@ -295,9 +298,63 @@ Four rules hold this together:
 
 ### Zigbee or Matter on a small board
 
-A 512 MB board fits the operating system (~70 MB), the hub (~119 MB), and
-**one** of Zigbee2MQTT (~150 MB, its own process) or Matter (~60 MB inside the
-hub). Not both — in a *full* home. That qualification is the whole of
+**"Small" is a memory reading, never a model name.** `install.sh` divides
+`MemTotal` by a single threshold — **1024 MB** — and writes the answer into
+`GETHOME_RADIO`:
+
+| `MemTotal` | `GETHOME_RADIO` | Boards that land here |
+|---|---|---|
+| more than 1024 MB | `both` | Pi 5, Pi 4 (2/4/8 GB), Pi 400, Pi 500, CM4/CM5 at 2 GB+ |
+| 1024 MB or less | `one` | Zero 2 W, Pi 3 A+ (512 MB) · **Pi 3 / 3B+, Pi 4 1 GB, CM4 1 GB** (1 GB) |
+| less than 400 MB | — | refused by the installer |
+
+A board advertised as "1 GB" reports rather less than 1024 MB once the GPU has
+taken its share (~920 MB on a Pi 4, ~950 on a Pi 3), and a 2 GB board reports
+~1900 — so in practice the threshold reads as **2 GB or more runs both**. Two
+consequences that are easy to miss and are the reason the rule is written here
+rather than inferred from the boards:
+
+- **A 1 GB Pi 4 is a one-radio board.** Nothing in the installer looks at the
+  model, so "Pi 4" is not a capability. Never write copy that says a Pi 4 runs
+  both — say *2 GB or more*. The apps had this wrong in five places at once.
+- **1 GB is unmeasured, and it has its own ceilings anyway.** Every figure in
+  this section came off a 512 MB Zero 2 W. A 1 GB board has about twice the room
+  and is very probably fine on both radios; nobody has run it for a day to find
+  out, so it is recommended one at a time and allowed two, exactly like the
+  smaller board. What it no longer shares is the *ceilings*. It ran on the
+  512 MB board's `MemoryHigh=200M`, which was a real fault rather than an
+  untidiness: 200 MB against ~920 MB of `MemTotal` throttles the hub with
+  hundreds of megabytes free, and throttling is exactly what the radio watch
+  acts on — so a 1 GB board running both radios could have one handed back while
+  its memory was fine. `install.sh` splits the tier at `TIGHT_BOARD_MAX_MB`
+  (768 MB, with 490 and 920 either side of it and no board near it):
+
+  | | 512 MB | 1 GB |
+  |---|---|---|
+  | hub `MemoryHigh` | 200M | **400M** |
+  | hub `--max-old-space-size` | 160 | **320** |
+  | Z2M `MemoryHigh` / `MemoryMax` | 170M / 230M | **320M / 400M** |
+  | hub V8 flags | `--optimize-for-size --max-semi-space-size=1` | `--optimize-for-size` |
+
+  **Reasoned from the same arithmetic, not measured.** A full home is ~70 (OS)
+  + ~180 (hub with Matter) + ~150 (Zigbee2MQTT), so the 1 GB ceilings sit at
+  roughly 2.3× the hub's measured both-radio peak and 2.5× Z2M's assumed
+  full-home working set — and, unlike the tier above, they are **not
+  over-subscribed**: 400 + 400 + 70 is 870 of ~920, where the 512 MB board
+  deliberately promises 200 + 230 + 70 out of 415 and leans on zram to make it
+  true. A ceiling is a bound on a leak there, not a squeeze. The semi-space pin
+  is dropped for the same reason: it buys memory with garbage-collection
+  throughput, which is a trade a board with 500 MB spare has no reason to make,
+  while `--optimize-for-size` is measured as most of that 176 → 139 MB for half
+  a second of startup and is worth taking anywhere. **The budget is the
+  separate decision and still wants hardware**: `radio-pressure.ts` gates
+  *acting* on `budget === 'one'`, so promoting this tier to `both` would take
+  away its safety net along with its warning.
+
+The arithmetic behind the threshold: a 512 MB board fits the operating system
+(~70 MB), the hub (~119 MB), and **one** of Zigbee2MQTT (~150 MB, its own
+process) or Matter (~60 MB inside the hub). Not both — in a *full* home. That
+qualification is the whole of
 [running both anyway](#running-both-on-a-board-measured-for-one), and it is
 why the budget below is a recommendation rather than a refusal. Two separate
 things decide which radio runs:
@@ -558,6 +615,18 @@ at 170 MB against a 200 MB ceiling — about 30 MB of headroom, which is real an
 far too little to *promise*, but is not a reason to take Matter away from
 somebody who has four devices.
 
+**What the apps have to say about that, and why it is a copy rule rather than a
+preference.** The failure this is written against is not a hub falling over; it
+is somebody turning both radios on with four devices, being perfectly happy,
+spending a year buying Zigbee devices, and meeting the trade long after the
+point where a different board was the cheap answer. So every surface that offers
+`both` on a `one` board says four things in this order: it works now, **what
+changes it** (the Zigbee network growing, because Z2M holds state per device),
+what the hub does when it stops fitting (stands a radio down, with an
+explanation, nothing unpaired), and which board never has the question (2 GB or
+more). Dropping the second of those turns an informed choice back into a
+surprise, and it is the one most easily lost to editing for length.
+
 So `mode: both` is accepted on any board, and the answer to the 30 MB is to
 watch rather than to refuse. **Refusing would have been the worse of the two
 mistakes in the common case, and allowing it unwatched the worse one in the
@@ -581,10 +650,11 @@ supposed to cost memory; that is the difference the second threshold is
 drawing, and the gap between the two is the only warning a small board gets
 before anything happens to it.
 
-**The saying is for every board; the acting is only for a small one.** A Pi 4
-or 5 under real memory pressure has the same symptom and a completely
-different answer — there is no second radio to hand back, because the board is
-supposed to run both — so the hub reports it and does nothing. Taking a radio
+**The saying is for every board; the acting is only for a small one.** A board
+measured for both radios — 2 GB or more — under real memory pressure has the
+same symptom and a completely different answer: there is no second radio to hand
+back, because the board is supposed to run both, so the hub reports it and does
+nothing. Taking a radio
 off a board that was measured for two would be making a working home smaller
 to fix a problem that is somewhere else entirely. `radio.pressure` carries it,
 with `willStandDown` separating *something is about to happen* from *somebody
@@ -657,8 +727,9 @@ deferring it risks the kill it exists to prevent.
 cgroup, and systemd recreates that on every restart, so a hub that is OOM-killed
 comes back to counters at zero with no memory of it. Nothing here would notice.
 
-That is a real gap and it is bounded by design rather than by luck:
-`MemoryHigh=200M` *throttles* the hub long before the kernel kills anything, and
+That is a real gap and it is bounded by design rather than by luck: the hub's
+`MemoryHigh` (200M on a 512 MB board, 400M on a 1 GB one) *throttles* it long
+before the kernel kills anything, and
 the watch samples every 30 seconds — so getting from a healthy board to a dead
 process without six throttled samples in between takes a very sudden change.
 The signal is deliberately the slow one.

@@ -218,12 +218,19 @@ esac
 # Zigbee2MQTT keeps a hard cap: it is the optional process, and it should die
 # on its own rather than take the hub with it.
 SMALL_BOARD=""
+TIGHT_BOARD=""
 HUB_HEAP_MB=512
 Z2M_HEAP_MB=512
 HUB_MEM_HIGH=""
 Z2M_MEM_HIGH=""
 Z2M_MEM_MAX=""
 HUB_V8_FLAGS=""
+# Where the small tier splits in two. Below this line is a 512 MB board, above
+# it a 1 GB one, and no board lands near it: a Zero 2 W reports 415-490 MB of
+# MemTotal and a "1 GB" Pi reports 920-970 once the GPU has taken its share.
+# The gap is wide on purpose — this has to separate two families of hardware,
+# not measure either of them.
+TIGHT_BOARD_MAX_MB=768
 # How many radios this board was measured for — measured, not chosen. The
 # owner's preference is a separate thing and lives in <DATA_DIR>/radio-mode;
 # gethome-zigbee-detect is where the two meet.
@@ -235,14 +242,21 @@ HUB_V8_FLAGS=""
 # its own memory and hands a radio back by itself if the board really does run
 # short (src/core/radio-pressure.ts). What this value decides is what is
 # *recommended*, and what every app warns from.
+#
+# **The test is memory and only memory**, which is what makes the tier below
+# *512 MB and 1 GB together*: a Zero 2 W, a Pi 3, and the 1 GB Pi 4 all land on
+# `one`, because a board sold as "1 GB" reports ~920-950 MB once the GPU has
+# taken its share. Read as a shopping rule that is "2 GB or more runs both" —
+# and never as "a Pi 4 runs both", which is false for every 1 GB Pi 4 there is.
+# The 1 GB half of this tier is still **unmeasured** — nobody has run one for a
+# day — which is why it keeps the recommendation while getting ceilings of its
+# own below. Moving the *budget* is the separate decision, and it needs
+# hardware: a board on `both` is one the pressure watch only reports on
+# (src/core/radio-pressure.ts gates acting on `budget === 'one'`), so promoting
+# an unmeasured tier would take away its safety net as well as its warning.
 RADIO_BUDGET=both
 if [[ "$RAM_MB" -gt 0 && "$RAM_MB" -le 1024 ]]; then
   SMALL_BOARD=1
-  HUB_HEAP_MB=160
-  Z2M_HEAP_MB=200
-  HUB_MEM_HIGH="MemoryHigh=200M"
-  Z2M_MEM_HIGH="MemoryHigh=170M"
-  Z2M_MEM_MAX="MemoryMax=230M"
   # One radio, not none. Matter and Zigbee do not both fit — 70 (OS) + 178
   # (hub with Matter) + 150 (Zigbee2MQTT) is more than a Zero 2 W has, while
   # 70 + 119 + 150 fits with room for zram. But this used to be written as
@@ -253,11 +267,54 @@ if [[ "$RAM_MB" -gt 0 && "$RAM_MB" -le 1024 ]]; then
   # is the only thing that knows whether the stick is there — at boot, on
   # every plug and unplug, and at the end of this install.
   RADIO_BUDGET=one
-  # Measured on this hub: with Matter loaded these two take its resident set
-  # from 176 MB to 139 MB, for about half a second of extra startup and no
-  # change in request latency. They have to be argv — NODE_OPTIONS refuses
-  # --optimize-for-size outright ("not allowed in NODE_OPTIONS").
-  HUB_V8_FLAGS="--optimize-for-size --max-semi-space-size=1"
+
+  if [[ "$RAM_MB" -le "$TIGHT_BOARD_MAX_MB" ]]; then
+    # A 512 MB board. Every number here was measured on a Zero 2 W and they
+    # are deliberately tight: 200M is 25 MB above the highest resident set ever
+    # recorded there (175 MB, both radios, one Matter plug, seven hours), which
+    # is the margin that makes throttling the signal the radio watch acts on.
+    TIGHT_BOARD=1
+    HUB_HEAP_MB=160
+    Z2M_HEAP_MB=200
+    HUB_MEM_HIGH="MemoryHigh=200M"
+    Z2M_MEM_HIGH="MemoryHigh=170M"
+    Z2M_MEM_MAX="MemoryMax=230M"
+    # Measured on this hub: with Matter loaded these two take its resident set
+    # from 176 MB to 139 MB, for about half a second of extra startup and no
+    # change in request latency. They have to be argv — NODE_OPTIONS refuses
+    # --optimize-for-size outright ("not allowed in NODE_OPTIONS").
+    HUB_V8_FLAGS="--optimize-for-size --max-semi-space-size=1"
+  else
+    # A 1 GB board — a Pi 3, a Pi 3B+, a 1 GB Pi 4. It shares the tier above
+    # for everything that is about *scarcity* (zram, the memory cgroup, no
+    # building from source here, one radio recommended) and must not share the
+    # ceilings, which are a 512 MB board's arithmetic. It had them, and that was
+    # a real fault rather than an untidiness: `MemoryHigh=200M` on a board with
+    # ~920 MB of MemTotal throttles the hub with hundreds of megabytes free, and
+    # throttling is exactly what `radio-pressure.ts` acts on — so a 1 GB board
+    # running both radios could have one taken back while its memory was fine.
+    #
+    # **These are reasoned, not measured**, and the reasoning is the same
+    # arithmetic the 512 MB tier came from rather than a new claim: a full home
+    # is ~70 (OS) + ~180 (hub with Matter) + ~150 (Zigbee2MQTT), so the ceilings
+    # below sit at roughly 2.3x the hub's measured both-radio peak and 2.5x
+    # Z2M's assumed full-home working set. They are also, unlike the tier above,
+    # **not over-subscribed**: 400 + 400 + 70 is 870 of ~920, where the 512 MB
+    # board deliberately promises 200 + 230 + 70 out of 415 and relies on zram
+    # to make that true. A ceiling is a bound on a leak here, not a squeeze.
+    HUB_HEAP_MB=320
+    Z2M_HEAP_MB=320
+    HUB_MEM_HIGH="MemoryHigh=400M"
+    Z2M_MEM_HIGH="MemoryHigh=320M"
+    Z2M_MEM_MAX="MemoryMax=400M"
+    # `--optimize-for-size` stays: measured, it is most of that 176 -> 139 MB
+    # for half a second of startup and no change in request latency, which is
+    # worth taking on any board. `--max-semi-space-size=1` does not — it pins
+    # the scavenger's young generation to buy memory with garbage-collection
+    # throughput, and buying memory is the trade a board with 500 MB spare has
+    # no reason to make.
+    HUB_V8_FLAGS="--optimize-for-size"
+  fi
 fi
 
 # Said out loud, and early. GetHome Studio draws the choice between one radio
@@ -437,8 +494,19 @@ if [[ -n "$SMALL_BOARD" ]]; then
   # spending — but that offer is made at the end of the install, in one place,
   # where it can be answered rather than being an aside in a warning about
   # something else.
+  #
+  # The first clause is the one that has to follow the tier: 75 MB is a good
+  # part of a 512 MB board and about eight per cent of a 1 GB one, so telling a
+  # Pi 3 owner their board is too small to run a desktop is the 512 MB
+  # conclusion applied to twice the hardware. The advice is the same either way,
+  # which is why only the claim changes.
   if [[ "$(systemctl get-default 2>/dev/null || true)" == "graphical.target" ]]; then
-    warn "This Pi is running the desktop version of Raspberry Pi OS. On a board this small the desktop uses up a good part of the memory the hub needs, for a screen that isn't attached. The hub works either way, it just has less room. If nobody uses a screen on this Pi, run \`sudo systemctl set-default multi-user.target\` and restart it to give that memory back; Raspberry Pi OS Lite is the version that never takes it in the first place."
+    if [[ -n "$TIGHT_BOARD" ]]; then
+      DESKTOP_COST="On a board this small the desktop uses up a good part of the memory the hub needs, for a screen that isn't attached."
+    else
+      DESKTOP_COST="The desktop holds about 75 MB for a screen that isn't attached — not a lot on this board, but it is memory the hub could be using."
+    fi
+    warn "This Pi is running the desktop version of Raspberry Pi OS. ${DESKTOP_COST} The hub works either way, it just has less room. If nobody uses a screen on this Pi, run \`sudo systemctl set-default multi-user.target\` and restart it to give that memory back; Raspberry Pi OS Lite is the version that never takes it in the first place."
   fi
 fi
 
@@ -1686,6 +1754,48 @@ ADAPTER_MATTER=1
 ENV
 fi
 
+# **A budget is a measurement of the machine, and the machine can change under
+# it.** `hub.env` is written only when it is absent, which is right for
+# everything else in it — those are settings, and an upgrade must not stamp on
+# them. `GETHOME_RADIO` and the heap are not settings: they are what this
+# script measured from the RAM it found, and the commonest way somebody grows
+# a GetHome home is to move the SD card into a bigger Pi. That carries
+# `/etc/gethome/hub.env` with it, so a card that started life in a Zero 2 W
+# went on telling a Pi 5 it had memory for one radio — for ever, because
+# re-running this installer does not rewrite an existing file either. The
+# upgrade path this project recommends in its own README ended on a board that
+# still recommended one radio, still drew the picker, and still let the hub
+# stand a radio down with gigabytes free.
+#
+# **It only ever widens.** A stored `one` on a board that now measures `both`
+# is a stale measurement and is corrected; a stored `both` is left alone
+# whatever this board measures, because that is the documented hand-edit (see
+# `deploy/CLAUDE.md`) and the owner's own override — and `radio-pressure.ts`
+# is already watching a board running two radios it was not measured for. So
+# this can remove a restriction and can never add one.
+if [[ -f "$CONF_DIR/hub.env" ]]; then
+  STORED_RADIO=$(sed -n 's/^GETHOME_RADIO=//p' "$CONF_DIR/hub.env" | tail -n1)
+  if [[ "$STORED_RADIO" == "one" && "$RADIO_BUDGET" == "both" ]]; then
+    # A temporary file rather than `sed -i`, which takes the next argument as a
+    # backup suffix on BSD and is the portability trap this repo has already
+    # paid for once.
+    HUB_ENV_NEW=$(mktemp)
+    sed 's/^GETHOME_RADIO=one$/GETHOME_RADIO=both/' "$CONF_DIR/hub.env" > "$HUB_ENV_NEW" \
+      && $SUDO cp "$HUB_ENV_NEW" "$CONF_DIR/hub.env"
+    rm -f "$HUB_ENV_NEW"
+    # The heap travels with it for the same reason: 160 MB was this board's
+    # predecessor's number, and nothing else would ever revisit it.
+    if grep -q '^NODE_OPTIONS=--max-old-space-size=' "$CONF_DIR/hub.env"; then
+      HUB_ENV_NEW=$(mktemp)
+      sed "s/^NODE_OPTIONS=--max-old-space-size=.*/NODE_OPTIONS=--max-old-space-size=${HUB_HEAP_MB}/" \
+        "$CONF_DIR/hub.env" > "$HUB_ENV_NEW" \
+        && $SUDO cp "$HUB_ENV_NEW" "$CONF_DIR/hub.env"
+      rm -f "$HUB_ENV_NEW"
+    fi
+    say "This Pi has more memory than the one this hub was first set up on, so it is no longer held to one radio at a time: ${RAM_MB} MB runs Zigbee and Matter together. Nothing else about the hub changed."
+  fi
+fi
+
 $SUDO tee /etc/systemd/system/gethome-hubd.service >/dev/null <<UNIT
 [Unit]
 Description=GetHome Hub
@@ -2212,7 +2322,7 @@ if [[ "$RADIO_BUDGET" == "one" && "$RADIO_MODE" != "both" ]]; then
   # was still an option. So it names what *changes* the answer, and names the
   # board that never has the question — which is the only part somebody
   # standing at the start of a setup can act on.
-  say "Worth knowing before you build the network, though: what uses up the margin is Zigbee growing. Zigbee2MQTT holds state for every device you pair, so the board that copes with a handful may not cope with another twenty — this is a setting to come back to rather than one to set and forget. If it does run short the hub notices before anything breaks, hands one radio back by itself and says so in the app; nothing is unpaired. And if you already know you want a large Zigbee network alongside Matter, a Raspberry Pi 4 or 5 is the board that never has to choose."
+  say "Worth knowing before you build the network, though: what uses up the margin is Zigbee growing. Zigbee2MQTT holds state for every device you pair, so the board that copes with a handful may not cope with another twenty — this is a setting to come back to rather than one to set and forget. If it does run short the hub notices before anything breaks, hands one radio back by itself and says so in the app; nothing is unpaired. And if you already know you want a large Zigbee network alongside Matter, a board with 2 GB of memory or more never has to choose — that is a Pi 5, or a Pi 4 in its 2 GB or larger version, and not the 1 GB Pi 4, which is measured exactly like this one."
   # Two things the watch depends on, and both are worth naming *here* rather
   # than where they were set up: they were noise on a hub running one radio and
   # they are the difference between "hands a radio back" and "something dies"

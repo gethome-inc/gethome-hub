@@ -12,7 +12,7 @@ import type { ApiDeps } from '../src/api/server.js';
  * Every radio surface in the apps was rewritten around a board that can only
  * afford one — the resting-radio rule, the "standing by" wording, the switch,
  * the notice under the dashboard — and all of it keys off facts this snapshot
- * reports. A Pi 4 or 5 never makes the choice, so none of that machinery
+ * reports. A board with 2 GB or more never makes the choice, so none of that
  * should ever fire there, and the way it would go wrong is the quiet way:
  * devices silently excluded from the "needs attention" count on a home where
  * nothing is resting at all.
@@ -253,6 +253,44 @@ describe('a board measured for one, asked for both', () => {
  * every board and `willStandDown` is what separates *something is about to
  * happen* from *somebody should look at this*.
  */
+/**
+ * The SD card is the upgrade path, and it carries the old board's history.
+ *
+ * Moving the card into a bigger Pi is how somebody grows a GetHome home — it is
+ * what this project's own README tells them to do when they want a large Zigbee
+ * network — and `<data>/radio-stand-down` goes with it. On the new board `auto`
+ * already runs both radios, so that record is history rather than a debt, and
+ * the app must not draw "Your hub went back to one radio" over a hub plainly
+ * running two.
+ *
+ * It would have been permanent, which is what makes it worth a test rather than
+ * a comment: the watch only ever restores while *one* radio is live, so on a
+ * board running both there was nothing left that could clear the record.
+ */
+describe('a stand-down record that has outlived its board', () => {
+  beforeEach(() => {
+    writeRadioStandDown(dir, { reason: 'memory-pressure', wish: 'both', bootId: 'boot-a' });
+  });
+
+  it('is history on a board measured for both, not a radio still owed', () => {
+    const snapshot = reader({ budget: 'both', zigbeeConnected: true, matter: true }).snapshot();
+    expect(snapshot.radio.standDown?.suspended).toBe(false);
+    expect(snapshot.radio.standDown?.willRetry).toBe(false);
+  });
+
+  it('still speaks on the board it was written for', () => {
+    const snapshot = reader({ budget: 'one', zigbeeConnected: true, matter: false }).snapshot();
+    expect(snapshot.radio.standDown?.suspended).toBe(true);
+    expect(snapshot.radio.standDown?.willRetry).toBe(true);
+  });
+
+  it('keeps the record itself either way — what happened is still true', () => {
+    const snapshot = reader({ budget: 'both', zigbeeConnected: true, matter: true }).snapshot();
+    expect(snapshot.radio.standDown?.count).toBe(1);
+    expect(snapshot.radio.standDown?.reason).toBe('memory-pressure');
+  });
+});
+
 describe('what the hub says about its memory', () => {
   const pressure = {
     since: Date.now(),

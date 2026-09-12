@@ -9,7 +9,9 @@
 > whichever radio is actually in use: Zigbee when a coordinator is plugged in,
 > Matter when one isn't. The owner can override that from the GetHome app.
 > See [Zigbee or Matter on a small board](zigbee.md#zigbee-or-matter-on-a-small-board).
-> A Pi 4 or 5 runs both together and never makes the choice.
+> A board with **2 GB or more** runs both together and never makes the choice —
+> the threshold is `MemTotal` against 1024 MB, so a 1 GB Pi 4 and a Pi 3 are on
+> the small side of it beside the Zero 2 W.
 
 `ADAPTER_MATTER` in `/etc/gethome/hub.env` is the live switch, but on a
 one-radio board it is **managed** — the detector rewrites it on every plug and

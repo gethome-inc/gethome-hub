@@ -526,6 +526,56 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   **bound, not a wait for the radios to agree** — asking for Zigbee on a hub
   with no coordinator is reasonable, correctly changes nothing, and would spin
   for ever.
+- **The radio budget is a memory reading, and a board name is never the claim.**
+  `install.sh` divides `MemTotal` by **1024 MB** and writes `GETHOME_RADIO`;
+  nothing looks at the model. So a **1 GB Pi 4** and a **Pi 3** answer
+  `budget: one` exactly as a Zero 2 W does, which reads in practice as *2 GB or
+  more runs both*. Copy that says "a Pi 4 runs both radios" is wrong for every
+  1 GB Pi 4 in circulation — it was written that way in five user-facing places
+  across the three repos at once, including this repo's own README two
+  paragraphs from a table that said the opposite. Write the memory, not the
+  model, everywhere a person reads it. Two things follow that are **unmeasured
+  rather than decided**: every figure in `docs/zigbee.md` came off a 512 MB
+  board, so the 1 GB tier is grouped with the small ones out of honesty rather
+  than measurement. **The ceilings are not shared, and that split is the fix to
+  a real fault**: `SMALL_BOARD` used to hand a 1 GB board the 512 MB board's
+  `MemoryHigh=200M`, which throttles the hub against ~920 MB of `MemTotal` —
+  and throttling is what `radio-pressure.ts` acts on, so such a board could have
+  a radio taken back with hundreds of megabytes free. `install.sh` now splits at
+  `TIGHT_BOARD_MAX_MB` and gives 1 GB its own (400M/320M/400M, heaps 320, no
+  `--max-semi-space-size` pin), reasoned from the same full-home arithmetic the
+  512 MB numbers came from rather than measured; `test/deploy-config.test.ts`
+  pins that the roomier tier really is roomier, since the older test slices the
+  whole `-le 1024` block and passes on either branch alone. **The budget is the
+  separate decision**: `radio-pressure.ts` gates *acting* on `budget === 'one'`,
+  so promoting 1 GB to `both` would remove its safety net as well as its
+  warning, and that one wants hardware.
+  **And a budget is a measurement of the machine, so a machine that changes
+  under it has to be re-measured.** `hub.env` is written only when absent —
+  right for the settings in it, wrong for this — and the commonest way a home
+  grows is an SD card moved into a bigger Pi, which carries `/etc/gethome/` and
+  `<data>/` along with it. A card that started in a Zero 2 W therefore told a
+  Pi 5 it had memory for one radio for ever, since re-running the installer does
+  not rewrite an existing file either: the upgrade path this repo's own README
+  recommends ended on a board that still recommended one radio and could still
+  stand one down with gigabytes free. `install.sh` reconciles `GETHOME_RADIO`
+  and the heap now, and **only ever widens** — a stored `both` is the documented
+  hand-edit and the owner's override, so narrowing must never happen. The other
+  half of the same transplant is `<data>/radio-stand-down`, which is a **small
+  board's fact**: on a board measured for both it is history rather than a debt,
+  so `hub-status.ts` gates `suspended`/`willRetry` on the budget and
+  `radio-pressure.ts` gates the restore on it — without both, the apps drew
+  "Your hub went back to one radio" over a hub plainly running two, permanently,
+  because the watch only restores while *one* radio is live and nothing else
+  could clear the record.
+  **And every surface that offers `both` on a `one` board owes one sentence
+  that is easy to edit away** — *what changes this is your Zigbee network
+  growing* — because the failure worth designing against is not a hub falling
+  over. It is somebody turning both radios on with four devices, being
+  perfectly happy, buying for a year on the strength of it, and meeting the
+  trade when a different board is no longer the cheap answer. Say it works now,
+  say what changes that, say what the hub does when it stops fitting, and name
+  the board that never has the question as *2 GB or more*.
 - **The radio budget is a measurement of a *full* home, so it is advice and not
   a ceiling — and what replaces the refusal is a watch.** `GETHOME_RADIO=one`
   is measured against the OS plus the hub with Matter plus a Zigbee2MQTT

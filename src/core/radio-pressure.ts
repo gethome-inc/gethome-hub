@@ -437,6 +437,12 @@ export function createRadioPressureWatch(deps: RadioPressureDeps): RadioPressure
       if (deps.busy?.() === true) return;
       const record = readRadioStandDown(deps.dataDir);
       if (
+        // Nothing to give back on a board measured for two. A record can reach
+        // one — an SD card moved into a bigger Pi carries it along — and there
+        // it is history rather than a debt: `auto` already runs both radios, so
+        // "trying both again" would restart the hub and write an activity row
+        // about undoing something that is not being done.
+        overCommitted &&
         readRadioMode(deps.dataDir) !== 'both' &&
         shouldRestoreBoth(record, { bootId: bootId() })
       ) {

@@ -38,6 +38,22 @@ in `deploy/install.sh` must stay accurate.
   choice. Claiming support for hardware nobody has tried is the misleading half
   of that choice; refusing a Pi 3 that has twice a Zero 2 W's memory is the
   other.
+- **"Small" is `MemTotal` against 1024 MB, and nothing here reads the model.**
+  So the tier is *512 MB and 1 GB together* — a Zero 2 W, a Pi 3, and the 1 GB
+  Pi 4 — which reads as *2 GB or more runs both* once the GPU's share is
+  accounted for (a "1 GB" board reports ~920–950). Two consequences to keep in
+  mind when editing anything here or writing copy against it: a board name is
+  never a capability (README, Studio and the iOS app all claimed "a Pi 4 runs
+  both" at once, which is false for every 1 GB Pi 4), and the 1 GB half of the
+  tier is **unmeasured**. It no longer shares the *ceilings*, though, and that
+  split is a fix rather than tidying: on the 512 MB board's `MemoryHigh=200M` a
+  1 GB board is throttled against ~920 MB of `MemTotal`, and throttling is what
+  `radio-pressure.ts` acts on — so it could have a radio handed back with
+  hundreds of megabytes free. `TIGHT_BOARD_MAX_MB` (768) is the split, `SMALL_BOARD`
+  still gates everything about scarcity (zram, the memory cgroup, no building
+  from source, one radio recommended), and `TIGHT_BOARD` gates only the 512 MB
+  numbers. Moving the **budget** is the separate decision and still wants
+  hardware — a board on `both` is one the watch only reports on.
 - **A small board is *recommended* one radio; which one is decided by what is
   plugged in, not at install time.** 512 MB fits the OS, the hub, and *either*
   Matter (~60 MB in-process) *or* Zigbee2MQTT (~150 MB, its own process).
@@ -475,10 +491,20 @@ in `deploy/install.sh` must stay accurate.
   same arithmetic is what makes a small board a one-radio board: 70 (OS) + 178
   (hub with Matter) + 150 (Z2M) does not fit in 512 MB, while either 70 + 178 or
   70 + 119 + 150 does — see the radio note above for who chooses between them.
-  A small board also gets `--optimize-for-size --max-semi-space-size=1` in
-  `ExecStart`, measured at 176 → 139 MB resident with Matter loaded for about
-  half a second of startup. They have to be **argv**: `NODE_OPTIONS` refuses
-  `--optimize-for-size` outright.
+  A small board also gets `--optimize-for-size` in `ExecStart` — measured, with
+  `--max-semi-space-size=1` beside it, at 176 → 139 MB resident with Matter
+  loaded for about half a second of startup. They have to be **argv**:
+  `NODE_OPTIONS` refuses `--optimize-for-size` outright.
+  **The numbers above are the 512 MB tier's, and a 1 GB board gets its own**
+  (`TIGHT_BOARD`): hub `MemoryHigh=400M` with a 320 MB heap, Z2M `320M`/`400M`,
+  and `--optimize-for-size` without the semi-space pin, which buys memory with
+  GC throughput and is a scarcity trade a board with 500 MB spare need not make.
+  Those are **reasoned from the same full-home arithmetic, not measured**: 70 +
+  180 + 150 against ~920 MB leaves them at ~2.3× the hub's measured peak, and
+  unlike the tier above they are not over-subscribed (400 + 400 + 70 of ~920,
+  where 512 MB promises 200 + 230 + 70 of 415 and leans on zram). Raising a
+  ceiling is **not** promoting a board: `RADIO_BUDGET` is still `one` across the
+  whole tier.
   **None of those cgroup limits were ever in force on a Raspberry Pi.** A Pi
   boots with `cgroup_disable=memory`, so the kernel has no memory controller to
   enforce them with: the units carried the right numbers, `systemctl show` read

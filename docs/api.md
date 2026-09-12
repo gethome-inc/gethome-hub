@@ -587,10 +587,13 @@ timed out.
 
 ### Radio (`GET /hub` and `PUT /settings/radio`)
 
-A 512 MB board has memory for one radio at a time, so what a hub can talk to is
-not the same on every machine and an app that assumes otherwise shows sections
-that can never fill. The `radio` block on `GET /hub` says which situation this
-hub is in:
+A board with 1 GB of memory or less is set up for one radio at a time, so what a
+hub can talk to is not the same on every machine and an app that assumes
+otherwise shows sections that can never fill. **Ask this block; never infer it
+from a board name.** The threshold is `MemTotal` against 1024 MB, so a 1 GB Pi 4
+and a Pi 3 answer `budget: "one"` exactly as a Zero 2 W does — an app that tells
+somebody "a Pi 4 runs both" is wrong for every 1 GB Pi 4 there is. The `radio`
+block on `GET /hub` says which situation this hub is in:
 
 | Field | Meaning |
 |---|---|
@@ -650,6 +653,14 @@ the board come back when it is handed back. They read as offline meanwhile.
 
 #### Running both radios on a board measured for one
 
+**`standDown` is a small board's fact, and `suspended` says whether it is still
+one.** The record outlives the board it was written for — an SD card moved into
+a bigger Pi carries `<data>/` with it — so `suspended` and `willRetry` are false
+whenever `budget` is `both`, however the record reads: there `auto` already runs
+both radios, and an app drawing "went back to one radio" over a hub running two
+is the reason the gate exists. The record itself stays (`at`, `reason`, `count`
+are still true), so a client that wants to say *this happened once* still can.
+
 `budget` is a **measurement, not a ceiling**, and the distinction is the whole
 of this section. It is measured against a *full* home — the operating system,
 the hub with Matter loaded, and a Zigbee2MQTT holding a hundred devices' state
@@ -658,6 +669,15 @@ board therefore took Matter away from somebody to prevent a problem they did
 not have, so the refusal is gone: **`PUT /settings/radio` accepts `"both"` on
 any board.** What `budget: "one"` now means is *recommended one at a time*, and
 it is the fact an app warns from.
+
+**What an app owes the person at that switch is one specific sentence**, and it
+is the one most easily dropped: *what changes this is your Zigbee network
+growing*. Everything else about the offer is reassuring and true — it works now,
+the hub watches itself, nothing is unpaired if it stands down — and an app that
+says only those has described a setting somebody will meet again in a year with
+twenty devices bought on the strength of it. Say what moves the margin, and name
+the board that never has the question as **2 GB or more** rather than as a
+model.
 
 What makes that safe is that the hub watches itself. While the mode is `both`
 **and both radios are actually up**, it samples the kernel's own counters every
@@ -682,7 +702,7 @@ radios is the condition, whatever route the board took to them — a hub whose
 seconds between a stand-down writing the mode and the detector applying it. On
 a board measured for **both**, a reading that would stand a radio down on a
 Zero 2 W instead only *reports*: there is no second radio to hand back, the
-board is supposed to run them, and taking one off a Pi 5 would be the hub
+board is supposed to run them, and taking one off a 4 GB board would be the hub
 making a working home smaller to fix a problem that is somewhere else.
 
 That report is `radio.pressure`, and it is present on any hardware:

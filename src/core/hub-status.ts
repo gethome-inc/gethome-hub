@@ -294,11 +294,26 @@ export function createHubStatusReader(deps: ApiDeps): HubStatusReader {
                   ...(standDown.detail !== undefined ? { detail: standDown.detail } : {}),
                   count: standDown.count,
                   acknowledged: standDown.acknowledgedAt !== undefined,
-                  // Both computed from the mode as well as the record, because
-                  // the question is about *now*: a hub that has since been put
-                  // back on both owes nobody anything, whatever its history.
-                  suspended: standDown.wish === 'both' && mode !== 'both',
+                  // Both computed from the mode *and the budget* as well as
+                  // the record, because the question is about now: a hub that
+                  // has since been put back on both owes nobody anything,
+                  // whatever its history — and neither does one whose board
+                  // has changed underneath it.
+                  //
+                  // **The budget is the half that was missing, and an SD card
+                  // is why.** A stand-down is a small board's fact; a record
+                  // travels with the card into a bigger Pi, where `auto`
+                  // already runs both radios. Without this the apps drew "Your
+                  // hub went back to one radio", with a button offering to try
+                  // both again, over a hub that was running both — permanently,
+                  // since the watch only ever restores while *one* radio is
+                  // live and there was nothing here to clear the record.
+                  suspended:
+                    deps.radioBudget === 'one' &&
+                    standDown.wish === 'both' &&
+                    mode !== 'both',
                   willRetry:
+                    deps.radioBudget === 'one' &&
                     standDown.wish === 'both' &&
                     mode !== 'both' &&
                     standDown.autoRetries < MAX_AUTO_RETRIES,

@@ -80,15 +80,44 @@ LAN-only by design.
 
 ### The computer
 
-A **64-bit** system is required, and the board's memory decides what the hub can
-run on it.
+A **64-bit** system is required, and **memory is what decides everything below**
+— not the model name. The installer reads the board's RAM and applies one rule:
 
-| | Board | What you get |
-|---|---|---|
-| **Recommended** | Raspberry Pi 5, Pi 4 (2 GB or more) | Everything: Matter, Zigbee, MQTT, room to spare |
-| **Tested, with one limit** | Raspberry Pi Zero 2 W (512 MB) | Matter, Wi-Fi and MQTT, **or** Zigbee — one radio at a time recommended, both available, see below |
-| **Should work, not routinely tested** | Pi 3 / 3B+, 400, 500, CM4, CM5, and any other 64-bit ARM or x86-64 Linux machine | Everything above 1 GB; one radio at a time recommended at 1 GB or below |
-| **Cannot work** | Pi 1, Pi Zero, Pi Zero W | Nothing — these are ARMv6, and Node.js has published no ARMv6 build since Node 12 |
+> **2 GB or more → both radios together. 1 GB or less → one radio at a time,
+> recommended.** Nothing is refused either way; the smaller board is advised,
+> not restricted, and [you can run both on it](#you-can-run-both-radios-on-a-small-board-and-here-is-what-that-costs).
+
+Read the memory column first, because several boards are sold in more than one
+size and the same model lands in different rows:
+
+| Memory | Both radios at once? | Boards | Tested here |
+|---|---|---|---|
+| **4 GB and up** | **Yes**, with room to spare | Pi 5 (4/8/16 GB), Pi 4 (4/8 GB), Pi 400, Pi 500, CM4/CM5 (4 GB+) | Pi 5 and Pi 4 are tested |
+| **2 GB** | **Yes** | Pi 5 (2 GB), Pi 4 (2 GB), CM4/CM5 (2 GB) | same rule, same code path as the row above |
+| **1 GB** | One at a time recommended · both allowed | **Pi 4 (1 GB)**, **Pi 3 / 3B+**, CM4 (1 GB) | not routinely tested — see below |
+| **512 MB** | One at a time recommended · both allowed | Pi Zero 2 W, Pi 3 A+ | tested most — the Zero 2 W is the board the hub is developed on |
+| **Under 400 MB** | — | — | Refused by the installer, with the reason |
+| **ARMv6, any size** | — | Pi 1, Pi Zero, Pi Zero W | Cannot work — Node.js has published no ARMv6 build since Node 12 |
+
+Two rows are worth reading twice, because both are easy to buy by accident:
+
+- **A 1 GB Pi 4 is a one-radio board.** So is a Pi 3. "Buy a Pi 4" is not the
+  advice — *2 GB or more* is. The Pi 4 was sold in a 1 GB version and plenty are
+  still in circulation secondhand; it gets exactly the same recommendation as a
+  Zero 2 W, because the installer measures memory rather than reading the model
+  off the board.
+- **1 GB is the tier nobody here has measured.** Everything written below about
+  running both radios was measured on a 512 MB Zero 2 W. A 1 GB board has
+  roughly twice that to work with, so it is very likely more comfortable — but
+  "likely" is the honest word, and it is why 1 GB is grouped with the small
+  boards rather than with the ones that never have the question. It is *sized*
+  for its own memory, though: the installer gives a 1 GB board room to use what
+  it has rather than the ceilings a 512 MB board needs.
+
+Any other 64-bit ARM or x86-64 Linux machine works and follows the same memory
+rule; the installer prints a warning for Raspberry Pis it does not recognise,
+and says nothing for machines that are not Pis at all, where running a home hub
+is already a deliberate choice.
 
 The tested operating system is **Raspberry Pi OS Lite (64-bit)**. Debian and
 Ubuntu on arm64 work too; they are simply not what we test against.
@@ -197,18 +226,20 @@ closes were found.
 Zigbee. That is a real limitation rather than a temporary one, so it is worth
 deciding before you buy a board:
 
-> **A Raspberry Pi Zero 2 W is set up for one radio at a time.** 512 MB is not
-> comfortably enough for Matter *and* Zigbee at once — measured, the hub is
-> ~120 MB, Matter adds ~60 MB, and Zigbee2MQTT another ~150 MB on top of the
-> operating system's ~70 MB. So that board starts with whichever one you are
+> **A board with 1 GB or less is set up for one radio at a time** — a Pi Zero
+> 2 W, a Pi 3, and the 1 GB version of the Pi 4. The arithmetic that sets the
+> rule is the smallest board's: 512 MB is not comfortably enough for Matter
+> *and* Zigbee at once in a full house, since measured the hub is ~120 MB,
+> Matter adds ~60 MB, and Zigbee2MQTT another ~150 MB on top of the operating
+> system's ~70 MB. So that board starts with whichever one you are
 > actually using: plug a coordinator in and it runs Zigbee, leave it out and it
 > runs Matter. Nothing to configure either way, and the installer says which one
 > you ended up with. You can switch it in the GetHome app at any time — the
 > coordinator stays configured, and Zigbee devices come back when you switch
-> back (they show as offline meanwhile). A Pi 4 or Pi 5 runs both together and
-> never asks.
+> back (they show as offline meanwhile). A board with 2 GB or more runs both
+> together and never asks.
 
-#### You can run both on a Zero 2 W, and here is what that costs
+#### You can run both radios on a small board, and here is what that costs
 
 Those figures are for a *full* home, and most homes are nowhere near one. A
 Zero 2 W with three Zigbee devices and one Matter plug ran both radios for an
@@ -217,7 +248,16 @@ hour with no throttling, no restarts and nothing killed — the hub peaking at
 GetHome app on every board**, including this one. What `one` now means is
 *recommended one at a time*, and the app says so where you turn it on.
 
-Before you do, the honest version:
+**The trap this section exists to prevent**, in one paragraph, because it is the
+one way a hub like this goes wrong months after it was set up: you put both
+radios on a small board with four devices, everything works, you go on buying
+Zigbee devices for a year, and somewhere in there the board stops fitting. You
+are not left to discover that in the dark — the hub notices and hands a radio
+back with an explanation — but by then the cheap fix, buying a 2 GB board at the
+start, is behind you. So decide the *size of the home you are building* now, not
+the size it is today.
+
+Before you turn both on, the honest version:
 
 - **What decides it is your Zigbee network, not the board.** Measured over
   seven hours with both radios on a Zero 2 W — one Matter plug, three Zigbee
@@ -226,10 +266,18 @@ Before you do, the honest version:
   comfortable. What uses up the remaining margin is Zigbee2MQTT, which holds
   state for every device you pair: the board that copes with a handful may not
   cope with another twenty.
+- **Nobody here can give you the number of devices**, and you should be
+  suspicious of anyone who does. What has been measured is four devices for
+  seven hours; what has not been measured is twenty, or forty, on this board or
+  on a 1 GB one. The honest boundary is the one above: a handful is known to be
+  fine, a full house is known not to fit, and everything between them is why the
+  hub watches its own memory instead of quoting you a limit.
 - **So treat it as a setting to come back to, not one to set and forget.** This
   is the part worth knowing *before* you start buying: if you already know you
-  want a large Zigbee network alongside Matter, buy a Pi 4 or Pi 5 instead. It
-  never has the question.
+  want a large Zigbee network alongside Matter, get a board with **2 GB or
+  more** — a Pi 5, or a Pi 4 in its 2 GB, 4 GB or 8 GB version. It never has the
+  question. Note the memory, not the model: a 1 GB Pi 4 is a one-radio board on
+  exactly the same terms as a Zero 2 W.
 - **The hub watches for it rather than waiting to be told.** With both radios
   on, it samples the kernel's own memory counters every 30 seconds — how often
   the hub is being throttled at its limit, whether anything has been killed,
@@ -256,8 +304,10 @@ Before you do, the honest version:
   the installer switched the kernel's memory accounting back on — until it has,
   the hub cannot see the board running short and cannot hand a radio back. The
   installer says so if either applies to you.
-- **A Pi 4 or Pi 5 has none of these questions.** If you know you want both
-  radios and a large network, that is the board to buy.
+- **A board with 2 GB or more has none of these questions.** If you know you
+  want both radios and a large network, that is what to buy — a Pi 5, or a
+  Pi 4 in 2 GB or larger. Not "a Pi 4": the 1 GB one is in the same tier as a
+  Zero 2 W and gets this whole section.
 
 ## Quick start
 
