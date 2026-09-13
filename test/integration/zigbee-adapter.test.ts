@@ -79,6 +79,21 @@ describe.skipIf(!enabled)('ZigbeeAdapter runtime AI adaptation', () => {
 
   const requestMapping = vi.fn(async () => null as AppliedAiMapping | null);
 
+  /**
+   * How many times adoption asked the agent, read while the answer still
+   * exists.
+   *
+   * This suite is a *sequence* — one adapter, one broker, one mock, each test
+   * standing on what the one before it did — and `mock.calls` deliberately is
+   * not: vitest clears every mock's history before each test, so a count read
+   * in a test body is about that test alone. That is the right default and
+   * every assertion below is written to it, but it wipes what `beforeAll`
+   * did before the first test can look — which would have turned the
+   * assertion under it into one that cannot fail. So the one fact this suite
+   * needs about the hook is taken in the hook.
+   */
+  let asksDuringAdoption = -1;
+
   beforeAll(async () => {
     fake = await mqtt.connectAsync(MQTT_URL);
     await fake.publishAsync(`${BASE}/bridge/devices`, JSON.stringify([probe]), { retain: true });
@@ -92,6 +107,7 @@ describe.skipIf(!enabled)('ZigbeeAdapter runtime AI adaptation', () => {
     });
     await adapter.start(bus);
     await waitFor(() => upserts.length >= 1);
+    asksDuringAdoption = requestMapping.mock.calls.length;
   }, 30_000);
 
   afterAll(async () => {
@@ -106,7 +122,7 @@ describe.skipIf(!enabled)('ZigbeeAdapter runtime AI adaptation', () => {
       externalId: probe.ieee_address,
       needsReview: false,
     });
-    expect(requestMapping).not.toHaveBeenCalled();
+    expect(asksDuringAdoption).toBe(0);
   });
 
   it('asks the AI once when an undeclared parameter appears, with samples', async () => {
@@ -146,7 +162,7 @@ describe.skipIf(!enabled)('ZigbeeAdapter runtime AI adaptation', () => {
   it('does not re-ask for a parameter it already asked about', async () => {
     await fake.publishAsync(`${BASE}/Weird probe`, JSON.stringify({ temperature: 22, soil_moisture: 45 }));
     await new Promise((resolve) => setTimeout(resolve, 200));
-    expect(requestMapping).toHaveBeenCalledTimes(1);
+    expect(requestMapping).not.toHaveBeenCalled();
   });
 
   it('answers an explicit remap while the agent is still working', async () => {
@@ -168,10 +184,10 @@ describe.skipIf(!enabled)('ZigbeeAdapter runtime AI adaptation', () => {
       expect(adapter.remap(probe.ieee_address)).toBe(true);
       // The run really did start — an answer that came back because nothing
       // happened would be the bug this replaced, wearing the same face.
-      await waitFor(() => requestMapping.mock.calls.length === 2);
+      await waitFor(() => requestMapping.mock.calls.length === 1);
       // Same cast as above: the mock is declared with no parameters, so its
       // recorded arguments need spelling out.
-      const [, , options] = requestMapping.mock.calls[1]! as unknown as [
+      const [, , options] = requestMapping.mock.calls[0]! as unknown as [
         unknown,
         unknown,
         { force?: boolean },
@@ -218,7 +234,12 @@ describe.skipIf(!enabled)('ZigbeeAdapter runtime AI adaptation', () => {
 
     reachability.length = 0;
     await fake.publishAsync(`${BASE}/bridge/devices`, JSON.stringify([probe, newcomer]), { retain: true });
-    await waitFor(() => requestMapping.mock.calls.length >= 2);
+    // The newcomer's run has actually begun — everything below depends on it
+    // being *in flight*. This used to wait on the suite's running total,
+    // which the test before it had already carried past the number, so the
+    // wait returned at once and the publish below raced the adoption it
+    // exists to interrupt.
+    await waitFor(() => requestMapping.mock.calls.length >= 1);
 
     try {
       // Mid-run: the device is not yet announced, but it must already be

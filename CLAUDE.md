@@ -86,6 +86,21 @@ which of the two you have. Prefer a temporary file over `sed -i`, build a sed
 program into a variable before using it, and run `npm test` on the machine you
 are writing on.
 
+**A mock's history is per test, and a `beforeAll` that exercises one is the
+trap.** Vitest clears every mock before each test (`clearMocks`, its default
+since 5.0), so `mock.calls` in a test body is that test's calls and nothing
+else — write counts relative to the test, never as the suite's running total.
+The half that is not merely a rewrite is the one place a suite asserts on what
+a *hook* did: the clear runs before the first test, so
+`expect(m).not.toHaveBeenCalled()` about a `beforeAll` is an assertion that
+cannot fail — the same shape as the shell trap above, where the test looked
+green because it had stopped reaching anything. Take the count in the hook and
+assert on that (`test/integration/zigbee-adapter.test.ts` is the worked
+example, and it is the only suite here with a mock outside an `it`). The
+running-total form hides the other direction too: a wait for "at least two
+calls" that the previous test had already satisfied returned at once, so the
+race it existed to close was never actually held open.
+
 **Dependencies are gated, not just watched.** Every vulnerable package this repo
 has shipped arrived transitively — `mqtt → socks → ip-address`, and
 `@anthropic-ai/claude-agent-sdk → @modelcontextprotocol/sdk → hono` before that
