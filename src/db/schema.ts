@@ -132,6 +132,31 @@ export const devices = sqliteTable(
      * round-trip on `GET /devices`.
      */
     recognition: text('recognition', { mode: 'json' }),
+    /**
+     * Somebody in the home saying this one being offline is fine.
+     *
+     * Unplugging a heater for the summer is not a fault, and the apps had no
+     * way to be told so: the dashboard counted it, put a red triangle over the
+     * home and went on doing it until the thing was plugged back in. This is
+     * the answer, and it is on the **device row** rather than in a phone,
+     * because it is a fact about the house in exactly the way the device's
+     * name is — one person unplugs the heater and nobody else should go on
+     * being told the home needs looking at.
+     *
+     * Epoch ms rather than a boolean: "since when" is the question somebody
+     * asks in September about a socket they silenced in May, and it costs the
+     * same column.
+     *
+     * **Cleared when the device is reachable again** (`reachabilityChanged`),
+     * which is what ties it to *this* absence rather than to the device: a
+     * thing that comes back and goes again is a new event and is asked about
+     * again. The member id and name follow `device_portraits`' rule — an
+     * `ALTER TABLE` column gets no `ON DELETE` action in SQLite, so the id may
+     * point at somebody long removed and the name is what is actually drawn.
+     */
+    offlineExpectedAt: integer('offline_expected_at'),
+    offlineExpectedBy: text('offline_expected_by'),
+    offlineExpectedByName: text('offline_expected_by_name'),
     createdAt: createdAt(),
   },
   (table) => [uniqueIndex('devices_adapter_external_id').on(table.adapter, table.externalId)],

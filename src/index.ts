@@ -16,6 +16,7 @@ import { FavoritesService } from './core/favorites.js';
 import { AccessService } from './core/access.js';
 import { PairingService } from './core/pairing.js';
 import { SettingsService } from './core/settings.js';
+import { readWifiCredentials } from './core/wifi.js';
 import { DeviceRegistry } from './core/registry.js';
 import { AiRunLog } from './core/ai-runs.js';
 import { MqttObserver } from './core/mqtt-observer.js';
@@ -24,6 +25,7 @@ import { PermitJoinService } from './core/permit-join.js';
 import { activityForLifecycleEvent, normalizeBridgeEvent } from './core/zigbee-events.js';
 import { buildServer } from './api/server.js';
 import { MdnsAdvertiser } from './mdns/advertiser.js';
+import { createRadioPressureWatch, type RadioPressureWatch } from './core/radio-pressure.js';
 import { lazyAiAssist } from './ai/lazy.js';
 import { MappingLibrary } from './ai/library.js';
 import { AutomationStore } from './automations/store.js';
@@ -219,7 +221,16 @@ async function main(): Promise<void> {
   }
   if (config.ADAPTER_MATTER) {
     const { MatterAdapter } = await import('./adapters/matter/adapter.js');
-    matter = new MatterAdapter({ dataDir: config.DATA_DIR, log: log.child({ module: 'matter' }) });
+    matter = new MatterAdapter({
+      dataDir: config.DATA_DIR,
+      log: log.child({ module: 'matter' }),
+      ble: config.ADAPTER_MATTER_BLE,
+      hciId: config.MATTER_BLE_HCI,
+      // A function, not a value: the home may retype its Wi-Fi password long
+      // after this hub booted, and the dispatcher that writes the file rewrites
+      // it on every association. Read per pairing, which is once in a while.
+      wifi: () => readWifiCredentials(config.WIFI_ENV_FILE),
+    });
     registry.registerAdapter(matter);
   }
 
@@ -252,6 +263,8 @@ async function main(): Promise<void> {
     log: log.child({ module: 'ai' }),
   });
 
+  let radioPressure: RadioPressureWatch | undefined;
+
   const app = await buildServer({
     db,
     log,
@@ -269,7 +282,12 @@ async function main(): Promise<void> {
     version,
     dataDir: config.DATA_DIR,
     radioBudget: config.GETHOME_RADIO,
+    // Late-bound on purpose: the API listens *before* the adapters start (so a
+    // slow radio cannot hold port 8420 closed), and the watch needs to know
+    // which radios came up. One indirection is cheaper than moving either.
+    radioPressure: { pressure: () => radioPressure?.pressure() },
     z2mDataDir: config.Z2M_DATA_DIR,
+    zigbeeEnvFile: config.ZIGBEE_ENV_FILE,
     mqtt: {
       url: config.MQTT_URL,
       username: config.MQTT_USERNAME,
@@ -364,12 +382,66 @@ async function main(): Promise<void> {
       log.error({ err: error }, 'Device registry failed to start.');
     });
 
+  // A hub asked to run both radios on a board measured for one is watched, and
+  // hands a radio back itself if the board really does run out. Started
+  // unconditionally and idle on every hub that is not in that position — the
+  // tick is a mode read and returns, and the timer is `unref`ed — because the
+  // alternative is deciding here, once, something that changes while the
+  // process runs: a coordinator plugged in an hour from now is exactly how a
+  // hub arrives at running two radios without anybody restarting it.
+  radioPressure = createRadioPressureWatch({
+    dataDir: config.DATA_DIR,
+    radioBudget: config.GETHOME_RADIO,
+    radiosLive: () => ({ zigbee: zigbee?.connected ?? false, matter: matter !== undefined }),
+    // Somebody standing in front of a device. Only the retry waits for it: a
+    // hub that restarted itself mid-pairing would take the pairing with it,
+    // for a trial that had no reason to happen in that particular minute.
+    busy: () => matter?.isCommissioning === true || permitJoin.state.active,
+    log: log.child({ module: 'radio' }),
+    onStandDown: async (record) => {
+      // Both, in this order, and both before the mode is written: the frame is
+      // what the app on the sofa finds out from, and the row is what somebody
+      // reads on Thursday wondering why half the house went quiet on Tuesday.
+      // `memberId` is deliberately absent — nobody did this.
+      await activity.record({
+        kind: 'hub.radio-stood-down',
+        message:
+          record.reason === 'out-of-memory'
+            ? 'The hub went back to one radio: this board ran out of memory running both.'
+            : 'The hub went back to one radio: this board was running short of memory.',
+        data: {
+          reason: record.reason,
+          ...(record.detail !== undefined ? { detail: record.detail } : {}),
+          count: record.count,
+        },
+      });
+      events.emit('hubStatusChanged');
+    },
+    onRestore: async (record) => {
+      // Its own row and its own kind, because it is the opposite news: the
+      // stand-down row says the home got smaller and nobody asked, and this
+      // one says the hub is giving back what it took. A feed that showed only
+      // the first would read as a hub that keeps taking things away.
+      await activity.record({
+        kind: 'hub.radio-restored',
+        message: 'The hub is trying both radios again — this board has restarted since it stopped.',
+        data: { attempt: record.autoRetries, count: record.count },
+      });
+      events.emit('hubStatusChanged');
+    },
+    // Pressure is news on every board, so this reaches every app whatever the
+    // hardware — on a Pi 5 it is the *whole* of what the hub does about it.
+    onPressure: () => events.emit('hubStatusChanged'),
+  });
+  radioPressure.start();
+
   const stopping = { value: false };
   const shutdown = async (signal: string) => {
     if (stopping.value) return;
     stopping.value = true;
     log.info(`${signal} received, shutting down…`);
     permitJoin.stop();
+    radioPressure?.stop();
     await automations.stop().catch(() => {});
     await mdns?.stop().catch(() => {});
     await app.close().catch(() => {});

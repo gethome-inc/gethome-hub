@@ -136,4 +136,34 @@ describe('the migration journal says what is really there', () => {
     const onDisk = migrations().map((migration) => migration.file);
     expect(tagged).toEqual(onDisk);
   });
+
+  /**
+   * **And a snapshot for every entry, chained to the one before it.**
+   *
+   * The snapshots are not read at boot, which is exactly why one can go
+   * missing without anybody noticing — and the cost lands on the *next* person
+   * to run `db:generate`. It happened: `0014_snapshot.json` was never
+   * committed, so drizzle diffed the schema against `0013`, and the next
+   * generated migration re-emitted `0014`'s three `ALTER TABLE … ADD`s on top
+   * of its own. Applied to any hub that had already run `0014`, that is
+   * `duplicate column name` — the migration throws at boot, and the hub does
+   * not start.
+   *
+   * Nothing above catches it: the SQL was well formed, the journal was
+   * complete, and the file was additive. So the chain is asserted here, where
+   * the rest of the journal's invariants are.
+   */
+  it('has a snapshot for every entry, each following the one before it', () => {
+    const snapshots = journal.entries.map((entry) => {
+      const file = path.join(migrationsDir, 'meta', `${String(entry.idx).padStart(4, '0')}_snapshot.json`);
+      return JSON.parse(readFileSync(file, 'utf8')) as { id: string; prevId: string };
+    });
+    // A break in the chain is a snapshot that is missing or out of order, and
+    // either way drizzle would generate its next migration against the wrong
+    // schema.
+    for (const [index, snapshot] of snapshots.entries()) {
+      if (index === 0) continue;
+      expect([index, snapshot.prevId]).toEqual([index, snapshots[index - 1]!.id]);
+    }
+  });
 });

@@ -67,6 +67,102 @@ describe.skipIf(!handle)('DeviceRegistry', () => {
     await handle?.close();
   });
 
+  /**
+   * "That one being offline is fine."
+   *
+   * Unplugging a heater for the summer is not a fault, and until this existed
+   * the apps had no way to be told so: the dashboard counted it, put a red
+   * triangle over the home, and went on doing it until the thing was plugged
+   * back in. The excuse lives on the device row because it is a fact about the
+   * *house* — one person unplugs the heater and nobody else should go on being
+   * told the home needs looking at.
+   *
+   * What is worth pinning is not the write but what **retires** it, because
+   * that is the whole of what makes it an excuse for *this* absence rather
+   * than a permanent "never mind about this device".
+   */
+  describe('a device somebody said is meant to be offline', () => {
+    const excuse = async (): Promise<string> => {
+      adapter.bus!.deviceUpserted(lampDescriptor);
+      await registry.flush();
+      const deviceId = registry.listDevices()[0]!.id;
+      adapter.bus!.reachabilityChanged('mqtt', 'lamp-1', false);
+      await registry.flush();
+      await registry.setOfflineExpected(deviceId, { id: 'member-1', name: 'Georgy' });
+      return deviceId;
+    };
+
+    it('records who said so and when, and hands it back', async () => {
+      const deviceId = await excuse();
+      const device = registry.getDevice(deviceId)!;
+      expect(device.offlineExpectedAt).toBeGreaterThan(0);
+      expect(device.offlineExpectedByName).toBe('Georgy');
+      // The name is what an app draws; the id may point at somebody long gone,
+      // since an `ALTER TABLE` column gets no `ON DELETE` action in SQLite.
+      expect(device.offlineExpectedBy).toBe('member-1');
+    });
+
+    it('survives the restart that reads it back off the disk', async () => {
+      await excuse();
+      await registry.flush();
+
+      const second = new DeviceRegistry(db, new HubEventBus(), new ActivityService(db, events), log);
+      second.registerAdapter(new FakeAdapter());
+      await second.start();
+      expect(second.listDevices()[0]!.offlineExpectedByName).toBe('Georgy');
+    });
+
+    it('is retired by the device answering again', async () => {
+      // The point of the whole feature: a socket excused in May, plugged back
+      // in and pulled out again in September, is a new thing to be told about.
+      const deviceId = await excuse();
+      adapter.bus!.reachabilityChanged('mqtt', 'lamp-1', true);
+      await registry.flush();
+      expect(registry.getDevice(deviceId)!.offlineExpectedAt).toBeNull();
+
+      // …and it really reached the disk, not just the cache.
+      const row = await db.query.devices.findFirst({ where: eq(devices.id, deviceId) });
+      expect(row?.offlineExpectedAt).toBeNull();
+      expect(row?.offlineExpectedByName).toBeNull();
+    });
+
+    it('is **not** retired by a radio coming back up', async () => {
+      // `radioReachabilityChanged` speaks for everything behind it and is an
+      // assumption rather than a report about this device — and Zigbee2MQTT's
+      // bridge says `online` on every hub restart, which would have cleared
+      // every excuse in the home overnight on a hub nobody had touched.
+      const deviceId = await excuse();
+      adapter.bus!.radioReachabilityChanged('mqtt', true);
+      await registry.flush();
+      expect(registry.getDevice(deviceId)!.offlineExpectedAt).toBeGreaterThan(0);
+    });
+
+    it('is retired by the first real report after such a radio bounce', async () => {
+      // The other half of the rule above: holding it across the radio's
+      // statement must not make it permanent. The device's own word ends it.
+      const deviceId = await excuse();
+      adapter.bus!.radioReachabilityChanged('mqtt', true);
+      await registry.flush();
+      adapter.bus!.reachabilityChanged('mqtt', 'lamp-1', true);
+      await registry.flush();
+      expect(registry.getDevice(deviceId)!.offlineExpectedAt).toBeNull();
+    });
+
+    it('can be taken back, which is what somebody does when it is not fine', async () => {
+      const deviceId = await excuse();
+      await registry.setOfflineExpected(deviceId, undefined);
+      expect(registry.getDevice(deviceId)!.offlineExpectedAt).toBeNull();
+      expect(registry.getDevice(deviceId)!.offlineExpectedByName).toBeNull();
+    });
+
+    it('says nothing about a device nobody has excused', async () => {
+      // Absence is the answer, which is nearly every device in every home.
+      adapter.bus!.deviceUpserted(lampDescriptor);
+      await registry.flush();
+      expect(registry.listDevices()[0]!.offlineExpectedAt).toBeNull();
+    });
+  });
+
   it('persists announced devices with endpoints and empty state', async () => {
     adapter.bus!.deviceUpserted(lampDescriptor);
     await registry.flush();

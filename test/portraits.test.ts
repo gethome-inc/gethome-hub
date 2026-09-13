@@ -137,6 +137,7 @@ describe.skipIf(!handle)('device portraits', () => {
       dataDir,
       radioBudget: 'both',
       z2mDataDir: path.join(dataDir, 'zigbee2mqtt'),
+      zigbeeEnvFile: path.join(dataDir, 'zigbee.env'),
       mqtt: testBroker(),
       permitJoin: new PermitJoinService(undefined, log, () => {}),
     });

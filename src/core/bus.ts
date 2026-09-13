@@ -3,6 +3,7 @@ import type { AdapterId } from '../adapters/adapter.js';
 import type { EndpointState } from '../schema/index.js';
 import type { MqttFrame } from './mqtt-observer.js';
 import type { AiRunEvent } from './ai-runs.js';
+import type { CommissionFailure } from '../adapters/matter/commission-failures.js';
 
 /**
  * Events the hub fans out to WebSocket clients (and internal listeners).
@@ -99,7 +100,17 @@ export interface HubEvents {
    * one phone that fails is a fact the phone in the next room is also drawing.
    */
   commandFailed: [failure: CommandFailure];
-  commissioningProgress: [jobId: string, status: string, detail?: string];
+  /**
+   * A Matter pairing moved.
+   *
+   * One object rather than three positional arguments, because what a pairing
+   * has to say grew: which step it is on (which decides whether the advice is
+   * "hold its button" or "leave it alone"), and, when it fails, *why* in words
+   * an app can act on rather than matter.js's own sentence about
+   * discriminators. `status` deliberately keeps its original three values —
+   * a fourth is one an existing client drops on the floor.
+   */
+  commissioningProgress: [update: CommissioningUpdate];
   mqttFrame: [frame: MqttFrame];
   zigbeeEvent: [event: ZigbeeLifecycleEvent];
   aiRun: [event: AiRunEvent];
@@ -223,6 +234,25 @@ export interface AutomationRunEvent {
  * `unreachable` or `refused` — see `adapters/zigbee/write-failures.ts`, which
  * also explains why `superseded` never reaches here.
  */
+/**
+ * A Matter pairing's progress, as it reaches the sockets.
+ *
+ * `status` is the wire's original vocabulary and stays that way; everything
+ * that grew is beside it. A **cancelled** pairing is `failed` carrying
+ * `failure.kind === 'cancelled'`, so a client that has never heard of cancel
+ * shows its ordinary refusal rather than nothing at all.
+ */
+export interface CommissioningUpdate {
+  jobId: string;
+  status: 'running' | 'done' | 'failed';
+  /** `looking` while the hub is searching, `pairing` once it has answered. */
+  step?: 'looking' | 'pairing';
+  nodeId?: string;
+  failure?: CommissionFailure;
+  /** When the hub will give up, so a screen counts down rather than guessing. */
+  deadline?: number;
+}
+
 export interface CommandFailure {
   deviceId: string;
   /** What was being written, in the vocabulary the client asked in. */

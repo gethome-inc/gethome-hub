@@ -148,6 +148,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
       dataDir,
       radioBudget: 'one',
       z2mDataDir: path.join(dataDir, 'zigbee2mqtt'),
+      zigbeeEnvFile: path.join(dataDir, 'zigbee.env'),
       mqtt: testBroker(),
       permitJoin: new PermitJoinService(undefined, log, () => {}),
       aiRuns: new AiRunLog(db, events),
@@ -324,7 +325,11 @@ describe.skipIf(!handle)('roles and permissions', () => {
     expect(pinned.statusCode).toBe(200);
     expect(pinned.json()).toMatchObject({ favorite: true });
 
-    for (const payload of [{ name: 'Not yours' }, { roomId }]) {
+    // `offlineExpected` is in this list rather than beside `favorite`: it
+    // silences the home's own "needs attention" for **everybody**, so it is
+    // the house's in exactly the way the name is, and a guest staying the
+    // weekend has no business switching it off.
+    for (const payload of [{ name: 'Not yours' }, { roomId }, { offlineExpected: true }]) {
       const refused = await app.inject({
         method: 'PATCH',
         url: `/api/v1/devices/${deviceId}`,
@@ -355,6 +360,21 @@ describe.skipIf(!handle)('roles and permissions', () => {
       ['PATCH', '/api/v1/home', 'home.rename', { name: 'Not yours' }],
       ['POST', '/api/v1/zigbee/permit-join', 'device.add', { seconds: 60 }],
       ['POST', '/api/v1/matter/commission', 'device.add', { pairingCode: '34970112332' }],
+      // Cancelling is the same permission as starting, because the hub pairs
+      // one accessory at a time: a member who cannot call off somebody else's
+      // abandoned job cannot pair anything either until it times out. The
+      // guard runs before the handler, so a job id that never existed still
+      // proves the refusal.
+      [
+        'POST',
+        '/api/v1/matter/commission/44444444-4444-4444-a444-444444444444/cancel',
+        'device.add',
+        undefined,
+      ],
+      // Looking around is the same act as adding, one step earlier — and it
+      // drives a radio for a few seconds, which is on its own reason enough not
+      // to leave it where anything could poll it.
+      ['GET', '/api/v1/matter/discoverable', 'device.add', undefined],
       ['PUT', '/api/v1/settings/radio', 'hub.radio', { mode: 'matter' }],
       ['DELETE', `/api/v1/devices/${deviceId}`, 'device.remove', undefined],
       ['GET', '/api/v1/settings/ai', 'hub.ai', undefined],
