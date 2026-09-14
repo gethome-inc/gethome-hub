@@ -144,6 +144,33 @@ describe('a spoken request', () => {
     });
   });
 
+  it('keeps two things said as two lines rather than one run-on sentence', async () => {
+    // The deltas carry no punctuation between utterances, so a greeting, a
+    // pause and then a request concatenated into `Hi turn the kitchen light
+    // off` — asked of the agent that way and shown that way in the row an app
+    // draws. The session's own clock already says they were two.
+    const h = harness();
+    h.read(heard('Hi', 1_000, 1_300));
+    h.read(heard('turn the kitchen light off', 5_000, 6_000));
+    h.read(delegated('item_1', 6_050));
+    await vi.waitFor(() => expect(h.sent).toHaveLength(1));
+
+    expect(h.asked[0]?.question).toBe('Hi\nturn the kitchen light off');
+  });
+
+  it('keeps one sentence’s own fragments on one line', async () => {
+    // The other half, and the one that would regress silently: a pause inside
+    // a sentence is not a new thing said, so nothing is inserted between the
+    // fragments of it.
+    const h = harness();
+    h.read(heard('turn the ', 1_000, 1_400));
+    h.read(heard('kitchen light off', 1_600, 2_000));
+    h.read(delegated('item_1', 2_050));
+    await vi.waitFor(() => expect(h.sent).toHaveLength(1));
+
+    expect(h.asked[0]?.question).toBe('turn the kitchen light off');
+  });
+
   it('is spoken even though the tail of it was transcribed after the ask', async () => {
     // **The regression this file exists for.** The model asks for help the
     // moment it has understood, so " off" lands after the notice. It must

@@ -62,6 +62,22 @@ const TYPE_SCAN_CHARS = 400;
  */
 const CONTEXT_CHARS = 1_200;
 
+/**
+ * How long a pause has to be before two things said are two things said.
+ *
+ * The deltas carry no punctuation between utterances, so "Hi", a pause, and
+ * then "turn the kitchen light off" concatenated into one line reading
+ * `Hi turn the kitchen light off` — which is what the agent was asked and what
+ * the transcript row then showed, with the greeting stuck on the front of the
+ * request as if it were part of it. The session's own clock already says
+ * otherwise, so a real pause is written down as a line break: the agent reads
+ * two sentences, and the row an app draws has them on two lines.
+ *
+ * The phone's `VoiceConversation.captionGap` is the same number doing the same
+ * job on the live caption, so the two agree about where one thing said ends.
+ */
+const UTTERANCE_GAP_MS = 2_000;
+
 export class VoiceDelegation {
   /** What the person has said since the last delegation was handed over. */
   private heard = '';
@@ -103,6 +119,9 @@ export class VoiceDelegation {
         if (typeof delta !== 'string') return;
         const start = finite(frame['start_ms']);
         const end = finite(frame['end_ms']);
+        // Where the last thing said stopped, read before this fragment moves
+        // it — the gap between the two is what separates two utterances.
+        const previousEnd = this.latestEnd;
         if (start !== undefined) this.latestStart = Math.max(this.latestStart ?? start, start);
         if (end !== undefined) this.latestEnd = Math.max(this.latestEnd ?? end, end);
         // **Transcription lags the delegation, and that is the whole of this
@@ -116,7 +135,9 @@ export class VoiceDelegation {
         if (start !== undefined && this.askedUntil !== undefined && start < this.askedUntil) {
           return;
         }
-        this.heard = (this.heard + delta).slice(-CONTEXT_CHARS);
+        this.heard = (this.heard + this.separator(start, previousEnd) + delta).slice(
+          -CONTEXT_CHARS,
+        );
         return;
       }
       case LIVE_EVENTS.delegated: {
@@ -182,6 +203,21 @@ export class VoiceDelegation {
    * A superseded answer is handed over as something the model should know
    * rather than something it should say — the rule kept, the fact not lost.
    */
+  /**
+   * What goes between the last thing said and this fragment.
+   *
+   * Nothing, normally — the deltas of one sentence already carry their own
+   * spacing. A line break where the clock says there was a real pause, so a
+   * request assembled from two utterances reads as two. Silent when either end
+   * of the gap is unknown, which is the honest answer: a build of this API
+   * that stops sending a timeline gets the behaviour it had before.
+   */
+  private separator(start: number | undefined, previousEnd: number | undefined): string {
+    if (this.heard === '') return '';
+    if (start === undefined || previousEnd === undefined) return '';
+    return start - previousEnd >= UTTERANCE_GAP_MS ? '\n' : '';
+  }
+
   private async answer(delegationId: string, offset?: number): Promise<void> {
     if (this.claimed.has(delegationId)) return;
     this.claimed.add(delegationId);

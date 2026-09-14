@@ -767,7 +767,15 @@ domains — update them in the same change.
   fragment is already represented in what was sent and is dropped; after it,
   the person really has moved on. With no timeline at all the answer is
   **spoken**: a slightly late sentence about something the hub has already done
-  costs far less than never hearing that it happened. **The prompt is split the way
+  costs far less than never hearing that it happened. **The same clock
+  separates two things said from one**: the deltas carry no punctuation between
+  utterances, so "Hi", a pause and then a request concatenated into one line —
+  asked of the agent that way and shown that way in the row an app draws — and
+  a gap of `UTTERANCE_GAP_MS` is written down as a line break instead, silent
+  when either end of it is unknown. **And what comes back is said as it was
+  written**: the prompt asks the voice to relay the answer rather than retell
+  it, because the page and the room are one conversation and a re-wording
+  leaves somebody reading one sentence while hearing another. **The prompt is split the way
   the migration guide says**: style and *when to ask* to the voice, business
   rules and the shape of the home to the backend — which is the assistant,
   whose prompt already carries them. It is written to the prompting guide's own

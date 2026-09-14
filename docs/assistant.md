@@ -353,6 +353,30 @@ said something new. With no timeline at all — a build of this API that stops
 sending one — the answer is **spoken**, because a slightly late sentence about
 something already done costs far less than never hearing that it happened.
 
+**The same clock separates two things said from one.** The deltas carry no
+punctuation between utterances, so "Hi", a pause, and then "turn the kitchen
+light off" concatenated into one line — which is what the agent was asked, and
+what the transcript row an app draws then showed, with the greeting stuck on
+the front of the request as if it had been part of it. A gap of
+`UTTERANCE_GAP_MS` (2 s) between one fragment's end and the next one's start is
+written down as a **line break**: the agent reads two sentences, and the row
+has them on two lines. Silent when either end of the gap is unknown, which is
+the honest answer rather than a guess — a build of this API that stops sending
+a timeline gets exactly the behaviour it had before. The iOS app's
+`VoiceConversation.captionGap` is the same number doing the same job on the
+live caption, so the two agree about where one thing said ends.
+
+**And what comes back is said as it was written.** The page and the room are
+one conversation: the answer the assistant produced is the row an app draws,
+and a voice re-wording it leaves somebody reading one sentence while hearing
+another — the one thing a transcript is for. It is also where a re-wording
+quietly drops a number or a caveat the agent was careful about. So the voice
+prompt asks it to **relay rather than retell**: keep the answer's wording and
+every fact in it, add nothing, and change only what would not read aloud (a
+list unfolded into a sentence, a symbol said as a word). They will not be
+identical — a spoken "one moment" has no written half at all — but they no
+longer say different things about the same result.
+
 **One thing about attaching costs a Raspberry Pi something, and it is not
 optional.** A sideband is sent *copies* of both directions of audio — base64
 PCM16 at 24 kHz, about a megabit a second, several kilobytes of JSON every

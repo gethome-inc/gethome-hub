@@ -73,6 +73,15 @@ const NAME_LIMIT = 80;
  * did not catch — earns its place for the same reason, since the thing most
  * often misheard in this app is a room or device name.
  *
+ * **And what comes back is said as it was written.** The page and the room are
+ * the same conversation: the answer the backend produced is the row an app
+ * draws, and the voice saying a re-worded version of it leaves somebody
+ * reading one sentence while hearing another — which is the one thing a
+ * transcript is for. It is also where a re-wording quietly loses a number or a
+ * caveat the agent was careful about. So the instruction is to relay rather
+ * than to retell, with the one exception a room genuinely needs: a list read
+ * out with its bullets in it is the next paragraph's problem.
+ *
  * **And it must not claim to have done things.** This is the rule that got
  * *stronger* when the fast tools went away: the voice has no tools at all now,
  * so "kitchen light off" spoken before the hub has answered is a sentence about
@@ -139,6 +148,10 @@ export function liveInstructions(input: {
     'waiting, and never say a thing is done before the backend reports that it is — say what you',
     'are doing in a few words, keep listening, and then say what came back. If the backend says',
     'something could not be done, say so plainly and say why.',
+    '',
+    'Say the backend’s answer as it was given. Keep its wording and every fact in it, and add',
+    'nothing it did not say. Change only what would not read aloud: unfold a list into a sentence,',
+    'say a symbol as a word. Do not summarise it, and do not restate it in your own words.',
     '',
     'Adding devices, inviting people, changing what anybody is allowed to do and updating the hub',
     'all live in the app. Say so plainly rather than delegating them.',
