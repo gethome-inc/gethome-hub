@@ -63,6 +63,49 @@ export const LIVE_MODEL = 'gpt-live-1';
 export const LIVE_SESSIONS_URL = 'https://api.openai.com/v1/live/sessions';
 
 /**
+ * Where the hub attaches its own connection to a running session.
+ *
+ * A **sideband**: a second socket onto the *same* session, authenticated with
+ * the home's key, carrying every event the phone's data channel carries and
+ * accepting every command. It is what lets the delegation loop live here
+ * rather than on the phone — see `sideband.ts`. The session must already be
+ * running: an attached socket never sends `session.start`.
+ */
+export function liveSidebandUrl(liveSessionId: string): string {
+  return `wss://api.openai.com/v1/live/sessions/${encodeURIComponent(liveSessionId)}/attach`;
+}
+
+/** The events the hub acts on, off its sideband. */
+export const LIVE_EVENTS = {
+  /** A fragment of what the person is saying. **Not a turn** — there is no
+   *  event that is, so a request is assembled from these. */
+  heard: 'session.input_transcript.delta',
+  /** A fragment of what the assistant is saying. */
+  said: 'session.output_transcript.delta',
+  /** The model wants help, and has said nothing about what with. */
+  delegated: 'session.delegation.created',
+  /** Cumulative seconds on the line. A snapshot, not an increment. */
+  usage: 'session.usage.updated',
+  /** Finalised, with the last word on usage and a reason. */
+  closed: 'session.closed',
+  error: 'error',
+} as const;
+
+/**
+ * The two events a sideband is sent copies of and must throw away.
+ *
+ * **A sideband receives the audio whether it asked for it or not** — both
+ * directions, base64 PCM16 at 24 kHz, about a megabit a second — and there is
+ * no way to decline it. On a board with hundreds of megabytes that is the one
+ * real cost of attaching, which is why `sideband.ts` drops these off a bounded
+ * prefix of the raw frame rather than parsing them first.
+ */
+export const LIVE_AUDIO_EVENTS: ReadonlySet<string> = new Set([
+  'session.input_audio.append',
+  'session.output_audio.delta',
+]);
+
+/**
  * Audio, and **WebRTC negotiates it rather than being told.**
  *
  * `session.audio.format` is a WebSocket field and WebRTC *rejects* it, so the

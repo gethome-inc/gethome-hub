@@ -470,15 +470,28 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
 
     // Minted before the conversation, because a tool context is built with it
     // — see `openConversation`.
-    const sessionId = randomUUID();
-    const conversation = await this.openConversation({
-      memberId: input.memberId,
-      topic: input.topic,
-      sessionId,
-    });
+    const session = await this.open(randomUUID(), input.memberId, input.topic);
+    return this.say(session, input.message, 'send');
+  }
+
+  /**
+   * A conversation at an id somebody else chose, with nothing said in it yet.
+   *
+   * `start()` is this plus a first message, and that is the ordinary way in.
+   * The seam exists for the **voice**, where the id is minted before a word is
+   * spoken (`beginVoice`) and the first thing that happens to the session is a
+   * question arriving from a sideband rather than from a route — so there is no
+   * transcript to revive from and no message to start with.
+   */
+  protected async open(
+    sessionId: string,
+    memberId: string,
+    topic?: string | undefined,
+  ): Promise<ChatSession<Turn>> {
+    const conversation = await this.openConversation({ memberId, topic, sessionId });
     const session: ChatSession<Turn> = {
       id: sessionId,
-      memberId: input.memberId,
+      memberId,
       conversation,
       lastAt: Date.now(),
       startedAt: Date.now(),
@@ -486,10 +499,10 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       recordedUsd: 0,
       steps: [],
       produced: 0,
-      ...(input.topic !== undefined ? { topic: input.topic } : {}),
+      ...(topic !== undefined ? { topic } : {}),
     };
     this.sessions.set(session.id, session);
-    return this.say(session, input.message, 'send');
+    return session;
   }
 
   /** Continue one. A typed reply to a question is an answer, not a new

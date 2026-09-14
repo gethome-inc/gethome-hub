@@ -157,6 +157,57 @@ describe('the assistant', () => {
     expect(rows[1]?.text).toBe('The kitchen light is on.');
   });
 
+  /**
+   * The hub-side half of client delegation, and the bug it fixed.
+   *
+   * GPT-Live says "I need help" and nothing else, so the hub's sideband
+   * assembles the request from the transcript and asks — through the *ordinary*
+   * path, so a spoken exchange leaves exactly what a typed one does. The phone
+   * used to write the person's sentence itself **and** send it as a message, so
+   * every spoken request landed in the transcript twice; the row count is what
+   * pins that.
+   *
+   * And it **waits**, where the phone could only acknowledge and subscribe: the
+   * conversation's own `inFlight` is the answer, which is why the caller gets a
+   * string back rather than a continuation to resume.
+   */
+  it('asks the home out loud, waits for the answer, and writes one row each', async () => {
+    const { assistant } = await assistantFor([
+      { kind: 'said', text: 'The kitchen light is off now.' },
+    ]);
+    const sessionId = assistant.beginVoice();
+
+    const answer = await assistant.askAloud({
+      sessionId,
+      memberId,
+      question: 'turn the kitchen light off',
+    });
+    expect(answer).toBe('The kitchen light is off now.');
+
+    const rows = await assistant.transcript(sessionId);
+    expect(rows.map((row) => row.role)).toEqual(['user', 'agent']);
+    expect(rows[0]?.text).toBe('turn the kitchen light off');
+  });
+
+  /**
+   * A second question reaches the same conversation, which is what makes a
+   * spoken exchange continuable — by speaking again, and by typing afterwards.
+   */
+  it('carries one spoken conversation on across questions', async () => {
+    const { assistant } = await assistantFor([
+      { kind: 'said', text: 'It is off.' },
+      { kind: 'said', text: 'The hall one is off too.' },
+    ]);
+    const sessionId = assistant.beginVoice();
+
+    await assistant.askAloud({ sessionId, memberId, question: 'turn the kitchen light off' });
+    const second = await assistant.askAloud({ sessionId, memberId, question: 'and the hall' });
+
+    expect(second).toBe('The hall one is off too.');
+    const rows = await assistant.transcript(sessionId);
+    expect(rows.map((row) => row.role)).toEqual(['user', 'agent', 'user', 'agent']);
+  });
+
   it('keeps its conversations apart from the automations agent’s', async () => {
     const { assistant, automationChat } = await assistantFor([
       { kind: 'said', text: 'Hello.' },

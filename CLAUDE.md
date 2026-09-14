@@ -132,6 +132,12 @@ the vulnerable `0.18.20`. The cost is that `drizzle-kit` runs above its declared
 range, which CI does not cover because nothing there runs `db:generate`; if you
 touch these versions, run it by hand and check it still reads the schema.
 
+`ws` is the one direct dependency added for the voice, and it was already in
+the tree via `@fastify/websocket` — declared rather than used transitively,
+because the audit rule below is about the lockfile being *ours* to pin. Node's
+own global `WebSocket` cannot carry an `Authorization` header, which is what
+attaching a sideband needs.
+
 Green `typecheck` + `test` is the bar for every change. The e2e suites
 (`test/integration/mqtt-roundtrip.test.ts` for the whole pipeline,
 `test/integration/zigbee-adapter.test.ts` for the Zigbee runtime AI

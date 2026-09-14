@@ -717,7 +717,7 @@ domains — update them in the same change.
   posts both with the home's key and hands back the SDP answer. The phone holds
   the audio, because a hop through a Pi is latency nobody would tolerate, and
   it is handed **no credential at all**. `docs/assistant.md` is canonical.
-  Seven rules. **WebRTC is the API's answer, not a preference**: Live's
+  Eight rules. **WebRTC is the API's answer, not a preference**: Live's
   WebSocket authenticates with the *project key* and is documented for
   server-side audio, and there is no ephemeral client secret anywhere in the
   family — so a phone holding a Live socket would be a phone holding the home's
@@ -735,7 +735,22 @@ domains — update them in the same change.
   `POST /assistant/voice/tool` route are gone. It is not slow for the reason it
   looks — the assistant's `control_device` is an in-process registry call, so a
   lamp is one LAN round trip and one model round, and the voice says "one
-  moment" and keeps listening while it happens. **The prompt is split the way
+  moment" and keeps listening while it happens. **The delegation loop lives
+  here, on a sideband** — a second connection onto the same session
+  (`wss://…/v1/live/sessions/{id}/attach`, the home's key again) — because
+  somebody has to assemble the request from the transcript, and doing that on
+  the phone added two LAN legs to the one thing measured in how fast a lamp
+  goes off. The API's rule is one owner per action, since both connections see
+  everything: the sideband owns delegations, the transcript and the usage; the
+  phone owns the audio and sends `session.close`. `askAloud` is the whole
+  handler and is ten lines where the phone's was sixty, because the wait is the
+  conversation's own `inFlight` rather than a socket, a subscription and a
+  resumed continuation — and it runs the *ordinary* path, so a spoken exchange
+  leaves the same two rows a typed one does. That also fixed a real duplicate:
+  the phone wrote the person's sentence itself **and** sent it as a message. The
+  one cost is that a sideband is sent copies of both directions of audio with no
+  way to decline, so `frameType` reads the type off a bounded prefix and drops
+  audio before parsing. **The prompt is split the way
   the migration guide says**: style and *when to ask* to the voice, business
   rules and the shape of the home to the backend — which is the assistant,
   whose prompt already carries them. It is written to the prompting guide's own

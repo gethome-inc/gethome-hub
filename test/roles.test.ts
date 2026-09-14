@@ -454,27 +454,12 @@ describe.skipIf(!handle)('roles and permissions', () => {
         undefined,
       ],
       // **Talking out loud is the same conversation by another route**, so it
-      // takes the same key and nothing more. There is no separate tool route
-      // to guard any more: client delegation makes no structured tool calls,
-      // so a spoken request reaches the home through the ordinary message
-      // route and is guarded exactly where a typed one is.
+      // takes the same key and nothing more — and there is now exactly one
+      // route to guard. Client delegation makes no structured tool calls, so a
+      // spoken request reaches the home through the ordinary message path; and
+      // the hub's own sideband writes the transcript and reads the usage, so
+      // the two routes the phone used for those are gone.
       ['POST', '/api/v1/assistant/voice/session', 'hub.ai', {} as object],
-      [
-        'POST',
-        '/api/v1/assistant/voice/said',
-        'hub.ai',
-        {
-          sessionId: '44444444-4444-4444-a444-444444444444',
-          role: 'user',
-          text: 'lights off',
-        } as object,
-      ],
-      [
-        'POST',
-        '/api/v1/assistant/voice/ended',
-        'hub.ai',
-        { sessionId: '44444444-4444-4444-a444-444444444444', seconds: 12 } as object,
-      ],
       ['PUT', '/api/v1/settings/timezone', 'automation.manage', { timezone: 'UTC' } as object],
       // Reading the home is the floor, and the rules are the home — including
       // what they are made of and why one fired.
@@ -579,47 +564,12 @@ describe.skipIf(!handle)('roles and permissions', () => {
    * prove on its own — a permission tested only one way can be broken by
    * denying everybody.
    *
-   * Three of the four run without reaching a provider at all, which is what
-   * makes them testable here: writing down what was said and reporting what a
-   * session cost are local, and opening one gets as far as "this home has no
-   * OpenAI key". That last is the assertion worth having, because a **409 is
-   * proof the member got past the guard** where a 403 would not be — and it
-   * pins the fourth refusal code, which is the one genuinely new thing about
-   * this surface: GPT-Live is OpenAI's and there is no substitute, so a home
-   * answering perfectly well on Anthropic still cannot speak without a key it
-   * may never have needed before.
+   * There is one voice route left — the hub's own sideband writes the
+   * transcript and reads the usage, so the two the phone used for those are
+   * gone — and it is testable here because it gets as far as "this home has no
+   * OpenAI key" without reaching a provider.
    */
   it('lets a member talk out loud, and says plainly when the home cannot', async () => {
-    const session = '44444444-4444-4444-a444-444444444444';
-
-    const said = await app.inject({
-      method: 'POST',
-      url: '/api/v1/assistant/voice/said',
-      headers: auth(memberToken),
-      payload: { sessionId: session, role: 'user', text: 'turn the kitchen light off' },
-    });
-    expect(said.statusCode).toBe(204);
-
-    // And it landed in the assistant's own transcript, which is the whole
-    // point: speak, then open the page, and the conversation is there.
-    const transcript = await app.inject({
-      method: 'GET',
-      url: `/api/v1/assistant/chat/${session}`,
-      headers: auth(memberToken),
-    });
-    expect(transcript.statusCode).toBe(200);
-    expect(transcript.json()).toMatchObject({
-      messages: [{ role: 'user', text: 'turn the kitchen light off' }],
-    });
-
-    const ended = await app.inject({
-      method: 'POST',
-      url: '/api/v1/assistant/voice/ended',
-      headers: auth(memberToken),
-      payload: { sessionId: session, seconds: 42 },
-    });
-    expect(ended.statusCode).toBe(204);
-
     // Deterministically keyless, whatever an earlier case in this file stored:
     // the assertion below is about a *configuration* refusal, and a hub that
     // happens to have a key would go on to ask OpenAI and fail for a different
@@ -631,7 +581,12 @@ describe.skipIf(!handle)('roles and permissions', () => {
       payload: { clear: 'openai' },
     });
 
-    // Past the guard, and stopped by the thing that is actually missing.
+    // Past the guard, and stopped by the thing that is actually missing. A
+    // **409 is proof the member got past it** where a 403 would not be, and it
+    // pins the fourth refusal code — the one genuinely new thing about this
+    // surface: GPT-Live is OpenAI's and there is no substitute, so a home
+    // answering perfectly well on Anthropic still cannot *speak* without a key
+    // it may never have needed before.
     const opened = await app.inject({
       method: 'POST',
       url: '/api/v1/assistant/voice/session',

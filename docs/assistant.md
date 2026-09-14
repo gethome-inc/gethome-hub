@@ -258,9 +258,60 @@ that switching a lamp through a reasoning model is three seconds where it
 should be a third of one. That route is gone, because the shape it was built on
 does not exist in this API. What replaces it is not slow for the reason it
 looks: the assistant's own `control_device` is an in-process call to the
-registry that is already there, so a lamp is one LAN round trip and one model
-round rather than two network hops — and the voice is told to say "one moment"
-and keep listening while it happens, which the API is built for.
+registry that is already there, so a lamp is one model round rather than two
+network hops — and the voice is told to say "one moment" and keep listening
+while it happens, which the API is built for.
+
+## The sideband, and where the loop belongs
+
+**Somebody has to assemble the request, and for two days it was the phone.**
+That is the shape client delegation forces: the notice says "I need help", the
+transcript says what was asked, and the two have to be put together by whoever
+is listening. Doing it on the phone meant every spoken request went OpenAI →
+phone → hub → phone → OpenAI — two LAN legs added to the one thing on this
+surface measured in how fast a lamp goes off, plus a transcript written by a
+phone and a duration measured with a stopwatch on it.
+
+A **sideband** is a second connection onto the *same* session, attached from
+here at `wss://api.openai.com/v1/live/sessions/{id}/attach` with the home's own
+key. `src/ai/voice/sideband.ts` is canonical. It receives every event the
+phone's data channel receives and accepts every command, so the request never
+leaves the machine that can answer it.
+
+**The API's own rule is one owner per action**, because both connections see
+everything — so the split is written down rather than left to whichever side
+happens to react first. The sideband owns **delegations** (the phone answers
+none), **the transcript** and **what the line cost**. The phone owns the
+**audio** and the live captions on its page, and it is the phone that sends
+`session.close`, because it is the thing somebody presses stop on.
+
+**`askAloud` is the whole delegation handler, and it is ten lines** where the
+phone's was sixty — because the wait is the runtime's own. The phone could only
+acknowledge a message, subscribe to a socket, and resume a continuation when a
+`turn` frame came back with the rows re-read; here the conversation's
+`inFlight` is the answer. It runs the **ordinary** path, so a spoken exchange
+leaves exactly the two rows a typed one does, with the same trail on the socket
+and the same conversation to carry on by typing. That also fixed a real bug:
+the phone wrote the person's sentence itself *and* sent it as a message, so
+every spoken request landed in the transcript twice. Nothing writes rows now
+but the round.
+
+**One thing about attaching costs a Raspberry Pi something, and it is not
+optional.** A sideband is sent *copies* of both directions of audio — base64
+PCM16 at 24 kHz, about a megabit a second, several kilobytes of JSON every
+twenty milliseconds — with no way to decline it. So `frameType` reads the type
+off a **bounded prefix** of the raw frame and audio is dropped before anything
+is parsed, with a full parse as the fallback for a frame whose `type` sits
+past the prefix. JSON promises no field order; every frame this API actually
+sends puts `type` first, and `test/voice-prompts.test.ts` pins both halves.
+
+The registry of attached sidebands is **module-level rather than a service
+threaded through `ApiDeps`**, and that is a trade rather than laziness: one hub
+is one home and one process, so there is exactly one of these however it is
+passed, and every field added to `ApiDeps` is a field two `buildServer` call
+sites in `test/` have to learn about — which has already cost this repository a
+CI failure that read as `list.map is not a function` a hundred lines from its
+cause.
 
 **The hub describes the session and the phone holds it**, and both halves of
 that are deliberate. Audio has to go straight from the phone to OpenAI or it is
@@ -323,19 +374,18 @@ not crowd out the policy above it. `test/voice-prompts.test.ts` pins the labels
 and the bound, because the way this regresses is somebody flattening the policy
 into prose or copying the assistant's prompt back in.
 
-**It is the same transcript**, which is the part worth having. What was said
-becomes rows through `POST /assistant/voice/said`, so the page fills in while
-somebody talks, is there when they open it afterwards, and can be *continued*
-by typing — `revive()` rebuilds a model conversation from exactly those rows, so
-a typed follow-up reaches an agent that has read what was spoken. It runs the
-other way too: when the app sends a session id it already has, that
-conversation's last few exchanges are seeded into `session.input`, so pressing
-the microphone on a page you have been typing on carries one conversation on
-rather than starting a second beside it. `beginVoice()` is a few lines for the
-same reason it always was: a spoken exchange has no provider conversation on
-this hub, so there is no session object to hold, nothing in memory and nothing
-to sweep — only an id, a transcript, and a mark saying somebody is talking to
-it. That mark is what keeps **one word in the activity log** true: a command
+**It is the same transcript**, which is the part worth having. The rows are the
+round's own, written here, so the page fills in while somebody talks, is there
+when they open it afterwards, and can be *continued* by typing — `revive()`
+rebuilds a model conversation from exactly those rows, so a typed follow-up
+reaches an agent that has read what was spoken. It runs the other way too: when
+the app sends a session id it already has, that conversation's last few
+exchanges are seeded into `session.input`, so pressing the microphone on a page
+you have been typing on carries one conversation on rather than starting a
+second beside it. `beginVoice()` is still only an id and a mark: what it opens
+is a conversation nothing has said anything in yet, which is why `askAloud`
+reaches for `open()` — there is no transcript to revive from until the first
+question arrives. That mark is what keeps **one word in the activity log** true: a command
 somebody spoke and a command somebody typed are worth telling apart in a feed
 read a week later, and since every spoken command now arrives as an ordinary
 assistant turn, `spokenSessions` is the only thing left that knows which is
@@ -355,12 +405,12 @@ its own `ai_runs` row (`kind: 'voice'`, $0.05 a minute) beside the `assist` rows
 the delegated turns already write. GPT-Live bills for *time on the line* —
 silence and backend thinking included — where the model behind it bills for
 tokens; summed they are what the conversation cost, apart they answer why. The
-seconds are the **phone's** measurement, which is softer than anything else in
-this ledger and is the only one available, since the hub is not in the audio
-path — the phone reports what `session.usage.updated` and `session.closed` told
-it, falling back to its own clock when neither arrived. It is bounded at half
-an hour (the secret's own lifetime), and a session that ends without the phone
-saying so records nothing rather than guessing.
+seconds are the **session's own**, read off `session.usage.updated` and
+`session.closed` on the sideband — which is what stopped them being the softest
+number in this ledger. They used to be a stopwatch on a phone, gone entirely
+when somebody force-quit; now a socket that drops before the final event
+records the last snapshot it saw, which is the API's own advice, and a session
+that never said anything records nothing rather than guessing.
 
 **`live-wire.ts` is the containment, and it is a rule rather than tidiness.**
 Every constant and every field name of an API weeks old lives in that one file,

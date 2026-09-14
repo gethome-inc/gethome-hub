@@ -3300,10 +3300,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       });
     }
 
-    const [{ openLiveSession }, { liveInstructions, liveHistory }] = await Promise.all([
-      import('../ai/voice/session.js'),
-      import('../ai/voice/prompts.js'),
-    ]);
+    const [{ openLiveSession }, { liveInstructions, liveHistory }, { attachSideband }] =
+      await Promise.all([
+        import('../ai/voice/session.js'),
+        import('../ai/voice/prompts.js'),
+        import('../ai/voice/sideband.js'),
+      ]);
     const personName = await deps.assistantChat.personName(request.member!.id);
     // **What the session opens knowing.** Carrying a conversation on means the
     // voice should already have read it — somebody who typed a question and
@@ -3349,6 +3351,35 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       });
     }
 
+    /**
+     * **The hub attaches its own connection, and that is where the delegation
+     * loop lives.** Client delegation says "I need help" and nothing else, so
+     * somebody has to assemble the request from the transcript and answer it —
+     * and doing that on the phone added two LAN legs to the one thing on this
+     * surface measured in how fast a lamp goes off. A sideband is a second
+     * socket onto the *same* session from here, so the request never leaves
+     * the machine that can answer it. `src/ai/voice/sideband.ts` is canonical,
+     * including what it deliberately does **not** own: audio stays on the
+     * phone's WebRTC connection.
+     *
+     * A failure to attach is logged and nothing more. The session is real and
+     * the phone can talk over it; what is lost is the house answering, which
+     * the voice reports itself when a delegation goes unanswered.
+     */
+    const sessionId = deps.assistantChat.beginVoice(asked.sessionId);
+    if (opened.liveSessionId !== undefined) {
+      attachSideband({
+        liveSessionId: opened.liveSessionId,
+        sessionId,
+        memberId: request.member!.id,
+        secret,
+        host: deps.assistantChat,
+        log: deps.log,
+      });
+    } else {
+      deps.log.warn('voice: OpenAI opened a session without an id, so nothing can attach');
+    }
+
     return reply.code(201).send({
       // **The answer to the phone's offer, and nothing it could have got for
       // itself.** The session — the model, the voice, the instructions, the
@@ -3365,66 +3396,27 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       // The conversation the phone will write into. A plain id: nothing on this
       // hub is holding a model conversation for it, and the transcript is what
       // makes it findable, readable and — by typing — continuable afterwards.
-      sessionId: deps.assistantChat.beginVoice(asked.sessionId),
+      sessionId,
     });
   });
 
   /**
-   * Write down what was said out loud.
+   * **Two routes used to live here and the sideband replaced both.**
    *
-   * **The same transcript the typed chat uses**, which is what makes the page
-   * fill in while somebody talks and be there when they open it afterwards —
-   * and what lets them type a follow-up to something they said, since `revive()`
-   * rebuilds a model conversation from exactly these rows.
+   * `POST /assistant/voice/said` wrote down what was said, because the hub was
+   * not in the audio path and the phone was the only thing that knew. And
+   * `POST /assistant/voice/ended` reported what a session cost, measured with
+   * a stopwatch on that phone — the softest number in this ledger, and gone
+   * entirely when somebody force-quit.
    *
-   * The client is the only thing that knows what was said, because the hub is
-   * not in the audio path. That is not a hole: the row is written under the
-   * caller's own member id from their own token, so what it can add to is their
-   * own conversation, in a log that is shared by design anyway.
+   * The hub's own sideband receives the transcript and the usage from the
+   * session itself, so both facts now come from the thing that owns them:
+   * `askAloud` writes the rows a spoken exchange leaves, and
+   * `session.usage.updated` / `session.closed` carry the seconds OpenAI will
+   * bill. Which leaves **one** voice route — opening a session — and the rule
+   * the API states for two connections onto one session: assign one owner per
+   * action. See `src/ai/voice/sideband.ts`.
    */
-  app.post('/api/v1/assistant/voice/said', needs('hub.ai'), async (request, reply) => {
-    const body = z
-      .object({
-        sessionId: z.uuid(),
-        role: z.enum(['user', 'agent']),
-        text: z.string().trim().min(1).max(4_000),
-        steps: z
-          .array(
-            z.object({
-              text: z.string().min(1).max(200),
-              kind: z.string().min(1).max(40),
-              detail: z.string().max(400).optional(),
-            }),
-          )
-          .max(12)
-          .optional(),
-      })
-      .parse(request.body);
-    await deps.assistantChat.recordSpoken({
-      sessionId: body.sessionId,
-      memberId: request.member!.id,
-      role: body.role,
-      text: body.text,
-      ...(body.steps !== undefined ? { steps: body.steps } : {}),
-    });
-    return reply.code(204).send();
-  });
-
-  /**
-   * A voice session has ended, and this is what it cost.
-   *
-   * The seconds are the **phone's** measurement, which is softer than anything
-   * else in this ledger and is the only one available — the hub is not in the
-   * audio path, which is the entire point of the arrangement. A session that
-   * ends without this arriving records nothing rather than guessing.
-   */
-  app.post('/api/v1/assistant/voice/ended', needs('hub.ai'), async (request, reply) => {
-    const body = z
-      .object({ sessionId: z.uuid(), seconds: z.number().min(0).max(24 * 60 * 60) })
-      .parse(request.body);
-    await deps.assistantChat.recordVoiceSpend(body);
-    return reply.code(204).send();
-  });
 
   app.delete('/api/v1/assistant/chat/:id', needs('hub.ai'), async (request, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);

@@ -540,37 +540,57 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
   private readonly spokenSessions = new Set<string>();
 
   /**
-   * Write down what was said out loud, and say so on the socket.
+   * Ask the home something somebody said out loud, and wait for the answer.
    *
-   * The frame matters as much as the row: a phone talking to its home is often
-   * not the only screen looking at that home, and the assistant page open on
-   * the table should fill in as the conversation happens rather than when
-   * somebody next pulls it down. It is `turn`, because from every other
-   * screen's point of view that is exactly what this is — a round that has
-   * landed and a transcript that is ready to re-read.
+   * **This is the hub-side half of client delegation**, and it is what the
+   * sideband calls when GPT-Live asks for help. It is deliberately the
+   * *ordinary* path: `say()` writes the person's row, runs the round with every
+   * tool the assistant has, and writes the answer — so a spoken exchange and a
+   * typed one leave the same two rows, the same trail on the socket, and the
+   * same conversation to carry on by typing.
+   *
+   * **One writer, which is the bug this fixed.** The phone used to write the
+   * person's sentence itself *and* send it as a message, so every spoken
+   * request landed in the transcript twice. Nothing writes rows here but the
+   * round.
+   *
+   * **The wait is the runtime's, not a socket's.** The phone had to send a
+   * message, subscribe, and resume a continuation when a `turn` frame came
+   * back with the rows re-read — because it is on the other side of the LAN
+   * from the thing doing the work. Here the conversation's own `inFlight` is
+   * the answer, which is why this is ten lines and that was sixty.
+   *
+   * **And a session may not exist yet.** `beginVoice` mints an id before a word
+   * is spoken, so the first question arrives at a conversation with no
+   * transcript to revive from — hence `open`. Later questions find it in
+   * memory, or revive it from its rows after a restart.
    */
-  async recordSpoken(input: {
+  async askAloud(input: {
     sessionId: string;
     memberId: string;
-    role: 'user' | 'agent';
-    text: string;
-    /** What the voice did in that exchange, in the trail's own vocabulary. */
-    steps?: { text: string; kind: string; detail?: string | undefined }[];
-  }): Promise<void> {
-    const steps = input.steps ?? [];
-    await this.writeRow(
-      input.sessionId,
-      input.role,
-      input.text,
-      steps.length > 0 ? { steps } : undefined,
-      input.memberId,
-    );
-    this.emit({
-      sessionId: input.sessionId,
-      phase: 'turn',
-      at: new Date().toISOString(),
-      text: 'voice',
-    });
+    question: string;
+  }): Promise<string | null> {
+    const session =
+      this.sessions.get(input.sessionId) ??
+      (await this.revive(input.sessionId, input.memberId)) ??
+      (await this.open(input.sessionId, input.memberId));
+    if (session.memberId !== input.memberId) return null;
+
+    const before = (await this.transcript(input.sessionId)).length;
+    await this.say(session, input.question, 'auto');
+    try {
+      await session.inFlight;
+    } catch (error) {
+      // The round's own failure is already an `agent` row and an `ai_runs`
+      // entry; what matters here is not throwing into a socket handler.
+      this.options.log.warn({ error }, 'voice: a spoken round failed');
+    }
+    const rows = await this.transcript(input.sessionId);
+    for (let index = rows.length - 1; index >= before; index -= 1) {
+      const row = rows[index];
+      if (row?.role === 'agent' || row?.role === 'note') return row.text;
+    }
+    return null;
   }
 
   /**
