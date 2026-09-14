@@ -234,20 +234,11 @@ with it. `docs/api.md` is canonical on the phase.
 
 ## The voice
 
-The same assistant, reached by talking. **The realtime model
-(`gpt-realtime-2.1`) is the voice layer and nothing else** — it listens and
-speaks at once, so it can be interrupted mid-sentence — and it delegates the
-thinking to a backend you choose, which is exactly the split this hub already
-has: the brain stays here, where the home is, on whatever model the home picked.
-
-**Mind the two names.** *GPT-Live* is what OpenAI calls the full-duplex voice
-experience in ChatGPT, and `gpt-live-1` is **not an API model id** — this file
-said it was, and the first phone to dial the socket got `Model "gpt-live-1" is
-not supported in realtime mode` straight back. The API's family is
-`gpt-realtime-*`, and a session's transcription is a separate speech-to-text
-model again (`gpt-4o-transcribe`), not the live model doing double duty. The
-account's own `GET /v1/models` is the authority; `live-wire.ts` carries the
-alternates.
+The same assistant, reached by talking. **GPT-Live (`gpt-live-1`) is the voice
+layer and nothing else** — it listens and speaks at once, so it can be
+interrupted mid-sentence — and it delegates the thinking to a backend you
+choose, which is exactly the split this hub already has: the brain stays here,
+where the home is, on whatever model the home picked.
 
 **The hub builds the session and the phone holds it**, and both halves of that
 are deliberate. Audio has to go straight from the phone to OpenAI or it is not
@@ -291,20 +282,13 @@ one, so stopping and restarting the microphone on a page carries the same
 conversation on instead of starting a second one beside it.
 
 **Two meters, and pretending otherwise would hide one.** A voice session writes
-its own `ai_runs` row (`kind: 'voice'`, $0.11 a minute) beside the `assist` rows
-the delegated turns already write. The voice layer bills for *audio* where the
-model behind it bills for text tokens; summed they are what the conversation
-cost, apart they answer why. The seconds are the **phone's** measurement, which
-is softer than anything else in this ledger and is the only one available, since
-the hub is not in the audio path.
-
-**And the per-minute figure is a bound rather than a rate.** The realtime models
-bill per audio token, split by direction — roughly $0.019 a minute heard against
-$0.077 a minute spoken — and seconds-on-the-line cannot tell those apart, so
-`LIVE_USD_PER_MINUTE` sits at the top of the band for the reason the portrait
-ledger prices an unsplit input at the dearer rate. Silence still costs, since
-the microphone streams throughout. The way to stop estimating is for the phone
-to report the two durations it already counts; `live-wire.ts` says so. It is bounded at half an hour (the secret's own lifetime), and a session
+its own `ai_runs` row (`kind: 'voice'`, $0.05 a minute) beside the `assist` rows
+the delegated turns already write. GPT-Live bills for *time on the line* —
+silence and backend thinking included — where the model behind it bills for
+tokens; summed they are what the conversation cost, apart they answer why. The
+seconds are the **phone's** measurement, which is softer than anything else in
+this ledger and is the only one available, since the hub is not in the audio
+path. It is bounded at half an hour (the secret's own lifetime), and a session
 that ends without the phone saying so records nothing rather than guessing.
 
 **`live-wire.ts` is the containment, and it is a rule rather than tidiness.**

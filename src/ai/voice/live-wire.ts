@@ -2,20 +2,14 @@
  * The GPT-Live wire, and **the only place in this repository that names one of
  * its fields**.
  *
- * That is a deliberate containment rather than tidiness, and **it has already
- * paid for itself once.** The first version of this file was written from
- * second-hand summaries of OpenAI's guides rather than the guides, and it got
- * the model id wrong: `gpt-live-1` is the name of the ChatGPT *product*, not an
- * API model, and the socket came back with `Model "gpt-live-1" is not supported
- * in realtime mode` the first time a phone dialled it. Because every constant
- * and every key lives in this one file, with the app's `LiveWire.swift` as its
- * mirror, that was two lines rather than a hunt through an audio pipeline.
- *
- * The lesson stands for whoever is next: nothing here is provable by running
- * the suite, so **check it against the live docs and against `GET /v1/models`
- * for the home's own key** before trusting it. A wrong id fails loudly and
- * legibly — the provider's own sentence reaches the phone's screen verbatim,
- * which is the design working.
+ * That is a deliberate containment rather than tidiness. This was written
+ * against OpenAI's published guides for `gpt-live-1` and the model ids,
+ * endpoint, audio format and event names below are what those describe — but
+ * the API is weeks old and its shape is the one thing here nobody can check by
+ * running the suite. So every constant and every key lives in this file, the
+ * app's own `LiveWire.swift` is its mirror, and a field that turns out
+ * different is one edit in one place rather than a hunt through an audio
+ * pipeline. Read the guides before changing anything in it.
  *
  * **What the hub does and does not do with this.** The hub mints the ephemeral
  * secret and builds the whole session config — the instructions, the tools, the
@@ -26,27 +20,11 @@
  * where the home is.
  */
 
-/**
- * The live voice model.
- *
- * **Not `gpt-live-1`**, which is what this said first and is a ChatGPT product
- * name; the API's realtime family is `gpt-realtime-*`. Known alternates, if
- * this one is ever retired or refused: `gpt-realtime-2.1-mini` (the cheaper
- * tier), and the older `gpt-realtime` / `gpt-realtime-2`. The account's own
- * list is the authority — `GET /v1/models` with the home's key.
- */
-export const LIVE_MODEL = 'gpt-realtime-2.1';
+/** The live voice model. */
+export const LIVE_MODEL = 'gpt-live-1';
 
-/**
- * What turns the person's speech into the text a transcript row is made of.
- *
- * A realtime session's `input_audio_transcription.model` is a **separate**
- * speech-to-text model rather than the live model doing double duty, and it
- * takes one of `gpt-4o-transcribe`, `gpt-4o-mini-transcribe` or `whisper-1`.
- * Deliberately not `gpt-realtime-whisper`, which is a standalone streaming STT
- * model and is not accepted here.
- */
-export const LIVE_TRANSCRIBE_MODEL = 'gpt-4o-transcribe';
+/** What turns the person's speech into the text a transcript row is made of. */
+export const LIVE_TRANSCRIBE_MODEL = 'gpt-live-transcribe';
 
 /** Where an ephemeral client secret is minted. */
 export const CLIENT_SECRETS_URL = 'https://api.openai.com/v1/realtime/client_secrets';
@@ -63,37 +41,17 @@ export const LIVE_AUDIO_RATE = 24_000;
 /**
  * What a minute on the line costs, and **it is the voice layer alone**.
  *
- * Whatever model does the thinking behind it is billed on top and is already
- * recorded by `ChatRuntime.bank` as an ordinary `assist` row — so a home that
- * asks what it spent gets two numbers for one conversation, which is the honest
- * answer rather than an accident.
+ * $0.05 a minute, billed per second. Whatever model does the thinking behind it
+ * is billed on top and is already recorded by `ChatRuntime.bank` as an ordinary
+ * `assist` row — so a home that asks what it spent gets two numbers for one
+ * conversation, which is the honest answer rather than an accident.
  *
- * **This is a bound, not a measurement, and the comment is the honest part.**
- * The realtime models bill per *audio token*, split by direction: on
- * `gpt-realtime-2.1` that is $32 per 1M in and $64 per 1M out, at one token per
- * 100 ms heard and one per 50 ms spoken — so about $0.019 a minute heard and
- * $0.077 a minute spoken, and a real agent lands somewhere around $0.06–$0.11 a
- * minute depending on how much of it is talking. The phone reports **seconds on
- * the line** and nothing finer, which cannot tell those apart.
- *
- * So this is the top of that band rather than the middle, for the reason the
- * portrait ledger prices an unsplit input at the dearer rate: an estimate that
- * reads low is the one that surprises somebody. It was $0.05 while this file
- * still thought the model was `gpt-live-1`, which was both a guess and the
- * wrong direction.
- *
- * **The way to stop guessing** is for the phone to report the two durations it
- * already knows — it counts every PCM buffer it sends and every one it plays —
- * so `POST /assistant/voice/ended` could carry `heardSeconds`/`spokenSeconds`
- * and each be priced at its own rate. Worth doing; deliberately not bundled
- * into the change that made the socket connect at all.
- *
- * **Silence still costs**, which is why the app closes an idle session rather
- * than leaving one open behind a page somebody walked away from: the microphone
- * streams continuously, so input tokens accrue through every quiet second even
- * when nothing is said.
+ * **Active time includes silence.** The meter runs while the person speaks,
+ * while the assistant speaks, while neither does, and while the backend is
+ * working — which is the whole reason the app closes an idle session rather
+ * than leaving one open behind a page somebody walked away from.
  */
-export const LIVE_USD_PER_MINUTE = 0.11;
+export const LIVE_USD_PER_MINUTE = 0.05;
 
 /** The voice it speaks in. One, chosen here, because it is the home's. */
 export const LIVE_VOICE = 'marin';
