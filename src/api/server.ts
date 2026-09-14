@@ -3250,6 +3250,15 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * or, worse, a microphone button that fails on the first word.
    */
   app.post('/api/v1/assistant/voice/session', needs('hub.ai'), async (request, reply) => {
+    // **Carrying on rather than forking.** Somebody stops listening and starts
+    // again on the same page, and that is one conversation — so the app hands
+    // back the id it already has and the transcript keeps going. Absent is the
+    // ordinary case: a fresh page mints one. It grants nothing new, since
+    // `voice/said` already writes against whatever id it is given, and the
+    // home's transcripts are shared by design.
+    const asked = z
+      .object({ sessionId: z.uuid().optional() })
+      .parse(request.body ?? {});
     const ai = await deps.settings.getAiSettings();
     if (!ai.enabled) return reply.code(409).send({ error: 'ai_disabled' });
     if (!ai.openai.hasKey) {
@@ -3307,7 +3316,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       // The conversation the phone will write into. A plain id: nothing on this
       // hub is holding a model conversation for it, and the transcript is what
       // makes it findable, readable and — by typing — continuable afterwards.
-      sessionId: deps.assistantChat.beginVoice(),
+      sessionId: deps.assistantChat.beginVoice(asked.sessionId),
     });
   });
 

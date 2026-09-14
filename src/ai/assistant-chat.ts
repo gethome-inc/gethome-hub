@@ -500,9 +500,13 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
    * the page afterwards and it is simply a chat, readable and continuable —
    * `revive()` rebuilds a model conversation from those rows, so typing a
    * follow-up to something you said out loud reaches an agent that has read it.
+   *
+   * `existing` is the app carrying one on — stopping and restarting the mic on
+   * one page is one conversation, not two — and is simply handed back, since
+   * there is no session object here for a second call to disturb.
    */
-  beginVoice(): string {
-    return randomUUID();
+  beginVoice(existing?: string): string {
+    return existing ?? randomUUID();
   }
 
   /**

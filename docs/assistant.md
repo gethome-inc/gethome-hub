@@ -276,7 +276,10 @@ by typing — `revive()` rebuilds a model conversation from exactly those rows, 
 a typed follow-up reaches an agent that has read what was spoken. `beginVoice()`
 is three lines for that reason: a spoken exchange has no provider conversation
 on this hub, so there is no session object to hold, nothing in memory and
-nothing to sweep — only an id and a transcript.
+nothing to sweep — only an id and a transcript. It takes one back, too: the
+app hands its current session id to `POST /assistant/voice/session` when it has
+one, so stopping and restarting the microphone on a page carries the same
+conversation on instead of starting a second one beside it.
 
 **Two meters, and pretending otherwise would hide one.** A voice session writes
 its own `ai_runs` row (`kind: 'voice'`, $0.05 a minute) beside the `assist` rows
