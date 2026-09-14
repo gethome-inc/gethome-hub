@@ -3,17 +3,12 @@ import { describe, expect, it } from 'vitest';
 import type { AutomationHomeView } from '../src/automations/targets.js';
 import type { ChatMessageWire } from '../src/ai/chat/chat-runtime.js';
 import { liveHistory, liveInstructions } from '../src/ai/voice/prompts.js';
-import {
-  LIVE_AUDIO_EVENTS,
-  LIVE_HISTORY_MESSAGES,
-  liveSidebandUrl,
-} from '../src/ai/voice/live-wire.js';
-import { frameType } from '../src/ai/voice/sideband.js';
+import { LIVE_HISTORY_MESSAGES } from '../src/ai/voice/live-wire.js';
 
 /**
- * The two halves of the voice prompt that are pure functions, which is most of
- * what is testable about this surface at all: everything else on it is an
- * audio socket the suite cannot dial.
+ * The two halves of the voice prompt that are pure functions. The rest of what
+ * a suite can reach on this surface is in `test/voice-sideband.test.ts`; what
+ * neither can reach is the audio, which is the phone's.
  *
  * Both assertions are about a rule that has already been got wrong once. The
  * instructions used to carry the whole home as JSON — device ids, endpoint
@@ -140,42 +135,5 @@ describe('the voice prompt', () => {
     // Newest last, and the newest is the last thing that was actually said.
     expect(history.at(-1)?.content[0].text).toBe('line 39');
     expect(history[0]?.content[0].text).toBe(`line ${40 - LIVE_HISTORY_MESSAGES}`);
-  });
-});
-
-/**
- * The sideband's cheap half.
- *
- * A sideband is sent copies of every audio frame in both directions — about a
- * megabit a second, several kilobytes of base64 every twenty milliseconds —
- * with no way to decline it. On a 1 GHz board that is the one real cost of
- * attaching, so the type is read off a bounded prefix and audio is dropped
- * before anything is parsed. These are the two assertions that keep that true:
- * an audio frame is recognised from its prefix, and a frame too long to scan
- * is reported as unknown rather than guessed at, which is what sends the
- * caller to a real parse.
- */
-describe('the voice sideband', () => {
-  it('recognises an audio frame from its prefix, without parsing it', () => {
-    const audio = `{"type":"session.output_audio.delta","delta":"${'A'.repeat(6_000)}"}`;
-    expect(frameType(audio)).toBe('session.output_audio.delta');
-    expect(LIVE_AUDIO_EVENTS.has(frameType(audio) ?? '')).toBe(true);
-
-    const transcript = '{"type":"session.input_transcript.delta","delta":"turn the"}';
-    expect(LIVE_AUDIO_EVENTS.has(frameType(transcript) ?? '')).toBe(false);
-  });
-
-  it('reports an unscannable frame as unknown rather than guessing', () => {
-    // JSON does not promise field order. A frame whose `type` sits past the
-    // prefix must fall through to the real parse, not be mistaken for audio.
-    const awkward = `{"delta":"${'A'.repeat(600)}","type":"session.output_audio.delta"}`;
-    expect(frameType(awkward)).toBeUndefined();
-  });
-
-  it('attaches to the session it was given, and escapes the id', () => {
-    expect(liveSidebandUrl('sess_123')).toBe(
-      'wss://api.openai.com/v1/live/sessions/sess_123/attach',
-    );
-    expect(liveSidebandUrl('a/b')).toContain('a%2Fb');
   });
 });

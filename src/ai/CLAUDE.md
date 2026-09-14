@@ -717,7 +717,7 @@ domains — update them in the same change.
   posts both with the home's key and hands back the SDP answer. The phone holds
   the audio, because a hop through a Pi is latency nobody would tolerate, and
   it is handed **no credential at all**. `docs/assistant.md` is canonical.
-  Eight rules. **WebRTC is the API's answer, not a preference**: Live's
+  Nine rules. **WebRTC is the API's answer, not a preference**: Live's
   WebSocket authenticates with the *project key* and is documented for
   server-side audio, and there is no ephemeral client secret anywhere in the
   family — so a phone holding a Live socket would be a phone holding the home's
@@ -742,7 +742,12 @@ domains — update them in the same change.
   the phone added two LAN legs to the one thing measured in how fast a lamp
   goes off. The API's rule is one owner per action, since both connections see
   everything: the sideband owns delegations, the transcript and the usage; the
-  phone owns the audio and sends `session.close`. `askAloud` is the whole
+  phone owns the audio and sends `session.close`. **`sideband.ts` is the socket
+  and `delegation.ts` is what the frames mean**, split for the reason
+  `adapters/matter/settling.ts` is its own file: reading those rules through
+  the socket means dialling `api.openai.com`, so a rule every spoken request in
+  the house goes through would be a rule no test could reach —
+  `test/voice-sideband.test.ts` drives it frame by frame instead. `askAloud` is the whole
   handler and is ten lines where the phone's was sixty, because the wait is the
   conversation's own `inFlight` rather than a socket, a subscription and a
   resumed continuation — and it runs the *ordinary* path, so a spoken exchange
@@ -750,7 +755,19 @@ domains — update them in the same change.
   the phone wrote the person's sentence itself **and** sent it as a message. The
   one cost is that a sideband is sent copies of both directions of audio with no
   way to decline, so `frameType` reads the type off a bounded prefix and drops
-  audio before parsing. **The prompt is split the way
+  audio before parsing. **And a superseded answer is told apart on the
+  session's own clock, never by counting fragments** — the rule that says
+  whether the assistant's answer is *spoken* (`commentary`) or merely *known*
+  (`thinking`). The model asks for help the moment it has understood, so the
+  closing fragments of "turn the kitchen light off" are transcribed *after* the
+  notice: a fragment counter demoted almost every answer in the house using the
+  very sentence that asked for it, which is a voice assistant that silently
+  stops answering out loud. A delta's `start_ms` against the delegation's own
+  offset is what tells the tail of a request from a new one — before it, the
+  fragment is already represented in what was sent and is dropped; after it,
+  the person really has moved on. With no timeline at all the answer is
+  **spoken**: a slightly late sentence about something the hub has already done
+  costs far less than never hearing that it happened. **The prompt is split the way
   the migration guide says**: style and *when to ask* to the voice, business
   rules and the shape of the home to the backend — which is the assistant,
   whose prompt already carries them. It is written to the prompting guide's own
@@ -763,7 +780,7 @@ domains — update them in the same change.
   endpoints or capabilities. `test/voice-prompts.test.ts` pins the labels and
   the bound, because the way it regresses is somebody flattening the policy into
   prose or copying the assistant's prompt back in. **It is the same transcript, both ways** —
-  `recordSpoken` writes rows under the caller's own member id so the page fills
+  `askAloud` writes rows under the caller's own member id so the page fills
   in while somebody talks and `revive()` can continue it by typing, and
   `liveHistory` seeds the last few exchanges into `session.input` so pressing
   the microphone on a page you have been typing on carries one conversation on.
@@ -774,9 +791,12 @@ domains — update them in the same change.
   morning and talked to in the evening.
   **Two meters**: an `ai_runs` row of `kind: 'voice'` at $0.05 a minute beside
   the `assist` rows the delegated turns write, because GPT-Live bills for time
-  on the line — silence included — and the model behind it bills for tokens;
-  the seconds are the *phone's* measurement, the only one available, and a
-  session that ends silently records nothing rather than guessing. And
+  on the line — silence included — and the model behind it bills for tokens.
+  The seconds are the **session's own** (`session.usage.updated`, with
+  `session.closed` for the last word), read on the sideband and recorded once
+  however the line ended, rather than the phone's stopwatch they used to be: a
+  phone can be force-quit and a stopwatch counts the dial and the teardown too.
+  A session that ends without ever saying records nothing rather than guessing. And
   **`live-wire.ts` is the only file that names one of that API's fields**, with
   `LiveWire.swift` its mirror: it is the one thing here nobody can check by
   running the suite, and it has been got wrong twice — a wrong *mode* read as a

@@ -3389,9 +3389,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       // release. And no credential crosses: the key stayed on this machine and
       // what the phone receives is an SDP answer.
       answerSdp: opened.answerSdp,
-      // OpenAI's own id for the session. Opaque, and carried because it is
-      // what a fork would one day be started from.
-      ...(opened.liveSessionId !== undefined ? { liveSessionId: opened.liveSessionId } : {}),
+      // OpenAI's own id for the session is deliberately **not** sent. It is
+      // what the hub attaches its sideband with, and the app has no use for
+      // one — `session.started` carries it on the data channel if a log line
+      // ever wants it.
       audioRate: opened.audioRate,
       // The conversation the phone will write into. A plain id: nothing on this
       // hub is holding a model conversation for it, and the transcript is what

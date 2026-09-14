@@ -274,9 +274,19 @@ phone and a duration measured with a stopwatch on it.
 
 A **sideband** is a second connection onto the *same* session, attached from
 here at `wss://api.openai.com/v1/live/sessions/{id}/attach` with the home's own
-key. `src/ai/voice/sideband.ts` is canonical. It receives every event the
-phone's data channel receives and accepts every command, so the request never
-leaves the machine that can answer it.
+key. It receives every event the phone's data channel receives and accepts
+every command, so the request never leaves the machine that can answer it.
+
+**Two files, and the split is what makes any of this checkable.**
+`src/ai/voice/sideband.ts` is the socket — attach, hand each frame over, put a
+frame on the wire, and make sure the cost is written down however the
+connection ended. `src/ai/voice/delegation.ts` is what the frames *mean*, with
+no connection in it, for the reason `adapters/matter/settling.ts` is its own
+file: reading these rules through the socket means dialling `api.openai.com`,
+so a rule every spoken request in the house goes through would be a rule no
+test could reach. `test/voice-sideband.test.ts` drives it frame by frame — and
+that suite is the only verification this loop has ever had, since the phone's
+version of it lived in a repository with no test target.
 
 **The API's own rule is one owner per action**, because both connections see
 everything — so the split is written down rather than left to whichever side
@@ -296,6 +306,25 @@ the phone wrote the person's sentence itself *and* sent it as a message, so
 every spoken request landed in the transcript twice. Nothing writes rows now
 but the round.
 
+**Spoken or merely known, and the session's own clock is what decides.** The
+answer goes back as `session.commentary.append` when it still matters and as
+`session.thinking.append` when the person has moved on — the API's rule about
+not announcing an outdated result, kept without throwing the fact away, since
+by the time the hub answers it has *already done the thing*. What tells the two
+apart has to be the timeline, and the first version counted fragments instead.
+That is wrong in the ordinary case rather than at an edge: the model asks for
+help the moment it has understood, so the closing fragments of "turn the
+kitchen light off" are transcribed **after** the notice, and a fragment counter
+demoted nearly every answer in the house using the very sentence that had asked
+for it — a voice assistant that silently stops speaking its answers, which
+looks exactly like a model that has decided to be quiet. So a delta's
+`start_ms` is compared against the delegation's own offset: before it, the
+fragment is already inside what was sent and is dropped (keeping it would also
+put "off" on the front of the next request); after it, the person really has
+said something new. With no timeline at all — a build of this API that stops
+sending one — the answer is **spoken**, because a slightly late sentence about
+something already done costs far less than never hearing that it happened.
+
 **One thing about attaching costs a Raspberry Pi something, and it is not
 optional.** A sideband is sent *copies* of both directions of audio — base64
 PCM16 at 24 kHz, about a megabit a second, several kilobytes of JSON every
@@ -303,7 +332,9 @@ twenty milliseconds — with no way to decline it. So `frameType` reads the type
 off a **bounded prefix** of the raw frame and audio is dropped before anything
 is parsed, with a full parse as the fallback for a frame whose `type` sits
 past the prefix. JSON promises no field order; every frame this API actually
-sends puts `type` first, and `test/voice-prompts.test.ts` pins both halves.
+sends puts `type` first, and `test/voice-sideband.test.ts` pins both halves —
+including that a frame of either shape reaches neither the transcript nor the
+assistant.
 
 The registry of attached sidebands is **module-level rather than a service
 threaded through `ApiDeps`**, and that is a trade rather than laziness: one hub
