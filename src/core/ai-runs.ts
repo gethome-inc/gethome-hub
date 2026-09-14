@@ -44,7 +44,7 @@ const RETAIN_EXCHANGES = 1000;
  * device recognition from rule-writing into two tables would make it two
  * screens. Such a row leaves `exposesHash` empty and fills `automationId`.
  */
-export type AiRunKind = 'map' | 'repair' | 'automate' | 'assist' | 'portrait';
+export type AiRunKind = 'map' | 'repair' | 'automate' | 'assist' | 'portrait' | 'voice';
 
 export interface AiRunEvent {
   phase: 'started' | 'step' | 'finished';

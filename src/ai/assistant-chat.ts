@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { members } from '../db/schema.js';
 import type { AiRunKind } from '../core/ai-runs.js';
@@ -9,6 +10,7 @@ import type { HubCommand } from '../schema/index.js';
 import type { AssistantTurn } from './assistant-agent.js';
 import type { AssistantToolContext, DelegateOutcome } from './assistant-tools.js';
 import { delegateAgents, type DelegateAgent } from './agents/registry.js';
+import { LIVE_MODEL, LIVE_USD_PER_MINUTE } from './voice/live-wire.js';
 import type { AutomationChat } from './automation-chat.js';
 import {
   AgentNotConfiguredError,
@@ -86,6 +88,16 @@ export interface AssistantChatOptions extends ChatRuntimeOptions {
     taskPrompt: string;
   }) => AgentConversation<AssistantTurn>;
 }
+
+/**
+ * The longest a reported voice session may be, in seconds.
+ *
+ * A bound on a number the *client* reports rather than a policy about how long
+ * anybody may talk: the ephemeral secret expires inside half an hour, so a
+ * larger figure is a bug or a lie either way, and an unbounded one would let a
+ * wrong number write an alarming line into the home's ledger.
+ */
+const VOICE_MAX_SECONDS = 30 * 60;
 
 export class AssistantChat extends ChatRuntime<AssistantTurn> {
   protected readonly surface: AgentSurface = 'assistant';
@@ -448,13 +460,17 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
    * feed is read a week later. And a handover is refused or allowed by *that
    * member's* role, which is a question only this conversation can answer.
    */
-  private toolContext(memberId: string, sessionId: string): AssistantToolContext {
+  private toolContext(
+    memberId: string,
+    sessionId: string,
+    via: 'assistant' | 'voice' = 'assistant',
+  ): AssistantToolContext {
     return {
       home: () => this.options.engine.homeView(),
       timezone: () => this.options.settings.timezone,
       stateOf: (deviceId, endpointId) => this.options.engine.stateFor(deviceId, endpointId),
       control: async (deviceId, endpointId, command) => {
-        await this.control(memberId, deviceId, endpointId, command);
+        await this.control(memberId, deviceId, endpointId, command, via);
       },
       runAutomation: async (id) =>
         this.options.engine.runManually(id, (await this.memberName(memberId)) ?? 'the assistant'),
@@ -466,6 +482,117 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
         description: agent.description,
       })),
     };
+  }
+
+  // ── The voice ──────────────────────────────────────────────────────────────
+
+  /**
+   * The conversation a voice session will fill in.
+   *
+   * **A plain id and nothing else**, which is the whole of why this is three
+   * lines. A spoken exchange has no provider conversation on this hub — the
+   * model is on the other end of the phone's own socket — so there is no
+   * session object, no history in memory and nothing to sweep. What there *is*
+   * is a transcript, written row by row as things are said, which is what makes
+   * the page fill in while somebody talks.
+   *
+   * And it is the same kind of id as a typed conversation's, deliberately: open
+   * the page afterwards and it is simply a chat, readable and continuable —
+   * `revive()` rebuilds a model conversation from those rows, so typing a
+   * follow-up to something you said out loud reaches an agent that has read it.
+   */
+  beginVoice(): string {
+    return randomUUID();
+  }
+
+  /**
+   * Write down what was said out loud, and say so on the socket.
+   *
+   * The frame matters as much as the row: a phone talking to its home is often
+   * not the only screen looking at that home, and the assistant page open on
+   * the table should fill in as the conversation happens rather than when
+   * somebody next pulls it down. It is `turn`, because from every other
+   * screen's point of view that is exactly what this is — a round that has
+   * landed and a transcript that is ready to re-read.
+   */
+  async recordSpoken(input: {
+    sessionId: string;
+    memberId: string;
+    role: 'user' | 'agent';
+    text: string;
+    /** What the voice did in that exchange, in the trail's own vocabulary. */
+    steps?: { text: string; kind: string; detail?: string | undefined }[];
+  }): Promise<void> {
+    const steps = input.steps ?? [];
+    await this.writeRow(
+      input.sessionId,
+      input.role,
+      input.text,
+      steps.length > 0 ? { steps } : undefined,
+      input.memberId,
+    );
+    this.emit({
+      sessionId: input.sessionId,
+      phase: 'turn',
+      at: new Date().toISOString(),
+      text: 'voice',
+    });
+  }
+
+  /**
+   * What a voice session cost, once it is over.
+   *
+   * **Its own `ai_runs` row rather than an addition to the conversation's**,
+   * because they are two meters and pretending otherwise would hide one:
+   * GPT-Live bills for time on the line — including silence, and including the
+   * seconds the backend is thinking — while the model behind it bills for
+   * tokens and has already written its own `assist` rows. Summed, they are what
+   * the conversation cost; apart, they answer *why*.
+   *
+   * **The duration is the phone's**, which is softer than anything else in this
+   * ledger and is the only measurement available: the hub is not in the audio
+   * path, which is the entire point of the arrangement. It is bounded by the
+   * ephemeral secret's own lifetime, and a session that ends without the phone
+   * saying so — a crash, a train tunnel — simply records nothing rather than
+   * guessing.
+   */
+  async recordVoiceSpend(input: { sessionId: string; seconds: number }): Promise<void> {
+    const seconds = Math.max(0, Math.min(input.seconds, VOICE_MAX_SECONDS));
+    if (seconds <= 0) return;
+    const handle = this.options.runs.begin({
+      kind: 'voice',
+      adapter: 'assistant',
+      // Empty on purpose: this column is about a device model, and a
+      // conversation is not about one.
+      exposesHash: '',
+      provider: 'openai',
+      modelId: LIVE_MODEL,
+      sessionId: input.sessionId,
+    });
+    await handle.finish({
+      ok: true,
+      costUsd: (seconds / 60) * LIVE_USD_PER_MINUTE,
+      durationMs: seconds * 1000,
+    });
+  }
+
+  /**
+   * What a **voice** session's tools can reach.
+   *
+   * The same context the conversation builds and not a second one, which is the
+   * whole point: `control_device` goes through the same registry path, into the
+   * same activity row, named for the same person. What differs is one word in
+   * `data.via`, because a command somebody spoke and a command somebody typed
+   * are worth telling apart in a feed read a week later.
+   *
+   * **`delegate` is deliberately unreachable here.** The voice hands work to
+   * *this* agent (`ask_home`) rather than to sub-agents of its own, so the
+   * assistant stays the one thing that knows how to delegate and its transcript
+   * stays the record of what was asked for. `liveTools()` withholds the tool;
+   * this closure would refuse it anyway.
+   */
+  voiceTools(memberId: string, sessionId: string): AssistantToolContext {
+    return this.toolContext(memberId, sessionId, 'voice');
   }
 
   /**
@@ -482,6 +609,7 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
     deviceId: string,
     endpointId: number,
     command: HubCommand,
+    via: 'assistant' | 'voice',
   ): Promise<void> {
     await this.options.registry.execute(deviceId, endpointId, command);
     const device = this.options.engine.homeView().devices.find((entry) => entry.id === deviceId);
@@ -499,12 +627,23 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
         command,
         deviceName: device?.name ?? deviceId,
         memberName: name,
-        via: 'assistant',
+        via,
       },
     });
   }
 
   /** The member's own name, for anything written in the home's voice. */
+  /**
+   * Who is being talked to, for a prompt that greets them by name.
+   *
+   * Public because the voice needs it and has no conversation to ask through —
+   * its instructions are built once, before a word is said, by the route that
+   * mints the session.
+   */
+  async personName(memberId: string): Promise<string | undefined> {
+    return this.memberName(memberId);
+  }
+
   private async memberName(memberId: string): Promise<string | undefined> {
     const row = await this.options.db.query.members.findFirst({ where: eq(members.id, memberId) });
     return row?.name;

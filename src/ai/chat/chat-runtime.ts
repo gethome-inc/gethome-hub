@@ -1074,8 +1074,28 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
         ? { ...(typeof data === 'object' && data !== null ? data : {}), steps }
         : data;
 
+    return this.writeRow(session.id, role, text, payload, memberId);
+  }
+
+  /**
+   * One transcript row, against a session id rather than a live conversation.
+   *
+   * Split out of `write` for the voice, which has rows to record and no
+   * provider conversation to hang them on — somebody speaking and a lamp
+   * going off is a real exchange in this transcript even though no model on
+   * this hub was asked anything. Everything about a row that is the same
+   * either way lives here; what `write` keeps is the step capture, which
+   * belongs to a round.
+   */
+  protected async writeRow(
+    sessionId: string,
+    role: ChatMessageWire['role'],
+    text: string,
+    payload?: unknown,
+    memberId?: string,
+  ): Promise<ChatMessageWire> {
     const row = {
-      sessionId: session.id,
+      sessionId,
       role,
       text: text.slice(0, 4_000),
       data: payload ?? null,

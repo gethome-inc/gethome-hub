@@ -711,6 +711,31 @@ domains — update them in the same change.
   conversation and a name over the next. One `ai_runs` table, two surfaces
   asking one question of it, so the answer is the union. Effort is `medium` here
   against the mapper's `high`, and is exposed by neither.
+  **And the same assistant can be talked to.** `src/ai/voice/` opens a GPT-Live
+  session for the phone: the hub builds the instructions, the tool catalog, the
+  voice and the audio formats, mints an ephemeral client secret against it and
+  hands over an `ek_…` value that expires — the phone holds the audio, because
+  a hop through a Pi is latency nobody would tolerate, and the home's key never
+  leaves the machine that holds it. `docs/assistant.md` is canonical. Five
+  rules. **Two speeds**: `ask_home` is a message in the assistant's own
+  conversation, so the home's model choice still governs every real decision,
+  while `control_device` and the reads are proxied in one LAN hop — switching a
+  lamp through a reasoning model is three seconds where it should be a third of
+  one, and the prompt says so in as many words. **The catalog is generated from
+  `assistantTools()`** minus `ask_user` (speaking *is* how this one asks) and
+  `delegate` (the voice hands work to the assistant, which is the thing that
+  knows how to delegate). **It is the same transcript** — `recordSpoken` writes
+  rows under the caller's own member id, so the page fills in while somebody
+  talks and `revive()` can continue it by typing; `beginVoice()` is three lines
+  because a spoken exchange has no provider conversation here to hold.
+  **Two meters**: an `ai_runs` row of `kind: 'voice'` at $0.05 a minute beside
+  the `assist` rows the delegated turns write, because GPT-Live bills for time
+  on the line — silence included — and the model behind it bills for tokens;
+  the seconds are the *phone's* measurement, the only one available, and a
+  session that ends silently records nothing rather than guessing. And
+  **`live-wire.ts` is the only file that names one of that API's fields**, with
+  `LiveWire.swift` its mirror: it is the one thing here nobody can check by
+  running the suite, so a field that moves is one edit rather than a hunt.
   **`control_device` is the one tool that writes to the home**, through the
   registry's ordinary path and into the activity log **named for the person who
   asked** — the feed is read a week later and "the assistant" is nobody anyone

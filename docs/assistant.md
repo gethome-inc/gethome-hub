@@ -232,6 +232,69 @@ this lands whenever the other agent moves, including mid-round in the
 conversation it is about, and `turn` would have taken that round's trail down
 with it. `docs/api.md` is canonical on the phase.
 
+## The voice
+
+The same assistant, reached by talking. **GPT-Live (`gpt-live-1`) is the voice
+layer and nothing else** — it listens and speaks at once, so it can be
+interrupted mid-sentence — and it delegates the thinking to a backend you
+choose, which is exactly the split this hub already has: the brain stays here,
+where the home is, on whatever model the home picked.
+
+**The hub builds the session and the phone holds it**, and both halves of that
+are deliberate. Audio has to go straight from the phone to OpenAI or it is not
+a conversation — a hop through a Raspberry Pi on the way to the west coast and
+back is latency nobody would tolerate, and a 1 GHz core has better things to do
+than relay PCM. But the home's key must not leave the hub, which is the rule
+portraits are drawn here for, and *what the model is told* is the home's
+business. So `POST /assistant/voice/session` assembles the whole thing —
+instructions, tools, voice, formats — mints an ephemeral client secret against
+it, and hands the phone an `ek_…` value that expires and is not a key.
+
+**Two speeds, and the split is most of how it feels.** Anything that needs
+working out goes to `ask_home`, which is a message in the assistant's own
+conversation on this hub — so the model choice still governs every real
+decision once somebody starts talking, and a handoff to the automations agent
+happens exactly as it always did. Everything fast is the voice's own:
+`control_device`, `run_automation` and the read tools, proxied through
+`POST /assistant/voice/tool` in one LAN hop. Switching a lamp through a
+reasoning model is three seconds where it should be a third of one, and the
+prompt says so in as many words, because the failure worth designing against
+here is not the model being wrong — it is the model being slow about something
+it could have done itself.
+
+The catalog is **generated from `assistantTools()`**, minus two. `ask_user` is
+gone because *speaking* is how this one asks a question: a tool that suspends a
+turn for tappable options is a page's idiom, and the person is standing in a
+room. `delegate` is gone because the voice hands work to the assistant rather
+than to sub-agents of its own — one route out, and the assistant's transcript
+stays the record of what was asked for.
+
+**It is the same transcript**, which is the part worth having. What was said
+becomes rows through `POST /assistant/voice/said`, so the page fills in while
+somebody talks, is there when they open it afterwards, and can be *continued*
+by typing — `revive()` rebuilds a model conversation from exactly those rows, so
+a typed follow-up reaches an agent that has read what was spoken. `beginVoice()`
+is three lines for that reason: a spoken exchange has no provider conversation
+on this hub, so there is no session object to hold, nothing in memory and
+nothing to sweep — only an id and a transcript.
+
+**Two meters, and pretending otherwise would hide one.** A voice session writes
+its own `ai_runs` row (`kind: 'voice'`, $0.05 a minute) beside the `assist` rows
+the delegated turns already write. GPT-Live bills for *time on the line* —
+silence and backend thinking included — where the model behind it bills for
+tokens; summed they are what the conversation cost, apart they answer why. The
+seconds are the **phone's** measurement, which is softer than anything else in
+this ledger and is the only one available, since the hub is not in the audio
+path. It is bounded at half an hour (the secret's own lifetime), and a session
+that ends without the phone saying so records nothing rather than guessing.
+
+**`live-wire.ts` is the containment, and it is a rule rather than tidiness.**
+Every constant and every field name of an API weeks old lives in that one file,
+mirrored by the app's own `LiveWire.swift`. It is the one thing here nobody can
+check by running the suite, so a field that turns out different is one edit in
+one place rather than a hunt through an audio pipeline. Read OpenAI's guides
+before changing anything in it.
+
 ## The registry, and the third agent
 
 `src/ai/agents/registry.ts` is a table with one entry today, and it is a table

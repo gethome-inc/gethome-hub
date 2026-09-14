@@ -3231,6 +3231,186 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     };
   });
 
+  // ── The assistant's voice ─────────────────────────────────────────────────
+
+  /**
+   * Open a live voice session, and hand the phone something that is not a key.
+   *
+   * **The hub builds the session and the phone holds it**, which is the whole
+   * arrangement: audio has to go straight from the phone to OpenAI or it is not
+   * a conversation, while what the model is told — the home, the tools, how to
+   * speak — is the home's business, and the home's key must never leave the
+   * machine that holds it. So this mints an ephemeral secret against a config
+   * built here, and answers with a value that expires.
+   *
+   * **A fourth refusal, and it is a real one.** GPT-Live is OpenAI's and there
+   * is no substitute, so a home running its assistant perfectly well on
+   * Anthropic still cannot *speak* without an OpenAI key. That is a thing to
+   * say plainly — `openai_not_configured`, with a sentence — rather than a 500
+   * or, worse, a microphone button that fails on the first word.
+   */
+  app.post('/api/v1/assistant/voice/session', needs('hub.ai'), async (request, reply) => {
+    const ai = await deps.settings.getAiSettings();
+    if (!ai.enabled) return reply.code(409).send({ error: 'ai_disabled' });
+    if (!ai.openai.hasKey) {
+      return reply.code(409).send({
+        error: 'openai_not_configured',
+        detail:
+          'Talking out loud runs on OpenAI’s voice model, so this home needs an OpenAI key — ' +
+          'even if the assistant itself answers on Anthropic. Add one in the home’s AI settings.',
+      });
+    }
+    const secret = await deps.settings.aiKey('openai');
+    if (!secret) return reply.code(409).send({ error: 'openai_not_configured' });
+
+    const [{ openLiveSession }, { liveInstructions }] = await Promise.all([
+      import('../ai/voice/session.js'),
+      import('../ai/voice/prompts.js'),
+    ]);
+    const personName = await deps.assistantChat.personName(request.member!.id);
+    /**
+     * **A provider that refuses must not reach the app as a 500**, which is a
+     * lesson this repository has already paid for once: the automations agent's
+     * OpenAI refusal threw past the route's handler, Fastify answered
+     * `{"statusCode":500,…}`, and the app drew "The hub answered 500." over a
+     * home that was working perfectly and had just said what was wrong.
+     *
+     * `502` rather than `409`, because the two are different screens: a `409`
+     * is something in this home's settings, and the way out is on a page
+     * somebody can open. This is OpenAI saying no — a key that has been
+     * revoked, a balance that has run out, a rate limit — so the detail is
+     * *their* sentence, which is always better than one invented here.
+     */
+    let opened: Awaited<ReturnType<typeof openLiveSession>>;
+    try {
+      opened = await openLiveSession({
+        secret,
+        instructions: liveInstructions({
+          home: deps.automations.homeView(),
+          timezone: deps.settings.timezone,
+          ...(personName !== undefined ? { personName } : {}),
+        }),
+        log: deps.log,
+      });
+    } catch (error) {
+      return reply.code(502).send({
+        error: 'voice_unavailable',
+        detail: error instanceof Error ? error.message : 'OpenAI would not open a voice session.',
+      });
+    }
+
+    return reply.code(201).send({
+      clientSecret: opened.secret.value,
+      expiresAt: opened.secret.expiresAt,
+      model: opened.config.model,
+      audioRate: opened.config.audio.output.format.rate,
+      // The conversation the phone will write into. A plain id: nothing on this
+      // hub is holding a model conversation for it, and the transcript is what
+      // makes it findable, readable and — by typing — continuable afterwards.
+      sessionId: deps.assistantChat.beginVoice(),
+    });
+  });
+
+  /**
+   * Run one of the voice's tools, which are the assistant's own.
+   *
+   * **This is the fast half of the arrangement.** GPT-Live could hand every
+   * request to the backend and wait, and for anything that needs working out it
+   * should — but switching a lamp through a reasoning model is three seconds
+   * where it should be a third of one, and that difference is most of how the
+   * thing feels. So the phone proxies the call here, one hop across the LAN,
+   * into exactly the context a typed conversation uses: the same registry path,
+   * the same activity row, named for the same person, with `via: "voice"` the
+   * only thing that differs.
+   *
+   * `hub.ai` and nothing more, for the reason the chat routes take it: asking
+   * what the kitchen is doing and switching a lamp on is the floor.
+   */
+  app.post('/api/v1/assistant/voice/tool', needs('hub.ai'), async (request) => {
+    const body = z
+      .object({
+        sessionId: z.uuid(),
+        name: z.string().min(1).max(60),
+        input: z.unknown().optional(),
+      })
+      .parse(request.body);
+    const { runAssistantTool } = await import('../ai/assistant-tools.js');
+    const result = await runAssistantTool(
+      body.name,
+      body.input,
+      deps.assistantChat.voiceTools(request.member!.id, body.sessionId),
+      // **Per call rather than per turn, and that is the honest bound here.**
+      // A turn is a concept the hub can see in a typed conversation and cannot
+      // in a spoken one — the rounds happen on the phone's own socket — so the
+      // guard that matters moves to the app, and what is left here is the
+      // schema, the permission and the log. Named rather than absent, so the
+      // next person to read this knows the difference was deliberate.
+      { commands: 0 },
+    );
+    return {
+      text: result.text,
+      ...(result.detail !== undefined ? { detail: result.detail } : {}),
+      ...(result.isError === true ? { isError: true } : {}),
+    };
+  });
+
+  /**
+   * Write down what was said out loud.
+   *
+   * **The same transcript the typed chat uses**, which is what makes the page
+   * fill in while somebody talks and be there when they open it afterwards —
+   * and what lets them type a follow-up to something they said, since `revive()`
+   * rebuilds a model conversation from exactly these rows.
+   *
+   * The client is the only thing that knows what was said, because the hub is
+   * not in the audio path. That is not a hole: the row is written under the
+   * caller's own member id from their own token, so what it can add to is their
+   * own conversation, in a log that is shared by design anyway.
+   */
+  app.post('/api/v1/assistant/voice/said', needs('hub.ai'), async (request, reply) => {
+    const body = z
+      .object({
+        sessionId: z.uuid(),
+        role: z.enum(['user', 'agent']),
+        text: z.string().trim().min(1).max(4_000),
+        steps: z
+          .array(
+            z.object({
+              text: z.string().min(1).max(200),
+              kind: z.string().min(1).max(40),
+              detail: z.string().max(400).optional(),
+            }),
+          )
+          .max(12)
+          .optional(),
+      })
+      .parse(request.body);
+    await deps.assistantChat.recordSpoken({
+      sessionId: body.sessionId,
+      memberId: request.member!.id,
+      role: body.role,
+      text: body.text,
+      ...(body.steps !== undefined ? { steps: body.steps } : {}),
+    });
+    return reply.code(204).send();
+  });
+
+  /**
+   * A voice session has ended, and this is what it cost.
+   *
+   * The seconds are the **phone's** measurement, which is softer than anything
+   * else in this ledger and is the only one available — the hub is not in the
+   * audio path, which is the entire point of the arrangement. A session that
+   * ends without this arriving records nothing rather than guessing.
+   */
+  app.post('/api/v1/assistant/voice/ended', needs('hub.ai'), async (request, reply) => {
+    const body = z
+      .object({ sessionId: z.uuid(), seconds: z.number().min(0).max(24 * 60 * 60) })
+      .parse(request.body);
+    await deps.assistantChat.recordVoiceSpend(body);
+    return reply.code(204).send();
+  });
+
   app.delete('/api/v1/assistant/chat/:id', needs('hub.ai'), async (request, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     await deps.assistantChat.close(id);
