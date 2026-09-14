@@ -789,6 +789,19 @@ domains — update them in the same change.
   was *spoken* now that every one arrives as an ordinary assistant turn — read
   at the moment of the command, since one conversation can be typed in the
   morning and talked to in the evening.
+  **A spoken round thinks less, and that is per *turn* rather than per
+  conversation.** `ChatTurnContext.effort` is the override and
+  `AssistantChat.spokenEffort` (`low`) is the only thing that uses it; a typed
+  round stays on the transport's `medium`. The same question genuinely costs
+  differently out loud: a typed answer is read when it lands, so a few seconds
+  more deliberation is free, while a spoken one is somebody standing in a room
+  after the voice has said "one moment" — and the work is usually smaller than
+  it looks, since "switch the kitchen light off" is one tool call against a
+  catalog the agent can already see. It has to be the **turn's** because a
+  transport is built once and holds the history, while one conversation is
+  typed in the morning and talked to in the evening — `spokenSessions`'
+  own reasoning. Still exposed to nobody: two knobs for one decision is one
+  too many.
   **Two meters**: an `ai_runs` row of `kind: 'voice'` at $0.05 a minute beside
   the `assist` rows the delegated turns write, because GPT-Live bills for time
   on the line — silence included — and the model behind it bills for tokens.

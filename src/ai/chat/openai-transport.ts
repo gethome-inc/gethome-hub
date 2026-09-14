@@ -185,7 +185,9 @@ export function createOpenAiTransport(options: ChatTransportOptions): ChatTransp
           systemPrompt,
           input,
           tools: definitions,
-          effort,
+          // The round's own effort where it asked for one — a spoken turn
+          // does — and the conversation's otherwise.
+          effort: context?.effort ?? effort,
           signal,
           onDelta: context?.onDelta,
           onThinking: context?.onThinking,

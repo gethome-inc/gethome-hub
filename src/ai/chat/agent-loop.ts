@@ -1,6 +1,6 @@
 import type { AiProvider } from '../../core/settings.js';
 import type { Logger } from '../../logging.js';
-import type { ChatTurnContext } from './chat-runtime.js';
+import type { ChatEffort, ChatTurnContext } from './chat-runtime.js';
 
 /**
  * The parts of a conversational agent loop that are neither a vendor's API nor
@@ -95,7 +95,7 @@ export interface ChatTransport {
    * word the caller cannot handle.
    */
   round(
-    context: Pick<ChatTurnContext, 'onDelta' | 'onThinking' | 'onSaid'> | undefined,
+    context: Pick<ChatTurnContext, 'onDelta' | 'onThinking' | 'onSaid' | 'effort'> | undefined,
   ): Promise<ChatRound>;
 
   /**
@@ -125,12 +125,16 @@ export interface ChatTransportOptions {
   label: string;
   timeoutMs: number;
   /**
-   * How hard the model works. `high` for a job cached against a device model
-   * for ever; `medium` for a chat, which is many small rounds read the moment
-   * they arrive. Not exposed to anybody: two settings for one decision is one
-   * too many, so each agent states its own and nothing configures it.
+   * How hard the model works, for every round this conversation runs.
+   *
+   * `high` for a job cached against a device model for ever; `medium` for a
+   * chat, which is many small rounds read the moment they arrive. Not exposed
+   * to anybody: two settings for one decision is one too many, so each agent
+   * states its own and nothing configures it. **One round may ask for
+   * something else** — `ChatTurnContext.effort`, which is how a spoken round
+   * gets answered at the speed a person standing in a room expects.
    */
-  effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  effort: ChatEffort;
   signal: AbortSignal;
   log: Logger;
 }

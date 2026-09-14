@@ -295,6 +295,18 @@ none), **the transcript** and **what the line cost**. The phone owns the
 **audio** and the live captions on its page, and it is the phone that sends
 `session.close`, because it is the thing somebody presses stop on.
 
+**A spoken round is answered at `low` effort where a typed one is `medium`**,
+and the knob is on the turn (`ChatTurnContext.effort`) rather than on the
+conversation, because a transport is built once and holds the history while one
+conversation is both — typed in the morning, talked to in the evening. The
+reason is the wait itself: a typed answer is read when it lands, so thinking
+longer is free, and a spoken answer is a person standing in a room with the
+voice having already said "one moment". The work behind most spoken requests is
+also smaller than it looks — one tool call against a catalog the agent can
+already see — so what the extra effort buys is deliberation about a decision
+that was never in doubt. Nothing configures it, and nothing else uses the
+override.
+
 **`askAloud` is the whole delegation handler, and it is ten lines** where the
 phone's was sixty — because the wait is the runtime's own. The phone could only
 acknowledge a message, subscribe to a socket, and resume a continuation when a

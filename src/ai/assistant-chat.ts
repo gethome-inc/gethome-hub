@@ -17,6 +17,7 @@ import {
   ChatRuntime,
   type AgentConversation,
   type AgentSurface,
+  type ChatEffort,
   type ChatMessageWire,
   type ChatRuntimeOptions,
   type ChatSession,
@@ -565,6 +566,25 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
    * transcript to revive from — hence `open`. Later questions find it in
    * memory, or revive it from its rows after a restart.
    */
+  /**
+   * What a spoken round works at, against `medium` for a typed one.
+   *
+   * **The same question costs differently out loud.** A typed answer is read
+   * when it lands, so a few extra seconds of thinking buys a better one for
+   * free; a spoken answer is a person standing in a room with nothing
+   * happening, where the voice has already said "one moment" and the silence
+   * after that is the whole experience. The work is also usually smaller than
+   * it looks — "switch the kitchen light off" is one tool call against a
+   * catalog the agent can already see — so what `medium` mostly buys here is
+   * deliberation about a decision that was never in doubt.
+   *
+   * It is per **turn** rather than per conversation because one conversation
+   * is both: typed in the morning, talked to in the evening. Deliberately not
+   * a setting — see `ChatTransportOptions.effort` on why two knobs for one
+   * decision is one too many.
+   */
+  private static readonly spokenEffort: ChatEffort = 'low';
+
   async askAloud(input: {
     sessionId: string;
     memberId: string;
@@ -577,7 +597,7 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
     if (session.memberId !== input.memberId) return null;
 
     const before = (await this.transcript(input.sessionId)).length;
-    await this.say(session, input.question, 'auto');
+    await this.say(session, input.question, 'auto', AssistantChat.spokenEffort);
     try {
       await session.inFlight;
     } catch (error) {

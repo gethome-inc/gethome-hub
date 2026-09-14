@@ -63,6 +63,9 @@ describe('the assistant', () => {
   ) => Promise<{
     assistant: AssistantChat;
     automationChat: Awaited<ReturnType<typeof startedAutomations>>['chat'];
+    /** What each round was asked to work at — `undefined` is the
+     *  conversation's own setting. See the spoken-effort test. */
+    efforts: (string | undefined)[];
   }>;
 
   beforeEach(async () => {
@@ -111,9 +114,11 @@ describe('the assistant', () => {
       startedEngines.push(engine);
 
       let index = 0;
+      const efforts: (string | undefined)[] = [];
       const round = async (_text: string, context?: ChatTurnContext): Promise<AssistantTurn> => {
         const at = index;
         index += 1;
+        efforts.push(context?.effort);
         context?.onStep?.('Reading your home', 'thinking');
         await options?.gate;
         return turns[at] ?? { kind: 'said', text: 'nothing left to say' };
@@ -139,7 +144,7 @@ describe('the assistant', () => {
         automationChat,
         createConversation: () => scripted,
       });
-      return { assistant, automationChat };
+      return { assistant, automationChat, efforts };
     };
   });
 
@@ -206,6 +211,30 @@ describe('the assistant', () => {
     expect(second).toBe('The hall one is off too.');
     const rows = await assistant.transcript(sessionId);
     expect(rows.map((row) => row.role)).toEqual(['user', 'agent', 'user', 'agent']);
+  });
+
+  /**
+   * **The same conversation, two speeds.** A spoken round is a person standing
+   * in a room waiting for an answer, and a typed one is a message they read
+   * when it lands — so the turn asks for `low` out loud and leaves a typed
+   * round on the conversation's own `medium`. Per *turn* is the whole point:
+   * this asserts both against one session, because a transport is built once
+   * and a conversation typed in the morning is talked to in the evening.
+   */
+  it('thinks less when the answer is spoken, and only then', async () => {
+    const { assistant, efforts } = await assistantFor([
+      { kind: 'said', text: 'It is off.' },
+      { kind: 'said', text: 'Both are off.' },
+    ]);
+    const sessionId = assistant.beginVoice();
+
+    await assistant.askAloud({ sessionId, memberId, question: 'turn the kitchen light off' });
+    expect(efforts).toEqual(['low']);
+
+    // The same conversation, carried on by typing.
+    await assistant.reply(sessionId, memberId, 'and the hall one?');
+    await assistant.idle();
+    expect(efforts).toEqual(['low', undefined]);
   });
 
   it('keeps its conversations apart from the automations agent’s', async () => {

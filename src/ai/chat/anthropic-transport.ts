@@ -149,7 +149,9 @@ export function createAnthropicTransport(options: ChatTransportOptions): ChatTra
             messages,
             tools: definitions,
             thinking: { type: 'adaptive', display: 'summarized' },
-            output_config: { effort },
+            // The round's own effort where it asked for one — a spoken turn
+            // does — and the conversation's otherwise.
+            output_config: { effort: context?.effort ?? effort },
           },
           { signal },
         );

@@ -186,7 +186,29 @@ export interface ChatSummaryWire {
 }
 
 /** What a running turn reports as it happens, for the socket. */
+/**
+ * How hard the model works on one round.
+ *
+ * **It belongs to the turn, not to the conversation**, which is the whole of
+ * why it is here rather than only on `ChatTransportOptions`. A transport is
+ * built once and holds the message history, so an effort chosen there is
+ * chosen for the life of the chat — and the same conversation is typed in the
+ * morning and talked to in the evening (`spokenSessions`' own reasoning). A
+ * spoken round is answered out loud while somebody stands there waiting, and a
+ * typed one is read when it lands.
+ */
+export type ChatEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
 export interface ChatTurnContext {
+  /**
+   * What this round works at, when it is not what the conversation works at.
+   *
+   * Absent is the ordinary case and means the transport's own setting. Present
+   * is one round asking for something else — today only a spoken one, where
+   * the reply is a person waiting in a room rather than a message they will
+   * read when they get to it.
+   */
+  effort?: ChatEffort;
   /** Text as it arrives, so a chat is not minutes of nothing. */
   onDelta?: (text: string) => void;
   /**
@@ -594,12 +616,13 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     session: ChatSession<Turn>,
     text: string,
     how: 'send' | 'answer' | 'auto',
+    effort?: ChatEffort,
   ): Promise<ChatReply> {
     const written = await this.write(session, 'user', text, undefined, session.memberId);
     session.lastAt = Date.now();
     session.inFlight = session.inFlight.then(async () => {
       const mode = how === 'auto' ? (session.conversation.awaitingAnswer() ? 'answer' : 'send') : how;
-      await this.exchange(session, text, mode);
+      await this.exchange(session, text, mode, effort);
     });
     return { sessionId: session.id, messages: [written] };
   }
@@ -802,9 +825,10 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     session: ChatSession<Turn>,
     text: string,
     how: 'send' | 'answer',
+    effort?: ChatEffort,
   ): Promise<void> {
     try {
-      await this.runExchange(session, text, how);
+      await this.runExchange(session, text, how, effort);
     } catch (error) {
       /**
        * **The promise `say()` stores must never reject**, and the inner catch
@@ -848,6 +872,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     session: ChatSession<Turn>,
     text: string,
     how: 'send' | 'answer',
+    effort?: ChatEffort,
   ): Promise<void> {
     // A round's working belongs to that round. Cleared here rather than after
     // the rows are written, so a turn that throws between the two cannot hand
@@ -891,6 +916,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       session.priming = undefined;
 
       turn = await session.conversation[how](primed, {
+        ...(effort !== undefined ? { effort } : {}),
         onStep: (summary, kind, detail) => {
           // Whatever was reasoned belongs to the step it was reasoned under,
           // which is the one already there rather than this one.
