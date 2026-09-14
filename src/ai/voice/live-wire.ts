@@ -11,6 +11,36 @@
  * different is one edit in one place rather than a hunt through an audio
  * pipeline. Read the guides before changing anything in it.
  *
+ * **THIS FILE IS REALTIME-SHAPED AND THE MODEL IS LIVE. It does not work yet.**
+ *
+ * The first phone to dial the socket got `Model "gpt-live-1" is not supported in
+ * realtime mode`, and the mistake was reading that as a wrong model id. It is
+ * not: `gpt-live-1` is right, and so is the $0.05 a minute below. What is wrong
+ * is the *mode* — GPT-Live is a different endpoint family from the Realtime API,
+ * and everything below was written to Realtime's shape. Established, from the
+ * guides' own pages:
+ *
+ * - Live sessions live at **`v1/live/sessions`**, not `v1/realtime`.
+ * - The socket opens with a **`session.start`** frame and waits for
+ *   `session.started`. Nothing here sends one.
+ * - **Tools are gone; delegation replaces them.** `session.delegation.created`
+ *   carries an id and metadata rather than task text, and client delegation
+ *   answers with `session.thinking.append` / `session.commentary.append` /
+ *   `session.instructions.append`. `conversation.item.create` with a
+ *   `function_call_output`, and `response.create` after it, are Realtime's
+ *   vocabulary and have no equivalent here.
+ * - **Manual turn control is removed**, so `response.create` should not exist.
+ * - **Audio and transcript events are renamed** relative to Realtime. Every
+ *   `Event` name at the bottom of this file is therefore suspect.
+ *
+ * What is *not* established, and must not be guessed a third time: the exact
+ * socket URL, the `session.start` payload, the audio frame names in both
+ * directions, the transcript event, and the delegation schema a tool is
+ * declared in. `developers.openai.com` is blocked by this session's egress
+ * policy, so those come from the guides by hand:
+ * `guides/live`, `guides/live-conversations`, `guides/live-migration`, and
+ * `guides/live-delegation` for the tool half.
+ *
  * **What the hub does and does not do with this.** The hub mints the ephemeral
  * secret and builds the whole session config — the instructions, the tools, the
  * voice — so the phone composes nothing and the home's OpenAI key never leaves
