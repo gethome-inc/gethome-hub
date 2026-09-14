@@ -8,10 +8,11 @@ import { AccessService } from '../src/core/access.js';
 import { SettingsService } from '../src/core/settings.js';
 import {
   activity as activityTable,
+  aiRuns as aiRunsTable,
   members as membersTable,
   roles as rolesTable,
 } from '../src/db/schema.js';
-import { eq } from 'drizzle-orm';
+import { asc, eq } from 'drizzle-orm';
 import { openTestDb, resetDb, startedAutomations, type TestDb } from './helpers/db.js';
 import { AssistantChat } from '../src/ai/assistant-chat.js';
 import { AutomationNotConfiguredError } from '../src/ai/automation-chat.js';
@@ -99,6 +100,7 @@ describe('the assistant', () => {
       const scriptedDelegate: AutomationConversation = {
         provider: 'anthropic',
         modelId: 'claude-opus-5',
+        effort: 'medium' as const,
         awaitingAnswer: () => false,
         costUsd: () => 0.02,
         send: delegatedTurn,
@@ -126,6 +128,7 @@ describe('the assistant', () => {
       const scripted: AgentConversation<AssistantTurn> = {
         provider: 'anthropic',
         modelId: 'claude-opus-5',
+        effort: 'medium' as const,
         awaitingAnswer: () => false,
         costUsd: options?.cost ?? (() => 0.04),
         send: round,
@@ -235,6 +238,61 @@ describe('the assistant', () => {
     await assistant.reply(sessionId, memberId, 'and the hall one?');
     await assistant.idle();
     expect(efforts).toEqual(['low', undefined]);
+  });
+
+  /**
+   * **The ledger says what ran, not what is configured now.**
+   *
+   * `kind` cannot tell a spoken round from a typed one — both are `assist` —
+   * and those are exactly the two that behave differently: one answered at a
+   * lower effort with a per-second meter running beside it. Reading a slow
+   * answer back next week without either field leaves the only question worth
+   * asking unanswerable.
+   */
+  it('writes down what each turn ran at and how it was asked', async () => {
+    // A turn's row is its *delta*, so a conversation whose cost never moves
+    // writes one row however many rounds it runs — see `record`.
+    let spent = 0.04;
+    const { assistant } = await assistantFor(
+      [
+        { kind: 'said', text: 'It is off.' },
+        { kind: 'said', text: 'Both are off.' },
+      ],
+      { cost: () => spent },
+    );
+    const sessionId = assistant.beginVoice();
+
+    await assistant.askAloud({ sessionId, memberId, question: 'turn the kitchen light off' });
+    spent = 0.07;
+    await assistant.reply(sessionId, memberId, 'and the hall one?');
+    await assistant.idle();
+
+    const rows = await handle!.db
+      .select()
+      .from(aiRunsTable)
+      .orderBy(asc(aiRunsTable.at));
+    expect(rows.map((row) => [row.kind, row.effort, row.via])).toEqual([
+      ['assist', 'low', 'voice'],
+      // The conversation's own effort, read back rather than re-derived.
+      ['assist', 'medium', 'typed'],
+    ]);
+  });
+
+  /**
+   * The meter on the line is not a generation: GPT-Live has no effort setting,
+   * and a number invented here would be the one field in this log that was
+   * never true of anything.
+   */
+  it('marks the voice meter as spoken and gives it no effort', async () => {
+    const { assistant } = await assistantFor([]);
+    const sessionId = assistant.beginVoice();
+    await assistant.recordVoiceSpend({ sessionId, seconds: 90 });
+
+    const rows = await handle!.db.select().from(aiRunsTable);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.kind).toBe('voice');
+    expect(rows[0]?.via).toBe('voice');
+    expect(rows[0]?.effort).toBeNull();
   });
 
   it('keeps its conversations apart from the automations agent’s', async () => {

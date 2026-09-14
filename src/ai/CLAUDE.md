@@ -791,7 +791,7 @@ domains — update them in the same change.
   morning and talked to in the evening.
   **A spoken round thinks less, and that is per *turn* rather than per
   conversation.** `ChatTurnContext.effort` is the override and
-  `AssistantChat.spokenEffort` (`low`) is the only thing that uses it; a typed
+  `AssistantChat.spokenOrigin` (`low`, `voice`) is the only thing that uses it; a typed
   round stays on the transport's `medium`. The same question genuinely costs
   differently out loud: a typed answer is read when it lands, so a few seconds
   more deliberation is free, while a spoken one is somebody standing in a room
@@ -802,6 +802,25 @@ domains — update them in the same change.
   typed in the morning and talked to in the evening — `spokenSessions`'
   own reasoning. Still exposed to nobody: two knobs for one decision is one
   too many.
+  **And a turn writes down what it ran at and how it was asked** — `ai_runs`
+  gained `effort` and `via` beside `provider`/`modelId`, filled from
+  `ChatSession.origin`, which `runExchange` resolves at the moment a round
+  begins. That is the same question those two columns already answer, and it
+  had one honest answer per row and nowhere to put it: two conversations on
+  one model, one spoken and one typed, were the same row twice at different
+  prices, and the first thing anybody asks about a bad answer is what was
+  behind it. **Two narrow columns rather than a `meta` blob**, because both
+  are closed vocabularies a screen groups and sums by, and a JSON bag is
+  neither queryable nor reviewable — `ai_run_exchanges` is where *content*
+  goes, and its rule that nothing carries a credential is what keeps these two
+  cheap to add beside it. **Read back, never re-derived**, the rule `modelId`
+  already follows: a log is about what ran, and every setting behind it moves.
+  **Null is a real answer** and both are nullable for the same reason: a row
+  written before this has neither, a portrait has no effort, a device
+  recognition nobody asked for has no `via`, and the `voice` meter below is a
+  line rather than a generation — it carries `via: 'voice'` and no effort,
+  since GPT-Live has no such setting and a number invented here would be the
+  one field in this log that was never true of anything.
   **Two meters**: an `ai_runs` row of `kind: 'voice'` at $0.05 a minute beside
   the `assist` rows the delegated turns write, because GPT-Live bills for time
   on the line — silence included — and the model behind it bills for tokens.

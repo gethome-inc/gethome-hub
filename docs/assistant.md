@@ -129,6 +129,22 @@ Spend is one ledger: `ai_runs` rows with `kind: 'assist'`, linked by
 `session_id`, beside the mapper's `map`/`repair` and the automations agent's
 `automate`. What a home spent on AI is one question.
 
+Each row also says **what that turn ran at and how it was asked** — `effort`
+(`low`/`medium`/`high`) beside `via` (`voice`/`typed`), filled from the turn's
+own origin at the moment the round begins, the way `provider`/`modelId` are
+read back rather than re-derived. Without them a spoken round and a typed one
+on the same model were the same row twice at different prices, and the first
+thing anybody asks about a poor answer is what was behind it. Both are
+**nullable and null means the question does not apply**: a row written before
+them has neither, a portrait has no effort, a device recognition nobody asked
+for has no `via`, and the `voice` meter is a line rather than a generation, so
+it carries `via: 'voice'` and no effort — GPT-Live has no such setting, and a
+number invented here would be the one field in this log that was never true of
+anything. They are two narrow columns rather than a `meta` blob because both
+are closed vocabularies a screen groups and sums by; `ai_run_exchanges` is
+where *content* goes, and its rule that request bodies are recorded and headers
+never are is what keeps a run log safe to read.
+
 ## The tools
 
 Seven, and short on purpose. Three of them — `list_devices`, `get_device`,

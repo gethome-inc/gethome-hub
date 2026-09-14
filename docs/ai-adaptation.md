@@ -641,6 +641,12 @@ on the `ai` WebSocket channel: what was sent, every `web_search` query, every
 `web_fetch` URL, what was submitted and why it was refused, plus cost, turns
 and duration.
 
+A row carries `effort` and `via` beside `provider`/`modelId` — what the run
+worked at, and how it was asked for. A mapping run is always `high` and always
+has a null `via`: nobody typed or said anything, a device arriving on the
+network is what starts it. The conversational surfaces are where the pair
+earns its keep — see [assistant.md](assistant.md).
+
 It is a **summary, never a transcript.** Model prose is the largest thing a run
 produces and the least useful to read later, so it is not stored. Bounded at
 both ends — 40 steps per run, 60 runs retained, `detail` truncated at 2 KB —

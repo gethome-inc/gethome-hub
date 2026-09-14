@@ -740,6 +740,7 @@ describe('the chat service', () => {
       const scripted: AutomationConversation = {
         provider: 'anthropic',
         modelId: 'claude-opus-5',
+        effort: 'medium' as const,
         awaitingAnswer: () => false,
         costUsd: cost ?? (() => 0.12),
         send: round,
@@ -1560,6 +1561,7 @@ describe('AutomationChat provider selection', () => {
           return {
             provider: 'anthropic',
             modelId,
+            effort: 'medium' as const,
             awaitingAnswer: () => false,
             costUsd: () => 0,
             send: async () => ({ kind: 'said', text: 'hello' }) as AutomationTurn,

@@ -199,6 +199,40 @@ export interface ChatSummaryWire {
  */
 export type ChatEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
+/**
+ * What a conversation works at, for both agents.
+ *
+ * `medium` against the mapper's `high`: a descriptor is cached against a
+ * device model for ever, while a chat is many small rounds read the moment
+ * they arrive. Named once here because two agents state it and the run log
+ * records it — three places for one number is two too many.
+ */
+export const AGENT_EFFORT: ChatEffort = 'medium';
+
+/**
+ * How a person reached the agent, for the run log.
+ *
+ * `kind` on an `ai_runs` row says which agent spent the money and cannot say
+ * this: a spoken request is an ordinary `assist` row, so without it the two
+ * halves of one conversation are indistinguishable in the ledger — and they
+ * are exactly the two halves that behave differently, one answered at a lower
+ * effort with a per-second meter running on the line beside it.
+ */
+export type ChatVia = 'voice' | 'typed';
+
+/**
+ * Where one turn came from and what it asked for — everything about a turn
+ * that is *not* its text.
+ *
+ * Both halves are per **turn** rather than per conversation, and for the same
+ * reason: a transport is built once and holds the history, while one
+ * conversation is typed in the morning and talked to in the evening.
+ */
+export interface TurnOrigin {
+  effort?: ChatEffort;
+  via?: ChatVia;
+}
+
 export interface ChatTurnContext {
   /**
    * What this round works at, when it is not what the conversation works at.
@@ -254,6 +288,12 @@ export interface AgentConversation<Turn> {
   costUsd(): number;
   /** Which model has been answering, for the run log and for the apps. */
   readonly modelId: string;
+  /**
+   * What this conversation works at when a turn does not ask for something
+   * else — read back for the run log rather than re-derived, the rule
+   * `modelId` follows: the log is about what *ran*.
+   */
+  readonly effort: ChatEffort;
   readonly provider: string;
 }
 
@@ -318,6 +358,11 @@ export interface ChatSession<Turn> {
    * process.
    */
   inFlight: Promise<void>;
+  /**
+   * What the turn now running is — its effort and how it was asked — resolved
+   * at the moment it began, for the `ai_runs` row that follows it.
+   */
+  origin?: { effort: ChatEffort; via: ChatVia };
   /**
    * How much of this conversation's spend is already in `ai_runs`.
    *
@@ -616,13 +661,13 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     session: ChatSession<Turn>,
     text: string,
     how: 'send' | 'answer' | 'auto',
-    effort?: ChatEffort,
+    origin?: TurnOrigin,
   ): Promise<ChatReply> {
     const written = await this.write(session, 'user', text, undefined, session.memberId);
     session.lastAt = Date.now();
     session.inFlight = session.inFlight.then(async () => {
       const mode = how === 'auto' ? (session.conversation.awaitingAnswer() ? 'answer' : 'send') : how;
-      await this.exchange(session, text, mode, effort);
+      await this.exchange(session, text, mode, origin);
     });
     return { sessionId: session.id, messages: [written] };
   }
@@ -825,10 +870,10 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     session: ChatSession<Turn>,
     text: string,
     how: 'send' | 'answer',
-    effort?: ChatEffort,
+    origin?: TurnOrigin,
   ): Promise<void> {
     try {
-      await this.runExchange(session, text, how, effort);
+      await this.runExchange(session, text, how, origin);
     } catch (error) {
       /**
        * **The promise `say()` stores must never reject**, and the inner catch
@@ -872,8 +917,18 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     session: ChatSession<Turn>,
     text: string,
     how: 'send' | 'answer',
-    effort?: ChatEffort,
+    origin?: TurnOrigin,
   ): Promise<void> {
+    // **What this turn was, for the row it is about to write.** Kept on the
+    // session because `record` runs after the turn and takes only the
+    // session; turns are chained per conversation, so the value cannot belong
+    // to a different one by the time it is read.
+    session.origin = {
+      effort: origin?.effort ?? session.conversation.effort,
+      // A chat turn is typed unless something says otherwise, which is the
+      // honest default: `askAloud` is the only caller that says otherwise.
+      via: origin?.via ?? 'typed',
+    };
     // A round's working belongs to that round. Cleared here rather than after
     // the rows are written, so a turn that throws between the two cannot hand
     // its steps to the next answer.
@@ -916,7 +971,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       session.priming = undefined;
 
       turn = await session.conversation[how](primed, {
-        ...(effort !== undefined ? { effort } : {}),
+        ...(origin?.effort !== undefined ? { effort: origin.effort } : {}),
         onStep: (summary, kind, detail) => {
           // Whatever was reasoned belongs to the step it was reasoned under,
           // which is the one already there rather than this one.
@@ -1205,6 +1260,12 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       // And which conversation it was, which is what makes the spend
       // answerable per chat rather than only per rule.
       sessionId: session.id,
+      // What this turn actually was. Both are read back rather than
+      // re-derived, the rule `modelId` follows: a log is about what ran, and
+      // every setting behind it moves.
+      ...(session.origin !== undefined
+        ? { effort: session.origin.effort, via: session.origin.via }
+        : {}),
     });
     await handle.finish({
       ok,

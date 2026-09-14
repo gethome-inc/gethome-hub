@@ -6,6 +6,7 @@ import { type AgentAuth } from './agent-core.js';
 import { isSupportedModel, supportedModelIds } from './models.js';
 import { QuestionGate, type ChatToolResult } from './chat/agent-loop.js';
 import { createChatTransport } from './chat/transport.js';
+import { AGENT_EFFORT } from './chat/chat-runtime.js';
 import {
   AUTOMATION_MAX_BUDGET_USD,
   AUTOMATION_MAX_RULES_PER_TURN,
@@ -90,7 +91,7 @@ export async function createAutomationConversation(
     tools: AUTOMATION_TOOLS,
     label: 'the automation agent',
     timeoutMs: AUTOMATION_TIMEOUT_MS,
-    effort: 'medium',
+    effort: AGENT_EFFORT,
     signal: controller.signal,
     log,
   });
@@ -467,6 +468,9 @@ export async function createAutomationConversation(
   const conversation: AutomationConversation = {
     provider,
     modelId,
+    // What this conversation works at, for the run log to read back rather
+    // than re-derive. A single turn may still ask for something else.
+    effort: AGENT_EFFORT,
 
     async send(text, context) {
       if (gate.isOpen) {

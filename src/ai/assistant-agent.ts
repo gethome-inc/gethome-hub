@@ -4,6 +4,7 @@ import { type AgentAuth } from './agent-core.js';
 import { isSupportedModel, supportedModelIds } from './models.js';
 import { QuestionGate, type ChatToolResult } from './chat/agent-loop.js';
 import { createChatTransport } from './chat/transport.js';
+import { AGENT_EFFORT } from './chat/chat-runtime.js';
 import type { AgentConversation, ChatTurnContext } from './chat/chat-runtime.js';
 import { askUserInput, type AskUser } from './automation-tools.js';
 import {
@@ -111,7 +112,7 @@ export async function createAssistantConversation(
     label: 'the assistant',
     timeoutMs: ASSISTANT_TIMEOUT_MS,
     // See the note at the top of the file: a chat, not a cached descriptor.
-    effort: 'medium',
+    effort: AGENT_EFFORT,
     signal: controller.signal,
     log,
   });
@@ -295,6 +296,9 @@ export async function createAssistantConversation(
   const conversation: AgentConversation<AssistantTurn> = {
     provider,
     modelId,
+    // What this conversation works at, for the run log to read back rather
+    // than re-derive. A single turn may still ask for something else.
+    effort: AGENT_EFFORT,
 
     async send(text, context) {
       if (gate.isOpen) {

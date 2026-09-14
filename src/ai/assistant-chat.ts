@@ -17,7 +17,7 @@ import {
   ChatRuntime,
   type AgentConversation,
   type AgentSurface,
-  type ChatEffort,
+  type TurnOrigin,
   type ChatMessageWire,
   type ChatRuntimeOptions,
   type ChatSession,
@@ -582,8 +582,13 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
    * is both: typed in the morning, talked to in the evening. Deliberately not
    * a setting — see `ChatTransportOptions.effort` on why two knobs for one
    * decision is one too many.
+   *
+   * `via` rides with it for the same reason and lands in the same place: the
+   * `ai_runs` row, where a spoken round would otherwise be indistinguishable
+   * from a typed one — same `kind`, same agent, different effort, and a meter
+   * running on the line beside it.
    */
-  private static readonly spokenEffort: ChatEffort = 'low';
+  private static readonly spokenOrigin: TurnOrigin = { effort: 'low', via: 'voice' };
 
   async askAloud(input: {
     sessionId: string;
@@ -597,7 +602,7 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
     if (session.memberId !== input.memberId) return null;
 
     const before = (await this.transcript(input.sessionId)).length;
-    await this.say(session, input.question, 'auto', AssistantChat.spokenEffort);
+    await this.say(session, input.question, 'auto', AssistantChat.spokenOrigin);
     try {
       await session.inFlight;
     } catch (error) {
@@ -644,6 +649,10 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
       provider: 'openai',
       modelId: LIVE_MODEL,
       sessionId: input.sessionId,
+      // The line itself. No `effort`: GPT-Live has no such setting, and a
+      // number invented here would be the one field in this log that was
+      // never true of anything.
+      via: 'voice',
     });
     await handle.finish({
       ok: true,

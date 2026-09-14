@@ -2272,6 +2272,14 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       // before the hub could run on more than one.
       provider: row.provider,
       modelId: row.modelId,
+      /**
+       * What it ran at, and how it was asked — `low`/`medium`/`high` and
+       * `voice`/`typed`. Both null on a row written before this and on a run
+       * the idea does not apply to (a portrait has no effort; a device
+       * recognition nobody asked for has no `via`).
+       */
+      effort: row.effort,
+      via: row.via,
       ok: row.ok,
       costUsd: row.costUsd,
       turns: row.turns,
