@@ -3270,7 +3270,19 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       });
     }
     const secret = await deps.settings.aiKey('openai');
-    if (!secret) return reply.code(409).send({ error: 'openai_not_configured' });
+    // The same sentence as the check above, not a bare code: this is the race
+    // where the key went away between `hasKey` and the read, and an app that
+    // falls back to its own wording for `openai_not_configured` is holding one
+    // written for *portraits* — the code means "no OpenAI key" on both routes
+    // and only the detail says which thing cannot happen.
+    if (!secret) {
+      return reply.code(409).send({
+        error: 'openai_not_configured',
+        detail:
+          'Talking out loud runs on OpenAI’s voice model, so this home needs an OpenAI key — ' +
+          'even if the assistant itself answers on Anthropic. Add one in the home’s AI settings.',
+      });
+    }
 
     const [{ openLiveSession }, { liveInstructions }] = await Promise.all([
       import('../ai/voice/session.js'),
