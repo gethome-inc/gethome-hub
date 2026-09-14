@@ -324,6 +324,68 @@ describe('what the line cost', () => {
   });
 });
 
+describe('a round that takes too long', () => {
+  /**
+   * **The phone hangs up before the hub gives up, so the hub has to speak.**
+   *
+   * `VoiceConversation`'s idle clock closes a line after a minute with nothing
+   * said and nothing playing, and the assistant is allowed a two-minute round —
+   * so a slow answer used to arrive at a session that had already gone, and the
+   * person heard "one moment" and then nothing, ever. Making the phone more
+   * patient is the wrong side: that clock is there for a page left on a kitchen
+   * counter. This side knows a round is running.
+   */
+  it('says so on the same delegation, and stops the moment the answer lands', async () => {
+    vi.useFakeTimers();
+    try {
+      let release: (answer: string) => void = () => undefined;
+      const h = harness(() => new Promise<string>((resolve) => (release = resolve)));
+      h.read({ type: 'session.input_transcript.delta', delta: 'why is the hall light on' });
+      h.read({ type: 'session.delegation.created', delegation: { id: 'item_1', target: 'client' } });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.sent).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(h.sent).toHaveLength(1);
+      expect(h.sent[0]).toMatchObject({
+        type: 'session.commentary.append',
+        delegation_id: 'item_1',
+      });
+
+      // It repeats, because two minutes of assistant is four of these.
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(h.sent).toHaveLength(2);
+
+      release('The hall light is on because of the evening rule.');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.sent).toHaveLength(3);
+      expect(h.sent[2]).toMatchObject({ content: 'The hall light is on because of the evening rule.' });
+
+      // And nothing more, however long nobody says anything else.
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(h.sent).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /** An ordinary round never sees it. */
+  it('is silent for a round that answers at once', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = harness();
+      h.read({ type: 'session.input_transcript.delta', delta: 'turn the kitchen light off' });
+      h.read({ type: 'session.delegation.created', delegation: { id: 'item_1', target: 'client' } });
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(h.sent).toHaveLength(1);
+      expect(h.sent[0]).toMatchObject({ content: 'It is off now.' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('attaching', () => {
   it('is the running session, with the id escaped', () => {
     expect(liveSidebandUrl('sess_123')).toBe(

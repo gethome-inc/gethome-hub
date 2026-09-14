@@ -626,10 +626,28 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
      * person said out loud, and an instruction stapled to the front of it
      * would be read back on the page and spoken into the next round's history.
      */
-    session.priming =
-      session.priming === undefined
-        ? AssistantChat.spokenPriming
-        : `${session.priming}\n${AssistantChat.spokenPriming}`;
+    /**
+     * **And what everything is doing right now**, which is the one thing the
+     * cached first message cannot carry: it is written once and would be
+     * answered from confidently an hour later. Built here, at the moment of
+     * the turn, it costs a spoken read a whole model round — "is the kitchen
+     * light on" was one round to call `get_device` and a second to say the
+     * answer, which is a doubling of the term that dominates a spoken exchange
+     * on most of what anybody asks a house. Prefill against decode: about a
+     * thousand input tokens against one or two seconds of somebody standing in
+     * a room. `spokenStateDigest` is where the bounds are.
+     */
+    // Loaded on demand, like `open()`'s call to the same module two hundred
+    // lines down: this file's rule is that a prompt is not part of its graph.
+    const { spokenStateDigest } = await import('./assistant-prompts.js');
+    const digest = spokenStateDigest({
+      home: this.options.engine.homeView(),
+      stateOf: (deviceId, endpointId) => this.options.engine.stateFor(deviceId, endpointId),
+    });
+    for (const line of [AssistantChat.spokenPriming, digest]) {
+      if (line === undefined) continue;
+      session.priming = session.priming === undefined ? line : `${session.priming}\n${line}`;
+    }
 
     const before = (await this.transcript(input.sessionId)).length;
     await this.say(session, input.question, 'auto', AssistantChat.spokenOrigin);

@@ -57,6 +57,33 @@ const TYPE_SCAN_CHARS = 400;
 const APPENDS_REMEMBERED = 32;
 
 /**
+ * How long a delegation may go unanswered before the hub says so out loud.
+ *
+ * **This is a timeout fix wearing the clothes of a nicety.** The phone closes
+ * a line after a minute with nothing said and nothing playing
+ * (`VoiceConversation`'s idle clock), and the assistant is allowed a two-minute
+ * round — so a slow answer arrived at a session that had already hung up, and
+ * the person heard the voice say "one moment" and then nothing, ever. Making
+ * the phone more patient is the wrong side to fix it on: that clock exists for
+ * a page left on a kitchen counter, where being generous is a meter running in
+ * an empty room. This side is the one that *knows* a round is running.
+ *
+ * So the hub says so, on the same delegation, as
+ * `session.commentary.append` — the API's own "information the model should
+ * speak aloud" — and the model speaking resets the phone's clock through the
+ * transcript deltas it already watches. Twenty seconds is comfortably inside
+ * the minute and nowhere near a normal round, which finishes in two or three;
+ * it repeats, because two minutes is four of these and a round that long is
+ * pathological rather than impossible.
+ *
+ * **It is a signal rather than a guarantee.** The model decides when to speak,
+ * and commentary is content it may paraphrase or fold into what it is already
+ * saying. What it cannot do is leave the hub silent for a minute, which is the
+ * failure this replaces.
+ */
+const PATIENCE_MS = 20_000;
+
+/**
  * How much of what was said is carried into one request.
  *
  * A delegation is about what the person has been saying, and "the last thing"
@@ -256,6 +283,13 @@ export class VoiceDelegation {
     this.askedUntil = offset ?? this.latestEnd ?? this.latestStart;
     const askedUntil = this.askedUntil;
 
+    // See `PATIENCE_MS`: a round that outlives the phone's idle clock has to
+    // say so, or the answer lands on a line that has already gone.
+    const patience = setInterval(() => {
+      this.send('commentary', delegationId, AWAY_TOO_LONG);
+    }, PATIENCE_MS);
+    patience.unref?.();
+
     let answer: string | null = null;
     try {
       answer = await this.options.host.askAloud({
@@ -265,6 +299,8 @@ export class VoiceDelegation {
       });
     } catch (error) {
       this.options.log.warn({ error }, 'voice: could not ask the home');
+    } finally {
+      clearInterval(patience);
     }
 
     if (answer === null || answer.trim() === '') {
@@ -339,6 +375,16 @@ export class VoiceDelegation {
     }
   }
 }
+
+/**
+ * What the voice is given to say while the house is still being asked.
+ *
+ * Deliberately **not** a claim about what is happening — the hub knows a round
+ * is running and nothing more, and "checking the kitchen light" would be a
+ * sentence invented here about a tool call nobody here can see. The one true
+ * thing is that it is taking a while, so that is what is said.
+ */
+const AWAY_TOO_LONG = 'This is taking longer than usual. Still working on it — say so briefly.';
 
 /** A number the frame actually carried, or nothing. */
 function finite(value: unknown): number | undefined {

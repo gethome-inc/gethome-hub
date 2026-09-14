@@ -391,6 +391,45 @@ turn. What is left in the voice prompt is the half the model can actually keep:
 every fact and number survives, nothing is added, and a caveat is not dropped
 for being inconvenient.
 
+**A spoken turn also carries what everything is doing right now**, which is
+the one thing the cached first message cannot. The home goes into that message
+rather than behind a tool because a round spent asking "what devices do you
+have" is a round somebody watched go past — and live *values* were the
+deliberate exception, since it is written once and sits behind the
+conversation's cache breakpoint, so a snapshot put there would be answered from
+confidently an hour later. `get_device` is the right answer for a chat. Out
+loud it costs a whole model round: "is the kitchen light on" runs one round to
+call the tool and a second to say the answer, which doubles the term that
+dominates a spoken exchange, on the class of question that is most of what
+anybody asks a house. So `spokenStateDigest` builds one **at the moment of the
+turn** and puts it on `priming` beside the marker — fresh by construction,
+never in the transcript and never in the cached message. Four bounds keep it
+worth paying for on every spoken turn: only what somebody asks out loud (on,
+bright, warm, humid, locked, open, playing, offline, a battery under 20% — the
+device card's own threshold); an endpoint with nothing to report is left out
+entirely, which in a real home is most of the buttons and remotes; it is keyed
+by **id**, because the first message is already the index and a house with two
+lamps called "Lamp" has to stay unambiguous; and it uses the same raw units
+`get_device` does, because two vocabularies for one reading is how a model
+comes to say twenty-one degrees about 2,140 of something.
+
+**And a round that outlives the phone's patience says so.** The app closes a
+line after a minute with nothing said and nothing playing, and the assistant is
+allowed a two-minute round — so a slow answer arrived at a session that had
+already hung up, and the person heard "one moment" and then nothing, ever.
+Making the phone more patient is the wrong side to fix it on: that clock exists
+for a page left on a kitchen counter, where being generous is a meter running in
+an empty room. This side is the one that knows a round is running, so every
+`PATIENCE_MS` (20 s) an unanswered delegation gets a `session.commentary.append`
+on its own id saying it is taking longer than usual — the model speaks, the
+phone's transcript deltas reset its clock, and the wait stops being silence. It
+says nothing about *what* is happening, because the hub knows a round is running
+and no more; "checking the kitchen light" would be a sentence invented here
+about a tool call nobody here can see. It is a signal rather than a guarantee —
+the model decides when to speak — but what it cannot do is leave this side
+silent for a minute, which is the failure it replaces. An ordinary round
+finishes in two or three seconds and never sees it.
+
 **A question is an answer, and for a while it was a refusal.** `askAloud`
 returned `agent` and `note` rows only, which covers the two arms a typed reply
 usually ends in — and silently drops the third. `ask_user` is precisely where

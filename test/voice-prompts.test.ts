@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import type { AutomationHomeView } from '../src/automations/targets.js';
 import type { ChatMessageWire } from '../src/ai/chat/chat-runtime.js';
 import type { AutomationDocument } from '../src/automations/schema.js';
+import type { EndpointState } from '../src/schema/index.js';
+import { spokenStateDigest } from '../src/ai/assistant-prompts.js';
 import { liveHistory, liveInstructions } from '../src/ai/voice/prompts.js';
 import { LIVE_HISTORY_MESSAGES } from '../src/ai/voice/live-wire.js';
 
@@ -184,5 +186,107 @@ describe('the voice prompt', () => {
     // Newest last, and the newest is the last thing that was actually said.
     expect(history.at(-1)?.content[0].text).toBe('line 39');
     expect(history[0]?.content[0].text).toBe(`line ${40 - LIVE_HISTORY_MESSAGES}`);
+  });
+});
+
+/**
+ * What a spoken turn is told about *now*, which the cached first message
+ * cannot carry. `assistant-prompts.ts` builds it and `askAloud` puts it on
+ * `ChatSession.priming`; it is here because the two voice prompts are the
+ * other pure functions on this surface and this is the third.
+ */
+describe('what everything is doing right now', () => {
+  const empty: EndpointState = { reachable: true, sensors: {} };
+
+  function digestOf(states: Record<string, EndpointState>): string | undefined {
+    return spokenStateDigest({
+      home: home(),
+      stateOf: (deviceId) => states[deviceId],
+    });
+  }
+
+  /**
+   * The whole point: "is the kitchen light on" used to be one round to call
+   * `get_device` and a second to say the answer, which doubles the term that
+   * dominates a spoken exchange on most of what anybody asks a house.
+   */
+  it('carries what a person asks out loud, keyed by id', () => {
+    const digest = digestOf({
+      [lightId]: { ...empty, onOff: true, level: { current: 180, min: 1, max: 254 } },
+    });
+
+    expect(digest).toContain(lightId);
+    expect(digest).toContain('"onOff":true');
+    expect(digest).toContain('"level":180');
+    // Keyed by id rather than by name, because the first message is already
+    // the index and a house with two lamps called "Lamp" must stay unambiguous.
+    expect(digest).not.toContain('Ceiling light');
+  });
+
+  /**
+   * **An endpoint with nothing to say is left out entirely**, which in a real
+   * home is most of the buttons and remotes — and it is what keeps this worth
+   * paying for on every spoken turn.
+   */
+  it('leaves out an endpoint with nothing to report', () => {
+    expect(digestOf({ [lightId]: empty })).toBeUndefined();
+  });
+
+  /**
+   * A full battery is not news, and printing one per line would be the largest
+   * thing in the digest about the question nobody asks. Twenty per cent is the
+   * device card's own threshold, so the hub and the apps agree about when a
+   * battery has become something to say.
+   */
+  it('mentions a battery only once it is worth mentioning', () => {
+    expect(digestOf({ [lightId]: { ...empty, battery: { percent: 84 } } })).toBeUndefined();
+    expect(digestOf({ [lightId]: { ...empty, battery: { percent: 12 } } })).toContain(
+      '"batteryPercent":12',
+    );
+  });
+
+  /**
+   * Offline is the whole of what there is to say about a device, and it is
+   * worth saying: the first message's `online` is as old as the conversation.
+   */
+  it('says offline and stops there', () => {
+    const gone = home();
+    gone.devices = gone.devices.map((device) =>
+      device.id === lightId ? { ...device, online: false } : device,
+    );
+    const digest = spokenStateDigest({
+      home: gone,
+      stateOf: () => ({ ...empty, onOff: true }),
+    });
+    expect(digest).toContain(`{"id":"${lightId}","online":false}`);
+  });
+
+  /** `ep` rides along only where a device has more than one, because almost
+   *  none do and it is a field on every line otherwise. */
+  it('names an endpoint only on a device that has two', () => {
+    const gang = home();
+    gang.devices = [
+      {
+        id: lightId,
+        name: 'Two gang',
+        roomId: kitchenId,
+        online: true,
+        endpoints: [
+          { endpointId: 1, deviceKind: 'light', capabilities: ['onOff'] },
+          { endpointId: 2, deviceKind: 'light', capabilities: ['onOff'] },
+        ],
+      },
+    ];
+    const digest = spokenStateDigest({ home: gang, stateOf: () => ({ ...empty, onOff: false }) });
+    expect(digest).toContain('"ep":1');
+    expect(digest).toContain('"ep":2');
+
+    expect(digestOf({ [lightId]: { ...empty, onOff: false } })).not.toContain('"ep"');
+  });
+
+  /** A home where nothing is reporting anything gets no section at all, rather
+   *  than a heading over an empty list. */
+  it('is nothing at all for a home with no readings', () => {
+    expect(spokenStateDigest({ home: home(), stateOf: () => undefined })).toBeUndefined();
   });
 });

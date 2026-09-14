@@ -806,6 +806,24 @@ domains — update them in the same change.
   sits behind a cache breakpoint. Priming rather than the message itself for
   the reason `rememberSaved` uses it: it reaches the model and is never written
   down, and the row this turn writes is what the person actually said.
+  **A spoken turn carries what everything is doing right now**, which the
+  cached first message cannot: it is written once, so a snapshot there would be
+  answered from confidently an hour later, and `get_device` is the right answer
+  for a chat. Out loud it is a whole model round — "is the kitchen light on"
+  was one round to call the tool and a second to say the answer, doubling the
+  term that dominates a spoken exchange on most of what anybody asks a house.
+  `spokenStateDigest` builds one at the moment of the turn onto `priming`:
+  bounded to what somebody asks out loud, skipping an endpoint with nothing to
+  report, **keyed by id** (the first message is the index), in `get_device`'s
+  own raw units, with a battery only under 20%. Spoken turns only — a typed
+  answer is read when it lands, and the agent trail makes that wait legible.
+  **And a round that outlives the phone's patience says so.** The app hangs up
+  after a minute of silence and the assistant gets two, so a slow answer landed
+  on a dead line. Every `PATIENCE_MS` an unanswered delegation gets a
+  `commentary.append` on its own id; the model speaking resets the phone's
+  clock. It says only that it is taking a while — the hub knows a round is
+  running and nothing more, and naming a tool call it cannot see would be an
+  invention.
   **And a question is an answer.** `askAloud` took `agent` and `note` rows
   only, which drops the third arm — `ask_user`, which is exactly where this
   agent's prompt sends it when a request is ambiguous about *what to do*, and

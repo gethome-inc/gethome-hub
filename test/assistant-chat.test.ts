@@ -20,6 +20,7 @@ import type { AssistantTurn } from '../src/ai/assistant-agent.js';
 import type { AgentConversation, ChatTurnContext } from '../src/ai/chat/chat-runtime.js';
 import { refusalSentence } from '../src/ai/chat/agent-loop.js';
 import type { AutomationConversation, AutomationTurn } from '../src/ai/automation-conversation.js';
+import type { EngineRegistry } from '../src/automations/engine.js';
 import { AGENT_MODELS, effectiveAgentModel } from '../src/ai/models.js';
 
 /**
@@ -60,6 +61,12 @@ describe('the assistant', () => {
        *  and a sub-agent with no seam fails its first round — which is real
        *  behaviour and the wrong thing to be asserting on here. */
       delegated?: AutomationTurn[];
+      /** What the registry holds, for the spoken state digest — the one thing
+       *  here that reads a device's *values* rather than the home's shape.
+       *  The registry's own return type, not a hand-written copy: `deviceKind`
+       *  and `capabilities` are closed vocabularies and a widened `string`
+       *  makes this the only stub in the file that does not typecheck. */
+      devices?: ReturnType<EngineRegistry['listDevices']>;
     },
   ) => Promise<{
     assistant: AssistantChat;
@@ -89,7 +96,7 @@ describe('the assistant', () => {
 
     assistantFor = async (turns, options) => {
       const registry = {
-        listDevices: () => [],
+        listDevices: () => options?.devices ?? [],
         execute: async (deviceId: string, endpointId: number, command: { type: string }) => {
           commanded.push({ deviceId, endpointId, type: command.type });
         },
@@ -305,6 +312,62 @@ describe('the assistant', () => {
 
     const rows = await assistant.transcript(sessionId);
     expect(rows[0]?.text).toBe('turn the kitchen light off');
+  });
+
+  /**
+   * **What everything is doing right now, which the cached first message
+   * cannot carry.**
+   *
+   * The home goes into the first user message because a round spent asking
+   * "what devices do you have" is a round somebody watched go past — and live
+   * *values* were the deliberate exception, since that message is written once
+   * and would be answered from confidently an hour later. Out loud that
+   * exception costs a whole model round: "is the kitchen light on" was one
+   * round to call `get_device` and a second to say the answer, on the class of
+   * question that is most of what anybody asks a house. Built at the moment of
+   * the turn, so there is nothing to go stale, and on `priming`, so it reaches
+   * the model and never the transcript or the cached first message.
+   */
+  it('tells a spoken round what everything is doing right now', async () => {
+    const deviceId = randomUUID();
+    const { assistant, sent } = await assistantFor([{ kind: 'said', text: 'It is on.' }], {
+      devices: [
+        {
+          id: deviceId,
+          name: 'Ceiling light',
+          roomId: null,
+          online: true,
+          endpoints: [
+            {
+              endpointId: 1,
+              deviceKind: 'light',
+              capabilities: ['onOff'],
+              state: { reachable: true, sensors: {}, onOff: true },
+            },
+          ],
+        },
+      ],
+    });
+    const sessionId = assistant.beginVoice();
+
+    await assistant.askAloud({ sessionId, memberId, question: 'is the ceiling light on?' });
+
+    expect(sent[0]).toContain('WHAT EVERY DEVICE IS DOING RIGHT NOW');
+    expect(sent[0]).toContain('"onOff":true');
+    expect(sent[0]).toContain(deviceId);
+
+    // And not into the transcript, which is what the person actually said.
+    const rows = await assistant.transcript(sessionId);
+    expect(rows[0]?.text).toBe('is the ceiling light on?');
+  });
+
+  /** A home with nothing reporting anything grows no section, rather than a
+   *  heading over an empty list. */
+  it('says nothing about state in a home with none', async () => {
+    const { assistant, sent } = await assistantFor([{ kind: 'said', text: 'It is off.' }]);
+    const sessionId = assistant.beginVoice();
+    await assistant.askAloud({ sessionId, memberId, question: 'turn the kitchen light off' });
+    expect(sent[0]).not.toContain('WHAT EVERY DEVICE IS DOING RIGHT NOW');
   });
 
   /** And a typed round in the same conversation is told nothing of the sort —
