@@ -240,46 +240,79 @@ interrupted mid-sentence — and it delegates the thinking to a backend you
 choose, which is exactly the split this hub already has: the brain stays here,
 where the home is, on whatever model the home picked.
 
-**The hub builds the session and the phone holds it**, and both halves of that
-are deliberate. Audio has to go straight from the phone to OpenAI or it is not
-a conversation — a hop through a Raspberry Pi on the way to the west coast and
-back is latency nobody would tolerate, and a 1 GHz core has better things to do
-than relay PCM. But the home's key must not leave the hub, which is the rule
-portraits are drawn here for, and *what the model is told* is the home's
-business. So `POST /assistant/voice/session` assembles the whole thing —
-instructions, tools, voice, formats — mints an ephemeral client secret against
-it, and hands the phone an `ek_…` value that expires and is not a key.
+**`delegation.type: 'client'` is that architecture in one field**, and it is
+the decision everything else on this surface follows from. GPT-Live offers two
+modes. `responses` hands task reasoning to a model OpenAI hosts, configured
+with its own instructions and its own tool list — which would quietly make the
+home's model choice not apply the moment somebody started talking, and would
+route every command around this hub's agent, its transcript and its handoff to
+the rule writer. `client` asks *this hub* instead. So the home keeps all four.
 
-**Two speeds, and the split is most of how it feels.** Anything that needs
-working out goes to `ask_home`, which is a message in the assistant's own
-conversation on this hub — so the model choice still governs every real
-decision once somebody starts talking, and a handoff to the automations agent
-happens exactly as it always did. Everything fast is the voice's own:
-`control_device`, `run_automation` and the read tools, proxied through
-`POST /assistant/voice/tool` in one LAN hop. Switching a lamp through a
-reasoning model is three seconds where it should be a third of one, and the
-prompt says so in as many words, because the failure worth designing against
-here is not the model being wrong — it is the model being slow about something
-it could have done itself.
+**The cost of that choice is real and worth stating: client delegation makes no
+structured tool calls.** `session.delegation.created` carries an id, a target
+and a timing offset — no request text, no tool name, no parsed arguments — so
+the voice has no catalog to declare and no fast path of its own. There *was*
+one, for a few days: the phone proxied `control_device` and the read tools
+through a `POST /assistant/voice/tool` route in one LAN hop, on the reasoning
+that switching a lamp through a reasoning model is three seconds where it
+should be a third of one. That route is gone, because the shape it was built on
+does not exist in this API. What replaces it is not slow for the reason it
+looks: the assistant's own `control_device` is an in-process call to the
+registry that is already there, so a lamp is one LAN round trip and one model
+round rather than two network hops — and the voice is told to say "one moment"
+and keep listening while it happens, which the API is built for.
 
-The catalog is **generated from `assistantTools()`**, minus two. `ask_user` is
-gone because *speaking* is how this one asks a question: a tool that suspends a
-turn for tappable options is a page's idiom, and the person is standing in a
-room. `delegate` is gone because the voice hands work to the assistant rather
-than to sub-agents of its own — one route out, and the assistant's transcript
-stays the record of what was asked for.
+**The hub describes the session and the phone holds it**, and both halves of
+that are deliberate. Audio has to go straight from the phone to OpenAI or it is
+not a conversation — a hop through a Raspberry Pi on the way to the west coast
+and back is latency nobody would tolerate, and a 1 GHz core has better things
+to do than relay PCM. But the home's key must not leave the hub, which is the
+rule portraits are drawn here for, and *what the model is told* is the home's
+business. So `POST /assistant/voice/session` assembles the whole thing and
+answers with the `session.start` frame **already serialised**, plus a credential
+that expires. The phone forwards an opaque string: it names no session field at
+all, so a prompt change, a voice change or a configuration key this API grows
+next month reaches the microphone with no app release.
+
+**The prompt is split the way OpenAI's own migration guide says to split it**,
+which happens to be the split this hub already had. Conversation style and when
+to ask for help go to the voice; business rules, tool workflows and the shape
+of the home go to the backend — and the backend is the assistant, whose prompt
+carries every one of them already. So `liveInstructions` is what is left after
+that subtraction: how to sound, what to hand over, and the home's **names**,
+so "the kitchen one" is heard correctly and said back. Names and nothing else —
+a device id, an endpoint number or a capability list is context a model with no
+tools can only mispronounce, and the instructions are capped at 16,384 tokens,
+which a large home's device JSON was heading for. `test/voice-prompts.test.ts`
+pins that, because the way this regresses is somebody copying the assistant's
+prompt back in.
 
 **It is the same transcript**, which is the part worth having. What was said
 becomes rows through `POST /assistant/voice/said`, so the page fills in while
 somebody talks, is there when they open it afterwards, and can be *continued*
 by typing — `revive()` rebuilds a model conversation from exactly those rows, so
-a typed follow-up reaches an agent that has read what was spoken. `beginVoice()`
-is three lines for that reason: a spoken exchange has no provider conversation
-on this hub, so there is no session object to hold, nothing in memory and
-nothing to sweep — only an id and a transcript. It takes one back, too: the
-app hands its current session id to `POST /assistant/voice/session` when it has
-one, so stopping and restarting the microphone on a page carries the same
-conversation on instead of starting a second one beside it.
+a typed follow-up reaches an agent that has read what was spoken. It runs the
+other way too: when the app sends a session id it already has, that
+conversation's last few exchanges are seeded into `session.input`, so pressing
+the microphone on a page you have been typing on carries one conversation on
+rather than starting a second beside it. `beginVoice()` is a few lines for the
+same reason it always was: a spoken exchange has no provider conversation on
+this hub, so there is no session object to hold, nothing in memory and nothing
+to sweep — only an id, a transcript, and a mark saying somebody is talking to
+it. That mark is what keeps **one word in the activity log** true: a command
+somebody spoke and a command somebody typed are worth telling apart in a feed
+read a week later, and since every spoken command now arrives as an ordinary
+assistant turn, `spokenSessions` is the only thing left that knows which is
+which. It is read at the moment of the command rather than closed over, because
+one conversation can be typed in the morning and talked to in the evening.
+
+**There is no turn-completed event**, so a transcript row is the client's to
+assemble. `session.input_transcript.delta` and `session.output_transcript.delta`
+carry fragments with `start_ms`/`end_ms` and no item id, both speakers can grow
+at once, and a fragment is explicitly not a turn — so the app accumulates per
+speaker and writes a row when that speaker has been quiet for a moment. The hub
+takes finished rows only, which is the `STATE_FLUSH_MS` rule in another place: a
+row per fragment would be a database write per syllable onto an SD card.
 
 **Two meters, and pretending otherwise would hide one.** A voice session writes
 its own `ai_runs` row (`kind: 'voice'`, $0.05 a minute) beside the `assist` rows
@@ -288,15 +321,21 @@ silence and backend thinking included — where the model behind it bills for
 tokens; summed they are what the conversation cost, apart they answer why. The
 seconds are the **phone's** measurement, which is softer than anything else in
 this ledger and is the only one available, since the hub is not in the audio
-path. It is bounded at half an hour (the secret's own lifetime), and a session
-that ends without the phone saying so records nothing rather than guessing.
+path — the phone reports what `session.usage.updated` and `session.closed` told
+it, falling back to its own clock when neither arrived. It is bounded at half
+an hour (the secret's own lifetime), and a session that ends without the phone
+saying so records nothing rather than guessing.
 
 **`live-wire.ts` is the containment, and it is a rule rather than tidiness.**
 Every constant and every field name of an API weeks old lives in that one file,
 mirrored by the app's own `LiveWire.swift`. It is the one thing here nobody can
-check by running the suite, so a field that turns out different is one edit in
-one place rather than a hunt through an audio pipeline. Read OpenAI's guides
-before changing anything in it.
+check by running the suite — and it has already been got wrong once, when
+`Model "gpt-live-1" is not supported in realtime mode` was read as a wrong
+model id rather than as the wrong *endpoint family*. The model was right;
+everything around it was Realtime's. One constant in that file is still a
+reasoned guess and says so in its own comment: `LIVE_SOCKET_URL`, and the
+credential question underneath it. Read OpenAI's guides against those two files
+before chasing anything else.
 
 ## The registry, and the third agent
 

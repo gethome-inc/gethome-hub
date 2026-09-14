@@ -712,22 +712,39 @@ domains — update them in the same change.
   asking one question of it, so the answer is the union. Effort is `medium` here
   against the mapper's `high`, and is exposed by neither.
   **And the same assistant can be talked to.** `src/ai/voice/` opens a GPT-Live
-  session for the phone: the hub builds the instructions, the tool catalog, the
-  voice and the audio formats, mints an ephemeral client secret against it and
-  hands over an `ek_…` value that expires — the phone holds the audio, because
+  session for the phone: the hub builds the whole `session.start` frame —
+  instructions, voice, history, delegation mode — and answers with it already
+  serialised, plus a credential that expires, so the phone forwards an opaque
+  string and names no session field at all. The phone holds the audio, because
   a hop through a Pi is latency nobody would tolerate, and the home's key never
-  leaves the machine that holds it. `docs/assistant.md` is canonical. Five
-  rules. **Two speeds**: `ask_home` is a message in the assistant's own
-  conversation, so the home's model choice still governs every real decision,
-  while `control_device` and the reads are proxied in one LAN hop — switching a
-  lamp through a reasoning model is three seconds where it should be a third of
-  one, and the prompt says so in as many words. **The catalog is generated from
-  `assistantTools()`** minus `ask_user` (speaking *is* how this one asks) and
-  `delegate` (the voice hands work to the assistant, which is the thing that
-  knows how to delegate). **It is the same transcript** — `recordSpoken` writes
-  rows under the caller's own member id, so the page fills in while somebody
-  talks and `revive()` can continue it by typing; `beginVoice()` is three lines
-  because a spoken exchange has no provider conversation here to hold.
+  leaves the machine that holds it. `docs/assistant.md` is canonical. Six
+  rules. **`delegation.type: 'client'` is the architecture in one field**: the
+  voice asks *this hub* for help rather than a model OpenAI hosts, so the home
+  keeps its own agent, its own tools, its own transcript and whichever provider
+  it picked — `responses` would have taken all four away the moment somebody
+  started talking. **There is no tool catalog and no fast path**, and that is
+  this API rather than a choice: client delegation makes no structured tool
+  calls at all (`session.delegation.created` carries an id, no request text and
+  no arguments), so the `ask_home` tool, the generated catalog and the
+  `POST /assistant/voice/tool` route are gone. It is not slow for the reason it
+  looks — the assistant's `control_device` is an in-process registry call, so a
+  lamp is one LAN round trip and one model round, and the voice says "one
+  moment" and keeps listening while it happens. **The prompt is split the way
+  the migration guide says**: style and *when to ask* to the voice, business
+  rules and the shape of the home to the backend — which is the assistant,
+  whose prompt already carries them — so `liveInstructions` keeps the home's
+  **names** and no ids, endpoints or capabilities, pinned by
+  `test/voice-prompts.test.ts` because the way it regresses is somebody copying
+  the assistant's prompt back in. **It is the same transcript, both ways** —
+  `recordSpoken` writes rows under the caller's own member id so the page fills
+  in while somebody talks and `revive()` can continue it by typing, and
+  `liveHistory` seeds the last few exchanges into `session.input` so pressing
+  the microphone on a page you have been typing on carries one conversation on.
+  `beginVoice()` is still a few lines (no provider conversation here to hold)
+  and marks `spokenSessions`, which is the only thing left that knows a command
+  was *spoken* now that every one arrives as an ordinary assistant turn — read
+  at the moment of the command, since one conversation can be typed in the
+  morning and talked to in the evening.
   **Two meters**: an `ai_runs` row of `kind: 'voice'` at $0.05 a minute beside
   the `assist` rows the delegated turns write, because GPT-Live bills for time
   on the line — silence included — and the model behind it bills for tokens;
@@ -735,7 +752,9 @@ domains — update them in the same change.
   session that ends silently records nothing rather than guessing. And
   **`live-wire.ts` is the only file that names one of that API's fields**, with
   `LiveWire.swift` its mirror: it is the one thing here nobody can check by
-  running the suite, so a field that moves is one edit rather than a hunt.
+  running the suite, it has already been got wrong once — a wrong *mode* read
+  as a wrong model id — and one constant in it is still a reasoned guess that
+  says so (`LIVE_SOCKET_URL`, and the credential question underneath it).
   **`control_device` is the one tool that writes to the home**, through the
   registry's ordinary path and into the activity log **named for the person who
   asked** — the feed is read a week later and "the assistant" is nobody anyone

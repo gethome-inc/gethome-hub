@@ -460,17 +460,26 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
    * feed is read a week later. And a handover is refused or allowed by *that
    * member's* role, which is a question only this conversation can answer.
    */
-  private toolContext(
-    memberId: string,
-    sessionId: string,
-    via: 'assistant' | 'voice' = 'assistant',
-  ): AssistantToolContext {
+  private toolContext(memberId: string, sessionId: string): AssistantToolContext {
     return {
       home: () => this.options.engine.homeView(),
       timezone: () => this.options.settings.timezone,
       stateOf: (deviceId, endpointId) => this.options.engine.stateFor(deviceId, endpointId),
       control: async (deviceId, endpointId, command) => {
-        await this.control(memberId, deviceId, endpointId, command, via);
+        // **Spoken or typed, asked at the moment of the command.** A
+        // conversation is created once and can be both — typed this morning,
+        // talked to this evening — so reading `spokenSessions` here rather
+        // than closing over a value is what keeps the feed's own distinction
+        // true in either direction. It used to be a parameter, which was fine
+        // while the voice ran its own tools and wrong the moment the voice
+        // started reaching the assistant instead.
+        await this.control(
+          memberId,
+          deviceId,
+          endpointId,
+          command,
+          this.spokenSessions.has(sessionId) ? 'voice' : 'assistant',
+        );
       },
       runAutomation: async (id) =>
         this.options.engine.runManually(id, (await this.memberName(memberId)) ?? 'the assistant'),
@@ -506,8 +515,29 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
    * there is no session object here for a second call to disturb.
    */
   beginVoice(existing?: string): string {
-    return existing ?? randomUUID();
+    const sessionId = existing ?? randomUUID();
+    this.spokenSessions.add(sessionId);
+    return sessionId;
   }
+
+  /**
+   * Conversations somebody is currently *talking* to.
+   *
+   * **One word in the activity log, and it is worth the set.** A command
+   * somebody spoke and a command somebody typed are worth telling apart in a
+   * feed read a week later, and since the voice stopped running its own tools
+   * every spoken command arrives here as an ordinary assistant turn — so
+   * without this, speaking became indistinguishable from typing in the one
+   * place the difference is read.
+   *
+   * Marked when a session opens and cleared when it reports what it cost,
+   * which is the only signal the hub gets that a line has closed. A session
+   * that ends without that — a crash, a train tunnel — leaves the mark, so a
+   * typed follow-up hours later could be logged as spoken; that is a wrong
+   * word in one row against a set that would otherwise grow for the life of
+   * the process, and the row's `memberName` and sentence are both still right.
+   */
+  private readonly spokenSessions = new Set<string>();
 
   /**
    * Write down what was said out loud, and say so on the socket.
@@ -561,6 +591,8 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
    * guessing.
    */
   async recordVoiceSpend(input: { sessionId: string; seconds: number }): Promise<void> {
+    // The line has closed, so a typed follow-up in this conversation is typed.
+    this.spokenSessions.delete(input.sessionId);
     const seconds = Math.max(0, Math.min(input.seconds, VOICE_MAX_SECONDS));
     if (seconds <= 0) return;
     const handle = this.options.runs.begin({
@@ -578,25 +610,6 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
       costUsd: (seconds / 60) * LIVE_USD_PER_MINUTE,
       durationMs: seconds * 1000,
     });
-  }
-
-  /**
-   * What a **voice** session's tools can reach.
-   *
-   * The same context the conversation builds and not a second one, which is the
-   * whole point: `control_device` goes through the same registry path, into the
-   * same activity row, named for the same person. What differs is one word in
-   * `data.via`, because a command somebody spoke and a command somebody typed
-   * are worth telling apart in a feed read a week later.
-   *
-   * **`delegate` is deliberately unreachable here.** The voice hands work to
-   * *this* agent (`ask_home`) rather than to sub-agents of its own, so the
-   * assistant stays the one thing that knows how to delegate and its transcript
-   * stays the record of what was asked for. `liveTools()` withholds the tool;
-   * this closure would refuse it anyway.
-   */
-  voiceTools(memberId: string, sessionId: string): AssistantToolContext {
-    return this.toolContext(memberId, sessionId, 'voice');
   }
 
   /**

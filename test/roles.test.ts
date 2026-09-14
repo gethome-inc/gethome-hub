@@ -454,18 +454,11 @@ describe.skipIf(!handle)('roles and permissions', () => {
         undefined,
       ],
       // **Talking out loud is the same conversation by another route**, so it
-      // takes the same key and nothing more. `voice/tool` is the one worth
-      // pausing on: it works devices, which is the floor — but it does so with
-      // the *assistant's* catalog and spends the home's money opening the
-      // session that reaches it, so it is guarded where the conversation is
-      // rather than where a command is.
+      // takes the same key and nothing more. There is no separate tool route
+      // to guard any more: client delegation makes no structured tool calls,
+      // so a spoken request reaches the home through the ordinary message
+      // route and is guarded exactly where a typed one is.
       ['POST', '/api/v1/assistant/voice/session', 'hub.ai', {} as object],
-      [
-        'POST',
-        '/api/v1/assistant/voice/tool',
-        'hub.ai',
-        { sessionId: '44444444-4444-4444-a444-444444444444', name: 'list_devices' } as object,
-      ],
       [
         'POST',
         '/api/v1/assistant/voice/said',

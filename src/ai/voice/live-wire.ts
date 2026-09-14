@@ -2,69 +2,86 @@
  * The GPT-Live wire, and **the only place in this repository that names one of
  * its fields**.
  *
- * That is a deliberate containment rather than tidiness. This was written
- * against OpenAI's published guides for `gpt-live-1` and the model ids,
- * endpoint, audio format and event names below are what those describe — but
- * the API is weeks old and its shape is the one thing here nobody can check by
- * running the suite. So every constant and every key lives in this file, the
- * app's own `LiveWire.swift` is its mirror, and a field that turns out
- * different is one edit in one place rather than a hunt through an audio
- * pipeline. Read the guides before changing anything in it.
+ * That is a deliberate containment rather than tidiness. The API is weeks old,
+ * its shape is the one thing on this surface nobody can check by running the
+ * suite, and it has already been got wrong once here — so every constant and
+ * every key lives in this file, the app's own `LiveWire.swift` is its mirror,
+ * and a field that turns out different is one edit in one place rather than a
+ * hunt through an audio pipeline.
  *
- * **THIS FILE IS REALTIME-SHAPED AND THE MODEL IS LIVE. It does not work yet.**
+ * **GPT-Live is not the Realtime API with a different model id.** The first
+ * phone to dial got `Model "gpt-live-1" is not supported in realtime mode`, and
+ * the mistake was reading that as a wrong model. It is not: `gpt-live-1` is
+ * right, and so is the $0.05 a minute below. The *mode* was wrong — this is a
+ * different endpoint family, and four things about it change the design rather
+ * than a field name:
  *
- * The first phone to dial the socket got `Model "gpt-live-1" is not supported in
- * realtime mode`, and the mistake was reading that as a wrong model id. It is
- * not: `gpt-live-1` is right, and so is the $0.05 a minute below. What is wrong
- * is the *mode* — GPT-Live is a different endpoint family from the Realtime API,
- * and everything below was written to Realtime's shape. Established, from the
- * guides' own pages:
+ * - **The socket opens with a `session.start` frame** carrying the whole
+ *   session, and waits for `session.started`. Nothing is described in a query
+ *   item or minted-and-forgotten.
+ * - **Tools are gone; delegation replaces them.** The model does not make
+ *   structured function calls. `session.delegation.created` carries an id,
+ *   a target and a timing offset — *no request text, no tool name, no parsed
+ *   arguments* — and the client answers with `session.commentary.append`,
+ *   `session.thinking.append` or `session.instructions.append`, each carrying
+ *   that `delegation_id`.
+ * - **There is no manual turn control and no turn-completed event.** Audio
+ *   streams continuously, the model decides when to speak, and nothing marks
+ *   the end of a spoken reply — transcript rows are assembled from fragments
+ *   by the client, on a gap it chooses.
+ * - **Transcription is native.** `session.input_transcript.delta` and
+ *   `session.output_transcript.delta` carry text with `start_ms`/`end_ms`, so
+ *   there is no transcription model to name.
  *
- * - Live sessions live at **`v1/live/sessions`**, not `v1/realtime`.
- * - The socket opens with a **`session.start`** frame and waits for
- *   `session.started`. Nothing here sends one.
- * - **Tools are gone; delegation replaces them.** `session.delegation.created`
- *   carries an id and metadata rather than task text, and client delegation
- *   answers with `session.thinking.append` / `session.commentary.append` /
- *   `session.instructions.append`. `conversation.item.create` with a
- *   `function_call_output`, and `response.create` after it, are Realtime's
- *   vocabulary and have no equivalent here.
- * - **Manual turn control is removed**, so `response.create` should not exist.
- * - **Audio and transcript events are renamed** relative to Realtime. Every
- *   `Event` name at the bottom of this file is therefore suspect.
+ * **One thing here is still a guess, and it is named rather than buried.**
+ * `LIVE_SOCKET_URL` is inferred from the one Live socket URL the guides spell
+ * out — the fork, at `wss://api.openai.com/v1/live/sessions/{id}/fork` — and
+ * the credential question underneath it is open: the guides' two client paths
+ * are WebRTC, where a server exchanges the SDP and the client holds nothing,
+ * and WebSocket, described as server-side and dialled by the SDK with a
+ * project key. Whether Live mints an ephemeral client secret for a WebSocket
+ * the way Realtime did is what `guides/voice-websockets?api=live` answers, and
+ * `developers.openai.com` is blocked by this session's egress policy. So the
+ * URL is **sent to the phone** rather than compiled into it (see
+ * `openLiveSession`): if it moves, it is one line here and no app release.
  *
- * What is *not* established, and must not be guessed a third time: the exact
- * socket URL, the `session.start` payload, the audio frame names in both
- * directions, the transcript event, and the delegation schema a tool is
- * declared in. `developers.openai.com` is blocked by this session's egress
- * policy, so those come from the guides by hand:
- * `guides/live`, `guides/live-conversations`, `guides/live-migration`, and
- * `guides/live-delegation` for the tool half.
- *
- * **What the hub does and does not do with this.** The hub mints the ephemeral
- * secret and builds the whole session config — the instructions, the tools, the
- * voice — so the phone composes nothing and the home's OpenAI key never leaves
- * the machine that holds it. The phone then holds the audio connection itself,
- * because that is the whole point of GPT-Live: the voice layer talks directly
- * to OpenAI at conversational latency, and the reasoning is delegated back here
- * where the home is.
+ * **What the hub does and does not do with this.** The hub builds the entire
+ * `session.start` frame — instructions, voice, history, delegation mode — and
+ * hands the phone the finished JSON plus a credential, so the phone composes
+ * nothing and the home's OpenAI key never leaves the machine that holds it. The
+ * phone then holds the audio connection itself, because that is the whole point
+ * of GPT-Live: the voice layer talks directly to OpenAI at conversational
+ * latency, and the reasoning is delegated back here where the home is.
  */
 
 /** The live voice model. */
 export const LIVE_MODEL = 'gpt-live-1';
 
-/** What turns the person's speech into the text a transcript row is made of. */
-export const LIVE_TRANSCRIBE_MODEL = 'gpt-live-transcribe';
+/** Where a live session is created, and where a stored one is forked. */
+export const LIVE_SESSIONS_URL = 'https://api.openai.com/v1/live/sessions';
 
-/** Where an ephemeral client secret is minted. */
-export const CLIENT_SECRETS_URL = 'https://api.openai.com/v1/realtime/client_secrets';
+/**
+ * The primary socket, which carries audio and control events both ways.
+ *
+ * **The one unverified line in this file** — see the header. It is answered to
+ * the phone rather than pinned in the app, so being wrong about it costs one
+ * edit here.
+ */
+export const LIVE_SOCKET_URL = 'wss://api.openai.com/v1/live';
+
+/** Where an ephemeral client secret is minted, if this API mints one. */
+export const LIVE_CLIENT_SECRETS_URL = 'https://api.openai.com/v1/live/client_secrets';
 
 /**
  * Audio, in the one format this path uses in both directions.
  *
- * 24 kHz mono PCM16 is what the API takes and returns, and the phone's
- * `AVAudioConverter` is pointed at exactly this — a mismatch is not an error
- * anywhere, it is a conversation that sounds like a chipmunk.
+ * 24 kHz mono PCM16 is the session default, so `audio.format` is **omitted**
+ * from the config rather than declared: the guides give the default in as many
+ * words and give the field's own shape only by reference, so taking the default
+ * is both what we want and the one answer that cannot be wrong about a field
+ * nobody here can check. The phone's `AVAudioConverter` is pointed at exactly
+ * this number — a mismatch is not an error anywhere, it is a conversation that
+ * sounds like a chipmunk.
  */
 export const LIVE_AUDIO_RATE = 24_000;
 
@@ -86,35 +103,56 @@ export const LIVE_USD_PER_MINUTE = 0.05;
 /** The voice it speaks in. One, chosen here, because it is the home's. */
 export const LIVE_VOICE = 'marin';
 
-/** A tool as the live session declares it. */
-export interface LiveTool {
-  type: 'function';
-  name: string;
-  description: string;
-  parameters: Record<string, unknown>;
+/**
+ * How much prior conversation a session may open on.
+ *
+ * The API's own caps are 128 messages and 8,192 combined tokens; this is well
+ * inside both, because what it is *for* is the last exchange or two — somebody
+ * typed a question, then pressed the microphone to carry it on out loud. A
+ * transcript fortnight deep seeded into a voice session is money spent on
+ * context nobody is about to refer to.
+ */
+export const LIVE_HISTORY_MESSAGES = 12;
+
+/**
+ * How long one piece of context handed to a running session may be.
+ *
+ * The three append events take at most 500 tokens of plain string. Characters
+ * rather than tokens because nothing here counts tokens and four per token is
+ * the conservative direction — an answer clipped a little short is a sentence
+ * the model paraphrases, where one refused is silence in a room.
+ */
+export const LIVE_APPEND_CHARS = 1_800;
+
+/** A message a session opens knowing about. */
+export interface LiveHistoryMessage {
+  type: 'message';
+  role: 'developer' | 'user' | 'assistant';
+  content: [{ type: 'input_text' | 'output_text'; text: string }];
 }
 
-/** The session the phone is about to hold, built entirely by the hub. */
+/**
+ * The session the phone is about to hold, built entirely by the hub.
+ *
+ * `delegation: { type: 'client' }` is the whole architecture in one field: the
+ * voice asks *this hub* for help rather than a model OpenAI hosts, so the home
+ * keeps its own agent, its own tools, its own transcript and whichever provider
+ * it picked. The alternative — `responses` — hands task reasoning to a hosted
+ * OpenAI model, which would quietly make the home's model choice not apply the
+ * moment somebody started talking.
+ */
 export interface LiveSessionConfig {
-  type: 'realtime';
   model: string;
   instructions: string;
-  audio: {
-    input: {
-      format: { type: 'audio/pcm'; rate: number };
-      transcription: { model: string };
-      /**
-       * The model decides when a turn has ended rather than waiting for a
-       * button, which is what makes this a conversation instead of a
-       * walkie-talkie — and `interrupt_response` is what lets somebody talk
-       * over an answer that has gone wrong, which is the whole of why a
-       * full-duplex model is worth the trouble.
-       */
-      turn_detection: { type: 'semantic_vad'; interrupt_response: true };
-    };
-    output: { format: { type: 'audio/pcm'; rate: number }; voice: string };
-  };
-  tools: LiveTool[];
+  input: LiveHistoryMessage[];
+  audio: { output: { voice: string } };
+  delegation: { type: 'client' };
+}
+
+/** The first frame on the socket. The phone forwards it verbatim. */
+export interface LiveStartFrame {
+  type: 'session.start';
+  session: LiveSessionConfig;
 }
 
 /** What the mint answers with, and all the phone is ever handed. */
@@ -124,43 +162,3 @@ export interface LiveClientSecret {
   /** When it stops working, as an ISO instant. */
   expiresAt: string;
 }
-
-/**
- * The one tool that is not a tool the assistant already has.
- *
- * **This is the delegation**, and it is the whole reason the model choice still
- * means something once somebody starts talking: GPT-Live handles the listening
- * and the speaking, and anything that needs working out is handed to the
- * agent on this hub running whatever model the home picked. Everything else in
- * the catalog is there so the *fast* things stay fast — switching a lamp is one
- * LAN hop, not a round with a reasoning model.
- *
- * Its description is written for the model and is the only thing it knows about
- * the arrangement, so it says what to hand over **and what not to**: a tool
- * call that could have been `control_device` costs seconds somebody is standing
- * there for.
- */
-export const ASK_HOME_TOOL: LiveTool = {
-  type: 'function',
-  name: 'ask_home',
-  description:
-    'Hand a question or a job to the assistant on this home’s hub, which thinks harder than you ' +
-    'do and can do anything you cannot. Use it for anything that needs working out — "make it ' +
-    'cosy in here", "why did the hall light come on", "what is using the most power" — and for ' +
-    'anything about automations, schedules or rules, which only it can write. Do NOT use it for ' +
-    'something you can already do: switching, dimming, setting a colour, running a scene and ' +
-    'reading the home are yours, and they happen in a moment where this takes a few seconds. ' +
-    'Say what you are doing while you wait — you can keep talking and listening the whole time. ' +
-    'Write `question` as one self-contained message in the person’s own words.',
-  parameters: {
-    type: 'object',
-    properties: {
-      question: {
-        type: 'string',
-        description: 'The whole request, in one self-contained message.',
-      },
-    },
-    required: ['question'],
-    additionalProperties: false,
-  },
-};

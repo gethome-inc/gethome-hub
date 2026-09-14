@@ -1,20 +1,20 @@
 import type { Logger } from '../../logging.js';
 import { classifyApiError } from '../errors.js';
-import { assistantTools } from '../assistant-tools.js';
 import {
-  ASK_HOME_TOOL,
-  CLIENT_SECRETS_URL,
   LIVE_AUDIO_RATE,
+  LIVE_CLIENT_SECRETS_URL,
+  LIVE_HISTORY_MESSAGES,
   LIVE_MODEL,
-  LIVE_TRANSCRIBE_MODEL,
+  LIVE_SOCKET_URL,
   LIVE_VOICE,
   type LiveClientSecret,
+  type LiveHistoryMessage,
   type LiveSessionConfig,
-  type LiveTool,
+  type LiveStartFrame,
 } from './live-wire.js';
 
 /**
- * Opening a live voice session, which the hub does and the phone holds.
+ * Opening a live voice session, which the hub describes and the phone holds.
  *
  * **The split is the design.** The audio has to go straight from the phone to
  * OpenAI or it is not a conversation — a hop through a Raspberry Pi on the way
@@ -22,77 +22,76 @@ import {
  * 1 GHz core that has better things to do than relay PCM. But the home's key
  * must not leave the hub (`docs/portraits.md`'s rule, and the reason portraits
  * are drawn here), and what the model is *told* is the home's business. So the
- * hub builds the entire session — instructions, tools, voice, formats — mints
- * an ephemeral secret against it, and hands the phone a value that expires and
- * is not a key.
+ * hub builds the entire `session.start` frame — instructions, voice, history,
+ * delegation mode — mints a credential, and hands the phone a finished string
+ * to put on the socket plus a value that expires.
  *
- * **The tool catalog is generated from the assistant's own**, which is the
- * `delegate` rule applied one layer out: a tool added to `assistant-tools.ts`
- * reaches the voice with no app release, because the app never sees a tool name
- * it did not get from here.
- */
-
-/**
- * What the voice may do without asking anybody.
+ * **The phone is handed JSON rather than fields**, which is the containment
+ * rule one step further than it used to go. It used to receive a model id and a
+ * tool catalog and assemble a session; now it forwards an opaque frame, so
+ * `LiveWire.swift` names only the events coming *back* and nothing about what a
+ * session is. A prompt change, a voice change, a new configuration field: all
+ * of them reach the microphone with no app release.
  *
- * The assistant's own tools minus the two that make no sense out loud.
- * `ask_user` is gone because *speaking* is how this one asks a question — a
- * tool that suspends a turn for tappable options is a page's idiom, and the
- * person is standing in a room. `delegate` is gone because the voice does not
- * hand jobs to sub-agents directly: it hands them to the assistant, which is
- * the thing that knows how to delegate, and one route out keeps the assistant's
- * transcript the record of what was asked for.
+ * **And there is no tool catalog at all any more.** Client delegation does not
+ * make structured function calls — `session.delegation.created` carries an id
+ * and nothing else — so the voice has no catalog to declare and no fast path of
+ * its own. Every request reaches this hub's assistant, which is where the
+ * tools, the model choice and the transcript already were. See `live-wire.ts`.
  */
-const WITHHELD = new Set(['ask_user', 'delegate']);
-
-/** The catalog the session declares, in the hub's own vocabulary. */
-export function liveTools(): LiveTool[] {
-  const fromAssistant = assistantTools([])
-    .filter((tool) => !WITHHELD.has(tool.name))
-    .map((tool) => ({
-      type: 'function' as const,
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.schema(),
-    }));
-  return [...fromAssistant, ASK_HOME_TOOL];
-}
 
 export interface LiveSessionRequest {
   /** The home's OpenAI key. Used here and never returned. */
   secret: string;
+  /** How to sound, and when to ask this hub for help. */
   instructions: string;
+  /** What the conversation has already said, newest last. */
+  history?: LiveHistoryMessage[] | undefined;
   log: Logger;
 }
 
+/** Everything the phone needs, and nothing it could compose itself. */
+export interface OpenedLiveSession {
+  secret: LiveClientSecret;
+  config: LiveSessionConfig;
+  /** The socket to dial. Answered rather than pinned — see `live-wire.ts`. */
+  socketUrl: string;
+  /** The first frame, serialised, for the phone to send verbatim. */
+  startFrame: string;
+  audioRate: number;
+}
+
 /**
- * Mint the ephemeral secret the phone connects with.
+ * Mint the credential the phone connects with, and describe the session.
  *
  * Answers OpenAI's own sentence on a refusal rather than one invented here —
  * `classifyApiError` branches on HTTP status, which is why it is structural and
- * works for a vendor it has never been pointed at before.
+ * works for a vendor it has never been pointed at before. **That matters more
+ * than usual on this route**, because the credential question is the open one
+ * (see `live-wire.ts`): if this API mints no client secret for a socket, the
+ * failure arrives here, with OpenAI's wording, and reaches the person as a
+ * `502` naming the real problem rather than as a microphone that does nothing.
  */
-export async function openLiveSession(
-  request: LiveSessionRequest,
-): Promise<{ secret: LiveClientSecret; config: LiveSessionConfig }> {
+export async function openLiveSession(request: LiveSessionRequest): Promise<OpenedLiveSession> {
   const config: LiveSessionConfig = {
-    type: 'realtime',
     model: LIVE_MODEL,
     instructions: request.instructions,
-    audio: {
-      input: {
-        format: { type: 'audio/pcm', rate: LIVE_AUDIO_RATE },
-        transcription: { model: LIVE_TRANSCRIBE_MODEL },
-        turn_detection: { type: 'semantic_vad', interrupt_response: true },
-      },
-      output: { format: { type: 'audio/pcm', rate: LIVE_AUDIO_RATE }, voice: LIVE_VOICE },
-    },
-    tools: liveTools(),
+    // Newest last, and bounded here rather than by the caller: the API's own
+    // caps are 128 messages and 8,192 tokens, and what this is for is the last
+    // exchange or two.
+    input: (request.history ?? []).slice(-LIVE_HISTORY_MESSAGES),
+    // No `audio.format`: 24 kHz mono PCM16 is the documented default, and
+    // taking a default is the one answer that cannot be wrong about a field's
+    // shape. `audio.format` is also immutable for the life of a session, so
+    // there is nothing to revisit later.
+    audio: { output: { voice: LIVE_VOICE } },
+    delegation: { type: 'client' },
   };
+  const start: LiveStartFrame = { type: 'session.start', session: config };
 
   let response: Response;
   try {
-    response = await fetch(CLIENT_SECRETS_URL, {
+    response = await fetch(LIVE_CLIENT_SECRETS_URL, {
       method: 'POST',
       headers: { authorization: `Bearer ${request.secret}`, 'content-type': 'application/json' },
       body: JSON.stringify({ session: config }),
@@ -137,6 +136,9 @@ export async function openLiveSession(
       expiresAt: expires ?? new Date(Date.now() + 30 * 60_000).toISOString(),
     },
     config,
+    socketUrl: LIVE_SOCKET_URL,
+    startFrame: JSON.stringify(start),
+    audioRate: LIVE_AUDIO_RATE,
   };
 }
 

@@ -3284,11 +3284,22 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       });
     }
 
-    const [{ openLiveSession }, { liveInstructions }] = await Promise.all([
+    const [{ openLiveSession }, { liveInstructions, liveHistory }] = await Promise.all([
       import('../ai/voice/session.js'),
       import('../ai/voice/prompts.js'),
     ]);
     const personName = await deps.assistantChat.personName(request.member!.id);
+    // **What the session opens knowing.** Carrying a conversation on means the
+    // voice should already have read it — somebody who typed a question and
+    // then pressed the microphone is having one conversation, not two — so the
+    // last few exchanges go into `session.input`, which the API reads before
+    // the first word. A fresh conversation seeds nothing, and a transcript
+    // that cannot be read (a session id the app has invented, a role without
+    // the rows) is an empty list rather than a refusal.
+    const history =
+      asked.sessionId === undefined
+        ? []
+        : liveHistory(await deps.assistantChat.transcript(asked.sessionId));
     /**
      * **A provider that refuses must not reach the app as a 500**, which is a
      * lesson this repository has already paid for once: the automations agent's
@@ -3311,6 +3322,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
           timezone: deps.settings.timezone,
           ...(personName !== undefined ? { personName } : {}),
         }),
+        history,
         log: deps.log,
       });
     } catch (error) {
@@ -3323,56 +3335,21 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     return reply.code(201).send({
       clientSecret: opened.secret.value,
       expiresAt: opened.secret.expiresAt,
-      model: opened.config.model,
-      audioRate: opened.config.audio.output.format.rate,
+      // **The whole first frame, serialised, for the phone to send verbatim.**
+      // The phone used to be handed a model id and a tool catalog and assemble
+      // a session from them; it now forwards an opaque string, so the app names
+      // no session field at all and a prompt, a voice or a new configuration
+      // key reaches the microphone with no app release.
+      startFrame: opened.startFrame,
+      // Answered rather than pinned in the app, because it is the one thing on
+      // this surface nobody here can verify — see `live-wire.ts`.
+      socketUrl: opened.socketUrl,
+      audioRate: opened.audioRate,
       // The conversation the phone will write into. A plain id: nothing on this
       // hub is holding a model conversation for it, and the transcript is what
       // makes it findable, readable and — by typing — continuable afterwards.
       sessionId: deps.assistantChat.beginVoice(asked.sessionId),
     });
-  });
-
-  /**
-   * Run one of the voice's tools, which are the assistant's own.
-   *
-   * **This is the fast half of the arrangement.** GPT-Live could hand every
-   * request to the backend and wait, and for anything that needs working out it
-   * should — but switching a lamp through a reasoning model is three seconds
-   * where it should be a third of one, and that difference is most of how the
-   * thing feels. So the phone proxies the call here, one hop across the LAN,
-   * into exactly the context a typed conversation uses: the same registry path,
-   * the same activity row, named for the same person, with `via: "voice"` the
-   * only thing that differs.
-   *
-   * `hub.ai` and nothing more, for the reason the chat routes take it: asking
-   * what the kitchen is doing and switching a lamp on is the floor.
-   */
-  app.post('/api/v1/assistant/voice/tool', needs('hub.ai'), async (request) => {
-    const body = z
-      .object({
-        sessionId: z.uuid(),
-        name: z.string().min(1).max(60),
-        input: z.unknown().optional(),
-      })
-      .parse(request.body);
-    const { runAssistantTool } = await import('../ai/assistant-tools.js');
-    const result = await runAssistantTool(
-      body.name,
-      body.input,
-      deps.assistantChat.voiceTools(request.member!.id, body.sessionId),
-      // **Per call rather than per turn, and that is the honest bound here.**
-      // A turn is a concept the hub can see in a typed conversation and cannot
-      // in a spoken one — the rounds happen on the phone's own socket — so the
-      // guard that matters moves to the app, and what is left here is the
-      // schema, the permission and the log. Named rather than absent, so the
-      // next person to read this knows the difference was deliberate.
-      { commands: 0 },
-    );
-    return {
-      text: result.text,
-      ...(result.detail !== undefined ? { detail: result.detail } : {}),
-      ...(result.isError === true ? { isError: true } : {}),
-    };
   });
 
   /**
