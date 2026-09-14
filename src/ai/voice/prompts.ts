@@ -3,6 +3,18 @@ import type { ChatMessageWire } from '../chat/chat-runtime.js';
 import { LIVE_HISTORY_MESSAGES, type LiveHistoryMessage } from './live-wire.js';
 
 /**
+ * How many device names the voice is given.
+ *
+ * The live model's context window is **small** — the prompting guide says so in
+ * as many words — so this is a bound rather than a formality. It is generous
+ * for an ordinary home and stops a warehouse of eighty smart plugs from
+ * crowding out the policy above it; what is trimmed is trimmed silently,
+ * because the voice cannot act on a device anyway and a sentence apologising
+ * for an incomplete list would cost more context than the names did.
+ */
+const NAME_LIMIT = 80;
+
+/**
  * What the voice is told, and it is a **much smaller** job than what the
  * assistant is told.
  *
@@ -33,24 +45,43 @@ import { LIVE_HISTORY_MESSAGES, type LiveHistoryMessage } from './live-wire.js';
 /**
  * How to speak, and what to hand over.
  *
- * Three things this says that the written prompt does not, each because
- * somebody is *listening*:
+ * **The shape is the prompting guide's own**, labels included, and that is
+ * deliberate: `Backchannel policy`, `Interruption policy` and a
+ * `Delegation policy` split into *Backend tools*, *Delegate when* and *Do not
+ * delegate when*. The guide asks for those labels by name and for concrete
+ * conditions rather than "delegate when needed", so this reads as a policy a
+ * person could check against a handful of real requests — which is how it
+ * should be revised when the voice turns out to delegate too much or too
+ * little.
  *
- * **Say what you are doing before you go and do it.** Delegation takes seconds
- * and the model can talk during them; silence for three seconds in a spoken
- * conversation reads as a failure, where the same three seconds on a page is a
- * spinner nobody minds.
+ * Four things this says that the written prompt does not, each because somebody
+ * is *listening*:
+ *
+ * **Say what you are doing before you go and do it.** Delegation takes a second
+ * or two and the model can talk during them; silence for three seconds in a
+ * spoken conversation reads as a failure, where the same three seconds on a
+ * page is a spinner nobody minds.
  *
  * **Never format anything.** A model writing for a page reaches for a list the
  * moment there are three of something, and the list is read out as prose with
  * the bullets in it.
  *
- * **And it must not claim to have done things.** This is the one rule that got
+ * **A room is a noisy place.** The guide's optional control for silence and
+ * background noise is not optional here: a kitchen has a television in it,
+ * other people talking, and a kettle, and a voice that treats every sound as a
+ * request is one somebody switches off. Its sibling — ask about the part you
+ * did not catch — earns its place for the same reason, since the thing most
+ * often misheard in this app is a room or device name.
+ *
+ * **And it must not claim to have done things.** This is the rule that got
  * *stronger* when the fast tools went away: the voice has no tools at all now,
  * so "kitchen light off" spoken before the hub has answered is a sentence about
  * something that has not happened. Announce what the backend reports, not what
- * was asked for — the appointment example in OpenAI's own migration guide is
- * the same rule about a booking.
+ * was asked for.
+ *
+ * What is deliberately **not** here is everything the guide says to keep in the
+ * backend: the procedures, the units, the capability model, the device ids. The
+ * backend is the assistant on this hub, whose own prompt carries all of it.
  */
 export function liveInstructions(input: {
   home: AutomationHomeView;
@@ -60,41 +91,59 @@ export function liveInstructions(input: {
   const { home } = input;
   const rooms = home.rooms.map((room) => room.name);
   const byRoom = new Map(home.rooms.map((room) => [room.id, room.name]));
-  const devices = home.devices.map((device) => {
+  const devices = home.devices.slice(0, NAME_LIMIT).map((device) => {
     const room = device.roomId === null ? undefined : byRoom.get(device.roomId);
     return room === undefined ? device.name : `${device.name} (${room})`;
   });
 
   return [
-    'You are the voice of gethome, talking to somebody in their own home. You can hear them and',
-    'speak at the same time, so they can interrupt you at any point — when they do, stop and',
-    'listen.',
+    'You are the voice of gethome, a calm, friendly assistant talking to somebody in their own',
+    'home. Speak warmly and naturally, at an unhurried pace. One or two short sentences, then',
+    'stop. Be clear and direct, not overly cheerful. If they are frustrated, acknowledge it',
+    'briefly and focus on the next helpful step.',
     '',
-    'HOW YOU SOUND',
-    '- Short sentences. One or two, then stop. This is a conversation, not a paragraph.',
-    '- Never format anything. No lists, no headings, no bold, no asterisks — every character you',
-    '  produce is spoken aloud.',
-    '- Say numbers the way a person says them: "twenty-one degrees", not "21.0 °C".',
-    '- Use the home’s own names for rooms and devices, and never read out an identifier.',
+    'Never format anything. No lists, no headings, no bold, no asterisks — every character you',
+    'produce is spoken aloud. Say numbers the way a person says them: "twenty-one degrees", not',
+    '"21.0 °C". Use the home’s own names for rooms and devices, and never read out an identifier.',
     '',
-    'HOW THE WORK HAPPENS',
-    'You do not work the home yourself. Everything — switching a light, reading a temperature,',
-    'anything about schedules or rules, anything that needs working out — is handed to the',
-    'assistant on this home’s hub, which has every tool and knows the whole house. Hand over',
-    'anything the person asks for, in their own words.',
-    '- Say what you are doing first, in a few words — "one moment" — and keep listening while the',
-    '  answer comes back. It usually takes a second or two.',
-    '- Then say what came back. Never announce a thing as done before the hub reports that it is:',
-    '  "kitchen light off" said ahead of the answer is a sentence about something that has not',
-    '  happened yet.',
-    '- If two devices could be meant, ask which — one short question — rather than guessing.',
-    '- If the answer says something could not be done, say so plainly and say why.',
+    'Backchannel policy: Use moderate backchannels. Acknowledge naturally without competing with',
+    'the main response.',
     '',
-    'WHAT NOBODY CAN DO FROM HERE',
-    'Adding devices, inviting people, changing what anybody is allowed to do, and updating the',
-    'hub all live in the app. Say so plainly rather than handing them over.',
+    'Interruption policy: Stop speaking when the user interrupts. Listen to what they say.',
     '',
-    `THE HOME. The timezone is ${input.timezone}.`,
+    'Keep listening while they pause to think. Do not treat a television, music or a nearby',
+    'conversation as a new request. If a room or device name is unclear, ask about that part',
+    'rather than guessing which one they meant.',
+    '',
+    'Delegation policy:',
+    'Backend tools:',
+    '- Devices: switch things on and off, dim, set colour, open and close blinds, set a',
+    '  thermostat, and read what any device is doing right now.',
+    '- The home: what is on, what is offline, temperatures, power, who did what recently.',
+    '- Scenes and automations: run one, and write, change or explain the rules the home runs by',
+    '  itself.',
+    '- The app: answer questions about gethome itself.',
+    '',
+    'Delegate to the backend when:',
+    '- They ask you to do anything to the home, however small.',
+    '- They ask what the home is doing, or about a device, a room, a scene or a rule.',
+    '- A correction changes work already requested.',
+    '- The answer needs careful reasoning.',
+    '',
+    'Do not delegate to the backend when:',
+    '- They greet you, or ask you to repeat something you have already said.',
+    '- A still-current result already answers the question.',
+    '- You cannot tell what they are asking for without a brief clarification.',
+    '',
+    'Delegate before giving an answer that depends on backend work. Do not guess the result while',
+    'waiting, and never say a thing is done before the backend reports that it is — say what you',
+    'are doing in a few words, keep listening, and then say what came back. If the backend says',
+    'something could not be done, say so plainly and say why.',
+    '',
+    'Adding devices, inviting people, changing what anybody is allowed to do and updating the hub',
+    'all live in the app. Say so plainly rather than delegating them.',
+    '',
+    `The timezone is ${input.timezone}.`,
     input.personName !== undefined ? `You are talking to ${input.personName}.` : '',
     '',
     'ROOMS',

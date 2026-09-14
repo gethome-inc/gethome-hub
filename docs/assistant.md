@@ -268,24 +268,60 @@ not a conversation — a hop through a Raspberry Pi on the way to the west coast
 and back is latency nobody would tolerate, and a 1 GHz core has better things
 to do than relay PCM. But the home's key must not leave the hub, which is the
 rule portraits are drawn here for, and *what the model is told* is the home's
-business. So `POST /assistant/voice/session` assembles the whole thing and
-answers with the `session.start` frame **already serialised**, plus a credential
-that expires. The phone forwards an opaque string: it names no session field at
-all, so a prompt change, a voice change or a configuration key this API grows
-next month reaches the microphone with no app release.
+business.
 
-**The prompt is split the way OpenAI's own migration guide says to split it**,
-which happens to be the split this hub already had. Conversation style and when
-to ask for help go to the voice; business rules, tool workflows and the shape
-of the home go to the backend — and the backend is the assistant, whose prompt
+**WebRTC is what makes that possible, and it is the API's own answer rather
+than a preference.** Live has two transports: a primary WebSocket at
+`wss://api.openai.com/v1/live/sessions`, authenticated with the **project API
+key** and documented "for server-side audio integrations", and WebRTC,
+documented for "browser and mobile applications". There is no ephemeral client
+secret anywhere in the family — the thing Realtime had, and the thing this
+route was first built around. So a phone cannot hold a Live WebSocket without
+holding the home's key, and the alternatives were relaying PCM through a Pi or
+putting a project key on every phone. Instead `POST /assistant/voice/session`
+takes the phone's **SDP offer**, attaches the whole session, posts both with the
+home's key and hands back the answer. The session itself is never sent to the
+app, so a prompt change, a voice change or a configuration key this API grows
+next month reaches the microphone with no app release — and the phone ends up
+holding an audio connection it was never given a credential of any kind for,
+which is a stronger containment than an expiring secret was.
+
+It is the better transport by some distance too, which is a bonus rather than
+the argument: a WebSocket carries 24 kHz PCM16 as base64 over TCP — about 64 kB
+a second, with head-of-line blocking, retransmission instead of concealment and
+no congestion control — where WebRTC carries Opus over SRTP at a twentieth of
+that, with a jitter buffer, packet-loss concealment and congestion control, on
+a path built for conversation. `audio.format` is deliberately **not** sent:
+it is a WebSocket field and WebRTC refuses it, negotiating its own.
+
+**The prompt is split the way OpenAI's own guides say to split it**, which
+happens to be the split this hub already had. Conversation style and when to
+ask for help go to the voice; business rules, tool workflows and the shape of
+the home go to the backend — and the backend is the assistant, whose prompt
 carries every one of them already. So `liveInstructions` is what is left after
-that subtraction: how to sound, what to hand over, and the home's **names**,
-so "the kitchen one" is heard correctly and said back. Names and nothing else —
-a device id, an endpoint number or a capability list is context a model with no
-tools can only mispronounce, and the instructions are capped at 16,384 tokens,
-which a large home's device JSON was heading for. `test/voice-prompts.test.ts`
-pins that, because the way this regresses is somebody copying the assistant's
-prompt back in.
+that subtraction, **written to the prompting guide's own structure**, labels
+included: a short personality, then `Backchannel policy`, `Interruption
+policy`, and a `Delegation policy` split into *Backend tools*, *Delegate to the
+backend when* and *Do not delegate to the backend when*. The guide asks for
+those labels by name and for concrete conditions rather than "delegate when
+needed", which is what makes the policy checkable against a handful of real
+requests — and is how it should be revised when the voice turns out to delegate
+too much or too little.
+
+Two of the guide's *optional* controls are not optional here. A room is a noisy
+place: a kitchen has a television in it, other people talking, and a kettle, so
+"keep listening while they pause, and do not treat a television or a nearby
+conversation as a new request" earns its place. Its sibling — ask about the part
+you did not catch — earns it for the same reason, since the thing most often
+misheard in this app is a room or device name.
+
+What is left beside the policy is the home's **names**, and nothing else: a
+device id, an endpoint number or a capability list is context a model with no
+tools can only mispronounce. They are **bounded** (`NAME_LIMIT`), because the
+live model's context window is small and a warehouse of eighty smart plugs must
+not crowd out the policy above it. `test/voice-prompts.test.ts` pins the labels
+and the bound, because the way this regresses is somebody flattening the policy
+into prose or copying the assistant's prompt back in.
 
 **It is the same transcript**, which is the part worth having. What was said
 becomes rows through `POST /assistant/voice/said`, so the page fills in while
@@ -329,13 +365,14 @@ saying so records nothing rather than guessing.
 **`live-wire.ts` is the containment, and it is a rule rather than tidiness.**
 Every constant and every field name of an API weeks old lives in that one file,
 mirrored by the app's own `LiveWire.swift`. It is the one thing here nobody can
-check by running the suite — and it has already been got wrong once, when
+check by running the suite — and it has been got wrong twice. First when
 `Model "gpt-live-1" is not supported in realtime mode` was read as a wrong
-model id rather than as the wrong *endpoint family*. The model was right;
-everything around it was Realtime's. One constant in that file is still a
-reasoned guess and says so in its own comment: `LIVE_SOCKET_URL`, and the
-credential question underneath it. Read OpenAI's guides against those two files
-before chasing anything else.
+model id rather than as the wrong *endpoint family*: the model was right and
+everything around it was Realtime's. Then when the WebSocket was kept and a
+client secret assumed to exist for it, because the pages describing the
+transports had not been read yet — the containment is what made that a
+constant and a route rather than a hunt. Read OpenAI's guides against those two
+files before chasing anything else.
 
 ## The registry, and the third agent
 

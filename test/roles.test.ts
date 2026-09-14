@@ -636,7 +636,10 @@ describe.skipIf(!handle)('roles and permissions', () => {
       method: 'POST',
       url: '/api/v1/assistant/voice/session',
       headers: auth(memberToken),
-      payload: {},
+      // The offer is required — Live has no client-secret path, so a session
+      // is created by answering one — and the body is parsed before the key is
+      // read, so omitting it would be a 400 rather than the refusal under test.
+      payload: { sdp: 'v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n' },
     });
     expect(opened.statusCode).toBe(409);
     expect(opened.json()).toMatchObject({ error: 'openai_not_configured' });

@@ -712,13 +712,19 @@ domains — update them in the same change.
   asking one question of it, so the answer is the union. Effort is `medium` here
   against the mapper's `high`, and is exposed by neither.
   **And the same assistant can be talked to.** `src/ai/voice/` opens a GPT-Live
-  session for the phone: the hub builds the whole `session.start` frame —
-  instructions, voice, history, delegation mode — and answers with it already
-  serialised, plus a credential that expires, so the phone forwards an opaque
-  string and names no session field at all. The phone holds the audio, because
-  a hop through a Pi is latency nobody would tolerate, and the home's key never
-  leaves the machine that holds it. `docs/assistant.md` is canonical. Six
-  rules. **`delegation.type: 'client'` is the architecture in one field**: the
+  session for the phone: the hub takes the phone's **WebRTC offer**, attaches
+  the whole session — model, voice, instructions, history, delegation mode —
+  posts both with the home's key and hands back the SDP answer. The phone holds
+  the audio, because a hop through a Pi is latency nobody would tolerate, and
+  it is handed **no credential at all**. `docs/assistant.md` is canonical.
+  Seven rules. **WebRTC is the API's answer, not a preference**: Live's
+  WebSocket authenticates with the *project key* and is documented for
+  server-side audio, and there is no ephemeral client secret anywhere in the
+  family — so a phone holding a Live socket would be a phone holding the home's
+  key, which is the one rule this surface exists to keep. It is also Opus over
+  SRTP against base64 PCM16 over TCP, which is a twentieth of the bytes with a
+  jitter buffer and loss concealment. `audio.format` is not sent: WebRTC refuses
+  it and negotiates its own. **`delegation.type: 'client'` is the architecture in one field**: the
   voice asks *this hub* for help rather than a model OpenAI hosts, so the home
   keeps its own agent, its own tools, its own transcript and whichever provider
   it picked — `responses` would have taken all four away the moment somebody
@@ -732,10 +738,16 @@ domains — update them in the same change.
   moment" and keeps listening while it happens. **The prompt is split the way
   the migration guide says**: style and *when to ask* to the voice, business
   rules and the shape of the home to the backend — which is the assistant,
-  whose prompt already carries them — so `liveInstructions` keeps the home's
-  **names** and no ids, endpoints or capabilities, pinned by
-  `test/voice-prompts.test.ts` because the way it regresses is somebody copying
-  the assistant's prompt back in. **It is the same transcript, both ways** —
+  whose prompt already carries them. It is written to the prompting guide's own
+  structure, labels included (`Backchannel policy`, `Interruption policy`, and a
+  `Delegation policy` split into *Backend tools* / *Delegate when* / *Do not
+  delegate when*), plus the two "optional" controls a **room** makes mandatory:
+  keep listening through a pause, and don't treat a television as a request.
+  What is left beside the policy is the home's **names**, bounded by
+  `NAME_LIMIT` because the live model's context window is small — no ids,
+  endpoints or capabilities. `test/voice-prompts.test.ts` pins the labels and
+  the bound, because the way it regresses is somebody flattening the policy into
+  prose or copying the assistant's prompt back in. **It is the same transcript, both ways** —
   `recordSpoken` writes rows under the caller's own member id so the page fills
   in while somebody talks and `revive()` can continue it by typing, and
   `liveHistory` seeds the last few exchanges into `session.input` so pressing
@@ -752,9 +764,10 @@ domains — update them in the same change.
   session that ends silently records nothing rather than guessing. And
   **`live-wire.ts` is the only file that names one of that API's fields**, with
   `LiveWire.swift` its mirror: it is the one thing here nobody can check by
-  running the suite, it has already been got wrong once — a wrong *mode* read
-  as a wrong model id — and one constant in it is still a reasoned guess that
-  says so (`LIVE_SOCKET_URL`, and the credential question underneath it).
+  running the suite, and it has been got wrong twice — a wrong *mode* read as a
+  wrong model id, then a WebSocket kept with a client secret assumed to exist
+  for it. Both times the containment is what made the fix a constant and a
+  route rather than a hunt through an audio pipeline.
   **`control_device` is the one tool that writes to the home**, through the
   registry's ordinary path and into the activity log **named for the person who
   asked** — the feed is read a week later and "the assistant" is nobody anyone

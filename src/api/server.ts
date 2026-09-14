@@ -3234,14 +3234,22 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   // ── The assistant's voice ─────────────────────────────────────────────────
 
   /**
-   * Open a live voice session, and hand the phone something that is not a key.
+   * Open a live voice session, and answer the phone's connection offer.
    *
    * **The hub builds the session and the phone holds it**, which is the whole
    * arrangement: audio has to go straight from the phone to OpenAI or it is not
-   * a conversation, while what the model is told — the home, the tools, how to
-   * speak — is the home's business, and the home's key must never leave the
-   * machine that holds it. So this mints an ephemeral secret against a config
-   * built here, and answers with a value that expires.
+   * a conversation, while what the model is told — the home, how to speak, when
+   * to ask for help — is the home's business, and the home's key must never
+   * leave the machine that holds it.
+   *
+   * **WebRTC is what makes that possible rather than a preference.** Live's
+   * WebSocket transport authenticates with the *project API key* and is
+   * documented for server-side audio; there is no ephemeral client secret
+   * anywhere in the family. So this takes the phone's SDP offer, attaches the
+   * session, posts both with the home's key, and hands back the answer — and
+   * the phone ends up holding an audio connection it was never given a
+   * credential of any kind for, which is a stronger containment than the
+   * expiring secret this route was first built around.
    *
    * **A fourth refusal, and it is a real one.** GPT-Live is OpenAI's and there
    * is no substitute, so a home running its assistant perfectly well on
@@ -3256,8 +3264,16 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // ordinary case: a fresh page mints one. It grants nothing new, since
     // `voice/said` already writes against whatever id it is given, and the
     // home's transcripts are shared by design.
+    //
+    // **And the phone's own connection offer**, which is what makes the whole
+    // arrangement possible: Live authenticates a WebSocket with the *project
+    // key* and has no ephemeral client secret anywhere in the family, so a
+    // phone can only hold a Live session over WebRTC — where the hub does the
+    // offer/answer exchange with the key and the phone is handed no credential
+    // at all. Required, so a client that cannot do WebRTC is a `400` rather
+    // than a session nothing can connect to.
     const asked = z
-      .object({ sessionId: z.uuid().optional() })
+      .object({ sessionId: z.uuid().optional(), sdp: z.string().min(1).max(64_000) })
       .parse(request.body ?? {});
     const ai = await deps.settings.getAiSettings();
     if (!ai.enabled) return reply.code(409).send({ error: 'ai_disabled' });
@@ -3323,6 +3339,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
           ...(personName !== undefined ? { personName } : {}),
         }),
         history,
+        offerSdp: asked.sdp,
         log: deps.log,
       });
     } catch (error) {
@@ -3333,17 +3350,17 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     }
 
     return reply.code(201).send({
-      clientSecret: opened.secret.value,
-      expiresAt: opened.secret.expiresAt,
-      // **The whole first frame, serialised, for the phone to send verbatim.**
-      // The phone used to be handed a model id and a tool catalog and assemble
-      // a session from them; it now forwards an opaque string, so the app names
-      // no session field at all and a prompt, a voice or a new configuration
-      // key reaches the microphone with no app release.
-      startFrame: opened.startFrame,
-      // Answered rather than pinned in the app, because it is the one thing on
-      // this surface nobody here can verify — see `live-wire.ts`.
-      socketUrl: opened.socketUrl,
+      // **The answer to the phone's offer, and nothing it could have got for
+      // itself.** The session — the model, the voice, the instructions, the
+      // history, the delegation mode — was described here and is never sent to
+      // the app at all, so a prompt change, a voice change or a configuration
+      // key this API grows next month reaches the microphone with no app
+      // release. And no credential crosses: the key stayed on this machine and
+      // what the phone receives is an SDP answer.
+      answerSdp: opened.answerSdp,
+      // OpenAI's own id for the session. Opaque, and carried because it is
+      // what a fork would one day be started from.
+      ...(opened.liveSessionId !== undefined ? { liveSessionId: opened.liveSessionId } : {}),
       audioRate: opened.audioRate,
       // The conversation the phone will write into. A plain id: nothing on this
       // hub is holding a model conversation for it, and the transcript is what

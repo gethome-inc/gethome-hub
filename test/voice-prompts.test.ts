@@ -71,6 +71,33 @@ describe('the voice prompt', () => {
     expect(prompt).not.toContain('onOff');
   });
 
+  it('keeps the delegation policy labelled, and bounds the names', () => {
+    // The prompting guide asks for these labels by name and for concrete
+    // conditions rather than "delegate when needed". They are the part of this
+    // prompt a future edit would quietly flatten into prose, so they are pinned.
+    const prompt = liveInstructions({ home: home(), timezone: 'UTC' });
+    expect(prompt).toContain('Backchannel policy:');
+    expect(prompt).toContain('Interruption policy:');
+    expect(prompt).toContain('Delegation policy:');
+    expect(prompt).toContain('Backend tools:');
+    expect(prompt).toContain('Delegate to the backend when:');
+    expect(prompt).toContain('Do not delegate to the backend when:');
+
+    // And the names are bounded, because the live model's context window is
+    // small: a warehouse of smart plugs must not crowd out the policy above it.
+    const crowded = home();
+    crowded.devices = Array.from({ length: 200 }, (_, index) => ({
+      id: randomUUID(),
+      name: `Plug ${index}`,
+      roomId: null,
+      online: true,
+      endpoints: [{ endpointId: 1, deviceKind: 'outlet' as const, capabilities: ['onOff'] }],
+    }));
+    const long = liveInstructions({ home: crowded, timezone: 'UTC' });
+    expect(long).toContain('Plug 0');
+    expect(long).not.toContain('Plug 199');
+  });
+
   it('opens on what was said, not on what a page did', () => {
     const rows: ChatMessageWire[] = [
       { id: '1', at: '2026-09-14T10:00:00.000Z', role: 'user', text: 'is the heater on?' },
