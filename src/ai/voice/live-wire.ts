@@ -92,13 +92,22 @@ export const LIVE_EVENTS = {
 } as const;
 
 /**
- * The two events a sideband is sent copies of and must throw away.
+ * The two audio events, dropped before they are parsed.
  *
- * **A sideband receives the audio whether it asked for it or not** — both
- * directions, base64 PCM16 at 24 kHz, about a megabit a second — and there is
- * no way to decline it. On a board with hundreds of megabytes that is the one
- * real cost of attaching, which is why `sideband.ts` drops these off a bounded
- * prefix of the raw frame rather than parsing them first.
+ * **They should never arrive, and the guard stays anyway.** The claim used to
+ * be that a sideband is sent copies of both directions as base64 PCM16 — about
+ * a megabit a second — and that dropping them off a bounded prefix was the one
+ * thing that made attaching affordable on a Pi. That was read across from the
+ * WebSocket transport and is wrong for every session this hub opens: the
+ * reference marks `session.input_audio.append` and `session.output_audio.delta`
+ * **WebSocket only**, and a WebRTC session carries its media on the negotiated
+ * track, so there is no JSON audio in existence for a sideband to be copied.
+ *
+ * It is kept because it costs one set lookup against a string this code has
+ * already got, and because the one session shape that *would* flood a sideband
+ * is the one a later change might reach for. What it is not is a justification:
+ * `frameType`'s prefix scan is worth having for the transcript deltas, which
+ * are real, frequent and equally uninteresting most of the time.
  */
 export const LIVE_AUDIO_EVENTS: ReadonlySet<string> = new Set([
   'session.input_audio.append',
@@ -149,12 +158,38 @@ export const LIVE_HISTORY_MESSAGES = 12;
 /**
  * How long one piece of context handed to a running session may be.
  *
- * The three append events take at most 500 tokens of plain string. Characters
- * rather than tokens because nothing here counts tokens and four per token is
- * the conservative direction — an answer clipped a little short is a sentence
- * the model paraphrases, where one refused is silence in a room.
+ * The three append events take at most **500 tokens** of plain string, and an
+ * append over that is refused — which on this surface is not an error anybody
+ * sees, it is a person standing in a room hearing nothing back. So the bound is
+ * set from the *worst* side rather than the average one.
+ *
+ * It was 1,800, from four characters to the token, which is English. Cyrillic
+ * runs closer to two, so a Russian home's answer hit the cap at about half the
+ * length an English one did and the refusal fell on exactly the homes least
+ * likely to be testing this. Nine hundred is inside 500 tokens in either
+ * script, and it is still around fifteen seconds of speech — far more than a
+ * spoken answer should be, now that the backend is told it is being spoken to
+ * (`assistantSystemPrompt`'s *SOMETIMES YOU ARE BEING SPOKEN TO*).
+ *
+ * Characters rather than tokens because nothing here counts tokens, and the
+ * conservative direction is the one where a sentence is a little short.
  */
-export const LIVE_APPEND_CHARS = 1_800;
+export const LIVE_APPEND_CHARS = 900;
+
+/**
+ * How long one attached sideband may live, in seconds.
+ *
+ * A bound rather than a policy: the session itself expires, the phone closes
+ * it, or the connection drops — all three end it sooner. What the ceiling
+ * stops is a socket held for ever against a session nobody told us about, on a
+ * board that measures its memory in hundreds of megabytes.
+ *
+ * It lives here rather than in `sideband.ts` because `AssistantChat` clamps
+ * what it writes into the ledger to the same figure: the sideband is what
+ * reads the usage, so nothing can be billed for longer than it stayed
+ * attached, and two numbers for that would eventually disagree.
+ */
+export const SIDEBAND_MAX_SECONDS = 60 * 60;
 
 /** A message a session opens knowing about. */
 export interface LiveHistoryMessage {

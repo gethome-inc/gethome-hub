@@ -21,9 +21,10 @@ import { LIVE_APPEND_CHARS, LIVE_AUDIO_EVENTS, LIVE_EVENTS } from './live-wire.j
  * - **What it cost.** `session.usage.updated` and `session.closed` carry the
  *   seconds OpenAI will bill, read here rather than measured by a stopwatch on
  *   a phone that may be force-quit.
- * - **Nothing about audio.** Audio arrives here whether we want it or not and
- *   is dropped before it is parsed; media itself stays on the phone's WebRTC
- *   connection, and this is explicitly not a place to send any.
+ * - **Nothing about audio.** Media stays on the phone's WebRTC connection and
+ *   never becomes JSON, so none of it reaches here; the audio event names are
+ *   still dropped on sight as insurance, and this is explicitly not a place to
+ *   send any.
  */
 
 /** What answering a delegation needs from the hub, narrowed to two calls. */
@@ -51,6 +52,36 @@ export interface VoiceDelegationOptions {
 
 /** How much of a frame is scanned for its `type` before giving up and parsing. */
 const TYPE_SCAN_CHARS = 400;
+
+/** How many of our own append ids are kept, for correlating a refusal. */
+const APPENDS_REMEMBERED = 32;
+
+/**
+ * How long a delegation may go unanswered before the hub says so out loud.
+ *
+ * **This is a timeout fix wearing the clothes of a nicety.** The phone closes
+ * a line after a minute with nothing said and nothing playing
+ * (`VoiceConversation`'s idle clock), and the assistant is allowed a two-minute
+ * round — so a slow answer arrived at a session that had already hung up, and
+ * the person heard the voice say "one moment" and then nothing, ever. Making
+ * the phone more patient is the wrong side to fix it on: that clock exists for
+ * a page left on a kitchen counter, where being generous is a meter running in
+ * an empty room. This side is the one that *knows* a round is running.
+ *
+ * So the hub says so, on the same delegation, as
+ * `session.commentary.append` — the API's own "information the model should
+ * speak aloud" — and the model speaking resets the phone's clock through the
+ * transcript deltas it already watches. Twenty seconds is comfortably inside
+ * the minute and nowhere near a normal round, which finishes in two or three;
+ * it repeats, because two minutes is four of these and a round that long is
+ * pathological rather than impossible.
+ *
+ * **It is a signal rather than a guarantee.** The model decides when to speak,
+ * and commentary is content it may paraphrase or fold into what it is already
+ * saying. What it cannot do is leave the hub silent for a minute, which is the
+ * failure this replaces.
+ */
+const PATIENCE_MS = 20_000;
 
 /**
  * How much of what was said is carried into one request.
@@ -100,8 +131,10 @@ export class VoiceDelegation {
   // ── Reading ────────────────────────────────────────────────────────────────
 
   read(raw: string): void {
-    // The cheap half: a frame whose type is audio is dropped without being
-    // parsed at all, which is most of what arrives here.
+    // The cheap half: the type is read off a bounded prefix, so an audio frame
+    // is dropped without being parsed. A WebRTC session sends none — see
+    // `LIVE_AUDIO_EVENTS` — but the transcript deltas below arrive several
+    // times a second and the scan is what keeps that off a 1 GHz core.
     if (LIVE_AUDIO_EVENTS.has(frameType(raw) ?? '')) return;
 
     let frame: Record<string, unknown>;
@@ -164,9 +197,19 @@ export class VoiceDelegation {
       }
       case LIVE_EVENTS.error: {
         const error = frame['error'] as Record<string, unknown> | undefined;
+        // **A refused append is silence in a room, so it is named as one.**
+        // `error.client_event_id` is the API's own correlation back to the
+        // command that failed, and the command that matters here is the one
+        // carrying an answer — an append over the 500-token cap is refused,
+        // the person hears nothing, and a line reading "the session reported
+        // an error" is the least useful possible way to find that out.
+        const cause = error?.['client_event_id'];
+        const wasOurs = typeof cause === 'string' && this.appended.has(cause);
         this.options.log.warn(
-          { detail: error?.['message'], code: error?.['code'] },
-          'voice: the session reported an error',
+          { detail: error?.['message'], code: error?.['code'], ...(wasOurs ? { cause } : {}) },
+          wasOurs
+            ? 'voice: the session refused an answer, so nothing was said'
+            : 'voice: the session reported an error',
         );
         return;
       }
@@ -240,6 +283,13 @@ export class VoiceDelegation {
     this.askedUntil = offset ?? this.latestEnd ?? this.latestStart;
     const askedUntil = this.askedUntil;
 
+    // See `PATIENCE_MS`: a round that outlives the phone's idle clock has to
+    // say so, or the answer lands on a line that has already gone.
+    const patience = setInterval(() => {
+      this.send('commentary', delegationId, AWAY_TOO_LONG);
+    }, PATIENCE_MS);
+    patience.unref?.();
+
     let answer: string | null = null;
     try {
       answer = await this.options.host.askAloud({
@@ -249,6 +299,8 @@ export class VoiceDelegation {
       });
     } catch (error) {
       this.options.log.warn({ error }, 'voice: could not ask the home');
+    } finally {
+      clearInterval(patience);
     }
 
     if (answer === null || answer.trim() === '') {
@@ -266,33 +318,73 @@ export class VoiceDelegation {
   }
 
   private send(kind: 'commentary' | 'thinking', delegationId: string, content: string): void {
+    const eventId = `${kind}_${this.claimed.size}_${Date.now()}`;
+    this.remember(eventId);
     this.options.send({
       type: `session.${kind}.append`,
-      event_id: `${kind}_${this.claimed.size}_${Date.now()}`,
+      event_id: eventId,
       delegation_id: delegationId,
       content: content.slice(0, LIVE_APPEND_CHARS),
     });
   }
 
   /**
-   * Write down what the line cost, **once**.
+   * The appends this session has sent, so a refusal can be named as one.
+   *
+   * Bounded, because it exists only to read an `error` arriving moments later
+   * and a session is minutes long — the oldest entry is one nothing could
+   * still be failing about.
+   */
+  private readonly appended = new Set<string>();
+
+  private remember(eventId: string): void {
+    this.appended.add(eventId);
+    if (this.appended.size > APPENDS_REMEMBERED) {
+      const oldest = this.appended.values().next().value;
+      if (oldest !== undefined) this.appended.delete(oldest);
+    }
+  }
+
+  /**
+   * Say the line has closed, **once**, and what it cost if the session said.
    *
    * A session that closes twice — the event, then the socket — must not be
-   * billed twice, and one that ends without ever saying records nothing rather
-   * than guessing.
+   * billed twice, and one that ends without ever saying what it cost records
+   * nothing rather than guessing.
+   *
+   * **But it is still told, which is the half that was missing.**
+   * `session.usage.updated` arrives about once a minute, so a session that ran
+   * for forty seconds and then dropped — a phone force-quit, a train tunnel —
+   * never carried a number at all, and the early return meant the host was
+   * never told the line had gone either. What the host hangs off that is
+   * whether the conversation is still being *spoken* to, so the mark stayed
+   * and a follow-up typed into it hours later was logged as speech. Zero is
+   * the honest number for a line nobody could measure, and the host writes no
+   * row for it.
    */
   async settle(): Promise<void> {
     if (this.spent) return;
     this.spent = true;
-    const seconds = this.seconds;
-    if (seconds === undefined || seconds <= 0) return;
     try {
-      await this.options.host.recordVoiceSpend({ sessionId: this.options.sessionId, seconds });
+      await this.options.host.recordVoiceSpend({
+        sessionId: this.options.sessionId,
+        seconds: this.seconds ?? 0,
+      });
     } catch (error) {
       this.options.log.warn({ error }, 'voice: could not record what a session cost');
     }
   }
 }
+
+/**
+ * What the voice is given to say while the house is still being asked.
+ *
+ * Deliberately **not** a claim about what is happening — the hub knows a round
+ * is running and nothing more, and "checking the kitchen light" would be a
+ * sentence invented here about a tool call nobody here can see. The one true
+ * thing is that it is taking a while, so that is what is said.
+ */
+const AWAY_TOO_LONG = 'This is taking longer than usual. Still working on it — say so briefly.';
 
 /** A number the frame actually carried, or nothing. */
 function finite(value: unknown): number | undefined {
@@ -302,10 +394,7 @@ function finite(value: unknown): number | undefined {
 /**
  * The frame's `type`, off a bounded prefix.
  *
- * **The whole point is not parsing the frame.** A sideband is sent copies of
- * every audio frame in both directions, so most of what arrives is a few
- * kilobytes of base64 that nothing is going to read — and `JSON.parse` on all
- * of it, fifty times a second, is real work on a 1 GHz core. JSON does not
+ * **The point is deciding what to ignore without parsing it.** JSON does not
  * promise field order, so a frame whose `type` is not in the prefix falls
  * through to `undefined` and the caller parses properly; every frame this API
  * actually sends puts `type` first.
