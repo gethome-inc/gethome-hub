@@ -155,6 +155,12 @@ export function assistantSystemPrompt(delegates: readonly { key: string; title: 
     'Your question is read out too, so write one somebody can answer by talking. The options are',
     'spoken after it, so keep their labels short and distinct.',
     '',
+    'A spoken turn also carries what every device is reporting **right now**, under its own',
+    'heading. That is the current reading, not a remembered one, so answer a plain question about',
+    'a value straight from it — calling `get_device` to read something already in front of you is',
+    'a round somebody spends standing in a room waiting. `get_device` is still how you get what',
+    'that list does not carry, and it says which things those are.',
+    '',
     'HOW TO WRITE',
     '',
     '**Otherwise you are writing into a chat column on a phone, about three inches wide.** Short paragraphs,',
@@ -257,6 +263,23 @@ export function assistantTaskPrompt(input: {
  * vocabularies for one reading is how a model comes to say twenty-one degrees
  * about 2,140 of something. The conversion to speech is the model's, as it
  * already is everywhere else.
+ *
+ * **And it has to say out loud that it replaces the tool call**, which is the
+ * half that makes any of it pay. Two other places point the model straight at
+ * `get_device` for exactly this — its own description ("use it before working
+ * a device whose exact endpoint or *current value* matters") and the system
+ * prompt's *Look before you act* ("use the tools when you need a detail — …
+ * what a value reads right now") — and both are right for a typed turn, where
+ * the trail showing "Looking at one device closely" is the wait being legible
+ * rather than the wait itself. So the digest does not merely offer the data: it
+ * says the reading is current, that a device missing from it is reporting
+ * nothing, that a plain reading is answered from here, and **which things
+ * genuinely still need the tool** — a colour, a thermostat's limits, a fan
+ * percentage, a battery that is not low, settings, learned buttons. Vague was
+ * not good enough: "call get_device for anything else" is an invitation, and a
+ * model with two nudges towards a tool and one weak hint away takes the tool.
+ * The spoken section of the system prompt carries the same rule, because that
+ * is where behaviour is set and it is cached, so it costs nothing to repeat.
  */
 export function spokenStateDigest(input: {
   home: AutomationHomeView;
@@ -288,8 +311,12 @@ export function spokenStateDigest(input: {
   if (lines.length === 0) return undefined;
   return [
     'WHAT EVERY DEVICE IS DOING RIGHT NOW',
-    'Keyed by the device ids in DEVICES above, in the same units get_device uses. This is the',
-    'whole of what is worth saying out loud; call get_device for anything else about one device.',
+    'Current as of this moment, keyed by the device ids in DEVICES above, in the same units',
+    'get_device uses. A device or endpoint not listed here is reporting nothing worth saying.',
+    'Answer a plain reading straight from this — do not call get_device to read a value that is',
+    'already below. Call it when you need something this does not carry: a colour, a thermostat’s',
+    'limits, a fan percentage, a battery that is not low, a device’s settings or its learned',
+    'buttons — or when a device says something here that does not add up.',
     JSON.stringify(lines),
   ].join('\n');
 }
@@ -318,6 +345,9 @@ function spokenReading(state: EndpointState): Record<string, unknown> | undefine
   if (state.thermostat?.occupiedHeatingSetpointCenti !== undefined) {
     reading['heatingSetpointCenti'] = state.thermostat.occupiedHeatingSetpointCenti;
   }
+  // "Is the heating on?" is a spoken question and this is the field that
+  // answers it — one small int, against a `get_device` round for a thermostat.
+  if (state.thermostat !== undefined) reading['systemMode'] = state.thermostat.systemMode;
 
   const sensors = state.sensors;
   const readings: [string, number | boolean | undefined][] = [

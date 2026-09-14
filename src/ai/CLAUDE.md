@@ -817,6 +817,15 @@ domains — update them in the same change.
   report, **keyed by id** (the first message is the index), in `get_device`'s
   own raw units, with a battery only under 20%. Spoken turns only — a typed
   answer is read when it lands, and the agent trail makes that wait legible.
+  **And it has to say that it replaces the tool call.** `get_device`'s own
+  description and the system prompt's *Look before you act* both send the model
+  there for a current value, and both are right for a typed turn — so the
+  digest says the reading is current, that a device missing from it reports
+  nothing, that a plain reading is answered from it, and **names** what still
+  needs the tool (a colour, a thermostat's limits, a fan percentage, a battery
+  that is not low, settings, learned buttons). "Anything else" was the first
+  wording and it is an invitation: two nudges towards a tool and one weak hint
+  away means the tool gets called and the round is spent anyway.
   **And a round that outlives the phone's patience says so.** The app hangs up
   after a minute of silence and the assistant gets two, so a slow answer landed
   on a dead line. Every `PATIENCE_MS` an unanswered delegation gets a

@@ -224,6 +224,56 @@ describe('what everything is doing right now', () => {
   });
 
   /**
+   * **It has to say that it replaces the tool call, or it buys nothing.**
+   *
+   * Two other places point the model straight at `get_device` for exactly this
+   * — its own description ("before working a device whose exact endpoint or
+   * *current value* matters") and the system prompt's *Look before you act* —
+   * and both are right for a typed turn. So the digest is directive rather
+   * than merely present: the reading is current, a device missing from it is
+   * reporting nothing, a plain reading is answered from here, and the things
+   * that genuinely still need the tool are named. "Call get_device for
+   * anything else" was the first version and it is an invitation.
+   */
+  it('says it is current, and names what still needs the tool', () => {
+    const digest = digestOf({ [lightId]: { ...empty, onOff: true } })!;
+
+    expect(digest).toContain('Current as of this moment');
+    expect(digest).toContain('do not call get_device to read a value that is');
+    // A device that is simply absent is absent because it reports nothing —
+    // not because the digest ran out of room.
+    expect(digest).toContain('reporting nothing worth saying');
+    // And the gaps are named rather than left as "anything else".
+    for (const missing of ['colour', 'limits', 'fan percentage', 'battery that is not low']) {
+      expect(digest).toContain(missing);
+    }
+  });
+
+  /** "Is the heating on?" is a spoken question, and `systemMode` is the field
+   *  that answers it — one small int against a whole `get_device` round. */
+  it('carries a thermostat’s mode, not only its temperature', () => {
+    const digest = digestOf({
+      [lightId]: {
+        ...empty,
+        thermostat: {
+          localTemperatureCenti: 2140,
+          occupiedHeatingSetpointCenti: 2000,
+          heatSetpointMinCenti: 500,
+          heatSetpointMaxCenti: 3000,
+          coolSetpointMinCenti: 1600,
+          coolSetpointMaxCenti: 3200,
+          systemMode: 4,
+        },
+      },
+    });
+    expect(digest).toContain('"temperatureCenti":2140');
+    expect(digest).toContain('"systemMode":4');
+    // The limits stay out — four scalars nobody asks about out loud, and
+    // `get_device` is named for exactly them.
+    expect(digest).not.toContain('heatSetpointMax');
+  });
+
+  /**
    * **An endpoint with nothing to say is left out entirely**, which in a real
    * home is most of the buttons and remotes — and it is what keeps this worth
    * paying for on every spoken turn.

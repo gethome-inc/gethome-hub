@@ -413,6 +413,21 @@ lamps called "Lamp" has to stay unambiguous; and it uses the same raw units
 `get_device` does, because two vocabularies for one reading is how a model
 comes to say twenty-one degrees about 2,140 of something.
 
+**And it says out loud that it replaces the tool call**, which is the half that
+makes it pay. Two other places point the model straight at `get_device` for
+exactly this — its own description ("before working a device whose exact
+endpoint or *current value* matters") and the system prompt's *Look before you
+act* — and both are right for a typed turn, where the trail showing "Looking at
+one device closely" is the wait being made legible rather than the wait itself.
+So the digest is directive: the reading is current, a device missing from it is
+reporting nothing, a plain reading is answered from it, and the things that
+genuinely still need the tool are **named** — a colour, a thermostat's limits, a
+fan percentage, a battery that is not low, settings, learned buttons. Vague was
+not good enough: "call get_device for anything else" is an invitation, and a
+model with two nudges towards a tool and one weak hint away takes the tool. The
+spoken section of the system prompt carries the same rule, since that is where
+behaviour is set and it is cached.
+
 **And a round that outlives the phone's patience says so.** The app closes a
 line after a minute with nothing said and nothing playing, and the assistant is
 allowed a two-minute round — so a slow answer arrived at a session that had
