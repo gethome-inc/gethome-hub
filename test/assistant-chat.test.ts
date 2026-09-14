@@ -190,17 +190,61 @@ describe('the assistant', () => {
   });
 
   it('runs the model the settings route reports, and moves with the offered list', async () => {
+    const both = { anthropic: true, openai: true };
     // The gap that cost the mapper a release: every surface that *reported* a
     // model went through `effectiveModel` while the call that picked one to
     // run read the stored column.
-    expect(effectiveAgentModel(null)).toBe(AGENT_MODELS.default);
-    expect(effectiveAgentModel('claude-sonnet-5')).toBe('claude-sonnet-5');
+    expect(effectiveAgentModel(null, both)).toEqual({
+      provider: 'anthropic',
+      modelId: AGENT_MODELS.anthropic.default,
+    });
+    expect(effectiveAgentModel('claude-sonnet-5', both)).toEqual({
+      provider: 'anthropic',
+      modelId: 'claude-sonnet-5',
+    });
     // A model this build no longer offers is stored happily and is simply not
-    // what runs — silently keeping a home on a retired one is the failure.
-    expect(effectiveAgentModel('claude-opus-4-6')).toBe(AGENT_MODELS.default);
+    // what runs — silently keeping a home on a retired one is the failure. The
+    // *provider* survives it, off `PRICING`: the vendor was a real choice and
+    // the retired id was not.
+    expect(effectiveAgentModel('claude-opus-4-6', both)).toEqual({
+      provider: 'anthropic',
+      modelId: AGENT_MODELS.anthropic.default,
+    });
 
     await settings.setAssistantModel('claude-sonnet-5');
     expect((await settings.getAiSettings()).assistant.model).toBe('claude-sonnet-5');
+  });
+
+  it('runs on the key the home actually has, whatever model is stored', async () => {
+    /**
+     * The half a list-only resolution gets wrong, and the reason this is
+     * key-aware at all. A home that has only ever had an OpenAI key still has
+     * `claude-opus-5` stored — it is the default, and nobody chose it — so
+     * resolving on the offered list alone points every conversation at a vendor
+     * the hub cannot authenticate to and answers `ai_not_configured` on a home
+     * that is configured.
+     */
+    const onlyOpenAi = { anthropic: false, openai: true };
+    expect(effectiveAgentModel('claude-opus-5', onlyOpenAi)).toEqual({
+      provider: 'openai',
+      modelId: AGENT_MODELS.openai.default,
+    });
+    // And a deliberate OpenAI choice is kept, rather than being read as a
+    // fallback and moved to that provider's default.
+    expect(effectiveAgentModel('gpt-5.6-terra', onlyOpenAi)).toEqual({
+      provider: 'openai',
+      modelId: 'gpt-5.6-terra',
+    });
+    // Neither key is the only case with no answer — the caller refuses on it.
+    expect(effectiveAgentModel('claude-opus-5', { anthropic: false, openai: false })).toBeNull();
+
+    // End to end: the same home, through the settings route both agents read.
+    await settings.setAiKey('openai', 'sk-proj-test');
+    await settings.clearAiProvider('anthropic');
+    const ai = await settings.getAiSettings();
+    expect(ai.assistant.provider).toBe('openai');
+    expect(ai.automations.provider).toBe('openai');
+    expect(AGENT_MODELS.openai.choices.map((choice) => choice.id)).toContain(ai.assistant.model);
   });
 
   it('lets the two agents choose their model apart, and the mapper choose neither', async () => {
@@ -229,7 +273,7 @@ describe('the assistant', () => {
     await settings.setAssistantModel(null);
     ai = await settings.getAiSettings();
     expect(ai.anthropic.model).toBe('claude-opus-5');
-    expect(ai.assistant.model).toBe(AGENT_MODELS.default);
+    expect(ai.assistant.model).toBe(AGENT_MODELS.anthropic.default);
     expect(ai.automations.model).toBe('claude-sonnet-5');
   });
 
@@ -238,13 +282,14 @@ describe('the assistant', () => {
     // so `stop_reason` decides *that* a round was refused and this decides only
     // the sentence — a category the build has never met, and a null one, both
     // keep the generic wording rather than falling through to nothing.
-    expect(refusalSentence({ stop_details: { type: 'refusal', category: 'reasoning_extraction', explanation: null } }))
-      .toContain('my own reasoning');
-    expect(refusalSentence({ stop_details: { type: 'refusal', category: 'cyber', explanation: null } }))
-      .toContain('security work');
-    expect(refusalSentence({ stop_details: { type: 'refusal', category: null, explanation: null } }))
-      .toBe('The model declined to answer that. Try asking for it differently.');
-    expect(refusalSentence({})).toBe(
+    expect(refusalSentence('reasoning_extraction')).toContain('my own reasoning');
+    expect(refusalSentence('cyber')).toContain('security work');
+    expect(refusalSentence(null)).toBe(
+      'The model declined to answer that. Try asking for it differently.',
+    );
+    // OpenAI reports no category at all, so this is the branch every refusal
+    // on that provider takes — a valid permanent state rather than a gap.
+    expect(refusalSentence(undefined)).toBe(
       'The model declined to answer that. Try asking for it differently.',
     );
   });

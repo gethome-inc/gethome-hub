@@ -145,13 +145,16 @@ export const PROVIDER_MODELS: Readonly<
  * what a model costs per round is a real trade a home can make, and both
  * halves of it are visible.
  *
- * So an agent offers two and the picker means something. Opus 5 is the
- * default and the recommendation; Sonnet 5 is the same conversation at rather
- * less than half the price. Both are already in `PRICING`, so nothing about
- * cost estimation moves.
+ * So an agent offers two per provider and the picker means something. The
+ * thorough tier is the default and the recommendation; the other is the same
+ * conversation at rather less than half the price. All four are already in
+ * `PRICING`, so nothing about cost estimation moves.
  *
- * Anthropic only, for the reason the automations agent is: only the Anthropic
- * loop is written.
+ * **Both providers, now that both loops are written.** This was Anthropic-only
+ * — not as a policy but because `chat/agent-loop.ts` typed every signature
+ * against the Anthropic SDK, so "the assistant runs on Claude" was a fact
+ * about the module graph rather than about any setting. `ChatTransport` is
+ * what changed that; the lists follow.
  *
  * **One table for both agents, and two stored columns.** It was
  * `ASSISTANT_MODELS`, and the automations agent read `ai_model` — the
@@ -165,43 +168,135 @@ export const PROVIDER_MODELS: Readonly<
  * differ per agent, the honest place for that is the app's own copy, not a
  * second table here waiting to drift.
  */
-export const AGENT_MODELS: {
-  readonly default: string;
-  readonly choices: readonly ModelChoice[];
-} = {
-  default: 'claude-opus-5',
-  choices: [
-    {
-      id: 'claude-opus-5',
-      label: 'Opus 5',
-      note: 'The most capable. Best at anything it has to work out.',
-      recommended: true,
-    },
-    {
-      id: 'claude-sonnet-5',
-      label: 'Sonnet 5',
-      note: 'Quicker, and less than half the price. Good for the straightforward.',
-    },
-  ],
+export const AGENT_MODELS: Readonly<
+  Record<AiProvider, { readonly default: string; readonly choices: readonly ModelChoice[] }>
+> = {
+  anthropic: {
+    default: 'claude-opus-5',
+    choices: [
+      {
+        id: 'claude-opus-5',
+        label: 'Opus 5',
+        note: 'The most capable. Best at anything it has to work out.',
+        recommended: true,
+      },
+      {
+        id: 'claude-sonnet-5',
+        label: 'Sonnet 5',
+        note: 'Quicker, and less than half the price. Good for the straightforward.',
+      },
+    ],
+  },
+  openai: {
+    default: 'gpt-5.6-sol',
+    choices: [
+      {
+        id: 'gpt-5.6-sol',
+        label: 'GPT-5.6 Sol',
+        note: 'The most capable. Best at anything it has to work out.',
+        recommended: true,
+      },
+      {
+        id: 'gpt-5.6-terra',
+        label: 'GPT-5.6 Terra',
+        note: 'Quicker, and rather cheaper. Good for the straightforward.',
+      },
+    ],
+  },
 };
 
 /**
- * Which model an agent will actually run on.
+ * Which provider a model id belongs to.
  *
- * `effectiveModel`'s rule, and it exists separately for the same reason the
- * list does: a stored model counts only while it is still offered, or retiring
- * one leaves the homes that had chosen it as the only homes still running it,
- * silently, with nothing on a screen changed.
+ * **The provider follows the model, and there is no second stored column.**
+ * Ids do not collide across vendors (`claude-…` against `gpt-…`) — `priceOf`
+ * below has relied on that since the mapper had two providers — so a caller
+ * holding a model never has to be told which vendor it came from, and an app's
+ * provider picker is a control that writes that provider's default model id
+ * rather than a second setting that can disagree with the first.
+ *
+ * `null` for an id no list here names, which is a real answer: a hand-edited
+ * column, or a model retired between builds.
+ */
+export function agentProviderOf(modelId: string | null | undefined): AiProvider | null {
+  if (typeof modelId !== 'string') return null;
+  for (const provider of Object.keys(AGENT_MODELS) as AiProvider[]) {
+    if (AGENT_MODELS[provider].choices.some((choice) => choice.id === modelId)) return provider;
+  }
+  return null;
+}
+
+/** Which providers an agent could actually authenticate as, right now. */
+export interface UsableProviders {
+  anthropic: boolean;
+  openai: boolean;
+}
+
+/**
+ * Which model an agent will actually run on, and on whose key.
+ *
+ * `effectiveModel`'s rule with a second half, and it exists separately for the
+ * same reason the list does: a stored model counts only while it is still
+ * offered, or retiring one leaves the homes that had chosen it as the only
+ * homes still running it, silently, with nothing on a screen changed.
+ *
+ * **The second half is the key, and without it the setting is a trap.** A home
+ * that has only ever had an OpenAI key still has `claude-opus-5` stored — it is
+ * the default, and nobody chose it — so resolving on the offered list alone
+ * would point every conversation at a vendor the hub cannot authenticate to,
+ * and answer `ai_not_configured` on a home that is configured. So a stored
+ * choice counts while its provider is *usable*, and otherwise the hub falls
+ * back to the provider that is, at that provider's own default. Most specific
+ * first: the stored model, then the stored model's provider's default, then
+ * whichever provider has a key.
  *
  * **And the loop has to read this, not the column.** That is the one bug the
  * mapper paid a release for: every surface that *reported* a model went
  * through `effectiveModel` while the call that picked one to run read the
  * stored value, so a hub ran a model every screen said it was not running.
  * `test/ai-model-choice.test.ts` pins both halves, for both agents.
+ *
+ * Answers `null` when neither provider can authenticate — the caller refuses
+ * with `ai_not_configured`, which is the only honest thing left to say.
  */
-export function effectiveAgentModel(stored: string | null | undefined): string {
-  const offered = AGENT_MODELS.choices.some((choice) => choice.id === stored);
-  return offered && stored ? stored : AGENT_MODELS.default;
+export function effectiveAgentModel(
+  stored: string | null | undefined,
+  usable: UsableProviders,
+): { provider: AiProvider; modelId: string } | null {
+  const offeredBy = agentProviderOf(stored);
+  if (offeredBy !== null && usable[offeredBy] && typeof stored === 'string') {
+    return { provider: offeredBy, modelId: stored };
+  }
+  /**
+   * A model this build has **retired**, on a provider that still works.
+   *
+   * `agentProviderOf` answers `null` for one — it reads the offered list, which
+   * is the point of it — so the vendor comes from `PRICING` instead, which
+   * stays broad for exactly this reason. The provider was a real choice
+   * somebody made and the retired id was not, so the vendor is kept and only
+   * the model moves. Without this, a home that had picked Sonnet 5 on the day
+   * it was withdrawn would be moved to Anthropic's *and* OpenAI's list in
+   * whatever order the loop below happens to run.
+   */
+  const pricedBy = pricedProviderOf(stored);
+  if (pricedBy !== null && usable[pricedBy]) {
+    return { provider: pricedBy, modelId: AGENT_MODELS[pricedBy].default };
+  }
+  for (const provider of ['anthropic', 'openai'] as const) {
+    if (usable[provider]) {
+      return { provider, modelId: AGENT_MODELS[provider].default };
+    }
+  }
+  return null;
+}
+
+/** Which provider has ever billed for this id, offered or retired. */
+function pricedProviderOf(modelId: string | null | undefined): AiProvider | null {
+  if (typeof modelId !== 'string') return null;
+  for (const provider of Object.keys(PRICING) as AiProvider[]) {
+    if (Object.hasOwn(PRICING[provider], modelId)) return provider;
+  }
+  return null;
 }
 
 /** The Anthropic default, kept flat because the agent has always read it so. */
@@ -271,18 +366,23 @@ export function modelLabel(provider: string, model: string): string {
  * Every model this hub has a name for, under the provider that would have run
  * it.
  *
- * The assistant's list is Anthropic-only — only that loop is written — so it
- * is named under that provider and nowhere else, which keeps the lookup a
- * statement about who ran what rather than a flat search of every id the hub
- * has ever heard of. A model on both lists is named once; the first match wins
- * and the two agree on the label, which is the only field read here.
+ * Two vocabularies per provider — `PROVIDER_MODELS` for recognising a device
+ * and `AGENT_MODELS` for a conversation — so the answer is the union of both,
+ * which keeps the lookup a statement about who ran what rather than a flat
+ * search of every id the hub has ever heard of. A model on both lists is named
+ * once; the first match wins and the two agree on the label, which is the only
+ * field read here.
+ *
+ * It used to union the agents' list under `anthropic` alone, because that was
+ * the only loop written. Leaving it that way would be the same gap the bug it
+ * fixed had, pointed at the other vendor: a chat that ran on GPT-5.6 Terra —
+ * offered to agents and nowhere else — would report a raw id where a chat on
+ * Sol reported a name.
  */
 function namedModels(provider: string): readonly ModelChoice[] {
-  const mapper = (
-    PROVIDER_MODELS[provider as AiProvider] as (typeof PROVIDER_MODELS)[AiProvider] | undefined
-  )?.choices;
-  if (provider === 'anthropic') return [...(mapper ?? []), ...AGENT_MODELS.choices];
-  return mapper ?? [];
+  const known = provider === 'anthropic' || provider === 'openai' ? (provider as AiProvider) : null;
+  if (known === null) return [];
+  return [...PROVIDER_MODELS[known].choices, ...AGENT_MODELS[known].choices];
 }
 
 /** Server-side web search, billed per request rather than per token. */

@@ -2042,6 +2042,27 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    */
   const aiSettingsResponse = async () => {
     const [ai, status] = await Promise.all([deps.settings.getAiSettings(), deps.settings.getAiStatus()]);
+    /**
+     * One agent's block: who answers, on what, and what else it could be.
+     *
+     * **`models` stays the *chosen provider's* list**, which is what an app a
+     * version behind reads to draw its picker — so a hub that has grown a
+     * second provider does not hand that app a list mixing two vendors it has
+     * no control for. `choices` is the whole table for an app that knows about
+     * both, and `choosable` is "there is a decision to make here", exactly as
+     * `mapping.choosable` means it.
+     *
+     * `provider` is derived from the model rather than stored beside it — see
+     * `agentProviderOf` — so the two can never disagree, and a picker writes
+     * that provider's default model id rather than a second setting.
+     */
+    const forAgent = (agent: { model: string; provider: AiProvider | null }) => ({
+      model: agent.model,
+      provider: agent.provider,
+      models: agent.provider === null ? [] : AGENT_MODELS[agent.provider].choices,
+      choices: { anthropic: AGENT_MODELS.anthropic.choices, openai: AGENT_MODELS.openai.choices },
+      choosable: ai.mappingChoosable,
+    });
     const forProvider = (provider: AiProvider) => ({
       hasKey: ai[provider].hasKey,
       model: effectiveModel(provider, ai[provider].model),
@@ -2057,13 +2078,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       // different question from "which model reads a device's exposes tree"
       // and is offered a different list for reasons that have nothing to do
       // with the other one.
-      assistant: { model: ai.assistant.model, models: AGENT_MODELS.choices },
+      assistant: forAgent(ai.assistant),
       // And what writes the home's rules, which is a separate choice on the
       // same list: answering questions about the house and writing the rules
       // it runs by itself are different jobs, and a home may want to spend
       // differently on them. Its own block for the reason the assistant's is
       // its own, and it replaces this agent having quietly read the mapper's.
-      automations: { model: ai.automations.model, models: AGENT_MODELS.choices },
+      automations: forAgent(ai.automations),
       portraits: deps.portraits.describe(),
     };
   };

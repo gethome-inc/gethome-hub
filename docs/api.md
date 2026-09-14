@@ -139,7 +139,7 @@ than no button.
 | `GET /automations/:id/versions` · `POST /automations/:id/revert` | `automation.manage` | what it used to say, and going back to it. `{versionId}` |
 | `POST /automations/dry-run` | `automation.manage` | check a document without saving: `{problems, warnings, shape, summary, outline}` — the same pair every rule carries, so a preview draws exactly what the saved rule would |
 | `POST /automations/templates/:key` | `automation.manage` | install a preset. A template may install **more than one** rule — "light on movement" is genuinely two — so this answers with a list |
-| `POST /automations/chat` | `automation.manage` **+** `hub.ai` | start a conversation: `{message, automationId?}` → `201 {sessionId, messages}`. **An acknowledgement, not an outcome**: `messages` is the person's own row and nothing else, and it answers the moment the hub takes the message — a turn is a provider loop with a three-minute watchdog and no client waits that long. What the agent says arrives on the opt-in `automations` stream, and its `turn` frame is what says the transcript is ready to re-read. Three refusals, all `409 {error, detail}` because they lead to three different screens: `ai_not_configured` (no key), `ai_disabled` (the owner switched AI off), `automation_needs_anthropic` (a key, but only OpenAI's — the OpenAI half of this agent is not written). `detail` is a sentence, so an app that has never met one of these codes still shows something true. The route names `automation.manage` in a refusal; the second key is checked in the handler and refused in the same `{error, permission}` shape |
+| `POST /automations/chat` | `automation.manage` **+** `hub.ai` | start a conversation: `{message, automationId?}` → `201 {sessionId, messages}`. **An acknowledgement, not an outcome**: `messages` is the person's own row and nothing else, and it answers the moment the hub takes the message — a turn is a provider loop with a three-minute watchdog and no client waits that long. What the agent says arrives on the opt-in `automations` stream, and its `turn` frame is what says the transcript is ready to re-read. Three refusals, all `409 {error, detail}` because they lead to three different screens: `ai_not_configured` (no key), `ai_disabled` (the owner switched AI off), `automation_needs_anthropic` (a key the hub holds and cannot use — a Claude subscription token, with no OpenAI key beside it; the code is kept because both apps branch on it, but it no longer means "only OpenAI's", since either vendor now runs either agent). `detail` is a sentence, so an app that has never met one of these codes still shows something true. The route names `automation.manage` in a refusal; the second key is checked in the handler and refused in the same `{error, permission}` shape |
 | `POST /automations/chat/:id/messages` | `automation.manage` **+** `hub.ai` | `{message}` → the same acknowledgement shape, and the same rule: it returns when the message is taken, never when the turn ends. Turns are chained per conversation, so a second message sent while one is running is queued rather than run beside it. A typed reply to a question is treated as the *answer* to it, since only the conversation knows whether a tool call is outstanding. **`410 conversation_ended`** only when there is nothing left to read — a session that never existed, or one past the fortnight transcripts are kept for. A hub that has merely *forgotten how to continue* (a restart, or the two-hour idle sweep) rebuilds the model's memory from the stored transcript and carries on under the same session id, because that state is the ordinary one and refusing it made the whole conversations list read-only |
 | `GET /automations/chats` | `automation.manage` **+** `hub.ai` | every conversation this home has had, newest first: `[{sessionId, startedAt, updatedAt, messageCount, title, live, spend?}]`. `title` is the **first thing the person said** — the agent's opening line is about the home rather than about what was asked — and `live` is whether it can still be *continued*, which is a different question from whether it can be read. `spend` is `{usd, provider, modelId, model}`: what it cost and what answered, with `model` the label to draw and `modelId` the id as recorded. It is **absent rather than zero** when the hub cannot say — `ai_runs` keeps sixty runs and a transcript a fortnight, so a readable conversation can outlive its own spend row, and `$0.00` about one that plainly cost something is a claim |
 | `GET /automations/chat/:id` | `automation.manage` **+** `hub.ai` | `{sessionId, live, spend?, messages}` — the transcript, oldest first, with the same `spend` block the list carries so a chat opened from a link says what it cost without the list having been read. `live: false` is history. A message is `{id, at, role, text, data?}` with `role` an **open** vocabulary (`user`/`agent`/`question`/`preview`/`note`); see [`docs/automations.md`](automations.md) for what `data` carries per row. **One turn can write several `preview` rows** — a reply that delivers two rules is one `agent` line followed by a card each, in submission order, so draw a card per row rather than assuming one per turn. The **first** row a round writes also carries `data.steps` — `[{text, kind, detail?}]`, what the agent did to produce it, the same three fields the `step` frame streams — so a conversation read back next week shows the working and not only the answer |
@@ -1467,12 +1467,16 @@ the second provider reads exactly what it read before — plus a per-provider ha
     "openai":    { "hasKey": true, "model": "gpt-5.6-sol", "models": [ … ] }
   },
   "mapping":   { "provider": "anthropic", "choosable": true },
-  "assistant": { "model": "claude-opus-5",
+  "assistant": { "model": "claude-opus-5", "provider": "anthropic", "choosable": true,
                  "models": [ { "id": "claude-opus-5", "label": "Opus 5",
-                               "note": "The most capable. Best at a house it has to work out.",
+                               "note": "The most capable. Best at anything it has to work out.",
                                "recommended": true },
                              { "id": "claude-sonnet-5", "label": "Sonnet 5",
-                               "note": "Quicker and cheaper. …" } ] },
+                               "note": "Quicker, and less than half the price. …" } ],
+                 "choices": { "anthropic": [ { "id": "claude-opus-5", … },
+                                             { "id": "claude-sonnet-5", … } ],
+                              "openai":    [ { "id": "gpt-5.6-sol", "label": "GPT-5.6 Sol", … },
+                                             { "id": "gpt-5.6-terra", "label": "GPT-5.6 Terra", … } ] } },
   "portraits": { "model": "gpt-image-2.5-flare", "maxPerDevice": 6, "budgetBytes": 314572800 }
 }
 ```
@@ -1512,14 +1516,33 @@ two. Write them with `PATCH /settings/ai {assistantModel}` and
 `model` fields are what will **run**, and a stored id this build no longer
 offers resolves to the default rather than being refused.
 
-**The two agents are offered the same two models and choose separately**, which
-is the point of them being two blocks: answering questions about the house and
-writing the rules it runs by itself are different jobs, and a home may want to
-spend differently on them. `automations` is new — that agent used to read
-`providers.anthropic.model`, the *mapper's* choice, which never showed because
-that list offers one model and Sonnet is not on it, and was one added choice
-away from making "which model recognises a device" silently decide "which model
-writes a rule".
+**The two agents are offered the same list and choose separately**, which is the
+point of them being two blocks: answering questions about the house and writing
+the rules it runs by itself are different jobs, and a home may want to spend
+differently on them. `automations` used to read `providers.anthropic.model`, the
+*mapper's* choice, which never showed because that list offers one model and
+Sonnet is not on it, and was one added choice away from making "which model
+recognises a device" silently decide "which model writes a rule".
+
+**And either agent runs on either vendor, so each block carries four fields
+rather than two.** `provider` is who answers; `models` is **that provider's**
+list, which is what an app a version behind draws its picker from — so a hub
+that has grown a second provider never hands such an app a list mixing two
+vendors it has no control for; `choices` is the whole table, keyed by provider,
+for an app that knows about both; and `choosable` says there is a decision here
+at all, exactly as `mapping.choosable` does (both keys stored).
+
+**There is no `assistantProvider` to write, and that is deliberate.** Model ids
+do not collide across vendors, so the provider is *derived* from the model and
+one column says both things — a provider picker writes that provider's default
+model id. A second stored field would be a second thing to disagree with the
+first. **And the resolution is key-aware**, which is the half a list-only
+version gets wrong: a home that has only ever had an OpenAI key still has
+`claude-opus-5` stored — it is the default and nobody chose it — so a stored
+choice counts only while its provider has a usable key, and otherwise falls back
+to the provider that does, at that provider's default. A stored Anthropic
+*subscription token* is not a usable key here, since the loops authenticate with
+an API key.
 
 **`provider` and `mapping.provider` are the same answer**: which provider would
 recognise a device right now. With one key there is no choice to make; with two,

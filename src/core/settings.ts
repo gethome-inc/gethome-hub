@@ -7,7 +7,7 @@ import { decryptSecret, encryptSecret, type EncryptedValue } from './crypto.js';
 // no runtime cycle. It is worth it to make `getAiSettings` answer with the
 // model that will *run* rather than the column — the mapper's one expensive
 // bug was exactly that gap between the two.
-import { effectiveAgentModel } from '../ai/models.js';
+import { effectiveAgentModel, type UsableProviders } from '../ai/models.js';
 
 /**
  * The providers the hub can hold a credential for.
@@ -59,8 +59,20 @@ export interface AiAgentSettings {
    * The model the agent runs on, as it will actually run — never the stored
    * column. Null is not a state here: `effectiveAgentModel` has already
    * turned an absent or retired choice into the default.
+   *
+   * Empty only when neither provider can authenticate, which the caller has
+   * already refused on (`hasKey`); `provider` is null in exactly that case.
    */
   model: string;
+  /**
+   * Whose key answers, derived from the model rather than stored beside it.
+   *
+   * Ids do not collide across vendors, so one column says both things and the
+   * two can never disagree — `agentProviderOf`'s whole argument. Null means no
+   * provider this hub holds a usable key for, which is the `ai_not_configured`
+   * case and not a setting anybody chose.
+   */
+  provider: AiProvider | null;
 }
 
 export interface AiSettings {
@@ -231,6 +243,18 @@ export class SettingsService {
     const anthropic = await this.providerSettings('anthropic');
     const openai = await this.providerSettings('openai');
     const chosen = await this.get<AiProvider>('ai_mapping_provider');
+    /**
+     * Which providers an *agent* could authenticate as.
+     *
+     * A stored Anthropic subscription token is a key the hub holds and cannot
+     * use — the chat loops authenticate with an API key — so it is not
+     * usability, and treating it as such would point every conversation at a
+     * vendor that answers 401 while a working OpenAI key sat beside it.
+     */
+    const usable: UsableProviders = {
+      anthropic: anthropic.hasKey && authType !== LEGACY_OAUTH_AUTH_TYPE,
+      openai: openai.hasKey,
+    };
     return {
       provider: this.resolveMappingProvider(chosen, anthropic, openai),
       model: anthropic.model,
@@ -241,10 +265,8 @@ export class SettingsService {
       anthropic,
       openai,
       mappingChoosable: anthropic.hasKey && openai.hasKey,
-      assistant: { model: effectiveAgentModel(await this.get<string>('ai_assistant_model')) },
-      automations: {
-        model: effectiveAgentModel(await this.get<string>('ai_automations_model')),
-      },
+      assistant: agentSettings(await this.get<string>('ai_assistant_model'), usable),
+      automations: agentSettings(await this.get<string>('ai_automations_model'), usable),
     };
   }
 
@@ -385,4 +407,18 @@ export class SettingsService {
   async setAiStatus(status: AiStatus): Promise<void> {
     await this.set('ai_status', status);
   }
+}
+
+/**
+ * One stored column, as the pair of facts every caller needs.
+ *
+ * Written once and used for both agents: the assistant and the automations
+ * agent ask the identical question of two different columns, and two copies of
+ * the "what is null" reasoning is exactly where the two would drift.
+ */
+function agentSettings(stored: string | null, usable: UsableProviders): AiAgentSettings {
+  const resolved = effectiveAgentModel(stored, usable);
+  return resolved === null
+    ? { model: '', provider: null }
+    : { model: resolved.modelId, provider: resolved.provider };
 }

@@ -4,8 +4,8 @@ import type { AiRunKind } from '../core/ai-runs.js';
 import type { AccessService } from '../core/access.js';
 import type { ActivityService } from '../core/activity.js';
 import type { AutomationEngine } from '../automations/engine.js';
+import type { AiProvider } from '../core/settings.js';
 import type { HubCommand } from '../schema/index.js';
-import { effectiveAgentModel } from './models.js';
 import type { AssistantTurn } from './assistant-agent.js';
 import type { AssistantToolContext, DelegateOutcome } from './assistant-tools.js';
 import { delegateAgents, type DelegateAgent } from './agents/registry.js';
@@ -79,6 +79,7 @@ export interface AssistantChatOptions extends ChatRuntimeOptions {
   automationChat: AutomationChat;
   /** Overridden in tests, so the suite never reaches a provider. */
   createConversation?: (input: {
+    provider: AiProvider;
     modelId: string;
     secret: string;
     systemPrompt: string;
@@ -376,19 +377,31 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
     const ai = await this.options.settings.getAiSettings();
     if (!ai.enabled) throw new AgentNotConfiguredError('ai_disabled');
     if (!ai.hasKey) throw new AgentNotConfiguredError('ai_not_configured');
-    if (!ai.anthropic.hasKey || ai.legacySubscriptionToken) {
+    /**
+     * **Whose key answers, and what runs on it — both from `getAiSettings`.**
+     *
+     * This used to refuse anything but Anthropic outright, which was honest
+     * while only that loop was written and is now simply wrong: a home with an
+     * OpenAI key runs on it. What is left of that refusal is the one case it
+     * was always really about — a stored Anthropic *subscription token*, which
+     * is a credential the hub holds and cannot use, with no OpenAI key beside
+     * it. The code stays because both apps branch on it; the sentence says the
+     * true thing now.
+     */
+    const provider = ai.assistant.provider;
+    if (provider === null) {
       throw new AgentNotConfiguredError(
         'automation_needs_anthropic',
-        'The assistant needs an Anthropic key at the moment. Add one in the home’s AI ' +
-          'settings; device portraits and recognition carry on using OpenAI.',
+        'The key saved for this home can’t be used to talk to a model — a Claude subscription ' +
+          'token is not an API key. Add an Anthropic or OpenAI API key in the home’s AI settings.',
       );
     }
-    const secret = await this.options.settings.aiKey('anthropic');
+    const secret = await this.options.settings.aiKey(provider);
     if (!secret) throw new AgentNotConfiguredError('ai_not_configured');
 
     // What will *run*, never the stored column — the one gap that cost the
     // mapper a release, and `getAiSettings` has already closed it here.
-    const modelId = effectiveAgentModel(ai.assistant.model);
+    const modelId = ai.assistant.model;
 
     // Imported here rather than at the top, the `lazy.ts` seam: a hub nobody
     // has talked to never loads the SDK.
@@ -411,12 +424,13 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
      * shipped untested and reached a phone as a 500.
      */
     if (this.options.createConversation) {
-      return this.options.createConversation({ modelId, secret, systemPrompt, taskPrompt });
+      return this.options.createConversation({ provider, modelId, secret, systemPrompt, taskPrompt });
     }
 
     const { createAssistantConversation } = await import('./assistant-agent.js');
     return createAssistantConversation({
       auth: { secret },
+      provider,
       modelId,
       systemPrompt,
       taskPrompt,

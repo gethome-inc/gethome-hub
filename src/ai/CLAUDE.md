@@ -602,11 +602,36 @@ domains — update them in the same change.
   retention, the list. A subclass supplies which model and prompt open a
   conversation and what to write down for the arms only it has; the three arms
   *every* agent has are the runtime's, so a new agent cannot get them subtly
-  different. `chat/agent-loop.ts` is the same argument for the parts that are
-  the **API's** shape — the two cache breakpoints, `display: 'summarized'`, the
-  abort that becomes a sentence, and `QuestionGate`, which is the rule that no
-  request may carry a `tool_use` with no `tool_result` after it. Each agent
-  keeps its own `pump`, because what *ends* a turn genuinely differs.
+  different. Each agent keeps its own `pump`, because what *ends* a turn
+  genuinely differs.
+  **`chat/agent-loop.ts` is the same argument for what is neither the vendor's
+  nor the agent's, and it imports no SDK** — `agent-core.ts`'s rule, one
+  subsystem over, and it was missing here for as long as both agents typed
+  their pumps against `Anthropic.*`: "the assistant runs on Claude" was a fact
+  about the **module graph** rather than about any setting, and a home with only
+  an OpenAI key was refused outright. It holds `ChatRound`
+  (`{said, calls, stop, refusal?}`), `ChatToolCall`/`ChatToolResult`, and
+  `QuestionGate` — the rule that no request may carry a tool call with no result
+  after it. **`ChatStop` is four words for what two vendors spell differently**:
+  Anthropic's `end_turn`/`tool_use`/`refusal`/`pause_turn` and OpenAI's `status`
+  plus a refusal block inside the output collapse to the same four questions,
+  and a pump that branched on the raw value would be a pump per vendor.
+  **`ChatTransport` is where each vendor's shape lives, and it owns the message
+  history** — Anthropic wants content blocks with thinking replayed verbatim,
+  OpenAI an item array with encrypted reasoning echoed back, and a neutral
+  history converted at the boundary would be a third representation to keep
+  correct. `chat/anthropic-transport.ts` keeps the two cache breakpoints,
+  `display: 'summarized'` and the streamed `messages.stream`;
+  `chat/openai-transport.ts` is the Responses API over plain `fetch` — **no
+  second SDK for a Pi to download**, the same decision `openai-agent.ts` made —
+  with `summary: 'auto'` as that vendor's spelling of the summarized-thinking
+  lesson, `store: false`, and an SSE parser that **buffers across chunks**,
+  since a frame split mid-delta is the ordinary case rather than the edge.
+  `chat/transport.ts` picks one behind a **dynamic import**, so a home with one
+  key never loads the other vendor's client. `test/ai-openai-chat.test.ts`
+  stubs `fetch` with a real SSE body rather than a parsed object, for the reason
+  `test/ai-agent.test.ts` learned: a mock laxer than the thing it stands in for
+  tests the mock.
   **One transcript store**, told apart by a nullable `surface` column on
   `automation_chat_messages` (null = `automation`, which every row written
   before it is). Two tables would be a second retention sweep, a second recap
@@ -651,12 +676,26 @@ domains — update them in the same change.
   paragraph and a release of both apps. `permission` is checked when the tool
   runs, so a member whose role cannot hand a job over gets a sentence the model
   reads out rather than a capability silently absent.
-  **The agents' model list is its own** (`AGENT_MODELS` — Opus 5 and
-  Sonnet 5), and the mapper's one-model list is untouched: a descriptor is
-  cached against a device model and shapes every unit of it for ever, while a
-  chat is many small rounds answered with another message when the reply is
-  poor. **One list, a column each**: the assistant and the automations agent
-  are offered the same two and choose independently
+  **The agents' model list is its own** (`AGENT_MODELS` — Opus 5 and Sonnet 5
+  on Anthropic, GPT-5.6 Sol and Terra on OpenAI), and the mapper's one-model
+  list is untouched: a descriptor is cached against a device model and shapes
+  every unit of it for ever, while a chat is many small rounds answered with
+  another message when the reply is poor. **The provider follows the model id
+  and there is no second column** (`agentProviderOf`): ids do not collide across
+  vendors — `priceOf` has relied on that since the mapper had two — so one
+  setting says both things and they cannot disagree, and an app's provider
+  picker writes that provider's default model id. **And resolution is
+  key-aware**, which is the half a list-only version gets wrong: a home that has
+  only ever had an OpenAI key still has `claude-opus-5` stored, because it is
+  the default and nobody chose it, so resolving on the offered list alone points
+  every conversation at a vendor the hub cannot authenticate to and answers
+  `ai_not_configured` on a home that is configured. A stored choice counts while
+  its provider is *usable*; otherwise the hub falls back to the provider that
+  is. A **retired** id keeps its vendor off `PRICING` rather than `AGENT_MODELS`
+  — the list answers `null` for one, which is the point of it — since the vendor
+  was a real choice somebody made and the retired id was not.
+  **One list, a column each**: the assistant and the automations agent
+  are offered the same lists and choose independently
   (`ai_assistant_model`, `ai_automations_model`), because answering questions
   about the house and writing the rules it runs by itself are different jobs a
   home may want to spend differently on. The automations agent had no column of

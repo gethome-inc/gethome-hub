@@ -11,25 +11,48 @@ answers questions about the home and about the app, works devices and presses
 scenes, says what it can and cannot do — and hands the jobs that belong to
 another agent over to it.
 
-It runs on Anthropic, on a model the home chooses between **Opus 5** and
-**Sonnet 5**. That list is its own rather than the mapper's, and the difference
-is the trade: a mapping descriptor is cached against a device *model* and
-shapes every unit of it the home ever meets, so a cheaper tier that is wrong
-once is wrong for ever and the mapper offers exactly one model. A conversation
-is many small rounds, read the moment they arrive and answered with another
-message when the reply is poor — so what a round costs is a real choice
-somebody can make, and both halves of it are visible.
+It runs on **either vendor**, on a model the home chooses: **Opus 5** or
+**Sonnet 5** on Anthropic, **GPT-5.6 Sol** or **GPT-5.6 Terra** on OpenAI. That
+list is its own rather than the mapper's, and the difference is the trade: a
+mapping descriptor is cached against a device *model* and shapes every unit of
+it the home ever meets, so a cheaper tier that is wrong once is wrong for ever
+and the mapper offers exactly one model per provider. A conversation is many
+small rounds, read the moment they arrive and answered with another message
+when the reply is poor — so what a round costs is a real choice somebody can
+make, and both halves of it are visible.
 
-**Two lists means `modelLabel` has to read both**, and it did not. It names a
-model that has already run — the label an app draws over a finished
-conversation — and it searched the mapper's `PROVIDER_MODELS` alone. Sonnet 5
-is on the assistant's list and nowhere else, so a chat that ran on it reported
-`claude-sonnet-5` where a chat on Opus reported "Opus 5", and an app drew a raw
-id at the top of one conversation and a name at the top of the next, which
-reads as the app failing to translate rather than as the hub naming two
+**It was Anthropic-only, and not as a policy.** `chat/agent-loop.ts` typed every
+signature against `Anthropic.*` and both agents imported the SDK at the top of
+the file, so "the assistant runs on Claude" was a fact about the *module graph*
+rather than about any setting — and `openConversation` refused outright when the
+home had no Anthropic key, with a working OpenAI one beside it.
+`ChatTransport` is what changed that: a `ChatRound` is `{said, calls, stop}`,
+each vendor's shape lives behind one implementation of it, and
+`createChatTransport` loads whichever half is needed, so a home with only an
+OpenAI key never pulls the Anthropic client into its graph. That is
+`agent-core.ts`'s rule, which the mapper has kept since it had two providers.
+
+**The provider follows the model id**, and there is no second stored column —
+ids do not collide across vendors, so one setting says both things and they can
+never disagree. What is new beside it is that resolution is **key-aware**: a
+home that has only ever had an OpenAI key still has `claude-opus-5` stored (it
+is the default and nobody chose it), so a stored choice counts only while its
+provider has a usable key, and otherwise falls back to the one that does. A
+stored Claude *subscription token* is not a usable key — the loops authenticate
+with an API key — and a home holding only that is the one case
+`automation_needs_anthropic` is still for.
+
+**Two lists per vendor means `modelLabel` has to read all of them**, and it did
+not. It names a model that has already run — the label an app draws over a
+finished conversation — and it searched the mapper's `PROVIDER_MODELS` alone.
+Sonnet 5 is on the agents' list and nowhere else, so a chat that ran on it
+reported `claude-sonnet-5` where a chat on Opus reported "Opus 5", and an app
+drew a raw id at the top of one conversation and a name at the top of the next,
+which reads as the app failing to translate rather than as the hub naming two
 different things. Both surfaces record into one `ai_runs` table and both ask
-this question of it, so the answer covers the union — the assistant's list
-under Anthropic, where it belongs, since only that loop is written.
+this question of it, so the answer covers the union, per provider — leaving the
+agents' list under `anthropic` alone would be the same gap pointed at the other
+vendor.
 
 ## Two agents, one runtime
 
@@ -58,13 +81,25 @@ which surface its rows belong to. The three arms **every** agent has — it said
 something, it asked something, it ran out — are the runtime's, so a new agent
 cannot get them subtly different.
 
-`chat/agent-loop.ts` is the same argument one layer down, for the parts that
-are the *API's* shape rather than any one agent's: the two cache breakpoints,
-`display: 'summarized'` (the default is `omitted`, which streams empty thinking
-blocks and reads as a silent minute), the abort that has to become a sentence
-rather than a stack trace, and `QuestionGate` — the rule that no request may
-ever carry a `tool_use` with no `tool_result` after it. Every one of those was
-learned by breaking something; a second copy is a second place to unlearn it.
+`chat/agent-loop.ts` is the same argument one layer down — and it imports no
+SDK. It holds the vocabulary a pump works in (`ChatRound`, `ChatToolCall`,
+`ChatToolResult`, the four-word `ChatStop`) and `QuestionGate`, the rule that no
+request may ever carry a tool call with no result after it. Each vendor's own
+shape sits behind `ChatTransport`: `chat/anthropic-transport.ts` keeps the two
+cache breakpoints, `display: 'summarized'` (the default is `omitted`, which
+streams empty thinking blocks and reads as a silent minute) and the streamed
+`messages.stream` that a non-streaming `create` would refuse outright;
+`chat/openai-transport.ts` is the Responses API over plain `fetch` — no second
+SDK for a Pi to download — with `summary: 'auto'` as that vendor's spelling of
+the same lesson and `store: false` with the encrypted reasoning replayed by hand.
+Every one of those was learned by breaking something; a second copy is a second
+place to unlearn it.
+
+`ChatStop` is worth its own line. Anthropic says
+`end_turn`/`tool_use`/`refusal`/`pause_turn` and OpenAI answers a `status` with
+a refusal block inside the output; both collapse to the same four questions —
+did it finish, does it want tools, did it decline, should we ask again — and a
+pump that branched on the raw value would be a pump per vendor.
 
 **Reporting what a round said before it went off to work is there too**, for
 the same reason: a model narrates and then calls something, only the last
@@ -219,8 +254,10 @@ rather than a capability that is silently absent for reasons nobody explains.
 ## Refusals
 
 **Two kinds, and they are not the same thing.** A *classifier* refusal is the
-model declining a request: HTTP 200, `stop_reason: "refusal"`, and a
-`stop_details` category. It is a content outcome, not an error — code that
+model declining a request, and it reaches a pump as `ChatStop: 'refusal'` —
+HTTP 200 on both vendors, `stop_reason: "refusal"` with a `stop_details`
+category on Anthropic, a `refusal` content block on OpenAI, which reports no
+category at all and therefore always takes the generic sentence. It is a content outcome, not an error — code that
 reads `content[0]` without checking the stop reason breaks on it, which is why
 both pumps check first. `refusalSentence` (`chat/agent-loop.ts`) turns the
 category into words: `reasoning_extraction` is somebody asking the assistant to
@@ -247,7 +284,8 @@ log.
 
 The other three refusals are the automations agent's, carrying the same codes
 because both apps already branch on them: `ai_not_configured`, `ai_disabled`,
-`automation_needs_anthropic`. Each carries a sentence, so an app that has never
+`automation_needs_anthropic` — the last narrowed to what is still true of it, a
+credential the hub holds and cannot use. Each carries a sentence, so an app that has never
 met a code a later build adds still shows something true.
 
 The test seam (`createConversation`) sits **after** every one of them. Above

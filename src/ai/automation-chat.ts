@@ -4,7 +4,6 @@ import type { AutomationEngine } from '../automations/engine.js';
 import type { AutomationStore } from '../automations/store.js';
 import { automationDocumentSchema, type AutomationDocument } from '../automations/schema.js';
 import { automationShape, describeAutomation } from '../automations/summarize.js';
-import { effectiveAgentModel } from './models.js';
 import type { AutomationConversation, AutomationTurn } from './automation-conversation.js';
 import {
   AgentNotConfiguredError,
@@ -48,6 +47,7 @@ export interface AutomationChatOptions extends ChatRuntimeOptions {
   store: AutomationStore;
   /** Overridden in tests, so the suite never reaches a provider. */
   createConversation?: (input: {
+    provider: AiProvider;
     modelId: string;
     secret: string;
     systemPrompt: string;
@@ -243,24 +243,30 @@ export class AutomationChat extends ChatRuntime<AutomationTurn> {
      * mapper's.**
      *
      * `ai.provider` answers "which model reads a device's exposes tree" — a
-     * real choice, because both halves of *that* are written. Only one half of
-     * this one is, so reading the same field turned an unrelated preference
-     * into a refusal: a home with both keys that recognises devices with
-     * OpenAI could not write a rule at all, with a perfectly good Anthropic
-     * key sitting beside it. Worse, the refusal was an `AiUnavailableError`
-     * the route rethrew as a 500.
+     * different question, and reading the same field once turned an unrelated
+     * preference into a refusal: a home with both keys that recognises devices
+     * with OpenAI could not write a rule at all, with a perfectly good
+     * Anthropic key sitting beside it. Worse, the refusal was an
+     * `AiUnavailableError` the route rethrew as a 500.
      *
-     * So: run on Anthropic whenever the home has a key that can, and refuse
-     * only when it genuinely has none. Switching the *mapping* provider must
-     * not change whether rules can be written, in either direction.
+     * It also used to fall back to `'openai'` and then refuse it, because only
+     * the Anthropic loop was written. Both loops exist now
+     * (`chat/transport.ts`), so the fallback is a real one: the provider comes
+     * from this agent's own stored model, and from whichever key the home
+     * actually has when that model's vendor is not one of them.
      *
-     * A subscription token is not an API key — the loop authenticates with
-     * `x-api-key` — so a home holding only that has, for this purpose, no
-     * Anthropic key at all.
+     * A subscription token is not an API key — the loops authenticate with a
+     * key — so a home holding only that has, for this purpose, no Anthropic key
+     * at all, and `getAiSettings` has already decided that.
      */
-    const provider: AiProvider = ai.anthropic.hasKey && !ai.legacySubscriptionToken
-      ? 'anthropic'
-      : 'openai';
+    const provider = ai.automations.provider;
+    if (provider === null) {
+      throw new AgentNotConfiguredError(
+        'automation_needs_anthropic',
+        'The key saved for this home can’t be used to talk to a model — a Claude subscription ' +
+          'token is not an API key. Add an Anthropic or OpenAI API key in the home’s AI settings.',
+      );
+    }
     const secret = await this.options.settings.aiKey(provider);
     if (!secret) throw new AgentNotConfiguredError('ai_not_configured');
 
@@ -272,16 +278,17 @@ export class AutomationChat extends ChatRuntime<AutomationTurn> {
      * writes a rule" shared an answer. It never showed, because the mapper
      * offers one model and Sonnet is not on its list, so `effectiveModel`
      * handed back Opus whatever was stored. Now it reads its own column
-     * through `AGENT_MODELS`, which is the same two models the assistant is
-     * offered and a choice made separately: answering questions about the
-     * house and writing the rules it runs by itself are different jobs, and a
-     * home may want to spend differently on them.
+     * through `AGENT_MODELS`, which is the same list the assistant is offered
+     * and a choice made separately: answering questions about the house and
+     * writing the rules it runs by itself are different jobs, and a home may
+     * want to spend differently on them.
      *
-     * `effectiveAgentModel`, never the stored column — the one bug that cost
-     * the mapper a release: every surface that *reported* a model went through
-     * it while the call that picked one to run read the column.
+     * Resolved by `getAiSettings` rather than here — never the stored column,
+     * which is the one bug that cost the mapper a release: every surface that
+     * *reported* a model went through the resolver while the call that picked
+     * one to run read the column.
      */
-    const modelId = effectiveAgentModel(ai.automations.model);
+    const modelId = ai.automations.model;
 
     const home = this.options.engine.homeView();
     const editing =
@@ -325,12 +332,13 @@ export class AutomationChat extends ChatRuntime<AutomationTurn> {
      * with no test at all and reached a phone as a 500.
      */
     if (this.options.createConversation) {
-      return this.options.createConversation({ modelId, secret, systemPrompt, taskPrompt });
+      return this.options.createConversation({ provider, modelId, secret, systemPrompt, taskPrompt });
     }
 
     const { createAutomationConversation } = await import('./automation-agent.js');
     return createAutomationConversation({
       auth: { secret },
+      provider,
       modelId,
       systemPrompt,
       taskPrompt,
