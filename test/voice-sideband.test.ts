@@ -299,11 +299,28 @@ describe('what the line cost', () => {
     expect(h.spend).toEqual([{ sessionId: 'chat-1', seconds: 9 }]);
   });
 
-  it('is nothing at all for a session that never said', async () => {
+  /**
+   * **A session that never said what it cost still has to be settled**, which
+   * is the half this used to assert the absence of.
+   *
+   * `session.usage.updated` arrives about once a minute, so the sessions that
+   * carry no number are precisely the short ones — a phone force-quit forty
+   * seconds in, a train tunnel. The host hangs two things off this call: what
+   * the line cost, and whether the conversation is still being *spoken* to. Not
+   * calling it left the second one marked, so a follow-up typed into the same
+   * conversation hours later was logged as speech. Zero is the honest figure,
+   * and `AssistantChat.recordVoiceSpend` writes no `ai_runs` row for it —
+   * `$0.00` against a line that plainly ran is a claim where nothing is true.
+   */
+  it('is settled at zero for a session that never said, so the mark still clears', async () => {
     const h = harness();
     h.read({ type: 'session.closed', reason: 'connection_lost' });
     await h.settle();
-    expect(h.spend).toEqual([]);
+    expect(h.spend).toEqual([{ sessionId: 'chat-1', seconds: 0 }]);
+
+    // Still once, however many times the line ends.
+    await h.settle();
+    expect(h.spend).toHaveLength(1);
   });
 });
 

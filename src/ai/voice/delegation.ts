@@ -21,9 +21,10 @@ import { LIVE_APPEND_CHARS, LIVE_AUDIO_EVENTS, LIVE_EVENTS } from './live-wire.j
  * - **What it cost.** `session.usage.updated` and `session.closed` carry the
  *   seconds OpenAI will bill, read here rather than measured by a stopwatch on
  *   a phone that may be force-quit.
- * - **Nothing about audio.** Audio arrives here whether we want it or not and
- *   is dropped before it is parsed; media itself stays on the phone's WebRTC
- *   connection, and this is explicitly not a place to send any.
+ * - **Nothing about audio.** Media stays on the phone's WebRTC connection and
+ *   never becomes JSON, so none of it reaches here; the audio event names are
+ *   still dropped on sight as insurance, and this is explicitly not a place to
+ *   send any.
  */
 
 /** What answering a delegation needs from the hub, narrowed to two calls. */
@@ -51,6 +52,9 @@ export interface VoiceDelegationOptions {
 
 /** How much of a frame is scanned for its `type` before giving up and parsing. */
 const TYPE_SCAN_CHARS = 400;
+
+/** How many of our own append ids are kept, for correlating a refusal. */
+const APPENDS_REMEMBERED = 32;
 
 /**
  * How much of what was said is carried into one request.
@@ -100,8 +104,10 @@ export class VoiceDelegation {
   // ── Reading ────────────────────────────────────────────────────────────────
 
   read(raw: string): void {
-    // The cheap half: a frame whose type is audio is dropped without being
-    // parsed at all, which is most of what arrives here.
+    // The cheap half: the type is read off a bounded prefix, so an audio frame
+    // is dropped without being parsed. A WebRTC session sends none — see
+    // `LIVE_AUDIO_EVENTS` — but the transcript deltas below arrive several
+    // times a second and the scan is what keeps that off a 1 GHz core.
     if (LIVE_AUDIO_EVENTS.has(frameType(raw) ?? '')) return;
 
     let frame: Record<string, unknown>;
@@ -164,9 +170,19 @@ export class VoiceDelegation {
       }
       case LIVE_EVENTS.error: {
         const error = frame['error'] as Record<string, unknown> | undefined;
+        // **A refused append is silence in a room, so it is named as one.**
+        // `error.client_event_id` is the API's own correlation back to the
+        // command that failed, and the command that matters here is the one
+        // carrying an answer — an append over the 500-token cap is refused,
+        // the person hears nothing, and a line reading "the session reported
+        // an error" is the least useful possible way to find that out.
+        const cause = error?.['client_event_id'];
+        const wasOurs = typeof cause === 'string' && this.appended.has(cause);
         this.options.log.warn(
-          { detail: error?.['message'], code: error?.['code'] },
-          'voice: the session reported an error',
+          { detail: error?.['message'], code: error?.['code'], ...(wasOurs ? { cause } : {}) },
+          wasOurs
+            ? 'voice: the session refused an answer, so nothing was said'
+            : 'voice: the session reported an error',
         );
         return;
       }
@@ -266,28 +282,58 @@ export class VoiceDelegation {
   }
 
   private send(kind: 'commentary' | 'thinking', delegationId: string, content: string): void {
+    const eventId = `${kind}_${this.claimed.size}_${Date.now()}`;
+    this.remember(eventId);
     this.options.send({
       type: `session.${kind}.append`,
-      event_id: `${kind}_${this.claimed.size}_${Date.now()}`,
+      event_id: eventId,
       delegation_id: delegationId,
       content: content.slice(0, LIVE_APPEND_CHARS),
     });
   }
 
   /**
-   * Write down what the line cost, **once**.
+   * The appends this session has sent, so a refusal can be named as one.
+   *
+   * Bounded, because it exists only to read an `error` arriving moments later
+   * and a session is minutes long — the oldest entry is one nothing could
+   * still be failing about.
+   */
+  private readonly appended = new Set<string>();
+
+  private remember(eventId: string): void {
+    this.appended.add(eventId);
+    if (this.appended.size > APPENDS_REMEMBERED) {
+      const oldest = this.appended.values().next().value;
+      if (oldest !== undefined) this.appended.delete(oldest);
+    }
+  }
+
+  /**
+   * Say the line has closed, **once**, and what it cost if the session said.
    *
    * A session that closes twice — the event, then the socket — must not be
-   * billed twice, and one that ends without ever saying records nothing rather
-   * than guessing.
+   * billed twice, and one that ends without ever saying what it cost records
+   * nothing rather than guessing.
+   *
+   * **But it is still told, which is the half that was missing.**
+   * `session.usage.updated` arrives about once a minute, so a session that ran
+   * for forty seconds and then dropped — a phone force-quit, a train tunnel —
+   * never carried a number at all, and the early return meant the host was
+   * never told the line had gone either. What the host hangs off that is
+   * whether the conversation is still being *spoken* to, so the mark stayed
+   * and a follow-up typed into it hours later was logged as speech. Zero is
+   * the honest number for a line nobody could measure, and the host writes no
+   * row for it.
    */
   async settle(): Promise<void> {
     if (this.spent) return;
     this.spent = true;
-    const seconds = this.seconds;
-    if (seconds === undefined || seconds <= 0) return;
     try {
-      await this.options.host.recordVoiceSpend({ sessionId: this.options.sessionId, seconds });
+      await this.options.host.recordVoiceSpend({
+        sessionId: this.options.sessionId,
+        seconds: this.seconds ?? 0,
+      });
     } catch (error) {
       this.options.log.warn({ error }, 'voice: could not record what a session cost');
     }
@@ -302,10 +348,7 @@ function finite(value: unknown): number | undefined {
 /**
  * The frame's `type`, off a bounded prefix.
  *
- * **The whole point is not parsing the frame.** A sideband is sent copies of
- * every audio frame in both directions, so most of what arrives is a few
- * kilobytes of base64 that nothing is going to read — and `JSON.parse` on all
- * of it, fifty times a second, is real work on a 1 GHz core. JSON does not
+ * **The point is deciding what to ignore without parsing it.** JSON does not
  * promise field order, so a frame whose `type` is not in the prefix falls
  * through to `undefined` and the caller parses properly; every frame this API
  * actually sends puts `type` first.

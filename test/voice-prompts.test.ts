@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import type { AutomationHomeView } from '../src/automations/targets.js';
 import type { ChatMessageWire } from '../src/ai/chat/chat-runtime.js';
+import type { AutomationDocument } from '../src/automations/schema.js';
 import { liveHistory, liveInstructions } from '../src/ai/voice/prompts.js';
 import { LIVE_HISTORY_MESSAGES } from '../src/ai/voice/live-wire.js';
 
@@ -22,6 +23,23 @@ import { LIVE_HISTORY_MESSAGES } from '../src/ai/voice/live-wire.js';
 const kitchenId = randomUUID();
 const lightId = randomUUID();
 const plugId = randomUUID();
+
+/** A rule somebody can press, and one the house runs by itself. */
+function rule(name: string, pressable: boolean, enabled = true) {
+  const triggers = pressable
+    ? [{ kind: 'manual' as const }]
+    : [{ kind: 'time' as const, at: '23:00' }];
+  return {
+    id: randomUUID(),
+    name,
+    enabled,
+    document: {
+      name,
+      triggers,
+      actions: [{ kind: 'logActivity' as const, message: name }],
+    } as unknown as AutomationDocument,
+  };
+}
 
 function home(): AutomationHomeView {
   return {
@@ -96,6 +114,37 @@ describe('the voice prompt', () => {
     const long = liveInstructions({ home: crowded, timezone: 'UTC' });
     expect(long).toContain('Plug 0');
     expect(long).not.toContain('Plug 199');
+  });
+
+  /**
+   * **A scene has the same problem a device has and had none of the fix.**
+   *
+   * The voice cannot run one — under client delegation it has no tools at all
+   * — but "put Movie Night on" has to be heard as a *name* rather than as
+   * three words, and said back the way the home spells it, which is the whole
+   * argument the device names were already carrying. Only the ones somebody
+   * could actually ask for: a `watching` rule is something the house does by
+   * itself and nobody says its name out loud, and a switched-off rule is not a
+   * thing to offer.
+   */
+  it('names the scenes somebody could ask for, and no others', () => {
+    const withRules = home();
+    withRules.automations = [
+      rule('Movie night', true),
+      rule('Goodnight', false),
+      rule('Away', true, false),
+    ];
+    const prompt = liveInstructions({ home: withRules, timezone: 'UTC' });
+
+    expect(prompt).toContain('Movie night');
+    // A rule that watches for something, and one switched off.
+    expect(prompt).not.toContain('Goodnight');
+    expect(prompt).not.toContain('Away');
+  });
+
+  /** A home with none grows no heading, rather than an empty one. */
+  it('says nothing about scenes in a home that has none', () => {
+    expect(liveInstructions({ home: home(), timezone: 'UTC' })).not.toContain('SCENES');
   });
 
   it('opens on what was said, not on what a page did', () => {

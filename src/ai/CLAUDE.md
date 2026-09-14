@@ -783,11 +783,37 @@ domains — update them in the same change.
   `Delegation policy` split into *Backend tools* / *Delegate when* / *Do not
   delegate when*), plus the two "optional" controls a **room** makes mandatory:
   keep listening through a pause, and don't treat a television as a request.
-  What is left beside the policy is the home's **names**, bounded by
-  `NAME_LIMIT` because the live model's context window is small — no ids,
-  endpoints or capabilities. `test/voice-prompts.test.ts` pins the labels and
+  What is left beside the policy is the home's **names** — rooms, devices, and
+  the scenes somebody could ask for, bounded by `NAME_LIMIT` because the live
+  model's context window is small — no ids, endpoints or capabilities. The
+  scenes are there for the devices' own reason: the voice cannot run one, but
+  "put Movie night on" has to be heard as a *name* and said back the way the
+  home spells it. Only pressable, enabled rules, since nobody asks a `watching`
+  rule for anything out loud. `test/voice-prompts.test.ts` pins the labels and
   the bound, because the way it regresses is somebody flattening the policy into
-  prose or copying the assistant's prompt back in. **It is the same transcript, both ways** —
+  prose or copying the assistant's prompt back in.
+  **The answer is written for the ear at the other end.** The voice prompt used
+  to ask GPT-Live to relay the assistant's answer word for word — a rule the
+  API will not keep (`commentary` is documented as content the model is trained
+  to paraphrase) defending text that should never have been handed over in that
+  shape (the assistant writes for a three-inch phone column, bullets and bold
+  included). So `askAloud` puts one line on `ChatSession.priming` and the
+  assistant's system prompt carries a *SOMETIMES YOU ARE BEING SPOKEN TO*
+  section it switches on: no formatting, numbers as a person says them, one or
+  two sentences, a transcript read as speech, nothing announced as done that
+  was not done. **The rules live in the system prompt and only the marker is
+  per turn**, because that prompt is byte-identical for the life of a build and
+  sits behind a cache breakpoint. Priming rather than the message itself for
+  the reason `rememberSaved` uses it: it reaches the model and is never written
+  down, and the row this turn writes is what the person actually said.
+  **And a question is an answer.** `askAloud` took `agent` and `note` rows
+  only, which drops the third arm — `ask_user`, which is exactly where this
+  agent's prompt sends it when a request is ambiguous about *what to do*, and
+  the commonest thing to be ambiguous about out loud. The scan fell off the
+  end, `null` reached the sideband as "that could not be worked out", and a
+  refusal was spoken over a good question with two tappable options. Question
+  rows are spoken now with their **options folded into the sentence**, because
+  the model writes the choices into `options` and leaves the question bare. **It is the same transcript, both ways** —
   `askAloud` writes rows under the caller's own member id so the page fills
   in while somebody talks and `revive()` can continue it by typing, and
   `liveHistory` seeds the last few exchanges into `session.input` so pressing
@@ -836,7 +862,14 @@ domains — update them in the same change.
   `session.closed` for the last word), read on the sideband and recorded once
   however the line ended, rather than the phone's stopwatch they used to be: a
   phone can be force-quit and a stopwatch counts the dial and the teardown too.
-  A session that ends without ever saying records nothing rather than guessing. And
+  Clamped to `SIDEBAND_MAX_SECONDS`, since nothing can have cost more than the
+  socket reading it stayed attached for.
+  **A session that never said still settles, at zero.** Usage arrives about
+  once a minute, so the sessions carrying no number are exactly the short ones
+  — and settling clears the `spokenSessions` mark as well as writing the row,
+  so hanging both on there being a number left the mark on precisely those and
+  logged a later typed follow-up as speech. No seconds, no row: `$0.00` about a
+  line that plainly ran is a claim where nothing is the truth. And
   **`live-wire.ts` is the only file that names one of that API's fields**, with
   `LiveWire.swift` its mirror: it is the one thing here nobody can check by
   running the suite, and it has been got wrong twice — a wrong *mode* read as a

@@ -10,7 +10,7 @@ import type { HubCommand } from '../schema/index.js';
 import type { AssistantTurn } from './assistant-agent.js';
 import type { AssistantToolContext, DelegateOutcome } from './assistant-tools.js';
 import { delegateAgents, type DelegateAgent } from './agents/registry.js';
-import { LIVE_MODEL, LIVE_USD_PER_MINUTE } from './voice/live-wire.js';
+import { LIVE_MODEL, LIVE_USD_PER_MINUTE, SIDEBAND_MAX_SECONDS } from './voice/live-wire.js';
 import type { AutomationChat } from './automation-chat.js';
 import {
   AgentNotConfiguredError,
@@ -91,14 +91,21 @@ export interface AssistantChatOptions extends ChatRuntimeOptions {
 }
 
 /**
- * The longest a reported voice session may be, in seconds.
+ * The longest a voice session may be billed for here, in seconds.
  *
- * A bound on a number the *client* reports rather than a policy about how long
- * anybody may talk: the ephemeral secret expires inside half an hour, so a
- * larger figure is a bug or a lie either way, and an unbounded one would let a
- * wrong number write an alarming line into the home's ledger.
+ * A bound on a number rather than a policy about how long anybody may talk,
+ * and the one it has to agree with is the sideband's own ceiling — that socket
+ * is what reads the usage, so nothing can report more than it stayed attached
+ * for. It said half an hour against the sideband's hour for a while, on a
+ * reason that has since gone (an ephemeral client secret that expired inside
+ * thirty minutes, from the design WebRTC replaced), which would have silently
+ * under-reported a long conversation.
+ *
+ * `SIDEBAND_MAX_MS` is the number; this is it in seconds, with the same job an
+ * unbounded figure could not do — keeping a wrong number out of the home's
+ * ledger.
  */
-const VOICE_MAX_SECONDS = 30 * 60;
+const VOICE_MAX_SECONDS = SIDEBAND_MAX_SECONDS;
 
 export class AssistantChat extends ChatRuntime<AssistantTurn> {
   protected readonly surface: AgentSurface = 'assistant';
@@ -531,12 +538,16 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
    * without this, speaking became indistinguishable from typing in the one
    * place the difference is read.
    *
-   * Marked when a session opens and cleared when it reports what it cost,
-   * which is the only signal the hub gets that a line has closed. A session
-   * that ends without that — a crash, a train tunnel — leaves the mark, so a
-   * typed follow-up hours later could be logged as spoken; that is a wrong
-   * word in one row against a set that would otherwise grow for the life of
-   * the process, and the row's `memberName` and sentence are both still right.
+   * Marked when a session opens and cleared when the sideband settles, which
+   * is every way a line can end that this process is still alive to see — the
+   * session closing, the socket dropping, the ceiling, the hub letting go. It
+   * is deliberately **not** hung off a session having reported what it cost:
+   * usage arrives about once a minute, so the short sessions are exactly the
+   * ones that end with no number, and clearing on the money would have left
+   * the mark on precisely those.
+   *
+   * What is left is a hub killed outright mid-conversation, where the set goes
+   * with the process.
    */
   private readonly spokenSessions = new Set<string>();
 
@@ -601,6 +612,25 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
       (await this.open(input.sessionId, input.memberId));
     if (session.memberId !== input.memberId) return null;
 
+    /**
+     * **The one thing this round needs to know that a typed one does not.**
+     *
+     * The system prompt carries the rules (see *SOMETIMES YOU ARE BEING SPOKEN
+     * TO*) because it is byte-identical for the life of a build and therefore
+     * free after the first round; this is the marker that turns them on, and
+     * it is a line rather than a paragraph for exactly that reason.
+     *
+     * It rides on `ChatSession.priming`, the channel `revive()` already uses —
+     * so it reaches the model and is *not* written down as a message, which
+     * matters here more than anywhere: the row this turn writes is what the
+     * person said out loud, and an instruction stapled to the front of it
+     * would be read back on the page and spoken into the next round's history.
+     */
+    session.priming =
+      session.priming === undefined
+        ? AssistantChat.spokenPriming
+        : `${session.priming}\n${AssistantChat.spokenPriming}`;
+
     const before = (await this.transcript(input.sessionId)).length;
     await this.say(session, input.question, 'auto', AssistantChat.spokenOrigin);
     try {
@@ -613,13 +643,57 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
     const rows = await this.transcript(input.sessionId);
     for (let index = rows.length - 1; index >= before; index -= 1) {
       const row = rows[index];
-      if (row?.role === 'agent' || row?.role === 'note') return row.text;
+      const said = row === undefined ? null : AssistantChat.spoken(row);
+      if (said !== null) return said;
     }
     return null;
   }
 
+  /** What one spoken round is told about itself. See `askAloud`. */
+  private static readonly spokenPriming =
+    'This turn was spoken aloud and your answer will be read out by a voice. ' +
+    'Follow the spoken rules in your instructions.';
+
   /**
-   * What a voice session cost, once it is over.
+   * What the voice should say about a row this round wrote, or nothing.
+   *
+   * **A question is an answer.** This used to take `agent` and `note` rows
+   * only, which is right for the two arms a typed reply usually ends in and
+   * silently wrong for the third: `ask_user` is the tool the assistant's own
+   * prompt sends it to whenever a request is ambiguous in a way that changes
+   * what it would *do* — three lamps, the room or the house — which is the
+   * commonest thing to be ambiguous about out loud. The row was skipped, the
+   * scan fell off the end, and the person who had just asked for a light to be
+   * turned off heard *"that could not be worked out"* while a perfectly good
+   * question with two tappable options landed on a page in their pocket.
+   *
+   * **The options are folded into the sentence**, because the model writes
+   * the choices into `options` and the question bare — "Which one?" is not a
+   * question anybody can answer out loud. Speaking them is also what makes the
+   * answer work: the reply comes back through `askAloud` as another spoken
+   * turn, and `say(…, 'auto')` already routes it to `answer` because the
+   * conversation is awaiting one.
+   *
+   * `preview` and `handoff` rows stay out: a rule's document and a brief
+   * written from one agent to another are page furniture, and the `handoff`
+   * arm writes its own `agent` row saying what was handed over.
+   */
+  private static spoken(row: ChatMessageWire): string | null {
+    if (row.role === 'agent' || row.role === 'note') return row.text;
+    if (row.role !== 'question') return null;
+    const options = (row.data as { options?: { label?: unknown }[] } | undefined)?.options ?? [];
+    const labels = options
+      .map((option) => option.label)
+      .filter((label): label is string => typeof label === 'string' && label.trim() !== '');
+    if (labels.length === 0) return row.text;
+    const last = labels[labels.length - 1]!;
+    const spokenOptions =
+      labels.length === 1 ? last : `${labels.slice(0, -1).join(', ')} or ${last}`;
+    return `${row.text} ${spokenOptions}?`;
+  }
+
+  /**
+   * The line has closed — and what it cost, when the session said.
    *
    * **Its own `ai_runs` row rather than an addition to the conversation's**,
    * because they are two meters and pretending otherwise would hide one:
@@ -628,12 +702,17 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
    * tokens and has already written its own `assist` rows. Summed, they are what
    * the conversation cost; apart, they answer *why*.
    *
-   * **The duration is the phone's**, which is softer than anything else in this
-   * ledger and is the only measurement available: the hub is not in the audio
-   * path, which is the entire point of the arrangement. It is bounded by the
-   * ephemeral secret's own lifetime, and a session that ends without the phone
-   * saying so — a crash, a train tunnel — simply records nothing rather than
-   * guessing.
+   * **The duration is the session's own**, read off `session.usage.updated` /
+   * `session.closed` by the sideband. It used to be a stopwatch on the phone,
+   * which was the softest number in this ledger and gone entirely when
+   * somebody force-quit; that went with the loop it belonged to.
+   *
+   * **And zero is a real argument.** Usage snapshots arrive about once a
+   * minute, so a short session that dropped rather than closing carried no
+   * number at all — and the call still has to happen, because clearing the
+   * spoken mark is the other half of what this does and a conversation left
+   * marked logs a typed follow-up as speech. No seconds, no row: `$0.00`
+   * against a line that plainly ran is a claim, where nothing is the truth.
    */
   async recordVoiceSpend(input: { sessionId: string; seconds: number }): Promise<void> {
     // The line has closed, so a typed follow-up in this conversation is typed.

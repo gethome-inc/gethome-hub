@@ -1,4 +1,5 @@
 import type { AutomationHomeView } from '../../automations/targets.js';
+import { automationShape } from '../../automations/summarize.js';
 import type { ChatMessageWire } from '../chat/chat-runtime.js';
 import { LIVE_HISTORY_MESSAGES, type LiveHistoryMessage } from './live-wire.js';
 
@@ -33,8 +34,9 @@ const NAME_LIMIT = 80;
  * left after that subtraction: how to sound, what to hand over, and enough of
  * the home's **names** to hear "the kitchen one" correctly and say it back.
  *
- * Names and nothing else, deliberately. Under client delegation the voice has
- * no tools and cannot touch a device, so a device id, a capability list or an
+ * Names and nothing else, deliberately — rooms, devices, and the scenes
+ * somebody could ask for by name. Under client delegation the voice has no
+ * tools and cannot touch a device, so a device id, a capability list or an
  * endpoint number here would be context it can only mispronounce — and the
  * instructions are capped at 16,384 tokens, which a large home's full device
  * JSON was heading for. The cost is that the names are a snapshot taken when
@@ -73,14 +75,23 @@ const NAME_LIMIT = 80;
  * did not catch — earns its place for the same reason, since the thing most
  * often misheard in this app is a room or device name.
  *
- * **And what comes back is said as it was written.** The page and the room are
- * the same conversation: the answer the backend produced is the row an app
- * draws, and the voice saying a re-worded version of it leaves somebody
- * reading one sentence while hearing another — which is the one thing a
- * transcript is for. It is also where a re-wording quietly loses a number or a
- * caveat the agent was careful about. So the instruction is to relay rather
- * than to retell, with the one exception a room genuinely needs: a list read
- * out with its bullets in it is the next paragraph's problem.
+ * **What comes back is spoken, and the fix for that is at the other end.** For
+ * a while this asked the voice to relay the backend's answer word for word and
+ * not to restate it — which is a rule the API will not keep: `commentary` is
+ * documented as content "the model is trained to paraphrase", so the
+ * instruction was fighting the model's own training for something it never
+ * promised. Worse, it was fighting it on *behalf* of the wrong text: the
+ * backend was writing for a three-inch phone column, bold and bullets
+ * included, exactly what OpenAI's delegation guide means by keeping "Markdown
+ * intended for display in the backend".
+ *
+ * So the backend is told when it is being spoken to and writes for the ear
+ * (`assistantSystemPrompt`'s *SOMETIMES YOU ARE BEING SPOKEN TO*), and what is
+ * left here is the half that matters and that the model *can* keep: every fact
+ * and every number survives, nothing is added, and a caveat is not dropped for
+ * being inconvenient. The page and the room no longer have to be the same
+ * sentence — the app already draws both, the hub's row and the caption of what
+ * was actually said.
  *
  * **And it must not claim to have done things.** This is the rule that got
  * *stronger* when the fast tools went away: the voice has no tools at all now,
@@ -104,6 +115,21 @@ export function liveInstructions(input: {
     const room = device.roomId === null ? undefined : byRoom.get(device.roomId);
     return room === undefined ? device.name : `${device.name} (${room})`;
   });
+  /**
+   * The rules somebody could *press*, by name.
+   *
+   * Same argument as the devices: the voice cannot run one, but it has to hear
+   * "put Movie Night on" as a name rather than as three words, and say it back
+   * the way the home spells it. Only the pressable ones — a `watching` rule is
+   * something the house does by itself and nobody asks for it out loud — and
+   * the enabled ones, since a switched-off rule is not a thing to offer.
+   * Bounded with the devices, because a home with eighty scenes is the same
+   * context problem by another door.
+   */
+  const scenes = home.automations
+    .filter((rule) => rule.enabled && automationShape(rule.document) !== 'watching')
+    .slice(0, NAME_LIMIT)
+    .map((rule) => rule.name);
 
   return [
     'You are the voice of gethome, a calm, friendly assistant talking to somebody in their own',
@@ -149,12 +175,14 @@ export function liveInstructions(input: {
     'are doing in a few words, keep listening, and then say what came back. If the backend says',
     'something could not be done, say so plainly and say why.',
     '',
-    'Say the backend’s answer as it was given. Keep its wording and every fact in it, and add',
-    'nothing it did not say. Change only what would not read aloud: unfold a list into a sentence,',
-    'say a symbol as a word. Do not summarise it, and do not restate it in your own words.',
+    'What the backend sends back is already written to be spoken. Say it. Keep every fact and',
+    'every number in it, add nothing it did not say, and do not leave out a caveat because it is',
+    'inconvenient — it is the only thing in this conversation that knows what actually happened.',
     '',
     'Adding devices, inviting people, changing what anybody is allowed to do and updating the hub',
-    'all live in the app. Say so plainly rather than delegating them.',
+    'are things a person does in the app, and nothing on either side of this conversation can do',
+    'them. Say so plainly — and if they ask where, delegate, because the backend knows the app',
+    'and you do not.',
     '',
     `The timezone is ${input.timezone}.`,
     input.personName !== undefined ? `You are talking to ${input.personName}.` : '',
@@ -164,6 +192,7 @@ export function liveInstructions(input: {
     '',
     'DEVICES, BY NAME',
     devices.join(', '),
+    ...(scenes.length > 0 ? ['', 'SCENES AND MODES THEY CAN ASK FOR, BY NAME', scenes.join(', ')] : []),
   ]
     .filter((line) => line !== '')
     .join('\n');

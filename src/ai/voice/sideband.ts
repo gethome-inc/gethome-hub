@@ -1,6 +1,6 @@
 import WebSocket from 'ws';
 import type { Logger } from '../../logging.js';
-import { liveSidebandUrl } from './live-wire.js';
+import { liveSidebandUrl, SIDEBAND_MAX_SECONDS } from './live-wire.js';
 import { VoiceDelegation, type VoiceDelegationHost } from './delegation.js';
 
 /**
@@ -23,12 +23,14 @@ import { VoiceDelegation, type VoiceDelegationHost } from './delegation.js';
  * Here: attach, hand every frame over, put a frame on the wire when asked, and
  * make sure what the line cost is written down however the connection ended.
  *
- * **And it receives audio whether it wants to or not**, which is the one thing
- * about this that costs a Raspberry Pi something: a sideband is sent *copies*
- * of both directions as base64 PCM16 at 24 kHz — about a megabit a second,
- * arriving as several kilobytes of JSON every twenty milliseconds, with no way
- * to decline it. That is why `VoiceDelegation.read` reads the type off a
- * bounded prefix, and why nothing here parses a frame on its way through.
+ * **And nothing here parses a frame on its way through**, which was justified
+ * for a while by a claim that turned out to be wrong: that a sideband is sent
+ * copies of the audio in both directions, a megabit a second of base64 PCM16,
+ * with no way to decline it. It is not — those two events are WebSocket-only
+ * and a WebRTC session's media never becomes JSON at all (`LIVE_AUDIO_EVENTS`
+ * has the correction). The prefix scan in `VoiceDelegation.read` still earns
+ * its place on the transcript deltas, which really do arrive several times a
+ * second and are mostly of no interest to this side.
  */
 
 export type { VoiceDelegationHost as VoiceSidebandHost } from './delegation.js';
@@ -46,15 +48,9 @@ export interface VoiceSidebandOptions {
   log: Logger;
 }
 
-/**
- * How long one attached sideband may live.
- *
- * A bound rather than a policy: the session itself expires, the phone closes
- * it, or the connection drops — all three end this. What the ceiling stops is
- * a socket held for ever against a session nobody told us about, on a board
- * that measures its memory in hundreds of megabytes.
- */
-const SIDEBAND_MAX_MS = 60 * 60 * 1000;
+/** The ceiling, in the units a timer takes. `live-wire.ts` owns the number,
+ *  because what is billed is clamped to the same one. */
+const SIDEBAND_MAX_MS = SIDEBAND_MAX_SECONDS * 1000;
 
 export class VoiceSideband {
   private socket: WebSocket | undefined;

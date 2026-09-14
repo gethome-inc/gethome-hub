@@ -366,27 +366,73 @@ a timeline gets exactly the behaviour it had before. The iOS app's
 `VoiceConversation.captionGap` is the same number doing the same job on the
 live caption, so the two agree about where one thing said ends.
 
-**And what comes back is said as it was written.** The page and the room are
-one conversation: the answer the assistant produced is the row an app draws,
-and a voice re-wording it leaves somebody reading one sentence while hearing
-another — the one thing a transcript is for. It is also where a re-wording
-quietly drops a number or a caveat the agent was careful about. So the voice
-prompt asks it to **relay rather than retell**: keep the answer's wording and
-every fact in it, add nothing, and change only what would not read aloud (a
-list unfolded into a sentence, a symbol said as a word). They will not be
-identical — a spoken "one moment" has no written half at all — but they no
-longer say different things about the same result.
+**The answer is written for the ear at the other end, which is where that
+belongs.** For a while the voice prompt asked GPT-Live to relay the assistant's
+answer word for word and never restate it, so that the row an app draws and the
+sentence somebody hears would be the same. Two things were wrong with it.
+`session.commentary.append` is documented as content "the model is trained to
+paraphrase", so the rule was fighting the model's training for something the
+API never promised. And it was defending the wrong text: the assistant writes
+into a three-inch phone column, bold and bullets included — exactly what
+OpenAI's delegation guide means by keeping "Markdown intended for display in
+the backend" — so the voice was being asked to unfold a list it should never
+have been handed.
 
-**One thing about attaching costs a Raspberry Pi something, and it is not
-optional.** A sideband is sent *copies* of both directions of audio — base64
-PCM16 at 24 kHz, about a megabit a second, several kilobytes of JSON every
-twenty milliseconds — with no way to decline it. So `frameType` reads the type
-off a **bounded prefix** of the raw frame and audio is dropped before anything
-is parsed, with a full parse as the fallback for a frame whose `type` sits
-past the prefix. JSON promises no field order; every frame this API actually
-sends puts `type` first, and `test/voice-sideband.test.ts` pins both halves —
-including that a frame of either shape reaches neither the transcript nor the
-assistant.
+So the **backend is told when it is being spoken to**. `askAloud` puts one line
+on `ChatSession.priming` — the channel that reaches the model and is never
+written down, so the transcript row stays exactly what the person said — and
+the assistant's system prompt carries a *SOMETIMES YOU ARE BEING SPOKEN TO*
+section it switches on: no formatting at all, numbers said the way a person
+says them, one or two sentences, a transcript read as speech rather than as
+something typed carefully, and nothing announced as done that was not done. The
+rules live in the system prompt because it is byte-identical for the life of a
+build and sits behind a cache breakpoint, so only the marker is paid for per
+turn. What is left in the voice prompt is the half the model can actually keep:
+every fact and number survives, nothing is added, and a caveat is not dropped
+for being inconvenient.
+
+**A question is an answer, and for a while it was a refusal.** `askAloud`
+returned `agent` and `note` rows only, which covers the two arms a typed reply
+usually ends in — and silently drops the third. `ask_user` is precisely where
+the assistant's own prompt sends it when a request is ambiguous in a way that
+changes what it would *do* ("which of three lamps", "the room or the house"),
+which is the commonest thing to be ambiguous about out loud. The scan fell off
+the end, the sideband read `null` as "that could not be worked out", and
+somebody who had just asked for a light to be turned off heard a refusal while
+a perfectly good question with two tappable options landed on a page in their
+pocket. Question rows are spoken now, with their **options folded into the
+sentence** — the model writes the choices into `options` and leaves the
+question bare, and "Which one?" is not answerable in a room. The reply comes
+back through `askAloud` as another spoken turn and `say(…, 'auto')` already
+routes it to `answer`, so nothing else had to change.
+
+**Audio does not reach the sideband, and the claim that it did was read across
+from the wrong transport.** `session.input_audio.append` and
+`session.output_audio.delta` are **WebSocket only**; a WebRTC session carries
+its media on the negotiated track, so there is no JSON audio in existence for a
+sideband to be sent copies of — which makes the old "about a megabit a second,
+and that is the price of attaching" simply untrue of every session this hub
+opens. The two event names are still dropped on sight, because that costs one
+set lookup and the one session shape that *would* flood a sideband is the one a
+later change might reach for. `frameType`'s **bounded prefix** earns its place
+on the transcript deltas instead, which really do arrive several times a second
+and are mostly of no interest here; JSON promises no field order, so a frame
+whose `type` sits past the prefix falls through to a full parse. Every frame
+this API actually sends puts `type` first, and `test/voice-sideband.test.ts`
+pins both halves.
+
+**An answer is capped at 500 tokens, and the cap is set from the worst side.**
+The three append events take at most that much plain string and refuse anything
+over it — which on this surface is not an error anybody sees, it is a person
+standing in a room hearing nothing back. `LIVE_APPEND_CHARS` was 1,800, from
+four characters to the token, which is English: Cyrillic runs closer to two, so
+a Russian home hit the cap at about half the length an English one did and the
+refusal landed on exactly the homes least likely to be testing this. Nine
+hundred is inside 500 tokens in either script and is still around fifteen
+seconds of speech — far more than a spoken answer should now be. A refusal that
+does happen is named as one: `error.client_event_id` correlates back to the
+append that failed, so the log says the session refused an answer rather than
+"the session reported an error".
 
 The registry of attached sidebands is **module-level rather than a service
 threaded through `ApiDeps`**, and that is a trade rather than laziness: one hub
@@ -493,7 +539,21 @@ seconds are the **session's own**, read off `session.usage.updated` and
 number in this ledger. They used to be a stopwatch on a phone, gone entirely
 when somebody force-quit; now a socket that drops before the final event
 records the last snapshot it saw, which is the API's own advice, and a session
-that never said anything records nothing rather than guessing.
+that never said anything records nothing rather than guessing. What is billed
+is clamped to `SIDEBAND_MAX_SECONDS`, because the sideband is the thing doing
+the reading and nothing can have cost more than it stayed attached for — it
+said half an hour against the sideband's hour for a while, on a reason that had
+already gone (an ephemeral client secret, from the design WebRTC replaced).
+
+**But a session that never said still has to be settled**, which is the half
+that was missing and the one the ledger does not see. `session.usage.updated`
+arrives about **once a minute**, so the sessions that carry no number at all
+are precisely the short ones — a phone force-quit forty seconds in, a train
+tunnel. Settling does two things: it writes what the line cost, and it clears
+the `spokenSessions` mark. Hanging both off there being a number meant the mark
+survived exactly those endings, so a follow-up typed into the same conversation
+hours later was logged as speech. Zero settles, and writes no row — `$0.00`
+against a line that plainly ran is a claim where nothing is the truth.
 
 **`live-wire.ts` is the containment, and it is a rule rather than tidiness.**
 Every constant and every field name of an API weeks old lives in that one file,

@@ -27,6 +27,19 @@ import { commandsAsPrompt } from '../automations/catalog.js';
  * app.** The app renders exactly this much and no more; asking for restraint
  * without rendering shows the asterisks, and rendering without asking gives a
  * typeset document in a chat bubble. Change the two together.
+ *
+ * **And one conversation is read as well as heard, which is why there are two
+ * sets of writing rules rather than one.** A spoken turn arrives through
+ * `askAloud`, and what it produces is handed to GPT-Live as a
+ * `session.commentary.append` and read out — so the three-inch column's own
+ * advice (a `- ` list where things are listed, `**bold**` for a name worth
+ * picking out) becomes asterisks and hyphens spoken aloud, which is exactly
+ * what OpenAI's delegation guide means by keeping "Markdown intended for
+ * display in the backend". The rules for that turn are here rather than in the
+ * turn itself because this prompt is byte-identical for the life of a build
+ * and sits behind a cache breakpoint: the marker that switches them on is one
+ * line on `ChatSession.priming`, and everything it refers to is already paid
+ * for. `AssistantChat.spokenPriming` is the other half.
  */
 
 export function assistantSystemPrompt(delegates: readonly { key: string; title: string }[]): string {
@@ -121,9 +134,29 @@ export function assistantSystemPrompt(delegates: readonly { key: string; title: 
     'You cannot add or remove devices, invite people, change roles, or update the hub. Those are',
     'things the person does in the app, and naming where they are is the useful answer.',
     '',
+    'SOMETIMES YOU ARE BEING SPOKEN TO',
+    '',
+    'A turn that says it was spoken aloud reached you through a voice, and your answer is read',
+    'out by one. Everything else about the job is the same; four things about the answer are not.',
+    '',
+    'Write for the ear. **No formatting at all** — no lists, no bold, no asterisks, no headings —',
+    'because every character is spoken. Say numbers as a person says them: "twenty-one degrees",',
+    'not "21.0 °C". One or two sentences, and then stop: somebody is standing in a room waiting,',
+    'and what reads as thorough on a page is a monologue out loud.',
+    '',
+    'The request was transcribed, so it can be misheard, cut off mid-phrase, or corrected a',
+    'moment later. Read it as speech rather than as something typed carefully. If a name you',
+    'need is genuinely unclear, `ask_user` about that part — do not guess which device was meant.',
+    '',
+    'Say only what actually happened. A device that was worked, a value that was read: confirmed',
+    'things, in the words the hub gave you. Never announce something as done that you did not do.',
+    '',
+    'Your question is read out too, so write one somebody can answer by talking. The options are',
+    'spoken after it, so keep their labels short and distinct.',
+    '',
     'HOW TO WRITE',
     '',
-    '**You are writing into a chat column on a phone, about three inches wide.** Short paragraphs,',
+    '**Otherwise you are writing into a chat column on a phone, about three inches wide.** Short paragraphs,',
     'blank line between them. A `- ` list where you are genuinely listing things, and `**bold**`',
     'for a name worth picking out of a sentence — those two are drawn properly. Headings, tables,',
     'nested lists, numbered outlines and code fences are not what this column is for: a bolded line',
