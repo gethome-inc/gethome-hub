@@ -728,7 +728,7 @@ domains — update them in the same change.
   rows under the caller's own member id, so the page fills in while somebody
   talks and `revive()` can continue it by typing; `beginVoice()` is three lines
   because a spoken exchange has no provider conversation here to hold.
-  **Two meters**: an `ai_runs` row of `kind: 'voice'` at $0.05 a minute beside
+  **Two meters**: an `ai_runs` row of `kind: 'voice'` at $0.11 a minute beside
   the `assist` rows the delegated turns write, because GPT-Live bills for time
   on the line — silence included — and the model behind it bills for tokens;
   the seconds are the *phone's* measurement, the only one available, and a
