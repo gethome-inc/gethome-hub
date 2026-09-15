@@ -147,13 +147,48 @@ export const LIVE_VOICE = 'marin';
  * How much prior conversation a session opens on.
  *
  * The API's own caps are 128 messages and 8,192 combined tokens, and this is
- * well inside both — **deliberately, because the live model's context window is
- * small** and the prompting guide says so in as many words. What this is for is
- * the last exchange or two: somebody typed a question, then pressed the
- * microphone to carry it on out loud. A transcript a fortnight deep seeded into
- * a voice session is money spent on context nobody is about to refer to.
+ * well inside the first — **deliberately, because the live model's context
+ * window is small** and the prompting guide says so in as many words. What this
+ * is for is the last exchange or two: somebody typed a question, then pressed
+ * the microphone to carry it on out loud. A transcript a fortnight deep seeded
+ * into a voice session is money spent on context nobody is about to refer to.
+ *
+ * **A count alone does not keep the second cap, which is the bug this pair
+ * replaced.** The other cap is on *tokens*, and a transcript row holds up to
+ * 4,000 characters — so a dozen long answers cleared twelve messages easily and
+ * sailed past 8,192 tokens, and the session creation is then refused outright.
+ * That failure is the worst shape one can take here: it is not a bad answer, it
+ * is `502 voice_unavailable` **every time** on that conversation, because the
+ * history that caused it is the same history on the next try.
  */
 export const LIVE_HISTORY_MESSAGES = 12;
+
+/**
+ * How much of one prior message is carried, and how much of all of them.
+ *
+ * `LIVE_APPEND_CHARS`'s reasoning applied to the other cap, and for the same
+ * reason it had to be: four characters to the token is English, Cyrillic runs
+ * closer to two, so a budget set in characters has to clear the cap in the
+ * worse script or it falls on exactly the homes least likely to be testing it.
+ * Six thousand characters is about three thousand tokens of Cyrillic and half
+ * that of English — comfortably inside 8,192 either way, with room for the
+ * API's own per-message overhead.
+ *
+ * Two bounds rather than one, because they answer different failures: the
+ * per-message clip stops a single long answer eating the whole budget and
+ * leaving the actual question out of it, and the total is what the API is
+ * counting. Oldest is dropped first, which is the same rule
+ * `VoiceDelegation`'s `CONTEXT_CHARS` follows — the newest exchange is the one
+ * somebody is about to refer to.
+ *
+ * Characters rather than tokens because nothing here counts tokens, and the
+ * conservative direction is the one where a session opens knowing slightly
+ * less.
+ */
+export const LIVE_HISTORY_CHARS = 6_000;
+
+/** @see LIVE_HISTORY_CHARS */
+export const LIVE_HISTORY_MESSAGE_CHARS = 1_200;
 
 /**
  * How long one piece of context handed to a running session may be.

@@ -844,14 +844,33 @@ domains — update them in the same change.
   `askAloud` writes rows under the caller's own member id so the page fills
   in while somebody talks and `revive()` can continue it by typing, and
   `liveHistory` seeds the last few exchanges into `session.input` so pressing
-  the microphone on a page you have been typing on carries one conversation on.
+  the microphone on a page you have been typing on carries one conversation on
+  — **bounded in characters as well as messages** (`LIVE_HISTORY_CHARS`),
+  because that list is capped at 8,192 tokens as well as at 128 messages and a
+  transcript row holds 4,000 characters, so a count alone had a long
+  conversation refused on every attempt rather than answered with less history.
+  **And writing into somebody else's conversation is refused**
+  (`maySpeakInto`): `askAloud`'s third arm is `open()`, which is for the id
+  `beginVoice` minted and refuses nothing, so another member's session id
+  reached it and the round wrote into their transcript — `revive()`'s ownership
+  rule held one arm further along, with `409 not_your_conversation` on the
+  route so it is a sentence rather than a voice that answers nothing.
   `beginVoice()` is still a few lines (no provider conversation here to hold)
   and marks `spokenSessions`, which is the only thing left that knows a command
   was *spoken* now that every one arrives as an ordinary assistant turn — read
   at the moment of the command, since one conversation can be typed in the
-  morning and talked to in the evening.
+  morning and talked to in the evening. **The mark goes on after the sideband is
+  attached**, because attaching replaces the one this conversation was holding
+  and a replaced sideband settles, which is what clears the mark: set first, it
+  was cleared by the line it belonged to, and a session nothing attached to
+  stayed marked for the life of the process.
   **A spoken round thinks less, and that is per *turn* rather than per
-  conversation.** `ChatTurnContext.effort` is the override and
+  conversation.** `ChatEffort` is `low`/`medium`/`high` and nothing else,
+  because the value goes straight onto two vendors' wires
+  (`output_config.effort`, `reasoning.effort`) and a word only one of them
+  takes is a 400 in somebody's kitchen rather than a checker error — widening
+  it means checking both, or giving the transport that cannot a mapping.
+  `ChatTurnContext.effort` is the override and
   `AssistantChat.spokenOrigin` (`low`, `voice`) is the only thing that uses it; a typed
   round stays on the transport's `medium`. The same question genuinely costs
   differently out loud: a typed answer is read when it lands, so a few seconds

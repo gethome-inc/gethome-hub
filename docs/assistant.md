@@ -411,7 +411,13 @@ entirely, which in a real home is most of the buttons and remotes; it is keyed
 by **id**, because the first message is already the index and a house with two
 lamps called "Lamp" has to stay unambiguous; and it uses the same raw units
 `get_device` does, because two vocabularies for one reading is how a model
-comes to say twenty-one degrees about 2,140 of something.
+comes to say twenty-one degrees about 2,140 of something. A fifth bound is on
+the *house* rather than on a device: `DIGEST_LIMIT` caps how many readings one
+round carries, since this is rebuilt and re-sent every spoken round and a home
+grows. A cut list **says how many it left out** and sends the model to
+`get_device` for them, because the sentence above it claims that anything
+missing is reporting nothing — which a silent cut would turn into the hub
+telling the model something untrue about a hundred devices.
 
 **And it says out loud that it replaces the tool call**, which is the half that
 makes it pay. Two other places point the model straight at `get_device` for
@@ -565,10 +571,29 @@ reaches an agent that has read what was spoken. It runs the other way too: when
 the app sends a session id it already has, that conversation's last few
 exchanges are seeded into `session.input`, so pressing the microphone on a page
 you have been typing on carries one conversation on rather than starting a
-second beside it. `beginVoice()` is still only an id and a mark: what it opens
+second beside it. **That seed is bounded twice**, because the API bounds it
+twice: 128 messages *and* 8,192 tokens, of which only the first is a count
+anything here could keep by itself — a transcript row holds up to 4,000
+characters, so a dozen long answers cleared twelve messages easily and had the
+session creation refused outright, which repeats on every attempt because the
+history that caused it has not changed. `LIVE_HISTORY_CHARS` is the second
+bound, in characters and set from the worse script for `LIVE_APPEND_CHARS`'s
+own reason, spent newest-first.
+
+`beginVoice()` is still only an id and a mark: what it opens
 is a conversation nothing has said anything in yet, which is why `askAloud`
 reaches for `open()` — there is no transcript to revive from until the first
-question arrives. That mark is what keeps **one word in the activity log** true: a command
+question arrives. **`open()` is also the one arm that refuses nothing**, so it
+is guarded: a session id belonging to another member is refused by
+`maySpeakInto` rather than opened under their transcript, which is `revive()`'s
+own ownership rule held one arm further along. The route answers
+`409 not_your_conversation` for it, before anything is opened or spent.
+**And the mark is set after the sideband is attached, never before**: attaching
+replaces whatever sideband the conversation was holding and a replaced sideband
+settles, which is what *clears* the mark — so marking first meant stopping and
+restarting the microphone quickly cleared the mark the new line had just set,
+and a session nothing attaches to would stay marked for the life of the
+process. That mark is what keeps **one word in the activity log** true: a command
 somebody spoke and a command somebody typed are worth telling apart in a feed
 read a week later, and since every spoken command now arrives as an ordinary
 assistant turn, `spokenSessions` is the only thing left that knows which is

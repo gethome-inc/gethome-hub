@@ -6,7 +6,7 @@ import type { AutomationDocument } from '../src/automations/schema.js';
 import type { EndpointState } from '../src/schema/index.js';
 import { spokenStateDigest } from '../src/ai/assistant-prompts.js';
 import { liveHistory, liveInstructions } from '../src/ai/voice/prompts.js';
-import { LIVE_HISTORY_MESSAGES } from '../src/ai/voice/live-wire.js';
+import { LIVE_HISTORY_CHARS, LIVE_HISTORY_MESSAGE_CHARS, LIVE_HISTORY_MESSAGES } from '../src/ai/voice/live-wire.js';
 
 /**
  * The two halves of the voice prompt that are pure functions. The rest of what
@@ -187,6 +187,47 @@ describe('the voice prompt', () => {
     expect(history.at(-1)?.content[0].text).toBe('line 39');
     expect(history[0]?.content[0].text).toBe(`line ${40 - LIVE_HISTORY_MESSAGES}`);
   });
+
+  /**
+   * The other cap, which a count cannot keep.
+   *
+   * `session.input` is bounded at 8,192 tokens as well as at 128 messages, and
+   * a transcript row holds up to 4,000 characters — so a dozen long answers
+   * cleared the count easily and had the session creation refused outright.
+   * That failure repeats: the same history is there on the next try, so the
+   * microphone stops working on that conversation for good.
+   */
+  it('keeps the budget as well as the count, dropping the oldest to do it', () => {
+    const rows: ChatMessageWire[] = Array.from({ length: 12 }, (_, index) => ({
+      id: String(index),
+      at: new Date(Date.UTC(2026, 8, 14, 10, 0, index)).toISOString(),
+      role: index % 2 === 0 ? ('user' as const) : ('agent' as const),
+      // What the transcript itself allows, which is what made this reachable.
+      text: `${index}`.padEnd(4_000, 'x'),
+    }));
+
+    const history = liveHistory(rows);
+    const spent = history.reduce((total, message) => total + message.content[0].text.length, 0);
+    expect(spent).toBeLessThanOrEqual(LIVE_HISTORY_CHARS);
+    // Every message that survived is clipped rather than whole, and the ones
+    // that survived are the newest: the exchange somebody is about to refer to.
+    for (const message of history) {
+      expect(message.content[0].text.length).toBeLessThanOrEqual(LIVE_HISTORY_MESSAGE_CHARS);
+    }
+    expect(history.at(-1)?.content[0].text.startsWith('11')).toBe(true);
+    expect(history).not.toHaveLength(0);
+  });
+
+  it('carries a short conversation whole', () => {
+    const rows: ChatMessageWire[] = [
+      { id: '1', at: '2026-09-14T10:00:00.000Z', role: 'user', text: 'turn the kettle on' },
+      { id: '2', at: '2026-09-14T10:00:01.000Z', role: 'agent', text: 'Done.' },
+    ];
+    expect(liveHistory(rows).map((message) => message.content[0].text)).toEqual([
+      'turn the kettle on',
+      'Done.',
+    ]);
+  });
 });
 
 /**
@@ -336,6 +377,41 @@ describe('what everything is doing right now', () => {
 
   /** A home where nothing is reporting anything gets no section at all, rather
    *  than a heading over an empty list. */
+  /**
+   * The one bound on this surface that grows with the *house*, and it is paid
+   * on every spoken round — so it has a ceiling, and a cut list says so rather
+   * than letting the sentence above it claim the missing devices are reporting
+   * nothing.
+   */
+  it('has a ceiling, and says what it had to leave out', () => {
+    const many = Array.from({ length: 200 }, () => randomUUID());
+    const digest = spokenStateDigest({
+      home: {
+        rooms: [],
+        zones: [],
+        automations: [],
+        devices: many.map((id) => ({
+          id,
+          name: 'Plug',
+          roomId: null,
+          online: true,
+          endpoints: [{ endpointId: 1, deviceKind: 'outlet' as const, capabilities: ['onOff'] }],
+        })),
+      },
+      stateOf: () => ({ ...empty, onOff: true }),
+    })!;
+
+    const listed = many.filter((id) => digest.includes(id));
+    expect(listed.length).toBeLessThan(many.length);
+    expect(digest).toContain(`${many.length - listed.length} more devices`);
+    expect(digest).toContain('call get_device rather than saying it is reporting nothing');
+  });
+
+  it('says nothing about a list it did not have to cut', () => {
+    const digest = digestOf({ [lightId]: { ...empty, onOff: true } })!;
+    expect(digest).not.toContain('too long to send whole');
+  });
+
   it('is nothing at all for a home with no readings', () => {
     expect(spokenStateDigest({ home: home(), stateOf: () => undefined })).toBeUndefined();
   });

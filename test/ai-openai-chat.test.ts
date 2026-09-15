@@ -266,6 +266,47 @@ describe('the OpenAI chat transport', () => {
     expect(round.refusal).toBe('I can’t help with that.');
   });
 
+  /**
+   * **Running out of room is an answer, not a failure**, and the other vendor
+   * has always said so: Anthropic's `max_tokens` falls through to `end` and
+   * the truncated reply reaches the person. Throwing here made one provider
+   * lose an answer the page had *already been streamed* — the words appeared
+   * and were then replaced by an error about them.
+   */
+  it('keeps a reply the model ran out of room for', async () => {
+    const said: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        streamOf([
+          frame('response.output_text.delta', { delta: 'The kitchen light is on, and the' }),
+          frame('response.incomplete', {
+            response: {
+              status: 'incomplete',
+              incomplete_details: { reason: 'max_output_tokens' },
+              output: [
+                {
+                  type: 'message',
+                  content: [{ type: 'output_text', text: 'The kitchen light is on, and the' }],
+                },
+              ],
+              usage: { input_tokens: 40, output_tokens: 32_000 },
+            },
+          }),
+        ]),
+      ),
+    );
+    const transport = transportFor();
+    transport.pushUser('what is on?');
+    const round = await transport.round({ onDelta: (delta) => said.push(delta) });
+
+    expect(round.stop).toBe('end');
+    expect(round.said).toBe('The kitchen light is on, and the');
+    expect(said.join('')).toBe(round.said);
+    // And it is still billed for: the body carries the usage either way.
+    expect(transport.costUsd()).toBeGreaterThan(0);
+  });
+
   it('does not read a failed or unfinished stream as an answer', async () => {
     vi.stubGlobal(
       'fetch',
@@ -283,6 +324,20 @@ describe('the OpenAI chat transport', () => {
     // push a half-round onto the history and refuse the conversation later.
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(streamOf([])));
     await expect(transport.round(undefined)).rejects.toThrow(/without completing/);
+
+    // And an `incomplete` for any reason but the output ceiling is still a
+    // failure, because there what was produced is not an answer at all.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        streamOf([
+          frame('response.incomplete', {
+            response: { incomplete_details: { reason: 'content_filter' } },
+          }),
+        ]),
+      ),
+    );
+    await expect(transport.round(undefined)).rejects.toThrow(/content_filter/);
   });
 
   it('reports the vendor’s own sentence when the request itself is refused', async () => {
