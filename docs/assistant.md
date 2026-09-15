@@ -364,7 +364,32 @@ has them on two lines. Silent when either end of the gap is unknown, which is
 the honest answer rather than a guess — a build of this API that stops sending
 a timeline gets exactly the behaviour it had before. The iOS app's
 `VoiceConversation.captionGap` is the same number doing the same job on the
-live caption, so the two agree about where one thing said ends.
+live caption — measured on the same clock rather than on arrival, which is what
+makes "the two agree about where one thing said ends" actually true.
+
+**And what the voice answered by itself is not carried onto the front of the
+next request.** `heard` was one buffer cleared only when a delegation took it,
+which was right while every round went to the backend and wrong the moment the
+policy told the voice to answer some things itself — a greeting, a repeat,
+"what else can you do". That utterance stayed in the buffer, so the *next*
+request was assembled out of both. Caught on a recording of a real
+conversation: "what else can you do", answered aloud, reached the agent glued
+to "tell me what's on then" as one two-line question, the agent answered the
+pair, and the answer the voice had already given vanished off the page — the
+phone drops a caption the moment a row lands that covers it.
+
+So what has been heard is a **list of utterances** with their spans rather than
+one string, and `session.output_transcript.delta` — which the sideband had no
+case for at all — is what retires one: when the voice speaks after an utterance
+has ended, and the person then opens a new one, that utterance is marked
+answered and left out of the request. **The newest is never retired**, and that
+single line is what keeps it safe: the policy asks the voice to say what it is
+doing *before* it goes and does it, so "one moment" is assistant speech landing
+a beat after the very request about to be delegated, and retiring on it would
+hand the agent an empty question. With no timeline nothing is retired, which is
+the conservative direction — too much context beats too little. The bound is
+the same `CONTEXT_CHARS`, dropping whole utterances oldest-first rather than
+slicing a string mid-word.
 
 **The answer is written for the ear at the other end, which is where that
 belongs.** For a while the voice prompt asked GPT-Live to relay the assistant's
@@ -559,9 +584,21 @@ What is left beside the policy is the home's **names**, and nothing else: a
 device id, an endpoint number or a capability list is context a model with no
 tools can only mispronounce. They are **bounded** (`NAME_LIMIT`), because the
 live model's context window is small and a warehouse of eighty smart plugs must
-not crowd out the policy above it. `test/voice-prompts.test.ts` pins the labels
-and the bound, because the way this regresses is somebody flattening the policy
-into prose or copying the assistant's prompt back in.
+not crowd out the policy above it.
+
+**And the policy has to say what those names are *for*, because the model is
+looking at the list and not at the heading over it.** Asked what scenes the
+home had, the voice read the list back and said that was all there was — on a
+home with three, off a list that deliberately leaves out the `watching` rules
+and the switched-off ones, in a confident sentence nobody could tell was
+invented. It is a snapshot for pronunciation and it says nothing about what
+anything is doing, so every heading is hedged (`SOME ROOMS, BY NAME`), the
+"do not delegate" clause names the backend as where a still-current result came
+from, and one sentence says plainly that what the home has, what it is doing
+and what a scene does are the backend's answers every time, even when a name is
+right there. `test/voice-prompts.test.ts` pins the labels, the bound and this,
+because the way this regresses is somebody flattening the policy into prose or
+copying the assistant's prompt back in.
 
 **It is the same transcript**, which is the part worth having. The rows are the
 round's own, written here, so the page fills in while somebody talks, is there

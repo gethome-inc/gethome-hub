@@ -772,7 +772,15 @@ domains — update them in the same change.
   utterances, so "Hi", a pause and then a request concatenated into one line —
   asked of the agent that way and shown that way in the row an app draws — and
   a gap of `UTTERANCE_GAP_MS` is written down as a line break instead, silent
-  when either end of it is unknown. **And what comes back is said as it was
+  when either end of it is unknown. **And what the voice answered by itself is
+  left out of the next request**: `heard` is a list of utterances rather than
+  one buffer, `session.output_transcript.delta` retires one the voice has
+  answered, and the **newest is never retired** — "one moment" is assistant
+  speech landing after the very request about to be delegated, so retiring on
+  it would hand the agent an empty question. Without that, an utterance the
+  policy told the voice to answer itself arrived glued to the front of the next
+  one, the agent answered the pair, and the phone dropped the caption of the
+  answer already given because a row had landed covering it. **And what comes back is said as it was
   written**: the prompt asks the voice to relay the answer rather than retell
   it, because the page and the room are one conversation and a re-wording
   leaves somebody reading one sentence while hearing another. **The prompt is split the way
@@ -789,7 +797,15 @@ domains — update them in the same change.
   scenes are there for the devices' own reason: the voice cannot run one, but
   "put Movie night on" has to be heard as a *name* and said back the way the
   home spells it. Only pressable, enabled rules, since nobody asks a `watching`
-  rule for anything out loud. `test/voice-prompts.test.ts` pins the labels and
+  rule for anything out loud. **And the policy has to say the names are for
+  hearing rather than for answering**, because the model is looking at the list
+  and not at the heading over it: asked what scenes the home had, the voice read
+  that list back — the one that deliberately leaves out the `watching` rules and
+  the switched-off ones — and said that was all there was, on a home with three.
+  Every heading is hedged (`SOME ROOMS, BY NAME`), "a still-current result"
+  names the backend as where it came from, and one sentence says plainly that
+  what the home *has* is the backend's answer every time, even when a name is
+  right there. `test/voice-prompts.test.ts` pins the labels and
   the bound, because the way it regresses is somebody flattening the policy into
   prose or copying the assistant's prompt back in.
   **The answer is written for the ear at the other end.** The voice prompt used

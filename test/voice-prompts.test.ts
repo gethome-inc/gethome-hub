@@ -149,6 +149,28 @@ describe('the voice prompt', () => {
     expect(liveInstructions({ home: home(), timezone: 'UTC' })).not.toContain('SCENES');
   });
 
+  it('says the names are for hearing rather than for answering', () => {
+    // **Caught on a recording of a real conversation.** Asked what scenes the
+    // home had, the voice read the list back off these instructions — a list
+    // that deliberately leaves out the `watching` rules and the switched-off
+    // ones — and said that was all there was. It is a snapshot for
+    // pronunciation and the heading says so; the delegation policy has to say
+    // it too, because the model is looking at the names and not at the
+    // heading.
+    const withRules = home();
+    withRules.automations = [rule('Movie night', true)];
+    const prompt = liveInstructions({ home: withRules, timezone: 'UTC' });
+
+    expect(prompt).toContain('Never answer from them');
+    // Every list is hedged, so none of the three reads as the whole home.
+    expect(prompt).toContain('SOME ROOMS, BY NAME');
+    expect(prompt).toContain('SOME DEVICES, BY NAME');
+    expect(prompt).toContain('SOME SCENES AND MODES THEY CAN ASK FOR, BY NAME');
+    // And what a still-current result *is* names where it came from, or the
+    // list itself reads as one.
+    expect(prompt).toContain('A still-current result the backend gave you');
+  });
+
   it('opens on what was said, not on what a page did', () => {
     const rows: ChatMessageWire[] = [
       { id: '1', at: '2026-09-14T10:00:00.000Z', role: 'user', text: 'is the heater on?' },

@@ -86,6 +86,11 @@ function heard(delta: string, start: number, end: number): Record<string, unknow
   return { type: 'session.input_transcript.delta', delta, start_ms: start, end_ms: end };
 }
 
+/** What the voice said, on the same clock. */
+function said(delta: string, start: number, end: number): Record<string, unknown> {
+  return { type: 'session.output_transcript.delta', delta, start_ms: start, end_ms: end };
+}
+
 function delegated(id: string, offset?: number): Record<string, unknown> {
   return {
     type: 'session.delegation.created',
@@ -274,6 +279,81 @@ describe('a spoken request', () => {
     h.read(delegated('item_1', 1_600));
     await vi.waitFor(() => expect(h.sent).toHaveLength(1));
     expect(h.sent[0]).toMatchObject({ type: 'session.thinking.append' });
+  });
+});
+
+describe('what the voice answered by itself', () => {
+  it('is not carried onto the front of the next request', async () => {
+    // **The bug this is here for, caught on a recording of a real
+    // conversation.** The policy tells the voice to answer some things itself
+    // — a greeting, "what else can you do" — and `heard` was one buffer
+    // cleared only by a delegation, so the answered sentence was still in it
+    // when the *next* one was handed over. The agent was asked both at once,
+    // the row an app draws carried both on two lines, and the answer the voice
+    // had already given was nowhere: the phone drops a caption the moment a
+    // row lands that covers it.
+    const h = harness();
+    h.read(heard('what else can you do', 1_000, 2_000));
+    h.read(said('I can switch things on and off.', 2_500, 4_000));
+    h.read(heard('tell me what is on then', 6_000, 7_000));
+    h.read(delegated('item_1', 7_100));
+    await vi.waitFor(() => expect(h.asked).toHaveLength(1));
+
+    expect(h.asked[0]?.question).toBe('tell me what is on then');
+  });
+
+  it('keeps the newest thing said, whatever the voice says over it', async () => {
+    // The other side of the same rule, and the one that would break every
+    // spoken command in the house. The policy asks the voice to say what it is
+    // doing *before* it goes and does it, so "one moment" is assistant speech
+    // landing after the very sentence that is about to be delegated. Retiring
+    // on that would hand the agent an empty question.
+    const h = harness();
+    h.read(heard('turn the kitchen light off', 1_000, 2_000));
+    h.read(said('One moment.', 2_100, 2_600));
+    h.read(delegated('item_1', 2_700));
+    await vi.waitFor(() => expect(h.asked).toHaveLength(1));
+
+    expect(h.asked[0]?.question).toBe('turn the kitchen light off');
+  });
+
+  it('keeps an earlier sentence the voice never answered', async () => {
+    // Retiring is about what the voice *answered*, not about age: two things
+    // said with nothing in between are one request, which is the line break
+    // rule above.
+    const h = harness();
+    h.read(heard('I said', 1_000, 1_500));
+    h.read(heard('turn the light on', 5_000, 6_000));
+    h.read(delegated('item_1', 6_100));
+    await vi.waitFor(() => expect(h.asked).toHaveLength(1));
+
+    expect(h.asked[0]?.question).toBe('I said\nturn the light on');
+  });
+
+  it('retires every answered sentence, not just the last one', async () => {
+    const h = harness();
+    h.read(heard('hello', 1_000, 1_400));
+    h.read(said('Hello.', 1_600, 2_000));
+    h.read(heard('what can you do', 4_000, 5_000));
+    h.read(said('Quite a lot.', 5_200, 6_000));
+    h.read(heard('switch the lamp on', 8_000, 9_000));
+    h.read(delegated('item_1', 9_100));
+    await vi.waitFor(() => expect(h.asked).toHaveLength(1));
+
+    expect(h.asked[0]?.question).toBe('switch the lamp on');
+  });
+
+  it('retires nothing when the session sends no timeline', async () => {
+    // The conservative direction, and the rule `separator` already follows: a
+    // request with too much context beats one with too little.
+    const h = harness();
+    h.read({ type: 'session.input_transcript.delta', delta: 'hello ' });
+    h.read({ type: 'session.output_transcript.delta', delta: 'Hello.' });
+    h.read({ type: 'session.input_transcript.delta', delta: 'lights on' });
+    h.read(delegated('item_1'));
+    await vi.waitFor(() => expect(h.asked).toHaveLength(1));
+
+    expect(h.asked[0]?.question).toBe('hello lights on');
   });
 });
 

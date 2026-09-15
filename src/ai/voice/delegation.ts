@@ -109,9 +109,33 @@ const CONTEXT_CHARS = 1_200;
  */
 const UTTERANCE_GAP_MS = 2_000;
 
+/**
+ * One thing the person said, with where it sits on the session's own clock.
+ *
+ * **A list rather than a string, because the voice answers some of these
+ * itself.** `heard` used to be one buffer cleared only when a delegation took
+ * it, so an utterance the model answered out loud — a greeting, "what can you
+ * do", anything the policy says not to delegate — stayed in the buffer and was
+ * handed over on the front of the *next* request. Observed: "what else can you
+ * do", answered aloud, arriving at the agent glued to "tell me what's on then"
+ * as one two-line question, with the answer the voice had already given
+ * nowhere on the page. Keeping them apart is what lets `spent` retire one
+ * without touching its neighbours.
+ */
+interface Utterance {
+  text: string;
+  /** Where it began and where it has been transcribed to, when the API said. */
+  start: number | undefined;
+  end: number | undefined;
+  /** The voice answered this one by itself — see `retire`. */
+  answered: boolean;
+}
+
 export class VoiceDelegation {
   /** What the person has said since the last delegation was handed over. */
-  private heard = '';
+  private heard: Utterance[] = [];
+  /** Where the assistant's own most recent speech began on the session clock. */
+  private saidFrom: number | undefined;
   /** Delegations already taken, so a duplicate delivery runs one job. */
   private readonly claimed = new Set<string>();
   /**
@@ -168,9 +192,15 @@ export class VoiceDelegation {
         if (start !== undefined && this.askedUntil !== undefined && start < this.askedUntil) {
           return;
         }
-        this.heard = (this.heard + this.separator(start, previousEnd) + delta).slice(
-          -CONTEXT_CHARS,
-        );
+        this.hear(delta, start, end, previousEnd);
+        return;
+      }
+      case LIVE_EVENTS.said: {
+        // **The voice answering by itself is what retires an utterance**, and
+        // reading it is the whole of why this case exists. See `retire`.
+        const start = finite(frame['start_ms']);
+        this.saidFrom = start ?? this.latestEnd ?? this.saidFrom;
+        this.retire();
         return;
       }
       case LIVE_EVENTS.delegated: {
@@ -255,17 +285,101 @@ export class VoiceDelegation {
    * of the gap is unknown, which is the honest answer: a build of this API
    * that stops sending a timeline gets the behaviour it had before.
    */
-  private separator(start: number | undefined, previousEnd: number | undefined): string {
-    if (this.heard === '') return '';
-    if (start === undefined || previousEnd === undefined) return '';
-    return start - previousEnd >= UTTERANCE_GAP_MS ? '\n' : '';
+  private separator(start: number | undefined, previousEnd: number | undefined): boolean {
+    if (this.heard.length === 0) return true;
+    if (start === undefined || previousEnd === undefined) return false;
+    return start - previousEnd >= UTTERANCE_GAP_MS;
+  }
+
+  /** One fragment onto the thing being said, or a new thing said. */
+  private hear(
+    delta: string,
+    start: number | undefined,
+    end: number | undefined,
+    previousEnd: number | undefined,
+  ): void {
+    const opens = this.separator(start, previousEnd);
+    const newest = this.heard[this.heard.length - 1];
+    if (opens || newest === undefined) {
+      this.heard.push({ text: delta, start, end, answered: false });
+      // **Opening a new one is what retires the last**, and it has to be here
+      // as well as on the voice's own speech: at the moment the voice answers,
+      // the sentence it is answering is still the newest — which `retire`
+      // never touches, since "one moment" is assistant speech landing after
+      // the very request about to be delegated. It stops being the newest
+      // exactly here.
+      this.retire();
+    } else {
+      newest.text += delta;
+      if (end !== undefined) newest.end = Math.max(newest.end ?? end, end);
+    }
+    this.bound();
+  }
+
+  /**
+   * Mark what the voice has just answered by itself.
+   *
+   * **The newest thing said is never retired**, and that one line is what
+   * makes this safe. The policy asks the model to say what it is doing
+   * *before* it goes and does it, so "one moment" is assistant speech landing
+   * a beat after the very request that is about to be delegated — retiring on
+   * that would hand the agent an empty question. Anything older is a
+   * different matter: the person moved on, and the only thing that can have
+   * answered it in between is the voice, since a delegated round clears the
+   * whole list when it is taken.
+   *
+   * It is a mark rather than a deletion because a retired utterance is still
+   * *context* right up until the next one opens — and because `answer` is the
+   * one place allowed to decide what a request is made of.
+   */
+  private retire(): void {
+    const saidFrom = this.saidFrom;
+    for (let index = 0; index < this.heard.length - 1; index += 1) {
+      const utterance = this.heard[index];
+      if (utterance === undefined || utterance.answered) continue;
+      // With no timeline at all — a build of this API that stops sending one —
+      // nothing is retired. The old behaviour, which is the conservative
+      // direction: a request with too much context beats one with too little.
+      if (saidFrom === undefined || utterance.end === undefined) continue;
+      if (saidFrom >= utterance.end) utterance.answered = true;
+    }
+  }
+
+  /** What one request is made of, newest kept, oldest dropped first. */
+  private question(): string {
+    // The newest is always in it — see `retire`. Everything before it is in
+    // only if the voice did not already answer it.
+    const kept = this.heard.filter(
+      (utterance, index) => index === this.heard.length - 1 || !utterance.answered,
+    );
+    return kept
+      .map((utterance) => utterance.text)
+      .join('\n')
+      .slice(-CONTEXT_CHARS)
+      .trim();
+  }
+
+  /**
+   * Keep what is remembered inside `CONTEXT_CHARS`, oldest dropped first.
+   *
+   * The bound used to be a `slice` on one string, which cut mid-word and could
+   * leave an utterance headless. Whole utterances go instead, which is the
+   * same rule said properly: the newest exchange is the one somebody is about
+   * to refer to.
+   */
+  private bound(): void {
+    let total = this.heard.reduce((sum, utterance) => sum + utterance.text.length, 0);
+    while (total > CONTEXT_CHARS && this.heard.length > 1) {
+      const dropped = this.heard.shift();
+      total -= dropped?.text.length ?? 0;
+    }
   }
 
   private async answer(delegationId: string, offset?: number): Promise<void> {
     if (this.claimed.has(delegationId)) return;
     this.claimed.add(delegationId);
 
-    const question = this.heard.trim();
+    const question = this.question();
     if (question === '') {
       // Nothing has been transcribed yet, so there is nothing this could be
       // about. The model carries on talking; a real request arrives with its
@@ -276,7 +390,7 @@ export class VoiceDelegation {
     // Taken, so a second delegation about the same sentence does not run the
     // same job twice — and so the next request is assembled from what is said
     // next rather than from everything since the session opened.
-    this.heard = '';
+    this.heard = [];
     // Where on the session's clock this was asked: the notice's own offset
     // when it carries one, and otherwise the furthest point anybody had been
     // transcribed to.
