@@ -44,7 +44,7 @@ const RETAIN_EXCHANGES = 1000;
  * device recognition from rule-writing into two tables would make it two
  * screens. Such a row leaves `exposesHash` empty and fills `automationId`.
  */
-export type AiRunKind = 'map' | 'repair' | 'automate' | 'assist' | 'portrait';
+export type AiRunKind = 'map' | 'repair' | 'automate' | 'assist' | 'portrait' | 'voice';
 
 export interface AiRunEvent {
   phase: 'started' | 'step' | 'finished';
@@ -97,6 +97,17 @@ export interface AiRunStart {
    * incarnation, so nothing else could total them.
    */
   sessionId?: string | undefined;
+  /**
+   * How hard the model was asked to work on this run — `low` · `medium` ·
+   * `high`. Absent where the idea does not apply (a portrait, the voice
+   * meter). See the column's own note in `schema.ts`.
+   */
+  effort?: string | undefined;
+  /**
+   * How the person reached the agent — `voice` · `typed`. Absent where
+   * nobody asked: a mapping run, a portrait.
+   */
+  via?: string | undefined;
 }
 
 export interface AiRunOutcome {
@@ -215,6 +226,8 @@ export class AiRunLog {
             automationId: input.automationId ?? null,
             portraitId: outcome.portraitId ?? null,
             sessionId: input.sessionId ?? null,
+            effort: input.effort ?? null,
+            via: input.via ?? null,
             ok: outcome.ok,
             costUsd: outcome.costUsd ?? null,
             turns: outcome.turns ?? null,

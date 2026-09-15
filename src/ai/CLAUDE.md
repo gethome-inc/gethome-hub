@@ -602,11 +602,36 @@ domains — update them in the same change.
   retention, the list. A subclass supplies which model and prompt open a
   conversation and what to write down for the arms only it has; the three arms
   *every* agent has are the runtime's, so a new agent cannot get them subtly
-  different. `chat/agent-loop.ts` is the same argument for the parts that are
-  the **API's** shape — the two cache breakpoints, `display: 'summarized'`, the
-  abort that becomes a sentence, and `QuestionGate`, which is the rule that no
-  request may carry a `tool_use` with no `tool_result` after it. Each agent
-  keeps its own `pump`, because what *ends* a turn genuinely differs.
+  different. Each agent keeps its own `pump`, because what *ends* a turn
+  genuinely differs.
+  **`chat/agent-loop.ts` is the same argument for what is neither the vendor's
+  nor the agent's, and it imports no SDK** — `agent-core.ts`'s rule, one
+  subsystem over, and it was missing here for as long as both agents typed
+  their pumps against `Anthropic.*`: "the assistant runs on Claude" was a fact
+  about the **module graph** rather than about any setting, and a home with only
+  an OpenAI key was refused outright. It holds `ChatRound`
+  (`{said, calls, stop, refusal?}`), `ChatToolCall`/`ChatToolResult`, and
+  `QuestionGate` — the rule that no request may carry a tool call with no result
+  after it. **`ChatStop` is four words for what two vendors spell differently**:
+  Anthropic's `end_turn`/`tool_use`/`refusal`/`pause_turn` and OpenAI's `status`
+  plus a refusal block inside the output collapse to the same four questions,
+  and a pump that branched on the raw value would be a pump per vendor.
+  **`ChatTransport` is where each vendor's shape lives, and it owns the message
+  history** — Anthropic wants content blocks with thinking replayed verbatim,
+  OpenAI an item array with encrypted reasoning echoed back, and a neutral
+  history converted at the boundary would be a third representation to keep
+  correct. `chat/anthropic-transport.ts` keeps the two cache breakpoints,
+  `display: 'summarized'` and the streamed `messages.stream`;
+  `chat/openai-transport.ts` is the Responses API over plain `fetch` — **no
+  second SDK for a Pi to download**, the same decision `openai-agent.ts` made —
+  with `summary: 'auto'` as that vendor's spelling of the summarized-thinking
+  lesson, `store: false`, and an SSE parser that **buffers across chunks**,
+  since a frame split mid-delta is the ordinary case rather than the edge.
+  `chat/transport.ts` picks one behind a **dynamic import**, so a home with one
+  key never loads the other vendor's client. `test/ai-openai-chat.test.ts`
+  stubs `fetch` with a real SSE body rather than a parsed object, for the reason
+  `test/ai-agent.test.ts` learned: a mock laxer than the thing it stands in for
+  tests the mock.
   **One transcript store**, told apart by a nullable `surface` column on
   `automation_chat_messages` (null = `automation`, which every row written
   before it is). Two tables would be a second retention sweep, a second recap
@@ -651,12 +676,26 @@ domains — update them in the same change.
   paragraph and a release of both apps. `permission` is checked when the tool
   runs, so a member whose role cannot hand a job over gets a sentence the model
   reads out rather than a capability silently absent.
-  **The agents' model list is its own** (`AGENT_MODELS` — Opus 5 and
-  Sonnet 5), and the mapper's one-model list is untouched: a descriptor is
-  cached against a device model and shapes every unit of it for ever, while a
-  chat is many small rounds answered with another message when the reply is
-  poor. **One list, a column each**: the assistant and the automations agent
-  are offered the same two and choose independently
+  **The agents' model list is its own** (`AGENT_MODELS` — Opus 5 and Sonnet 5
+  on Anthropic, GPT-5.6 Sol and Terra on OpenAI), and the mapper's one-model
+  list is untouched: a descriptor is cached against a device model and shapes
+  every unit of it for ever, while a chat is many small rounds answered with
+  another message when the reply is poor. **The provider follows the model id
+  and there is no second column** (`agentProviderOf`): ids do not collide across
+  vendors — `priceOf` has relied on that since the mapper had two — so one
+  setting says both things and they cannot disagree, and an app's provider
+  picker writes that provider's default model id. **And resolution is
+  key-aware**, which is the half a list-only version gets wrong: a home that has
+  only ever had an OpenAI key still has `claude-opus-5` stored, because it is
+  the default and nobody chose it, so resolving on the offered list alone points
+  every conversation at a vendor the hub cannot authenticate to and answers
+  `ai_not_configured` on a home that is configured. A stored choice counts while
+  its provider is *usable*; otherwise the hub falls back to the provider that
+  is. A **retired** id keeps its vendor off `PRICING` rather than `AGENT_MODELS`
+  — the list answers `null` for one, which is the point of it — since the vendor
+  was a real choice somebody made and the retired id was not.
+  **One list, a column each**: the assistant and the automations agent
+  are offered the same lists and choose independently
   (`ai_assistant_model`, `ai_automations_model`), because answering questions
   about the house and writing the rules it runs by itself are different jobs a
   home may want to spend differently on. The automations agent had no column of
@@ -672,6 +711,233 @@ domains — update them in the same change.
   conversation and a name over the next. One `ai_runs` table, two surfaces
   asking one question of it, so the answer is the union. Effort is `medium` here
   against the mapper's `high`, and is exposed by neither.
+  **And the same assistant can be talked to.** `src/ai/voice/` opens a GPT-Live
+  session for the phone: the hub takes the phone's **WebRTC offer**, attaches
+  the whole session — model, voice, instructions, history, delegation mode —
+  posts both with the home's key and hands back the SDP answer. The phone holds
+  the audio, because a hop through a Pi is latency nobody would tolerate, and
+  it is handed **no credential at all**. `docs/assistant.md` is canonical.
+  Nine rules. **WebRTC is the API's answer, not a preference**: Live's
+  WebSocket authenticates with the *project key* and is documented for
+  server-side audio, and there is no ephemeral client secret anywhere in the
+  family — so a phone holding a Live socket would be a phone holding the home's
+  key, which is the one rule this surface exists to keep. It is also Opus over
+  SRTP against base64 PCM16 over TCP, which is a twentieth of the bytes with a
+  jitter buffer and loss concealment. `audio.format` is not sent: WebRTC refuses
+  it and negotiates its own. **`delegation.type: 'client'` is the architecture in one field**: the
+  voice asks *this hub* for help rather than a model OpenAI hosts, so the home
+  keeps its own agent, its own tools, its own transcript and whichever provider
+  it picked — `responses` would have taken all four away the moment somebody
+  started talking. **There is no tool catalog and no fast path**, and that is
+  this API rather than a choice: client delegation makes no structured tool
+  calls at all (`session.delegation.created` carries an id, no request text and
+  no arguments), so the `ask_home` tool, the generated catalog and the
+  `POST /assistant/voice/tool` route are gone. It is not slow for the reason it
+  looks — the assistant's `control_device` is an in-process registry call, so a
+  lamp is one LAN round trip and one model round, and the voice says "one
+  moment" and keeps listening while it happens. **The delegation loop lives
+  here, on a sideband** — a second connection onto the same session
+  (`wss://…/v1/live/sessions/{id}/attach`, the home's key again) — because
+  somebody has to assemble the request from the transcript, and doing that on
+  the phone added two LAN legs to the one thing measured in how fast a lamp
+  goes off. The API's rule is one owner per action, since both connections see
+  everything: the sideband owns delegations, the transcript and the usage; the
+  phone owns the audio and sends `session.close`. **`sideband.ts` is the socket
+  and `delegation.ts` is what the frames mean**, split for the reason
+  `adapters/matter/settling.ts` is its own file: reading those rules through
+  the socket means dialling `api.openai.com`, so a rule every spoken request in
+  the house goes through would be a rule no test could reach —
+  `test/voice-sideband.test.ts` drives it frame by frame instead. `askAloud` is the whole
+  handler and is ten lines where the phone's was sixty, because the wait is the
+  conversation's own `inFlight` rather than a socket, a subscription and a
+  resumed continuation — and it runs the *ordinary* path, so a spoken exchange
+  leaves the same two rows a typed one does. That also fixed a real duplicate:
+  the phone wrote the person's sentence itself **and** sent it as a message. The
+  one cost is that a sideband is sent copies of both directions of audio with no
+  way to decline, so `frameType` reads the type off a bounded prefix and drops
+  audio before parsing. **And a superseded answer is told apart on the
+  session's own clock, never by counting fragments** — the rule that says
+  whether the assistant's answer is *spoken* (`commentary`) or merely *known*
+  (`thinking`). The model asks for help the moment it has understood, so the
+  closing fragments of "turn the kitchen light off" are transcribed *after* the
+  notice: a fragment counter demoted almost every answer in the house using the
+  very sentence that asked for it, which is a voice assistant that silently
+  stops answering out loud. A delta's `start_ms` against the delegation's own
+  offset is what tells the tail of a request from a new one — before it, the
+  fragment is already represented in what was sent and is dropped; after it,
+  the person really has moved on. With no timeline at all the answer is
+  **spoken**: a slightly late sentence about something the hub has already done
+  costs far less than never hearing that it happened. **The same clock
+  separates two things said from one**: the deltas carry no punctuation between
+  utterances, so "Hi", a pause and then a request concatenated into one line —
+  asked of the agent that way and shown that way in the row an app draws — and
+  a gap of `UTTERANCE_GAP_MS` is written down as a line break instead, silent
+  when either end of it is unknown. **And what the voice answered by itself is
+  left out of the next request**: `heard` is a list of utterances rather than
+  one buffer, `session.output_transcript.delta` retires one the voice has
+  answered, and the **newest is never retired** — "one moment" is assistant
+  speech landing after the very request about to be delegated, so retiring on
+  it would hand the agent an empty question. Without that, an utterance the
+  policy told the voice to answer itself arrived glued to the front of the next
+  one, the agent answered the pair, and the phone dropped the caption of the
+  answer already given because a row had landed covering it. **And what comes back is said as it was
+  written**: the prompt asks the voice to relay the answer rather than retell
+  it, because the page and the room are one conversation and a re-wording
+  leaves somebody reading one sentence while hearing another. **The prompt is split the way
+  the migration guide says**: style and *when to ask* to the voice, business
+  rules and the shape of the home to the backend — which is the assistant,
+  whose prompt already carries them. It is written to the prompting guide's own
+  structure, labels included (`Backchannel policy`, `Interruption policy`, and a
+  `Delegation policy` split into *Backend tools* / *Delegate when* / *Do not
+  delegate when*), plus the two "optional" controls a **room** makes mandatory:
+  keep listening through a pause, and don't treat a television as a request.
+  What is left beside the policy is the home's **names** — rooms, devices, and
+  the scenes somebody could ask for, bounded by `NAME_LIMIT` because the live
+  model's context window is small — no ids, endpoints or capabilities. The
+  scenes are there for the devices' own reason: the voice cannot run one, but
+  "put Movie night on" has to be heard as a *name* and said back the way the
+  home spells it. Only pressable, enabled rules, since nobody asks a `watching`
+  rule for anything out loud. **And the policy has to say the names are for
+  hearing rather than for answering**, because the model is looking at the list
+  and not at the heading over it: asked what scenes the home had, the voice read
+  that list back — the one that deliberately leaves out the `watching` rules and
+  the switched-off ones — and said that was all there was, on a home with three.
+  Every heading is hedged (`SOME ROOMS, BY NAME`), "a still-current result"
+  names the backend as where it came from, and one sentence says plainly that
+  what the home *has* is the backend's answer every time, even when a name is
+  right there. `test/voice-prompts.test.ts` pins the labels and
+  the bound, because the way it regresses is somebody flattening the policy into
+  prose or copying the assistant's prompt back in.
+  **The answer is written for the ear at the other end.** The voice prompt used
+  to ask GPT-Live to relay the assistant's answer word for word — a rule the
+  API will not keep (`commentary` is documented as content the model is trained
+  to paraphrase) defending text that should never have been handed over in that
+  shape (the assistant writes for a three-inch phone column, bullets and bold
+  included). So `askAloud` puts one line on `ChatSession.priming` and the
+  assistant's system prompt carries a *SOMETIMES YOU ARE BEING SPOKEN TO*
+  section it switches on: no formatting, numbers as a person says them, one or
+  two sentences, a transcript read as speech, nothing announced as done that
+  was not done. **The rules live in the system prompt and only the marker is
+  per turn**, because that prompt is byte-identical for the life of a build and
+  sits behind a cache breakpoint. Priming rather than the message itself for
+  the reason `rememberSaved` uses it: it reaches the model and is never written
+  down, and the row this turn writes is what the person actually said.
+  **A spoken turn carries what everything is doing right now**, which the
+  cached first message cannot: it is written once, so a snapshot there would be
+  answered from confidently an hour later, and `get_device` is the right answer
+  for a chat. Out loud it is a whole model round — "is the kitchen light on"
+  was one round to call the tool and a second to say the answer, doubling the
+  term that dominates a spoken exchange on most of what anybody asks a house.
+  `spokenStateDigest` builds one at the moment of the turn onto `priming`:
+  bounded to what somebody asks out loud, skipping an endpoint with nothing to
+  report, **keyed by id** (the first message is the index), in `get_device`'s
+  own raw units, with a battery only under 20%. Spoken turns only — a typed
+  answer is read when it lands, and the agent trail makes that wait legible.
+  **And it has to say that it replaces the tool call.** `get_device`'s own
+  description and the system prompt's *Look before you act* both send the model
+  there for a current value, and both are right for a typed turn — so the
+  digest says the reading is current, that a device missing from it reports
+  nothing, that a plain reading is answered from it, and **names** what still
+  needs the tool (a colour, a thermostat's limits, a fan percentage, a battery
+  that is not low, settings, learned buttons). "Anything else" was the first
+  wording and it is an invitation: two nudges towards a tool and one weak hint
+  away means the tool gets called and the round is spent anyway.
+  **And a round that outlives the phone's patience says so.** The app hangs up
+  after a minute of silence and the assistant gets two, so a slow answer landed
+  on a dead line. Every `PATIENCE_MS` an unanswered delegation gets a
+  `commentary.append` on its own id; the model speaking resets the phone's
+  clock. It says only that it is taking a while — the hub knows a round is
+  running and nothing more, and naming a tool call it cannot see would be an
+  invention.
+  **And a question is an answer.** `askAloud` took `agent` and `note` rows
+  only, which drops the third arm — `ask_user`, which is exactly where this
+  agent's prompt sends it when a request is ambiguous about *what to do*, and
+  the commonest thing to be ambiguous about out loud. The scan fell off the
+  end, `null` reached the sideband as "that could not be worked out", and a
+  refusal was spoken over a good question with two tappable options. Question
+  rows are spoken now with their **options folded into the sentence**, because
+  the model writes the choices into `options` and leaves the question bare. **It is the same transcript, both ways** —
+  `askAloud` writes rows under the caller's own member id so the page fills
+  in while somebody talks and `revive()` can continue it by typing, and
+  `liveHistory` seeds the last few exchanges into `session.input` so pressing
+  the microphone on a page you have been typing on carries one conversation on
+  — **bounded in characters as well as messages** (`LIVE_HISTORY_CHARS`),
+  because that list is capped at 8,192 tokens as well as at 128 messages and a
+  transcript row holds 4,000 characters, so a count alone had a long
+  conversation refused on every attempt rather than answered with less history.
+  **And writing into somebody else's conversation is refused**
+  (`maySpeakInto`): `askAloud`'s third arm is `open()`, which is for the id
+  `beginVoice` minted and refuses nothing, so another member's session id
+  reached it and the round wrote into their transcript — `revive()`'s ownership
+  rule held one arm further along, with `409 not_your_conversation` on the
+  route so it is a sentence rather than a voice that answers nothing.
+  `beginVoice()` is still a few lines (no provider conversation here to hold)
+  and marks `spokenSessions`, which is the only thing left that knows a command
+  was *spoken* now that every one arrives as an ordinary assistant turn — read
+  at the moment of the command, since one conversation can be typed in the
+  morning and talked to in the evening. **The mark goes on after the sideband is
+  attached**, because attaching replaces the one this conversation was holding
+  and a replaced sideband settles, which is what clears the mark: set first, it
+  was cleared by the line it belonged to, and a session nothing attached to
+  stayed marked for the life of the process.
+  **A spoken round thinks less, and that is per *turn* rather than per
+  conversation.** `ChatEffort` is `low`/`medium`/`high` and nothing else,
+  because the value goes straight onto two vendors' wires
+  (`output_config.effort`, `reasoning.effort`) and a word only one of them
+  takes is a 400 in somebody's kitchen rather than a checker error — widening
+  it means checking both, or giving the transport that cannot a mapping.
+  `ChatTurnContext.effort` is the override and
+  `AssistantChat.spokenOrigin` (`low`, `voice`) is the only thing that uses it; a typed
+  round stays on the transport's `medium`. The same question genuinely costs
+  differently out loud: a typed answer is read when it lands, so a few seconds
+  more deliberation is free, while a spoken one is somebody standing in a room
+  after the voice has said "one moment" — and the work is usually smaller than
+  it looks, since "switch the kitchen light off" is one tool call against a
+  catalog the agent can already see. It has to be the **turn's** because a
+  transport is built once and holds the history, while one conversation is
+  typed in the morning and talked to in the evening — `spokenSessions`'
+  own reasoning. Still exposed to nobody: two knobs for one decision is one
+  too many.
+  **And a turn writes down what it ran at and how it was asked** — `ai_runs`
+  gained `effort` and `via` beside `provider`/`modelId`, filled from
+  `ChatSession.origin`, which `runExchange` resolves at the moment a round
+  begins. That is the same question those two columns already answer, and it
+  had one honest answer per row and nowhere to put it: two conversations on
+  one model, one spoken and one typed, were the same row twice at different
+  prices, and the first thing anybody asks about a bad answer is what was
+  behind it. **Two narrow columns rather than a `meta` blob**, because both
+  are closed vocabularies a screen groups and sums by, and a JSON bag is
+  neither queryable nor reviewable — `ai_run_exchanges` is where *content*
+  goes, and its rule that nothing carries a credential is what keeps these two
+  cheap to add beside it. **Read back, never re-derived**, the rule `modelId`
+  already follows: a log is about what ran, and every setting behind it moves.
+  **Null is a real answer** and both are nullable for the same reason: a row
+  written before this has neither, a portrait has no effort, a device
+  recognition nobody asked for has no `via`, and the `voice` meter below is a
+  line rather than a generation — it carries `via: 'voice'` and no effort,
+  since GPT-Live has no such setting and a number invented here would be the
+  one field in this log that was never true of anything.
+  **Two meters**: an `ai_runs` row of `kind: 'voice'` at $0.05 a minute beside
+  the `assist` rows the delegated turns write, because GPT-Live bills for time
+  on the line — silence included — and the model behind it bills for tokens.
+  The seconds are the **session's own** (`session.usage.updated`, with
+  `session.closed` for the last word), read on the sideband and recorded once
+  however the line ended, rather than the phone's stopwatch they used to be: a
+  phone can be force-quit and a stopwatch counts the dial and the teardown too.
+  Clamped to `SIDEBAND_MAX_SECONDS`, since nothing can have cost more than the
+  socket reading it stayed attached for.
+  **A session that never said still settles, at zero.** Usage arrives about
+  once a minute, so the sessions carrying no number are exactly the short ones
+  — and settling clears the `spokenSessions` mark as well as writing the row,
+  so hanging both on there being a number left the mark on precisely those and
+  logged a later typed follow-up as speech. No seconds, no row: `$0.00` about a
+  line that plainly ran is a claim where nothing is the truth. And
+  **`live-wire.ts` is the only file that names one of that API's fields**, with
+  `LiveWire.swift` its mirror: it is the one thing here nobody can check by
+  running the suite, and it has been got wrong twice — a wrong *mode* read as a
+  wrong model id, then a WebSocket kept with a client secret assumed to exist
+  for it. Both times the containment is what made the fix a constant and a
+  route rather than a hunt through an audio pipeline.
   **`control_device` is the one tool that writes to the home**, through the
   registry's ordinary path and into the activity log **named for the person who
   asked** — the feed is read a week later and "the assistant" is nobody anyone

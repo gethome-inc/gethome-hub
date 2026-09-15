@@ -1,8 +1,10 @@
-import Anthropic from '@anthropic-ai/sdk';
+import type { AiProvider } from '../core/settings.js';
 import type { Logger } from '../logging.js';
 import { type AgentAuth } from './agent-core.js';
 import { isSupportedModel, supportedModelIds } from './models.js';
-import { QuestionGate, RunUsage, refusalSentence, streamTurn } from './chat/agent-loop.js';
+import { QuestionGate, type ChatToolResult } from './chat/agent-loop.js';
+import { createChatTransport } from './chat/transport.js';
+import { AGENT_EFFORT } from './chat/chat-runtime.js';
 import type { AgentConversation, ChatTurnContext } from './chat/chat-runtime.js';
 import { askUserInput, type AskUser } from './automation-tools.js';
 import {
@@ -18,12 +20,19 @@ import {
  * The assistant's loop.
  *
  * The same shape as the automations agent's and none of the same tools, with
- * everything that is the *API's* shape rather than this agent's shared through
- * `chat/agent-loop.ts` — the cache breakpoints, the summarized thinking, the
- * abort that becomes a sentence, and the rule that no request may carry a
- * `tool_use` with no `tool_result` after it.
+ * everything that is the *API's* shape rather than this agent's behind
+ * `ChatTransport` — the cache breakpoints, the summarized thinking, the abort
+ * that becomes a sentence, and the rule that no request may carry a tool call
+ * with no result after it.
  *
- * What is different here, and deliberately:
+ * **It imports no SDK**, and that is what makes the model setting mean
+ * anything: the transport is chosen by `createChatTransport` and loaded on
+ * demand, so a home with only an OpenAI key never pulls the Anthropic client
+ * into its graph. Before that, both agents imported `@anthropic-ai/sdk` at the
+ * top of the file, and "the assistant runs on Claude" was a fact about the
+ * module graph rather than about anything anybody could change.
+ *
+ * What is different here from the mapper, and deliberately:
  *
  * **Effort is `medium`.** The mapper runs at `high` because its answer is
  * cached against a device model and shapes every unit of it a home ever meets;
@@ -33,7 +42,7 @@ import {
  *
  * **No mid-conversation system messages.** They would be the natural way to
  * inject a changing home, and Sonnet 5 rejects them outright — and the model
- * here is switchable, so the one shape has to work on both.
+ * here is switchable, so the one shape has to work on all of them.
  *
  * **A turn can end with work handed to another agent.** `delegate` is an
  * ordinary tool that returns in milliseconds: it starts the other agent's
@@ -66,6 +75,7 @@ export type AssistantTurn =
 
 export interface AssistantAgentOptions {
   auth: AgentAuth;
+  provider: AiProvider;
   modelId: string;
   systemPrompt: string;
   /** The first user message: this home, and what was asked. */
@@ -74,30 +84,43 @@ export interface AssistantAgentOptions {
   log: Logger;
 }
 
-export function createAssistantConversation(
+export async function createAssistantConversation(
   options: AssistantAgentOptions,
-): AgentConversation<AssistantTurn> {
-  const { auth, modelId, systemPrompt, taskPrompt, tools, log } = options;
-  if (!isSupportedModel(modelId)) {
+): Promise<AgentConversation<AssistantTurn>> {
+  const { auth, provider, modelId, systemPrompt, taskPrompt, tools, log } = options;
+  if (!isSupportedModel(modelId, provider)) {
     throw new Error(
-      `model "${modelId}" cannot run the assistant (supported: ${supportedModelIds().join(', ')})`,
+      `model "${modelId}" cannot run the assistant ` +
+        `(supported: ${supportedModelIds(provider).join(', ')})`,
     );
   }
 
-  const client = new Anthropic({ apiKey: auth.secret, maxRetries: 3 });
-  const definitions = assistantTools(tools.delegates).map((tool) => ({
-    name: tool.name,
-    description: tool.description,
-    input_schema: tool.schema() as Anthropic.Tool['input_schema'],
-  }));
-  const usage = new RunUsage(modelId);
+  /**
+   * One controller for the conversation's life rather than one per turn.
+   *
+   * The transport is built once and holds the signal, so the watchdog is armed
+   * around each `round()` and disarmed after it — `AbortSignal.timeout` per
+   * request would need a new transport per turn, which is the history thrown
+   * away every round.
+   */
+  const controller = new AbortController();
+  const transport = await createChatTransport(provider, {
+    secret: auth.secret,
+    modelId,
+    systemPrompt,
+    tools: assistantTools(tools.delegates),
+    label: 'the assistant',
+    timeoutMs: ASSISTANT_TIMEOUT_MS,
+    // See the note at the top of the file: a chat, not a cached descriptor.
+    effort: AGENT_EFFORT,
+    signal: controller.signal,
+    log,
+  });
 
-  const messages: Anthropic.MessageParam[] = [];
-  const gate = new QuestionGate(messages, log, 'assistant');
+  const gate = new QuestionGate(transport);
   let opened = false;
 
   async function pump(context: ChatTurnContext | undefined): Promise<AssistantTurn> {
-    const controller = new AbortController();
     const watchdog = setTimeout(() => controller.abort(), ASSISTANT_TIMEOUT_MS);
     watchdog.unref?.();
 
@@ -123,34 +146,17 @@ export function createAssistantConversation(
          */
         context?.onStep?.(turn === 1 ? 'Reading your home' : 'Working it out', 'thinking');
 
-        if (usage.costUsd() >= ASSISTANT_MAX_BUDGET_USD) {
+        if (transport.costUsd() >= ASSISTANT_MAX_BUDGET_USD) {
           return {
             kind: 'stopped',
             reason: 'This conversation has reached its cost limit. Start a new one to carry on.',
           };
         }
 
-        const round = await streamTurn({
-          client,
-          modelId,
-          systemPrompt,
-          messages,
-          tools: definitions,
-          signal: controller.signal,
-          usage,
-          context,
-          label: 'the assistant',
-          timeoutMs: ASSISTANT_TIMEOUT_MS,
-          // See the note at the top of the file: a chat, not a cached
-          // descriptor.
-          effort: 'medium',
-        });
+        const round = await transport.round(context);
 
-        if (round.response.stop_reason === 'refusal') {
-          return {
-            kind: 'stopped',
-            reason: refusalSentence(round.response),
-          };
+        if (round.stop === 'refusal') {
+          return { kind: 'stopped', reason: round.refusal ?? 'The model declined to answer that.' };
         }
 
         const { said, calls } = round;
@@ -158,7 +164,7 @@ export function createAssistantConversation(
         // A pause is the API asking to be called again with the same
         // conversation — but only once anything it *did* call has been
         // answered, so this is asked after the calls are in hand.
-        if (calls.length === 0 && round.response.stop_reason === 'pause_turn') continue;
+        if (calls.length === 0 && round.stop === 'pause') continue;
 
         // Prose and nothing else: the model has handed back, which is the
         // ordinary end of a turn here. Anything handed to another agent during
@@ -168,7 +174,7 @@ export function createAssistantConversation(
           return handoffs.length > 0 ? { kind: 'handed', handoffs, text } : { kind: 'said', text };
         }
 
-        const results: Anthropic.ToolResultBlockParam[] = [];
+        const results: ChatToolResult[] = [];
         let question: AssistantTurn | null = null;
 
         for (const call of calls) {
@@ -176,12 +182,11 @@ export function createAssistantConversation(
             const parsed = askUserInput.safeParse(call.input);
             if (!parsed.success) {
               results.push({
-                type: 'tool_result',
-                tool_use_id: call.id,
-                content: `That question could not be asked: ${parsed.error.issues
+                id: call.id,
+                text: `That question could not be asked: ${parsed.error.issues
                   .map((issue) => issue.message)
                   .join('; ')}`,
-                is_error: true,
+                isError: true,
               });
               continue;
             }
@@ -191,12 +196,11 @@ export function createAssistantConversation(
               // rather than left open, which would be the same 400 by another
               // route.
               results.push({
-                type: 'tool_result',
-                tool_use_id: call.id,
-                content:
+                id: call.id,
+                text:
                   'Only one question can be outstanding at a time. Ask this one after the ' +
                   'first is answered.',
-                is_error: true,
+                isError: true,
               });
               continue;
             }
@@ -217,10 +221,9 @@ export function createAssistantConversation(
             const parsed = delegateInput.safeParse(call.input);
             if (!parsed.success) {
               results.push({
-                type: 'tool_result',
-                tool_use_id: call.id,
-                content: 'That handover needs an agent key and a brief.',
-                is_error: true,
+                id: call.id,
+                text: 'That handover needs an agent key and a brief.',
+                isError: true,
               });
               continue;
             }
@@ -231,12 +234,7 @@ export function createAssistantConversation(
             );
             if (outcome.refused !== undefined) {
               context?.onStep?.('Could not hand that over', 'writing', outcome.refused);
-              results.push({
-                type: 'tool_result',
-                tool_use_id: call.id,
-                content: outcome.refused,
-                is_error: true,
-              });
+              results.push({ id: call.id, text: outcome.refused, isError: true });
               continue;
             }
             handoffs.push({
@@ -245,7 +243,7 @@ export function createAssistantConversation(
               sessionId: outcome.sessionId,
             });
             context?.onStep?.('Handed this to another agent', 'writing', parsed.data.brief);
-            results.push({ type: 'tool_result', tool_use_id: call.id, content: outcome.text });
+            results.push({ id: call.id, text: outcome.text });
             continue;
           }
 
@@ -256,10 +254,9 @@ export function createAssistantConversation(
           // its name.
           context?.onStep?.(step.summary, step.kind, result.detail);
           results.push({
-            type: 'tool_result',
-            tool_use_id: call.id,
-            content: result.text,
-            ...(result.isError ? { is_error: true } : {}),
+            id: call.id,
+            text: result.text,
+            ...(result.isError ? { isError: true } : {}),
           });
         }
 
@@ -273,7 +270,7 @@ export function createAssistantConversation(
           return question;
         }
 
-        messages.push({ role: 'user', content: results });
+        transport.pushToolResults(results);
       }
 
       // Out of rounds. Anything already handed over still happened and still
@@ -290,34 +287,40 @@ export function createAssistantConversation(
     }
   }
 
-  return {
-    provider: 'anthropic',
+  /**
+   * Named rather than returned inline, because `send` and `answer` route into
+   * each other and `this` inside an object literal typed by a *promised*
+   * return is the union of the two — the price of the constructor becoming
+   * async so it can load one vendor's transport and not the other.
+   */
+  const conversation: AgentConversation<AssistantTurn> = {
+    provider,
     modelId,
+    // What this conversation works at, for the run log to read back rather
+    // than re-derive. A single turn may still ask for something else.
+    effort: AGENT_EFFORT,
 
     async send(text, context) {
       if (gate.isOpen) {
         // Somebody typed instead of tapping an option. That is an answer, and
         // treating it as a fresh message would leave the model's question
         // unclosed and the API refusing the conversation.
-        return this.answer(text, context);
+        return conversation.answer(text, context);
       }
-      // **Nothing is ever sent with a `tool_use` left unanswered.** Here
-      // rather than beside the request, which is where it can never fire:
-      // mid-loop the last message is always the results of the round before.
+      // **Nothing is ever sent with a tool call left unanswered.** Here rather
+      // than beside the request, which is where it can never fire: mid-loop the
+      // last message is always the results of the round before.
       gate.settleDangling();
-      messages.push({
-        role: 'user',
-        content: opened ? text : `${taskPrompt}\n\n${text}`.trim(),
-      });
+      transport.pushUser(opened ? text : `${taskPrompt}\n\n${text}`.trim());
       opened = true;
-      log.debug({ model: modelId }, 'assistant: user message');
+      log.debug({ model: modelId, provider }, 'assistant: user message');
       return pump(context);
     },
 
     async answer(text, context) {
-      if (!gate.isOpen) return this.send(text, context);
+      if (!gate.isOpen) return conversation.send(text, context);
       // The answer **and** every other call the same response made. One
-      // message, every `tool_use` in the assistant turn accounted for.
+      // message, every call in the assistant turn accounted for.
       gate.answer(text);
       return pump(context);
     },
@@ -327,9 +330,10 @@ export function createAssistantConversation(
     },
 
     costUsd() {
-      return usage.costUsd();
+      return transport.costUsd();
     },
   };
+  return conversation;
 }
 
 export { ASSISTANT_MAX_COMMANDS_PER_TURN };

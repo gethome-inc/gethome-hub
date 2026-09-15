@@ -453,6 +453,13 @@ describe.skipIf(!handle)('roles and permissions', () => {
         'hub.ai',
         undefined,
       ],
+      // **Talking out loud is the same conversation by another route**, so it
+      // takes the same key and nothing more — and there is now exactly one
+      // route to guard. Client delegation makes no structured tool calls, so a
+      // spoken request reaches the home through the ordinary message path; and
+      // the hub's own sideband writes the transcript and reads the usage, so
+      // the two routes the phone used for those are gone.
+      ['POST', '/api/v1/assistant/voice/session', 'hub.ai', {} as object],
       ['PUT', '/api/v1/settings/timezone', 'automation.manage', { timezone: 'UTC' } as object],
       // Reading the home is the floor, and the rules are the home — including
       // what they are made of and why one fired.
@@ -550,6 +557,47 @@ describe.skipIf(!handle)('roles and permissions', () => {
     });
     expect(rounds.statusCode).toBe(200);
     expect(rounds.json()).toEqual([]);
+  });
+
+  /**
+   * The allowed half of the voice routes, which the refusal table above cannot
+   * prove on its own — a permission tested only one way can be broken by
+   * denying everybody.
+   *
+   * There is one voice route left — the hub's own sideband writes the
+   * transcript and reads the usage, so the two the phone used for those are
+   * gone — and it is testable here because it gets as far as "this home has no
+   * OpenAI key" without reaching a provider.
+   */
+  it('lets a member talk out loud, and says plainly when the home cannot', async () => {
+    // Deterministically keyless, whatever an earlier case in this file stored:
+    // the assertion below is about a *configuration* refusal, and a hub that
+    // happens to have a key would go on to ask OpenAI and fail for a different
+    // reason entirely.
+    await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(ownerToken),
+      payload: { clear: 'openai' },
+    });
+
+    // Past the guard, and stopped by the thing that is actually missing. A
+    // **409 is proof the member got past it** where a 403 would not be, and it
+    // pins the fourth refusal code — the one genuinely new thing about this
+    // surface: GPT-Live is OpenAI's and there is no substitute, so a home
+    // answering perfectly well on Anthropic still cannot *speak* without a key
+    // it may never have needed before.
+    const opened = await app.inject({
+      method: 'POST',
+      url: '/api/v1/assistant/voice/session',
+      headers: auth(memberToken),
+      // The offer is required — Live has no client-secret path, so a session
+      // is created by answering one — and the body is parsed before the key is
+      // read, so omitting it would be a 400 rather than the refusal under test.
+      payload: { sdp: 'v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n' },
+    });
+    expect(opened.statusCode).toBe(409);
+    expect(opened.json()).toMatchObject({ error: 'openai_not_configured' });
   });
 
   /**

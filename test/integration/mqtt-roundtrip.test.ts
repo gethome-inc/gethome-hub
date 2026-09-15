@@ -45,13 +45,18 @@ const fixtures = JSON.parse(
   readFileSync(path.join(import.meta.dirname, '../fixtures/z2m/devices.json'), 'utf8'),
 ) as unknown[];
 
-const waitFor = async (predicate: () => boolean, timeoutMs = 8000): Promise<void> => {
+const waitFor = async (predicate: () => boolean, timeoutMs = 8000, what = 'condition'): Promise<void> => {
   const start = Date.now();
   while (!predicate()) {
-    if (Date.now() - start > timeoutMs) throw new Error('timed out waiting for condition');
+    if (Date.now() - start > timeoutMs) throw new Error(`timed out waiting for ${what}`);
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
 };
+
+/** The fixture fleet the Zigbee adapter adopts — every entry but the coordinator, which it filters. */
+const fleet = (fixtures as Array<{ friendly_name: string; type: string }>).filter(
+  (device) => device.type !== 'Coordinator',
+);
 
 describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention device)', () => {
   // Skipped suites still have their body collected, so never deref a null
@@ -167,7 +172,22 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
   });
 
   it('discovers the Zigbee fleet and the MQTT convention device over the broker', async () => {
-    await waitFor(() => registry.listDevices().length >= 10);
+    // Two adapters fill this list and `registry.start()` starts them in turn,
+    // so a bare count is met by the Zigbee flood on its own — sixteen fixtures
+    // against the ten this used to ask for — while the convention device
+    // behind the second adapter is still arriving. A gate something else can
+    // satisfy never holds open the race it exists for: on a loaded runner this
+    // read exactly the sixteen Zigbee devices and no Pool pump. So wait for
+    // the fleet the test is named for — the Zigbee half by count, so adding a
+    // fixture cannot quietly shrink the wait, and the convention device by
+    // name, since it is the one that arrives last and from somewhere else.
+    await waitFor(
+      () =>
+        registry.listDevices().length >= fleet.length + 1 &&
+        registry.listDevices().some((device) => device.name === 'Pool pump'),
+      8000,
+      'the Zigbee fleet and the convention device',
+    );
     const list = await devices();
     const names = list.map((device) => device.name);
     expect(names).toContain('Desk lamp');

@@ -1,4 +1,5 @@
 import type { AskUser } from './automation-tools.js';
+import type { ChatEffort } from './chat/chat-runtime.js';
 
 /**
  * Everything about an automation conversation that is not one vendor's API.
@@ -180,4 +181,7 @@ export interface AutomationConversation {
   /** Which model has been answering, for the run log and for the apps. */
   readonly modelId: string;
   readonly provider: string;
+  /** What it works at when a turn does not ask for something else — read
+   *  back for the run log rather than re-derived. */
+  readonly effort: ChatEffort;
 }

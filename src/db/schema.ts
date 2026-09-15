@@ -536,6 +536,30 @@ export const aiRuns = sqliteTable('ai_runs', {
    * and rows written before this column stay readable.
    */
   sessionId: text('session_id'),
+  /**
+   * How hard the model was asked to work — `low` · `medium` · `high`.
+   *
+   * Recorded rather than derived, for the reason `provider`/`model_id` are:
+   * this is a log of what *ran*, and every one of those is a setting that
+   * moves. A spoken round is `low` where a typed one is `medium`
+   * (`ChatTurnContext.effort`), and reading a slow answer back next week
+   * without it leaves the one question worth asking — *was it thinking, or was
+   * it the network?* — unanswerable. Null where the idea does not apply: a
+   * portrait is an image model, and a `voice` row is the meter on the line
+   * rather than a generation.
+   */
+  effort: text('effort'),
+  /**
+   * How the person reached the agent — `voice` · `typed`.
+   *
+   * `kind` says *which* agent spent the money and this says how it was asked,
+   * which `kind` cannot: a spoken request is an ordinary `assist` row, so
+   * without this the two halves of the same conversation are
+   * indistinguishable in the ledger — and they are the two halves that behave
+   * differently, one being answered at a lower effort while a meter runs on
+   * the line beside it. Null where nobody asked: a mapping run, a portrait.
+   */
+  via: text('via'),
   /** `AgentStep[]` as JSON. */
   steps: text('steps', { mode: 'json' }).notNull(),
 });

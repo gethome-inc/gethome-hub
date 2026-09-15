@@ -138,6 +138,7 @@ let homeThrows = false;
 function conversationFor(homeDevices: { id: string; name: string }[] = []) {
   return createAutomationConversation({
     auth: { secret: 'sk-ant-test' },
+    provider: 'anthropic',
     modelId: 'claude-opus-5',
     systemPrompt: 'system',
     taskPrompt: 'this home',
@@ -178,7 +179,7 @@ describe('the automation conversation', () => {
 
   it('streams what the model says and hands back when it stops with prose', async () => {
     streamMock.mockReturnValueOnce(assistant([text('Which lamp did you mean?')], 'end_turn'));
-    const conversation = conversationFor();
+    const conversation = await conversationFor();
     const deltas: string[] = [];
 
     const turn = await conversation.send('do something', {
@@ -194,7 +195,7 @@ describe('the automation conversation', () => {
 
   it('never uses the non-streaming call, whose ceiling it would exceed', async () => {
     streamMock.mockReturnValueOnce(assistant([text('hello')], 'end_turn'));
-    await conversationFor().send('hi');
+    await (await conversationFor()).send('hi');
     // The parameters the loop actually sent — proof it went through `stream`,
     // since `create` would have thrown on the way in.
     expect(streamMock.mock.calls[0]?.[0]).toMatchObject({
@@ -205,7 +206,7 @@ describe('the automation conversation', () => {
 
   it('caches the system prompt and the conversation tail', async () => {
     streamMock.mockReturnValueOnce(assistant([text('hello')], 'end_turn'));
-    await conversationFor().send('hi');
+    await (await conversationFor()).send('hi');
     const params = streamMock.mock.calls[0]?.[0] as {
       system: { cache_control?: unknown }[];
       cache_control?: unknown;
@@ -232,7 +233,7 @@ describe('the automation conversation', () => {
         ]),
       );
 
-    const conversation = conversationFor();
+    const conversation = await conversationFor();
     const first = await conversation.send('lights please');
     expect(first.kind).toBe('question');
     expect((first as { question: { options?: unknown[] } }).question.options).toHaveLength(1);
@@ -267,7 +268,7 @@ describe('the automation conversation', () => {
       .mockReturnValueOnce(assistant([toolUse('ask_user', { question: 'Which lamp?' }, 'ask-2')]))
       .mockReturnValueOnce(assistant([text('Right you are.')], 'end_turn'));
 
-    const conversation = conversationFor();
+    const conversation = await conversationFor();
     await conversation.send('lights');
     // `send` rather than `answer`: somebody typed instead of tapping, and
     // treating that as a fresh message would leave the call unclosed.
@@ -294,7 +295,7 @@ describe('the automation conversation', () => {
         ]),
       );
 
-    const turn = await conversationFor().send('write me a rule');
+    const turn = await (await conversationFor()).send('write me a rule');
     expect(turn.kind).toBe('submitted');
     // The person never saw the first attempt: the refusal went back as a tool
     // result and the model resubmitted in the same turn.
@@ -325,7 +326,7 @@ describe('the automation conversation', () => {
       )
       .mockReturnValueOnce(assistant([text('I will fix that.')], 'end_turn'));
 
-    const turn = await conversationFor([{ id: deviceId, name: 'Lamp' }]).send('washing machine');
+    const turn = await (await conversationFor([{ id: deviceId, name: 'Lamp' }])).send('washing machine');
     expect(turn.kind).toBe('said');
     const second = streamMock.mock.calls[1]?.[0] as { messages: unknown[] };
     expect(JSON.stringify(second.messages)).toContain('changes continuously');
@@ -342,7 +343,7 @@ describe('the automation conversation', () => {
       );
 
     const steps: { summary: string; kind: string; detail?: string | undefined }[] = [];
-    const turn = await conversationFor([{ id: deviceId, name: 'Kitchen lamp' }]).send('what have I got', {
+    const turn = await (await conversationFor([{ id: deviceId, name: 'Kitchen lamp' }])).send('what have I got', {
       onStep: (summary, kind, detail) => steps.push({ summary, kind, detail }),
     });
     expect(turn.kind).toBe('submitted');
@@ -389,7 +390,7 @@ describe('the automation conversation', () => {
       .mockReturnValueOnce(assistant([text('Done — the lights will come on this evening.')], 'end_turn'));
 
     const steps: string[] = [];
-    const turn = await conversationFor().send('make me a rule', {
+    const turn = await (await conversationFor()).send('make me a rule', {
       onStep: (summary) => steps.push(summary),
     });
 
@@ -414,7 +415,7 @@ describe('the automation conversation', () => {
       .mockReturnValueOnce(assistant([text('Saved it.'), toolUse('list_devices', {})]))
       .mockReturnValueOnce(assistant([text('never reached')], 'end_turn'));
 
-    const turn = await conversationFor().send('write me a rule');
+    const turn = await (await conversationFor()).send('write me a rule');
 
     expect(turn.kind).toBe('submitted');
     expect((turn as { text: string }).text).toBe('Saved it.');
@@ -437,7 +438,7 @@ describe('the automation conversation', () => {
       ]),
     );
 
-    const turn = await conversationFor().send('lights on and off');
+    const turn = await (await conversationFor()).send('lights on and off');
 
     expect(turn.kind).toBe('submitted');
     const rules = (turn as { rules: { document: { name: string } }[] }).rules;
@@ -469,7 +470,7 @@ describe('the automation conversation', () => {
       )
       .mockReturnValueOnce(assistant([text('Right you are.')], 'end_turn'));
 
-    const conversation = conversationFor([{ id: deviceId, name: 'Bedside' }]);
+    const conversation = await conversationFor([{ id: deviceId, name: 'Bedside' }]);
     const asked = await conversation.send('lights');
     expect(asked.kind).toBe('question');
 
@@ -496,7 +497,7 @@ describe('the automation conversation', () => {
       )
       .mockReturnValueOnce(assistant([text('Right you are.')], 'end_turn'));
 
-    const conversation = conversationFor();
+    const conversation = await conversationFor();
     const asked = await conversation.send('lights');
     expect(asked.kind).toBe('question');
     // The first is the one being waited on.
@@ -531,7 +532,7 @@ describe('the automation conversation', () => {
       )
       .mockReturnValueOnce(assistant([text('unused')], 'end_turn'));
 
-    const conversation = conversationFor();
+    const conversation = await conversationFor();
     const turn = await conversation.send('evening lights');
 
     expect(turn.kind).toBe('submitted');
@@ -553,7 +554,7 @@ describe('the automation conversation', () => {
       )
       .mockReturnValueOnce(assistant([text('unused')], 'end_turn'));
 
-    const conversation = conversationFor();
+    const conversation = await conversationFor();
     const turn = await conversation.send('evening lights');
 
     expect(turn.kind).toBe('submitted');
@@ -582,7 +583,7 @@ describe('the automation conversation', () => {
       )
       .mockReturnValueOnce(assistant([text('Right you are.')], 'end_turn'));
 
-    const conversation = conversationFor();
+    const conversation = await conversationFor();
     await expect(conversation.send('lights')).rejects.toThrow();
 
     // The conversation is still open, and saying something else has to work.
@@ -605,7 +606,7 @@ describe('the automation conversation', () => {
       )
       .mockReturnValueOnce(assistant([text('Right you are.')], 'end_turn'));
 
-    const turn = await conversationFor().send('lights');
+    const turn = await (await conversationFor()).send('lights');
     expect(turn.kind).toBe('said');
     expect(closedToolIds(1)).toContain('toolu_paused');
   });
@@ -621,7 +622,7 @@ describe('the automation conversation', () => {
 
     const steps: string[] = [];
     let thought = '';
-    await conversationFor().send('lights at ten', {
+    await (await conversationFor()).send('lights at ten', {
       onStep: (summary) => steps.push(summary),
       onThinking: (delta) => {
         thought += delta;
@@ -638,14 +639,14 @@ describe('the automation conversation', () => {
     // A model that only ever looks things up. The cap is what a person waiting
     // is protected by.
     streamMock.mockReturnValue(assistant([toolUse('list_rooms_zones', {})]));
-    const turn = await conversationFor().send('go on then');
+    const turn = await (await conversationFor()).send('go on then');
     expect(turn.kind).toBe('stopped');
     expect((turn as { reason: string }).reason).toContain('steps');
   });
 
   it('says so when the model declines', async () => {
     streamMock.mockReturnValueOnce(assistant([], 'refusal'));
-    const turn = await conversationFor().send('something');
+    const turn = await (await conversationFor()).send('something');
     expect(turn.kind).toBe('stopped');
     expect((turn as { reason: string }).reason).toContain('declined');
   });
@@ -739,6 +740,7 @@ describe('the chat service', () => {
       const scripted: AutomationConversation = {
         provider: 'anthropic',
         modelId: 'claude-opus-5',
+        effort: 'medium' as const,
         awaitingAnswer: () => false,
         costUsd: cost ?? (() => 0.12),
         send: round,
@@ -1559,6 +1561,7 @@ describe('AutomationChat provider selection', () => {
           return {
             provider: 'anthropic',
             modelId,
+            effort: 'medium' as const,
             awaitingAnswer: () => false,
             costUsd: () => 0,
             send: async () => ({ kind: 'said', text: 'hello' }) as AutomationTurn,

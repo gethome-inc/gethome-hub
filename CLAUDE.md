@@ -101,6 +101,24 @@ running-total form hides the other direction too: a wait for "at least two
 calls" that the previous test had already satisfied returned at once, so the
 race it existed to close was never actually held open.
 
+**And a wait gates nothing when something else can satisfy it.** The same shape
+again, one suite over, and this one only ever bit in CI:
+`test/integration/mqtt-roundtrip.test.ts` waited for
+`registry.listDevices().length >= 10` and then asserted that the MQTT
+convention device was among them. Two adapters fill that list and
+`registry.start()` starts them in turn, so the Zigbee fixtures — sixteen of
+them, six past the ten asked for — met the gate on their own while the
+convention device behind the second adapter was still arriving. It passed for
+months because adopting sixteen devices takes long enough that the other
+adapter usually got there, and then failed on a loaded runner reading exactly
+the sixteen Zigbee devices and no `Pool pump`. **Wait for the thing the
+assertion is about**, not for a number that anything in the process can reach:
+every other test in that file already did, waiting on a device *by name* or on
+the state it was about to check. Where the count is the point, derive it from
+the fixture rather than writing it out, or adding a fixture quietly shrinks the
+wait; and give `waitFor` a label, since "timed out waiting for condition" names
+neither the suite's problem nor yours.
+
 **Dependencies are gated, not just watched.** Every vulnerable package this repo
 has shipped arrived transitively — `mqtt → socks → ip-address`, and
 `@anthropic-ai/claude-agent-sdk → @modelcontextprotocol/sdk → hono` before that
@@ -131,6 +149,12 @@ Removing the override does not simplify this — it restores a *fourth* copy at
 the vulnerable `0.18.20`. The cost is that `drizzle-kit` runs above its declared
 range, which CI does not cover because nothing there runs `db:generate`; if you
 touch these versions, run it by hand and check it still reads the schema.
+
+`ws` is the one direct dependency added for the voice, and it was already in
+the tree via `@fastify/websocket` — declared rather than used transitively,
+because the audit rule below is about the lockfile being *ours* to pin. Node's
+own global `WebSocket` cannot carry an `Authorization` header, which is what
+attaching a sideband needs.
 
 Green `typecheck` + `test` is the bar for every change. The e2e suites
 (`test/integration/mqtt-roundtrip.test.ts` for the whole pipeline,

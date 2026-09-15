@@ -27,7 +27,8 @@ import {
   type DescriptorCustomField,
   type MappingDescriptor,
 } from './descriptor.js';
-import { agentStep, type AgentRunStats, type MappingProvider } from './agent-core.js';
+import {
+  EFFORT, agentStep, type AgentRunStats, type MappingProvider } from './agent-core.js';
 import { effectiveModel } from './models.js';
 import { AiUnavailableError, describeRunFailure, readableFailure } from './errors.js';
 import { mappingSystemPrompt, buildMappingUserPrompt, buildRepairUserPrompt } from './prompts.js';
@@ -243,6 +244,9 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
       model: input.device.definition?.model ?? input.device.friendly_name,
       provider: ranOn,
       modelId: effectiveModel(ranOn, ai[ranOn].model),
+      // What it ran at. No `via`: nobody typed or said anything — a device
+      // arriving on the network is what starts this.
+      effort: EFFORT,
     });
     run?.step(
       agentStep(

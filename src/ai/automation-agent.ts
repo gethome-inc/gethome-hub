@@ -1,10 +1,12 @@
-import Anthropic from '@anthropic-ai/sdk';
+import type { AiProvider } from '../core/settings.js';
 import type { Logger } from '../logging.js';
 import { automationDocumentSchema } from '../automations/schema.js';
 import { sanityCheckAutomation } from '../automations/sanity.js';
 import { type AgentAuth } from './agent-core.js';
 import { isSupportedModel, supportedModelIds } from './models.js';
-import { QuestionGate, RunUsage, refusalSentence, streamTurn } from './chat/agent-loop.js';
+import { QuestionGate, type ChatToolResult } from './chat/agent-loop.js';
+import { createChatTransport } from './chat/transport.js';
+import { AGENT_EFFORT } from './chat/chat-runtime.js';
 import {
   AUTOMATION_MAX_BUDGET_USD,
   AUTOMATION_MAX_RULES_PER_TURN,
@@ -54,20 +56,9 @@ import { automationShape, describeAutomation } from '../automations/summarize.js
  * plainer promise than any prompt about not using them.
  */
 
-/** Two breakpoints, the shape `agent.ts` arrived at: the explicit one covers
- *  the tools and the system prompt (tools sort ahead of system in the prefix),
- *  and the top-level field puts a second on the growing conversation tail —
- *  which here carries the home inventory and every round of clarification. */
-function buildTools(): Anthropic.Tool[] {
-  return AUTOMATION_TOOLS.map((tool) => ({
-    name: tool.name,
-    description: tool.description,
-    input_schema: tool.schema() as Anthropic.Tool['input_schema'],
-  }));
-}
-
 export interface AutomationAgentOptions {
   auth: AgentAuth;
+  provider: AiProvider;
   modelId: string;
   systemPrompt: string;
   /** The first user message: this home, and what was asked. */
@@ -76,31 +67,45 @@ export interface AutomationAgentOptions {
   log: Logger;
 }
 
-export function createAutomationConversation(
+export async function createAutomationConversation(
   options: AutomationAgentOptions,
-): AutomationConversation {
-  const { auth, modelId, systemPrompt, taskPrompt, tools, log } = options;
-  if (!isSupportedModel(modelId)) {
+): Promise<AutomationConversation> {
+  const { auth, provider, modelId, systemPrompt, taskPrompt, tools, log } = options;
+  if (!isSupportedModel(modelId, provider)) {
     throw new Error(
-      `model "${modelId}" cannot run the automation agent (supported: ${supportedModelIds().join(', ')})`,
+      `model "${modelId}" cannot run the automation agent ` +
+        `(supported: ${supportedModelIds(provider).join(', ')})`,
     );
   }
 
-  const client = new Anthropic({ apiKey: auth.secret, maxRetries: 3 });
-  const definitions = buildTools();
-  const usage = new RunUsage(modelId);
+  /**
+   * One controller for the conversation's life rather than one per turn: the
+   * transport is built once and holds the signal, so the watchdog is armed
+   * around each round and disarmed after it.
+   */
+  const controller = new AbortController();
+  const transport = await createChatTransport(provider, {
+    secret: auth.secret,
+    modelId,
+    systemPrompt,
+    tools: AUTOMATION_TOOLS,
+    label: 'the automation agent',
+    timeoutMs: AUTOMATION_TIMEOUT_MS,
+    effort: AGENT_EFFORT,
+    signal: controller.signal,
+    log,
+  });
 
-  const messages: Anthropic.MessageParam[] = [];
   /**
    * The question this conversation is waiting on, and the other results from
    * the same response that travel with its answer.
    *
    * Shared with the assistant (`chat/agent-loop.ts`), because the two bugs it
-   * exists for are the API's rule rather than this agent's: every `tool_use`
-   * in a response needs a `tool_result` in the very next message, and a
-   * conversation that breaks that is refused outright and for ever.
+   * exists for are the API's rule rather than this agent's: every tool call in
+   * a response needs a result in the very next message, and a conversation
+   * that breaks that is refused outright and for ever.
    */
-  const gate = new QuestionGate(messages, log, 'automation agent');
+  const gate = new QuestionGate(transport);
 
   let opened = false;
 
@@ -112,7 +117,6 @@ export function createAutomationConversation(
    * or a guardrail.
    */
   async function pump(context: AutomationTurnContext | undefined): Promise<AutomationTurn> {
-    const controller = new AbortController();
     const watchdog = setTimeout(() => controller.abort(), AUTOMATION_TIMEOUT_MS);
     watchdog.unref?.();
 
@@ -159,7 +163,7 @@ export function createAutomationConversation(
           'thinking',
         );
 
-        if (usage.costUsd() >= AUTOMATION_MAX_BUDGET_USD) {
+        if (transport.costUsd() >= AUTOMATION_MAX_BUDGET_USD) {
           return {
             kind: 'stopped',
             reason:
@@ -168,24 +172,12 @@ export function createAutomationConversation(
           };
         }
 
-        const round = await streamTurn({
-          client,
-          modelId,
-          systemPrompt,
-          messages,
-          tools: definitions,
-          signal: controller.signal,
-          usage,
-          context,
-          label: 'the automation agent',
-          timeoutMs: AUTOMATION_TIMEOUT_MS,
-        });
-        const response = round.response;
+        const round = await transport.round(context);
 
-        if (response.stop_reason === 'refusal') {
+        if (round.stop === 'refusal') {
           return {
             kind: 'stopped',
-            reason: refusalSentence(response),
+            reason: round.refusal ?? 'The model declined to answer that.',
           };
         }
 
@@ -196,7 +188,7 @@ export function createAutomationConversation(
         // answered, so this is asked after the calls are in hand rather than
         // before, which used to skip straight past them and leave the turn
         // half-answered.
-        if (calls.length === 0 && response.stop_reason === 'pause_turn') {
+        if (calls.length === 0 && round.stop === 'pause') {
           continue;
         }
 
@@ -212,7 +204,7 @@ export function createAutomationConversation(
           return { kind: 'said', text: said || 'Ready when you are.' };
         }
 
-        const results: Anthropic.ToolResultBlockParam[] = [];
+        const results: ChatToolResult[] = [];
         let handedBack: AutomationTurn | null = null;
         /**
          * Every rule accepted in *this* response, in the order they were
@@ -230,12 +222,11 @@ export function createAutomationConversation(
             const parsed = askUserInput.safeParse(call.input);
             if (!parsed.success) {
               results.push({
-                type: 'tool_result',
-                tool_use_id: call.id,
-                content: `That question could not be asked: ${parsed.error.issues
+                id: call.id,
+                text: `That question could not be asked: ${parsed.error.issues
                   .map((issue) => issue.message)
                   .join('; ')}`,
-                is_error: true,
+                isError: true,
               });
               continue;
             }
@@ -244,13 +235,11 @@ export function createAutomationConversation(
               // an answer closes one call id — so the second is refused here
               // rather than left open, which would be the same 400 by another
               // route.
-              results.push({
-                type: 'tool_result',
-                tool_use_id: call.id,
-                content:
+              results.push({                id: call.id,
+                text:
                   'Only one question can be outstanding at a time. Ask this one after the ' +
                   'first is answered.',
-                is_error: true,
+                isError: true,
               });
               continue;
             }
@@ -262,13 +251,11 @@ export function createAutomationConversation(
               // hand one thing back, so leaving both set was how one of them
               // got silently dropped. Refused inside the turn, which the
               // model can act on, rather than after it, which nobody can.
-              results.push({
-                type: 'tool_result',
-                tool_use_id: call.id,
-                content:
+              results.push({                id: call.id,
+                text:
                   'A rule has already been submitted in this response, which ends the turn. ' +
                   'Ask this once they have replied.',
-                is_error: true,
+                isError: true,
               });
               continue;
             }
@@ -291,23 +278,20 @@ export function createAutomationConversation(
               // is saved and shown, and the rest are asked for again once the
               // person has seen these — a reply that writes a page of rules
               // into somebody's home is a misread, not an answer.
-              results.push({
-                type: 'tool_result',
-                tool_use_id: call.id,
-                content:
+              results.push({                id: call.id,
+                text:
                   `That is more than ${AUTOMATION_MAX_RULES_PER_TURN} rules in one reply. The ` +
                   'ones already accepted are saved; tell them what those do and offer the rest ' +
                   'once they have replied.',
-                is_error: true,
+                isError: true,
               });
               continue;
             }
             const outcome = evaluateSubmission(call.input, tools);
             results.push({
-              type: 'tool_result',
-              tool_use_id: call.id,
-              content: outcome.text,
-              ...(outcome.accepted ? {} : { is_error: true }),
+              id: call.id,
+              text: outcome.text,
+              ...(outcome.accepted ? {} : { isError: true }),
             });
             context?.onStep?.(
               // The refusal is worth naming: a resubmission is the ordinary
@@ -353,10 +337,9 @@ export function createAutomationConversation(
           // that has nothing worth reading under its name.
           context?.onStep?.(step.summary, step.kind, result.detail);
           results.push({
-            type: 'tool_result',
-            tool_use_id: call.id,
-            content: result.text,
-            ...(result.isError ? { is_error: true } : {}),
+            id: call.id,
+            text: result.text,
+            ...(result.isError ? { isError: true } : {}),
           });
         }
 
@@ -370,7 +353,7 @@ export function createAutomationConversation(
           return handedBack;
         }
 
-        messages.push({ role: 'user', content: results });
+        transport.pushToolResults(results);
 
         // A rule accepted with nothing said about it: keep it, and give the
         // model one round to say what it did. Anything it says next comes back
@@ -476,16 +459,25 @@ export function createAutomationConversation(
     };
   }
 
-  return {
-    provider: 'anthropic',
+  /**
+   * Named rather than returned inline, because `send` and `answer` route into
+   * each other and `this` inside an object literal typed by a *promised*
+   * return is the union of the two — the price of the constructor becoming
+   * async so it can load one vendor's transport and not the other.
+   */
+  const conversation: AutomationConversation = {
+    provider,
     modelId,
+    // What this conversation works at, for the run log to read back rather
+    // than re-derive. A single turn may still ask for something else.
+    effort: AGENT_EFFORT,
 
     async send(text, context) {
       if (gate.isOpen) {
         // Somebody typed instead of tapping an option. That is an answer, and
         // treating it as a fresh message would leave the model's question
         // unclosed and the API refusing the conversation.
-        return this.answer(text, context);
+        return conversation.answer(text, context);
       }
       /**
        * **Nothing is ever sent with a `tool_use` left unanswered**, which is
@@ -507,17 +499,14 @@ export function createAutomationConversation(
        * other call in it.
        */
       gate.settleDangling();
-      messages.push({
-        role: 'user',
-        content: opened ? text : `${taskPrompt}\n\n${text}`.trim(),
-      });
+      transport.pushUser(opened ? text : `${taskPrompt}\n\n${text}`.trim());
       opened = true;
-      log.debug({ model: modelId }, 'automation agent: user message');
+      log.debug({ model: modelId, provider }, 'automation agent: user message');
       return pump(context);
     },
 
     async answer(text, context) {
-      if (!gate.isOpen) return this.send(text, context);
+      if (!gate.isOpen) return conversation.send(text, context);
       // The answer **and** every other call the same response made. One
       // message, every `tool_use` in the assistant turn accounted for — which
       // is the API's actual rule, and sending only the answer is what used to
@@ -531,7 +520,8 @@ export function createAutomationConversation(
     },
 
     costUsd() {
-      return usage.costUsd();
+      return transport.costUsd();
     },
   };
+  return conversation;
 }

@@ -2042,6 +2042,27 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    */
   const aiSettingsResponse = async () => {
     const [ai, status] = await Promise.all([deps.settings.getAiSettings(), deps.settings.getAiStatus()]);
+    /**
+     * One agent's block: who answers, on what, and what else it could be.
+     *
+     * **`models` stays the *chosen provider's* list**, which is what an app a
+     * version behind reads to draw its picker — so a hub that has grown a
+     * second provider does not hand that app a list mixing two vendors it has
+     * no control for. `choices` is the whole table for an app that knows about
+     * both, and `choosable` is "there is a decision to make here", exactly as
+     * `mapping.choosable` means it.
+     *
+     * `provider` is derived from the model rather than stored beside it — see
+     * `agentProviderOf` — so the two can never disagree, and a picker writes
+     * that provider's default model id rather than a second setting.
+     */
+    const forAgent = (agent: { model: string; provider: AiProvider | null }) => ({
+      model: agent.model,
+      provider: agent.provider,
+      models: agent.provider === null ? [] : AGENT_MODELS[agent.provider].choices,
+      choices: { anthropic: AGENT_MODELS.anthropic.choices, openai: AGENT_MODELS.openai.choices },
+      choosable: ai.mappingChoosable,
+    });
     const forProvider = (provider: AiProvider) => ({
       hasKey: ai[provider].hasKey,
       model: effectiveModel(provider, ai[provider].model),
@@ -2057,13 +2078,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       // different question from "which model reads a device's exposes tree"
       // and is offered a different list for reasons that have nothing to do
       // with the other one.
-      assistant: { model: ai.assistant.model, models: AGENT_MODELS.choices },
+      assistant: forAgent(ai.assistant),
       // And what writes the home's rules, which is a separate choice on the
       // same list: answering questions about the house and writing the rules
       // it runs by itself are different jobs, and a home may want to spend
       // differently on them. Its own block for the reason the assistant's is
       // its own, and it replaces this agent having quietly read the mapper's.
-      automations: { model: ai.automations.model, models: AGENT_MODELS.choices },
+      automations: forAgent(ai.automations),
       portraits: deps.portraits.describe(),
     };
   };
@@ -2251,6 +2272,14 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       // before the hub could run on more than one.
       provider: row.provider,
       modelId: row.modelId,
+      /**
+       * What it ran at, and how it was asked — `low`/`medium`/`high` and
+       * `voice`/`typed`. Both null on a row written before this and on a run
+       * the idea does not apply to (a portrait has no effort; a device
+       * recognition nobody asked for has no `via`).
+       */
+      effort: row.effort,
+      via: row.via,
       ok: row.ok,
       costUsd: row.costUsd,
       turns: row.turns,
@@ -3209,6 +3238,228 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       messages: await deps.assistantChat.transcript(id),
     };
   });
+
+  // ── The assistant's voice ─────────────────────────────────────────────────
+
+  /**
+   * Open a live voice session, and answer the phone's connection offer.
+   *
+   * **The hub builds the session and the phone holds it**, which is the whole
+   * arrangement: audio has to go straight from the phone to OpenAI or it is not
+   * a conversation, while what the model is told — the home, how to speak, when
+   * to ask for help — is the home's business, and the home's key must never
+   * leave the machine that holds it.
+   *
+   * **WebRTC is what makes that possible rather than a preference.** Live's
+   * WebSocket transport authenticates with the *project API key* and is
+   * documented for server-side audio; there is no ephemeral client secret
+   * anywhere in the family. So this takes the phone's SDP offer, attaches the
+   * session, posts both with the home's key, and hands back the answer — and
+   * the phone ends up holding an audio connection it was never given a
+   * credential of any kind for, which is a stronger containment than the
+   * expiring secret this route was first built around.
+   *
+   * **A fourth refusal, and it is a real one.** GPT-Live is OpenAI's and there
+   * is no substitute, so a home running its assistant perfectly well on
+   * Anthropic still cannot *speak* without an OpenAI key. That is a thing to
+   * say plainly — `openai_not_configured`, with a sentence — rather than a 500
+   * or, worse, a microphone button that fails on the first word.
+   */
+  app.post('/api/v1/assistant/voice/session', needs('hub.ai'), async (request, reply) => {
+    // **Carrying on rather than forking.** Somebody stops listening and starts
+    // again on the same page, and that is one conversation — so the app hands
+    // back the id it already has and the transcript keeps going. Absent is the
+    // ordinary case: a fresh page mints one. Somebody *else's* is refused
+    // below: reading a home's transcripts is shared by design and writing into
+    // one is not, which is the guard `revive()` already holds for a typed
+    // conversation.
+    //
+    // **And the phone's own connection offer**, which is what makes the whole
+    // arrangement possible: Live authenticates a WebSocket with the *project
+    // key* and has no ephemeral client secret anywhere in the family, so a
+    // phone can only hold a Live session over WebRTC — where the hub does the
+    // offer/answer exchange with the key and the phone is handed no credential
+    // at all. Required, so a client that cannot do WebRTC is a `400` rather
+    // than a session nothing can connect to.
+    const asked = z
+      .object({ sessionId: z.uuid().optional(), sdp: z.string().min(1).max(64_000) })
+      .parse(request.body ?? {});
+    const ai = await deps.settings.getAiSettings();
+    if (!ai.enabled) return reply.code(409).send({ error: 'ai_disabled' });
+    if (!ai.openai.hasKey) {
+      return reply.code(409).send({
+        error: 'openai_not_configured',
+        detail:
+          'Talking out loud runs on OpenAI’s voice model, so this home needs an OpenAI key — ' +
+          'even if the assistant itself answers on Anthropic. Add one in the home’s AI settings.',
+      });
+    }
+    const secret = await deps.settings.aiKey('openai');
+    // The same sentence as the check above, not a bare code: this is the race
+    // where the key went away between `hasKey` and the read, and an app that
+    // falls back to its own wording for `openai_not_configured` is holding one
+    // written for *portraits* — the code means "no OpenAI key" on both routes
+    // and only the detail says which thing cannot happen.
+    if (!secret) {
+      return reply.code(409).send({
+        error: 'openai_not_configured',
+        detail:
+          'Talking out loud runs on OpenAI’s voice model, so this home needs an OpenAI key — ' +
+          'even if the assistant itself answers on Anthropic. Add one in the home’s AI settings.',
+      });
+    }
+
+    const [{ openLiveSession }, { liveInstructions, liveHistory }, { attachSideband }] =
+      await Promise.all([
+        import('../ai/voice/session.js'),
+        import('../ai/voice/prompts.js'),
+        import('../ai/voice/sideband.js'),
+      ]);
+    /**
+     * **A conversation somebody else is having is refused here**, before a
+     * session is opened and before anything is spent.
+     *
+     * `askAloud` holds the same line, because it is the one that actually
+     * writes; this is the sentence, since the alternative is a microphone that
+     * transcribes perfectly and answers "that could not be worked out" to
+     * everything. `409` rather than `403`: nothing about the caller's role is
+     * wrong, and both apps read a 403 as "this home doesn't let your role do
+     * that", which would send somebody to the wrong page.
+     */
+    if (
+      asked.sessionId !== undefined &&
+      !(await deps.assistantChat.maySpeakInto(asked.sessionId, request.member!.id))
+    ) {
+      return reply.code(409).send({
+        error: 'not_your_conversation',
+        detail:
+          'That conversation belongs to somebody else in this home. Start a new one to talk out ' +
+          'loud.',
+      });
+    }
+
+    const personName = await deps.assistantChat.personName(request.member!.id);
+    // **What the session opens knowing.** Carrying a conversation on means the
+    // voice should already have read it — somebody who typed a question and
+    // then pressed the microphone is having one conversation, not two — so the
+    // last few exchanges go into `session.input`, which the API reads before
+    // the first word. A fresh conversation seeds nothing, and a transcript
+    // that cannot be read (a session id the app has invented, a role without
+    // the rows) is an empty list rather than a refusal.
+    const history =
+      asked.sessionId === undefined
+        ? []
+        : liveHistory(await deps.assistantChat.transcript(asked.sessionId));
+    /**
+     * **A provider that refuses must not reach the app as a 500**, which is a
+     * lesson this repository has already paid for once: the automations agent's
+     * OpenAI refusal threw past the route's handler, Fastify answered
+     * `{"statusCode":500,…}`, and the app drew "The hub answered 500." over a
+     * home that was working perfectly and had just said what was wrong.
+     *
+     * `502` rather than `409`, because the two are different screens: a `409`
+     * is something in this home's settings, and the way out is on a page
+     * somebody can open. This is OpenAI saying no — a key that has been
+     * revoked, a balance that has run out, a rate limit — so the detail is
+     * *their* sentence, which is always better than one invented here.
+     */
+    let opened: Awaited<ReturnType<typeof openLiveSession>>;
+    try {
+      opened = await openLiveSession({
+        secret,
+        instructions: liveInstructions({
+          home: deps.automations.homeView(),
+          timezone: deps.settings.timezone,
+          ...(personName !== undefined ? { personName } : {}),
+        }),
+        history,
+        offerSdp: asked.sdp,
+        log: deps.log,
+      });
+    } catch (error) {
+      return reply.code(502).send({
+        error: 'voice_unavailable',
+        detail: error instanceof Error ? error.message : 'OpenAI would not open a voice session.',
+      });
+    }
+
+    /**
+     * **The hub attaches its own connection, and that is where the delegation
+     * loop lives.** Client delegation says "I need help" and nothing else, so
+     * somebody has to assemble the request from the transcript and answer it —
+     * and doing that on the phone added two LAN legs to the one thing on this
+     * surface measured in how fast a lamp goes off. A sideband is a second
+     * socket onto the *same* session from here, so the request never leaves
+     * the machine that can answer it. `src/ai/voice/sideband.ts` is canonical,
+     * including what it deliberately does **not** own: audio stays on the
+     * phone's WebRTC connection.
+     *
+     * A failure to attach is logged and nothing more. The session is real and
+     * the phone can talk over it; what is lost is the house answering, which
+     * the voice reports itself when a delegation goes unanswered.
+     *
+     * **The id is minted here and the conversation is marked as spoken
+     * afterwards**, which is an ordering rather than a style: attaching
+     * *replaces* whatever sideband this conversation was holding, and a
+     * replaced sideband settles — which is what clears that mark. Marked first,
+     * stopping and restarting the microphone quickly cleared the mark the new
+     * session had just set. And a session nothing attaches to is never marked
+     * at all, since nothing would ever settle it and a conversation left
+     * marked logs a typed follow-up as speech. See `beginVoice`.
+     */
+    const sessionId = asked.sessionId ?? randomUUID();
+    if (opened.liveSessionId !== undefined) {
+      attachSideband({
+        liveSessionId: opened.liveSessionId,
+        sessionId,
+        memberId: request.member!.id,
+        secret,
+        host: deps.assistantChat,
+        log: deps.log,
+      });
+      deps.assistantChat.beginVoice(sessionId);
+    } else {
+      deps.log.warn('voice: OpenAI opened a session without an id, so nothing can attach');
+    }
+
+    return reply.code(201).send({
+      // **The answer to the phone's offer, and nothing it could have got for
+      // itself.** The session — the model, the voice, the instructions, the
+      // history, the delegation mode — was described here and is never sent to
+      // the app at all, so a prompt change, a voice change or a configuration
+      // key this API grows next month reaches the microphone with no app
+      // release. And no credential crosses: the key stayed on this machine and
+      // what the phone receives is an SDP answer.
+      answerSdp: opened.answerSdp,
+      // OpenAI's own id for the session is deliberately **not** sent. It is
+      // what the hub attaches its sideband with, and the app has no use for
+      // one — `session.started` carries it on the data channel if a log line
+      // ever wants it.
+      audioRate: opened.audioRate,
+      // The conversation the phone will write into. A plain id: nothing on this
+      // hub is holding a model conversation for it, and the transcript is what
+      // makes it findable, readable and — by typing — continuable afterwards.
+      sessionId,
+    });
+  });
+
+  /**
+   * **Two routes used to live here and the sideband replaced both.**
+   *
+   * `POST /assistant/voice/said` wrote down what was said, because the hub was
+   * not in the audio path and the phone was the only thing that knew. And
+   * `POST /assistant/voice/ended` reported what a session cost, measured with
+   * a stopwatch on that phone — the softest number in this ledger, and gone
+   * entirely when somebody force-quit.
+   *
+   * The hub's own sideband receives the transcript and the usage from the
+   * session itself, so both facts now come from the thing that owns them:
+   * `askAloud` writes the rows a spoken exchange leaves, and
+   * `session.usage.updated` / `session.closed` carry the seconds OpenAI will
+   * bill. Which leaves **one** voice route — opening a session — and the rule
+   * the API states for two connections onto one session: assign one owner per
+   * action. See `src/ai/voice/sideband.ts`.
+   */
 
   app.delete('/api/v1/assistant/chat/:id', needs('hub.ai'), async (request, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);

@@ -186,7 +186,73 @@ export interface ChatSummaryWire {
 }
 
 /** What a running turn reports as it happens, for the socket. */
+/**
+ * How hard the model works on one round.
+ *
+ * **It belongs to the turn, not to the conversation**, which is the whole of
+ * why it is here rather than only on `ChatTransportOptions`. A transport is
+ * built once and holds the message history, so an effort chosen there is
+ * chosen for the life of the chat — and the same conversation is typed in the
+ * morning and talked to in the evening (`spokenSessions`' own reasoning). A
+ * spoken round is answered out loud while somebody stands there waiting, and a
+ * typed one is read when it lands.
+ *
+ * **Three words, because it is one value sent to two vendors.** It goes
+ * straight onto the wire — Anthropic's `output_config.effort` and OpenAI's
+ * `reasoning.effort` — and the vocabularies are only the same where they
+ * overlap, so a wider type here is a value one transport would send and the
+ * other would be refused for, discovered as a 400 in somebody's kitchen rather
+ * than by the checker. It carried `xhigh` and `max` for a while with nothing
+ * setting them, which is the same trap one step from firing. Widening one is
+ * deliberate work: check both vendors take the word, or give the transport
+ * that cannot a mapping of its own.
+ */
+export type ChatEffort = 'low' | 'medium' | 'high';
+
+/**
+ * What a conversation works at, for both agents.
+ *
+ * `medium` against the mapper's `high`: a descriptor is cached against a
+ * device model for ever, while a chat is many small rounds read the moment
+ * they arrive. Named once here because two agents state it and the run log
+ * records it — three places for one number is two too many.
+ */
+export const AGENT_EFFORT: ChatEffort = 'medium';
+
+/**
+ * How a person reached the agent, for the run log.
+ *
+ * `kind` on an `ai_runs` row says which agent spent the money and cannot say
+ * this: a spoken request is an ordinary `assist` row, so without it the two
+ * halves of one conversation are indistinguishable in the ledger — and they
+ * are exactly the two halves that behave differently, one answered at a lower
+ * effort with a per-second meter running on the line beside it.
+ */
+export type ChatVia = 'voice' | 'typed';
+
+/**
+ * Where one turn came from and what it asked for — everything about a turn
+ * that is *not* its text.
+ *
+ * Both halves are per **turn** rather than per conversation, and for the same
+ * reason: a transport is built once and holds the history, while one
+ * conversation is typed in the morning and talked to in the evening.
+ */
+export interface TurnOrigin {
+  effort?: ChatEffort;
+  via?: ChatVia;
+}
+
 export interface ChatTurnContext {
+  /**
+   * What this round works at, when it is not what the conversation works at.
+   *
+   * Absent is the ordinary case and means the transport's own setting. Present
+   * is one round asking for something else — today only a spoken one, where
+   * the reply is a person waiting in a room rather than a message they will
+   * read when they get to it.
+   */
+  effort?: ChatEffort;
   /** Text as it arrives, so a chat is not minutes of nothing. */
   onDelta?: (text: string) => void;
   /**
@@ -232,6 +298,12 @@ export interface AgentConversation<Turn> {
   costUsd(): number;
   /** Which model has been answering, for the run log and for the apps. */
   readonly modelId: string;
+  /**
+   * What this conversation works at when a turn does not ask for something
+   * else — read back for the run log rather than re-derived, the rule
+   * `modelId` follows: the log is about what *ran*.
+   */
+  readonly effort: ChatEffort;
   readonly provider: string;
 }
 
@@ -296,6 +368,11 @@ export interface ChatSession<Turn> {
    * process.
    */
   inFlight: Promise<void>;
+  /**
+   * What the turn now running is — its effort and how it was asked — resolved
+   * at the moment it began, for the `ai_runs` row that follows it.
+   */
+  origin?: { effort: ChatEffort; via: ChatVia };
   /**
    * How much of this conversation's spend is already in `ai_runs`.
    *
@@ -470,15 +547,28 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
 
     // Minted before the conversation, because a tool context is built with it
     // — see `openConversation`.
-    const sessionId = randomUUID();
-    const conversation = await this.openConversation({
-      memberId: input.memberId,
-      topic: input.topic,
-      sessionId,
-    });
+    const session = await this.open(randomUUID(), input.memberId, input.topic);
+    return this.say(session, input.message, 'send');
+  }
+
+  /**
+   * A conversation at an id somebody else chose, with nothing said in it yet.
+   *
+   * `start()` is this plus a first message, and that is the ordinary way in.
+   * The seam exists for the **voice**, where the id is minted before a word is
+   * spoken (`beginVoice`) and the first thing that happens to the session is a
+   * question arriving from a sideband rather than from a route — so there is no
+   * transcript to revive from and no message to start with.
+   */
+  protected async open(
+    sessionId: string,
+    memberId: string,
+    topic?: string | undefined,
+  ): Promise<ChatSession<Turn>> {
+    const conversation = await this.openConversation({ memberId, topic, sessionId });
     const session: ChatSession<Turn> = {
       id: sessionId,
-      memberId: input.memberId,
+      memberId,
       conversation,
       lastAt: Date.now(),
       startedAt: Date.now(),
@@ -486,10 +576,10 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       recordedUsd: 0,
       steps: [],
       produced: 0,
-      ...(input.topic !== undefined ? { topic: input.topic } : {}),
+      ...(topic !== undefined ? { topic } : {}),
     };
     this.sessions.set(session.id, session);
-    return this.say(session, input.message, 'send');
+    return session;
   }
 
   /** Continue one. A typed reply to a question is an answer, not a new
@@ -581,12 +671,13 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     session: ChatSession<Turn>,
     text: string,
     how: 'send' | 'answer' | 'auto',
+    origin?: TurnOrigin,
   ): Promise<ChatReply> {
     const written = await this.write(session, 'user', text, undefined, session.memberId);
     session.lastAt = Date.now();
     session.inFlight = session.inFlight.then(async () => {
       const mode = how === 'auto' ? (session.conversation.awaitingAnswer() ? 'answer' : 'send') : how;
-      await this.exchange(session, text, mode);
+      await this.exchange(session, text, mode, origin);
     });
     return { sessionId: session.id, messages: [written] };
   }
@@ -789,9 +880,10 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     session: ChatSession<Turn>,
     text: string,
     how: 'send' | 'answer',
+    origin?: TurnOrigin,
   ): Promise<void> {
     try {
-      await this.runExchange(session, text, how);
+      await this.runExchange(session, text, how, origin);
     } catch (error) {
       /**
        * **The promise `say()` stores must never reject**, and the inner catch
@@ -835,7 +927,18 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     session: ChatSession<Turn>,
     text: string,
     how: 'send' | 'answer',
+    origin?: TurnOrigin,
   ): Promise<void> {
+    // **What this turn was, for the row it is about to write.** Kept on the
+    // session because `record` runs after the turn and takes only the
+    // session; turns are chained per conversation, so the value cannot belong
+    // to a different one by the time it is read.
+    session.origin = {
+      effort: origin?.effort ?? session.conversation.effort,
+      // A chat turn is typed unless something says otherwise, which is the
+      // honest default: `askAloud` is the only caller that says otherwise.
+      via: origin?.via ?? 'typed',
+    };
     // A round's working belongs to that round. Cleared here rather than after
     // the rows are written, so a turn that throws between the two cannot hand
     // its steps to the next answer.
@@ -878,6 +981,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       session.priming = undefined;
 
       turn = await session.conversation[how](primed, {
+        ...(origin?.effort !== undefined ? { effort: origin.effort } : {}),
         onStep: (summary, kind, detail) => {
           // Whatever was reasoned belongs to the step it was reasoned under,
           // which is the one already there rather than this one.
@@ -1074,8 +1178,28 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
         ? { ...(typeof data === 'object' && data !== null ? data : {}), steps }
         : data;
 
+    return this.writeRow(session.id, role, text, payload, memberId);
+  }
+
+  /**
+   * One transcript row, against a session id rather than a live conversation.
+   *
+   * Split out of `write` for the voice, which has rows to record and no
+   * provider conversation to hang them on — somebody speaking and a lamp
+   * going off is a real exchange in this transcript even though no model on
+   * this hub was asked anything. Everything about a row that is the same
+   * either way lives here; what `write` keeps is the step capture, which
+   * belongs to a round.
+   */
+  protected async writeRow(
+    sessionId: string,
+    role: ChatMessageWire['role'],
+    text: string,
+    payload?: unknown,
+    memberId?: string,
+  ): Promise<ChatMessageWire> {
     const row = {
-      sessionId: session.id,
+      sessionId,
       role,
       text: text.slice(0, 4_000),
       data: payload ?? null,
@@ -1146,6 +1270,12 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       // And which conversation it was, which is what makes the spend
       // answerable per chat rather than only per rule.
       sessionId: session.id,
+      // What this turn actually was. Both are read back rather than
+      // re-derived, the rule `modelId` follows: a log is about what ran, and
+      // every setting behind it moves.
+      ...(session.origin !== undefined
+        ? { effort: session.origin.effort, via: session.origin.via }
+        : {}),
     });
     await handle.finish({
       ok,
