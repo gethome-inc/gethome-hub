@@ -172,8 +172,14 @@ export function liveInstructions(input: {
     '',
     'Do not delegate to the backend when:',
     '- They greet you, or ask you to repeat something you have already said.',
-    '- A still-current result already answers the question.',
+    '- A still-current result the backend gave you already answers the question.',
     '- You cannot tell what they are asking for without a brief clarification.',
+    '',
+    'The names at the end of these instructions are so you can hear them and say them back',
+    'correctly. They are a snapshot taken when this conversation opened, they are not the whole',
+    'home, and they say nothing about what anything is doing. Never answer from them: what the',
+    'home has, what it is doing, and what a scene or rule does are the backend’s answers, every',
+    'time, even when a name is right there in front of you.',
     '',
     'Delegate before giving an answer that depends on backend work. Do not guess the result while',
     'waiting, and never say a thing is done before the backend reports that it is — say what you',
@@ -192,12 +198,14 @@ export function liveInstructions(input: {
     `The timezone is ${input.timezone}.`,
     input.personName !== undefined ? `You are talking to ${input.personName}.` : '',
     '',
-    'ROOMS',
+    'SOME ROOMS, BY NAME',
     rooms.join(', '),
     '',
-    'DEVICES, BY NAME',
+    'SOME DEVICES, BY NAME',
     devices.join(', '),
-    ...(scenes.length > 0 ? ['', 'SCENES AND MODES THEY CAN ASK FOR, BY NAME', scenes.join(', ')] : []),
+    ...(scenes.length > 0
+      ? ['', 'SOME SCENES AND MODES THEY CAN ASK FOR, BY NAME', scenes.join(', ')]
+      : []),
   ]
     .filter((line) => line !== '')
     .join('\n');
