@@ -196,8 +196,18 @@ export interface ChatSummaryWire {
  * morning and talked to in the evening (`spokenSessions`' own reasoning). A
  * spoken round is answered out loud while somebody stands there waiting, and a
  * typed one is read when it lands.
+ *
+ * **Three words, because it is one value sent to two vendors.** It goes
+ * straight onto the wire — Anthropic's `output_config.effort` and OpenAI's
+ * `reasoning.effort` — and the vocabularies are only the same where they
+ * overlap, so a wider type here is a value one transport would send and the
+ * other would be refused for, discovered as a 400 in somebody's kitchen rather
+ * than by the checker. It carried `xhigh` and `max` for a while with nothing
+ * setting them, which is the same trap one step from firing. Widening one is
+ * deliberate work: check both vendors take the word, or give the transport
+ * that cannot a mapping of its own.
  */
-export type ChatEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export type ChatEffort = 'low' | 'medium' | 'high';
 
 /**
  * What a conversation works at, for both agents.

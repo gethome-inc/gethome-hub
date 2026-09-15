@@ -3269,9 +3269,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // **Carrying on rather than forking.** Somebody stops listening and starts
     // again on the same page, and that is one conversation — so the app hands
     // back the id it already has and the transcript keeps going. Absent is the
-    // ordinary case: a fresh page mints one. It grants nothing new, since
-    // `voice/said` already writes against whatever id it is given, and the
-    // home's transcripts are shared by design.
+    // ordinary case: a fresh page mints one. Somebody *else's* is refused
+    // below: reading a home's transcripts is shared by design and writing into
+    // one is not, which is the guard `revive()` already holds for a typed
+    // conversation.
     //
     // **And the phone's own connection offer**, which is what makes the whole
     // arrangement possible: Live authenticates a WebSocket with the *project
@@ -3314,6 +3315,29 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         import('../ai/voice/prompts.js'),
         import('../ai/voice/sideband.js'),
       ]);
+    /**
+     * **A conversation somebody else is having is refused here**, before a
+     * session is opened and before anything is spent.
+     *
+     * `askAloud` holds the same line, because it is the one that actually
+     * writes; this is the sentence, since the alternative is a microphone that
+     * transcribes perfectly and answers "that could not be worked out" to
+     * everything. `409` rather than `403`: nothing about the caller's role is
+     * wrong, and both apps read a 403 as "this home doesn't let your role do
+     * that", which would send somebody to the wrong page.
+     */
+    if (
+      asked.sessionId !== undefined &&
+      !(await deps.assistantChat.maySpeakInto(asked.sessionId, request.member!.id))
+    ) {
+      return reply.code(409).send({
+        error: 'not_your_conversation',
+        detail:
+          'That conversation belongs to somebody else in this home. Start a new one to talk out ' +
+          'loud.',
+      });
+    }
+
     const personName = await deps.assistantChat.personName(request.member!.id);
     // **What the session opens knowing.** Carrying a conversation on means the
     // voice should already have read it — somebody who typed a question and
@@ -3373,8 +3397,17 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
      * A failure to attach is logged and nothing more. The session is real and
      * the phone can talk over it; what is lost is the house answering, which
      * the voice reports itself when a delegation goes unanswered.
+     *
+     * **The id is minted here and the conversation is marked as spoken
+     * afterwards**, which is an ordering rather than a style: attaching
+     * *replaces* whatever sideband this conversation was holding, and a
+     * replaced sideband settles — which is what clears that mark. Marked first,
+     * stopping and restarting the microphone quickly cleared the mark the new
+     * session had just set. And a session nothing attaches to is never marked
+     * at all, since nothing would ever settle it and a conversation left
+     * marked logs a typed follow-up as speech. See `beginVoice`.
      */
-    const sessionId = deps.assistantChat.beginVoice(asked.sessionId);
+    const sessionId = asked.sessionId ?? randomUUID();
     if (opened.liveSessionId !== undefined) {
       attachSideband({
         liveSessionId: opened.liveSessionId,
@@ -3384,6 +3417,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         host: deps.assistantChat,
         log: deps.log,
       });
+      deps.assistantChat.beginVoice(sessionId);
     } else {
       deps.log.warn('voice: OpenAI opened a session without an id, so nothing can attach');
     }

@@ -1,7 +1,12 @@
 import type { AutomationHomeView } from '../../automations/targets.js';
 import { automationShape } from '../../automations/summarize.js';
 import type { ChatMessageWire } from '../chat/chat-runtime.js';
-import { LIVE_HISTORY_MESSAGES, type LiveHistoryMessage } from './live-wire.js';
+import {
+  LIVE_HISTORY_CHARS,
+  LIVE_HISTORY_MESSAGE_CHARS,
+  LIVE_HISTORY_MESSAGES,
+  type LiveHistoryMessage,
+} from './live-wire.js';
 
 /**
  * How many device names the voice is given.
@@ -209,29 +214,51 @@ export function liveInstructions(input: {
  *
  * Three rules. **Only what was actually said**: `user` and the agent's own
  * answers, where a `question`, a `preview` or a `handoff` row is a page's
- * interaction and reads as nonsense out loud. **Bounded** — the last few
- * messages, not the fortnight the transcript keeps, because a voice session
- * pays for context nobody is about to refer to. And **roles carry their own
- * content type**: `input_text` for what the person said, `output_text` for
- * what the assistant said, which is the API's own asymmetry rather than ours.
+ * interaction and reads as nonsense out loud. **Bounded twice** — the last few
+ * messages, *and* a budget in characters, because the API caps this list at
+ * both 128 messages and 8,192 tokens and only the first of those is a count
+ * anything here could keep by itself (`LIVE_HISTORY_CHARS` has the arithmetic,
+ * and why a row of 4,000 characters made a dozen of them a refusal rather than
+ * a long prompt). And **roles carry their own content type**: `input_text` for
+ * what the person said, `output_text` for what the assistant said, which is
+ * the API's own asymmetry rather than ours.
+ *
+ * The budget is spent newest-first and the list is put back in order at the
+ * end, so what a session opens knowing is the exchange somebody is about to
+ * refer to rather than whatever happened to be oldest.
  */
 export function liveHistory(rows: ChatMessageWire[]): LiveHistoryMessage[] {
-  const spoken = rows.filter((row) => row.role === 'user' || row.role === 'agent');
-  return spoken.slice(-LIVE_HISTORY_MESSAGES).map((row) =>
-    row.role === 'user'
-      ? {
-          type: 'message' as const,
-          role: 'user' as const,
-          content: [{ type: 'input_text' as const, text: row.text }] as [
-            { type: 'input_text'; text: string },
-          ],
-        }
-      : {
-          type: 'message' as const,
-          role: 'assistant' as const,
-          content: [{ type: 'output_text' as const, text: row.text }] as [
-            { type: 'output_text'; text: string },
-          ],
-        },
-  );
+  const spoken = rows
+    .filter((row) => row.role === 'user' || row.role === 'agent')
+    .slice(-LIVE_HISTORY_MESSAGES);
+
+  const kept: LiveHistoryMessage[] = [];
+  let budget = LIVE_HISTORY_CHARS;
+  for (let index = spoken.length - 1; index >= 0; index -= 1) {
+    const row = spoken[index];
+    if (row === undefined) continue;
+    // Clipped before it is measured, so one long answer costs what it is
+    // allowed to cost rather than the whole budget.
+    const text = row.text.slice(0, LIVE_HISTORY_MESSAGE_CHARS);
+    if (text.length > budget) break;
+    budget -= text.length;
+    kept.push(
+      row.role === 'user'
+        ? {
+            type: 'message' as const,
+            role: 'user' as const,
+            content: [{ type: 'input_text' as const, text }] as [
+              { type: 'input_text'; text: string },
+            ],
+          }
+        : {
+            type: 'message' as const,
+            role: 'assistant' as const,
+            content: [{ type: 'output_text' as const, text }] as [
+              { type: 'output_text'; text: string },
+            ],
+          },
+    );
+  }
+  return kept.reverse();
 }

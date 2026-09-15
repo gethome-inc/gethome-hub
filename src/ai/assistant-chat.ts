@@ -521,11 +521,45 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
    * `existing` is the app carrying one on — stopping and restarting the mic on
    * one page is one conversation, not two — and is simply handed back, since
    * there is no session object here for a second call to disturb.
+   *
+   * **Call it *after* the sideband is attached, never before, and only when one
+   * is.** Attaching replaces whatever sideband this conversation was already
+   * holding, and replacing one settles it — which is what *clears* the mark.
+   * So marking first meant that stopping and starting the microphone quickly
+   * (before `session.closed` had reached the hub) cleared the mark the new
+   * session had just set, and every command spoken for the rest of that line
+   * was written into the home's feed as typed. The other half is the same rule
+   * pointed the other way: a session nothing attaches to is one nothing will
+   * ever settle, so marking it leaves the conversation marked for the life of
+   * the process and logs a typed follow-up as speech.
    */
   beginVoice(existing?: string): string {
     const sessionId = existing ?? randomUUID();
     this.spokenSessions.add(sessionId);
     return sessionId;
+  }
+
+  /**
+   * May this member speak into that conversation?
+   *
+   * **`revive()`'s ownership guard, asked where it can still be answered
+   * politely.** That guard refuses to rebuild somebody else's conversation, and
+   * `askAloud` fell straight past it: a session id nobody here holds and cannot
+   * revive reaches `open()`, which happily builds a *fresh* conversation under
+   * that id and writes into the other person's transcript. Reading a home's
+   * transcripts is shared by design; writing into one is not, and this is the
+   * only route that takes a session id from a request body.
+   *
+   * An empty transcript is a fresh id — the ordinary case, and the one the app
+   * is in every time it mints a conversation. Anything else has to be the
+   * caller's own, which deliberately refuses an *orphaned* one too (the column
+   * is `ON DELETE SET NULL`, so null means the person who had this conversation
+   * has left the home) — the same answer `revive` gives it.
+   */
+  async maySpeakInto(sessionId: string, memberId: string): Promise<boolean> {
+    const rows = await this.transcript(sessionId);
+    if (rows.length === 0) return true;
+    return (await this.ownerOf(sessionId)) === memberId;
   }
 
   /**
@@ -606,11 +640,20 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
     memberId: string;
     question: string;
   }): Promise<string | null> {
+    // **The last arm is the one that needed a guard.** A live session carries
+    // its member and is compared below; a revived one refuses an owner that is
+    // not the caller. `open()` refuses nothing — it is for the id `beginVoice`
+    // minted, which has no transcript yet — so without `maySpeakInto` a
+    // session id belonging to somebody else fell through to it and this round
+    // wrote into their conversation. See the method for why that is not the
+    // same question as reading one.
     const session =
       this.sessions.get(input.sessionId) ??
       (await this.revive(input.sessionId, input.memberId)) ??
-      (await this.open(input.sessionId, input.memberId));
-    if (session.memberId !== input.memberId) return null;
+      ((await this.maySpeakInto(input.sessionId, input.memberId))
+        ? await this.open(input.sessionId, input.memberId)
+        : null);
+    if (session === null || session.memberId !== input.memberId) return null;
 
     /**
      * **The one thing this round needs to know that a typed one does not.**

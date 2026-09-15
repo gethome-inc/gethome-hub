@@ -254,6 +254,16 @@ export function assistantTaskPrompt(input: {
  * **An endpoint with nothing to say is left out entirely**, which in a real
  * home is most of the buttons and remotes.
  *
+ * **And there is a ceiling on the rest of them** (`DIGEST_LIMIT`), because
+ * every other bound on this surface has one — `NAME_LIMIT` for the voice's own
+ * names, `CONTEXT_CHARS` for what a delegation carries — and this is the one
+ * that grows with the house and is paid on *every* spoken round. What is cut
+ * is the tail of the home's own order, which is arbitrary; what is not cut is
+ * the sentence, since a list that silently stopped would be the hub telling
+ * the model that a hundred devices are reporting nothing. A cut list says how
+ * many are missing and sends the model back to `get_device` for them, which is
+ * where it would have gone without any of this.
+ *
  * **Keyed by id, not by name.** The first message is the index — id, name,
  * room, capabilities — and it is in context, so nothing here needs repeating
  * and a house with two lamps called "Lamp" stays unambiguous. `ep` rides along
@@ -281,6 +291,17 @@ export function assistantTaskPrompt(input: {
  * The spoken section of the system prompt carries the same rule, because that
  * is where behaviour is set and it is cached, so it costs nothing to repeat.
  */
+/**
+ * How many device readings one spoken round carries. See `spokenStateDigest`.
+ *
+ * Generous for an ordinary home — a house with this many devices *reporting
+ * something* is a large one — and a bound rather than a formality: this is
+ * rebuilt and re-sent on every spoken round, so an unbounded list is a prefill
+ * that grows with the house on the one surface measured in how long somebody
+ * stands in a room waiting.
+ */
+const DIGEST_LIMIT = 120;
+
 export function spokenStateDigest(input: {
   home: AutomationHomeView;
   stateOf: (deviceId: string, endpointId: number) => EndpointState | undefined;
@@ -309,6 +330,11 @@ export function spokenStateDigest(input: {
   }
 
   if (lines.length === 0) return undefined;
+  // What was cut is said out loud rather than dropped: the line below tells the
+  // model that anything missing is reporting nothing, which would be a lie
+  // about the tail of a large home.
+  const shown = lines.slice(0, DIGEST_LIMIT);
+  const cut = lines.length - shown.length;
   return [
     'WHAT EVERY DEVICE IS DOING RIGHT NOW',
     'Current as of this moment, keyed by the device ids in DEVICES above, in the same units',
@@ -317,7 +343,14 @@ export function spokenStateDigest(input: {
     'already below. Call it when you need something this does not carry: a colour, a thermostat’s',
     'limits, a fan percentage, a battery that is not low, a device’s settings or its learned',
     'buttons — or when a device says something here that does not add up.',
-    JSON.stringify(lines),
+    ...(cut > 0
+      ? [
+          `This list was too long to send whole, so ${cut} more device${cut === 1 ? '' : 's'} ` +
+            'with readings are missing from it. For any device you cannot find below, call ' +
+            'get_device rather than saying it is reporting nothing.',
+        ]
+      : []),
+    JSON.stringify(shown),
   ].join('\n');
 }
 

@@ -210,6 +210,43 @@ describe('the assistant', () => {
   });
 
   /**
+   * **Somebody else's conversation is not one to speak into**, which is the
+   * guard `revive()` has always held for a typed message and which the spoken
+   * path fell straight past.
+   *
+   * `askAloud` resolves a session three ways: one this process holds, one
+   * revived from its rows, and — for the id `beginVoice` just minted — a fresh
+   * one opened under that id. Only the third refuses nothing, so a session id
+   * belonging to another member reached it and the round wrote into *their*
+   * transcript. Reading a home's transcripts is shared by design; writing into
+   * one is not.
+   */
+  it('refuses to speak into a conversation that belongs to somebody else', async () => {
+    const { assistant } = await assistantFor([{ kind: 'said', text: 'The kitchen light is off.' }]);
+    const sessionId = assistant.beginVoice();
+    await assistant.askAloud({ sessionId, memberId, question: 'turn the kitchen light off' });
+
+    const otherId = randomUUID();
+    await handle!.db.insert(membersTable).values({ id: otherId, name: 'Kolya', role: 'member' });
+
+    const answer = await assistant.askAloud({
+      sessionId,
+      memberId: otherId,
+      question: 'what did she ask you?',
+    });
+    expect(answer).toBeNull();
+    // And nothing of theirs was written into it.
+    const rows = await assistant.transcript(sessionId);
+    expect(rows.map((row) => row.role)).toEqual(['user', 'agent']);
+    expect(await assistant.maySpeakInto(sessionId, otherId)).toBe(false);
+    expect(await assistant.maySpeakInto(sessionId, memberId)).toBe(true);
+    // A conversation nobody has said anything in yet is anybody's to open,
+    // which is the ordinary case: the app mints an id and the hub writes the
+    // first row.
+    expect(await assistant.maySpeakInto(randomUUID(), otherId)).toBe(true);
+  });
+
+  /**
    * A second question reaches the same conversation, which is what makes a
    * spoken exchange continuable — by speaking again, and by typing afterwards.
    */

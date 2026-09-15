@@ -1,3 +1,4 @@
+import type { Logger } from '../../logging.js';
 import { AiUnavailableError, classifyApiError } from '../errors.js';
 import { MAX_OUTPUT_TOKENS } from '../agent-core.js';
 import { estimateCostUsd } from '../models.js';
@@ -189,6 +190,8 @@ export function createOpenAiTransport(options: ChatTransportOptions): ChatTransp
           // does — and the conversation's otherwise.
           effort: context?.effort ?? effort,
           signal,
+          label,
+          log,
           onDelta: context?.onDelta,
           onThinking: context?.onThinking,
         });
@@ -252,8 +255,11 @@ export function createOpenAiTransport(options: ChatTransportOptions): ChatTransp
  *
  * The deltas are the live experience and `response.completed` is the record:
  * both are needed, which is why this streams *and* returns a whole body. A
- * stream that ends on `response.failed` or `response.incomplete` is not a
- * normal answer to continue from, so it throws rather than being read as prose.
+ * stream that ends on `response.failed` is not a normal answer to continue
+ * from, so it throws rather than being read as prose — and so is an
+ * `response.incomplete` for any reason **but** the output ceiling, which is
+ * read as an answer that was cut short. See the case below for why that one is
+ * not a failure.
  */
 async function streamResponse(request: {
   secret: string;
@@ -263,6 +269,10 @@ async function streamResponse(request: {
   tools: unknown[];
   effort: string;
   signal: AbortSignal;
+  /** Named in the one line a cut-short reply writes, so it reads about this
+   *  agent rather than about "the transport". */
+  label: string;
+  log: Logger;
   onDelta: ((delta: string) => void) | undefined;
   onThinking: ((delta: string) => void) | undefined;
 }): Promise<ResponseBody> {
@@ -329,13 +339,35 @@ async function streamResponse(request: {
         if (typeof body === 'object' && body !== null) completed = body as ResponseBody;
         break;
       }
-      case 'response.failed':
       case 'response.incomplete': {
         const body = event.data['response'] as ResponseBody | undefined;
-        failure =
-          body?.error?.message ??
-          body?.incomplete_details?.reason ??
-          event.type.replace('response.', '');
+        const reason = body?.incomplete_details?.reason;
+        /**
+         * **Running out of room is an answer, not a failure**, and the other
+         * vendor has always said so: Anthropic's `max_tokens` stop reason
+         * falls through `stopOf` to `end`, so a long reply arrives truncated
+         * and the person reads what there was. Throwing here made the same
+         * conversation behave differently on one provider — and worse than
+         * merely differently, since the deltas have *already* been streamed to
+         * the page: the answer was on screen and then replaced by an error
+         * about it.
+         *
+         * So a response cut short by the output ceiling is read exactly as a
+         * completed one — the body carries the output and the usage either way
+         * — and every other incomplete reason (a content filter, say) is still
+         * a failure, because there the output is not an answer at all.
+         */
+        if (reason === 'max_output_tokens' && body !== undefined) {
+          request.log.warn(`${request.label}: the model ran out of room, so its reply is cut short`);
+          completed = body;
+          break;
+        }
+        failure = body?.error?.message ?? reason ?? 'incomplete';
+        break;
+      }
+      case 'response.failed': {
+        const body = event.data['response'] as ResponseBody | undefined;
+        failure = body?.error?.message ?? body?.incomplete_details?.reason ?? 'failed';
         break;
       }
       case 'error': {
