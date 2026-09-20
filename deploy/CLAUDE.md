@@ -743,6 +743,31 @@ in `deploy/install.sh` must stay accurate.
   MQTT integrations run on other machines; the firewall boundary for a home hub
   is the router — which is why it is also the reason the broker now has a
   password, see the two-accounts bullet above.
+- **What the installer downloads and then executes is checked against a
+  digest.** Two things arrive over the network and become code on the machine:
+  the hub bundle and the Node.js runtime under it. Both used to arrive on TLS
+  alone, which is a real guarantee about the *pipe* and none at all about what
+  was published down it — a release asset replaced, a truncated upload, a CDN
+  serving a stale object. `bundle.yml` now writes a `.sha256` beside each
+  tarball **in the container that built it**, before it has been anywhere, and
+  verifies its own digest with `sha256sum -c` before publishing — a checksum
+  nobody checks can quietly describe the wrong file, and since a mismatch is
+  fatal on the Pi, a wrong one published here would be every board refusing to
+  install. Node is checked against nodejs.org's own `SHASUMS256.txt`.
+  **Three outcomes, and only one of them stops an install.** A *mismatch* is
+  fatal, and this is the one place in `install.sh` that chooses stopping over
+  carrying on — it can afford to, because nothing has moved yet: the release
+  directory is staging, `current` still points at the build that is running,
+  and the hub on the machine is untouched. It deliberately does **not** fall
+  through to the source build, because answering "this download cannot be
+  trusted" by cloning from the same origin with less checking is not a
+  fallback. A digest that cannot be *obtained* — a release older than this, a
+  machine with neither `sha256sum` nor `shasum` — only warns, for the reason
+  the broker's password does one section up: a missing file is not evidence of
+  tampering, and refusing on it would turn a CI hiccup into a hub nobody can
+  set up. `verify_sha256` returns three distinct failure codes so those two
+  can never be confused; `test/deploy-integrity.test.ts` runs the real
+  functions and pins which outcome calls `fail`.
 - **Only install what is missing.** `install.sh` checks each apt package with
   `dpkg-query` first: Raspberry Pi OS Lite already ships avahi-daemon, curl,
   ca-certificates and xz-utils, so the step is "install mosquitto" and takes

@@ -77,6 +77,7 @@ import { MAX_WINDOW_SECONDS, type PermitJoinService } from '../core/permit-join.
 import { createHubStatusReader } from '../core/hub-status.js';
 import { deviceWire } from './dto.js';
 import { extractToken, requireMember, requirePermission } from './auth.js';
+import { createHostCheck, createRefusalLogGate, hostnameFromHeader } from './host-guard.js';
 import {
   OWNER_ROLE_KEY,
   PERMISSIONS,
@@ -115,6 +116,16 @@ export interface ApiDeps {
   /** Present when the corresponding adapter is enabled and running. */
   matter?: MatterAdapter;
   zigbee?: ZigbeeAdapter;
+  /**
+   * Names this hub answers to beyond the local ones `api/host-guard.ts`
+   * recognises on its own — `EXTRA_ALLOWED_HOSTS`, split on commas.
+   *
+   * Optional, and empty is the ordinary hub: addresses, `localhost`, a bare
+   * machine name and `.local` all pass without being listed. Optional also
+   * because a required field here is a field every `buildServer` call site in
+   * `test/` has to grow, which is the trap `access` fell into twice.
+   */
+  allowedHosts?: string | readonly string[];
   /** Where the owner's radio choice is stored, and how many radios fit. */
   dataDir: string;
   radioBudget: RadioBudget;
@@ -352,6 +363,39 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     }
     record.count += 1;
   };
+
+  /**
+   * Refuse a request that reached this hub under a name the local network
+   * cannot mean — the DNS-rebinding guard, whose whole argument is in
+   * `api/host-guard.ts`.
+   *
+   * `onRequest` rather than a per-route `preHandler`, and that placement is
+   * the point: it lands before the body is read, before every route including
+   * the two unauthenticated ones, and before the WebSocket upgrade — and
+   * `GET /hub` is exactly what a rebinding page is after, so exempting the
+   * public route would be exempting the target.
+   *
+   * `403` with the name echoed back, because the person who meets this is
+   * almost never an attacker: it is somebody who reached their own hub by a
+   * name nobody anticipated, and the answer has to tell them which name was
+   * refused so `EXTRA_ALLOWED_HOSTS` is a thing they can act on rather than
+   * guess at.
+   */
+  const hostAllowed = createHostCheck(deps.allowedHosts);
+  const shouldLogRefusal = createRefusalLogGate();
+  app.addHook('onRequest', async (request, reply) => {
+    if (hostAllowed(request.headers.host)) return undefined;
+    const hostname = hostnameFromHeader(request.headers.host);
+    if (shouldLogRefusal(hostname)) {
+      deps.log.warn(
+        { host: hostname, url: request.url },
+        'Refused a request addressed to a name this hub does not answer to. If this is how you ' +
+          'reach your own hub, add it to EXTRA_ALLOWED_HOSTS in /etc/gethome/hub.env.',
+      );
+    }
+    await reply.code(403).send({ error: 'host_not_allowed', host: hostname });
+    return reply;
+  });
 
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof z.ZodError) {

@@ -281,6 +281,7 @@ async function main(): Promise<void> {
     hubId: secret.hubId,
     version,
     dataDir: config.DATA_DIR,
+    allowedHosts: config.EXTRA_ALLOWED_HOSTS,
     radioBudget: config.GETHOME_RADIO,
     // Late-bound on purpose: the API listens *before* the adapters start (so a
     // slow radio cannot hold port 8420 closed), and the watch needs to know
@@ -339,8 +340,10 @@ async function main(): Promise<void> {
   // API closed — and with it the installer's health check and the claim. The
   // hub has always been designed to run with no devices and no radios; this
   // makes the boot match that.
-  await app.listen({ port: config.PORT, host: '0.0.0.0' });
-  log.info(`API listening on :${config.PORT} (hub ${secret.hubId}).`);
+  await app.listen({ port: config.PORT, host: config.BIND_ADDRESS });
+  log.info(
+    `API listening on ${config.BIND_ADDRESS}:${config.PORT} (hub ${secret.hubId}).`,
+  );
 
   let mdns: MdnsAdvertiser | null = null;
   if (config.MDNS) {

@@ -8,6 +8,35 @@ const boolFlag = z
 
 const configSchema = z.object({
   PORT: z.coerce.number().int().min(1).max(65_535).default(8420),
+  /**
+   * Which interface the API listens on. Every interface, by default.
+   *
+   * That default is the right one and is not going to change: a hub is found
+   * from a phone on the same Wi-Fi, so binding it to loopback would be a hub
+   * nothing in the house can reach. What this exists for is the arrangement
+   * the default cannot express — a board reachable over Ethernet and joined to
+   * a Wi-Fi network it has no business serving, or a hub that should answer
+   * only over a VPN interface. There was no way to say either, so the answer
+   * was "put it behind the router and hope".
+   *
+   * It is a *narrowing*, not a security boundary: the boundary is still the
+   * router, and this repository's own README says so. A hub reachable on one
+   * interface is reachable by everything on that interface.
+   */
+  BIND_ADDRESS: z.string().default('0.0.0.0'),
+  /**
+   * Host names this hub answers to beyond the local ones it recognises on its
+   * own — see `api/host-guard.ts` for the whole rule and why it exists.
+   *
+   * Empty on every ordinary hub, and that is the point: addresses, `localhost`,
+   * a bare machine name and the `.local` mDNS publishes are all recognised
+   * without being listed. This is for the one arrangement that cannot be
+   * recognised — a real registrable domain pointed at a LAN address by a
+   * resolver inside the house (`hub.example.com` → 192.168.1.50). Comma
+   * separated; `*` switches the check off entirely for somebody who has put
+   * the hub behind a proxy and means it.
+   */
+  EXTRA_ALLOWED_HOSTS: z.string().default(''),
   /** Empty means "<DATA_DIR>/hub.db" — resolved below, once DATA_DIR is known. */
   DATABASE_FILE: z.string().default(''),
   MQTT_URL: z.string().default('mqtt://127.0.0.1:1883'),

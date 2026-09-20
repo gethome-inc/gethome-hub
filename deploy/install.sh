@@ -622,15 +622,106 @@ elif command -v node >/dev/null 2>&1 && [[ "$(node_major "$(command -v node)")" 
   NODE_BIN="$(command -v node)"
   say "Using the system Node.js ($("$NODE_BIN" --version))."
 else
-  # Raspberry Pi OS Bookworm ships Node 18. Take the official build rather than
+  # ── Downloads are checked against a digest ─────────────────────────────────
+# Both things this script fetches and then *executes* — the hub bundle and the
+# Node.js runtime under it — arrived on TLS alone. That is a real guarantee
+# about the pipe and no guarantee at all about what was published down it: an
+# asset replaced in the release, a half-written upload, a CDN serving a stale
+# object. So each one is now checked against a SHA-256 the publisher wrote
+# separately, and the two outcomes are deliberately not the same thing.
+#
+# **A mismatch stops the install**, which is the one place in this file that
+# chooses stopping over carrying on — and it can afford to, because nothing has
+# been put in place yet. The release directory is staging, `current` still
+# points at the build that is running, and the hub on this machine is untouched.
+# Falling back to a source build would be answering "this download cannot be
+# trusted" by fetching from the same place with less checking.
+#
+# **A digest that cannot be obtained only warns.** A release published before
+# this existed carries no `.sha256`, and a machine with neither hashing tool
+# cannot compute one — neither is evidence of tampering, and refusing to
+# install on either would turn a missing file into a hub that cannot be set up
+# at all. That is the trade the broker's password makes one section down, in
+# the same direction.
+#
+# `sha256sum` is coreutils and `shasum` is perl's; Linux has the first and the
+# machines these functions are *tested* on have the second.
+sha256_of() {
+  local file="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+# 0 matched · 1 MISMATCH · 2 no usable digest given · 3 nothing here can hash.
+# Three failure codes rather than one, because only the first means the file is
+# wrong and only the first may stop an install.
+verify_sha256() {
+  local file="$1" expected="$2" actual=""
+  expected="$(printf '%s' "$expected" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+  case "$expected" in
+    *[!0-9a-f]* | "") return 2 ;;
+  esac
+  [[ ${#expected} -eq 64 ]] || return 2
+  actual="$(sha256_of "$file")" || return 3
+  actual="$(printf '%s' "$actual" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+  [[ "$actual" == "$expected" ]]
+}
+
+# One digest out of a `sha256sum`-format listing: lines of "<digest>  <name>".
+# The name is anchored on both sides so `node-v22.0.0-linux-arm64.tar.xz`
+# cannot be matched by a line for `node-v22.0.0-linux-arm64.tar.xz.asc`, and
+# the whole file is the two-hundred-odd lines nodejs.org publishes per release.
+digest_for() {
+  local listing="$1" name="$2"
+  awk -v want="$name" '$2 == want || $2 == "*" want { print $1; exit }' "$listing" 2>/dev/null
+}
+
+# Raspberry Pi OS Bookworm ships Node 18. Take the official build rather than
   # adding a package repository: one tarball, no apt keyring to go stale, and
   # the same version on every board.
   say "Downloading Node.js ${NODE_VERSION} (${NODE_ARCH})…"
   NODE_TGZ="/tmp/node-${NODE_VERSION}-${NODE_ARCH}.tar.xz"
+  NODE_TARBALL="node-v${NODE_VERSION}-${NODE_ARCH}.tar.xz"
   curl -fsSL --retry 5 --retry-delay 5 --retry-connrefused \
-    "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-${NODE_ARCH}.tar.xz" \
+    "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_TARBALL}" \
     -o "$NODE_TGZ" \
     || fail "Couldn't download Node.js from nodejs.org. Check the network and run the install again."
+
+  # nodejs.org publishes SHASUMS256.txt beside every release, so the runtime
+  # this hub is about to execute can be checked against something other than
+  # the connection it arrived on. See the digest helpers above for why only a
+  # mismatch is fatal.
+  NODE_SHA_FILE="/tmp/node-${NODE_VERSION}-SHASUMS256.txt"
+  NODE_EXPECTED=""
+  if curl -fsSL --retry 3 --retry-delay 2 \
+      "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" -o "$NODE_SHA_FILE" 2>/dev/null; then
+    # `|| true`, because this file runs under `set -e`: a listing that does not
+    # name this tarball makes `digest_for` exit non-zero, and an unguarded
+    # command substitution would end the install then and there — turning "no
+    # checksum to compare against" into the one outcome this must never be.
+    NODE_EXPECTED="$(digest_for "$NODE_SHA_FILE" "$NODE_TARBALL" || true)"
+  fi
+  rm -f "$NODE_SHA_FILE"
+  # Same reason, and the more dangerous half: `verify_sha256` reports its
+  # verdict *through* its exit status, so every verdict but "matched" is a
+  # non-zero return. Called bare it would abort the script under `set -e`
+  # before the case below could tell a mismatch from a missing digest.
+  NODE_VERIFY_RC=0
+  verify_sha256 "$NODE_TGZ" "$NODE_EXPECTED" || NODE_VERIFY_RC=$?
+  case "$NODE_VERIFY_RC" in
+    0) say "Node.js ${NODE_VERSION} matches the checksum nodejs.org published." ;;
+    1)
+      rm -f "$NODE_TGZ"
+      fail "The Node.js download does not match the checksum nodejs.org publishes for it. Nothing has been installed and your hub is untouched. This is usually a proxy or a captive portal rewriting the download; try again on a different network."
+      ;;
+    *) warn "Could not check the Node.js download against nodejs.org's checksum, so it was installed unverified." ;;
+  esac
+
   $SUDO rm -rf "$NODE_DIR"
   $SUDO mkdir -p "$NODE_DIR"
   $SUDO tar -xJf "$NODE_TGZ" -C "$NODE_DIR" --strip-components=1 \
@@ -666,6 +757,33 @@ $SUDO mkdir -p "$RELEASES_DIR"
 if [[ -z "$FORCE_BUILD" ]]; then
   say "Fetching ${BUNDLE_URL}…"
   if curl -fsSL --retry 5 --retry-delay 5 --retry-connrefused "$BUNDLE_URL" -o "$BUNDLE_TGZ" && [[ -s "$BUNDLE_TGZ" ]]; then
+    # The bundle is `dist/` plus a production `node_modules` — the code this
+    # machine is about to run as a service. `bundle.yml` publishes a `.sha256`
+    # beside it, computed in the same container that built the tarball, so a
+    # tarball replaced or truncated after the build does not survive this.
+    # `|| true` on both: this file runs under `set -euo pipefail`, so a release
+    # with no `.sha256` beside it (every one published before this existed)
+    # would otherwise end the install rather than fall through to the "cannot
+    # check" branch below — and `verify_sha256` reports every verdict but
+    # "matched" as a non-zero return, so calling it bare would abort before the
+    # case could tell a mismatch from a missing file.
+    BUNDLE_EXPECTED="$(curl -fsSL --retry 3 --retry-delay 2 "${BUNDLE_URL}.sha256" 2>/dev/null | awk '{print $1; exit}' || true)"
+    BUNDLE_VERIFY_RC=0
+    verify_sha256 "$BUNDLE_TGZ" "$BUNDLE_EXPECTED" || BUNDLE_VERIFY_RC=$?
+    case "$BUNDLE_VERIFY_RC" in
+      0) say "The hub bundle matches its published checksum." ;;
+      1)
+        rm -f "$BUNDLE_TGZ"
+        # Deliberately not the "falling back" path below: answering "this
+        # download cannot be trusted" by cloning from the same place with less
+        # checking is not a fallback. Nothing has moved yet — `current` still
+        # points at the build that is running — so stopping here costs the
+        # update and leaves the hub exactly as it was.
+        fail "The hub download does not match the checksum published beside it, so it was not installed. Your hub is untouched and still running the build it was. Run the install again; if it keeps happening, check whether something on this network is rewriting downloads before opening an issue."
+        ;;
+      2) say "That release publishes no checksum, so the download was taken as it came." ;;
+      *) warn "This machine has no sha256 tool, so the hub download was installed unverified." ;;
+    esac
     STAGING="$RELEASES_DIR/.incoming.$$"
     $SUDO rm -rf "$STAGING"
     $SUDO mkdir -p "$STAGING"
@@ -1722,6 +1840,18 @@ if [[ ! -f "$CONF_DIR/hub.env" ]]; then
   $SUDO tee "$CONF_DIR/hub.env" >/dev/null <<ENV
 # GetHome Hub configuration. Edit and \`systemctl restart gethome-hubd\`.
 PORT=8420
+# Which interface to listen on. Every one, which is what a hub wants: a phone
+# finds it over the same Wi-Fi. Narrow it only if this board sits on a network
+# it should not serve. It is a narrowing, not a boundary — the boundary is the
+# router.
+# BIND_ADDRESS=0.0.0.0
+# Extra names this hub answers to. It refuses a Host that is a registrable
+# public domain, which is what stops a web page pointing its own name at this
+# hub's address and reading it through your browser. Addresses, localhost, a
+# bare machine name and .local are all recognised already, so leave this alone
+# unless you reach your hub by a real domain resolved inside the house. Comma
+# separated; \`*\` turns the check off.
+# EXTRA_ALLOWED_HOSTS=
 DATA_DIR=${DATA_DIR}
 MQTT_URL=mqtt://127.0.0.1:1883
 Z2M_BASE_TOPIC=zigbee2mqtt

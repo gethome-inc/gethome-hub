@@ -965,6 +965,42 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   raw foreign key would turn an ordinary removal into a 500, and a code left to
   expire is fifteen minutes in which somebody just removed could let themselves
   back in.
+- **The hub is a LAN service, and the one attack that reaches past a bearer
+  token is rebinding.** Every route but `GET /hub` and `POST /pair` is behind a
+  token, and no browser can attach one cross-origin: there are no cookies here,
+  so a hostile page has no ambient authority to borrow, and asking for an
+  `Authorization` header triggers a preflight this API answers with a 404.
+  **That is why no CORS plugin is registered — the absence is the policy**, and
+  adding one would be handing back exactly what it withholds. DNS rebinding
+  walks past all of it by changing what the browser *thinks* the origin is: a
+  page on `evil.com` whose record flips to `192.168.1.50`, re-resolved, read
+  back as same-origin. No token is involved, so nothing about tokens helps.
+  `api/host-guard.ts` is the answer and the rule is about **names, not
+  addresses**: an attacker needs one they control, which means a registrable
+  public domain, while everything a hub is legitimately reached by — an
+  address, `localhost`, a bare machine name, `.local` and the other local
+  suffixes — cannot be pointed at somebody else's LAN. So no client had to
+  change to keep working, and the refusal is a **403 that echoes the name**,
+  because whoever meets it is almost always somebody who reached their own hub
+  by a name nobody anticipated. It hangs off `onRequest` rather than a
+  per-route `preHandler`, which is the placement doing the work: before the
+  body, before the two unauthenticated routes — `GET /hub` is exactly what a
+  rebound page reads, so exempting the public route would be exempting the
+  target — and before the WebSocket upgrade, where a socket authorizes once and
+  then streams the home. `EXTRA_ALLOWED_HOSTS` **adds** rather than replaces,
+  for the one arrangement that cannot be recognised (a real domain resolved to
+  a LAN address inside the house): a list that replaced the local rule is one
+  somebody sets to their own domain and thereby stops their own phone, which
+  reaches the hub by address, from connecting at all. And refusals are logged
+  **once per name, up to a bound**, because a refusal is the only thing that
+  tells an operator their hub has gone quiet and why — while the names are the
+  attacker's to invent, and one line per request is an SD card.
+  `BIND_ADDRESS` is the same question one layer down and defaults to
+  `0.0.0.0`, which is not going to change: a hub is found from a phone on the
+  same Wi-Fi, so loopback would be a hub nothing in the house can reach. It is
+  a *narrowing* for a board on a network it should not serve, never a security
+  boundary — the boundary is still the router, which is what the README says
+  and what the broker's own note repeats.
 - **Access is a table the home edits, and three rules hold it up.** Roles are
   rows (`roles`), permissions are a named vocabulary owned by
   `src/core/access.ts`, and a member holds one role; `requirePermission` in
