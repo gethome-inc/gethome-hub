@@ -980,7 +980,15 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   public domain, while everything a hub is legitimately reached by — an
   address, `localhost`, a bare machine name, `.local` and the other local
   suffixes — cannot be pointed at somebody else's LAN. So no client had to
-  change to keep working, and the refusal is a **403 that echoes the name**,
+  change to keep working, and that was **checked against the app rather than
+  assumed**: `HubDiscovery` resolves a hub to its IP and deliberately never to
+  a name (it forces IPv4 precisely because the hub binds `0.0.0.0`), and both
+  `HubClient` and the widget build `http://<host>:<port>` from that address, so
+  `URLSession` puts an address in `Host`. The iOS repo carries one line for
+  this and no more: `host_not_allowed` is named in `HubClient`'s error mapping,
+  because a bare 403 there reads as *"this home doesn't let your role do that"*
+  and would send somebody to the role matrix over a name their router resolved.
+  The refusal is a **403 that echoes the name**,
   because whoever meets it is almost always somebody who reached their own hub
   by a name nobody anticipated. It hangs off `onRequest` rather than a
   per-route `preHandler`, which is the placement doing the work: before the
@@ -991,7 +999,11 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   for the one arrangement that cannot be recognised (a real domain resolved to
   a LAN address inside the house): a list that replaced the local rule is one
   somebody sets to their own domain and thereby stops their own phone, which
-  reaches the hub by address, from connecting at all. And refusals are logged
+  reaches the hub by address, from connecting at all. There is deliberately
+  **no wildcard** beside it — a hub is a board on a home network and that is
+  the only deployment there is, so a mode that switched the check off would be
+  a second thing to get wrong for a topology nobody runs, and `*` is exactly
+  what somebody reaches for when a name is refused. And refusals are logged
   **once per name, up to a bound**, because a refusal is the only thing that
   tells an operator their hub has gone quiet and why — while the names are the
   attacker's to invent, and one line per request is an SD card.

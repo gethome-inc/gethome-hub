@@ -402,8 +402,10 @@ resolved inside your house, name it in `EXTRA_ALLOWED_HOSTS` in
 `/etc/gethome/hub.env`.
 
 What the hub installs is checked, too: the bundle and the Node.js runtime under
-it are each verified against a SHA-256 published beside them, and a mismatch
-stops the install with your existing hub left running and untouched.
+it are each verified against a SHA-256 published beside them, and anything the
+installer cannot verify — a mismatch, a missing checksum, a machine with no
+`sha256sum` — stops the install with your existing hub left running and
+untouched.
 
 ### There is no Docker, and no database server
 

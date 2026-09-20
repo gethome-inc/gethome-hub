@@ -265,37 +265,57 @@ describe('install.sh — how the outcomes are wired', () => {
     expect(nodeBlock).toContain('SHASUMS256.txt');
   });
 
-  it('stops the install on a mismatch, in both places', () => {
+  /**
+   * **Not verified is not installed, and there is one path through it.** Every
+   * outcome but a match stops: a mismatch, a release with no digest beside it,
+   * and a machine that cannot hash. The softer rule — warn when the digest is
+   * merely missing, since that is not evidence of tampering — makes the check
+   * trivial to walk past by deleting one file, and the only case it protects
+   * is a branch whose bundle predates this, which one push rebuilds.
+   */
+  it('stops the install on every outcome but a match, in both places', () => {
     for (const [name, block] of [
       ['bundle', bundleBlock],
       ['node', nodeBlock],
     ] as const) {
-      // Case 1 is the mismatch, and it is the only one allowed to call `fail`.
-      const mismatch = block.slice(block.indexOf('    1)'), block.indexOf('    *)'));
-      expect(mismatch, name).toContain('fail ');
-    }
-  });
-
-  it('only warns when the digest could not be obtained', () => {
-    for (const [name, block] of [
-      ['bundle', bundleBlock],
-      ['node', nodeBlock],
-    ] as const) {
-      const cannotCheck = block.slice(block.indexOf('    *)'));
-      expect(cannotCheck, name).not.toContain('fail ');
-      expect(cannotCheck, name).toMatch(/warn /);
+      // Each branch of the case, sliced at its own label so a branch that
+      // stopped calling `fail` cannot hide behind a neighbour that still does.
+      for (const label of ['1)', '2)', '*)']) {
+        const start = block.indexOf(label);
+        expect(start, `${name}: no ${label} branch`).toBeGreaterThan(-1);
+        const next = ['1)', '2)', '*)']
+          .map((other) => block.indexOf(other, start + label.length))
+          .filter((index) => index > -1);
+        const end = next.length > 0 ? Math.min(...next) : block.length;
+        expect(block.slice(start, end), `${name} ${label}`).toContain('fail ');
+      }
+      // And nothing in the whole block settles for a warning.
+      expect(block, name).not.toContain('warn ');
     }
   });
 
   /**
-   * A mismatch must not fall through to the source build. Cloning from the
-   * same origin with less checking is not an answer to "this download cannot
-   * be trusted", and the hub is still running its previous build, untouched.
+   * A refusal must not fall through to the source build. Cloning from the same
+   * origin with less checking is not an answer to "this download cannot be
+   * trusted", and the hub is still running its previous build, untouched.
    */
-  it('does not treat a bad bundle as a reason to build from source', () => {
-    const mismatch = bundleBlock.slice(bundleBlock.indexOf('    1)'), bundleBlock.indexOf('    2)'));
-    expect(mismatch).not.toContain('INSTALLED=');
-    expect(mismatch).toContain('fail ');
+  it('never treats an unverified bundle as a reason to build from source', () => {
+    expect(bundleBlock.slice(bundleBlock.indexOf('1)'))).not.toContain('INSTALLED=');
+  });
+
+  /** Each failure says which of the three it was, so nobody has to guess. */
+  it('gives the three refusals three different sentences', () => {
+    for (const [name, block] of [
+      ['bundle', bundleBlock],
+      ['node', nodeBlock],
+    ] as const) {
+      const sentences = [...block.matchAll(/fail "([^"]+)"/g)].map((match) => match[1]);
+      expect(sentences.length, name).toBe(3);
+      expect(new Set(sentences).size, `${name}: two refusals read the same`).toBe(3);
+      // The one a person can act on: a rebuild, a network, a missing package.
+      expect(sentences.some((text) => /does not match/.test(text!)), name).toBe(true);
+      expect(sentences.some((text) => /sha256sum|shasum/.test(text!)), name).toBe(true);
+    }
   });
 });
 

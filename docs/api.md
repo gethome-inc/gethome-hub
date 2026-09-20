@@ -36,8 +36,10 @@ the recognised set for the one arrangement that cannot be recognised: a real
 domain resolved to a LAN address by a resolver inside the house. It is additive
 rather than a replacement on purpose — a list that replaced the local rule is
 one somebody sets to their own domain and thereby stops their own phone, which
-reaches the hub by address, from connecting at all. `*` switches the check off
-for a hub deliberately put behind a proxy.
+reaches the hub by address, from connecting at all. It is a list of names and
+nothing else: there is deliberately **no wildcard** that switches the check off,
+because a hub is a board on a home network and that is the only deployment there
+is — and `*` is exactly what somebody reaches for when a name is refused.
 
 ### Claiming
 

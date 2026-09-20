@@ -33,8 +33,9 @@ const configSchema = z.object({
    * without being listed. This is for the one arrangement that cannot be
    * recognised — a real registrable domain pointed at a LAN address by a
    * resolver inside the house (`hub.example.com` → 192.168.1.50). Comma
-   * separated; `*` switches the check off entirely for somebody who has put
-   * the hub behind a proxy and means it.
+   * separated, and a list of names is all it is: there is no wildcard that
+   * switches the check off, because a hub is a board on a home network and
+   * that is the only deployment there is.
    */
   EXTRA_ALLOWED_HOSTS: z.string().default(''),
   /** Empty means "<DATA_DIR>/hub.db" — resolved below, once DATA_DIR is known. */

@@ -630,19 +630,21 @@ else
 # object. So each one is now checked against a SHA-256 the publisher wrote
 # separately, and the two outcomes are deliberately not the same thing.
 #
-# **A mismatch stops the install**, which is the one place in this file that
-# chooses stopping over carrying on — and it can afford to, because nothing has
-# been put in place yet. The release directory is staging, `current` still
+# **Not verified is not installed, and there is exactly one path through
+# here.** A mismatch, a release with no `.sha256` beside it, a machine that
+# cannot hash — all three stop the install. That is the one place in this file
+# that chooses stopping over carrying on, and it can afford to, because nothing
+# has been put in place yet: the release directory is staging, `current` still
 # points at the build that is running, and the hub on this machine is untouched.
 # Falling back to a source build would be answering "this download cannot be
 # trusted" by fetching from the same place with less checking.
 #
-# **A digest that cannot be obtained only warns.** A release published before
-# this existed carries no `.sha256`, and a machine with neither hashing tool
-# cannot compute one — neither is evidence of tampering, and refusing to
-# install on either would turn a missing file into a hub that cannot be set up
-# at all. That is the trade the broker's password makes one section down, in
-# the same direction.
+# The obvious softer rule — warn when the digest is merely *missing*, since
+# that is not evidence of tampering — was deliberately not taken. It makes the
+# check trivial to walk past (delete the file and the install proceeds), and
+# the case it protects is a branch whose bundle predates this, which one push
+# rebuilds. Every failure below says which of the three it was, so nobody has
+# to guess; what none of them does is carry on.
 #
 # `sha256sum` is coreutils and `shasum` is perl's; Linux has the first and the
 # machines these functions are *tested* on have the second.
@@ -673,12 +675,14 @@ verify_sha256() {
 }
 
 # One digest out of a `sha256sum`-format listing: lines of "<digest>  <name>".
-# The name is anchored on both sides so `node-v22.0.0-linux-arm64.tar.xz`
-# cannot be matched by a line for `node-v22.0.0-linux-arm64.tar.xz.asc`, and
-# the whole file is the two-hundred-odd lines nodejs.org publishes per release.
+# The name is matched whole rather than as a substring, so
+# `node-v22.22.2-linux-arm64.tar.xz` cannot be answered by the line for
+# `node-v22.22.2-linux-arm64.tar.xz.asc` — which would be a mismatch on every
+# install. The listing is the forty-odd lines nodejs.org publishes per release,
+# or the single line `bundle.yml` writes.
 digest_for() {
   local listing="$1" name="$2"
-  awk -v want="$name" '$2 == want || $2 == "*" want { print $1; exit }' "$listing" 2>/dev/null
+  awk -v want="$name" '$2 == want { print $1; exit }' "$listing" 2>/dev/null
 }
 
 # Raspberry Pi OS Bookworm ships Node 18. Take the official build rather than
@@ -719,7 +723,14 @@ digest_for() {
       rm -f "$NODE_TGZ"
       fail "The Node.js download does not match the checksum nodejs.org publishes for it. Nothing has been installed and your hub is untouched. This is usually a proxy or a captive portal rewriting the download; try again on a different network."
       ;;
-    *) warn "Could not check the Node.js download against nodejs.org's checksum, so it was installed unverified." ;;
+    2)
+      rm -f "$NODE_TGZ"
+      fail "Could not get nodejs.org's checksum for Node.js ${NODE_VERSION}, so the download could not be verified and was not installed. Your hub is untouched. Check the network — something between this machine and nodejs.org may be blocking or rewriting it — and run the install again."
+      ;;
+    *)
+      rm -f "$NODE_TGZ"
+      fail "This machine has neither sha256sum nor shasum, so the Node.js download could not be verified and was not installed. Install coreutils and run the install again."
+      ;;
   esac
 
   $SUDO rm -rf "$NODE_DIR"
@@ -770,19 +781,24 @@ if [[ -z "$FORCE_BUILD" ]]; then
     BUNDLE_EXPECTED="$(curl -fsSL --retry 3 --retry-delay 2 "${BUNDLE_URL}.sha256" 2>/dev/null | awk '{print $1; exit}' || true)"
     BUNDLE_VERIFY_RC=0
     verify_sha256 "$BUNDLE_TGZ" "$BUNDLE_EXPECTED" || BUNDLE_VERIFY_RC=$?
+    # None of these falls through to the source build below. Answering "this
+    # download cannot be trusted" by cloning from the same place with less
+    # checking is not a fallback — and nothing has moved yet, so stopping costs
+    # the update and leaves the hub exactly as it was.
     case "$BUNDLE_VERIFY_RC" in
       0) say "The hub bundle matches its published checksum." ;;
       1)
         rm -f "$BUNDLE_TGZ"
-        # Deliberately not the "falling back" path below: answering "this
-        # download cannot be trusted" by cloning from the same place with less
-        # checking is not a fallback. Nothing has moved yet — `current` still
-        # points at the build that is running — so stopping here costs the
-        # update and leaves the hub exactly as it was.
         fail "The hub download does not match the checksum published beside it, so it was not installed. Your hub is untouched and still running the build it was. Run the install again; if it keeps happening, check whether something on this network is rewriting downloads before opening an issue."
         ;;
-      2) say "That release publishes no checksum, so the download was taken as it came." ;;
-      *) warn "This machine has no sha256 tool, so the hub download was installed unverified." ;;
+      2)
+        rm -f "$BUNDLE_TGZ"
+        fail "The '${BUNDLE_TAG}' release publishes no checksum for ${NODE_ARCH}, so the download could not be verified and was not installed. Your hub is untouched. Every bundle built by the 'Publish bundle' workflow carries one — push to branch ${BRANCH} to rebuild it, then run the install again."
+        ;;
+      *)
+        rm -f "$BUNDLE_TGZ"
+        fail "This machine has neither sha256sum nor shasum, so the hub download could not be verified and was not installed. Install coreutils and run the install again."
+        ;;
     esac
     STAGING="$RELEASES_DIR/.incoming.$$"
     $SUDO rm -rf "$STAGING"
@@ -1850,7 +1866,7 @@ PORT=8420
 # hub's address and reading it through your browser. Addresses, localhost, a
 # bare machine name and .local are all recognised already, so leave this alone
 # unless you reach your hub by a real domain resolved inside the house. Comma
-# separated; \`*\` turns the check off.
+# separated, and a list of names is all it is.
 # EXTRA_ALLOWED_HOSTS=
 DATA_DIR=${DATA_DIR}
 MQTT_URL=mqtt://127.0.0.1:1883

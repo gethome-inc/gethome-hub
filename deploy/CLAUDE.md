@@ -754,20 +754,24 @@ in `deploy/install.sh` must stay accurate.
   nobody checks can quietly describe the wrong file, and since a mismatch is
   fatal on the Pi, a wrong one published here would be every board refusing to
   install. Node is checked against nodejs.org's own `SHASUMS256.txt`.
-  **Three outcomes, and only one of them stops an install.** A *mismatch* is
-  fatal, and this is the one place in `install.sh` that chooses stopping over
-  carrying on — it can afford to, because nothing has moved yet: the release
-  directory is staging, `current` still points at the build that is running,
-  and the hub on the machine is untouched. It deliberately does **not** fall
-  through to the source build, because answering "this download cannot be
-  trusted" by cloning from the same origin with less checking is not a
-  fallback. A digest that cannot be *obtained* — a release older than this, a
-  machine with neither `sha256sum` nor `shasum` — only warns, for the reason
-  the broker's password does one section up: a missing file is not evidence of
-  tampering, and refusing on it would turn a CI hiccup into a hub nobody can
-  set up. `verify_sha256` returns three distinct failure codes so those two
-  can never be confused; `test/deploy-integrity.test.ts` runs the real
-  functions and pins which outcome calls `fail`.
+  **Not verified is not installed, and there is exactly one path through it.**
+  All three failures stop the install — a mismatch, a release with no `.sha256`
+  beside it, and a machine with neither `sha256sum` nor `shasum`. This is the
+  one place in `install.sh` that chooses stopping over carrying on, and it can
+  afford to because nothing has moved yet: the release directory is staging,
+  `current` still points at the build that is running, and the hub on the
+  machine is untouched. None of the three falls through to the source build,
+  because answering "this download cannot be trusted" by cloning from the same
+  origin with less checking is not a fallback.
+  The softer rule was considered and **deliberately not taken**: warning when
+  the digest is merely *missing* — on the reasoning that absence is not
+  evidence of tampering, which is how the broker's password argument runs one
+  section up — makes the whole check trivial to walk past by deleting one file,
+  and the only case it protects is a branch whose bundle predates this, which
+  one push rebuilds. `verify_sha256` still returns three distinct codes, so
+  each refusal names which of the three it was and what to do about it;
+  `test/deploy-integrity.test.ts` runs the real functions and pins that every
+  branch calls `fail` and that none of them settles for a `warn`.
 - **Only install what is missing.** `install.sh` checks each apt package with
   `dpkg-query` first: Raspberry Pi OS Lite already ships avahi-daemon, curl,
   ca-certificates and xz-utils, so the step is "install mosquitto" and takes

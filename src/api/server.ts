@@ -125,7 +125,7 @@ export interface ApiDeps {
    * because a required field here is a field every `buildServer` call site in
    * `test/` has to grow, which is the trap `access` fell into twice.
    */
-  allowedHosts?: string | readonly string[];
+  allowedHosts?: string;
   /** Where the owner's radio choice is stored, and how many radios fit. */
   dataDir: string;
   radioBudget: RadioBudget;

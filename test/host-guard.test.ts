@@ -139,13 +139,20 @@ describe('createHostCheck', () => {
     expect(createHostCheck('Hub.Example.COM')('hub.example.com')).toBe(true);
   });
 
-  it('switches off entirely on "*"', () => {
+  /**
+   * There is deliberately no wildcard. A hub is a board on a home network and
+   * that is the only deployment there is, so a mode that switched the check
+   * off would be a second thing to get wrong for a topology nobody runs —
+   * and `*` is exactly what somebody reaches for when a name is refused.
+   */
+  it('treats "*" as a name, not as a way to switch the check off', () => {
     const check = createHostCheck('*');
-    expect(check('evil.com')).toBe(true);
+    expect(check('evil.com')).toBe(false);
+    expect(check('anything.example.com')).toBe(false);
   });
 
   it('allows the local set when nothing is configured', () => {
-    for (const extra of [undefined, '', []] as const) {
+    for (const extra of [undefined, '', '  '] as const) {
       const check = createHostCheck(extra);
       expect(check('localhost:8420')).toBe(true);
       expect(check('evil.com')).toBe(false);
@@ -239,13 +246,29 @@ describe.skipIf(!handle)('the Host guard over a real server', () => {
     await app?.close();
   });
 
+  /**
+   * **A cross-repo contract, checked rather than assumed.**
+   *
+   * The iOS app never sets `Host` itself — `URLSession` derives it from the
+   * URL — and every URL it builds comes from `URLComponents` with an
+   * *address* in `.host`: `HubDiscovery` resolves a hub by opening a
+   * connection to its Bonjour endpoint and reading the peer off the ready
+   * path, deliberately never guessing a `<service>.local` name, and both
+   * `HubClient.init(host:port:token:)` and `HubWidgetConnection.target` build
+   * `http://<host>:<port>` from it. So what arrives here is an IP literal,
+   * which is precisely what a rebinding page cannot have.
+   *
+   * If a change ever makes this list refuse one of these, the app stops
+   * connecting — so each entry names where it comes from.
+   */
   it('serves every host a real client arrives on', async () => {
     for (const host of [
       'localhost:8420', // install.sh's health check
-      '127.0.0.1:8420', // update-runner.sh
-      '192.168.1.50:8420', // an app connecting by address
+      '127.0.0.1:8420', // update-runner.sh, and gethome-hubctl
+      '192.168.1.50:8420', // iOS HubClient / HubWidgetConnection, by address
+      '10.0.0.4:8420',
       '[::1]:8420',
-      'raspberrypi.local:8420', // mDNS — how the apps find it
+      'raspberrypi.local:8420', // mDNS, and the typed-address escape hatch
       'raspberrypi',
       'hub.example.com', // EXTRA_ALLOWED_HOSTS
     ]) {
@@ -330,10 +353,16 @@ describe.skipIf(!handle)('the Host guard over a real server', () => {
     expect(outcome.status).toBe(403);
   });
 
-  it('accepts the same upgrade on a local name', async () => {
+  /**
+   * The address form, because that is the one the app opens: `socketURL()`
+   * rewrites `HubClient`'s own base URL to `ws://` and keeps its authority,
+   * and the token rides in the query since a WebSocket handshake cannot carry
+   * an `Authorization` header — which is what `extractToken` supports it for.
+   */
+  it('accepts the same upgrade on an address, as the app opens it', async () => {
     const hello = await new Promise<string>((resolve, reject) => {
       const socket = new WebSocket(`ws://127.0.0.1:${port}/api/v1/ws?token=${token}`, {
-        headers: { host: 'raspberrypi.local' },
+        headers: { host: '192.168.1.50:8420' },
       });
       socket.on('message', (raw) => {
         socket.close();

@@ -42,8 +42,10 @@ import { isIP } from 'node:net';
  *
  * The escape hatch is `EXTRA_ALLOWED_HOSTS`, for the one arrangement this
  * cannot recognise: a real domain resolved to a LAN address by a resolver
- * inside the house. `*` turns the check off for somebody who has put the hub
- * behind a proxy and means it.
+ * inside the house. It is a list of names and nothing else — there is
+ * deliberately no wildcard that switches the check off, because a hub is a
+ * board on a home network and that is the only deployment there is. A second
+ * mode would be a second thing to get wrong for a topology nobody runs.
  */
 
 /**
@@ -123,12 +125,13 @@ export type HostCheck = (header: string | undefined) => boolean;
  * thereby stops their own phone — which reaches the hub by address — from
  * connecting at all. There is no arrangement in which that is what they meant.
  */
-export function createHostCheck(extra: string | readonly string[] | undefined): HostCheck {
-  const entries = (typeof extra === 'string' ? extra.split(',') : (extra ?? []))
-    .map((entry) => entry.trim().toLowerCase())
-    .filter((entry) => entry.length > 0);
-  if (entries.includes('*')) return () => true;
-  const allowed = new Set(entries);
+export function createHostCheck(extra: string | undefined): HostCheck {
+  const allowed = new Set(
+    (extra ?? '')
+      .split(',')
+      .map((entry) => entry.trim().toLowerCase())
+      .filter((entry) => entry.length > 0),
+  );
   return (header) => {
     const hostname = hostnameFromHeader(header);
     return isLocalHostname(hostname) || allowed.has(hostname);
