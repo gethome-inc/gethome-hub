@@ -35,8 +35,11 @@ const configSchema = z.object({
    * The cost of that is real and is paid where it belongs: the hub must not
    * then *advertise* an address it will not answer on, which is what
    * `mdns/advertiser.ts` and the `publish-aaaa-on-ipv4` line in `install.sh`
-   * are between them for. Both apps carry an IPv4 preference of their own for
-   * the hubs that predate it.
+   * are between them for. They reach as far as this service's own
+   * announcement; the board's own AAAA is avahi's to answer and stays, so both
+   * apps' IPv4 preference is what finally decides the address rather than a
+   * workaround waiting to be retired. `mdns/advertiser.ts` has the
+   * measurement.
    */
   BIND_ADDRESS: z.string().default('0.0.0.0'),
   /**

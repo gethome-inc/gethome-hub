@@ -1642,8 +1642,14 @@ if [[ -f "$AVAHI_CONF" ]]; then
   # *first*, which is why both apps had to learn to ask for IPv4 before they
   # could reach a hub sitting next to them. avahi answers an IPv4 lookup with
   # AAAA records by default; this stops it, and the service file the hub writes
-  # announces over IPv4 only. Matter is untouched: matter.js runs its own
-  # responder, and the IPv6 it needs is its own.
+  # announces over IPv4 only.
+  #
+  # That is as far as it goes, which was measured rather than assumed: a client
+  # asking over the IPv6 transport still gets the board's link-local AAAA,
+  # because that is `use-ipv6`'s business. Turning *that* off is a protocol
+  # family switched off system-wide on somebody's own machine and is
+  # deliberately not done here. Matter is untouched either way: matter.js runs
+  # its own responder, and the IPv6 it needs is its own.
   avahi_set publish publish-aaaa-on-ipv4 no
   # GetHome Studio finds Raspberry Pis by browsing _workstation._tcp: Debian
   # publishes no _ssh._tcp record, so on a stock Pi this is the announcement

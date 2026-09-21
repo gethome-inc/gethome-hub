@@ -1026,13 +1026,31 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   usually the IPv6 link-local. It cost both apps a workaround before anyone
   noticed the hub was the one lying: the iOS browse sat on "Finding its
   address…" over a hub two metres away, and Studio spent a four-second timeout
-  and fell back to a `.local` guess. Two halves on the avahi path and neither
-  is enough alone — `mdns/advertiser.ts` writes `<service protocol="ipv4">`,
-  which says what the service is *announced* on, while the A and AAAA for the
-  machine's own name are avahi's, which is why `install.sh` also sets
-  `publish-aaaa-on-ipv4=no`. ciao needs only `disabledIpv6`, publishing its own
-  address records. `test/mdns-advertiser.test.ts` pins the file, including
-  across a rename, since three call sites rewrite it whole.
+  and fell back to a `.local` guess. **What the hub can do about that is
+  bounded, and measuring it corrected this paragraph.**
+  `mdns/advertiser.ts` writes `<service protocol="ipv4">`, which settles what
+  *our service* is announced on and is the part that is ours. The A and AAAA
+  for the machine's own name are avahi's, and `install.sh` sets
+  `publish-aaaa-on-ipv4=no`, which stops the AAAA going out in reply to a
+  lookup that arrived **over IPv4** — that and no more. A client that also asks
+  over the IPv6 transport, which macOS and iOS both do, still gets the board's
+  link-local AAAA, because that is governed by `use-ipv6` and answering it is
+  the machine's business rather than this service's. Verified on a Zero 2 W: a
+  Mac resolving `pi.local` gets both records after a clean `avahi-daemon`
+  restart with both settings in force.
+  **Finishing the job would mean `use-ipv6=no`, and that is the hammer to
+  refuse.** It switches a whole protocol family off in the system responder on
+  somebody's own machine, to tidy an advertisement neither app reads any more,
+  and anything else on that Pi wanting IPv6 mDNS breaks silently. So the rule
+  above keeps its first half — never publish an address *we* cannot be reached
+  at — and stops at what the service owns.
+  **Which makes the apps' IPv4 preference load-bearing rather than
+  transitional**: it is what actually decides the address, permanently, and
+  neither `HubDiscovery.probeParameters()` nor Studio's `resolveParameters` may
+  be relaxed on the strength of this. ciao needs only `disabledIpv6`, and there
+  the claim does hold, because ciao publishes its own address records.
+  `test/mdns-advertiser.test.ts` pins the file, including across a rename,
+  since three call sites rewrite it whole.
 - **Access is a table the home edits, and three rules hold it up.** Roles are
   rows (`roles`), permissions are a named vocabulary owned by
   `src/core/access.ts`, and a member holds one role; `requirePermission` in

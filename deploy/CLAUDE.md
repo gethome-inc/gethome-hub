@@ -739,11 +739,18 @@ in `deploy/install.sh` must stay accurate.
 - **Never publish an address the caller cannot reach — including a family.**
   That is the `docker0` rule above, and the same fault one level up is an AAAA
   record: the API binds `0.0.0.0`, so the board's IPv6 link-local refuses port
-  8420, and it is the answer a client usually gets *first*. Two halves, neither
-  enough alone — the hub's own service file says `<service protocol="ipv4">`
-  (what the service is *announced* on) and `install.sh` sets
-  `publish-aaaa-on-ipv4=no` (the A/AAAA avahi hands out for the machine's own
-  name, which the service file cannot speak for). Matter is untouched:
+  8420, and it is the answer a client usually gets *first*. The hub's own
+  service file says `<service protocol="ipv4">` — what *our service* is
+  announced on, and the part that is ours — and `install.sh` sets
+  `publish-aaaa-on-ipv4=no`, which stops the AAAA going out in reply to a
+  lookup that arrived **over IPv4**, and no further. **Measured on a Zero 2 W:
+  a Mac still gets the board's link-local AAAA**, because it also asks over the
+  IPv6 transport, where `use-ipv6` governs and the answer is the machine's
+  rather than this service's. Finishing that would mean `use-ipv6=no` — a whole
+  protocol family off in the system responder on somebody's own machine, to
+  tidy an advertisement neither app reads any more — so it is deliberately not
+  done, and both apps' IPv4 preference is what actually decides the address.
+  Matter is untouched:
   matter.js runs its own responder and the link-local IPv6 it needs is its own.
   Pinned by `test/deploy-config.test.ts`, which checks the rule is issued
   rather than running `avahi_set` — that function's body is an awk program

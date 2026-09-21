@@ -51,13 +51,25 @@ export interface MdnsOptions {
  * `docker0` — never publish an address the caller cannot reach — pointed at
  * the address family instead of the interface.
  *
- * **It takes two halves on the avahi path**, and neither is enough alone. The
- * service file below says which protocol the service is *announced* on; the
- * A and AAAA records for the machine's own name are avahi's, published from
- * its own config, which is why `install.sh` also sets
- * `publish-aaaa-on-ipv4=no`. Announce over IPv4 and answer the resulting
- * lookup with an address the hub cannot be reached at and nothing has been
- * fixed.
+ * **What this can settle is our own service, and no more — measured, after
+ * claiming otherwise.** The service file below says which protocol the service
+ * is *announced* on, and that part is ours. The A and AAAA for the machine's
+ * own name are avahi's, published from its own config: `install.sh` sets
+ * `publish-aaaa-on-ipv4=no`, which stops an AAAA going out in reply to a
+ * lookup that arrived over IPv4, and that is the whole of what it does. On a
+ * Zero 2 W with both settings in force and avahi freshly restarted, a Mac
+ * resolving `pi.local` still receives the board's link-local AAAA, because it
+ * also asks over the IPv6 transport — governed by `use-ipv6`, and an answer
+ * about the machine rather than about this service.
+ *
+ * Finishing that would mean `use-ipv6=no`: a protocol family switched off in
+ * the system responder on somebody's own machine, to tidy an advertisement
+ * neither app reads any more. Refused. So the apps' own IPv4 preference is not
+ * a workaround waiting to be retired — it is what decides the address, and it
+ * stays.
+ *
+ * ciao is the one place the stronger claim holds, since it publishes the
+ * address records for its own service.
  */
 export class MdnsAdvertiser {
   private responder: Responder | null = null;
