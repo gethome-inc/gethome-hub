@@ -380,6 +380,33 @@ take the home over. The connection is still unencrypted, which is right for a
 home LAN and wrong for the internet — don't forward 1883 through your router.
 See [mqtt-integrations.md](docs/mqtt-integrations.md).
 
+### The hub stays on your network
+
+There is no cloud account, no relay and no tunnel: the hub opens no inbound
+path through your router, and the only connections it ever makes outward are
+to your AI provider (if you gave it a key), to GitHub when it checks for an
+update, and to two documentation sites while it is working out what a Zigbee
+device is. The same applies to port 8420 as to 1883 — **don't forward it**. It
+is HTTP on a home network, so the token your phone holds crosses the wire in
+the clear; that is right behind your own router and wrong anywhere else.
+
+Two things guard it from inside the house. Every request but the public
+`GET /hub` and the claim needs a bearer token, and no web page can attach one —
+the hub sends no CORS headers, so a browser refuses to read its answers
+cross-origin. And the hub **refuses any request whose `Host` is a public
+domain**, which is what stops a page on the internet pointing its own name at
+your hub's address to read it through your browser (DNS rebinding). Reaching
+the hub by address, by `localhost` or by its `.local` name is untouched, so
+nothing about how the apps connect changed. If you reach yours by a real domain
+resolved inside your house, name it in `EXTRA_ALLOWED_HOSTS` in
+`/etc/gethome/hub.env`.
+
+What the hub installs is checked, too: the bundle and the Node.js runtime under
+it are each verified against a SHA-256 published beside them, and anything the
+installer cannot verify — a mismatch, a missing checksum, a machine with no
+`sha256sum` — stops the install with your existing hub left running and
+untouched.
+
 ### There is no Docker, and no database server
 
 Both were removed, and the reason is one machine: a Raspberry Pi Zero 2 W has

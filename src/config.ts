@@ -8,6 +8,54 @@ const boolFlag = z
 
 const configSchema = z.object({
   PORT: z.coerce.number().int().min(1).max(65_535).default(8420),
+  /**
+   * Which interface the API listens on. Every interface, by default.
+   *
+   * That default is the right one and is not going to change: a hub is found
+   * from a phone on the same Wi-Fi, so binding it to loopback would be a hub
+   * nothing in the house can reach. What this exists for is the arrangement
+   * the default cannot express — a board reachable over Ethernet and joined to
+   * a Wi-Fi network it has no business serving, or a hub that should answer
+   * only over a VPN interface. There was no way to say either, so the answer
+   * was "put it behind the router and hope".
+   *
+   * It is a *narrowing*, not a security boundary: the boundary is still the
+   * router, and this repository's own README says so. A hub reachable on one
+   * interface is reachable by everything on that interface.
+   *
+   * **`0.0.0.0` is IPv4, and that is the decision rather than the leftover.**
+   * The dual-stack spelling is `::`, it is one character, and it is refused on
+   * purpose: a home's IPv4 is behind NAT and a global IPv6 address is not, so
+   * binding both would put a plain-HTTP, bearer-token API on a routable
+   * address and leave the last thing between it and the internet a firewall
+   * default this hub cannot see. The board keeps its IPv6 — Matter needs the
+   * link-local one and will not start without it (`docs/matter.md`) — the API
+   * simply does not answer there.
+   *
+   * The cost of that is real and is paid where it belongs: the hub must not
+   * then *advertise* an address it will not answer on, which is what
+   * `mdns/advertiser.ts` and the `publish-aaaa-on-ipv4` line in `install.sh`
+   * are between them for. They reach as far as this service's own
+   * announcement; the board's own AAAA is avahi's to answer and stays, so both
+   * apps' IPv4 preference is what finally decides the address rather than a
+   * workaround waiting to be retired. `mdns/advertiser.ts` has the
+   * measurement.
+   */
+  BIND_ADDRESS: z.string().default('0.0.0.0'),
+  /**
+   * Host names this hub answers to beyond the local ones it recognises on its
+   * own — see `api/host-guard.ts` for the whole rule and why it exists.
+   *
+   * Empty on every ordinary hub, and that is the point: addresses, `localhost`,
+   * a bare machine name and the `.local` mDNS publishes are all recognised
+   * without being listed. This is for the one arrangement that cannot be
+   * recognised — a real registrable domain pointed at a LAN address by a
+   * resolver inside the house (`hub.example.com` → 192.168.1.50). Comma
+   * separated, and a list of names is all it is: there is no wildcard that
+   * switches the check off, because a hub is a board on a home network and
+   * that is the only deployment there is.
+   */
+  EXTRA_ALLOWED_HOSTS: z.string().default(''),
   /** Empty means "<DATA_DIR>/hub.db" — resolved below, once DATA_DIR is known. */
   DATABASE_FILE: z.string().default(''),
   MQTT_URL: z.string().default('mqtt://127.0.0.1:1883'),

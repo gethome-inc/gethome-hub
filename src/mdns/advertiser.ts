@@ -37,6 +37,39 @@ export interface MdnsOptions {
  * static service file in its watched directory, which it picks up and drops
  * without a reload, and which costs no memory in this process. `ciao` remains
  * for machines with no system responder.
+ *
+ * **And the advertisement is IPv4 only, because that is all the hub serves.**
+ * The API binds `BIND_ADDRESS`, which defaults to `0.0.0.0` — an IPv4 socket,
+ * deliberately rather than by omission (`config.ts` has the reasoning) — so an
+ * IPv6 address published for this service is an address nothing answers on.
+ * That is not a harmless extra: a client takes whichever answer arrives first,
+ * and on a Pi the first one is usually the IPv6 link-local, which refuses port
+ * 8420 with a TCP reset. Both apps had to learn to ask for a family before
+ * they could find a hub two metres away — the iOS browse sat on "Finding its
+ * address…" for ever, and Studio spent a four-second timeout and then fell
+ * back to a `.local` guess. It is the rule `install.sh` already applies to
+ * `docker0` — never publish an address the caller cannot reach — pointed at
+ * the address family instead of the interface.
+ *
+ * **What this can settle is our own service, and no more — measured, after
+ * claiming otherwise.** The service file below says which protocol the service
+ * is *announced* on, and that part is ours. The A and AAAA for the machine's
+ * own name are avahi's, published from its own config: `install.sh` sets
+ * `publish-aaaa-on-ipv4=no`, which stops an AAAA going out in reply to a
+ * lookup that arrived over IPv4, and that is the whole of what it does. On a
+ * Zero 2 W with both settings in force and avahi freshly restarted, a Mac
+ * resolving `pi.local` still receives the board's link-local AAAA, because it
+ * also asks over the IPv6 transport — governed by `use-ipv6`, and an answer
+ * about the machine rather than about this service.
+ *
+ * Finishing that would mean `use-ipv6=no`: a protocol family switched off in
+ * the system responder on somebody's own machine, to tidy an advertisement
+ * neither app reads any more. Refused. So the apps' own IPv4 preference is not
+ * a workaround waiting to be retired — it is what decides the address, and it
+ * stays.
+ *
+ * ciao is the one place the stronger claim holds, since it publishes the
+ * address records for its own service.
  */
 export class MdnsAdvertiser {
   private responder: Responder | null = null;
@@ -122,6 +155,12 @@ export class MdnsAdvertiser {
       protocol: Protocol.TCP,
       port: this.options.port,
       txt: this.txt(),
+      // ciao's own wording for this option is the whole argument: "the service
+      // won't advertise ipv6 address records… can be used to simulate binding
+      // on 0.0.0.0". That is exactly what the API does bind. Unlike the avahi
+      // path there is no second half to get right, because ciao publishes the
+      // address records for this service itself.
+      disabledIpv6: true,
     });
     await this.service.advertise();
   }
@@ -157,7 +196,7 @@ export class MdnsAdvertiser {
 <!-- Written by the GetHome Hub. Edits are overwritten on every start. -->
 <service-group>
   <name replace-wildcards="yes">${escapeXml(this.name)}</name>
-  <service>
+  <service protocol="ipv4">
     <type>_gethome._tcp</type>
     <port>${this.options.port}</port>
 ${records}

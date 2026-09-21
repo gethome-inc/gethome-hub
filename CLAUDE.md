@@ -965,6 +965,92 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   raw foreign key would turn an ordinary removal into a 500, and a code left to
   expire is fifteen minutes in which somebody just removed could let themselves
   back in.
+- **The hub is a LAN service, and the one attack that reaches past a bearer
+  token is rebinding.** Every route but `GET /hub` and `POST /pair` is behind a
+  token, and no browser can attach one cross-origin: there are no cookies here,
+  so a hostile page has no ambient authority to borrow, and asking for an
+  `Authorization` header triggers a preflight this API answers with a 404.
+  **That is why no CORS plugin is registered — the absence is the policy**, and
+  adding one would be handing back exactly what it withholds. DNS rebinding
+  walks past all of it by changing what the browser *thinks* the origin is: a
+  page on `evil.com` whose record flips to `192.168.1.50`, re-resolved, read
+  back as same-origin. No token is involved, so nothing about tokens helps.
+  `api/host-guard.ts` is the answer and the rule is about **names, not
+  addresses**: an attacker needs one they control, which means a registrable
+  public domain, while everything a hub is legitimately reached by — an
+  address, `localhost`, a bare machine name, `.local` and the other local
+  suffixes — cannot be pointed at somebody else's LAN. So no client had to
+  change to keep working, and that was **checked against the app rather than
+  assumed**: `HubDiscovery` resolves a hub to its IP and deliberately never to
+  a name (it forces IPv4 precisely because the hub binds `0.0.0.0`), and both
+  `HubClient` and the widget build `http://<host>:<port>` from that address, so
+  `URLSession` puts an address in `Host`. The iOS repo carries one line for
+  this and no more: `host_not_allowed` is named in `HubClient`'s error mapping,
+  because a bare 403 there reads as *"this home doesn't let your role do that"*
+  and would send somebody to the role matrix over a name their router resolved.
+  The refusal is a **403 that echoes the name**,
+  because whoever meets it is almost always somebody who reached their own hub
+  by a name nobody anticipated. It hangs off `onRequest` rather than a
+  per-route `preHandler`, which is the placement doing the work: before the
+  body, before the two unauthenticated routes — `GET /hub` is exactly what a
+  rebound page reads, so exempting the public route would be exempting the
+  target — and before the WebSocket upgrade, where a socket authorizes once and
+  then streams the home. `EXTRA_ALLOWED_HOSTS` **adds** rather than replaces,
+  for the one arrangement that cannot be recognised (a real domain resolved to
+  a LAN address inside the house): a list that replaced the local rule is one
+  somebody sets to their own domain and thereby stops their own phone, which
+  reaches the hub by address, from connecting at all. There is deliberately
+  **no wildcard** beside it — a hub is a board on a home network and that is
+  the only deployment there is, so a mode that switched the check off would be
+  a second thing to get wrong for a topology nobody runs, and `*` is exactly
+  what somebody reaches for when a name is refused. And refusals are logged
+  **once per name, up to a bound**, because a refusal is the only thing that
+  tells an operator their hub has gone quiet and why — while the names are the
+  attacker's to invent, and one line per request is an SD card.
+  `BIND_ADDRESS` is the same question one layer down and defaults to
+  `0.0.0.0`, which is not going to change: a hub is found from a phone on the
+  same Wi-Fi, so loopback would be a hub nothing in the house can reach. It is
+  a *narrowing* for a board on a network it should not serve, never a security
+  boundary — the boundary is still the router, which is what the README says
+  and what the broker's own note repeats.
+- **The hub answers on IPv4, so it must not advertise itself on IPv6.**
+  `0.0.0.0` is an IPv4 socket and the dual-stack `::` is refused deliberately:
+  a home's IPv4 is behind NAT and a global IPv6 address is not, so binding both
+  would put a plain-HTTP, bearer-token API on a routable address behind a
+  firewall default this hub cannot see. The board keeps its IPv6 — Matter needs
+  the link-local one and will not start without it — the API just does not
+  answer there. What that obliges is the other half: **never publish an address
+  the caller cannot reach.** It is the rule `install.sh` already applied to
+  `docker0`'s `172.17.0.1`, and an AAAA record is the same fault one level up,
+  because a client takes whichever answer arrives *first* and on a Pi that is
+  usually the IPv6 link-local. It cost both apps a workaround before anyone
+  noticed the hub was the one lying: the iOS browse sat on "Finding its
+  address…" over a hub two metres away, and Studio spent a four-second timeout
+  and fell back to a `.local` guess. **What the hub can do about that is
+  bounded, and measuring it corrected this paragraph.**
+  `mdns/advertiser.ts` writes `<service protocol="ipv4">`, which settles what
+  *our service* is announced on and is the part that is ours. The A and AAAA
+  for the machine's own name are avahi's, and `install.sh` sets
+  `publish-aaaa-on-ipv4=no`, which stops the AAAA going out in reply to a
+  lookup that arrived **over IPv4** — that and no more. A client that also asks
+  over the IPv6 transport, which macOS and iOS both do, still gets the board's
+  link-local AAAA, because that is governed by `use-ipv6` and answering it is
+  the machine's business rather than this service's. Verified on a Zero 2 W: a
+  Mac resolving `pi.local` gets both records after a clean `avahi-daemon`
+  restart with both settings in force.
+  **Finishing the job would mean `use-ipv6=no`, and that is the hammer to
+  refuse.** It switches a whole protocol family off in the system responder on
+  somebody's own machine, to tidy an advertisement neither app reads any more,
+  and anything else on that Pi wanting IPv6 mDNS breaks silently. So the rule
+  above keeps its first half — never publish an address *we* cannot be reached
+  at — and stops at what the service owns.
+  **Which makes the apps' IPv4 preference load-bearing rather than
+  transitional**: it is what actually decides the address, permanently, and
+  neither `HubDiscovery.probeParameters()` nor Studio's `resolveParameters` may
+  be relaxed on the strength of this. ciao needs only `disabledIpv6`, and there
+  the claim does hold, because ciao publishes its own address records.
+  `test/mdns-advertiser.test.ts` pins the file, including across a rename,
+  since three call sites rewrite it whole.
 - **Access is a table the home edits, and three rules hold it up.** Roles are
   rows (`roles`), permissions are a named vocabulary owned by
   `src/core/access.ts`, and a member holds one role; `requirePermission` in

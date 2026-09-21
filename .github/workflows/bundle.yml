@@ -79,11 +79,27 @@ jobs:
               mkdir -p /src/out
               tar -czf "/src/out/gethome-hub-${{ matrix.arch }}.tar.gz" \
                 dist node_modules package.json deploy VERSION
+              # The digest install.sh checks the download against,
+              # computed here — in the container that built the tarball,
+              # before it has been anywhere — so it attests to this build
+              # rather than to whatever is sitting in the release later.
+              # `cd` first: the file records a basename, which is what a
+              # Pi can compare against.
+              cd /src/out
+              sha256sum "gethome-hub-${{ matrix.arch }}.tar.gz" \
+                > "gethome-hub-${{ matrix.arch }}.tar.gz.sha256"
+              cat "gethome-hub-${{ matrix.arch }}.tar.gz.sha256"
             '
 
       - name: Check the bundle actually runs
         run: |
           set -euo pipefail
+          # The digest published beside the bundle has to describe the
+          # bundle actually uploaded. Checked here rather than trusted: a
+          # checksum nobody verifies can quietly describe the wrong file,
+          # and install.sh treats a mismatch as fatal — so a wrong one
+          # published here is every Pi refusing to install.
+          ( cd out && sha256sum -c "gethome-hub-${{ matrix.arch }}.tar.gz.sha256" )
           mkdir -p /tmp/verify && tar -xzf "out/gethome-hub-${{ matrix.arch }}.tar.gz" -C /tmp/verify
           # Boots, migrates a fresh SQLite file, answers, and shuts down. This
           # is the check that would have caught a bundle missing its native
@@ -102,7 +118,9 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: bundle-${{ matrix.arch }}
-          path: out/*.tar.gz
+          path: |
+            out/*.tar.gz
+            out/*.tar.gz.sha256
           if-no-files-found: error
           retention-days: 7
 
@@ -172,7 +190,7 @@ jobs:
           # and nothing else — so if the re-pointing below fails, the failure
           # should cost a red job and a stale description, never a branch with
           # no bundle at all. `set -e` means it fails loudly either way.
-          gh release upload "$tag" out/*.tar.gz --clobber
+          gh release upload "$tag" out/*.tar.gz out/*.tar.gz.sha256 --clobber
 
           # Then make the release describe what was just uploaded. Only for a
           # rolling branch release, and only when it already existed — a `v*`

@@ -8,6 +8,39 @@ Base URL: `http://<hub>:8420/api/v1`. JSON everywhere. Discover hubs via mDNS
 `GET /hub` is public (discovery/health). Everything else requires
 `Authorization: Bearer <token>` (or `?token=` for the WebSocket).
 
+### The hub only answers to local names
+
+Every request — the public route and the WebSocket upgrade included — is
+refused `403 {error: "host_not_allowed", host}` when its `Host` header is a
+**registrable public domain**. Nothing a real client sends is one, so no app
+changed and none has to: an address (which is how both apps connect when they
+are not using discovery), `localhost`, a bare machine name, and anything under
+`.local`, `.home.arpa`, `.lan`, `.internal` and friends are all recognised. A
+missing `Host` passes too — HTTP/1.1 requires one, so its absence marks a
+client that is not a browser.
+
+This closes **DNS rebinding**, which is the one attack the bearer-token scheme
+cannot see. A page on `evil.com` is served from a name whose DNS record flips
+to `192.168.1.50` a moment later; the browser re-resolves, connects to the hub,
+and hands the page the response because the origin still reads `evil.com`. No
+token is involved, so nothing about tokens helps — and the `Host` header is the
+only place the lie shows, because the browser faithfully sends the name it
+believes it dialled. It is also why no CORS plugin is registered: the absence
+of `Access-Control-Allow-Origin` *is* the policy for everything else, and
+rebinding is what walks past it.
+
+The refusal echoes the name back, because the person who meets it is almost
+never an attacker — it is somebody who reached their own hub by a name nobody
+anticipated. `EXTRA_ALLOWED_HOSTS` (comma separated, in `hub.env`) **adds** to
+the recognised set for the one arrangement that cannot be recognised: a real
+domain resolved to a LAN address by a resolver inside the house. It is additive
+rather than a replacement on purpose — a list that replaced the local rule is
+one somebody sets to their own domain and thereby stops their own phone, which
+reaches the hub by address, from connecting at all. It is a list of names and
+nothing else: there is deliberately **no wildcard** that switches the check off,
+because a hub is a board on a home network and that is the only deployment there
+is — and `*` is exactly what somebody reaches for when a name is refused.
+
 ### Claiming
 
 Tokens come from the claim flow, and **a token never expires** — a device

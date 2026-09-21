@@ -609,6 +609,83 @@ $SUDO mkdir -p "$INSTALL_DIR" "$DATA_DIR" "$DATA_DIR/update" "$Z2M_DATA_DIR" "$C
 $SUDO chown -R "$SERVICE_USER:$SERVICE_USER" /var/lib/gethome
 $SUDO chmod 0750 /var/lib/gethome "$DATA_DIR"
 
+# ── Downloads are checked against a digest ─────────────────────────────────
+# Both things this script fetches and then *executes* — the hub bundle and the
+# Node.js runtime under it — arrived on TLS alone. That is a real guarantee
+# about the pipe and no guarantee at all about what was published down it: an
+# asset replaced in the release, a half-written upload, a CDN serving a stale
+# object. So each one is now checked against a SHA-256 the publisher wrote
+# separately, and the two outcomes are deliberately not the same thing.
+#
+# **Not verified is not installed, and there is exactly one path through
+# here.** A mismatch, a release with no `.sha256` beside it, a machine that
+# cannot hash — all three stop the install. That is the one place in this file
+# that chooses stopping over carrying on, and it can afford to, because nothing
+# has been put in place yet: the release directory is staging, `current` still
+# points at the build that is running, and the hub on this machine is untouched.
+# Falling back to a source build would be answering "this download cannot be
+# trusted" by fetching from the same place with less checking.
+#
+# The obvious softer rule — warn when the digest is merely *missing*, since
+# that is not evidence of tampering — was deliberately not taken. It makes the
+# check trivial to walk past (delete the file and the install proceeds), and
+# the case it protects is a branch whose bundle predates this, which one push
+# rebuilds. Every failure below says which of the three it was, so nobody has
+# to guess; what none of them does is carry on.
+#
+# `sha256sum` is coreutils and `shasum` is perl's; Linux has the first and the
+# machines these functions are *tested* on have the second.
+#
+# **These sit here, above the Node block, because one caller is inside a branch
+# the other is not — and that cost a release.** They were written beside their
+# first use, inside the `else` that downloads Node, so on any machine that
+# already had Node 22 that branch never ran and the bundle check below called a
+# function that did not exist. `command not found` is status 127, which the
+# case there read as its catch-all "this machine cannot hash", so a Raspberry
+# Pi was told to install the coreutils it ships with. Every *update* of an
+# existing hub failed that way and every fresh install on a board without Node
+# 22 worked, which is the wrong way round for anything to be noticed in.
+#
+# `test/deploy-integrity.test.ts` pins that they stay at the top level, because
+# the suite `eval`s them out of this file before running them and therefore
+# cannot fail the way a real machine did.
+sha256_of() {
+  local file="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+# 0 matched · 1 MISMATCH · 2 no usable digest given · 3 nothing here can hash.
+# Three failure codes rather than one, because only the first means the file is
+# wrong and only the first may stop an install.
+verify_sha256() {
+  local file="$1" expected="$2" actual=""
+  expected="$(printf '%s' "$expected" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+  case "$expected" in
+    *[!0-9a-f]* | "") return 2 ;;
+  esac
+  [[ ${#expected} -eq 64 ]] || return 2
+  actual="$(sha256_of "$file")" || return 3
+  actual="$(printf '%s' "$actual" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+  [[ "$actual" == "$expected" ]]
+}
+
+# One digest out of a `sha256sum`-format listing: lines of "<digest>  <name>".
+# The name is matched whole rather than as a substring, so
+# `node-v22.22.2-linux-arm64.tar.xz` cannot be answered by the line for
+# `node-v22.22.2-linux-arm64.tar.xz.asc` — which would be a mismatch on every
+# install. The listing is the forty-odd lines nodejs.org publishes per release,
+# or the single line `bundle.yml` writes.
+digest_for() {
+  local listing="$1" name="$2"
+  awk -v want="$name" '$2 == want { print $1; exit }' "$listing" 2>/dev/null
+}
+
 # ── Node ───────────────────────────────────────────────────────────────────
 step runtime "Making sure Node.js 22 is available…"
 
@@ -627,10 +704,58 @@ else
   # the same version on every board.
   say "Downloading Node.js ${NODE_VERSION} (${NODE_ARCH})…"
   NODE_TGZ="/tmp/node-${NODE_VERSION}-${NODE_ARCH}.tar.xz"
+  NODE_TARBALL="node-v${NODE_VERSION}-${NODE_ARCH}.tar.xz"
   curl -fsSL --retry 5 --retry-delay 5 --retry-connrefused \
-    "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-${NODE_ARCH}.tar.xz" \
+    "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_TARBALL}" \
     -o "$NODE_TGZ" \
     || fail "Couldn't download Node.js from nodejs.org. Check the network and run the install again."
+
+  # nodejs.org publishes SHASUMS256.txt beside every release, so the runtime
+  # this hub is about to execute can be checked against something other than
+  # the connection it arrived on. See the digest helpers above for why only a
+  # mismatch is fatal.
+  NODE_SHA_FILE="/tmp/node-${NODE_VERSION}-SHASUMS256.txt"
+  NODE_EXPECTED=""
+  if curl -fsSL --retry 3 --retry-delay 2 \
+      "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" -o "$NODE_SHA_FILE" 2>/dev/null; then
+    # `|| true`, because this file runs under `set -e`: a listing that does not
+    # name this tarball makes `digest_for` exit non-zero, and an unguarded
+    # command substitution would end the install then and there — turning "no
+    # checksum to compare against" into the one outcome this must never be.
+    NODE_EXPECTED="$(digest_for "$NODE_SHA_FILE" "$NODE_TARBALL" || true)"
+  fi
+  rm -f "$NODE_SHA_FILE"
+  # Same reason, and the more dangerous half: `verify_sha256` reports its
+  # verdict *through* its exit status, so every verdict but "matched" is a
+  # non-zero return. Called bare it would abort the script under `set -e`
+  # before the case below could tell a mismatch from a missing digest.
+  NODE_VERIFY_RC=0
+  verify_sha256 "$NODE_TGZ" "$NODE_EXPECTED" || NODE_VERIFY_RC=$?
+  case "$NODE_VERIFY_RC" in
+    0) say "Node.js ${NODE_VERSION} matches the checksum nodejs.org published." ;;
+    1)
+      rm -f "$NODE_TGZ"
+      fail "The Node.js download does not match the checksum nodejs.org publishes for it. Nothing has been installed and your hub is untouched. This is usually a proxy or a captive portal rewriting the download; try again on a different network."
+      ;;
+    2)
+      rm -f "$NODE_TGZ"
+      fail "Could not get nodejs.org's checksum for Node.js ${NODE_VERSION}, so the download could not be verified and was not installed. Your hub is untouched. Check the network — something between this machine and nodejs.org may be blocking or rewriting it — and run the install again."
+      ;;
+    3)
+      rm -f "$NODE_TGZ"
+      fail "This machine has neither sha256sum nor shasum, so the Node.js download could not be verified and was not installed. Install coreutils and run the install again."
+      ;;
+    # Anything else is the check itself going wrong rather than a verdict
+    # about the file, and it must not borrow one of the sentences above.
+    # This used to be the catch-all itself, so a helper never defined at all
+    # returned 127 and was reported as a machine with no sha256sum — on a
+    # Raspberry Pi, which ships coreutils, telling its owner to install it.
+    *)
+      rm -f "$NODE_TGZ"
+      fail "The Node.js download could not be checked: the verification step itself failed with status ${NODE_VERIFY_RC}. Nothing has been installed and your hub is untouched. Please report this."
+      ;;
+  esac
+
   $SUDO rm -rf "$NODE_DIR"
   $SUDO mkdir -p "$NODE_DIR"
   $SUDO tar -xJf "$NODE_TGZ" -C "$NODE_DIR" --strip-components=1 \
@@ -666,6 +791,47 @@ $SUDO mkdir -p "$RELEASES_DIR"
 if [[ -z "$FORCE_BUILD" ]]; then
   say "Fetching ${BUNDLE_URL}…"
   if curl -fsSL --retry 5 --retry-delay 5 --retry-connrefused "$BUNDLE_URL" -o "$BUNDLE_TGZ" && [[ -s "$BUNDLE_TGZ" ]]; then
+    # The bundle is `dist/` plus a production `node_modules` — the code this
+    # machine is about to run as a service. `bundle.yml` publishes a `.sha256`
+    # beside it, computed in the same container that built the tarball, so a
+    # tarball replaced or truncated after the build does not survive this.
+    # `|| true` on both: this file runs under `set -euo pipefail`, so a release
+    # with no `.sha256` beside it (every one published before this existed)
+    # would otherwise end the install rather than fall through to the "cannot
+    # check" branch below — and `verify_sha256` reports every verdict but
+    # "matched" as a non-zero return, so calling it bare would abort before the
+    # case could tell a mismatch from a missing file.
+    BUNDLE_EXPECTED="$(curl -fsSL --retry 3 --retry-delay 2 "${BUNDLE_URL}.sha256" 2>/dev/null | awk '{print $1; exit}' || true)"
+    BUNDLE_VERIFY_RC=0
+    verify_sha256 "$BUNDLE_TGZ" "$BUNDLE_EXPECTED" || BUNDLE_VERIFY_RC=$?
+    # None of these falls through to the source build below. Answering "this
+    # download cannot be trusted" by cloning from the same place with less
+    # checking is not a fallback — and nothing has moved yet, so stopping costs
+    # the update and leaves the hub exactly as it was.
+    case "$BUNDLE_VERIFY_RC" in
+      0) say "The hub bundle matches its published checksum." ;;
+      1)
+        rm -f "$BUNDLE_TGZ"
+        fail "The hub download does not match the checksum published beside it, so it was not installed. Your hub is untouched and still running the build it was. Run the install again; if it keeps happening, check whether something on this network is rewriting downloads before opening an issue."
+        ;;
+      2)
+        rm -f "$BUNDLE_TGZ"
+        fail "The '${BUNDLE_TAG}' release publishes no checksum for ${NODE_ARCH}, so the download could not be verified and was not installed. Your hub is untouched. Every bundle built by the 'Publish bundle' workflow carries one — push to branch ${BRANCH} to rebuild it, then run the install again."
+        ;;
+      3)
+        rm -f "$BUNDLE_TGZ"
+        fail "This machine has neither sha256sum nor shasum, so the hub download could not be verified and was not installed. Install coreutils and run the install again."
+        ;;
+      # Anything else is the check itself going wrong rather than a verdict
+      # about the file, and it must not borrow one of the sentences above.
+      # This used to be the catch-all itself, so a helper never defined at all
+      # returned 127 and was reported as a machine with no sha256sum — on a
+      # Raspberry Pi, which ships coreutils, telling its owner to install it.
+      *)
+        rm -f "$BUNDLE_TGZ"
+        fail "The hub download could not be checked: the verification step itself failed with status ${BUNDLE_VERIFY_RC}. Nothing has been installed and your hub is untouched. Please report this."
+        ;;
+    esac
     STAGING="$RELEASES_DIR/.incoming.$$"
     $SUDO rm -rf "$STAGING"
     $SUDO mkdir -p "$STAGING"
@@ -1470,6 +1636,21 @@ if [[ -f "$AVAHI_CONF" ]]; then
   # otherwise also publish docker0's 172.17.0.1 and clients take whichever
   # answer arrives first.
   avahi_set server deny-interfaces docker0
+  # The same rule one step further, applied to an address family instead of an
+  # interface. The hub's API binds 0.0.0.0, so the board's IPv6 link-local
+  # answers nothing on port 8420 — and it is the answer a client usually gets
+  # *first*, which is why both apps had to learn to ask for IPv4 before they
+  # could reach a hub sitting next to them. avahi answers an IPv4 lookup with
+  # AAAA records by default; this stops it, and the service file the hub writes
+  # announces over IPv4 only.
+  #
+  # That is as far as it goes, which was measured rather than assumed: a client
+  # asking over the IPv6 transport still gets the board's link-local AAAA,
+  # because that is `use-ipv6`'s business. Turning *that* off is a protocol
+  # family switched off system-wide on somebody's own machine and is
+  # deliberately not done here. Matter is untouched either way: matter.js runs
+  # its own responder, and the IPv6 it needs is its own.
+  avahi_set publish publish-aaaa-on-ipv4 no
   # GetHome Studio finds Raspberry Pis by browsing _workstation._tcp: Debian
   # publishes no _ssh._tcp record, so on a stock Pi this is the announcement
   # that makes the machine findable at all.
@@ -1722,6 +1903,18 @@ if [[ ! -f "$CONF_DIR/hub.env" ]]; then
   $SUDO tee "$CONF_DIR/hub.env" >/dev/null <<ENV
 # GetHome Hub configuration. Edit and \`systemctl restart gethome-hubd\`.
 PORT=8420
+# Which interface to listen on. Every one, which is what a hub wants: a phone
+# finds it over the same Wi-Fi. Narrow it only if this board sits on a network
+# it should not serve. It is a narrowing, not a boundary — the boundary is the
+# router.
+# BIND_ADDRESS=0.0.0.0
+# Extra names this hub answers to. It refuses a Host that is a registrable
+# public domain, which is what stops a web page pointing its own name at this
+# hub's address and reading it through your browser. Addresses, localhost, a
+# bare machine name and .local are all recognised already, so leave this alone
+# unless you reach your hub by a real domain resolved inside the house. Comma
+# separated, and a list of names is all it is.
+# EXTRA_ALLOWED_HOSTS=
 DATA_DIR=${DATA_DIR}
 MQTT_URL=mqtt://127.0.0.1:1883
 Z2M_BASE_TOPIC=zigbee2mqtt

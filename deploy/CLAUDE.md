@@ -736,6 +736,25 @@ in `deploy/install.sh` must stay accurate.
   `install.sh` also denies `docker0` in `avahi-daemon.conf`, so a Docker
   installed later for something else can't get an unreachable `172.17.0.1`
   published for the Pi's name.
+- **Never publish an address the caller cannot reach — including a family.**
+  That is the `docker0` rule above, and the same fault one level up is an AAAA
+  record: the API binds `0.0.0.0`, so the board's IPv6 link-local refuses port
+  8420, and it is the answer a client usually gets *first*. The hub's own
+  service file says `<service protocol="ipv4">` — what *our service* is
+  announced on, and the part that is ours — and `install.sh` sets
+  `publish-aaaa-on-ipv4=no`, which stops the AAAA going out in reply to a
+  lookup that arrived **over IPv4**, and no further. **Measured on a Zero 2 W:
+  a Mac still gets the board's link-local AAAA**, because it also asks over the
+  IPv6 transport, where `use-ipv6` governs and the answer is the machine's
+  rather than this service's. Finishing that would mean `use-ipv6=no` — a whole
+  protocol family off in the system responder on somebody's own machine, to
+  tidy an advertisement neither app reads any more — so it is deliberately not
+  done, and both apps' IPv4 preference is what actually decides the address.
+  Matter is untouched:
+  matter.js runs its own responder and the link-local IPv6 it needs is its own.
+  Pinned by `test/deploy-config.test.ts`, which checks the rule is issued
+  rather than running `avahi_set` — that function's body is an awk program
+  whose own braces defeat function extraction.
 - **Mosquitto listens on the LAN, not loopback.** That is what the broker
   config always claimed — now the drop-in `install.sh` writes, which
   `test/deploy-config.test.ts` parses — and what the compose port mapping
@@ -743,6 +762,35 @@ in `deploy/install.sh` must stay accurate.
   MQTT integrations run on other machines; the firewall boundary for a home hub
   is the router — which is why it is also the reason the broker now has a
   password, see the two-accounts bullet above.
+- **What the installer downloads and then executes is checked against a
+  digest.** Two things arrive over the network and become code on the machine:
+  the hub bundle and the Node.js runtime under it. Both used to arrive on TLS
+  alone, which is a real guarantee about the *pipe* and none at all about what
+  was published down it — a release asset replaced, a truncated upload, a CDN
+  serving a stale object. `bundle.yml` now writes a `.sha256` beside each
+  tarball **in the container that built it**, before it has been anywhere, and
+  verifies its own digest with `sha256sum -c` before publishing — a checksum
+  nobody checks can quietly describe the wrong file, and since a mismatch is
+  fatal on the Pi, a wrong one published here would be every board refusing to
+  install. Node is checked against nodejs.org's own `SHASUMS256.txt`.
+  **Not verified is not installed, and there is exactly one path through it.**
+  All three failures stop the install — a mismatch, a release with no `.sha256`
+  beside it, and a machine with neither `sha256sum` nor `shasum`. This is the
+  one place in `install.sh` that chooses stopping over carrying on, and it can
+  afford to because nothing has moved yet: the release directory is staging,
+  `current` still points at the build that is running, and the hub on the
+  machine is untouched. None of the three falls through to the source build,
+  because answering "this download cannot be trusted" by cloning from the same
+  origin with less checking is not a fallback.
+  The softer rule was considered and **deliberately not taken**: warning when
+  the digest is merely *missing* — on the reasoning that absence is not
+  evidence of tampering, which is how the broker's password argument runs one
+  section up — makes the whole check trivial to walk past by deleting one file,
+  and the only case it protects is a branch whose bundle predates this, which
+  one push rebuilds. `verify_sha256` still returns three distinct codes, so
+  each refusal names which of the three it was and what to do about it;
+  `test/deploy-integrity.test.ts` runs the real functions and pins that every
+  branch calls `fail` and that none of them settles for a `warn`.
 - **Only install what is missing.** `install.sh` checks each apt package with
   `dpkg-query` first: Raspberry Pi OS Lite already ships avahi-daemon, curl,
   ca-certificates and xz-utils, so the step is "install mosquitto" and takes
