@@ -609,20 +609,7 @@ $SUDO mkdir -p "$INSTALL_DIR" "$DATA_DIR" "$DATA_DIR/update" "$Z2M_DATA_DIR" "$C
 $SUDO chown -R "$SERVICE_USER:$SERVICE_USER" /var/lib/gethome
 $SUDO chmod 0750 /var/lib/gethome "$DATA_DIR"
 
-# ── Node ───────────────────────────────────────────────────────────────────
-step runtime "Making sure Node.js 22 is available…"
-
-node_major() { "$1" --version 2>/dev/null | sed -n 's/^v\([0-9]*\).*/\1/p'; }
-
-NODE_BIN=""
-if [[ -x "$NODE_DIR/bin/node" ]] && [[ "$(node_major "$NODE_DIR/bin/node")" -ge 22 ]] 2>/dev/null; then
-  NODE_BIN="$NODE_DIR/bin/node"
-  say "Using the Node.js already installed at ${NODE_DIR}."
-elif command -v node >/dev/null 2>&1 && [[ "$(node_major "$(command -v node)")" -ge 22 ]] 2>/dev/null; then
-  NODE_BIN="$(command -v node)"
-  say "Using the system Node.js ($("$NODE_BIN" --version))."
-else
-  # ── Downloads are checked against a digest ─────────────────────────────────
+# ── Downloads are checked against a digest ─────────────────────────────────
 # Both things this script fetches and then *executes* — the hub bundle and the
 # Node.js runtime under it — arrived on TLS alone. That is a real guarantee
 # about the pipe and no guarantee at all about what was published down it: an
@@ -648,6 +635,20 @@ else
 #
 # `sha256sum` is coreutils and `shasum` is perl's; Linux has the first and the
 # machines these functions are *tested* on have the second.
+#
+# **These sit here, above the Node block, because one caller is inside a branch
+# the other is not — and that cost a release.** They were written beside their
+# first use, inside the `else` that downloads Node, so on any machine that
+# already had Node 22 that branch never ran and the bundle check below called a
+# function that did not exist. `command not found` is status 127, which the
+# case there read as its catch-all "this machine cannot hash", so a Raspberry
+# Pi was told to install the coreutils it ships with. Every *update* of an
+# existing hub failed that way and every fresh install on a board without Node
+# 22 worked, which is the wrong way round for anything to be noticed in.
+#
+# `test/deploy-integrity.test.ts` pins that they stay at the top level, because
+# the suite `eval`s them out of this file before running them and therefore
+# cannot fail the way a real machine did.
 sha256_of() {
   local file="$1"
   if command -v sha256sum >/dev/null 2>&1; then
@@ -685,7 +686,20 @@ digest_for() {
   awk -v want="$name" '$2 == want { print $1; exit }' "$listing" 2>/dev/null
 }
 
-# Raspberry Pi OS Bookworm ships Node 18. Take the official build rather than
+# ── Node ───────────────────────────────────────────────────────────────────
+step runtime "Making sure Node.js 22 is available…"
+
+node_major() { "$1" --version 2>/dev/null | sed -n 's/^v\([0-9]*\).*/\1/p'; }
+
+NODE_BIN=""
+if [[ -x "$NODE_DIR/bin/node" ]] && [[ "$(node_major "$NODE_DIR/bin/node")" -ge 22 ]] 2>/dev/null; then
+  NODE_BIN="$NODE_DIR/bin/node"
+  say "Using the Node.js already installed at ${NODE_DIR}."
+elif command -v node >/dev/null 2>&1 && [[ "$(node_major "$(command -v node)")" -ge 22 ]] 2>/dev/null; then
+  NODE_BIN="$(command -v node)"
+  say "Using the system Node.js ($("$NODE_BIN" --version))."
+else
+  # Raspberry Pi OS Bookworm ships Node 18. Take the official build rather than
   # adding a package repository: one tarball, no apt keyring to go stale, and
   # the same version on every board.
   say "Downloading Node.js ${NODE_VERSION} (${NODE_ARCH})…"
@@ -727,9 +741,18 @@ digest_for() {
       rm -f "$NODE_TGZ"
       fail "Could not get nodejs.org's checksum for Node.js ${NODE_VERSION}, so the download could not be verified and was not installed. Your hub is untouched. Check the network — something between this machine and nodejs.org may be blocking or rewriting it — and run the install again."
       ;;
-    *)
+    3)
       rm -f "$NODE_TGZ"
       fail "This machine has neither sha256sum nor shasum, so the Node.js download could not be verified and was not installed. Install coreutils and run the install again."
+      ;;
+    # Anything else is the check itself going wrong rather than a verdict
+    # about the file, and it must not borrow one of the sentences above.
+    # This used to be the catch-all itself, so a helper never defined at all
+    # returned 127 and was reported as a machine with no sha256sum — on a
+    # Raspberry Pi, which ships coreutils, telling its owner to install it.
+    *)
+      rm -f "$NODE_TGZ"
+      fail "The Node.js download could not be checked: the verification step itself failed with status ${NODE_VERIFY_RC}. Nothing has been installed and your hub is untouched. Please report this."
       ;;
   esac
 
@@ -795,9 +818,18 @@ if [[ -z "$FORCE_BUILD" ]]; then
         rm -f "$BUNDLE_TGZ"
         fail "The '${BUNDLE_TAG}' release publishes no checksum for ${NODE_ARCH}, so the download could not be verified and was not installed. Your hub is untouched. Every bundle built by the 'Publish bundle' workflow carries one — push to branch ${BRANCH} to rebuild it, then run the install again."
         ;;
-      *)
+      3)
         rm -f "$BUNDLE_TGZ"
         fail "This machine has neither sha256sum nor shasum, so the hub download could not be verified and was not installed. Install coreutils and run the install again."
+        ;;
+      # Anything else is the check itself going wrong rather than a verdict
+      # about the file, and it must not borrow one of the sentences above.
+      # This used to be the catch-all itself, so a helper never defined at all
+      # returned 127 and was reported as a machine with no sha256sum — on a
+      # Raspberry Pi, which ships coreutils, telling its owner to install it.
+      *)
+        rm -f "$BUNDLE_TGZ"
+        fail "The hub download could not be checked: the verification step itself failed with status ${BUNDLE_VERIFY_RC}. Nothing has been installed and your hub is untouched. Please report this."
         ;;
     esac
     STAGING="$RELEASES_DIR/.incoming.$$"
