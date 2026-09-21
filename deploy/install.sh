@@ -1604,6 +1604,15 @@ if [[ -f "$AVAHI_CONF" ]]; then
   # otherwise also publish docker0's 172.17.0.1 and clients take whichever
   # answer arrives first.
   avahi_set server deny-interfaces docker0
+  # The same rule one step further, applied to an address family instead of an
+  # interface. The hub's API binds 0.0.0.0, so the board's IPv6 link-local
+  # answers nothing on port 8420 — and it is the answer a client usually gets
+  # *first*, which is why both apps had to learn to ask for IPv4 before they
+  # could reach a hub sitting next to them. avahi answers an IPv4 lookup with
+  # AAAA records by default; this stops it, and the service file the hub writes
+  # announces over IPv4 only. Matter is untouched: matter.js runs its own
+  # responder, and the IPv6 it needs is its own.
+  avahi_set publish publish-aaaa-on-ipv4 no
   # GetHome Studio finds Raspberry Pis by browsing _workstation._tcp: Debian
   # publishes no _ssh._tcp record, so on a stock Pi this is the announcement
   # that makes the machine findable at all.

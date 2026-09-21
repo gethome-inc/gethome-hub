@@ -37,6 +37,27 @@ export interface MdnsOptions {
  * static service file in its watched directory, which it picks up and drops
  * without a reload, and which costs no memory in this process. `ciao` remains
  * for machines with no system responder.
+ *
+ * **And the advertisement is IPv4 only, because that is all the hub serves.**
+ * The API binds `BIND_ADDRESS`, which defaults to `0.0.0.0` — an IPv4 socket,
+ * deliberately rather than by omission (`config.ts` has the reasoning) — so an
+ * IPv6 address published for this service is an address nothing answers on.
+ * That is not a harmless extra: a client takes whichever answer arrives first,
+ * and on a Pi the first one is usually the IPv6 link-local, which refuses port
+ * 8420 with a TCP reset. Both apps had to learn to ask for a family before
+ * they could find a hub two metres away — the iOS browse sat on "Finding its
+ * address…" for ever, and Studio spent a four-second timeout and then fell
+ * back to a `.local` guess. It is the rule `install.sh` already applies to
+ * `docker0` — never publish an address the caller cannot reach — pointed at
+ * the address family instead of the interface.
+ *
+ * **It takes two halves on the avahi path**, and neither is enough alone. The
+ * service file below says which protocol the service is *announced* on; the
+ * A and AAAA records for the machine's own name are avahi's, published from
+ * its own config, which is why `install.sh` also sets
+ * `publish-aaaa-on-ipv4=no`. Announce over IPv4 and answer the resulting
+ * lookup with an address the hub cannot be reached at and nothing has been
+ * fixed.
  */
 export class MdnsAdvertiser {
   private responder: Responder | null = null;
@@ -122,6 +143,12 @@ export class MdnsAdvertiser {
       protocol: Protocol.TCP,
       port: this.options.port,
       txt: this.txt(),
+      // ciao's own wording for this option is the whole argument: "the service
+      // won't advertise ipv6 address records… can be used to simulate binding
+      // on 0.0.0.0". That is exactly what the API does bind. Unlike the avahi
+      // path there is no second half to get right, because ciao publishes the
+      // address records for this service itself.
+      disabledIpv6: true,
     });
     await this.service.advertise();
   }
@@ -157,7 +184,7 @@ export class MdnsAdvertiser {
 <!-- Written by the GetHome Hub. Edits are overwritten on every start. -->
 <service-group>
   <name replace-wildcards="yes">${escapeXml(this.name)}</name>
-  <service>
+  <service protocol="ipv4">
     <type>_gethome._tcp</type>
     <port>${this.options.port}</port>
 ${records}

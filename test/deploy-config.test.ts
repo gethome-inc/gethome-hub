@@ -805,4 +805,26 @@ describe('deploy/install.sh', () => {
     expect(small, 'name the fix, don\'t just name the problem')
       .toContain('set-default multi-user.target');
   });
+
+  /**
+   * avahi must not hand out an address the hub cannot be reached at.
+   *
+   * Two rules, one reason: `docker0`'s 172.17.0.1 is an interface nothing
+   * answers on, and an AAAA record is an address *family* nothing answers on,
+   * because the API binds `0.0.0.0`. A client takes whichever answer arrives
+   * first, so either one is a hub that cannot be found while it is sitting
+   * there working.
+   *
+   * Asserted against the installer's text rather than by running `avahi_set`.
+   * That function's body is an awk program whose own `}` lines would end any
+   * `/^ *avahi_set() {/,/^ *}/` extraction several lines early, so a
+   * behavioural test here would be a test of the wrong half of a function —
+   * and the thing worth pinning is that the rule is *issued* at all.
+   */
+  it('tells avahi to publish no address the hub does not answer on', () => {
+    const avahi = installer.slice(installer.indexOf('AVAHI_CONF=/etc/avahi/avahi-daemon.conf'));
+    expect(avahi).toContain('avahi_set server deny-interfaces docker0');
+    expect(avahi, 'the hub is IPv4-only; AAAA over IPv4 is the answer clients take first')
+      .toContain('avahi_set publish publish-aaaa-on-ipv4 no');
+  });
 });

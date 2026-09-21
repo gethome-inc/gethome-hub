@@ -736,6 +736,18 @@ in `deploy/install.sh` must stay accurate.
   `install.sh` also denies `docker0` in `avahi-daemon.conf`, so a Docker
   installed later for something else can't get an unreachable `172.17.0.1`
   published for the Pi's name.
+- **Never publish an address the caller cannot reach — including a family.**
+  That is the `docker0` rule above, and the same fault one level up is an AAAA
+  record: the API binds `0.0.0.0`, so the board's IPv6 link-local refuses port
+  8420, and it is the answer a client usually gets *first*. Two halves, neither
+  enough alone — the hub's own service file says `<service protocol="ipv4">`
+  (what the service is *announced* on) and `install.sh` sets
+  `publish-aaaa-on-ipv4=no` (the A/AAAA avahi hands out for the machine's own
+  name, which the service file cannot speak for). Matter is untouched:
+  matter.js runs its own responder and the link-local IPv6 it needs is its own.
+  Pinned by `test/deploy-config.test.ts`, which checks the rule is issued
+  rather than running `avahi_set` — that function's body is an awk program
+  whose own braces defeat function extraction.
 - **Mosquitto listens on the LAN, not loopback.** That is what the broker
   config always claimed — now the drop-in `install.sh` writes, which
   `test/deploy-config.test.ts` parses — and what the compose port mapping

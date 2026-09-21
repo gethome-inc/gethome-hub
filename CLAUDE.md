@@ -1013,6 +1013,26 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   a *narrowing* for a board on a network it should not serve, never a security
   boundary — the boundary is still the router, which is what the README says
   and what the broker's own note repeats.
+- **The hub answers on IPv4, so it must not advertise itself on IPv6.**
+  `0.0.0.0` is an IPv4 socket and the dual-stack `::` is refused deliberately:
+  a home's IPv4 is behind NAT and a global IPv6 address is not, so binding both
+  would put a plain-HTTP, bearer-token API on a routable address behind a
+  firewall default this hub cannot see. The board keeps its IPv6 — Matter needs
+  the link-local one and will not start without it — the API just does not
+  answer there. What that obliges is the other half: **never publish an address
+  the caller cannot reach.** It is the rule `install.sh` already applied to
+  `docker0`'s `172.17.0.1`, and an AAAA record is the same fault one level up,
+  because a client takes whichever answer arrives *first* and on a Pi that is
+  usually the IPv6 link-local. It cost both apps a workaround before anyone
+  noticed the hub was the one lying: the iOS browse sat on "Finding its
+  address…" over a hub two metres away, and Studio spent a four-second timeout
+  and fell back to a `.local` guess. Two halves on the avahi path and neither
+  is enough alone — `mdns/advertiser.ts` writes `<service protocol="ipv4">`,
+  which says what the service is *announced* on, while the A and AAAA for the
+  machine's own name are avahi's, which is why `install.sh` also sets
+  `publish-aaaa-on-ipv4=no`. ciao needs only `disabledIpv6`, publishing its own
+  address records. `test/mdns-advertiser.test.ts` pins the file, including
+  across a rename, since three call sites rewrite it whole.
 - **Access is a table the home edits, and three rules hold it up.** Roles are
   rows (`roles`), permissions are a named vocabulary owned by
   `src/core/access.ts`, and a member holds one role; `requirePermission` in

@@ -22,6 +22,21 @@ const configSchema = z.object({
    * It is a *narrowing*, not a security boundary: the boundary is still the
    * router, and this repository's own README says so. A hub reachable on one
    * interface is reachable by everything on that interface.
+   *
+   * **`0.0.0.0` is IPv4, and that is the decision rather than the leftover.**
+   * The dual-stack spelling is `::`, it is one character, and it is refused on
+   * purpose: a home's IPv4 is behind NAT and a global IPv6 address is not, so
+   * binding both would put a plain-HTTP, bearer-token API on a routable
+   * address and leave the last thing between it and the internet a firewall
+   * default this hub cannot see. The board keeps its IPv6 — Matter needs the
+   * link-local one and will not start without it (`docs/matter.md`) — the API
+   * simply does not answer there.
+   *
+   * The cost of that is real and is paid where it belongs: the hub must not
+   * then *advertise* an address it will not answer on, which is what
+   * `mdns/advertiser.ts` and the `publish-aaaa-on-ipv4` line in `install.sh`
+   * are between them for. Both apps carry an IPv4 preference of their own for
+   * the hubs that predate it.
    */
   BIND_ADDRESS: z.string().default('0.0.0.0'),
   /**

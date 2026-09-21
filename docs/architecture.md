@@ -50,7 +50,7 @@ plus a stock Postgres wanted half of it before the hub had started.
 | `src/ai/automation-*.ts` | Writing those rules in conversation. **Authoring only** — the engine above runs with no key and keeps running when one is taken away. Seven tools, no web access, `submit_automation` the only answer channel. See [automations.md](automations.md#writing-one-in-conversation). |
 | `src/ai/` | AI device adaptation — the mapping agent (a tool-use loop on the Anthropic Messages API) plus descriptor DSL, model allowlist, failure taxonomy, and backoff — see [ai-adaptation.md](ai-adaptation.md). |
 | `src/api/` | Fastify REST + WebSocket — see [api.md](api.md). |
-| `src/mdns/` | `_gethome._tcp` advertisement (@homebridge/ciao) with `id`/`ver`/`api`/`claimed` TXT records. |
+| `src/mdns/` | `_gethome._tcp` advertisement with `id`/`ver`/`api`/`claimed` TXT records — through **avahi** where it exists (a static service file) and in-process `@homebridge/ciao` where it doesn't. **IPv4 only**, because the API binds `0.0.0.0`: publishing an AAAA a client would try first is publishing an address the hub does not answer on. |
 
 ## Design rules
 
