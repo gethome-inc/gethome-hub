@@ -54,13 +54,10 @@ names elsewhere.
 ## Build, test, run
 
 ```sh
-npm install
 npm run typecheck                         # strict, exactOptionalPropertyTypes — src *and* test/
 npm run typecheck:test                    # just the test-suite pass, while iterating on a suite
 npm test                                  # vitest — the database is a temp file, so nothing to start
 HUB_TEST_MQTT=1 npm test                  # + end-to-end broker round-trip (needs a local mosquitto)
-npm run dev                               # tsx watch, reads .env
-npm run build && node dist/index.js       # production build (copies SQL migrations into dist)
 npm run db:generate                       # drizzle-kit: generate a migration after editing src/db/schema.ts
 npm audit --omit=dev --audit-level=moderate  # what CI gates on; reads the lockfile, no install needed
 ```
@@ -85,39 +82,6 @@ the thing it asserts on is a test of nothing**, and green CI does not tell you
 which of the two you have. Prefer a temporary file over `sed -i`, build a sed
 program into a variable before using it, and run `npm test` on the machine you
 are writing on.
-
-**A mock's history is per test, and a `beforeAll` that exercises one is the
-trap.** Vitest clears every mock before each test (`clearMocks`, its default
-since 5.0), so `mock.calls` in a test body is that test's calls and nothing
-else — write counts relative to the test, never as the suite's running total.
-The half that is not merely a rewrite is the one place a suite asserts on what
-a *hook* did: the clear runs before the first test, so
-`expect(m).not.toHaveBeenCalled()` about a `beforeAll` is an assertion that
-cannot fail — the same shape as the shell trap above, where the test looked
-green because it had stopped reaching anything. Take the count in the hook and
-assert on that (`test/integration/zigbee-adapter.test.ts` is the worked
-example, and it is the only suite here with a mock outside an `it`). The
-running-total form hides the other direction too: a wait for "at least two
-calls" that the previous test had already satisfied returned at once, so the
-race it existed to close was never actually held open.
-
-**And a wait gates nothing when something else can satisfy it.** The same shape
-again, one suite over, and this one only ever bit in CI:
-`test/integration/mqtt-roundtrip.test.ts` waited for
-`registry.listDevices().length >= 10` and then asserted that the MQTT
-convention device was among them. Two adapters fill that list and
-`registry.start()` starts them in turn, so the Zigbee fixtures — sixteen of
-them, six past the ten asked for — met the gate on their own while the
-convention device behind the second adapter was still arriving. It passed for
-months because adopting sixteen devices takes long enough that the other
-adapter usually got there, and then failed on a loaded runner reading exactly
-the sixteen Zigbee devices and no `Pool pump`. **Wait for the thing the
-assertion is about**, not for a number that anything in the process can reach:
-every other test in that file already did, waiting on a device *by name* or on
-the state it was about to check. Where the count is the point, derive it from
-the fixture rather than writing it out, or adding a fixture quietly shrinks the
-wait; and give `waitFor` a label, since "timed out waiting for condition" names
-neither the suite's problem nor yours.
 
 **Dependencies are gated, not just watched.** Every vulnerable package this repo
 has shipped arrived transitively — `mqtt → socks → ip-address`, and
@@ -164,19 +128,8 @@ adapter/registry/API change.
 
 ## Architecture: the boundaries that matter
 
-```
-adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ──▶ SQLite
-        ▲ execute()                                   │ events
-        └──────────── command routing ◀── REST/WS API ┘
-```
-
 - **`src/schema/` is dependency-free** (zod only) and is the single source of
-  truth: 27 capability kinds (incl. `event` for buttons/remotes, `irRemote`
-  for IR blasters, and `custom` — the universal generic-control fallback so
-  any parameter is usable), 16 device kinds, typed `EndpointState`,
-  `HubCommand` intents (incl. `ir*` learn/replay and `setCustomField`), unit
-  converters, Matter device-type catalog, zod wire schemas. Everything else
-  derives from it.
+  truth. Everything else derives from it.
 - **Adapters only see the `AdapterBus`** (`src/adapters/adapter.ts`). They
   never import `src/api` or `src/db`. Adding a protocol = new directory under
   `src/adapters/` + registration in `src/index.ts`.
@@ -184,58 +137,9 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   serialized write queue, write-through cache, JSON state persistence, event
   fan-out, command routing. Adapter start failures are isolated — the hub must
   keep running (and must boot with no devices/radios at all).
-  **A radio that isn't running is not a home that is fine.** Per-device
-  reachability only ever arrives *from* a running radio, so nothing could say
-  that a radio which is off, failed, or lost its bridge took every device with
-  it — they were read back out of SQLite with the `online` they last had and
-  kept it, so switching a one-radio board to Matter left the Zigbee half
-  reading healthy and answering nothing. `AdapterBus.radioReachabilityChanged`
-  is the statement; `start()` makes it for every adapter that is not registered
-  or failed to start, and the Zigbee adapter makes it on `bridge/state`. **Both
-  directions**, because Z2M ships with availability tracking off, so a hub that
-  only ever marked devices down would never bring them back. It also emits
-  `radioChanged`, which `api/ws.ts` fans out as a `hubStatus` frame carrying
-  the same `zigbee`/`radio` blocks `GET /hub` answers with — from the same
-  snapshot (`core/hub-status.ts`), because two shapes for one fact drift.
-  **`PUT /settings/radio` emits the same frame** through `hubStatusChanged`,
-  a separate event because `radioChanged` is the registry's statement about
-  reachability and has arguments a mode change would have to invent. Both
-  matter for the same reason: a mode change that doesn't move Matter restarts
-  nothing, so a client cannot wait for its socket to bounce, and not every app
-  polls `GET /hub` — the iOS app doesn't.
-  **Before** the device frames: those say which devices went, this says why,
-  and a client told in the other order draws a home half offline with nothing
-  to explain it. That is the moment somebody pulls a stick out of a Pi. It routes through
-  the per-device path on purpose: already serialized, already quiet for a
-  device in that state, already emitting `deviceUpserted`.
-  **Reachability is one fact in two rows, and the guard has to ask about
-  both.** It is written to `devices.online` *and* into every endpoint's
-  `state.reachable`, and the apps do not read the same one — Studio draws
-  `online`, the iOS app draws `(online ?? true) && state.reachable` — so the
-  two disagreeing shows up as one device reading offline on a phone and online
-  on a Mac, about the same hub, at the same moment. They drifted for two
-  reasons that compounded. The endpoint mutation was **in-memory only**: it
-  never marked the state dirty, so `reachable` reached the card solely by
-  riding along with the next state report that happened to flush, while the
-  device row was written immediately. And the guard read `cached.online`
-  alone, so once the pair had diverged on disk — they are loaded back from two
-  tables with nothing reconciling them — the radio coming up found `online`
-  already `true`, returned early, and left the endpoint stuck at `false`
-  **for ever**, because nothing else writes that field. Found on a hub whose
-  Zigbee2MQTT had `availability.enabled: false`, which is Z2M's default: with
-  no per-device availability message in existence, the early return was the
-  last word. So the guard now asks whether *either* place is behind, every
-  endpoint it corrects is marked dirty, and a repair emits `deviceUpserted`
-  but writes **no** activity row — the device's reachability did not change,
-  one of the two records of it was simply late. A new endpoint inherits
-  `device.online` rather than being born reachable, which is the same split
-  pointed the other way.
-  **Endpoint state is written behind a debounce** (`STATE_FLUSH_MS`), because
-  persisting on every report meant one whole-row JSON rewrite per sensor
-  message, forever, onto an SD card — a power meter alone is a write every few
-  seconds. The cache is authoritative while the process runs; the row only has
-  to be right when it restarts, so `flush()`/`stop()` are what make that true
-  and tests must call one of them before reading rows back.
+  Its reachability and persistence rules — the radio statements, the two
+  rows reachability lives in, the `STATE_FLUSH_MS` debounce — are in
+  `src/core/CLAUDE.md`.
 - **The API listens before the adapters start** (`src/index.ts`). Starting them
   first meant a broker that wasn't up yet, or matter.js opening its storage on a
   slow card, held port 8420 closed — and with it the installer's health check
@@ -275,296 +179,13 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   directly. An explicit run answers `409 ai_disabled`, which is a *different*
   refusal from `409 ai_not_configured` because an app has to say which of the
   two a person needs to change.
-- **Watching costs nothing when nobody is watching.** `MqttObserver` is
-  reference-counted: it opens no broker connection, holds no buffer and makes
-  no wildcard subscription until a client subscribes, and lets go a minute
-  after the last one leaves — long enough that switching screens and back does
-  not clear the log. Nothing it sees is written down, because traffic is a
-  stream a person watches rather than a record, and one row per sensor report
-  onto an SD card is what the registry's `STATE_FLUSH_MS` debounce exists to
-  avoid. Its buffer is bounded in **bytes as well as rows**: 300 sensor reports
-  are a few kilobytes while one `bridge/devices` on a large network is
-  hundreds — counted with `Buffer.byteLength`, not `String.length`, which is
-  UTF-16 units and under-reports a Cyrillic-named network by up to three times.
-  **A cut payload says how much was cut.** The per-message limit was 2 KB and
-  landed in the middle of the useful range: a device report is a few hundred
-  bytes and `bridge/info`, `bridge/event` and `bridge/health` are one to three
-  kilobytes, so the cap fell on messages that had only just become interesting.
-  It is 8 KB, which clears all of those whole and still cuts the two retained
-  registries — `bridge/devices` and `bridge/definitions` are reference data
-  rather than traffic, and holding one costs a Zero 2 W real memory on a
-  subscription that exists to be looked at. Frames therefore carry
-  `payloadBytes` (the whole message's size) beside `truncated`, so an app says
-  "8 KB of 341 KB" instead of asserting a constant from this repository — and
-  the cut lands on a **character**, via `StringDecoder`, because
-  `subarray().toString('utf8')` splits a multi-byte sequence and puts `U+FFFD`
-  on the end of every Cyrillic or CJK name. Nothing but the inspector ever sees
-  a cut payload: the adapters hold their own broker connections.
-  The same rule governs `src/api/ws.ts` — the `mqtt`, `zigbee` and
-  `ai` streams are opt-in, so a socket that never subscribes never has a
-  listener attached and the iOS app is untouched; `hello` advertises what the
-  hub can offer so a client never infers it from a version number; and frames
-  are rate-limited per socket with the losses *reported*, since a gap nobody is
-  told about is worse than a gap.
-- **The activity log records what was *asked*, never what was reported.** It is
-  the home's history and the iOS app's "Recent" feed reads it, so the
-  temptation is to write a row whenever anything changes — which is the
-  `STATE_FLUSH_MS` mistake with a different name: a power meter reports every
-  few seconds, forever, onto an SD card. The line is commands and discrete
-  transitions. `device.command` is written per API call, `device.online` /
-  `device.offline` only when reachability actually flips, and a state report
-  writes nothing at all. The cost of holding that line is that a wall switch
-  somebody flips by hand is invisible; the cost of crossing it is the card.
-  **Start-up is not history**: reachability entries are suppressed for
-  `REACHABILITY_QUIET_MS` after `registry.start()`, because on boot every
-  adapter re-establishes what it can reach and each device whose stored row
-  disagrees produces a transition nobody made — without it, every hub restart
-  filled the feed with "X went offline · X came back" for a home where nothing
-  moved. **Retention is two bounds** (`core/activity.ts`): 5 000 rows for the
-  disk, 30 days for relevance, whichever bites first, pruned at most hourly and
-  hung off the next write so a quiet hub never wakes to do it. And **`message`
-  is the contract, `data` is the convenience**: every entry carries a whole
-  sentence, because Studio renders that and an unknown `kind` must still say
-  something true; `data` repeats it structured (`command`, `deviceName`,
-  `memberName`) so an app can write its own wording, pick an icon and fold a
-  burst — and it copies the *names* because both ids are `ON DELETE SET NULL`
-  and a row read next week may be all that is left of the device. Everything in
-  it is optional; nothing may require it. Adding a kind is safe, and the log is
-  shared by design — any member reads all of it, by name.
-- **Readings are recorded in buckets, and that is the same line the activity log
-  holds.** `src/core/history.ts` is what lets an app draw the last few days of a
-  temperature — and the tempting shape, a row per report, is exactly the mistake
-  `STATE_FLUSH_MS` and `device.command` each exist to avoid: a power meter
-  reports every few seconds, forever, onto an SD card. So readings accumulate in
-  memory and **at most one five-minute bucket lands as one row** (`min`, `max`,
-  `sum`, `n`) — ~288 batched transactions a day against the tens of thousands of
-  whole-row rewrites one chatty meter already costs, and a week of an ordinary
-  home is one to two megabytes. **A one-minute bucket was tried and reverted**,
-  and the reason is the band: a bucket already carries the low and the high of
-  everything inside it, so a finer one buys the *timing* of a spike and nothing
-  else — a kettle that ran for ninety seconds still shows as a tall band either
-  way. Five times the rows on every chatty meter is the wrong trade for that on
-  an SD card. An hour is therefore thirteen bucket indices, which the apps draw
-  as a curve by **marking the points when a series is sparse** rather than by
-  recording more of them. Seven things to keep. **Nothing touches the disk on
-  the report path** — `observe` is field reads and a `Math.min`, hung off the
-  bus's `stateChanged` so `DeviceRegistry` is untouched. **A bucket merges
-  rather than replaces**: the upsert takes `min(…)`/`max(…)` and adds `sum`/`n`,
-  which is what makes a restart *inside* a bucket safe and a backwards clock
-  jump harmless on a board with no RTC — and it is why the mean is computed on
-  read, since a stored average cannot be merged. **`flush()` closes due buckets
-  itself**, because a flush that left a finished bucket in memory was one wrong
-  call away from readings that never reached the disk. **A gap is an absence**:
-  no report, no sample, no point at that offset — and `gapBuckets` (the series'
-  own median spacing ×4, floored at three points, capped at two hours) is what
-  tells an app how long a hole has to be before it stops drawing through it,
-  because a fixed threshold draws a half-hourly sensor as permanently broken or
-  an afternoon of silence as perfectly steady. **`leading` is that same honesty
-  pointed the other way**: a window's first reading lands wherever the sensor
-  happened to speak, so an hour of a twenty-minute sensor opens a third of the
-  way across with empty axis to its left — which reads as "nothing recorded"
-  while the hub knows exactly what it was. One index seek returns the reading
-  *before* `from`, bounded by that series' own `gapBuckets` and absent past it,
-  so an app can draw the line entering the window rather than beginning in
-  mid-air. It has to be the hub's answer rather than the app widening its own
-  `from`, because a wider request changes the span and the span picks the
-  emitted `bucketMs` — asking for a little context either side would silently
-  coarsen the whole chart. **A thinned point's width is
-  rounded up to something a clock recognises** (5, 10, 15, 20, 30, 60
-  minutes…): plain division lands on "every 25 minutes", which is honest and
-  reads as a glitch in the app that prints it under the chart and labels a time
-  axis with it — and `points` is *at most*, so an hour touches **thirteen**
-  bucket indices rather than twelve, and a caller wanting every stored bucket of
-  one asks for more than twelve. **Two bounds again** — seven days
-  and 500 recorded quantities — where the age bound is also the per-series row
-  cap, so the only unbounded axis is how many quantities a home has; the prune
-  runs **per series** (`series_id = ? AND bucket < ?` is a prefix of the key,
-  a bare `bucket < ?` is a full scan) and hangs off a write, so a quiet hub
-  never wakes for it. And **the table is `WITHOUT ROWID`**, which drizzle cannot
-  express — the migration is hand-finished and `db:generate` must never be
-  allowed to write it back to a plain table. Reading is the **floor**, not a
-  permission: a temperature chart is the home being read. Booleans are
-  deliberately out — transitions, not buckets; a step chart, not a line.
-  `docs/api.md` is canonical.
-- **A join window is several grants, and Zigbee2MQTT is the authority.** A
-  permit-join duration travels as a uint8 of seconds, so **254 is the most one
-  grant can last** — a protocol fact, not a Z2M one. `core/permit-join.ts`
-  re-issues, and sizes the last grant to expire *on* the deadline rather than
-  past it: a network left open for three minutes after the countdown the owner
-  was shown reached zero is worse than not offering a countdown. `bridge/info`
-  (`permit_join`, `permit_join_end`) overrules our own timer, because it knows
-  about restarts and radio failures and we don't, and a window opened from
-  Z2M's own UI is adopted rather than reported as closed. It fails closed. The
-  route's old ceiling of 254 was a protocol fact masquerading as a policy; the
-  limit is 900 now, and `GET /hub` carries `zigbee.permitJoin` because a client
-  that has just connected has no other way to learn the state — which is how
-  GetHome Studio came to draw "Close Network" over a network that had shut two
-  minutes earlier.
-- **A command that reached the protocol is not a command that reached the
-  device, and `bridge/logging` is the only thing that knows.** Publishing to
-  `<name>/set` resolves when the *broker* takes the message and Z2M has no
-  per-command reply topic, so `POST /devices/:id/commands` answers 200 for a
-  write a sleeping battery sensor will not see for an hour — and both apps
-  papered over that by drawing the optimistic value and then silently
-  reverting it. `parseWriteFailure`
-  (`src/adapters/zigbee/write-failures.ts`) reads the one line that says
-  otherwise, `AdapterBus.commandFailed` carries it, and `api/ws.ts` fans it out
-  as a `commandFailed` frame to **every** socket — like `structure`, because
-  the value being written is the house's and the phone in the next room has the
-  same wrong value on screen. Four rules. **`Request superseded` is not a
-  failure**: it is a *newer* write to the same property taking this one's place
-  in the queue, so somebody tapping − four times generates four of them for one
-  correct outcome; dropped in the adapter and again in `DeviceRegistry`, which
-  is the seam a second adapter arrives at. **Classification is
-  most-specific-first** — the `diagnosis.ts` rule, and here it is load-bearing
-  rather than tidy, because a supersede error carries the whole ZCL command
-  including `"timeout":10000` and a generic "timed out" match placed first
-  swallows the one outcome that must not be reported. **An unrecognised line
-  yields nothing**, which is nearly every line. And **nothing is written to the
-  activity log**: a write that failed at 17:11 is on screen now rather than
-  history, and `device.command` already recorded the ask. `kind` is an open
-  string on purpose — adapters classify in their own vocabulary and a client
-  that meets a new word falls back to `detail`. The hub does not retry, wake
-  the device, or hold the value to replay: waking an Aqara sensor is a person
-  pressing its button, and a retry loop against a sleeping device is the queue
-  we already have wrapped in a second one. `docs/zigbee.md` and `docs/api.md`
-  are canonical.
-- **Two bridge topics are relayed for device lifecycle; the rest are still
-  dropped** (`bridge/logging` is the third relay, above, and reads only failed
-  writes). `bridge/devices` lists a device only once its interview *finishes*, so
-  without `bridge/event` the whole of pairing produced no output at all, and
-  `bridge/info` is the join window above. The translation into the hub's
-  vocabulary lives in `core/zigbee-events.ts` with a **type-only** import of
-  the adapter, so adapters still see nothing but `AdapterBus` and the module
-  stays out of a Matter-only hub's graph. Only the *failure* and the
-  *departure* are written to the activity log — the rest is transient and the
-  registry already writes `device.added` on adoption, so recording every step
-  would put several rows saying "joined" in a log meant to be read a week
-  later. The adapter used to write a `zigbee.joined` row of its own and no
-  longer does: it gated that on its **in-memory** `byIeee` map, which is empty
-  on every process start, so each restart re-announced every paired device —
-  "0x54ef44100047c1bf joined over Zigbee", dated now, beside a `device.added`
-  from months ago. A join is the registry's to record because the registry is
-  keyed on the database; anything keyed on adapter memory is a restart
-  artifact, not history.
-  Read **both** `interview_completed` and `interview_state`: Z2M 2.x replaced
-  the first with the second, so `interview_completed === false` read
-  `undefined === false` on current installs and adopted devices mid-interview.
-- **An accessory that has never been on a network cannot be found on one, and
-  where to look is the accessory's answer rather than a setting.** A
-  factory-new — or factory-reset — Wi-Fi Matter accessory advertises over
-  Bluetooth LE and nowhere else. `MatterAdapter` used to hardcode
-  `discoveryCapabilities: { onIpNetwork: true }` for every setup code, so it
-  searched the LAN for a device that was never going to be there; matter.js
-  applies **no discovery timeout at all** when one is not passed (`Discovery`
-  guards its `withTimeout` on `!== undefined`), so the job never settled and
-  the app read "Pairing with your hub" until somebody force-quit it — thirty-five
-  minutes, on the hub this was found on. `adapters/matter/setup-code.ts` reads
-  the QR's own `discoveryCapabilities` instead, and a **manual code carries
-  none**: `undefined` there means "the code did not say" and is answered by
-  looking everywhere, never by guessing one place. BLE arrives through an
-  **optional** dependency installed into the environment *before* the
-  controller is built (afterwards it is a transport nothing is holding), with
-  every failure resolving to a named reason rather than throwing — see
-  `deploy/CLAUDE.md` for the rfkill and capability halves, and `docs/matter.md`,
-  which is canonical.
-  **Three refusals happen before anything is searched for**, because in each the
-  answer cannot change while somebody waits: a code the hub cannot read, an
-  accessory whose code says Bluetooth on a hub without it, and one with no
-  network that the hub has no Wi-Fi password to give. Everything else is bounded
-  (three minutes' discovery, four and a half for the job), cancellable — which
-  stops the *discovery*, not just the screen, and is why the hub pairs **one
-  accessory at a time** — and classified into words somebody can act on
-  (`commission-failures.ts`, `write-failures.ts`'s shape and both its rules:
-  open `kind`, most-specific-first). **A failed pairing is logged**, which it
-  was not: the only record of one was a WebSocket frame that had already gone,
-  so the journal of a hub whose owner could pair nothing showed a line saying
-  discovery had started and nothing else, ever. And **the step is a real signal,
-  never a timer**: a candidate reaching the controller's peer set is the moment
-  the advice changes from "hold its button" to "leave it alone", and a
-  five-second timeout would say the same thing about a hub that had found
-  nothing.
-  **Two things it deliberately cannot do yet are written down** under
-  *Not built yet* in `docs/matter.md`: giving an accessory away to another
-  ecosystem (the hub takes devices in and cannot share them, which is the fear
-  somebody has *before* they pair anything), and pairing from the phone when
-  the hub is out of Bluetooth range. Both carry the detail and the open
-  questions; neither is started.
-  **A device is not offline because the hub has only just started looking for
-  it.** Zigbee2MQTT hands its whole list over in one retained message; a Matter
-  controller opens a CASE session per node, which is twenty to thirty seconds
-  on a Zero 2 W — and those devices are read back from the database with the
-  `online: false` they were given when Matter was last switched *off*. So every
-  switch to Matter reported "1 offline · needs attention" for half a minute
-  about an accessory that was about to answer. `matter.settlingUntil` is the
-  hub saying it has not finished looking, and an app draws those devices as
-  *connecting*. It **clears when the last node connects, not when the clock
-  runs out** — the controller knows what it owns and what it has reached, so
-  there is nothing to guess — and the clock is a bound rather than a promise,
-  because the node that never answers is the one genuinely offline device and
-  must not hide behind "still looking" for ever.
-  **It covers the controller coming up as well**, which is the same bug one
-  step earlier and the half this first shipped without. The adapters start
-  after the API is listening, so every `GET /hub` in the seconds matter.js
-  spends loading and opening its storage was answered by an adapter that had
-  not begun looking — reporting a settled home, while `radio.matter` already
-  said `true` because the adapter had been *constructed*. That is the window
-  every switch to Matter lands in, so the fix for the paragraph above did not
-  reach the case it was written for. The two phases are bounded separately: a
-  clock running while matter.js loads counts time in which no node could have
-  reported in, so charging it to the nodes shortens the window they actually
-  get on precisely the boards slow enough to need all of it. The arithmetic is
-  `adapters/matter/settling.ts` rather than a getter in the adapter, for the
-  reason `reducer.ts` and `setup-code.ts` are their own files: reading it
-  through `adapter.ts` loads `@matter/main`, so a rule both apps draw every
-  Matter device from would be a rule no test could reach.
-  **And nothing `GET /hub` reads may throw**, which that first version learned
-  the hard way. It asked the controller what it was commissioned to *before*
-  deciding the phase, and matter.js refuses that question until `start()` has
-  finished (`getCommissionedNodes` asserts an instance) — while the controller
-  *object* exists for the tens of seconds `start()` spends loading and opening
-  its storage on a Zero 2 W. So every `GET /hub` in that window threw straight
-  out of the route, and that route is the health check `install.sh` gates on:
-  `curl -fsS` exited 22 and a real install aborted against a hub that was
-  coming up perfectly well and answered fine a minute later. The commissioned
-  list is a **function** on `SettlingPhase` now, called only in the one phase
-  that can answer it — which also means the health check asks matter.js nothing
-  at all in the steady state — with a `catch` behind it as the second layer,
-  because the cost of being wrong here is a failed install rather than a wrong
-  number. Every other read behind that route already obeys this (each file read
-  is `try`/`catch` with a documented fallback); a new one has to.
-  **And the hub can be asked what it can hear** (`GET /matter/discoverable`),
-  because Bluetooth range is the one part of pairing nobody can see and
-  `not-found` is the same word for "two rooms away" and "never went into
-  pairing mode". It is refused while a pairing runs, and that is a measurement:
-  a second scanner beside the hub's own took fifteen seconds of neighbourhood
-  advertisements from 231 down to 2 on a Zero 2 W, and a starved scan reports
-  an *empty list* — the wrong answer in the one direction somebody acts on.
-- **A radio that is off and a radio that is missing need opposite words, and
-  both were `connected: false`.** Switching a one-radio board to Matter made the
-  app say *"Zigbee · no stick"* about a coordinator the owner could see from
-  where they were standing — hardware the hub had detected and deliberately
-  stood down. `zigbee.coordinator` (`present`/`absent`/`unknown`) is the fix,
-  read from the detector's own `/etc/gethome/zigbee.env` rather than by scanning
-  USB: `gethome-zigbee-detect` owns that decision with a device table and a
-  `maybe` tier, and a second dumber copy in the hub would eventually disagree
-  with the first. It reads the **by-id name**, never the `/dev/ttyACM0` beside
-  it, or a 3D printer taking that number reports a coordinator present.
-  **A mode names the whole arrangement, so `applying` asserts what must be
-  *off* as well as what must be on.** Asking only whether the wanted radio was
-  up was right for every switch that turns one on and wrong for every switch
-  that turns one off: leaving `both` for `zigbee` left Zigbee already
-  connected, so the hub reported the switch as landed the instant it was
-  recorded — no progress bar, no planned downtime — and then went off the
-  network for seventy seconds with nothing on any screen to say why.
-  `both` → `matter` had the same defect and nobody had noticed.
-  **And `radio.applying` is on disk rather than in memory**, because applying a
-  radio *restarts the process that recorded it*: the only useful answer is one
-  that survives the restart it describes, and without it every app drew "can't
-  reach your hub" over a change somebody had just made on purpose. It is a
-  **bound, not a wait for the radios to agree** — asking for Zigbee on a hub
-  with no coordinator is reasonable, correctly changes nothing, and would spin
-  for ever.
+- **Watching costs nothing when nobody is watching, and that includes the
+  socket.** The `MqttObserver` half is in `src/core/CLAUDE.md`; the same rule
+  governs `src/api/ws.ts` — the `mqtt`, `zigbee` and `ai` streams are opt-in,
+  so a socket that never subscribes never has a listener attached and the iOS
+  app is untouched; `hello` advertises what the hub can offer so a client never
+  infers it from a version number; and frames are rate-limited per socket with
+  the losses *reported*, since a gap nobody is told about is worse than a gap.
 - **The radio budget is a memory reading, and a board name is never the claim.**
   `install.sh` divides `MemTotal` by **1024 MB** and writes `GETHOME_RADIO`;
   nothing looks at the model. So a **1 GB Pi 4** and a **Pi 3** answer
@@ -615,69 +236,6 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   trade when a different board is no longer the cheap answer. Say it works now,
   say what changes that, say what the hub does when it stops fitting, and name
   the board that never has the question as *2 GB or more*.
-- **The radio budget is a measurement of a *full* home, so it is advice and not
-  a ceiling — and what replaces the refusal is a watch.** `GETHOME_RADIO=one`
-  is measured against the OS plus the hub with Matter plus a Zigbee2MQTT
-  holding a hundred devices' state; a home with four devices is nowhere near
-  it, and refusing `mode: both` there took Matter away from somebody to prevent
-  a problem they did not have. So `both` is a fourth `RadioMode`, accepted on
-  any board, and `core/radio-pressure.ts` is the half that makes that safe:
-  while the mode is `both` **and both radios are genuinely up**, it samples the
-  cgroup's `memory.events` (`high`, `oom_kill`) and `MemAvailable` every 30 s
-  and writes `auto` back if the board is in trouble across six of ten checks.
-  Five rules. **It watches throttling, not deaths** — `memory.high` holds a
-  cgroup at its limit for a long time before anything is killed, so acting on
-  it means nothing is lost; `oom_kill` is a backstop and acts at once, because
-  by then something has gone. **The peak is the *start*** — a cold boot reached
-  170 MB of a 200 MB ceiling loading `@matter/main` while a six-second BLE scan
-  moved `memory.peak` by zero — so nothing is sampled for the first two
-  minutes, or every boot would stand a radio down. **A counter read once votes
-  on nothing**, since these are totals since boot, and **a kernel that cannot
-  answer abstains**: every field is optional, so a board with the memory
-  controller off and a developer's Mac both trip nothing. And **it says so
-  before it does it** — the stand-down record, the `hub.radio-stood-down`
-  activity row (the one entry with *no* member on it: nobody did this) and the
-  `hubStatus` frame all go out before the mode is written, because the mode
-  write is what wakes the path unit that kills this process. `auto` is what
-  gets written rather than a named radio, because "follow the hardware" is a
-  rule this hub already has and a second one for this case would be the policy
-  nobody had read. `radio.standDown` carries it to the apps, where
-  `acknowledged` ends the *notice* (any `PUT /settings/radio` answers it) and
-  `count` outlives every acknowledgement — one stand-down is a board having a
-  bad minute, a fourth is the board answering the question.
-- **A radio is suspended, not taken away — and the hub cannot tell whether both
-  would fit again, so a retry is a *trial*.** Writing `auto` is the only way a
-  hub can change its own radios, so on its own it meant that protecting the
-  board threw away the decision being protected; `wish` in the record is the
-  hub knowing it owes somebody a second radio, and `standDown.suspended` is how
-  an app draws a parked choice rather than an untouched switch. The reason
-  there is no measurement is worth stating plainly: after a stand-down the
-  board is no longer running the configuration that failed, so the pressure is
-  gone **because** the second radio is gone, and any signal derived from that
-  would say yes for ever. So `shouldRestoreBoth` asks about the *machine* — has
-  it rebooted (`/proc/sys/kernel/random/boot_id`, which a service restart does
-  **not** change, and the hub restarts itself several times during one
-  stand-down), or has a week passed — with a budget of two, because each try
-  costs a restart. A person choosing `both` hands the tries back, and so does a
-  stand-down a week after the last one: neither is flapping. And **the watch
-  runs on every board while two radios are live, but only a small one is acted
-  on**: two live radios is the condition rather than `mode === 'both'` (a
-  hand-edited `GETHOME_RADIO` reaches it on `auto`, and so does the gap between
-  a stand-down writing the mode and the detector applying it), the report
-  threshold is lower than the action threshold so a small board gets one
-  warning first, and on a board measured for both the hub only ever reports —
-  taking a radio off a Pi 5 would be making a working home smaller to fix
-  something that is somewhere else. `radio.pressure` carries that, live, so it
-  clears itself. **Only the retry waits for a quiet moment** (a Matter
-  commissioning in flight, or an open Zigbee join window) — a hub that
-  restarted itself mid-pairing would take the pairing with it, for a trial that
-  had no reason to happen in that minute; the stand-down never waits, because
-  it is the board being rescued and deferring it risks the kill it exists to
-  prevent. The one thing this cannot see is **the hub being killed outright** —
-  `memory.events` is in the service's own cgroup and systemd recreates it on
-  every restart — which is bounded by `MemoryHigh` throttling long before
-  anything is killed rather than by luck; `docs/zigbee.md` records the two
-  alternatives that were considered and left out.
 - **The AI subsystem's own conventions live in `src/ai/CLAUDE.md`**, which
   loads when you work under `src/ai/`: the mapping library and its five
   routes, the retry path and the backoff gate, `ai_run_exchanges`, the five
@@ -705,6 +263,36 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `enabled` (does the rule exist and listen) needs `automation.manage` while
   `active` (is a mode on right now) is **the floor**. `docs/automations.md` is
   canonical.
+- **The core services' own conventions live in `src/core/CLAUDE.md`**, which
+  loads when you work under `src/core/`: device reachability and the
+  `STATE_FLUSH_MS` debounce, the MQTT observer, the activity log, reading
+  history, the permit-join window, a radio that is off versus missing, the
+  memory-pressure watch and a suspended radio, per-member favorites,
+  `offlineExpected`, the pairing-code and `gethome-hubctl claim` contracts, and
+  the home's one name. One of its rules binds code outside that directory, so
+  it stays here: the history table **is `WITHOUT ROWID`**, which drizzle cannot
+  express — the migration is hand-finished and `db:generate` must never be
+  allowed to write it back to a plain table.
+- **The Zigbee adapter's conventions live in `src/adapters/zigbee/CLAUDE.md`**:
+  failed writes read from `bridge/logging`, the two relayed bridge topics,
+  `friendly_name` versus the suggested name, and the Z2M unit conversions. One
+  of its rules binds `DeviceRegistry` too: **`Request superseded` is not a
+  failure** — it is a newer write to the same property taking this one's
+  place, so it is dropped in the adapter *and* in the registry, which is the
+  seam a second adapter arrives at.
+- **Matter's conventions live in `src/adapters/matter/CLAUDE.md`**: discovery
+  from the setup code's own capabilities, Bluetooth, the three refusals before
+  anything is searched for, one bounded pairing at a time,
+  `matter.settlingUntil`, `GET /matter/discoverable`, and the reducer's
+  lockstep with the iOS `MatterStateReducer`. One of its rules binds every
+  read behind `GET /hub`: **nothing that route reads may throw**, because it is
+  the health check `install.sh` gates on — each read is `try`/`catch` with a
+  documented fallback, and a new one has to be.
+- **Portraits' conventions live in `src/portraits/CLAUDE.md`** — files beside
+  rows, bounds on bulk, the pinned image model and its prompt, and what a
+  drawing cost in `ai_runs` — and **the traps in the suites themselves live in
+  `test/CLAUDE.md`**: a mock's history is per test, and a wait has to be for
+  the thing an assertion is about, never for a count something else can reach.
 - **Nothing is unsupported by default — three layers, in order.** Devices are
   made usable by (1) **typed capabilities** (canonical schema), then (2)
   **generic custom fields** (`custom`) for every leftover parameter, generated
@@ -715,52 +303,6 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   `uncovered` after layers 1–2. This is design rule #6 — full model in
   `docs/zigbee.md` ("The three layers of device support") and
   `docs/architecture.md`. Keep it when editing the mapper.
-- **A name is the house's, a favorite is one person's, and that split decides
-  where each is stored.** Device names, rooms and zones sit on shared rows and
-  everybody sees the same ones; a favorite is `device_favorites` keyed by member
-  (`src/core/favorites.ts`), so pinning the kettle reaches one dashboard. The
-  wire is unchanged — `GET /devices` still answers a boolean called `favorite`,
-  rendered *per caller*, which is why `deviceWire` takes it as an argument and
-  `ws.ts` renders `deviceUpserted` per socket rather than once for the bus.
-  Three rules. **The old `devices.favorite` column stays**, maintained as the
-  union of everybody's pins: `install.sh` rolls back to the previous release
-  when a build fails its health check, by which time the migration has run, and
-  a dropped column would meet an older build that selects it on every device
-  query. **Any member may reshape the home** — rename a device, move it, add or
-  delete a room or a zone. That was owner-only, which sounds careful and locked
-  the feature away from everybody who lives there: Studio claims a hub as *the
-  Mac*, so the owner is usually a laptop in a drawer and the phones are plain
-  members, and a device called `0x54ef44100047c1bf` has to be fixable by whoever
-  is standing in front of it. Owner-only still guards taking things *away*
-  (`DELETE /devices/:id`, members) and every edit is logged with a name.
-  And **the favorites map is not a second source of truth**: it is loaded once
-  at boot, `forgetDevice` is wired to the `deviceRemoved` event and
-  `forgetMember` to `endMembership`, because both deletes are done by the
-  cascade and the map would otherwise hold pins on things that are gone.
-- **A device being offline is sometimes the plan, and only a person knows.**
-  Somebody unplugs a heater for the summer: the device is unreachable, the home
-  is fine, and nothing could say so — so the dashboard counted it, put *Needs
-  attention* over the home and went on doing it for four months.
-  `PATCH /devices/:id { offlineExpected }` is them saying it, and the device
-  carries `offlineExpected: { at, by? }` back. Four rules. **It is the house's**
-  — a column on the device row, not a dismissal each phone remembers — because
-  one person unplugs the heater and nobody else should go on being told the
-  home needs looking at; that is the same split `name` and `roomId` are on, and
-  it is why the field sits under `device.edit` while `favorite`, in the same
-  body, needs nothing. **It excuses *this* absence, not the device**: the
-  registry clears it the moment the device is reachable again, so a socket
-  excused in May, plugged back in and pulled out again in September is a new
-  thing to be told about. **A radio is not a device**, so
-  `radioReachabilityChanged` deliberately does *not* clear it — it speaks for
-  everything behind it and is an assumption rather than a report, and Z2M's
-  bridge says `online` on every hub restart, which would have wiped every
-  excuse in the home overnight on a hub nobody touched; nothing is hidden by
-  holding them, since a down radio's devices are already explained by the
-  resting-radio rule in both apps and the first real per-device report ends it
-  properly. That is what `applyReachability`'s `fromRadio` exists for, and it
-  is the only thing it decides. And **one activity row per decision, none for
-  the clear** — the device coming back already writes `device.online`.
-  `docs/api.md` is canonical.
 - **Zones are the layer above rooms, and are deliberately not floors.** A room
   belongs to one zone or to none, and none is the ordinary case — which is the
   whole argument: a flat has no floors and a garage is not one, so a *floor*
@@ -792,118 +334,11 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   fan mode 0–5, airQuality 0–6. The wire format (field names included) is a
   compatibility contract with the iOS app — never change it without
   versioning the API (`apiVersion` in `GET /hub`).
-- **A device's `friendly_name` is its address until somebody renames it, so it
-  is not a name.** Zigbee2MQTT names a newly joined device after its own IEEE —
-  `friendly_name: "0x54ef44100047c1bf"` — and passing that through as
-  `suggestedName` put eighteen characters of hex on the tile in the GetHome app,
-  which reads as a hub that failed to recognise the device. It hadn't: the same
-  `bridge/devices` record carried a full `exposes` schema, a vendor, a model and
-  upstream's own one-line description, all mapped correctly. `suggestedNameFor()`
-  prefers that description ("Smart plug EU"), then vendor + model, and appends
-  the last four hex digits because two units of one model would otherwise be two
-  identical rows. Not the device *kind* ("Outlet") — the apps already show that
-  on its own line, and repeating it says nothing about which plug this is. Two
-  names always win over it: one somebody set in Z2M, and the owner's, since
-  `insertDevice` writes this on the insert only and never over an existing row.
-- Zigbee2MQTT conversions to watch: cover position is **inverted** (Z2M
-  100 = open), temperatures ×100, power W → mW, energy kWh → mWh, hue/sat
-  degrees/percent → 0–254 cluster units. `action` enums parse through
-  `adapters/zigbee/actions.ts` into `event` state; multi-endpoint devices
-  address channels via suffixed properties (`state_l1`); every other leftover
-  expose (settings, vendor knobs) becomes a generic `custom` field from its
-  own metadata, so no parameter is unsupported. Tests in `test/zigbee-*.test.ts`
-  pin all of these.
-- The Matter reducer (`src/adapters/matter/reducer.ts`) is a 1:1 port of the
-  iOS `MatterStateReducer` — keep them in lockstep if either changes.
 - Secrets: tokens are stored sha256-only; each AI credential (an Anthropic key,
   an OpenAI key, one slot per provider) AES-256-GCM-encrypted with the hub
   secret (`<data>/hub-secret.json`, 0600); the API never returns key material.
   Keep it that way — it is also the reason portraits are drawn *here* rather
   than by handing a phone the key.
-- **A device's portrait is the house's, so the hub draws it and keeps it**
-  (`src/portraits/`, `docs/portraits.md` is canonical). The app used to do this
-  with a key in its own Keychain and the images in its own storage, which made a
-  picture one phone's: a second person opened the same kettle and saw a grey
-  sphere. Four rules. **The bytes are files, the record is a row** —
-  `<data>/portraits/<device>/<id>.png` beside a `device_portraits` row, because
-  a 1024² PNG through the WAL is the write amplification the rest of the store
-  is arranged to avoid. **This is not the `STATE_FLUSH_MS` case**: every other
-  bound here is about write *frequency*, and a portrait is one deliberate write
-  per press — so it gets a bound on *bulk* instead (6 per device, 300 MB per
-  hub, oldest-unselected first) plus the one thing only a large file needs, a
-  refusal to draw below 500 MB free. **A selected portrait is never evicted**,
-  and `selected: null` while portraits exist is a *state* — the procedural
-  sphere, chosen — rather than an absence, which is what saves a column meaning
-  the same thing twice. And **no thumbnails are made here**: that would mean a
-  native image library on a 415 MB board for something each app already derives
-  and caches. `gpt-image-2.5-flare` is pinned because it supports transparent
-  backgrounds, which is the whole point of a cut-out the apps float over their
-  own glow — and because it is the *fast* half of the 2.5 pair, on a surface
-  where somebody watches an orb until the picture lands. Moving off `gpt-image-2`
-  cost nothing at the wire: 2.5 kept the Image API's shape, so it was a model id
-  and a re-read of the three facts hanging off it. `quality` stays `high` rather
-  than reaching for the `xhigh`/`max` that 2.5 added — transparency is at its
-  best at medium or high, and spending the saved time on detail nobody sees at
-  card size would undo the reason for moving. **The prompt stopped naming a
-  scene** with it (`src/portraits/prompts.ts`): a prompt's instructions take
-  priority over `background: transparent`, so "empty space", "no ground plane"
-  and "no scenery" were a backdrop described in front of the one capability the
-  path exists for. The shadow ban stays — a shadow is something the object casts,
-  not a place it is standing in.
-  **And the finish and the light were rewritten for a model that obeys**, which is the
-  shape to expect from every prompt here written against a looser one: the palette said
-  `matte soft-touch`, `gpt-image-2` gave it a sheen anyway, and 2.5 rendered the sentence
-  exactly — a dry, chalky body with no highlight and the cobalt down to a few pixels. Not
-  a worse render, a *more faithful one to a prompt that asked for the wrong thing*. Matte
-  is the highlight's **roll-off** rather than its absence; the cobalt is named as the
-  device's **own indicator** rather than a light in the scene, since a lamp with a blue
-  studio light on it is a photograph of a different object; and the light now has a
-  **direction**, because "soft top light and gentle rim light" names two lights and no
-  direction and resolves as flat frontal fill. The three-quarter **angle is on the
-  generate path only** — with no photo the model invents the object anyway, while turning
-  one on the edit path means inventing the sides the camera never saw.
-  **What a drawing cost goes in `ai_runs`; who asked goes on the picture.** A
-  portrait is the third thing that spends the home's money on AI, so every draw
-  writes one row (`kind: 'portrait'`), failures included with the provider's own
-  `errorKind` — that table's argument is that what a home spent is *one*
-  question, and three tables would be three screens answering it; `portraitId`
-  links the row to what it bought the way `automationId` does for a rule, and
-  `finish` times the run so the duration is free. The price is read off the
-  response's own `usage`, because 2.5 bills per token and estimating from the
-  size we asked for is a guess dressed as a fact — with **no usage meaning no
-  price rather than a free one** (`$0.00` is a claim where nothing is the truth)
-  and an unsplit input priced at the dearer image rate, since an estimate that
-  reads low is the one that surprises somebody. **`drawnBy` is on the portrait
-  row** and is not a second copy of the activity log's `device.portrait` line:
-  that log is bounded at 5 000 rows and 30 days while a portrait has no age
-  bound, and `ai_runs` keeps 250 runs of every kind with a chat writing one per
-  turn — so both records of who drew a picture expire while the picture does
-  not. The member's *name* rides beside the id for the log's own reason: an
-  `ALTER TABLE` column gets no `ON DELETE` action in SQLite, so the id may point
-  at somebody long removed.
-- **`<data>/pairing-code` is a contract, and it now *survives* restarts.** It
-  used to be re-minted on every boot, and that was the bug: any code that had
-  been read — `install.sh`'s `@@PAIRING@@` marker, or a value Studio fetched a
-  minute earlier — was a different number by the time somebody pressed Claim, so
-  a finished install ended at `invalid_code` with nothing the user could do.
-  Rotation bought nothing: the code only ever proves physical access to the
-  machine, and reading the file *is* that access. The file is the source of
-  truth; it is deleted the moment the hub is claimed. Don't reintroduce
-  rotation.
-  **The startup line is part of that contract too.** The file is `0600` and
-  owned by the service account, so Studio falls back to grepping
-  `Pairing code: <digits>` out of the journal — the exact wording
-  `PairingService.boot()` logs. Rephrasing it breaks the last way Studio has of
-  handing a user the code it promised they'd never have to find.
-- **The code is the *fallback*, not the route.** `gethome-hubctl claim` reads
-  the code and claims in one step on the hub's own machine, printing
-  `@@HUBID:@@`/`@@TOKEN:@@`; Studio drives it over SSH with the key the card
-  planted, so the person who installs a hub never sees a code. Anyone who can
-  run it already holds root on the machine the code exists to prove access to.
-  `POST /pair` also takes a `claimId` — one UUID per attempt, replayed for five
-  minutes — because a hub can commit a claim and lose the response, and without
-  it the retry is told the code is wrong. Both halves are load-bearing; neither
-  replaces the typed code for a hub Studio has no key on.
 - **The token is the identity, so `me` is a member id.** A client that claimed
   over SSH never learns its member id — `gethome-hubctl claim` prints the hub id
   and the token and nothing else — so it held a working token and could not pick
@@ -1214,28 +649,6 @@ adapters (zigbee | mqtt | matter) ──AdapterBus──▶ DeviceRegistry ─�
   the access bullet above. Nothing ever called it, and a per-member access
   channel sitting there unused is an invitation to wire the narrow rule back
   in, so it is gone.
-- **One hub, one home, one name — and `HUB_NAME` only seeds it.** There used to
-  be two names: `GET /hub` answered `HUB_NAME` from `/etc/gethome/hub.env`,
-  which the installer writes once and nobody ever edits, while `GET /home`
-  answered a database row the apps could rename. A home cannot move between
-  hubs, so the second name was never a second fact — only a second place for
-  the first one to be wrong, and it was: a hub renamed to "Summer House" in
-  the app still advertised itself as "GetHome Hub" over mDNS and still read
-  "GetHome Hub" in GetHome Studio, where two hubs were two rows with the same
-  name.
-  `src/core/home.ts` holds the one name; `GET /hub`, `GET /home` and the
-  WebSocket hello all read it from there, and `PATCH /home` is the only writer.
-  Three rules: **the environment seeds and the database owns** — `HUB_NAME`
-  names a hub booting for the first time and is inert afterwards, which is why
-  it is documented as a seed in `config.ts`, `.env.example` *and* the `hub.env`
-  the installer writes (a variable that silently stops working is the trap this
-  replaced); **the name is held in memory**, because `GET /hub` is the health
-  check every app and installer polls and must not become a database read per
-  request; and **a rename re-publishes mDNS** (`MdnsAdvertiser.updateName`),
-  because a hub answering to its new name over HTTP while advertising the old
-  one is the same split this change removed. Renaming deliberately needs no
-  root and no restart — the same reason the radio mode lives in the data
-  directory rather than in `hub.env`.
 - matter.js is pinned to a minor (`~0.17.x`) because its API churns; keep all
   matter.js-specific code inside `src/adapters/matter/`.
 - `tsconfig` uses `exactOptionalPropertyTypes` — build optional-field objects
@@ -1294,7 +707,9 @@ change — flag it); routes/auth → `docs/api.md`; adapter behavior/topics →
 trigger/DSL → `docs/ai-adaptation.md`; the assistant, the chat runtime or the
 delegate registry → `docs/assistant.md`; portraits → `docs/portraits.md`;
 module boundaries → this file and the subsystem file for the directory you
-changed (`src/ai/CLAUDE.md`, `src/automations/CLAUDE.md`, `deploy/CLAUDE.md`) +
+changed (`src/ai/CLAUDE.md`, `src/automations/CLAUDE.md`, `src/core/CLAUDE.md`,
+`src/adapters/zigbee/CLAUDE.md`, `src/adapters/matter/CLAUDE.md`,
+`src/portraits/CLAUDE.md`, `test/CLAUDE.md`, `deploy/CLAUDE.md`) +
 `docs/architecture.md`; installer markers, autostart or Zigbee detection →
 `docs/zigbee.md` + the marker list in `deploy/install.sh` (and flag the Studio
 repo); anything README restates → `README.md`.
