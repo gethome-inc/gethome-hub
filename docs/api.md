@@ -512,7 +512,9 @@ writes `/etc/gethome/wifi.env` for it on every association; where that has not
 happened (an Ethernet hub, a machine with no NetworkManager, a hub installed
 before this existed) the app should ask for the password and send it. It is
 never logged and never stored — it goes into the commissioning conversation and
-is forgotten with the job.
+is forgotten with the job. **`false` also covers a hub on a network only 5 GHz
+can see**, which almost no Wi-Fi accessory can join: the hub does not hand that
+one over, so an app that asks should ask for a network on 2.4 GHz.
 
 #### What the hub can hear (`GET /matter/discoverable`)
 

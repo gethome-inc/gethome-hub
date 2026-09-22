@@ -95,6 +95,16 @@ profile and the point of the service account is that it cannot read one — so
 `GET /hub` reports whether the hub has any as `matter.wifi`, and an app may
 send `wifi: {ssid, passphrase}` with the request for a hub that has none.
 
+**The hub's own network is handed over only when an accessory can see it.**
+Almost every Wi-Fi Matter accessory has a 2.4 GHz radio and nothing else, and a
+dual-band hub (Pi 3B+, 4, 5) may be on 5 GHz. On one name across both bands
+that costs nothing; on a separate 5 GHz name it would hand every accessory a
+network it cannot find. So a hub associated at 5 GHz scans for its own name on
+2.4 GHz, and when it sees it only on 5 GHz it writes nothing — `matter.wifi` is
+`false`, and the app asks which network to use, exactly as for a hub on
+Ethernet. The hub's own band does not matter to Matter otherwise: it reaches an
+accessory on 2.4 GHz through the router like any other client on the LAN.
+
 **Thread accessories are not yet provisioned this way.** Taking one on over
 Bluetooth needs a Thread operational dataset, which means a border router the
 hub is part of; a Thread device already on a LAN border router is commissioned

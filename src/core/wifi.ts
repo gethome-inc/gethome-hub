@@ -19,9 +19,11 @@ import { readFileSync } from 'node:fs';
  * fresh profile and a fresh write; nothing here caches.
  *
  * Absent is an ordinary answer — an Ethernet hub, a machine where the
- * dispatcher never ran, a hub installed before this existed — and it means the
- * app is asked for the password instead, which is why `GET /hub` reports
- * whether the hub has one.
+ * dispatcher never ran, a hub installed before this existed, or a dual-band
+ * hub on a network only 5 GHz can see, which almost no Wi-Fi accessory can join
+ * and the dispatcher therefore declines to hand over — and it means the app is
+ * asked for the network instead, which is why `GET /hub` reports whether the
+ * hub has one.
  */
 export interface WifiCredentials {
   ssid: string;

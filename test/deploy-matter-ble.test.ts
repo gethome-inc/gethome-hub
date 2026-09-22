@@ -198,26 +198,42 @@ interface CredentialsOutcome {
   mode: string;
 }
 
-/** Run `deploy/wifi-credentials.sh` against a fake `nmcli`. */
+/**
+ * Run `deploy/wifi-credentials.sh` against a fake `nmcli`.
+ *
+ * `freq` is the frequency the hub is associated on (absent: `nmcli` does not
+ * say), `scan` the rows a fresh scan returns in `nmcli -t -f FREQ,SSID` form,
+ * already escaped the way `nmcli -t` escapes them, and `existing` a `wifi.env`
+ * an earlier association left behind.
+ */
 function credentials(options: {
   ssid?: string;
   psk?: string;
   active?: boolean;
   nmcli?: boolean;
-}): CredentialsOutcome {
+  freq?: number;
+  scan?: string[];
+  scanFails?: boolean;
+  existing?: string;
+}): CredentialsOutcome & { scanned: boolean } {
   const dir = scratch('gethome-wificreds-');
   const bin = path.join(dir, 'bin');
   const conf = path.join(dir, 'gethome');
+  const calls = path.join(dir, 'nmcli-calls');
   mkdirSync(bin, { recursive: true });
   mkdirSync(conf, { recursive: true });
+  if (options.existing !== undefined) writeFileSync(path.join(conf, 'wifi.env'), options.existing);
 
   if (options.nmcli !== false) {
     script_(
       path.join(bin, 'nmcli'),
-      `case "$*" in
+      `echo "$*" >> "${calls}"
+       case "$*" in
          *"connection show --active"*) [ "$FAKE_ACTIVE" = "no" ] || printf 'abc-123:802-11-wireless\\n' ;;
          *"802-11-wireless.ssid"*)     printf '%s\\n' "$FAKE_SSID" ;;
          *"802-11-wireless-security.psk"*) printf '%s\\n' "$FAKE_PSK" ;;
+         *"dev wifi list --rescan no"*) [ -n "$FAKE_FREQ" ] && printf 'no:2437 MHz\\nyes:%s MHz\\n' "$FAKE_FREQ" ;;
+         *"dev wifi list --rescan yes"*) [ "$FAKE_SCAN_FAILS" = "yes" ] && exit 8; printf '%s' "$FAKE_SCAN" ;;
        esac
        exit 0`,
     );
@@ -231,6 +247,9 @@ function credentials(options: {
       FAKE_SSID: options.ssid ?? 'Flat 3',
       FAKE_PSK: options.psk ?? 'hunter2hunter2',
       FAKE_ACTIVE: options.active === false ? 'no' : 'yes',
+      FAKE_FREQ: options.freq === undefined ? '' : String(options.freq),
+      FAKE_SCAN: (options.scan ?? []).map((row) => `${row}\n`).join(''),
+      FAKE_SCAN_FAILS: options.scanFails === true ? 'yes' : 'no',
       GETHOME_GROUP: 'staff',
       // A dispatcher sets this; without it the script asks nmcli which
       // connection carries the wireless link.
@@ -243,6 +262,7 @@ function credentials(options: {
     output,
     file: existsSync(file) ? readFileSync(file, 'utf8') : '',
     mode: existsSync(file) ? (statSync(file).mode & 0o777).toString(8) : '',
+    scanned: existsSync(calls) && readFileSync(calls, 'utf8').includes('--rescan yes'),
   };
 }
 
@@ -286,6 +306,66 @@ describe('the Wi-Fi the hub passes on to an accessory', () => {
     const run = credentials({ nmcli: false });
     expect(run.file).toBe('');
     expect(run.output).toContain('No NetworkManager');
+  });
+});
+
+/**
+ * **A dual-band hub can be on a network no Wi-Fi accessory can see.** Almost
+ * every Wi-Fi Matter accessory is 2.4 GHz only, and a Pi 3B+, 4 or 5 will sit
+ * on 5 GHz. One name on both bands costs nothing; a separate 5 GHz name, with
+ * the hub on it, used to hand every accessory a network it could not find — and
+ * the app never asked for another, because the hub said it had one.
+ */
+describe('a network the accessory can actually join', () => {
+  it('does not scan when the hub is already on 2.4 GHz', () => {
+    const run = credentials({ freq: 2412 });
+    expect(run.file).toContain("WIFI_SSID='Flat 3'");
+    expect(run.scanned).toBe(false);
+  });
+
+  it('hands over a network the hub is on the 5 GHz side of, when it is on 2.4 GHz too', () => {
+    const run = credentials({
+      freq: 5180,
+      scan: ['5180 MHz:Flat 3', '2412 MHz:Flat 3', '2437 MHz:Next door'],
+    });
+    expect(run.scanned).toBe(true);
+    expect(run.file).toContain("WIFI_SSID='Flat 3'");
+  });
+
+  it('hands nothing over for a network only 5 GHz can see, and says why', () => {
+    const run = credentials({
+      ssid: 'Flat 3 5G',
+      freq: 5180,
+      scan: ['5180 MHz:Flat 3 5G', '2412 MHz:Flat 3'],
+      // What an earlier association on the 2.4 GHz side, or an older hub,
+      // left behind: it has to go, or the hub goes on saying it has one.
+      existing: "WIFI_SSID='Flat 3 5G'\nWIFI_PSK='hunter2hunter2'\n",
+    });
+    expect(run.file).toBe('');
+    expect(run.output).toMatch(/only its 5 GHz radio can see/);
+    expect(run.output).toMatch(/app will ask/);
+  });
+
+  /** A scan that says nothing is not evidence of anything. */
+  it('changes nothing when the scan fails or does not show the network', () => {
+    expect(credentials({ freq: 5180, scanFails: true }).file).toContain("WIFI_SSID='Flat 3'");
+    expect(credentials({ freq: 5180, scan: ['2437 MHz:Next door'] }).file).toContain("WIFI_SSID='Flat 3'");
+    expect(credentials({ freq: 5180, scan: [] }).file).toContain("WIFI_SSID='Flat 3'");
+  });
+
+  /**
+   * `nmcli -t` escapes `\` and `:` inside a value, so a name with either in it
+   * has to be decoded before it is compared — or the hub cannot recognise its
+   * own network in the scan and falls back to handing it over regardless.
+   */
+  it('recognises a name nmcli has escaped', () => {
+    const escaped = 'Flat\\:3\\\\B';
+    expect(
+      credentials({ ssid: 'Flat:3\\B', freq: 5180, scan: [`5180 MHz:${escaped}`] }).file,
+    ).toBe('');
+    expect(
+      credentials({ ssid: 'Flat:3\\B', freq: 5180, scan: [`5180 MHz:${escaped}`, `2462 MHz:${escaped}`] }).file,
+    ).toContain('WIFI_SSID=');
   });
 });
 

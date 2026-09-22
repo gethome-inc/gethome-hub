@@ -490,11 +490,24 @@ in `deploy/install.sh` must stay accurate.
   next month gets a fresh profile, and enumerating today's profiles is the one
   thing that cannot cover that. **An open network writes an empty PSK**, which
   the hub reads as "no credentials": an accessory handed an empty password for a
-  network it cannot join is worse than being told the hub has none. And the
+  network it cannot join is worse than being told the hub has none. **A network
+  only 5 GHz can see is the same case**: almost every Wi-Fi Matter accessory is
+  2.4 GHz only, and a dual-band board (Pi 3B+, 4, 5) will sit on a separate
+  5 GHz name, which used to be handed to every accessory — a pairing that fails
+  at the last step every time, with the app never asking for another network
+  because the hub said it had one. So a hub associated at 5 GHz scans once for
+  its own name on 2.4 GHz; seen only on 5 GHz, it writes nothing and removes what
+  an earlier association left, and the app asks, as it does for an Ethernet hub.
+  A scan that fails or does not show the network changes nothing. `nmcli -t`
+  escapes `\` and `:` inside a name, so the comparison decodes in awk, with the
+  name passed in the environment because `awk -v` processes backslashes. And the
   shell-quoting is built into a variable before it is used, because inline
   inside the `printf` the replacement's backslashes go through a second round of
   quote removal and `Dave's Wi-Fi` comes out mangled — the sed-program rule from
-  `test/deploy-wifi.test.ts`, in a second place.
+  `test/deploy-wifi.test.ts`, in a second place. (The same family bit the 5 GHz
+  code while it was written: bash 3.2 keeps the quotes of a quoted replacement
+  in `${var//pattern/"$x"}`, so escaping the name in the shell produced
+  `My"\:"Net` on macOS and `My\:Net` on the Pi.)
 - **The detector exits 1 for an ordinary state, so the unit says
   `SuccessExitStatus=1`.** "Zigbee is not the radio here" — no coordinator, or
   one plugged into a board the owner has set to Matter — is correct and

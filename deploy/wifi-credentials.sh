@@ -74,6 +74,52 @@ if [[ -z "$SSID" ]]; then
   exit 0
 fi
 
+# ── A network the accessory can join ───────────────────────────────────────
+#
+# **The hub's own network is only the right answer when an accessory can see
+# it.** Almost every Wi-Fi Matter accessory has a 2.4 GHz radio and nothing
+# else, while a Pi 3B+, 4 or 5 is dual-band and will happily sit on 5 GHz. On a
+# network that is one name on both bands that costs nothing — the accessory
+# joins its 2.4 GHz side — but a home with a separate 5 GHz name ("Flat 3 5G")
+# and a hub on it would hand every accessory a network it cannot find: the
+# pairing fails at the last step, again and again, and the app never asks for
+# another network because the hub says it has one.
+#
+# So a hub on 5 GHz scans once and looks for the same name on 2.4 GHz. Seen
+# there: hand it over as usual. Seen **only** on 5 GHz: hand nothing over, and
+# take away what an earlier association left, so the hub reports that it has no
+# network to give and the app asks — which is the path an Ethernet hub already
+# takes. A scan that fails, or that does not show this network at all (a hidden
+# one, a radio that would not say), tells us nothing, and changes nothing.
+# `nmcli -t` escapes `\` and `:` inside a value, so the name is decoded in awk
+# and compared there, handed over in the environment because `awk -v` would
+# process its backslashes first.
+FREQ=$(nmcli -t -f ACTIVE,FREQ dev wifi list --rescan no 2>/dev/null \
+  | awk -F: '$1 == "yes" { print $2 + 0; exit }')
+if [[ -n "$FREQ" ]] && (( FREQ >= 3000 )); then
+  BANDS=$(nmcli -t -f FREQ,SSID dev wifi list --rescan yes 2>/dev/null | TARGET="$SSID" awk '
+    function unescape(s,    out, i, c) {
+      out = ""
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (c == "\\" && i < length(s)) { i++; c = substr(s, i, 1) }
+        out = out c
+      }
+      return out
+    }
+    {
+      i = index($0, ":")
+      if (i == 0 || unescape(substr($0, i + 1)) != ENVIRON["TARGET"]) next
+      if (substr($0, 1, i - 1) + 0 < 3000) low = 1; else high = 1
+    }
+    END { if (low) print "on-2.4ghz"; else if (high) print "5ghz-only" }')
+  if [[ "$BANDS" == "5ghz-only" ]]; then
+    rm -f "$OUT" 2>/dev/null || true
+    say "This hub is on ${SSID}, which only its 5 GHz radio can see. Wi-Fi Matter accessories need 2.4 GHz, so the app will ask which network to put them on."
+    exit 0
+  fi
+fi
+
 # Escaped into variables *first*, and that is not style. Used inline inside the
 # `printf` below, the replacement's backslashes go through a second round of
 # quote removal and `Dave's` comes out as `Dave\'\\'\''s` — the same shape of
