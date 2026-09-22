@@ -26,6 +26,14 @@
 # An open network writes an empty PSK, which the hub reads as "no credentials":
 # there is nothing to hand over, and an accessory given an empty password for a
 # network it cannot join is worse than being told the hub has none.
+#
+# The PSK may be the network's derived 64-hex key rather than its passphrase:
+# GetHome Studio and Raspberry Pi Imager both write that, so the card never
+# carries the password. It is handed over as it is. Matter defines the
+# credentials by length (8–63 bytes a passphrase, 64 a raw hex PSK), so an
+# accessory takes it as a key; only a WPA3-only network, whose SAE needs the
+# passphrase, cannot be joined with one, and that pairing fails in words that
+# send somebody to type the password.
 set -uo pipefail
 
 CONF_DIR="${GETHOME_CONF:-/etc/gethome}"

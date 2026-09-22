@@ -105,6 +105,16 @@ network it cannot find. So a hub associated at 5 GHz scans for its own name on
 Ethernet. The hub's own band does not matter to Matter otherwise: it reaches an
 accessory on 2.4 GHz through the router like any other client on the LAN.
 
+**What is handed over may be a key rather than the password**, and that is
+allowed. GetHome Studio and Raspberry Pi Imager both write the network's derived
+64-hex PSK into the profile rather than the passphrase, so the card never
+carries the password itself, and that is what `wifi.env` then holds.
+`AddOrUpdateWiFiNetwork` defines its credentials by length — 8 to 63 bytes are a
+passphrase and 64 are a raw hex PSK — so an accessory takes it as a key. The
+one network it cannot open is **WPA3-only**, because SAE needs the passphrase
+itself. That ends as `cannot-join-wifi`, and the app asks for the network and
+its password.
+
 **Thread accessories are not yet provisioned this way.** Taking one on over
 Bluetooth needs a Thread operational dataset, which means a border router the
 hub is part of; a Thread device already on a LAN border router is commissioned
