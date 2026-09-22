@@ -196,6 +196,49 @@ describe('speculation never changes what is asked', () => {
     expect(withoutWarm.asked[0]?.question).toContain('turn the kitchen light off');
   });
 
+  /**
+   * **The invariant `AssistantChat.reuseSpeculation` is built on, asserted
+   * where it is actually produced.**
+   *
+   * Reuse is `text.startsWith(cached.partial)` and nothing else — no revision
+   * counter, no second host call — and that is only sound because
+   * `question()` joins the utterances it has kept, so carrying on talking can
+   * only ever *extend* what a warm was given. If that join ever changed (a
+   * separator, an ordering, a trim), every reuse would silently become a miss
+   * and the feature would go back to costing money to change nothing, with
+   * nothing failing anywhere to say so.
+   *
+   * So: every partial handed to a warm is a prefix of the question finally
+   * asked, and at least one of them is a genuinely shorter one — otherwise
+   * this passes on a run where nothing was speculated at all.
+   */
+  it('only ever extends what a warm was given', async () => {
+    const h = harness();
+    vi.useFakeTimers();
+    try {
+      h.read(heard('turn the kitchen ', 1_000, 1_400));
+      vi.advanceTimersByTime(SPECULATE_EVERY_MS + 10);
+      h.read(heard('light ', 1_400, 1_700));
+      vi.advanceTimersByTime(SPECULATE_EVERY_MS + 10);
+      h.read(heard('off please', 1_700, 2_200));
+    } finally {
+      vi.useRealTimers();
+    }
+    h.read(delegated('d-1'));
+    await h.settle();
+
+    const question = h.asked[0]?.question ?? '';
+    expect(question).toContain('turn the kitchen light off please');
+    expect(h.warmed.length).toBeGreaterThan(1);
+    for (const warm of h.warmed) {
+      expect(question.startsWith(warm.partial)).toBe(true);
+    }
+    // And one of them really was a partial, or the loop above asserted
+    // nothing: a suite where every warm saw the finished sentence would pass
+    // this while proving none of it.
+    expect(h.warmed[0]?.partial.length).toBeLessThan(question.length);
+  });
+
   it('stops speculating once the sentence has been taken', async () => {
     const h = harness();
     h.read(heard('turn the kitchen light off', 1_000, 2_000));

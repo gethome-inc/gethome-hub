@@ -170,16 +170,16 @@ export class VoiceDelegation {
   private seconds: number | undefined;
   private spent = false;
   /**
-   * Bumped when what has been heard changes **structurally** — a new utterance
-   * opened, one retired, one dropped by the bound, a delegation taken.
+   * When the last speculation went out, and how many this utterance has had.
    *
-   * Deliberately **not** on an append: a warm that was right for "turn off the
-   * kitch" is still right for "turn off the kitchen light", because the second
-   * is the first continued. What it is not right for is the sentence having
-   * been replaced, which is exactly what each of the four cases above means.
+   * There is deliberately **no revision counter beside these**. One was
+   * written here for a cache that then landed somewhere better: the reading is
+   * kept on the conversation and reused only when the finished sentence
+   * *extends* the partial it ran on, so every structural change this would
+   * have tracked — a new utterance, a retirement, a drop by the bound — is
+   * already a string that is not a superset. A second mechanism agreeing with
+   * that one is a second mechanism to get wrong.
    */
-  private revision = 0;
-  /** When the last speculation went out, and how many this utterance has had. */
   private lastSpeculationAt = 0;
   private speculationsThisUtterance = 0;
 
@@ -335,9 +335,6 @@ export class VoiceDelegation {
     const newest = this.heard[this.heard.length - 1];
     if (opens || newest === undefined) {
       this.heard.push({ text: delta, start, end, answered: false });
-      // A different sentence is being said now, so anything warmed for the
-      // last one is about something else.
-      this.revision += 1;
       this.speculationsThisUtterance = 0;
       // **Opening a new one is what retires the last**, and it has to be here
       // as well as on the voice's own speech: at the moment the voice answers,
@@ -381,7 +378,6 @@ export class VoiceDelegation {
       if (saidFrom === undefined || utterance.end === undefined) continue;
       if (saidFrom >= utterance.end) {
         utterance.answered = true;
-        this.revision += 1;
       }
     }
   }
@@ -413,7 +409,6 @@ export class VoiceDelegation {
     while (total > CONTEXT_CHARS && this.heard.length > 1) {
       const dropped = this.heard.shift();
       total -= dropped?.text.length ?? 0;
-      this.revision += 1;
     }
   }
 
@@ -484,8 +479,7 @@ export class VoiceDelegation {
     // when it carries one, and otherwise the furthest point anybody had been
     // transcribed to.
     this.askedUntil = offset ?? this.latestEnd ?? this.latestStart;
-    // The sentence has been taken. Anything warmed for it is now history.
-    this.revision += 1;
+    // The sentence has been taken, so the next one starts its own count.
     this.speculationsThisUtterance = 0;
     const askedUntil = this.askedUntil;
 

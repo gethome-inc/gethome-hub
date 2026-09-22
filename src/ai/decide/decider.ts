@@ -155,5 +155,16 @@ export interface Decider {
     state: string | Readonly<Record<string, unknown>> | readonly unknown[];
     questions: Q;
     timeoutMs: number;
+    /**
+     * Whether somebody is waiting for this.
+     *
+     * **`live` is the default, and the asymmetry is the point.** A speculation
+     * is a guess about a sentence that has not finished, so it gives way to
+     * anything real; a live call is the turn itself and must never be dropped
+     * for a guess — which is exactly what a plain one-at-a-time rule does,
+     * silently, to the third of spoken commands that happen to arrive while a
+     * speculation is in flight.
+     */
+    priority?: 'live' | 'speculative';
   }): Promise<DecisionResult<Q> | null>;
 }

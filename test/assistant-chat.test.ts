@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { pino } from 'pino';
 import { HubEventBus } from '../src/core/bus.js';
 import { ActivityService } from '../src/core/activity.js';
@@ -22,6 +22,7 @@ import { refusalSentence } from '../src/ai/chat/agent-loop.js';
 import type { AutomationConversation, AutomationTurn } from '../src/ai/automation-conversation.js';
 import type { EngineRegistry } from '../src/automations/engine.js';
 import { AGENT_MODELS, effectiveAgentModel } from '../src/ai/models.js';
+import { DECISION_MODEL } from '../src/ai/decide/decider.js';
 
 /**
  * The assistant: its conversation service over a stand-in for a provider, and
@@ -35,6 +36,85 @@ import { AGENT_MODELS, effectiveAgentModel } from '../src/ai/models.js';
  */
 
 const log = pino({ level: 'silent' });
+
+/**
+ * A decision model that answers, and a count of how many times it was asked.
+ *
+ * The count is the assertion in both tests below: what the reuse fixes is not
+ * *what* the hub concludes but how many times it pays to conclude it, and a
+ * suite that only checked the command would have passed just as well against
+ * the version that threw every speculation away.
+ *
+ * `fetch` is stubbed with a real `Response` for `test/ai-decide.test.ts`'s
+ * reason — a mock laxer than the thing it stands in for tests the mock.
+ */
+function decidesCommand(deviceId: string): { calls: string[] } {
+  const calls: string[] = [];
+  vi.stubGlobal(
+    'fetch',
+    (async (_input: unknown, init?: RequestInit) => {
+      calls.push(
+        JSON.stringify((JSON.parse(String(init?.body)) as { state?: unknown }).state),
+      );
+      return new Response(
+        JSON.stringify({
+          model: DECISION_MODEL,
+          answers: {
+            intent: {
+              type: 'choice',
+              choice: 'device_command',
+              probabilities: { device_command: 0.97 },
+              confidence: 0.97,
+            },
+            multiple: { type: 'noul', noul: 0.02 },
+            needsValue: { type: 'noul', noul: 0.03 },
+            scope: {
+              type: 'choice',
+              choice: 'specific_device',
+              probabilities: { specific_device: 0.96 },
+              confidence: 0.96,
+            },
+            device: {
+              type: 'choice',
+              choice: deviceId,
+              probabilities: { [deviceId]: 0.95 },
+              confidence: 0.95,
+            },
+            switchAction: {
+              type: 'choice',
+              choice: 'turn_off',
+              probabilities: { turn_off: 0.96 },
+              confidence: 0.96,
+            },
+          },
+          usage: { input_tokens: 900 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as unknown as typeof fetch,
+  );
+  return { calls };
+}
+
+/** One light, which is all a device question needs to be answerable. */
+function oneLight(deviceId: string): ReturnType<EngineRegistry['listDevices']> {
+  return [
+    {
+      id: deviceId,
+      name: 'Ceiling light',
+      roomId: null,
+      online: true,
+      endpoints: [
+        {
+          endpointId: 1,
+          deviceKind: 'light',
+          capabilities: ['onOff'],
+          state: { reachable: true, sensors: {}, onOff: true },
+        },
+      ],
+    },
+  ];
+}
 let handle: TestDb | null = null;
 const startedEngines: { stop: () => Promise<void> }[] = [];
 
@@ -78,6 +158,10 @@ describe('the assistant', () => {
      *  is what was said; this is what the model read. */
     sent: string[];
   }>;
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
 
   beforeEach(async () => {
     handle ??= (await openTestDb())!;
@@ -978,6 +1062,81 @@ describe('the assistant', () => {
     expect((await automationChat.transcript(handed.sessionId))[0]?.text).toBe(
       'switch the hall lamp on at sunset',
     );
+  });
+
+  // ── Speculating while somebody is still talking ────────────────────────────
+
+  /**
+   * **What a half-finished sentence worked out is used when it finishes.**
+   *
+   * This is the whole of what the warm buys, and for a while it bought none of
+   * it: `warmForSpeech` read a partial, paid for a full reading of it, kept the
+   * price and threw the answer away — so the finished sentence was read from
+   * scratch and the feature cost money to change nothing. Worse, the decider
+   * single-flights, so a speculation still in the air made the *real* turn's
+   * reading return `null`: speaking to a hub with this switched on was slower
+   * than speaking to one without it.
+   *
+   * One request is the assertion. The command landing is what says the reused
+   * answer was a real one rather than an empty hit.
+   */
+  it('reuses what a half-finished sentence already decided', async () => {
+    const deviceId = randomUUID();
+    await settings.setAiKey('typesafe', 'ts-test-key');
+    const wire = decidesCommand(deviceId);
+    const { assistant } = await assistantFor([{ kind: 'said', text: 'The ceiling light is off.' }], {
+      devices: oneLight(deviceId),
+    });
+    const sessionId = assistant.beginVoice();
+
+    await assistant.warmForSpeech({ sessionId, memberId, partial: 'turn the ceiling light' });
+    expect(wire.calls).toHaveLength(1);
+
+    await assistant.askAloud({
+      sessionId,
+      memberId,
+      question: 'turn the ceiling light off',
+    });
+
+    // The finished sentence is a superset of the partial, so it spent nothing:
+    // still the speculation's one request.
+    expect(wire.calls).toHaveLength(1);
+    // And the light really went off, through the registry, on the reading the
+    // speculation had already made.
+    expect(commanded).toEqual([{ deviceId, endpointId: 1, type: 'power' }]);
+  });
+
+  /**
+   * **And a sentence that turned out to be a different one pays again.**
+   *
+   * `startsWith` is the whole invalidation rule: every way the transcript can
+   * move under a speculation — a new utterance, one retired because the voice
+   * answered it, one dropped by the context bound — produces a string that is
+   * not a superset. A miss simply decides live, which is what the hub did
+   * before any of this existed.
+   *
+   * The entry is consumed either way, which is the second half: a reading of
+   * the first sentence must never be waiting for the second one.
+   */
+  it('decides live when the sentence turned out not to be that one', async () => {
+    const deviceId = randomUUID();
+    await settings.setAiKey('typesafe', 'ts-test-key');
+    const wire = decidesCommand(deviceId);
+    const { assistant } = await assistantFor([{ kind: 'said', text: 'The ceiling light is off.' }], {
+      devices: oneLight(deviceId),
+    });
+    const sessionId = assistant.beginVoice();
+
+    await assistant.warmForSpeech({ sessionId, memberId, partial: 'what is the hall doing' });
+    await assistant.askAloud({
+      sessionId,
+      memberId,
+      question: 'turn the ceiling light off',
+    });
+
+    expect(wire.calls).toHaveLength(2);
+    expect(wire.calls[1]).toContain('turn the ceiling light off');
+    expect(commanded).toEqual([{ deviceId, endpointId: 1, type: 'power' }]);
   });
 
   it('refuses a handover the member’s role cannot make, in a sentence', async () => {

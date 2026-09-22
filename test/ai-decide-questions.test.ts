@@ -135,13 +135,18 @@ const choice = (value: string, confidence: number) => ({
 const noul = (value: number) => ({ type: 'noul' as const, noul: value });
 
 /** A decider that answers exactly what a case needs, and records the ask. */
-function decider(answers: Record<string, unknown>): Decider & { asked: Questions[] } {
+function decider(
+  answers: Record<string, unknown>,
+): Decider & { asked: Questions[]; states: unknown[] } {
   const asked: Questions[] = [];
+  const states: unknown[] = [];
   return {
     modelId: DECISION_MODEL,
     asked,
+    states,
     decide: async (input) => {
       asked.push(input.questions);
+      states.push(input.state);
       return {
         answers: answers as never,
         costUsd: 0.00002,
@@ -278,6 +283,52 @@ describe('reading a sentence against a home', () => {
     });
     expect(result.kind).toBe('none');
     expect(stub.asked).toHaveLength(0);
+  });
+
+  it('stands down when the room and the device disagree', async () => {
+    // The two are answered blind and cannot see each other, so when both are
+    // confident and they point different ways, one is wrong and nothing can
+    // tell which. This is the shape a catalog gets wrong in a home with three
+    // lights called Ceiling light.
+    const result = await decideHomeCommand({
+      decider: decider({ ...CONFIDENT_OFF, room: choice('hallway', 0.96) }),
+      home: {
+        rooms: [...HOME.rooms, { id: 'hallway', name: 'Hallway' }],
+        devices: HOME.devices,
+      },
+      delegates: DELEGATES,
+      said: 'turn the hallway light off',
+    });
+    expect(result.kind).toBe('none');
+  });
+
+  it('acts when the room abstains rather than objecting', async () => {
+    // No room named, or not confident about one, is not disagreement — and a
+    // device in no room cannot contradict anything.
+    for (const room of [choice(NONE_OF_THESE, 0.99), choice('hallway', 0.4)]) {
+      const result = await decideHomeCommand({
+        decider: decider({ ...CONFIDENT_OFF, room }),
+        home: HOME,
+        delegates: DELEGATES,
+        said: 'switch the kitchen light off',
+      });
+      expect(result.kind).toBe('command');
+    }
+  });
+
+  it('sends the sentence as the state and nothing else', async () => {
+    // Accuracy falls as the state fills with content unrelated to the
+    // question, and the rooms and devices are already the criteria of their
+    // own questions — putting them in the state too is a list every question
+    // pays for and only two can use.
+    const stub = decider(CONFIDENT_OFF);
+    await decideHomeCommand({
+      decider: stub,
+      home: HOME,
+      delegates: DELEGATES,
+      said: 'switch the kitchen light off',
+    });
+    expect(stub.states[0]).toEqual({ said: 'switch the kitchen light off' });
   });
 
   it('routes a confident, self-contained automation request', async () => {

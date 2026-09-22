@@ -1162,8 +1162,44 @@ describe.skipIf(!handle)('hub API', () => {
     expect(wrongKey.statusCode).toBe(400);
     expect(wrongKey.json()).toMatchObject({
       error: 'invalid_body',
-      detail: expect.stringContaining('TypeSafe key'),
+      detail: expect.stringContaining('Anthropic or OpenAI key'),
     });
+
+    // **And that is the only prefix it may judge.** This key can come from
+    // TypeSafe or from a gateway reselling the same model, and those share no
+    // prefix — so a key that is merely unfamiliar has to be accepted.
+    const gatewayKey = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { typesafeApiKey: 'vck_gateway_0123456789' },
+    });
+    expect(gatewayKey.statusCode).toBe(200);
+
+    // The route is a closed vocabulary the hub owns, offered as a table an app
+    // renders — and it is never a model picker: both serve the same model.
+    const routed = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { decisionRoute: 'vercel' },
+    });
+    expect(routed.json()).toMatchObject({
+      decision: { route: 'vercel', model: 'typesafe-ai/jev' },
+    });
+    expect(routed.json().decision.routes).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: 'typesafe' })]),
+    );
+
+    // An address the hub does not serve is a 400 rather than a silent
+    // fallback: every request would otherwise go somewhere that is not there.
+    const nowhere = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { decisionRoute: 'somewhere-else' },
+    });
+    expect(nowhere.statusCode).toBe(400);
 
     // Pausing it is not forgetting it — two requests with very different
     // costs to undo.

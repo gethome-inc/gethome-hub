@@ -148,6 +148,8 @@ export async function decideHomeCommand(input: {
   delegates: readonly { key: string; decisionCriterion: string }[];
   said: string;
   timeoutMs?: number;
+  /** `speculative` gives way to a live call — see `Decider.decide`. */
+  priority?: 'live' | 'speculative';
 }): Promise<HomeDecision> {
   const { home, said } = input;
   // A home past the bound is one this stands down on rather than guesses in:
@@ -192,11 +194,17 @@ export async function decideHomeCommand(input: {
   } as const;
 
   const result = await input.decider.decide({
-    // Named fields rather than one blob: the questions refer to "the person"
-    // and to this home, and a structured state is what lets them.
-    state: { said, home: 'the rooms and devices are the options in each question' },
+    // **Only what a question can use.** A named field rather than a bare
+    // string so the questions can refer to `said` by name — and nothing
+    // beside it, because the rooms and devices *are* the criteria of their own
+    // questions and repeating them here would be state that answers nothing
+    // while every question pays for it. Accuracy falls as the state fills with
+    // content unrelated to the question, which is the whole reason this is one
+    // field long.
+    state: { said },
     questions,
     timeoutMs: input.timeoutMs ?? DECISION_TIMEOUT_MS,
+    ...(input.priority !== undefined ? { priority: input.priority } : {}),
   });
   if (result === null) return { kind: 'none', costUsd: 0, effort: undefined };
   const costUsd = result.costUsd;
@@ -272,6 +280,26 @@ export async function decideHomeCommand(input: {
   if (chosen.confidence < ACT_CONFIDENCE_MIN) return { kind: 'none', costUsd, effort };
   const device = home.devices.find((entry) => entry.id === chosen.choice);
   if (device === undefined) return { kind: 'none', costUsd, effort };
+
+  /**
+   * The room has to agree, and this is the only thing that reads it.
+   *
+   * Asked blind beside the device question — the two cannot see each other —
+   * so when both are confident and they *disagree*, one of them is wrong and
+   * there is no way to tell which. Standing down is the cheap answer: this is
+   * the shape a catalog gets wrong in a home with three lights called Ceiling
+   * light, where "turn the kitchen light off" resolves to the bedroom by a
+   * name that matched better than the room did.
+   *
+   * A device in no room, an unconfident room answer, or `none_of_these` all
+   * abstain rather than object — none of them is disagreement.
+   */
+  const room = answers.room;
+  const roomIsClaimed =
+    room !== undefined && room.choice !== NONE_OF_THESE && room.confidence >= ACT_CONFIDENCE_MIN;
+  if (roomIsClaimed && device.roomId !== null && device.roomId !== room.choice) {
+    return { kind: 'none', costUsd, effort };
+  }
 
   // The endpoint is picked by capability, and the branch with it.
   for (const endpoint of device.endpoints) {

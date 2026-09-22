@@ -26,9 +26,13 @@
  *    does not transfer between models, so a threshold is only meaningful next
  *    to the `DECISION_MODEL` it was set against. Each one says whether it was
  *    *measured* or *assumed* — today every one is assumed, and says so.
- * 4. **The state is small on purpose.** Accuracy falls as the state fills with
- *    content unrelated to the question, so what goes in is the sentence and
- *    the catalog it has to be resolved against, and nothing else.
+ * 4. **The state is one field, on purpose.** Accuracy falls as the state fills
+ *    with content unrelated to the question, so the state is `said` — what the
+ *    person actually said — and nothing else. The rooms and the devices are
+ *    not in it: they are the *criteria* of their own questions, which is where
+ *    an answer space belongs, and putting them in the state as well would make
+ *    every question pay for a list only two of them can use. Questions name
+ *    the field with a backtick, the way the docs reference a nested path.
  *
  * Nothing here decides whether something is *allowed*. An answer picks a road;
  * every road ends at the guards it always did. `docs/jev.md` is canonical.
@@ -77,6 +81,16 @@ export const SPECULATIONS_PER_UTTERANCE = 4;
 export const SPECULATION_MIN_CHARS = 12;
 
 /**
+ * How long a reading of a partial sentence stays worth reusing.
+ *
+ * A speculation is only reused when the finished sentence *extends* the one it
+ * ran on, which is already the strong half of the check. This is the weak half
+ * and exists for the case that rule cannot see: a sentence left hanging for a
+ * minute while somebody is interrupted, whose home has moved on underneath it.
+ */
+export const SPECULATION_REUSE_MS = 30_000;
+
+/**
  * Confidence a `choice` must reach before the hub acts on it.
  *
  * **Assumed, not measured.** 0.85 is where one published integration landed
@@ -120,7 +134,8 @@ export const POSITIVE_NOUL_MIN = 0.85;
 export const INTENT_QUESTION: ChoiceQuestion = {
   type: 'choice',
   instructions:
-    'The person is talking to the assistant in their smart home. What are they asking for?',
+    'Somebody is talking to the assistant in their own smart home, and `said` is what ' +
+    'they said. What are they asking for?',
   criteria: {
     device_command: 'They want something in the home switched, opened, closed, locked or run now.',
     home_question: 'They are asking what the home or a device is doing, or for a reading from it.',
@@ -142,7 +157,7 @@ export const INTENT_QUESTION: ChoiceQuestion = {
 export const MULTIPLE_QUESTION: NoulQuestion = {
   type: 'noul',
   instructions:
-    'The person asked for more than one separate thing to be done, rather than one thing.',
+    '`said` asks for more than one separate thing to be done, rather than one thing.',
 };
 
 /**
@@ -157,7 +172,8 @@ export const MULTIPLE_QUESTION: NoulQuestion = {
 export const NEEDS_VALUE_QUESTION: NoulQuestion = {
   type: 'noul',
   instructions:
-    'The request names a particular amount: a brightness, a percentage, a temperature, a colour, a duration or a time.',
+    '`said` names a particular amount: a brightness, a percentage, a temperature, ' +
+    'a colour, a duration or a time.',
 };
 
 /**
@@ -169,7 +185,7 @@ export const NEEDS_VALUE_QUESTION: NoulQuestion = {
  */
 export const SCOPE_QUESTION: ChoiceQuestion = {
   type: 'choice',
-  instructions: 'How much of the home is the request about?',
+  instructions: 'How much of the home is `said` about?',
   criteria: {
     specific_device: 'One particular device.',
     room: 'Everything of one sort in one room, or the whole room.',
@@ -253,7 +269,7 @@ export function roomQuestion(
   criteria[NONE_OF_THESE] = 'No particular room, or a room that is not listed.';
   return {
     type: 'choice',
-    instructions: 'Which room in this home is the person talking about?',
+    instructions: 'Which room in this home is `said` about?',
     criteria,
   };
 }
@@ -272,7 +288,8 @@ export function deviceQuestion(
   return {
     type: 'choice',
     instructions:
-      'Which one device in this home should the request be carried out on? Go by the name the person used and the room they mentioned.',
+      'Which one device in this home should `said` be carried out on? Go by the name ' +
+      'they used and the room they mentioned.',
     criteria,
   };
 }
@@ -308,7 +325,7 @@ export function routeQuestion(
   return {
     type: 'choice',
     instructions:
-      'The assistant can answer a request itself or hand it to a specialist. Which should happen with this one?',
+      'The assistant can answer `said` itself or hand it to a specialist. Which should happen?',
     criteria,
   };
 }
@@ -329,7 +346,7 @@ export function routeQuestion(
  */
 export const EFFORT_QUESTION: ScoreQuestion = {
   type: 'score',
-  instructions: 'How much work does answering this properly take?',
+  instructions: 'How much work does answering `said` properly take?',
   criteria: [
     'A single plain fact about one device, or one thing switched on or off.',
     'A few devices or rooms at once, or a question needing one or two things looked up.',
@@ -356,5 +373,6 @@ export const EFFORT_CONFIDENCE_MIN = 0.8;
 export const SELF_CONTAINED_QUESTION: NoulQuestion = {
   type: 'noul',
   instructions:
-    'This sentence says enough on its own for somebody who has not read the rest of the conversation to carry it out.',
+    '`said` says enough on its own for somebody who has not read the rest of the ' +
+    'conversation to carry it out.',
 };

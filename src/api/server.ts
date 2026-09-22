@@ -15,6 +15,7 @@ import type { PairingService } from '../core/pairing.js';
 import type { ActivityService } from '../core/activity.js';
 import type { HomeService } from '../core/home.js';
 import type { FavoritesService } from '../core/favorites.js';
+import { DECISION_ROUTES, DECISION_ROUTE_IDS } from '../ai/decide/routes.js';
 import {
   AI_CREDENTIAL_SLOTS,
   AI_PROVIDERS,
@@ -2127,7 +2128,20 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       // that has no list to pick from and cannot answer a chat — which is the
       // confusion the two vocabularies are kept apart to avoid. It rides
       // `...ai` above; named here so this stays where somebody would look.
-      decision: ai.decision,
+      //
+      // `routes` is the table, rendered by an app rather than shipped in one —
+      // the `GET /permissions` rule the model lists already follow, so a
+      // gateway added later needs no app release. It is **not** a model
+      // picker: every route serves the same model, and `keyHint` is there so
+      // the sheet that asks for a key can say where to get *that* one.
+      decision: {
+        ...ai.decision,
+        routes: DECISION_ROUTES.map((route) => ({
+          id: route.id,
+          label: route.label,
+          keyHint: route.keyHint,
+        })),
+      },
       mapping: { provider: ai.provider, choosable: ai.mappingChoosable },
       // What answers in the assistant, and what it could answer on. Its own
       // block rather than more fields on `providers`, because it is a
@@ -2177,9 +2191,15 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       .refine((key) => (provider === 'openai' ? !key.trim().startsWith('sk-ant-') : true), {
         message: 'that looks like an Anthropic key — it belongs in the Anthropic field',
       })
-      // The decision model's field. Its key looks like neither of the other
-      // two, and pasting one of those in here is the ordinary mistake — the
-      // same argument the two arms above make, pointed at the new box.
+      // The decision model's field. Pasting one of the other two in here is
+      // the ordinary mistake — the same argument the two arms above make,
+      // pointed at the new box.
+      //
+      // **And that is all it may check.** This key can come from TypeSafe or
+      // from a gateway that resells the same model, and those do not share a
+      // prefix — so asserting what a decision key *starts* with would refuse a
+      // perfectly good gateway key with a sentence about the wrong vendor.
+      // Only the route-independent mistake is caught.
       .refine(
         (key) =>
           provider === 'typesafe'
@@ -2187,7 +2207,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
             : true,
         {
           message:
-            'that is an Anthropic or OpenAI key; this field wants a TypeSafe key, from the TypeSafe console',
+            'that is an Anthropic or OpenAI key; this field wants the key for your decision route',
         },
       )
       .optional();
@@ -2214,6 +2234,15 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     openaiApiKey: apiKeyField('openai'),
     /** The fast decision model's key. It has no model beside it — see `docs/jev.md`. */
     typesafeApiKey: apiKeyField('typesafe'),
+    /**
+     * Where decisions are bought.
+     *
+     * Validated against the offered list, unlike a *model* id — this is a
+     * closed vocabulary the hub owns and an unknown one would send every
+     * request to an address that does not exist, which is worth a 400 rather
+     * than a silent fallback.
+     */
+    decisionRoute: z.enum(DECISION_ROUTE_IDS).optional(),
     /**
      * **Generative providers only, deliberately.**
      *
@@ -2320,6 +2349,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (body.enabled !== undefined) await deps.settings.setAiEnabled(body.enabled);
     if (body.decisionsEnabled !== undefined) {
       await deps.settings.setDecisionsEnabled(body.decisionsEnabled);
+    }
+    if (body.decisionRoute !== undefined) {
+      await deps.settings.setDecisionRoute(body.decisionRoute);
     }
     if (body.recordExchanges !== undefined) {
       await deps.settings.setAiRecordExchanges(body.recordExchanges);

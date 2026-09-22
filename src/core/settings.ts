@@ -12,7 +12,7 @@ import { effectiveAgentModel, type UsableProviders } from '../ai/models.js';
 // API answers what will *run*. It lives in `decide/decider.ts` — the seam,
 // which imports nothing — rather than in the vendor client, so reporting it
 // never loads the client a hub without a Jev key has no use for.
-import { DECISION_MODEL } from '../ai/decide/decider.js';
+import { decisionRouteOf } from '../ai/decide/routes.js';
 
 /**
  * The providers the hub can hold a credential for.
@@ -133,7 +133,21 @@ export interface AiAgentSettings {
 export interface AiDecisionSettings {
   /** Whether a key is configured — the secret itself is never exposed. */
   hasKey: boolean;
-  /** Pinned in the build. Reported so an app can say what answered. */
+  /**
+   * Where the home buys its decisions — `DECISION_ROUTES`' own id.
+   *
+   * **Not a model choice.** Every route serves the same model; this says which
+   * address and which key, because a home may already hold a gateway key and
+   * ought not to open a second account to reach a model it can already buy.
+   */
+  route: string;
+  /**
+   * What the chosen route calls the model, which is the same model either way.
+   *
+   * Pinned per route rather than settable: the thresholds in
+   * `src/ai/decide/questions.ts` are calibrated against this one model and
+   * calibration does not transfer. Reported so an app can say what answered.
+   */
   model: string;
   /**
    * The owner's pause switch, absent meaning on.
@@ -323,6 +337,7 @@ export class SettingsService {
     const chosen = await this.get<AiProvider>('ai_mapping_provider');
     const decisionKey = await this.get<EncryptedValue>(DECISION_KEY_ROW);
     const decisionsEnabled = await this.get<boolean>('ai_decisions_enabled');
+    const decisionRoute = decisionRouteOf(await this.get<string>('ai_decision_route'));
     /**
      * Which providers an *agent* could authenticate as.
      *
@@ -350,7 +365,8 @@ export class SettingsService {
       openai,
       decision: {
         hasKey: decisionKey !== null,
-        model: DECISION_MODEL,
+        route: decisionRoute.id,
+        model: decisionRoute.modelId,
         enabled: decisionsEnabled !== false,
       },
       // Both *generative* keys: which model reads a device's exposes tree is
@@ -397,6 +413,11 @@ export class SettingsService {
    */
   async setDecisionsEnabled(enabled: boolean): Promise<void> {
     await this.set('ai_decisions_enabled', enabled);
+  }
+
+  /** Where decisions are bought. See `AiDecisionSettings.route`. */
+  async setDecisionRoute(route: string): Promise<void> {
+    await this.set('ai_decision_route', route);
   }
 
   async setAiEnabled(enabled: boolean): Promise<void> {
@@ -480,7 +501,10 @@ export class SettingsService {
   async clearAiCredential(slot: AiCredentialSlot): Promise<void> {
     if (slot === 'typesafe') {
       // No model row and no legacy marker: the decision model has neither.
+      // The route goes with the key: it names where *that* key is from, and
+      // leaving it behind would point the next key at the wrong address.
       await this.unset(DECISION_KEY_ROW);
+      await this.unset('ai_decision_route');
       return;
     }
     if (slot === 'anthropic') {

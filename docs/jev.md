@@ -89,13 +89,41 @@ only where a *credential row* is meant. Three things must never change with it:
 
 ---
 
+## What a home switches, and what it does not
+
+There is **no "Jev engine"**, and the settings say so. A home picks its LLM
+exactly as it did before — provider and model, per agent — and runs the
+ordinary loop on it. Jev is a step in *front* of that loop, and everything it
+decides is something the loop would have done anyway.
+
+So `GET`/`PATCH /settings/ai` carries three fields beside the existing ones,
+under `decision`:
+
+| Field | What it is |
+|---|---|
+| `hasKey` | whether a decision credential is stored (`typesafeApiKey` writes it, `clear: "typesafe"` forgets it) |
+| `enabled` | the owner's pause switch — `decisionsEnabled` writes it, and it defaults to **on** |
+| `route` / `routes` | where the key was bought, and the table of places it could be — `decisionRoute` writes it |
+
+**`enabled` is deliberately not the credential**, the argument `ai_enabled`
+already made one field up: "stop spending my money on this for now" and "forget
+my key" have very different costs to undo. Off, every plain request still
+happens; it just takes a model round, which is what the app's own copy says.
+
+`model` is reported and never settable — see *Calibration* below for why that
+is not a gap. Clearing the credential also unsets the stored route, because a
+route with no key is a preference about nothing.
+
+---
+
 ## The architecture
 
 ```
 src/ai/decide/
   decider.ts      the seam — no SDK, no vendor. Types, and the pinned model id.
   typesafe.ts     the only file that names TypeSafe's API. Plain fetch. Throws.
-  lazy.ts         the Decider a caller holds: fail-open, single-flight, breaker.
+  lazy.ts         the Decider a caller holds: fail-open, priority, breaker.
+  routes.ts       where the same model can be bought. Not a model list.
   questions.ts    every question and every threshold. The wording is the contract.
   home-command.ts reading one sentence against one home.
 ```
@@ -115,6 +143,20 @@ site instead of making fail-open a property of the type.
 `DecisionResult.answers` is **optional per question**, on purpose: a 200 that
 answered a subset is a real shape, and `answers.route!.choice` is how that
 becomes `undefined` in somebody's kitchen.
+
+### One at a time, and the asymmetry is the point
+
+Concurrent requests queue at the vendor, so `lazy.ts` runs one at a time. Which
+one gives way is `decide`'s `priority`, and it is **not symmetric**:
+
+- a **speculative** call is dropped outright when anything is in flight;
+- a **live** call *aborts* an in-flight speculative one and proceeds.
+
+Without the second half the feature starves the thing it exists to help: a
+speculation still in the air made the real turn's `decide` return `null`, so
+speaking to a hub with this switched on was **slower** than speaking to one
+without it. An aborted speculation arms nothing — nobody was waiting for it,
+and a breaker armed by our own cancellation would silence the next real call.
 
 ### No retry, and why
 
@@ -161,6 +203,48 @@ Two things follow that are easy to get wrong:
   would silently invalidate every number in `questions.ts`. This is the
   `src/portraits/CLAUDE.md` pinned-image-model argument.
 
+### A route is not a model
+
+The same model is sold in more than one place, so `routes.ts` is a table of
+**addresses**, not of models:
+
+| id | Base URL | Model id on the wire |
+|---|---|---|
+| `typesafe` | `https://api.typesafe.ai` | `jev-1.13.0` |
+| `vercel` | `https://ai-gateway.vercel.sh/typesafe` | `typesafe-ai/jev` |
+
+Vercel's AI Gateway serves a **TypeSafe-compatible** endpoint, so the body and
+the native `noul`/`choice`/`score` answers are unchanged — only the host, the
+key and the string that names the model differ. Deliberately **not** the AI
+SDK's normalised `/v1/evaluate`, which renames `noul` to `probability` and
+moves `confidence` into `providerMetadata`: reading that shape would mean a
+second parser for the one file nobody can check by running the hub.
+
+Everything above about pinning still holds, and this is why the distinction
+has to be said out loud rather than left to be inferred from a picker: a route
+changes **where the request goes and whose key pays**, and never what answers.
+If a route ever served a different model, the thresholds below would silently
+stop meaning what they say — so a route that did that would be a different
+feature, not a new row in this table.
+
+The hub owns the vocabulary (`GET /settings/ai` answers `decision.routes`), the
+`GET /permissions` rule the model lists already follow, so a gateway added
+later needs no app release. Two consequences in code: `typesafe.ts` takes the
+route rather than reading a constant, and the key-prefix check keeps only the
+route-independent guard — it refuses an `sk-ant-`/`sk-proj-` key in the wrong
+box and asserts nothing about how a decision key *starts*, because a gateway's
+does not look like TypeSafe's.
+
+**And one diagnostic, because the failure mode here is silence.** `typesafe.ts`
+drops an answer it cannot place — a `choice` with no `confidence`, a score off
+the rubric — which is right, and would mean that a gateway omitting a field
+left *every* fast path quietly never firing with nothing in the log. A response
+whose answers are dropped is logged at `warn` with the route, the model and how
+many were asked against how many were placed. That is the difference between
+"measure it" and "find out".
+
+---
+
 **Every threshold in this repository is assumed, not measured**, and
 `questions.ts` says so beside each one. They are the first thing to re-sweep
 against a real home.
@@ -202,7 +286,7 @@ spoken one. Modelled on TypeSafe's own smart-home demo.
 | `multiple` | noul | more than one thing asked for |
 | `needsValue` | noul | the sentence names a quantity |
 | `scope` | choice | one device · a room · the whole home |
-| `room` | choice | the home's own rooms, by id |
+| `room` | choice | the home's own rooms, by id — a **cross-check**, see below |
 | `device` | choice | the home's own devices, by id |
 | `switchAction` `coveringAction` `lockAction` `playbackAction` | choice | **speculative branches**, each stating its own premise |
 | `route` | choice | which agent should take it, built from the delegate registry |
@@ -214,7 +298,16 @@ applies — so each has to say "suppose this request is about…". **What settle
 which one is read is the resolved device's capabilities**, not the sentence: a
 lock is never "turned off", whatever it sounded like.
 
-### The three consumers
+`room` is read as a **cross-check** rather than as a way of finding anything.
+It and `device` are answered blind beside each other, so when both are
+confident and they *disagree*, one of them is wrong and there is no way to tell
+which — and standing down costs one comparison. This is the shape a catalog
+gets wrong: in a home with three lights called *Ceiling light*, "turn the
+kitchen light off" resolves to the bedroom by a name that matched better than
+the room did. A device in no room, an unconfident answer and `none_of_these`
+all abstain rather than object; none of those is disagreement.
+
+### The three that fire on a finished sentence
 
 | Consumer | Fires when | Falls back to |
 |---|---|---|
@@ -222,8 +315,26 @@ lock is never "turned off", whatever it sounded like.
 | **Delegate route** (typed only) | `route` is not `here`, clears the bar, and `selfContained` clears `POSITIVE_NOUL_MIN` | the ordinary round, where the model calls `delegate` itself |
 | **Effort** | the score says the work is plainly small | the transport's own `medium` |
 
-And one non-consumer: **voice speculation** warms the session, the transport
-and the state digest while somebody is still talking. It buys no answer.
+### And a fourth, on one still being said
+
+While somebody is talking, `warmForSpeech` reads the partial sentence and
+**keeps what it decided**. When the finished sentence arrives, the real turn
+spends no request at all and acts on the reading that is already there.
+
+**`startsWith` is the whole invalidation rule, and it is enough.**
+`VoiceDelegation.question()` joins the utterances it has kept, so somebody who
+carried on talking produces a *superset* of what was speculated on — a hit.
+Every way the transcript can have moved underneath instead produces a string
+that is not a superset: a new utterance opened, an earlier one retired because
+the voice answered it, one dropped by the context bound. Each of those is a
+miss, and a miss simply decides live, which is what the hub did before any of
+this existed. The entry is consumed either way and expires after
+`SPECULATION_REUSE_MS`, so a reading of one sentence can never answer the next.
+
+The warm also opens the conversation, builds the transport and gathers the
+state digest, which is where most of the wall-clock saving is. That part is
+worth doing on its own — but it is **not** the justification for spending a
+decision on a partial sentence. Keeping the answer is.
 
 ---
 
@@ -240,7 +351,10 @@ and the state digest while somebody is still talking. It buys no answer.
 3. **A speculative turn may never write.** `VoiceDelegationHost.warmForSpeech`
    is narrowed so it *cannot* reach the home — the narrowing is the mechanism,
    not the comment. "Turn the bedroom light on — no, off" is an ordinary thing
-   to say.
+   to say. Reusing the answer does not weaken this: what is reused is a
+   *reading*, and the write still happens on the real turn, after
+   `session.delegation.created` says the sentence has finished, through
+   `control` and past every guard.
 4. **Confidence-gated, with a documented fallback.** Without a threshold and a
    road for below it, the probability is decoration.
 5. **One device, for now.** `room` and `whole_home` fall through. The blast

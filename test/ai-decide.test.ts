@@ -263,6 +263,7 @@ describe('the wrapper, which is what makes an outage invisible', () => {
   const settingsWith = (input: {
     hasKey?: boolean;
     enabled?: boolean;
+    route?: string;
     secret?: string | null;
   }): SettingsService =>
     ({
@@ -270,6 +271,7 @@ describe('the wrapper, which is what makes an outage invisible', () => {
         decision: {
           hasKey: input.hasKey ?? true,
           enabled: input.enabled ?? true,
+          route: input.route ?? 'typesafe',
           model: DECISION_MODEL,
         },
       }),
@@ -319,7 +321,7 @@ describe('the wrapper, which is what makes an outage invisible', () => {
     let secret = 'old-key';
     const settings = {
       getAiSettings: async () => ({
-        decision: { hasKey: true, enabled: true, model: DECISION_MODEL },
+        decision: { hasKey: true, enabled: true, route: 'typesafe', model: DECISION_MODEL },
       }),
       aiKey: async () => secret,
     } as unknown as SettingsService;
@@ -339,6 +341,23 @@ describe('the wrapper, which is what makes an outage invisible', () => {
     const result = await decider.decide({ state: 's', questions: one, timeoutMs: 500 });
     expect(calls).toHaveLength(4);
     expect(result?.answers.urgent?.noul).toBe(0.91);
+  });
+
+  it('sends the route\'s own address and model id', async () => {
+    // A route is not a model: both serve the same one, and only the address
+    // and the string that address expects differ.
+    const { calls } = stub(() => ok(answered));
+    const decider = lazyDecider({ settings: settingsWith({ route: 'vercel' }), log });
+    await decider.decide({ state: 's', questions: one, timeoutMs: 500 });
+    expect(calls[0]?.url).toBe('https://ai-gateway.vercel.sh/typesafe/v1/systemone');
+    expect(calls[0]?.body['model']).toBe('typesafe-ai/jev');
+  });
+
+  it('falls back rather than refusing when a stored route is no longer served', async () => {
+    const { calls } = stub(() => ok(answered));
+    const decider = lazyDecider({ settings: settingsWith({ route: 'retired-gateway' }), log });
+    expect(await decider.decide({ state: 's', questions: one, timeoutMs: 500 })).not.toBeNull();
+    expect(calls[0]?.url).toBe('https://api.typesafe.ai/v1/systemone');
   });
 
   it('drops a second concurrent call rather than queueing it', async () => {
@@ -364,5 +383,83 @@ describe('the wrapper, which is what makes an outage invisible', () => {
     release?.();
     expect((await first)?.answers.urgent?.noul).toBe(0.91);
     expect(calls).toHaveLength(1);
+  });
+
+  /**
+   * A guess must never take the fast path away from the real thing.
+   *
+   * This is the rule the first version got wrong: one-at-a-time treated a
+   * speculation and a live turn alike, so a speculation in flight answered
+   * `null` to the very command it had been started for.
+   */
+  it('lets a live call overtake a speculation, and never the other way round', async () => {
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started = 0;
+    vi.stubGlobal('fetch', (async (_url: unknown, init?: RequestInit) => {
+      started += 1;
+      // The first call waits until it is either aborted or let go.
+      if (started === 1) {
+        await Promise.race([
+          held,
+          new Promise((_, reject) => {
+            (init?.signal as AbortSignal | undefined)?.addEventListener('abort', () =>
+              reject(new Error('aborted')),
+            );
+          }),
+        ]);
+      }
+      return ok(answered);
+    }) as unknown as typeof fetch);
+
+    const decider = lazyDecider({ settings: settingsWith({}), log });
+    const speculation = decider.decide({
+      state: 's',
+      questions: one,
+      timeoutMs: 500,
+      priority: 'speculative',
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // The live call goes through rather than being turned away.
+    const live = await decider.decide({ state: 's', questions: one, timeoutMs: 500 });
+    expect(live?.answers.urgent?.noul).toBe(0.91);
+    // And the speculation it overtook answers nothing, quietly.
+    expect(await speculation).toBeNull();
+    release?.();
+  });
+
+  it('does not arm the breaker over a speculation that was overtaken', async () => {
+    // Being overtaken is not a failure of the key, and counting it would open
+    // the breaker against a perfectly good one during a talkative minute.
+    let calls = 0;
+    vi.stubGlobal('fetch', (async (_url: unknown, init?: RequestInit) => {
+      calls += 1;
+      if (calls === 1) {
+        await new Promise((_, reject) => {
+          (init?.signal as AbortSignal | undefined)?.addEventListener('abort', () =>
+            reject(new Error('aborted')),
+          );
+        });
+      }
+      return ok(answered);
+    }) as unknown as typeof fetch);
+
+    const decider = lazyDecider({ settings: settingsWith({}), log });
+    const speculation = decider.decide({
+      state: 's',
+      questions: one,
+      timeoutMs: 500,
+      priority: 'speculative',
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    await decider.decide({ state: 's', questions: one, timeoutMs: 500 });
+    expect(await speculation).toBeNull();
+
+    // Still answering: nothing was armed.
+    const after = await decider.decide({ state: 's', questions: one, timeoutMs: 500 });
+    expect(after).not.toBeNull();
   });
 });

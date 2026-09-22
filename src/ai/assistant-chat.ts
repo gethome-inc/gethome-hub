@@ -12,8 +12,8 @@ import type { AssistantToolContext, DelegateOutcome } from './assistant-tools.js
 import { delegateAgents, type DelegateAgent } from './agents/registry.js';
 import type { Decider } from './decide/decider.js';
 import { lazyDecider } from './decide/lazy.js';
-import { decideHomeCommand } from './decide/home-command.js';
-import { SPECULATION_TIMEOUT_MS } from './decide/questions.js';
+import { decideHomeCommand, type HomeDecision } from './decide/home-command.js';
+import { SPECULATION_REUSE_MS, SPECULATION_TIMEOUT_MS } from './decide/questions.js';
 import { LIVE_MODEL, LIVE_USD_PER_MINUTE, SIDEBAND_MAX_SECONDS } from './voice/live-wire.js';
 import type { AutomationChat } from './automation-chat.js';
 import {
@@ -163,6 +163,20 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
    */
   private readonly actedThisTurn = new Map<string, Set<string>>();
 
+  /**
+   * What a sentence still being said has already been read as.
+   *
+   * **This is what makes speculating worth anything.** Without it the warm
+   * paid for a full reading of every partial and threw all of them away, so
+   * the finished sentence was read from scratch — the feature costing money to
+   * change nothing. The answer is kept here and the real turn uses it when the
+   * sentence it ran on turns out to have been the beginning of this one.
+   */
+  private readonly speculated = new Map<
+    string,
+    { partial: string; decision: HomeDecision; at: number }
+  >();
+
   constructor(private readonly options: AssistantChatOptions) {
     super(options);
     this.delegates = delegateAgents({ automationChat: options.automationChat });
@@ -177,6 +191,33 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
   }
 
   // ── The handoff ────────────────────────────────────────────────────────────
+
+  /**
+   * The reading a partial sentence already produced, when it is still about
+   * this one.
+   *
+   * **`startsWith` is the whole invalidation rule, and it is enough.**
+   * `VoiceDelegation.question()` joins the utterances it has kept, so somebody
+   * who carried on talking produces a *superset* of what was speculated on —
+   * which is a hit. Every way the sentence can have changed underneath instead
+   * produces a string that is not a superset: a new utterance opened, an
+   * earlier one retired because the voice answered it, one dropped by the
+   * context bound. Each of those is a miss, and a miss simply decides live.
+   *
+   * Consumed once. A second turn must not be answered from a reading of the
+   * first, however well the prefixes happen to line up.
+   */
+  private async reuseSpeculation(
+    sessionId: string,
+    text: string,
+  ): Promise<HomeDecision | undefined> {
+    const cached = this.speculated.get(sessionId);
+    if (cached === undefined) return undefined;
+    this.speculated.delete(sessionId);
+    if (!text.startsWith(cached.partial)) return undefined;
+    if (Date.now() - cached.at > SPECULATION_REUSE_MS) return undefined;
+    return cached.decision;
+  }
 
   /**
    * Hand a job over, and answer before it has done any of it.
@@ -705,19 +746,33 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
     });
     if (digest !== undefined) session.priming = digest;
 
-    // And a reading of the partial, which warms nothing by itself — what it
-    // buys is the first import of the decision client, so the real sentence
-    // does not pay for it. Its cost is banked on this conversation's next row
-    // like any other.
+    /**
+     * And the reading itself, **kept** for the turn that follows.
+     *
+     * `speculative` so it gives way to a live call rather than taking the
+     * fast path away from it, and the answer is stored rather than discarded —
+     * if the person finishes the sentence this began, the real turn spends no
+     * request at all and acts on what is already here.
+     */
     const decision = await decideHomeCommand({
       decider: this.decider,
       home: this.options.engine.homeView(),
       delegates: this.delegates,
       said: input.partial,
       timeoutMs: SPECULATION_TIMEOUT_MS,
+      priority: 'speculative',
     });
     session.decisionUsd +=
       decision.kind === 'command' ? decision.command.costUsd : decision.costUsd;
+    // A dropped or overtaken speculation answers `none` at no cost; keeping
+    // that would hand the real turn a "nothing to do" it never earned.
+    if (decision.kind !== 'none' || decision.costUsd > 0) {
+      this.speculated.set(input.sessionId, {
+        partial: input.partial,
+        decision,
+        at: Date.now(),
+      });
+    }
   }
 
   async askAloud(input: {
@@ -929,12 +984,13 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
     this.actedThisTurn.set(session.id, new Set());
     if (how === 'answer') return undefined;
 
-    const decision = await decideHomeCommand({
-      decider: this.decider,
-      home: this.options.engine.homeView(),
-      delegates: this.delegates,
-      said: text,
-    });
+    const decision = (await this.reuseSpeculation(session.id, text)) ??
+      (await decideHomeCommand({
+        decider: this.decider,
+        home: this.options.engine.homeView(),
+        delegates: this.delegates,
+        said: text,
+      }));
     // Paid for whatever it concluded, including nothing. Banked on this turn's
     // own row rather than on a row of its own — see `decisionUsd`.
     session.decisionUsd +=

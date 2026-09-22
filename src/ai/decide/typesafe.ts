@@ -14,14 +14,11 @@
  */
 import { classifyApiError } from '../errors.js';
 import type { Logger } from '../../logging.js';
-import {
-  DECISION_MODEL,
-  type DecisionQuestion,
-  type DecisionResult,
-  type Questions,
-} from './decider.js';
+import type { DecisionQuestion, DecisionResult, Questions } from './decider.js';
+import { DECISION_ROUTES, type DecisionRoute } from './routes.js';
 
-const DECISION_URL = 'https://api.typesafe.ai/v1/systemone';
+/** The path every route serves; the route supplies what goes in front of it. */
+const SYSTEM_ONE_PATH = '/v1/systemone';
 
 /**
  * $0.042 per million input tokens, read 2026-09-22; **output is free**.
@@ -146,9 +143,13 @@ function readAnswer(question: DecisionQuestion, raw: unknown): unknown {
  */
 export async function runDecision<Q extends Questions>(input: {
   secret: string;
+  /** Where to buy it, and what that address calls the model. */
+  route?: DecisionRoute;
   state: string | Readonly<Record<string, unknown>> | readonly unknown[];
   questions: Q;
   timeoutMs: number;
+  /** Cancelled from outside — a speculation giving way to a live call. */
+  signal?: AbortSignal;
   log: Logger;
 }): Promise<DecisionResult<Q>> {
   const state = typeof input.state === 'string' ? input.state : JSON.stringify(input.state);
@@ -156,19 +157,26 @@ export async function runDecision<Q extends Questions>(input: {
   // question about something else, which is worse than no answer at all.
   if (state.length > MAX_STATE_CHARS) throw new DecisionStateTooLargeError(state.length);
 
+  const route = input.route ?? DECISION_ROUTES[0];
   const started = Date.now();
   const controller = new AbortController();
   const watchdog = setTimeout(() => controller.abort(), input.timeoutMs);
+  // The caller's own reason to stop, folded into the same controller as the
+  // deadline: a speculation that a live call has overtaken is cancelled the
+  // same way a slow one is, and the request never reaches the network twice.
+  const relay = () => controller.abort();
+  input.signal?.addEventListener('abort', relay, { once: true });
+  if (input.signal?.aborted === true) controller.abort();
   let response: Response;
   try {
-    response = await fetch(DECISION_URL, {
+    response = await fetch(`${route.baseUrl}${SYSTEM_ONE_PATH}`, {
       method: 'POST',
       headers: {
         authorization: `Bearer ${input.secret}`,
         'content-type': 'application/json',
       },
       body: JSON.stringify({
-        model: DECISION_MODEL,
+        model: route.modelId,
         state: input.state,
         questions: wireQuestions(input.questions),
       }),
@@ -176,6 +184,7 @@ export async function runDecision<Q extends Questions>(input: {
     });
   } finally {
     clearTimeout(watchdog);
+    input.signal?.removeEventListener('abort', relay);
   }
 
   const requestId = response.headers.get('x-typesafe-request-id') ?? undefined;
@@ -213,16 +222,27 @@ export async function runDecision<Q extends Questions>(input: {
   const asked = Object.keys(input.questions).length;
   const answered = Object.keys(answers).length;
   if (answered < asked) {
+    /**
+     * **The one failure that is otherwise silent.**
+     *
+     * An answer this client cannot place is dropped, which is right — the type
+     * says the answer space is closed. But a route that answered in a shape
+     * slightly different from the one documented (a `choice` with no
+     * `confidence`, say) would have *every* answer dropped, and the only
+     * symptom would be a fast path that never fires: no error, no refusal,
+     * nothing to search for. So the route is named in the line, which is what
+     * turns "measure it and see" into something a log can be grepped for.
+     */
     input.log.warn(
-      { requestId, asked, answered },
-      'decision model left questions unanswered or unreadable',
+      { requestId, route: route.id, model: route.modelId, asked, answered },
+      'decision answers were dropped — check the route answers in the documented shape',
     );
   }
 
   return {
     answers: answers as DecisionResult<Q>['answers'],
     costUsd: estimateDecisionCostUsd({ inputTokens }),
-    modelId: typeof body.model === 'string' ? body.model : DECISION_MODEL,
+    modelId: typeof body.model === 'string' ? body.model : route.modelId,
     requestId,
     durationMs,
   };

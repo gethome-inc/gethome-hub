@@ -15,6 +15,7 @@ import { createHash } from 'node:crypto';
 import type { SettingsService } from '../../core/settings.js';
 import type { Logger } from '../../logging.js';
 import { DECISION_MODEL, type Decider, type DecisionResult, type Questions } from './decider.js';
+import { decisionRouteOf } from './routes.js';
 
 /**
  * How long the breaker stays open, and how many failures open it.
@@ -43,22 +44,46 @@ function credentialId(secret: string): string {
 
 export function lazyDecider(options: { settings: SettingsService; log: Logger }): Decider {
   let breaker: { credential: string; failures: number; openUntil: number } | undefined;
-  /** One at a time, hub-wide. See `decide` on why a second call is dropped. */
-  let inFlight = false;
+  /**
+   * The one call in flight, if there is one, and what it is worth.
+   *
+   * One at a time hub-wide, because concurrent requests queue at the other end
+   * anyway — but *which* one gives way is a decision rather than a race. See
+   * `decide`.
+   */
+  let inFlight: { priority: 'live' | 'speculative'; stop: AbortController } | undefined;
 
   async function decide<Q extends Questions>(input: {
     state: string | Readonly<Record<string, unknown>> | readonly unknown[];
     questions: Q;
     timeoutMs: number;
+    priority?: 'live' | 'speculative';
   }): Promise<DecisionResult<Q> | null> {
-    // **Dropped, not queued.** A queued decision arrives after the thing it
-    // was deciding — `Request superseded` one subsystem over: a newer ask
-    // taking this one's place is not a failure, and waiting for a slot is the
-    // one behaviour that could make this slower than not having it.
-    if (inFlight) return null;
+    const priority = input.priority ?? 'live';
+    /**
+     * **Dropped, not queued — and a guess gives way to the real thing.**
+     *
+     * A queued decision arrives after the thing it was deciding, which is
+     * `Request superseded` one subsystem over: a newer ask taking this one's
+     * place is not a failure, and waiting for a slot is the one behaviour that
+     * could make this slower than not having it at all.
+     *
+     * The asymmetry is what was missing. A speculation runs on a sentence
+     * somebody is still saying, so it steps aside for anything real; a live
+     * call is the turn itself. Treating them alike meant a speculation in
+     * flight silently took the fast path away from the very command it was
+     * started for — the feature making the thing it helps slower.
+     */
+    if (inFlight !== undefined) {
+      if (priority === 'speculative' || inFlight.priority === 'live') return null;
+      inFlight.stop.abort();
+    }
 
     const ai = await options.settings.getAiSettings();
     if (!ai.decision.hasKey || !ai.decision.enabled) return null;
+    // Read per call beside the credential, and for its reason: a route changed
+    // this afternoon takes effect this afternoon, with no restart.
+    const route = decisionRouteOf(ai.decision.route);
     const secret = await options.settings.aiKey('typesafe');
     if (secret === null) return null;
 
@@ -66,7 +91,8 @@ export function lazyDecider(options: { settings: SettingsService; log: Logger })
     if (breaker !== undefined && breaker.credential !== credential) breaker = undefined;
     if (breaker !== undefined && Date.now() < breaker.openUntil) return null;
 
-    inFlight = true;
+    const stop = new AbortController();
+    inFlight = { priority, stop };
     try {
       const { runDecision } = await import('./typesafe.js');
       const result = await runDecision({
@@ -74,11 +100,17 @@ export function lazyDecider(options: { settings: SettingsService; log: Logger })
         state: input.state,
         questions: input.questions,
         timeoutMs: input.timeoutMs,
+        signal: stop.signal,
+        route,
         log: options.log,
       });
       breaker = undefined;
       return result;
     } catch (error) {
+      // A speculation a live call overtook is not a failure of anything, and
+      // must not count towards the breaker — otherwise a talkative minute
+      // would open it against a perfectly good key.
+      if (stop.signal.aborted && priority === 'speculative') return null;
       const failures = (breaker?.credential === credential ? breaker.failures : 0) + 1;
       breaker = {
         credential,
@@ -91,7 +123,10 @@ export function lazyDecider(options: { settings: SettingsService; log: Logger })
       );
       return null;
     } finally {
-      inFlight = false;
+      // Only if it is still *this* call's: a live call that overtook a
+      // speculation has already replaced the entry, and the loser clearing it
+      // on the way out would leave the winner unguarded.
+      if (inFlight?.stop === stop) inFlight = undefined;
     }
   }
 
