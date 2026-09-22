@@ -372,8 +372,8 @@ function oneRound(options: { neigh: string; state?: string }): { calls: string[]
      case "$*" in
        "route show default") printf '%s' "$FAKE_ROUTE" ;;
        "-4 -o addr show wlan0") echo "3: wlan0    inet 192.168.0.200/24 brd 192.168.0.255 scope global wlan0" ;;
-       "-4 neigh show dev wlan0") printf '%s' "$FAKE_NEIGH" ;;
-       "-4 neigh show "*" dev wlan0") printf '%s' "$FAKE_NEIGH" | awk -v a="$4" '$1 == a' ;;
+       "neigh show dev wlan0") printf '%s' "$FAKE_NEIGH" ;;
+       "neigh show "*" dev wlan0") printf '%s' "$FAKE_NEIGH" | awk -v a="$3" '$1 == a' ;;
      esac`,
   );
   script_(path.join(bin, 'arping'), `echo "arping $*" >> "${calls}"`);
@@ -402,7 +402,7 @@ function oneRound(options: { neigh: string; state?: string }): { calls: string[]
 
 /** The commands a round ran that changed anything, minus the reads. */
 function writes(calls: string[]): string[] {
-  return calls.filter((call) => !/^ip (route show|-4 -o addr show|-4 neigh show)/.test(call));
+  return calls.filter((call) => !/^ip (route show|-4 -o addr show|neigh show)/.test(call));
 }
 
 const now = (): number => Math.floor(Date.now() / 1000);
@@ -500,6 +500,37 @@ describe("keeping every neighbour's record of the hub warm", () => {
       'arping -U -c 1 -I wlan0 192.168.0.200',
       'ip neigh replace 192.168.0.166 lladdr 02:00:00:00:01:66 nud probe dev wlan0',
     ]);
+  });
+
+  /**
+   * **Matter is IPv6, and its neighbour discovery is multicast through the same
+   * queue.** So the same unicast re-check covers the IPv6 table: a Wi-Fi
+   * accessory's record of the hub is refreshed by it, and a plug that comes
+   * back from being switched off is found at its old link address. An IPv6
+   * router keeps its flag, which a bare `replace` would clear.
+   */
+  it('re-checks IPv6 neighbours the same way, and keeps a router a router', () => {
+    const round = oneRound({
+      neigh: [
+        'fe80::1 lladdr 02:00:00:00:00:01 router STALE',
+        'fe80::5 lladdr 02:00:00:00:00:05 STALE',
+        'fe80::6 lladdr 02:00:00:00:00:06 REACHABLE',
+        '',
+      ].join('\n'),
+    });
+    expect(writes(round.calls)).toEqual([
+      'arping -U -c 1 -I wlan0 192.168.0.200',
+      'ip neigh replace fe80::1 lladdr 02:00:00:00:00:01 router nud probe dev wlan0',
+      'ip neigh replace fe80::5 lladdr 02:00:00:00:00:05 nud probe dev wlan0',
+    ]);
+  });
+
+  it('finds a Matter plug that was switched off at the link address it had', () => {
+    const round = oneRound({
+      neigh: 'fe80::5 FAILED\n',
+      state: `fe80::5 02:00:00:00:00:05 ${now() - 600}\n`,
+    });
+    expect(writes(round.calls)).toContain('ip neigh replace fe80::5 lladdr 02:00:00:00:00:05 nud probe dev wlan0');
   });
 
   /** Seeding an old address over a resolution in flight would only race it. */

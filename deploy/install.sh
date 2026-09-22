@@ -1489,6 +1489,14 @@ keep_wifi_reachable() {
 # that comes home is known again before anybody opens the app. Nothing is ever
 # broadcast at a neighbour.
 #
+# **Both families.** Matter is IPv6, and its neighbour discovery is multicast
+# through the same stuck queue: a Wi-Fi accessory that has lost its record of
+# this hub asks for it the way a phone does, and a hub that has lost its record
+# of the accessory asks back the same way. A stale IPv6 entry re-checked by
+# unicast carries this hub's link address to the accessory as well, and a plug
+# that comes back from being switched off is found by its old address within
+# two minutes rather than whenever the router lets a multicast through.
+#
 # Everything is re-read each round rather than captured, so a lease or an
 # interface that moves does not leave this announcing an address it no longer
 # has.
@@ -1506,7 +1514,7 @@ while :; do
     now=$(date +%s)
     fresh="$state.new"
     if : > "$fresh" 2>/dev/null; then
-      ip -4 neigh show dev "$iface" 2>/dev/null | while read -r addr ll mac rest; do
+      ip neigh show dev "$iface" 2>/dev/null | while read -r addr ll mac rest; do
         [ "$ll" = lladdr ] || continue
         # Reached means confirmed. Anything else keeps the time it last was,
         # or a neighbour that never answers again would be remembered for ever.
@@ -1519,6 +1527,8 @@ while :; do
         esac
         echo "$addr $mac $seen" >> "$fresh"
         case " $rest " in
+          # An IPv6 router keeps its flag: `replace` would clear it otherwise.
+          *" router "*"STALE "*) ip neigh replace "$addr" lladdr "$mac" router nud probe dev "$iface" 2>/dev/null ;;
           *" STALE "*) ip neigh replace "$addr" lladdr "$mac" nud probe dev "$iface" 2>/dev/null ;;
         esac
       done
@@ -1530,7 +1540,7 @@ while :; do
           echo "$addr $mac $seen" >> "$fresh"
           [ $((round % 6)) -eq 0 ] || continue
           # Never over a resolution the kernel is already making.
-          ip -4 neigh show "$addr" dev "$iface" 2>/dev/null | grep -q INCOMPLETE && continue
+          ip neigh show "$addr" dev "$iface" 2>/dev/null | grep -q INCOMPLETE && continue
           ip neigh replace "$addr" lladdr "$mac" nud probe dev "$iface" 2>/dev/null
         done < "$state"
       fi
