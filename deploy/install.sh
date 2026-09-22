@@ -1885,7 +1885,16 @@ zigbee_channel_clear_of_wifi() {
   # Nothing to measure — a wired hub, or a radio that would not say. 25 is
   # still the better guess than 11: it is clear of Wi-Fi 1 and 6, which is most
   # homes, and 11 sits inside the first of them.
-  if [[ -z "$wifi_mhz" ]]; then printf '25'; return 0; fi
+  #
+  # **A hub on 5 GHz is that same case, not a 2.4 GHz channel a long way off.**
+  # Measured from 5180 MHz, "furthest away" is channel 11 — inside Wi-Fi 1, the
+  # channel the home's own 2.4 GHz radio is most often on — so a dual-band
+  # board would have formed its network in the worst place there is. Its uplink
+  # is clear of Zigbee either way; the rest of the house's 2.4 GHz is not.
+  if [[ -z "$wifi_mhz" ]] || (( wifi_mhz < 2400 || wifi_mhz > 2500 )); then
+    printf '25'
+    return 0
+  fi
   # 26 is left out on purpose: several regions cap its transmit power and some
   # devices will not join on it at all.
   for channel in $(seq 11 25); do

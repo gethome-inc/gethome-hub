@@ -293,7 +293,10 @@ in `deploy/install.sh` must stay accurate.
   the whole reason it is decided at install time. `install.sh` picks the
   channel furthest from whatever Wi-Fi channel the hub is associated on, 26
   excluded (regions cap its power, some devices will not join it) and 25 as the
-  answer when there is no Wi-Fi to measure. **Only when this hub has never
+  answer when there is no 2.4 GHz Wi-Fi to measure — which includes a hub on
+  **5 GHz**: read as a distance, 5180 MHz is furthest from channel 11, inside
+  Wi-Fi 1, so every dual-band board used to form its network in the worst
+  place there is. **Only when this hub has never
   formed a network**, though — no `configuration.yaml` and no
   `coordinator_backup.json` — because moving the channel of a home that already
   works is not an upgrade: routers follow, sleepy end devices do not, and the

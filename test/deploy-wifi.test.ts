@@ -720,6 +720,19 @@ describe('choosing a Zigbee channel', () => {
     expect(zigbeeChannelFor('2472')).toBe(11);
   });
 
+  /**
+   * **A hub on 5 GHz has no 2.4 GHz channel to get away from**, so it gets the
+   * guess a hub that could not measure gets. Taken as a distance instead, 5180
+   * MHz is furthest from channel 11 — inside Wi-Fi 1, where the home's own
+   * 2.4 GHz radio most often is — which is where every dual-band board would
+   * otherwise have formed its network.
+   */
+  it('treats a hub on 5 GHz as having nothing to measure', () => {
+    expect(zigbeeChannelFor('5180')).toBe(25);
+    expect(zigbeeChannelFor('5745')).toBe(25);
+    expect(zigbeeChannelFor('')).toBe(25);
+  });
+
   it('never lands inside the Wi-Fi channel it was given', () => {
     for (const wifi of [2412, 2417, 2422, 2427, 2437, 2447, 2452, 2462, 2472]) {
       const zigbee = zigbeeChannelFor(String(wifi));
