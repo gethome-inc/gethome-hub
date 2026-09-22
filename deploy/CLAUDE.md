@@ -293,7 +293,10 @@ in `deploy/install.sh` must stay accurate.
   the whole reason it is decided at install time. `install.sh` picks the
   channel furthest from whatever Wi-Fi channel the hub is associated on, 26
   excluded (regions cap its power, some devices will not join it) and 25 as the
-  answer when there is no Wi-Fi to measure. **Only when this hub has never
+  answer when there is no 2.4 GHz Wi-Fi to measure — which includes a hub on
+  **5 GHz**: read as a distance, 5180 MHz is furthest from channel 11, inside
+  Wi-Fi 1, so every dual-band board used to form its network in the worst
+  place there is. **Only when this hub has never
   formed a network**, though — no `configuration.yaml` and no
   `coordinator_backup.json` — because moving the channel of a home that already
   works is not an upgrade: routers follow, sleepy end devices do not, and the
@@ -349,20 +352,22 @@ in `deploy/install.sh` must stay accurate.
   every other bound here (`STATE_FLUSH_MS`, the activity log's two, the history
   buckets) exists to *stop* writing, and this one exists because the alternative
   is a support question with no evidence behind it.
-- **The hub's Wi-Fi must not doze, and the failure it causes is why this is in
-  the installer rather than in a troubleshooting page.** 802.11 power save is on
-  by default on the Pi's brcmfmac (`brcmf_cfg80211_set_power_mgmt: power save
-  enabled`, in every Pi's kernel log), and a hub is the worst possible traffic
-  pattern for it: nobody talks to the machine for hours, and then a phone opens
-  the app. What comes out the other side is a hub that is *up* and unreachable —
-  the board running, the coordinator running, a motion rule switching the hall
-  light on, and both apps saying the hub cannot be reached. **It takes SSH with
-  it**, which is the half that misleads: an owner who cannot reach port 8420
-  *or* port 22 concludes the hub has crashed, and every measurement taken
-  afterwards (memory, restarts, `MemoryHigh`, disk) comes back clean, because
-  nothing was ever wrong with the hub. The one fact pointing the right way is
-  that the automations kept running, and nobody looks at that while the app says
-  "can't reach". `keep_wifi_awake()` turns it off on the interface carrying the
+- **The hub's Wi-Fi must not doze — though not for the reason this was first
+  written for.** 802.11 power save is on by default on the Pi's brcmfmac
+  (`brcmf_cfg80211_set_power_mgmt: power save enabled`, in every Pi's kernel
+  log), and a hub is the worst possible traffic pattern for it: nobody talks to
+  the machine for hours, and then a phone opens the app. It was turned off as
+  the fix for a hub that was *up* and unreachable — the board running, a motion
+  rule switching the hall light on, both apps and SSH saying the hub could not
+  be reached — and **those outages went on with it off**: they were the router
+  sitting on the broadcasts it owes the hub, which is the next bullet. Do not
+  read this bullet as the explanation for that shape again; the next person to
+  meet it should go straight to the router. Power save stays off on its own
+  reasoning: a dozing radio listens for broadcasts only when the access point's
+  DTIM signalling says there are some, and that is what the routers with the
+  fault get wrong (openwrt/mt76#598 is power-saving clients that stop hearing
+  broadcasts altogether until they next transmit), for ~20 mA on a mains board.
+  `keep_wifi_awake()` turns it off on the interface carrying the
   default route, and a wired hub gets no unit, no dispatcher and nothing said
   about it. Four rules. **Off now *and* off later**: NetworkManager re-enables
   it on every association, so the live `iw` call is only half the fix — the
@@ -385,38 +390,64 @@ in `deploy/install.sh` must stay accurate.
   `GETHOME_NM_DISPATCHER`, `GETHOME_WIFI_UNIT`) for the reason `GETHOME_CMDLINE`
   is — `test/deploy-wifi.test.ts` runs the real function against files it owns,
   including running the dispatcher the way NetworkManager runs it.
-- **The hub has to announce itself, by broadcast, or it goes unreachable after
-  a quiet spell.** This is the fault the outage reports were, and what named it
-  was the shape rather than any counter: a continuous one-per-second ping from
-  a Mac on the same Wi-Fi held the hub reachable for **fourteen minutes with no
-  loss at all**, twenty minutes after that same hub had been unreachable for
-  four minutes at a stretch. Traffic prevented it; quiet caused it — which is
-  the owner's whole experience, since an app opened after a while *is* a path
-  that has been silent.
-  **What goes quiet is one pair.** The Mac is on 5 GHz and the hub's radio on
-  2.4 GHz, so their traffic crosses the bridge between the two radios inside
-  the router, and it is this hub's entry on that bridge which ages out. Nothing
-  on the hub is wrong and everything on it says so: during one of these it
-  answered its own health check in 3 ms, exchanged pings with the gateway
-  throughout, and served *another* client 37 KB inside one 20-second window,
-  while three pings from the Mac got nothing and `rx_bytes` did not move by one
-  of them. **A hub that is unreachable from one client and serving another at
-  the same second is not a hub with a problem** — which is why every
-  measurement taken on it came back clean, twice, before this was found.
-  **A unicast to the gateway does not fix it, and shipping one is how that was
-  learned.** Those frames are addressed to the router itself and are consumed
-  by it; they never cross the bridge they were meant to keep warm. A
-  **gratuitous ARP is broadcast** (`arping -U`), so it is flooded to every
-  segment and refreshes the access point's forwarding table on both radios and
-  every client's ARP cache in one frame of a few dozen bytes.
-  `keep_wifi_reachable()` sends one every 20 seconds, re-reading the interface
-  and address each round so a moved lease does not leave it announcing an
-  address it no longer has, with the gateway ping kept beside it because it
-  costs nothing and keeps the hub's own default route fresh. A wired hub gets
-  none of it. Measured with the path deliberately idled for 55 seconds between
-  every probe, which is the condition the fault needs: **252 probes over four
-  hours, 503 of 504 replies, one lost packet**, against a gateway control that
-  lost none — where the same probe before it found multi-minute blackouts.
+- **The hub has to stay findable without a broadcast ever reaching it, because
+  some routers sit on the broadcasts they owe it.** This is the fault the
+  outage reports were, twice over, and the shape is what names it: a hub that is
+  unreachable from one client while it serves another in the same second, whose
+  every measurement comes back clean. **Measured behind a TP-Link Archer C6**
+  (MediaTek radios): numbered UDP broadcasts from a Mac on 5 GHz reached the
+  hub **up to 43 seconds late, released in bursts, and at worst three in five
+  never**, while unicast from the same Mac in the same minute arrived 45 of 45
+  inside 30 ms. It is the router's group-addressed queue for the 2.4 GHz radio
+  (openwrt/mt76#598 is the same fault): the hub's radio is in constant-awake
+  mode, its own broadcasts reach the 5 GHz side at once, and turning off the
+  Wi-Fi firmware's ARP offload changed nothing. It comes and goes, and nothing
+  on the hub can see it — so everything that would only reach the hub through
+  that queue has to be replaced by something that does not. There were two.
+  **The first was the router losing its way to a hub that had been quiet**: a
+  continuous one-per-second ping held it reachable for **fourteen minutes with
+  no loss**, twenty minutes after the same hub had been unreachable for four.
+  A unicast ping at the gateway did not fix it, which is how that was learned;
+  a **gratuitous ARP** (`arping -U`) every 20 seconds did — **252 probes idled
+  55 seconds apart over four hours, 503 of 504 replies**, against multi-minute
+  blackouts before it. It stays. The gateway ping that stayed beside it for a
+  while is gone — it was that first unicast attempt, kept on a claim that it
+  "kept the default route fresh", and the gateway is now simply one of the
+  neighbours re-checked below.
+  **The second is the one that measurement could not see, because 55 seconds
+  never lets a cache expire.** macOS keeps an ARP entry for 20 minutes
+  (`net.link.ether.inet.max_age`), iOS is the same kernel, and after that the
+  phone asks for the hub by broadcast — into the stuck queue. The app gets
+  `Host is down` (`EHOSTDOWN`, the ARP failure, captured on a phone whose Wi-Fi
+  was plainly fine), about a hub that is up. **A gratuitous ARP does not help
+  there, and that was measured rather than assumed**: the expiry of the Mac's
+  entry for the hub did not move for one, request or reply, and went back to
+  1200 seconds the moment the hub sent an ARP request *addressed to the Mac*.
+  That is exactly what the kernel sends when it re-checks a stale neighbour —
+  by unicast, which the stuck queue never sees — so `keep_wifi_reachable()`'s
+  loop puts every neighbour whose entry has gone stale into PROBE at the link
+  address the kernel already holds — `ip neigh replace <addr> lladdr <mac> nud
+  probe dev <if>`, measured on the hub: STALE to REACHABLE inside a second, and
+  the Mac's entry from −345 back to 1200 — and **remembers the ones the kernel
+  gives up on for a day** in `/run/gethome-wifi-neighbours`, seeding each
+  straight into PROBE at the link address it had every sixth round, because a
+  phone that comes home rejoins with an empty cache, and this is what makes the
+  hub known to it again before anybody opens the app. **`nud probe`, not `ip
+  neigh change … use`**: the second asks the same thing more politely, but only
+  iproute2 5.17 and later know it, so on Bullseye (5.10) or Ubuntu 22.04 (5.15)
+  the loop would fail every call and say nothing. **Nothing is ever broadcast
+  at a neighbour**: that is the path that is broken, and it wakes every
+  sleeping device in the house. The install makes one real re-check, of the
+  gateway, and warns if the kernel refuses it, since the loop would otherwise
+  fail quietly into the outage. A wired hub gets none of it.
+  **Two things make this hard to see from the hub, and both misled once.** The
+  brcmfmac firmware answers ARP for the hub itself (`arpoe=1`, `arp_ol=0x9`), so
+  a phone's ARP request never reaches Linux — `tcpdump` on the hub shows none
+  and `rx_bytes` does not count them; the firmware's own `arp_stats` iovar
+  does, read through `iw dev wlan0 vendor recv 0x001018 0x1 …`. And a probe
+  that keeps the path busy keeps every cache warm, so it measures the path a
+  phone takes only if it waits out the cache — or, faster, sends numbered
+  broadcasts and unicasts side by side and compares when each arrives.
   **Note what this rules out, because two earlier fixes were argued from it.**
   ICMP is answered by the kernel, so a hub that will not answer a ping is not a
   hub with a paged-out or busy userspace and no amount of `MemorySwapMax`
@@ -459,11 +490,45 @@ in `deploy/install.sh` must stay accurate.
   next month gets a fresh profile, and enumerating today's profiles is the one
   thing that cannot cover that. **An open network writes an empty PSK**, which
   the hub reads as "no credentials": an accessory handed an empty password for a
-  network it cannot join is worse than being told the hub has none. And the
+  network it cannot join is worse than being told the hub has none. **A network
+  only 5 GHz can see is the same case**: almost every Wi-Fi Matter accessory is
+  2.4 GHz only, and a dual-band board (Pi 3B+, 4, 5) will sit on a separate
+  5 GHz name, which used to be handed to every accessory — a pairing that fails
+  at the last step every time, with the app never asking for another network
+  because the hub said it had one. So a hub associated at 5 GHz scans once for
+  its own name on 2.4 GHz; seen only on 5 GHz, it writes nothing and removes what
+  an earlier association left, and the app asks, as it does for an Ethernet hub.
+  A scan that fails or does not show the network changes nothing. `nmcli -t`
+  escapes `\` and `:` inside a name, so the comparison decodes in awk, with the
+  name passed in the environment because `awk -v` processes backslashes. And the
   shell-quoting is built into a variable before it is used, because inline
   inside the `printf` the replacement's backslashes go through a second round of
   quote removal and `Dave's Wi-Fi` comes out mangled — the sed-program rule from
-  `test/deploy-wifi.test.ts`, in a second place.
+  `test/deploy-wifi.test.ts`, in a second place. (The same family bit the 5 GHz
+  code while it was written: bash 3.2 keeps the quotes of a quoted replacement
+  in `${var//pattern/"$x"}`, so escaping the name in the shell produced
+  `My"\:"Net` on macOS and `My\:Net` on the Pi.)
+- **A Thread accessory is reached through a route the border router
+  announces, and Linux ignores it by default.** An Apple TV, HomePod or Google
+  hub tells the LAN how to reach its Thread network with a Route Information
+  Option in its router advertisements, and `accept_ra_rt_info_max_plen` is 0
+  out of the box — matter.js's and OpenThread's troubleshooting pages both lead
+  with setting it to 64 — so a Thread accessory shared in from Apple Home paired
+  through the phone and was never heard from again. `matter_ipv6()` writes
+  `/etc/sysctl.d/61-gethome-matter.conf` on every hub: `default` for interfaces
+  that appear later, and each physical interface by name, because systemd
+  re-applies a per-interface key when the interface appears and `default` is
+  too late for one that already existed. **Routes and nothing else** — no
+  address, no listener, no forwarding — which is why it does not touch the
+  IPv4-only rule for the API. It is the kernel's job only because Raspberry Pi
+  OS's Imager writes NetworkManager profiles with `ipv6.method=ignore`; a
+  profile on `auto` handles advertisements in NetworkManager itself (1.42+).
+  It warns where Matter cannot work at all (no IPv6, a kernel without
+  route-information support, IPv6 disabled on the LAN interface) and where it
+  quietly stops working (IPv6 forwarding on, which makes the kernel ignore
+  advertisements and stop probing a border router that has gone). Unverifiable
+  end to end on the hub it was written on, which has no border router — measured
+  there: 0 router advertisements in three days.
 - **The detector exits 1 for an ordinary state, so the unit says
   `SuccessExitStatus=1`.** "Zigbee is not the radio here" — no coordinator, or
   one plugged into a board the owner has set to Matter — is correct and

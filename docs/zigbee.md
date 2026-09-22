@@ -73,7 +73,10 @@ So `install.sh` picks the channel furthest from whatever Wi-Fi channel the hub
 is associated on, and does it **only when this hub has never formed a network** —
 no `configuration.yaml` and no `coordinator_backup.json`. Channel 26 is left out
 (several regions cap its transmit power, and some devices will not join on it),
-and a hub with no Wi-Fi to measure gets 25, which is clear of Wi-Fi 1 and 6.
+and a hub with no 2.4 GHz Wi-Fi to measure gets 25, which is clear of Wi-Fi 1
+and 6. A hub on 5 GHz is one of those: its own uplink cannot collide with
+Zigbee, but the home's 2.4 GHz radio still can, and measuring "furthest" from
+5180 MHz would have picked channel 11, inside Wi-Fi 1.
 
 **A hub that already has a network is told rather than moved.** Every install
 before this chose nothing and formed on 11, so the installer compares the

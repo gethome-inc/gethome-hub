@@ -26,12 +26,20 @@ update it in the same change.
   **Three refusals happen before anything is searched for**, because in each the
   answer cannot change while somebody waits: a code the hub cannot read, an
   accessory whose code says Bluetooth on a hub without it, and one with no
-  network that the hub has no Wi-Fi password to give. Everything else is bounded
+  network that the hub has no Wi-Fi network to give — no password on file, or a
+  network only 5 GHz can see, which `deploy/wifi-credentials.sh` declines to hand
+  over (see `docs/matter.md`). Everything else is bounded
   (three minutes' discovery, four and a half for the job), cancellable — which
   stops the *discovery*, not just the screen, and is why the hub pairs **one
   accessory at a time** — and classified into words somebody can act on
   (`commission-failures.ts`, `write-failures.ts`'s shape and both its rules:
-  open `kind`, most-specific-first). **A failed pairing is logged**, which it
+  open `kind`, most-specific-first). **`cannot-join-wifi` is the two-band case
+  named**: matter.js scans with the accessory before handing the network over,
+  and a network it could not join — 5 GHz only, a wrong password, out of the
+  router's reach — is answered by the same Wi-Fi sheet as `needs-wifi`. **The
+  accessory is told the hub's country** (`commissioningFor`, fed by
+  `readWifiCountry`), because one told nothing is told `XX` and may keep to
+  channels 1–11, missing a router on 12 or 13. **A failed pairing is logged**, which it
   was not: the only record of one was a WebSocket frame that had already gone,
   so the journal of a hub whose owner could pair nothing showed a line saying
   discovery had started and nothing else, ever. And **the step is a real signal,

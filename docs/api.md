@@ -512,7 +512,9 @@ writes `/etc/gethome/wifi.env` for it on every association; where that has not
 happened (an Ethernet hub, a machine with no NetworkManager, a hub installed
 before this existed) the app should ask for the password and send it. It is
 never logged and never stored — it goes into the commissioning conversation and
-is forgotten with the job.
+is forgotten with the job. **`false` also covers a hub on a network only 5 GHz
+can see**, which almost no Wi-Fi accessory can join: the hub does not hand that
+one over, so an app that asks should ask for a network on 2.4 GHz.
 
 #### What the hub can hear (`GET /matter/discoverable`)
 
@@ -598,6 +600,7 @@ beside it:
 | `not-found` | nothing answered anywhere the hub could look. Nearly always: the accessory was not in pairing mode |
 | `needs-bluetooth` | the code says Bluetooth and this hub has none. **Refused before searching** |
 | `needs-wifi` | the accessory has no network and the hub has no password to give it. Refused before searching; ask for one and retry |
+| `cannot-join-wifi` | it was given a network and could not join it — a network only 5 GHz reaches, a wrong password, a router out of its reach. **Offer the same Wi-Fi sheet as for `needs-wifi`** and retry with the network somebody picks; `detail` carries matter.js's words, including its hint when the accessory's own scan did not find the network |
 | `bad-code` | not a Matter setup code, or its checksum is wrong. Refused before searching |
 | `wrong-code` | it answered and would not accept that passcode |
 | `already-paired` | still commissioned elsewhere, or out of fabric slots |

@@ -22,6 +22,12 @@ export type CommissionFailureKind =
   | 'needs-bluetooth'
   /** Found over Bluetooth, but the hub has no Wi-Fi password to hand over. */
   | 'needs-wifi'
+  /**
+   * Given a network, and could not join it: a 5 GHz-only network, a wrong
+   * password, a router out of its reach. The remedy is another network, so an
+   * app offers the same Wi-Fi sheet it offers for `needs-wifi`.
+   */
+  | 'cannot-join-wifi'
   /** The code is not a Matter setup code, or its checksum is wrong. */
   | 'bad-code'
   /** It answered and refused the passcode. */
@@ -50,8 +56,12 @@ const SUMMARY: Record<CommissionFailureKind, string> = {
     'That accessory can only be found over Bluetooth, and this hub has none available. An accessory ' +
     'already on your network pairs without it.',
   'needs-wifi':
-    "The hub found the accessory but has no Wi-Fi password to give it, so the accessory has no network to " +
-    'join. Enter your Wi-Fi password and try again.',
+    'This accessory has to be given a Wi-Fi network, and the hub has none it can pass on. Enter your ' +
+    'Wi-Fi name and password — the 2.4 GHz network, if your router has two — and try again.',
+  'cannot-join-wifi':
+    "The accessory couldn't join the Wi-Fi network it was given. Most accessories can only use 2.4 GHz, so " +
+    'if your router has a separate 5 GHz network, give it the 2.4 GHz one — and check the password, and that ' +
+    'the accessory is within reach of the router.',
   'bad-code':
     "That isn't a Matter setup code. Check the digits on the accessory or its box, or point the camera at " +
     'the QR code instead.',
@@ -103,6 +113,13 @@ export function classifyCommissionError(error: unknown): CommissionFailure {
   // the message carries a discovery failure around it either way.
   if (/invalid.*passcode|passcode.*(mismatch|invalid|incorrect)|pase.*(failed|error).*parameter/.test(text)) {
     return commissionFailure('wrong-code', detail);
+  }
+  // matter.js scans with the accessory before it hands the network over and
+  // says so when the network is not in the scan ("not found in scan results");
+  // either way the failure names the network step, which is the one thing
+  // somebody standing over the accessory can change.
+  if (/failed to (add|connect to) wifi network/.test(text)) {
+    return commissionFailure('cannot-join-wifi', detail);
   }
   if (/already.*commissioned|no more fabrics|fabric.*(full|limit)|window.*not open|failsafe.*busy|busy.*commission/.test(text)) {
     return commissionFailure('already-paired', detail);

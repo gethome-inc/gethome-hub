@@ -198,26 +198,42 @@ interface CredentialsOutcome {
   mode: string;
 }
 
-/** Run `deploy/wifi-credentials.sh` against a fake `nmcli`. */
+/**
+ * Run `deploy/wifi-credentials.sh` against a fake `nmcli`.
+ *
+ * `freq` is the frequency the hub is associated on (absent: `nmcli` does not
+ * say), `scan` the rows a fresh scan returns in `nmcli -t -f FREQ,SSID` form,
+ * already escaped the way `nmcli -t` escapes them, and `existing` a `wifi.env`
+ * an earlier association left behind.
+ */
 function credentials(options: {
   ssid?: string;
   psk?: string;
   active?: boolean;
   nmcli?: boolean;
-}): CredentialsOutcome {
+  freq?: number;
+  scan?: string[];
+  scanFails?: boolean;
+  existing?: string;
+}): CredentialsOutcome & { scanned: boolean } {
   const dir = scratch('gethome-wificreds-');
   const bin = path.join(dir, 'bin');
   const conf = path.join(dir, 'gethome');
+  const calls = path.join(dir, 'nmcli-calls');
   mkdirSync(bin, { recursive: true });
   mkdirSync(conf, { recursive: true });
+  if (options.existing !== undefined) writeFileSync(path.join(conf, 'wifi.env'), options.existing);
 
   if (options.nmcli !== false) {
     script_(
       path.join(bin, 'nmcli'),
-      `case "$*" in
+      `echo "$*" >> "${calls}"
+       case "$*" in
          *"connection show --active"*) [ "$FAKE_ACTIVE" = "no" ] || printf 'abc-123:802-11-wireless\\n' ;;
          *"802-11-wireless.ssid"*)     printf '%s\\n' "$FAKE_SSID" ;;
          *"802-11-wireless-security.psk"*) printf '%s\\n' "$FAKE_PSK" ;;
+         *"dev wifi list --rescan no"*) [ -n "$FAKE_FREQ" ] && printf 'no:2437 MHz\\nyes:%s MHz\\n' "$FAKE_FREQ" ;;
+         *"dev wifi list --rescan yes"*) [ "$FAKE_SCAN_FAILS" = "yes" ] && exit 8; printf '%s' "$FAKE_SCAN" ;;
        esac
        exit 0`,
     );
@@ -231,6 +247,9 @@ function credentials(options: {
       FAKE_SSID: options.ssid ?? 'Flat 3',
       FAKE_PSK: options.psk ?? 'hunter2hunter2',
       FAKE_ACTIVE: options.active === false ? 'no' : 'yes',
+      FAKE_FREQ: options.freq === undefined ? '' : String(options.freq),
+      FAKE_SCAN: (options.scan ?? []).map((row) => `${row}\n`).join(''),
+      FAKE_SCAN_FAILS: options.scanFails === true ? 'yes' : 'no',
       GETHOME_GROUP: 'staff',
       // A dispatcher sets this; without it the script asks nmcli which
       // connection carries the wireless link.
@@ -243,6 +262,7 @@ function credentials(options: {
     output,
     file: existsSync(file) ? readFileSync(file, 'utf8') : '',
     mode: existsSync(file) ? (statSync(file).mode & 0o777).toString(8) : '',
+    scanned: existsSync(calls) && readFileSync(calls, 'utf8').includes('--rescan yes'),
   };
 }
 
@@ -286,6 +306,179 @@ describe('the Wi-Fi the hub passes on to an accessory', () => {
     const run = credentials({ nmcli: false });
     expect(run.file).toBe('');
     expect(run.output).toContain('No NetworkManager');
+  });
+});
+
+/**
+ * **A dual-band hub can be on a network no Wi-Fi accessory can see.** Almost
+ * every Wi-Fi Matter accessory is 2.4 GHz only, and a Pi 3B+, 4 or 5 will sit
+ * on 5 GHz. One name on both bands costs nothing; a separate 5 GHz name, with
+ * the hub on it, used to hand every accessory a network it could not find — and
+ * the app never asked for another, because the hub said it had one.
+ */
+describe('a network the accessory can actually join', () => {
+  it('does not scan when the hub is already on 2.4 GHz', () => {
+    const run = credentials({ freq: 2412 });
+    expect(run.file).toContain("WIFI_SSID='Flat 3'");
+    expect(run.scanned).toBe(false);
+  });
+
+  it('hands over a network the hub is on the 5 GHz side of, when it is on 2.4 GHz too', () => {
+    const run = credentials({
+      freq: 5180,
+      scan: ['5180 MHz:Flat 3', '2412 MHz:Flat 3', '2437 MHz:Next door'],
+    });
+    expect(run.scanned).toBe(true);
+    expect(run.file).toContain("WIFI_SSID='Flat 3'");
+  });
+
+  it('hands nothing over for a network only 5 GHz can see, and says why', () => {
+    const run = credentials({
+      ssid: 'Flat 3 5G',
+      freq: 5180,
+      scan: ['5180 MHz:Flat 3 5G', '2412 MHz:Flat 3'],
+      // What an earlier association on the 2.4 GHz side, or an older hub,
+      // left behind: it has to go, or the hub goes on saying it has one.
+      existing: "WIFI_SSID='Flat 3 5G'\nWIFI_PSK='hunter2hunter2'\n",
+    });
+    expect(run.file).toBe('');
+    expect(run.output).toMatch(/only its 5 GHz radio can see/);
+    expect(run.output).toMatch(/app will ask/);
+  });
+
+  /** A scan that says nothing is not evidence of anything. */
+  it('changes nothing when the scan fails or does not show the network', () => {
+    expect(credentials({ freq: 5180, scanFails: true }).file).toContain("WIFI_SSID='Flat 3'");
+    expect(credentials({ freq: 5180, scan: ['2437 MHz:Next door'] }).file).toContain("WIFI_SSID='Flat 3'");
+    expect(credentials({ freq: 5180, scan: [] }).file).toContain("WIFI_SSID='Flat 3'");
+  });
+
+  /**
+   * `nmcli -t` escapes `\` and `:` inside a value, so a name with either in it
+   * has to be decoded before it is compared — or the hub cannot recognise its
+   * own network in the scan and falls back to handing it over regardless.
+   */
+  it('recognises a name nmcli has escaped', () => {
+    const escaped = 'Flat\\:3\\\\B';
+    expect(
+      credentials({ ssid: 'Flat:3\\B', freq: 5180, scan: [`5180 MHz:${escaped}`] }).file,
+    ).toBe('');
+    expect(
+      credentials({ ssid: 'Flat:3\\B', freq: 5180, scan: [`5180 MHz:${escaped}`, `2462 MHz:${escaped}`] }).file,
+    ).toContain('WIFI_SSID=');
+  });
+});
+
+/**
+ * Run `matter_ipv6` out of install.sh against a fake `/proc/sys/net/ipv6/conf`
+ * and `/sys/class/net`. `interfaces` names the interfaces the fake knows,
+ * `physical` the ones with a `device` link, as a real NIC has.
+ */
+function ipv6(options: {
+  interfaces?: string[];
+  physical?: string[];
+  noIpv6?: boolean;
+  noRouteInfo?: boolean;
+  forwarding?: boolean;
+  disabledOn?: string;
+}): { output: string; conf: string; live: Record<string, string> } {
+  const dir = scratch('gethome-ipv6-');
+  const bin = path.join(dir, 'bin');
+  const proc = path.join(dir, 'proc');
+  const net = path.join(dir, 'net');
+  const conf = path.join(dir, 'sysctl.d', '61-gethome-matter.conf');
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(path.dirname(conf), { recursive: true });
+  const interfaces = options.interfaces ?? ['lo', 'wlan0'];
+  const physical = options.physical ?? ['wlan0'];
+  if (options.noIpv6 !== true) {
+    for (const name of ['all', 'default', ...interfaces]) {
+      mkdirSync(path.join(proc, name), { recursive: true });
+      if (options.noRouteInfo !== true) writeFileSync(path.join(proc, name, 'accept_ra_rt_info_max_plen'), '0');
+      writeFileSync(path.join(proc, name, 'forwarding'), options.forwarding === true ? '1' : '0');
+      writeFileSync(path.join(proc, name, 'disable_ipv6'), options.disabledOn === name ? '1' : '0');
+    }
+  }
+  for (const name of interfaces) {
+    mkdirSync(path.join(net, name), { recursive: true });
+    if (physical.includes(name)) writeFileSync(path.join(net, name, 'device'), '');
+  }
+  script_(path.join(bin, 'ip'), `printf 'default via 192.168.0.1 dev wlan0 proto dhcp metric 600\\n'`);
+
+  const output = execFileSync(
+    'bash',
+    [
+      '-c',
+      `set -euo pipefail
+       SUDO=""
+       say()  { printf 'SAY %s\\n' "$*"; }
+       warn() { printf 'WARN %s\\n' "$*"; }
+       prog="/^matter_ipv6() {/,/^}/p"
+       eval "$(sed -n "$prog" "$1")"
+       matter_ipv6`,
+      'bash',
+      INSTALLER,
+    ],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH ?? ''}`,
+        GETHOME_SYSCTL_MATTER: conf,
+        GETHOME_PROC_IPV6: proc,
+        GETHOME_NET_DIR: net,
+      },
+    },
+  );
+  const live: Record<string, string> = {};
+  for (const name of ['default', ...interfaces]) {
+    const file = path.join(proc, name, 'accept_ra_rt_info_max_plen');
+    if (existsSync(file)) live[name] = readFileSync(file, 'utf8').trim();
+  }
+  return { output, conf: existsSync(conf) ? readFileSync(conf, 'utf8') : '', live };
+}
+
+/**
+ * **A Thread accessory is reached through a route its border router
+ * announces**, as a Route Information Option in its router advertisements —
+ * which Linux ignores by default (`accept_ra_rt_info_max_plen` is 0; matter.js
+ * and OpenThread both put setting it to 64 first in their troubleshooting). A
+ * Thread plug shared into GetHome from Apple Home would pair through the phone
+ * and then never be heard from again.
+ */
+describe('reaching a Thread accessory through its border router', () => {
+  it('takes routes up to /64, now and after every boot, on each physical interface', () => {
+    const run = ipv6({ interfaces: ['lo', 'eth0', 'wlan0', 'docker0'], physical: ['eth0', 'wlan0'] });
+    expect(run.conf).toContain('net.ipv6.conf.default.accept_ra_rt_info_max_plen = 64');
+    expect(run.conf).toContain('net.ipv6.conf.eth0.accept_ra_rt_info_max_plen = 64');
+    expect(run.conf).toContain('net.ipv6.conf.wlan0.accept_ra_rt_info_max_plen = 64');
+    // A virtual interface is not a LAN a border router is on.
+    expect(run.conf).not.toContain('docker0');
+    expect(run.conf).not.toContain('.lo.');
+    expect(run.live.wlan0).toBe('64');
+    expect(run.live.default).toBe('64');
+    expect(run.output).toContain('SAY');
+    expect(run.output).not.toContain('WARN');
+  });
+
+  it('says so when this machine has no IPv6 at all', () => {
+    const run = ipv6({ noIpv6: true });
+    expect(run.output).toMatch(/WARN IPv6 is switched off/);
+    expect(run.conf).toBe('');
+  });
+
+  it('says so when the kernel cannot learn routes from advertisements', () => {
+    const run = ipv6({ noRouteInfo: true });
+    expect(run.output).toMatch(/WARN This kernel cannot learn routes/);
+    expect(run.conf).toBe('');
+  });
+
+  it('warns about forwarding, which quietly undoes it', () => {
+    expect(ipv6({ forwarding: true }).output).toMatch(/WARN IPv6 forwarding is on/);
+  });
+
+  it('warns when the LAN interface has no IPv6, which Matter will not start without', () => {
+    expect(ipv6({ disabledOn: 'wlan0' }).output).toMatch(/WARN IPv6 is disabled on wlan0/);
   });
 });
 

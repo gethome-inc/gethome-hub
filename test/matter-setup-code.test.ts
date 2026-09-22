@@ -137,6 +137,28 @@ describe('naming why a pairing failed', () => {
     ).toBe('already-paired');
   });
 
+  /**
+   * **An accessory that could not join the network it was given** is the case
+   * two bands make common — a 5 GHz-only network, a wrong password, a router
+   * out of reach — and the one thing somebody can change is the network. The
+   * wording is matter.js 0.17's own, with and without the hint it adds when its
+   * scan with the accessory did not find the network.
+   */
+  it('says when the accessory could not join the Wi-Fi it was given', () => {
+    const notSeen = classifyCommissionError(
+      new Error(
+        'Commissionee failed to connect to WiFi network "Flat 3 5G": NetworkNotFound ' +
+          '(network not found in scan results - verify network name and availability)',
+      ),
+    );
+    expect(notSeen.kind).toBe('cannot-join-wifi');
+    expect(notSeen.summary).toContain('2.4 GHz');
+    expect(notSeen.detail).toContain('Flat 3 5G');
+    expect(
+      classifyCommissionError(new Error('Commissionee failed to add WiFi network "Flat 3": AuthFailure')).kind,
+    ).toBe('cannot-join-wifi');
+  });
+
   it('falls back rather than guessing', () => {
     const failure = classifyCommissionError(new Error('the kettle exploded'));
     expect(failure.kind).toBe('failed');

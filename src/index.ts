@@ -16,7 +16,7 @@ import { FavoritesService } from './core/favorites.js';
 import { AccessService } from './core/access.js';
 import { PairingService } from './core/pairing.js';
 import { SettingsService } from './core/settings.js';
-import { readWifiCredentials } from './core/wifi.js';
+import { readWifiCountry, readWifiCredentials } from './core/wifi.js';
 import { DeviceRegistry } from './core/registry.js';
 import { AiRunLog } from './core/ai-runs.js';
 import { MqttObserver } from './core/mqtt-observer.js';
@@ -230,6 +230,9 @@ async function main(): Promise<void> {
       // after this hub booted, and the dispatcher that writes the file rewrites
       // it on every association. Read per pairing, which is once in a while.
       wifi: () => readWifiCredentials(config.WIFI_ENV_FILE),
+      // The same, for the country: 12 and 13 are ordinary channels in much of
+      // the world, and an accessory told nothing keeps to the ones that are not.
+      country: () => readWifiCountry(),
     });
     registry.registerAdapter(matter);
   }

@@ -24,6 +24,7 @@ import {
   parseSetupCode,
 } from './setup-code.js';
 import type { WifiCredentials } from '../../core/wifi.js';
+import { commissioningFor } from './commissioning-options.js';
 import type { Logger } from '../../logging.js';
 
 const SWITCH_CLUSTER = 0x003b;
@@ -93,6 +94,12 @@ export interface MatterAdapterOptions {
    * home may have retyped its password since the hub booted.
    */
   wifi?: () => WifiCredentials | undefined;
+  /**
+   * The country this hub's Wi-Fi is set for, told to an accessory as it is
+   * commissioned so it may use every channel that country allows — see
+   * `readWifiCountry`. Read per pairing, like `wifi`.
+   */
+  country?: () => string | undefined;
 }
 
 /**
@@ -552,11 +559,7 @@ export class MatterAdapter implements ProtocolAdapter {
     this.controller!.node.peers.added.on(found);
 
     const pairing = this.controller!.commissionNode({
-      commissioning: {
-        ...(wifi !== undefined
-          ? { wifiNetwork: { wifiSsid: wifi.ssid, wifiCredentials: wifi.passphrase } }
-          : {}),
-      },
+      commissioning: commissioningFor(wifi, this.options.country?.()),
       discovery: {
         identifierData:
           code.longDiscriminator !== undefined
