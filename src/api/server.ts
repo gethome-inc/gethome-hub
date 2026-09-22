@@ -2140,6 +2140,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
           id: route.id,
           label: route.label,
           keyHint: route.keyHint,
+          keyPrefix: route.keyPrefix,
         })),
       },
       mapping: { provider: ai.provider, choosable: ai.mappingChoosable },

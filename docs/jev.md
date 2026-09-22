@@ -208,10 +208,10 @@ Two things follow that are easy to get wrong:
 The same model is sold in more than one place, so `routes.ts` is a table of
 **addresses**, not of models:
 
-| id | Base URL | Model id on the wire |
-|---|---|---|
-| `typesafe` | `https://api.typesafe.ai` | `jev-1.13.0` |
-| `vercel` | `https://ai-gateway.vercel.sh/typesafe` | `typesafe-ai/jev` |
+| id | Base URL | Model id on the wire | Key starts |
+|---|---|---|---|
+| `typesafe` | `https://api.typesafe.ai` | `jev-1.13.0` | `ts-` |
+| `vercel` | `https://ai-gateway.vercel.sh/typesafe` | `typesafe-ai/jev` | `vck_` |
 
 Vercel's AI Gateway serves a **TypeSafe-compatible** endpoint, so the body and
 the native `noul`/`choice`/`score` answers are unchanged — only the host, the
@@ -234,6 +234,22 @@ route rather than reading a constant, and the key-prefix check keeps only the
 route-independent guard — it refuses an `sk-ant-`/`sk-proj-` key in the wrong
 box and asserts nothing about how a decision key *starts*, because a gateway's
 does not look like TypeSafe's.
+
+**`keyPrefix` is a placeholder and nothing more**, and the two halves of that
+sentence are both deliberate. It is on the route so an app can put `vck_…` in
+an empty field rather than guessing or leaving it blank — the same reason
+`keyHint` is there. It is *not* wired into the check above: a vendor can change
+a prefix faster than a hub can be updated, and a positive assertion would then
+refuse a perfectly good key with no way past it. Being wrong about a
+placeholder costs a moment's confusion; being wrong about a guard costs
+somebody their key.
+
+**And the route is only ever written with a key.** `PATCH /settings/ai` takes
+both in one request (the key first, then the route), and a key the hub refuses
+rejects the whole request — so a stored credential can never be left pointing
+at an address it cannot authenticate to. The iOS app relies on that and offers
+the choice nowhere else: the picker lives in the sheet that asks for the key,
+and there is no control anywhere that moves a route on its own.
 
 **And one diagnostic, because the failure mode here is silence.** `typesafe.ts`
 drops an answer it cannot place — a `choice` with no `confidence`, a score off

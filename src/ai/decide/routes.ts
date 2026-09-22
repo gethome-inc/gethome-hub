@@ -30,6 +30,17 @@ export interface DecisionRoute {
   readonly modelId: string;
   /** Where a key for this route comes from, for the sheet that asks for one. */
   readonly keyHint: string;
+  /**
+   * What a key bought here starts with, for the field that asks for one.
+   *
+   * A placeholder and nothing else: `apiKeyField` deliberately asserts nothing
+   * about how a decision key *begins*, and that stays true with this beside it
+   * — a vendor can change a prefix faster than a hub can be updated, and a
+   * positive check would then refuse a perfectly good key with no way past it.
+   * Here it costs nothing to be wrong and saves somebody pasting the other
+   * route's key into the box.
+   */
+  readonly keyPrefix: string;
 }
 
 export const DECISION_ROUTES = [
@@ -39,6 +50,7 @@ export const DECISION_ROUTES = [
     baseUrl: 'https://api.typesafe.ai',
     modelId: DECISION_MODEL,
     keyHint: 'typesafe.ai',
+    keyPrefix: 'ts-',
   },
   {
     /**
@@ -56,6 +68,7 @@ export const DECISION_ROUTES = [
     baseUrl: 'https://ai-gateway.vercel.sh/typesafe',
     modelId: 'typesafe-ai/jev',
     keyHint: 'vercel.com/ai-gateway',
+    keyPrefix: 'vck_',
   },
 ] as const satisfies readonly DecisionRoute[];
 

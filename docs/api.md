@@ -2256,8 +2256,10 @@ hubs.
   "enabled": true,
   "route": "typesafe",
   "routes": [
-    { "id": "typesafe", "label": "TypeSafe",           "keyHint": "typesafe.ai" },
-    { "id": "vercel",   "label": "Vercel AI Gateway",  "keyHint": "vercel.com/ai-gateway" }
+    { "id": "typesafe", "label": "TypeSafe",
+      "keyHint": "typesafe.ai",          "keyPrefix": "ts-"  },
+    { "id": "vercel",   "label": "Vercel AI Gateway",
+      "keyHint": "vercel.com/ai-gateway", "keyPrefix": "vck_" }
   ]
 }
 ```
@@ -2286,15 +2288,18 @@ a gateway added later needs no app release. `PATCH {decisionRoute: "<id>"}`
 writes it and an id the hub does not serve is a `400`. What a route changes is
 where the request goes and whose key pays; **every route serves the same
 model**, which is what keeps the pin above meaningful rather than contradicted
-by a picker one line down. `keyHint` is where to buy that route's key, so the
-sheet asking for one can name the right shop. Three consequences worth holding:
-the key prefix check asserts nothing about how a decision key *starts* (a
-gateway's does not look like TypeSafe's — it still refuses an
-`sk-ant-`/`sk-proj-` key in that field); clearing the credential
-(`clear: "typesafe"`) unsets the stored route with it, since a route with no
-key is a preference about nothing; and changing the route does **not** carry
-the key across, so an app that offers the choice should say that the stored key
-has to be that route's.
+by a picker one line down. `keyHint` is where to buy that route's key and `keyPrefix` what one starts
+with, so the sheet asking for a key can name the right shop and put the right
+placeholder in the box. Three consequences worth holding. The key-prefix
+*check* asserts nothing about how a decision key starts — `keyPrefix` is for a
+placeholder, never a guard, because a vendor can change a prefix faster than a
+hub can be updated; it still refuses an `sk-ant-`/`sk-proj-` key in that field.
+Clearing the credential (`clear: "typesafe"`) unsets the stored route with it,
+since a route with no key is a preference about nothing. And **the two belong
+in one request**: `{typesafeApiKey, decisionRoute}` applies the key and then
+the route, and a refused key rejects both — which is what lets a client
+guarantee that a stored key is never left pointing at an address it cannot
+authenticate to. The iOS app writes `decisionRoute` only that way.
 
 Adding the key changes nothing about what the home can do; it changes how fast
 some of it happens. `docs/jev.md` is canonical.

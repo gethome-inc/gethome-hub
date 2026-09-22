@@ -1187,9 +1187,31 @@ describe.skipIf(!handle)('hub API', () => {
     expect(routed.json()).toMatchObject({
       decision: { route: 'vercel', model: 'typesafe-ai/jev' },
     });
+    // The table an app renders: a name, where to buy a key, and what one
+    // starts with — the placeholder for the field that asks for it, which is
+    // the hub's answer rather than the app's guess.
     expect(routed.json().decision.routes).toEqual(
-      expect.arrayContaining([expect.objectContaining({ id: 'typesafe' })]),
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'typesafe', keyHint: 'typesafe.ai', keyPrefix: 'ts-' }),
+        expect.objectContaining({ id: 'vercel', keyPrefix: 'vck_' }),
+      ]),
     );
+
+    // **The key and the route in one request, which is the only way the app
+    // ever changes a route.** A gateway key is refused nowhere on the way —
+    // the prefix guard asserts only that it is not one of the other two — and
+    // both land together, so a stored key can never be left pointing at an
+    // address it cannot authenticate to.
+    const bought = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { typesafeApiKey: 'vck_gateway_key', decisionRoute: 'vercel' },
+    });
+    expect(bought.statusCode).toBe(200);
+    expect(bought.json()).toMatchObject({
+      decision: { hasKey: true, route: 'vercel', model: 'typesafe-ai/jev' },
+    });
 
     // An address the hub does not serve is a 400 rather than a silent
     // fallback: every request would otherwise go somewhere that is not there.

@@ -359,7 +359,12 @@ domains — update them in the same change.
   `decision.routes` for an app to render, the `GET /permissions` rule. What a
   route changes is where the request goes and whose key pays; it never changes
   what answers, so a picker that looked like a model picker would be inviting
-  somebody to invalidate every threshold below without knowing it. Two things
+  somebody to invalidate every threshold below without knowing it. **A route is
+  written only with a key** — `PATCH /settings/ai` takes both in one request and
+  a refused key rejects both, which is what stops a stored credential being left
+  at an address it cannot authenticate to; `keyPrefix` rides the table for the
+  field's *placeholder* and is deliberately not a guard, since a vendor can
+  change a prefix faster than a hub can be updated. Two things
   follow in code: the key-prefix check keeps only the route-independent guard
   (an `sk-ant-`/`sk-proj-` key in the wrong box) and asserts nothing about how
   a decision key *starts*, since a gateway's does not look like TypeSafe's; and
