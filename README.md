@@ -144,28 +144,33 @@ before it writes anything at all.
 
 **Wi-Fi is fine, and the install turns its power saving off.** A hub is talked
 to in bursts — a phone opens the app, Studio browses for it, somebody SSHs in —
-and 802.11 power save is at its worst exactly there. On the Raspberry Pi's
-Broadcom radio it produces a failure that looks nothing like its cause: the
-board is up and its automations keep firing, while the apps and SSH both say
-the machine cannot be reached, for seconds or for ten minutes. The installer
-turns power saving off on whichever interface carries the LAN and makes it stay
-off across reconnects; a hub on Ethernet is left alone. It costs about 20 mA on
-a board that is plugged into the wall.
+and 802.11 power save is at its worst exactly there: a dozing radio listens
+for broadcasts only when the router signals that there are some, and some
+routers get that signalling wrong. The installer turns power saving off on
+whichever interface carries the LAN and makes it stay off across reconnects; a
+hub on Ethernet is left alone. It costs about 20 mA on a board that is plugged
+into the wall.
 
-**The hub also announces itself on your network every twenty seconds**, and
-that is the fix for the one that is hardest to believe: a hub that is running
-perfectly and cannot be reached, until you wait, or until something else on the
-network happens to talk to it.
+**The hub also keeps itself known on your network**, and that is the fix for
+the one that is hardest to believe: a hub that is running perfectly and cannot
+be reached, until you wait, or until something else on the network happens to
+talk to it.
 
-Routers keep a table of which device is on which radio, and they let an entry
-expire when the device has been quiet. A hub is quiet — it answers when asked
-and says nothing in between — so after a while your phone's messages to it stop
-being delivered, while the hub sits there with a full signal, running your
-automations, answering its own checks in milliseconds. Measured here: a
-continuous ping held it reachable for fourteen minutes without a single loss,
-twenty minutes after the same hub had been unreachable for four minutes.
-Traffic prevented it; quiet caused it. With the announcement in place: four
-hours of deliberately idle probing, one lost packet out of 504.
+Some routers sit on the broadcasts they owe a device on 2.4 GHz — for seconds,
+sometimes minutes — while passing ordinary traffic perfectly. Measured behind a
+TP-Link Archer C6: broadcasts from a Mac reached the hub up to 43 seconds late,
+and at worst three in five not at all, while direct traffic from the same Mac
+arrived 45 of 45 within 30 ms. Two things only ever reach a hub by broadcast.
+One is the router finding a hub that has been quiet for a while, so the hub
+announces itself to the router every twenty seconds (four hours of deliberately
+idle probing afterwards: one lost packet out of 504). The other is your phone:
+after twenty minutes without talking to the hub it forgets the hub's hardware
+address and asks for it again by broadcast, which is the question such a router
+loses — and the app says it cannot find a hub that is sitting there with a full
+signal, running your automations. So the hub does not wait to be asked. It
+keeps every phone and computer that talks to it up to date by addressing each
+one directly, and a phone that comes home is reminded within a couple of
+minutes of rejoining the Wi-Fi.
 
 Give the hub a fixed address while you are in the router — a DHCP reservation
 for its MAC is enough. The apps find it over mDNS and remember the address they

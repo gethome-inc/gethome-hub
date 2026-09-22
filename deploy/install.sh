@@ -1200,17 +1200,19 @@ fi
 # ── Wi-Fi must not doze ────────────────────────────────────────────────────
 # A hub is a machine nobody talks to for hours and then everybody talks to at
 # once — a phone opens the app, Studio browses for it, somebody SSHs in. That
-# is the worst traffic pattern there is for 802.11 power save, and on the
-# Raspberry Pi's brcmfmac it is the difference between a hub that answers and
-# a hub that has to be woken up. The chip is asked to sleep by default
-# (`brcmf_cfg80211_set_power_mgmt: power save enabled`, in every Pi's kernel
-# log), and the failure that follows is the one nobody can diagnose from the
-# app: the board is up, the coordinator is up, a motion rule is switching the
-# hall light on — and both apps say the hub cannot be reached, because the
-# radio is asleep and the access point's buffered frames went nowhere. It
-# takes SSH down with it, which is exactly what makes it look like the hub's
-# own fault. The one fact that says otherwise is that the automations kept
-# running, and nobody is looking at that while the app says "can't reach".
+# is the worst traffic pattern there is for 802.11 power save, and the Pi's
+# brcmfmac is asked to sleep by default (`brcmf_cfg80211_set_power_mgmt:
+# power save enabled`, in every Pi's kernel log).
+#
+# **This was first written as the fix for a hub that nothing could reach for
+# ten minutes at a time, and it was not that fix.** Those outages went on with
+# power save off; they were the router sitting on the broadcasts it owes the
+# hub, which is what `keep_wifi_reachable` below is about. Power save stays off
+# for a reason of its own: a dozing radio listens for broadcasts only when the
+# access point's DTIM signalling says there are some, and that signalling is
+# what the routers with that fault get wrong — openwrt/mt76#598 is power-saving
+# clients that stop hearing broadcasts altogether until they next transmit.
+# An awake radio at least hears them when the router finally sends them.
 #
 # The saving is on the order of 20 mA, on a mains-powered board that is the
 # home's front door. Not a trade worth making — so it goes off now, and off
@@ -1234,9 +1236,9 @@ find_iw() {
 # interface; Thomas Habets' `arping` package installs `/usr/sbin/arping` and
 # takes `-i`. Root's PATH on Debian puts `/usr/sbin` *first*, so a hub with
 # both would run the one whose flags we are not using — and it would fail
-# silently, leaving the gateway ping alone, which is exactly what was measured
-# not to work. Resolved by path here, and the caller sends one real
-# announcement before trusting it.
+# silently, taking with it the one announcement that was measured to keep the
+# router from losing the hub. Resolved by path here, and the caller sends one
+# real announcement before trusting it.
 find_arping() {
   local cand
   for cand in /usr/bin/arping "$(command -v arping 2>/dev/null || true)"; do
@@ -1368,44 +1370,56 @@ UNIT
   fi
 }
 
-# ── The hub has to announce itself, and it has to do it by broadcast ──────
-# **The fault this fixes needs the path to be idle, and that is what named
-# it.** A continuous one-per-second ping from a Mac on the same Wi-Fi held the
-# hub reachable for fourteen minutes without a single loss, while twenty
-# minutes earlier the same hub had been unreachable for four minutes at a
-# stretch. Traffic prevented it; quiet caused it. That is the owner's whole
-# experience too — open the app after a while and it cannot find the hub, keep
-# using it and nothing ever goes wrong.
+# ── The hub has to stay findable without a broadcast ever reaching it ──────
+# **Some routers sit on the broadcasts they owe the hub's radio, and a hub that
+# can only be found by broadcast goes missing while it runs perfectly.**
+# Measured on the hub this came from, behind a TP-Link Archer C6 (MediaTek
+# radios): numbered UDP broadcasts from a Mac on 5 GHz reached the hub up to 43
+# seconds late, released in bursts, and at worst three in five never arrived —
+# while unicast from the same Mac, in the same minute, arrived 45 of 45 inside
+# 30 ms. The router is the one holding them. The hub's radio is in constant-
+# awake mode, its own broadcasts reach the 5 GHz side at once, and turning the
+# Wi-Fi firmware's ARP offload off (promiscuous mode) changed nothing. It is a
+# known fault of these chips' group-addressed queue (openwrt/mt76#598), it comes
+# and goes, and nothing on the hub can see it happening.
 #
-# What goes quiet is one *pair*. Measured on the hub this came from: the Mac
-# is on 5 GHz and the hub's radio is on 2.4 GHz, so their traffic crosses the
-# bridge between the two radios inside the router, and it is the entry for
-# this hub on that bridge which ages out while it is silent. Everything else
-# keeps working and says so — during one of these the hub answered its own
-# health check in 3 ms, exchanged pings with the gateway throughout, and
-# served another client 37 KB in a single 20-second window, while three pings
-# from the Mac got nothing and its `rx_bytes` counter did not move by one of
-# them. Nothing on the hub is wrong, which is why nothing on the hub ever
-# reports it.
+# **Two different things only ever reach the hub through that queue, and each
+# was its own outage.** The first was the router losing its way to a hub that
+# had been quiet for minutes, which a broadcast from the hub every 20 seconds
+# cured: four hours of probes idled 55 seconds apart, 503 of 504 replies,
+# against multi-minute blackouts before it. The second is the one that
+# measurement could not see, because a 55-second gap never lets a cache
+# expire: **a phone's ARP request for the hub.** macOS keeps an entry for 20
+# minutes (`net.link.ether.inet.max_age`), iOS is the same kernel, and then
+# it asks again by broadcast. While the queue is stuck nothing answers and the
+# app gets `Host is down`, from a phone whose Wi-Fi is plainly fine, about a hub
+# that is up and serving every client whose cache is still warm.
 #
-# **A unicast to the gateway does not fix this, and shipping one is how that
-# was learned.** Those frames are addressed to the router itself and are
-# consumed by it; they never cross the bridge they are meant to keep warm. A
-# **gratuitous ARP is broadcast**, so it is flooded to every segment — it
-# refreshes the access point's forwarding table on both radios and every
-# client's ARP cache, in one frame of a few dozen bytes.
+# **A gratuitous ARP does not refresh that cache, and that was measured.** The
+# expiry of the Mac's entry for the hub did not move for one, request or
+# reply; it went back to 1200 seconds the moment the hub sent an ARP request
+# *addressed to the Mac* — which is what the kernel sends when it re-checks a
+# stale neighbour, by unicast, so the stuck queue never sees it. `ip neigh
+# change … use` asks for exactly that. So every round the keep-alive has the
+# kernel re-check each neighbour whose entry has gone stale, and it remembers
+# the ones the kernel has given up on for a day, asking about them by unicast
+# at the address they had every two minutes: a phone that comes home rejoins
+# with an empty cache, and this is what makes the hub known to it again before
+# anybody opens the app. **Nothing is ever broadcast at a neighbour** — that
+# is the path that is broken, and it would wake every sleeping device in the
+# house besides.
 #
-# Measured, with the path deliberately idled for 55 seconds between every
-# probe, which is the condition the fault needs: **252 probes over four hours,
-# 503 of 504 replies, one lost packet** — against a gateway control that lost
-# none. Before it, the same probe found multi-minute blackouts.
-#
-# The gateway ping stays beside it: it costs nothing and it keeps the hub's own
-# default route fresh. A wired hub gets none of this, for the reason it gets no
-# dispatcher.
+# The gratuitous ARP stays: it is what keeps the router from losing the hub in
+# the first place. The ping at the gateway that sat beside it is gone. It was
+# the first attempt at that outage, shipped on a theory the next commit
+# disproved, and kept afterwards "because it costs nothing" — but the gateway
+# is a neighbour like any other now and is re-checked with the rest. A wired
+# hub gets none of this, for the reason it gets no dispatcher.
 keep_wifi_reachable() {
-  local iface self arping_bin unit="${GETHOME_KEEPALIVE_UNIT:-/etc/systemd/system/gethome-wifi-keepalive.service}"
+  local iface self arping_bin neigh_help unit="${GETHOME_KEEPALIVE_UNIT:-/etc/systemd/system/gethome-wifi-keepalive.service}"
   local script="${GETHOME_KEEPALIVE_SCRIPT:-/usr/local/lib/gethome-wifi-keepalive.sh}"
+  # A word, not a substring: the same help text says "Usage".
+  local use_word='(^|[^[:alnum:]_])use([^[:alnum:]_]|$)'
 
   iface="$(lan_wifi_iface)"
   [[ -n "$iface" ]] || return 0
@@ -1421,46 +1435,112 @@ keep_wifi_reachable() {
   fi
 
   # Ask, never assume — `keep_wifi_awake`'s rule, and here it covers more than
-  # a missing binary: an announcement that cannot be sent leaves the hub with
-  # the gateway ping alone, which is the thing that was measured *not* to work.
-  # One real broadcast during the install is what tells the two apart.
+  # a missing binary: an announcement that cannot be sent leaves the router
+  # free to lose a quiet hub, which is the first of the two outages above. One
+  # real broadcast during the install is what tells the two apart.
   self="$(ip -4 -o addr show "$iface" 2>/dev/null | awk '{ split($4, a, "/"); print a[1]; exit }')"
   if [[ -z "$arping_bin" ]] || ! $SUDO "$arping_bin" -U -c 1 -I "$iface" "${self:-0.0.0.0}" >/dev/null 2>&1; then
     warn "This hub reaches the network over Wi-Fi (${iface}) and could not announce itself to the router. It works, but it may become unreachable for minutes at a time after a quiet spell, while running perfectly."
     arping_bin=""
   fi
 
+  # Ask, never assume, for the other half too. An `ip` that does not know
+  # `use` fails every call the loop makes and the loop says nothing, leaving
+  # each phone's record of this hub to expire — the fault itself, behind a
+  # clean install log. Captured before it is matched rather than piped into the
+  # test: `ip neigh help` exits non-zero by design, and under `pipefail` that
+  # reads as "no" whatever it printed.
+  neigh_help="$(ip neigh help 2>&1 || true)"
+  if [[ ! "$neigh_help" =~ $use_word ]]; then
+    warn "This hub's 'ip' command cannot ask the kernel to re-check a neighbour, so a phone that has not talked to the hub for 20 minutes may not find it for a while, on a router that is slow to pass broadcasts on."
+  fi
+
+  # The body is quoted, so it is written exactly as it reads. The one value
+  # baked in at install time is the `arping` resolved above, by path — see
+  # `find_arping` for why it is never looked up at run time. **No line in it
+  # may begin with `}`**: the suites lift this function out of the file with
+  # `sed '/^keep_wifi_reachable() {/,/^}/p'`, which would end it there — which
+  # is why the loop below has no functions of its own.
   $SUDO mkdir -p "$(dirname "$script")"
-  if ! $SUDO tee "$script" >/dev/null <<KEEPALIVE
-#!/bin/sh
-# Installed by GetHome. deploy/install.sh says why in full; the short version
-# is that the router ages this hub out of the table it uses to reach it from
-# its other radio, a hub is silent for minutes at a time, and what comes of
-# that is a hub nothing on the network can reach while it runs perfectly.
+  if ! {
+    printf '#!/bin/sh\n'
+    printf '# Installed by GetHome. deploy/install.sh says why in full.\n'
+    printf 'arping_bin="%s"\n' "${arping_bin:-/nonexistent}"
+    cat <<'KEEPALIVE'
 #
-# **Broadcast is the whole point.** A gratuitous ARP is flooded to every
-# segment, so it refreshes the access point's forwarding table on both radios
-# and every client's ARP cache at once. A unicast to the router does not: it is
-# addressed to the router itself and never crosses the bridge it is meant to
-# keep warm. That was tried first and did not work.
+# The short version: a router can sit on the broadcasts it owes this hub's
+# radio for seconds or minutes at a time while passing unicast perfectly, so
+# nothing here depends on a broadcast arriving.
+#
+# Every round:
+#  - a gratuitous ARP, so the router does not lose its way to a hub that has
+#    been quiet;
+#  - the kernel re-checks every neighbour whose entry has gone stale, which it
+#    does by asking that one machine, by unicast. That is what refreshes the
+#    neighbour's own record of this hub: macOS and iOS take nothing from a
+#    gratuitous ARP, and once their record expires they can only ask by
+#    broadcast, which is the question that goes missing.
+# Neighbours the kernel has given up on are remembered for a day and asked
+# about the same way every two minutes, at the address they had, so a phone
+# that comes home is known again before anybody opens the app. Nothing is ever
+# broadcast at a neighbour.
 #
 # Everything is re-read each round rather than captured, so a lease or an
 # interface that moves does not leave this announcing an address it no longer
-# has. Nothing is checked for a reply: transmitting is what does the work.
+# has.
+# $state holds one "address link-address last-reached" per neighbour.
+state="${GETHOME_NEIGH_STATE:-/run/gethome-wifi-neighbours}"
+round=0
 while :; do
-  iface=\$(ip route show default 2>/dev/null |
-    awk '/^default/ { for (i = 1; i < NF; i++) if (\$i == "dev") { print \$(i + 1); exit } }')
-  if [ -n "\$iface" ]; then
-    self=\$(ip -4 -o addr show "\$iface" 2>/dev/null | awk '{ split(\$4, a, "/"); print a[1]; exit }')
-    [ -n "\$self" ] && [ -x "${arping_bin:-/nonexistent}" ] &&
-      "${arping_bin:-/nonexistent}" -U -c 1 -I "\$iface" "\$self" >/dev/null 2>&1
-    gateway=\$(ip route show default 2>/dev/null | awk '/^default/ { print \$3; exit }')
-    [ -n "\$gateway" ] && ping -c 1 -W 1 "\$gateway" >/dev/null 2>&1
+  iface=$(ip route show default 2>/dev/null |
+    awk '/^default/ { for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')
+  if [ -n "$iface" ]; then
+    self=$(ip -4 -o addr show "$iface" 2>/dev/null | awk '{ split($4, a, "/"); print a[1]; exit }')
+    [ -n "$self" ] && [ -x "$arping_bin" ] &&
+      "$arping_bin" -U -c 1 -I "$iface" "$self" >/dev/null 2>&1
+
+    now=$(date +%s)
+    fresh="$state.new"
+    if : > "$fresh" 2>/dev/null; then
+      ip -4 neigh show dev "$iface" 2>/dev/null | while read -r addr ll mac rest; do
+        [ "$ll" = lladdr ] || continue
+        # Reached means confirmed. Anything else keeps the time it last was,
+        # or a neighbour that never answers again would be remembered for ever.
+        case " $rest " in
+          *" REACHABLE "*) seen=$now ;;
+          *)
+            seen=$(awk -v a="$addr" '$1 == a { print $3; exit }' "$state" 2>/dev/null)
+            case "$seen" in '' | *[!0-9]*) seen=$now ;; esac
+            ;;
+        esac
+        echo "$addr $mac $seen" >> "$fresh"
+        case " $rest " in
+          *" STALE "*) ip neigh change "$addr" dev "$iface" use 2>/dev/null ;;
+        esac
+      done
+      if [ -r "$state" ]; then
+        while read -r addr mac seen; do
+          case "$seen" in '' | *[!0-9]*) continue ;; esac
+          awk -v a="$addr" '$1 == a { found = 1 } END { exit !found }' "$fresh" && continue
+          [ $((now - seen)) -le 86400 ] || continue
+          echo "$addr $mac $seen" >> "$fresh"
+          [ $((round % 6)) -eq 0 ] || continue
+          # Never over a resolution the kernel is already making.
+          ip -4 neigh show "$addr" dev "$iface" 2>/dev/null | grep -q INCOMPLETE && continue
+          ip neigh replace "$addr" lladdr "$mac" nud stale dev "$iface" 2>/dev/null &&
+            ip neigh change "$addr" dev "$iface" use 2>/dev/null
+        done < "$state"
+      fi
+      mv -f "$fresh" "$state"
+    fi
   fi
+  # One round and out, for the suite that runs this file.
+  [ -z "${GETHOME_KEEPALIVE_ONCE:-}" ] || exit 0
+  round=$((round + 1))
   sleep 20
 done
 KEEPALIVE
-  then
+  } | $SUDO tee "$script" >/dev/null; then
     warn "Could not install the Wi-Fi keep-alive. The hub works, but it may become unreachable for minutes at a time after a quiet spell, while running perfectly."
     return 0
   fi
@@ -1491,7 +1571,7 @@ UNIT
     # does nothing at all — so the fix would sit on disk until the next reboot
     # while the old one kept running. `restart` starts a stopped unit too.
     if $SUDO systemctl restart gethome-wifi-keepalive >/dev/null 2>&1; then
-      say "The hub will announce itself on the network every 20 seconds, so it stays reachable after a quiet spell."
+      say "The hub will keep itself known on the network — to the router every 20 seconds, and to every phone and computer that talks to it — so it stays reachable after a quiet spell."
       return 0
     fi
   fi

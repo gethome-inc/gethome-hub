@@ -5,11 +5,13 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 /**
- * The Wi-Fi power-save decision in `deploy/install.sh`.
+ * The Wi-Fi decisions in `deploy/install.sh`: power save, and staying findable.
  *
  * Found on a Zero 2 W whose owner could not reach the hub from the app or over
  * SSH for ten minutes at a time, while a motion rule went on switching the
- * hall light on: the board was up and working, and its radio was asleep. That
+ * hall light on. Power save was blamed first and turned off, and the outages
+ * went on: it was the router sitting on the broadcasts it owed the hub (see
+ * "keeping the hub reachable after a quiet spell" below). Either way the
  * failure is invisible from every surface the product has — the hub cannot
  * report that it is unreachable — so the only place it can be fixed is here.
  *
@@ -147,13 +149,27 @@ function run(options: {
 
 const WIFI_ROUTE = 'default via 192.168.0.1 dev wlan0 proto dhcp src 192.168.0.200 metric 600\n';
 
+/** `ip neigh help` from the iproute2 a Raspberry Pi OS hub has, which knows `use`. */
+const NEIGH_HELP = `Usage: ip neigh { add | del | change | replace }
+                { ADDR [ lladdr LLADDR ] [ nud STATE ] proxy ADDR }
+                [ dev DEV ] [ router ] [ use ] [ managed ] [ extern_learn ]
+                [ protocol PROTO ]`;
+
+/**
+ * The same from an `ip` that has never heard of `use` — and still says
+ * "Usage", which is why the installer looks for the word rather than the
+ * letters.
+ */
+const NEIGH_HELP_WITHOUT_USE = `Usage: ip neigh { add | del | change | replace }
+                { ADDR [ lladdr LLADDR ] [ nud STATE ] | proxy ADDR } [ dev DEV ]`;
+
 /**
  * Run `keep_wifi_reachable` out of install.sh against files the test owns.
  *
  * Returns the unit and the script it writes, or empty strings for the wired
  * hub that must get neither.
  */
-function keepalive(options: { route: string; wireless: string[]; arping?: boolean }): {
+function keepalive(options: { route: string; wireless: string[]; arping?: boolean; ipKnowsUse?: boolean }): {
   unit: string;
   script: string;
   scriptMode: string;
@@ -170,7 +186,13 @@ function keepalive(options: { route: string; wireless: string[]; arping?: boolea
   mkdirSync(bin, { recursive: true });
   for (const iface of options.wireless) mkdirSync(path.join(net, iface, 'wireless'), { recursive: true });
   const systemctl = path.join(dir, 'systemctl-calls');
-  script_(path.join(bin, 'ip'), `printf '%s' "$FAKE_ROUTE"`);
+  // `ip neigh help` prints to stderr and exits non-zero, the way the real one
+  // does — which is the half that would read as "no" under `pipefail`.
+  script_(
+    path.join(bin, 'ip'),
+    `[ "$*" = "neigh help" ] && { printf '%s\\n' "$FAKE_NEIGH_HELP" >&2; exit 255; }
+     printf '%s' "$FAKE_ROUTE"`,
+  );
   script_(path.join(bin, 'systemctl'), `echo "$*" >> "${systemctl}"`);
   // Stubbed rather than borrowed from the host: whether this machine happens
   // to have `arping` decides which branch runs, and a test that says something
@@ -201,6 +223,7 @@ function keepalive(options: { route: string; wireless: string[]; arping?: boolea
         ...process.env,
         PATH: `${bin}:${process.env.PATH ?? ''}`,
         FAKE_ROUTE: options.route,
+        FAKE_NEIGH_HELP: options.ipKnowsUse === false ? NEIGH_HELP_WITHOUT_USE : NEIGH_HELP,
         GETHOME_NET_DIR: net,
         GETHOME_KEEPALIVE_UNIT: unit,
         GETHOME_KEEPALIVE_SCRIPT: script,
@@ -218,32 +241,35 @@ function keepalive(options: { route: string; wireless: string[]; arping?: boolea
 }
 
 /**
- * **The fault needs the path to be idle, and that is what named it.**
+ * **A router can sit on the broadcasts it owes the hub, and pass unicast
+ * perfectly the whole time.**
  *
- * A continuous one-per-second ping from a Mac on the same Wi-Fi held the hub
- * reachable for fourteen minutes without a single loss, twenty minutes after
- * the same hub had been unreachable for four minutes at a stretch. Traffic
- * prevented it; quiet caused it — which is the owner's whole experience, since
- * an app opened after a while is exactly a path that has been silent.
+ * Measured behind a TP-Link Archer C6 (MediaTek radios): numbered broadcasts
+ * from a Mac on 5 GHz reached the hub up to 43 seconds late, released in
+ * bursts, and at worst three in five never arrived, while unicast from the same
+ * Mac in the same minute arrived 45 of 45 inside 30 ms. Two things only ever
+ * reach the hub that way, and each was its own outage.
  *
- * What goes quiet is one *pair*: the Mac is on 5 GHz and the hub's radio on
- * 2.4 GHz, so their traffic crosses the bridge between the two radios inside
- * the router, and it is this hub's entry on that bridge which ages out. During
- * one of these the hub answered its own health check in 3 ms, exchanged pings
- * with the gateway throughout and served another client 37 KB in one 20-second
- * window, while three pings from the Mac got nothing at all.
+ * The first was the router losing its way to a hub that had been quiet. A
+ * continuous ping held the hub reachable for fourteen minutes, twenty minutes
+ * after it had been unreachable for four; with the hub announcing itself every
+ * 20 seconds, **252 probes idled 55 seconds apart over four hours got 503 of
+ * 504 replies**, against a gateway control that lost none.
  *
- * Measured with the path deliberately idled for 55 seconds between probes:
- * **252 probes over four hours, 503 of 504 replies, one lost packet**, against
- * a gateway control that lost none.
+ * The second is what that measurement could not see, because 55 seconds never
+ * lets a cache expire: **a phone asking for the hub again once its 20-minute ARP
+ * entry has run out**, by broadcast, which the stuck queue swallows — so the
+ * app reports `Host is down` about a hub that is up. A gratuitous ARP does not
+ * help there, measured: macOS takes nothing from one, request or reply, and its
+ * entry went back to 1200 seconds only when the hub asked for the Mac by name.
  */
 describe('keeping the hub reachable after a quiet spell', () => {
-  it('announces itself by broadcast, which is the only thing that crosses', () => {
+  it('announces itself to the router by broadcast every round', () => {
     const result = keepalive({ route: WIFI_ROUTE, wireless: ['wlan0'] });
     // **A gratuitous ARP, not a unicast.** A ping at the router is addressed
-    // to the router and never crosses the bridge it is meant to keep warm;
-    // that was shipped first and did not work. `-U` is the broadcast form.
-    expect(result.script).toMatch(/arping["']? -U\b/);
+    // to the router, and on its own it was shipped first and did not keep the
+    // hub found. `-U` is the broadcast form.
+    expect(result.script).toMatch(/"\$arping_bin" -U\b/);
     expect(result.scriptMode).toBe('755');
     // Bounded and quiet: this is a broadcast, so every station on the network
     // pays for it, and one every few seconds would be rude.
@@ -260,9 +286,43 @@ describe('keeping the hub reachable after a quiet spell', () => {
     // has two different programs called `arping` with different interface
     // flags, and root's PATH finds `/usr/sbin` before `/usr/bin` — so a hub
     // with both installed would run the one whose flags we are not using, and
-    // fail silently into the gateway ping that was measured not to work.
-    expect(result.script).toMatch(/\/arping["' ]/);
+    // the announcement would stop without a word.
+    expect(result.script).toMatch(/^arping_bin="\/[^"]*\/arping"$/m);
     expect(result.script).not.toMatch(/^\s*arping /m);
+  });
+
+  /**
+   * **The gateway ping is gone, and should stay gone.** It was the first
+   * attempt at the quiet-hub outage — shipped on the theory that the access
+   * point thought the hub was asleep, disproved by the next commit — and was
+   * kept afterwards because it "cost nothing". The gateway is one of the
+   * neighbours the round re-checks now, so it bought nothing either.
+   */
+  it('does not ping the gateway', () => {
+    const result = keepalive({ route: WIFI_ROUTE, wireless: ['wlan0'] });
+    const code = result.script.split('\n').filter((line) => !/^\s*#/.test(line));
+    expect(code.some((line) => /\bping\b/.test(line))).toBe(false);
+  });
+
+  /**
+   * **The other half has to be able to happen, and the install has to say when
+   * it cannot.** An `ip` that has never heard of `use` fails every call the
+   * loop makes, silently, which leaves each phone's record of the hub to expire
+   * — the outage itself, behind an install log with nothing in it.
+   */
+  it('says so when the kernel cannot be asked to re-check a neighbour', () => {
+    const result = keepalive({ route: WIFI_ROUTE, wireless: ['wlan0'], ipKnowsUse: false });
+    expect(result.output).toMatch(/WARN .*cannot ask the kernel to re-check a neighbour/);
+    // The broadcast half still installs: a hub with one of the two is better
+    // off than a hub with neither.
+    expect(result.script).not.toBe('');
+  });
+
+  it('stays quiet about it on an ip that knows use', () => {
+    const result = keepalive({ route: WIFI_ROUTE, wireless: ['wlan0'] });
+    // Only this warning: whether the arping one fires depends on whether the
+    // machine running the suite has a real `/usr/bin/arping` to fail with.
+    expect(result.output).not.toMatch(/cannot ask the kernel/);
   });
 
   /**
@@ -279,9 +339,9 @@ describe('keeping the hub reachable after a quiet spell', () => {
   });
 
   /**
-   * **A hub that cannot broadcast has to say so.** Without `arping` the loop
-   * falls back to the gateway ping, which is exactly the thing that was
-   * measured not to work — so the install must not go quiet about it.
+   * **A hub that cannot broadcast has to say so.** Without `arping` nothing
+   * tells the router the hub is still there, which is the first of the two
+   * outages exactly — so the install must not go quiet about it.
    */
   it('says so when it cannot send the broadcast', () => {
     const result = keepalive({ route: WIFI_ROUTE, wireless: ['wlan0'], arping: false });
@@ -298,6 +358,183 @@ describe('keeping the hub reachable after a quiet spell', () => {
     expect(result.unit).toBe('');
     expect(result.script).toBe('');
     expect(result.output).toBe('');
+  });
+});
+
+/**
+ * Run one round of the keep-alive the installer wrote, for real, under `sh`.
+ *
+ * `neigh` is what the kernel's neighbour table says (`ip -4 neigh show dev
+ * wlan0`), and `state` what the previous rounds remembered. Returns every
+ * command the round ran, in order, and what it remembered afterwards.
+ */
+function oneRound(options: { neigh: string; state?: string }): { calls: string[]; state: string } {
+  const written = keepalive({ route: WIFI_ROUTE, wireless: ['wlan0'] });
+  const dir = mkdtempSync(path.join(tmpdir(), 'gethome-round-'));
+  dirs.push(dir);
+  const bin = path.join(dir, 'bin');
+  const calls = path.join(dir, 'calls');
+  const state = path.join(dir, 'neighbours');
+  mkdirSync(bin, { recursive: true });
+  script_(
+    path.join(bin, 'ip'),
+    `echo "ip $*" >> "${calls}"
+     case "$*" in
+       "route show default") printf '%s' "$FAKE_ROUTE" ;;
+       "-4 -o addr show wlan0") echo "3: wlan0    inet 192.168.0.200/24 brd 192.168.0.255 scope global wlan0" ;;
+       "-4 neigh show dev wlan0") printf '%s' "$FAKE_NEIGH" ;;
+       "-4 neigh show "*" dev wlan0") printf '%s' "$FAKE_NEIGH" | awk -v a="$4" '$1 == a' ;;
+     esac`,
+  );
+  script_(path.join(bin, 'arping'), `echo "arping $*" >> "${calls}"`);
+  script_(path.join(bin, 'ping'), `echo "ping $*" >> "${calls}"`);
+  if (options.state !== undefined) writeFileSync(state, options.state);
+  // The installer bakes in whichever `arping` it resolved, which on a machine
+  // that has one is the real thing. This round has to call the fake.
+  const round = path.join(dir, 'keepalive.sh');
+  writeFileSync(round, written.script.replace(/^arping_bin=.*$/m, `arping_bin="${path.join(bin, 'arping')}"`));
+  execFileSync('sh', [round], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH ?? ''}`,
+      FAKE_ROUTE: WIFI_ROUTE,
+      FAKE_NEIGH: options.neigh,
+      GETHOME_KEEPALIVE_ONCE: '1',
+      GETHOME_NEIGH_STATE: state,
+    },
+  });
+  return {
+    calls: existsSync(calls) ? readFileSync(calls, 'utf8').trim().split('\n').filter(Boolean) : [],
+    state: existsSync(state) ? readFileSync(state, 'utf8') : '',
+  };
+}
+
+/** The commands a round ran that changed anything, minus the reads. */
+function writes(calls: string[]): string[] {
+  return calls.filter((call) => !/^ip (route show|-4 -o addr show|-4 neigh show)/.test(call));
+}
+
+const now = (): number => Math.floor(Date.now() / 1000);
+
+/**
+ * **What keeps a phone's record of the hub alive is a question addressed to the
+ * phone, and the kernel already knows how to ask one.** A stale neighbour
+ * re-checked with `ip neigh change … use` gets an ARP request by unicast five
+ * seconds later — measured on the hub: STALE, DELAY, then REACHABLE, and the
+ * Mac's entry for the hub back at 1200 seconds from minus 345. Nothing in it is
+ * broadcast, so a router sitting on its broadcasts never sees it.
+ */
+describe("keeping every neighbour's record of the hub warm", () => {
+  it('re-checks every stale neighbour by unicast, and nothing else', () => {
+    const round = oneRound({
+      neigh: [
+        '192.168.0.1 lladdr 02:00:00:00:00:01 REACHABLE',
+        '192.168.0.145 lladdr 02:00:00:00:01:45 STALE',
+        '192.168.0.166 lladdr 02:00:00:00:01:66 STALE',
+        '192.168.0.240 lladdr 02:00:00:00:02:40 DELAY',
+        '192.168.0.9 FAILED',
+        '192.168.0.10 INCOMPLETE',
+        '',
+      ].join('\n'),
+    });
+    expect(writes(round.calls)).toEqual([
+      'arping -U -c 1 -I wlan0 192.168.0.200',
+      'ip neigh change 192.168.0.145 dev wlan0 use',
+      'ip neigh change 192.168.0.166 dev wlan0 use',
+    ]);
+  });
+
+  /**
+   * **Never by broadcast at a neighbour.** That is the path the router is
+   * sitting on, and a broadcast wakes every sleeping device in the house. The
+   * only `arping` is the hub announcing its own address.
+   */
+  it('broadcasts nothing but its own announcement', () => {
+    const round = oneRound({
+      neigh: '192.168.0.145 lladdr 02:00:00:00:01:45 STALE\n192.168.0.9 FAILED\n',
+      state: `192.168.0.9 aa:bb:cc:dd:ee:09 ${now() - 600}\n`,
+    });
+    expect(round.calls.filter((call) => call.startsWith('arping'))).toEqual([
+      'arping -U -c 1 -I wlan0 192.168.0.200',
+    ]);
+  });
+
+  it('remembers who it has seen, and when each last answered', () => {
+    const answered = now() - 300;
+    const round = oneRound({
+      neigh: '192.168.0.1 lladdr 02:00:00:00:00:01 REACHABLE\n192.168.0.145 lladdr 02:00:00:00:01:45 STALE\n',
+      state: `192.168.0.145 02:00:00:00:01:45 ${answered}\n`,
+    });
+    const remembered = new Map(
+      round.state
+        .trim()
+        .split('\n')
+        .map((line) => line.split(' '))
+        .map(([address, mac, seen]) => [address!, { mac: mac!, seen: Number(seen) }]),
+    );
+    // Reachable is an answer, so it is dated now.
+    expect(remembered.get('192.168.0.1')!.mac).toBe('02:00:00:00:00:01');
+    expect(Math.abs(remembered.get('192.168.0.1')!.seen - now())).toBeLessThan(60);
+    // Stale is not: it keeps the time it last answered, or a neighbour that
+    // never answers again would be remembered for ever.
+    expect(remembered.get('192.168.0.145')).toEqual({ mac: '02:00:00:00:01:45', seen: answered });
+  });
+
+  /**
+   * **A phone that comes home rejoins with an empty cache**, and the kernel has
+   * long since given up on it. So the hub asks for it at the address and link
+   * address it had — seeded back as stale, then re-checked, which is a unicast
+   * question — and does it on the round it starts with and every sixth after,
+   * which is two minutes at 20 seconds a round.
+   */
+  it('asks about a neighbour the kernel has given up on, at the address it had', () => {
+    const round = oneRound({
+      neigh: '192.168.0.166 FAILED\n',
+      state: `192.168.0.166 02:00:00:00:01:66 ${now() - 600}\n`,
+    });
+    expect(writes(round.calls)).toContain('ip neigh replace 192.168.0.166 lladdr 02:00:00:00:01:66 nud stale dev wlan0');
+    const replace = round.calls.indexOf('ip neigh replace 192.168.0.166 lladdr 02:00:00:00:01:66 nud stale dev wlan0');
+    expect(round.calls[replace + 1]).toBe('ip neigh change 192.168.0.166 dev wlan0 use');
+    expect(round.state).toContain('192.168.0.166 02:00:00:00:01:66');
+    expect(keepalive({ route: WIFI_ROUTE, wireless: ['wlan0'] }).script).toContain('$((round % 6))');
+  });
+
+  it('and one the kernel has dropped altogether', () => {
+    const round = oneRound({ neigh: '', state: `192.168.0.166 02:00:00:00:01:66 ${now() - 600}\n` });
+    expect(writes(round.calls)).toEqual([
+      'arping -U -c 1 -I wlan0 192.168.0.200',
+      'ip neigh replace 192.168.0.166 lladdr 02:00:00:00:01:66 nud stale dev wlan0',
+      'ip neigh change 192.168.0.166 dev wlan0 use',
+    ]);
+  });
+
+  /** Seeding an old address over a resolution in flight would only race it. */
+  it('leaves alone a neighbour the kernel is already resolving', () => {
+    const round = oneRound({
+      neigh: '192.168.0.166 INCOMPLETE\n',
+      state: `192.168.0.166 02:00:00:00:01:66 ${now() - 600}\n`,
+    });
+    expect(writes(round.calls).some((call) => call.includes('192.168.0.166'))).toBe(false);
+    expect(round.state).toContain('192.168.0.166 02:00:00:00:01:66');
+  });
+
+  /** A day is long enough to cover coming home, and short enough not to keep asking after somebody who moved out. */
+  it('forgets a neighbour that has not answered for a day', () => {
+    const round = oneRound({ neigh: '', state: `192.168.0.77 aa:bb:cc:dd:ee:77 ${now() - 90_000}\n` });
+    expect(writes(round.calls).some((call) => call.includes('192.168.0.77'))).toBe(false);
+    expect(round.state).not.toContain('192.168.0.77');
+  });
+
+  /** It is our own file, but a keep-alive that dies on one bad line dies on every restart after it. */
+  it('skips a line it cannot read rather than stopping', () => {
+    const round = oneRound({
+      neigh: '192.168.0.145 lladdr 02:00:00:00:01:45 STALE\n',
+      state: `192.168.0.9 aa:bb:cc:dd:ee:09 yesterday\n192.168.0.166 02:00:00:00:01:66 ${now() - 600}\n`,
+    });
+    expect(writes(round.calls)).toContain('ip neigh change 192.168.0.145 dev wlan0 use');
+    expect(writes(round.calls)).toContain('ip neigh change 192.168.0.166 dev wlan0 use');
+    expect(round.state).not.toContain('192.168.0.9 ');
   });
 });
 
