@@ -1414,6 +1414,23 @@ UNIT
 # broadcast at a neighbour** — that is the path that is broken, and it would
 # wake every sleeping device in the house besides.
 #
+# **A Matter accessory is the case a day does not cover.** Reaching one starts
+# with a Neighbour Solicitation, which is multicast, and on the hub this came
+# from the hub's multicast reached its plug 7 times in 30 while unicast went
+# 30 in 30. A plug switched off for days was forgotten here and by the kernel
+# alike, so once it was back on, every retry the hub made — at the right
+# address, every two minutes — died in neighbour discovery until a multicast
+# got through, eight and a half minutes later. A reboot empties both memories
+# too, for every accessory at once. The hub knows better than either: each
+# accessory reports its own link-local address and link address, and
+# matter.js keeps them for as long as the accessory is commissioned. So the
+# hub writes them to `<data>/matter-neighbours`
+# (`src/adapters/matter/neighbours.ts`) and the loop asks after each the
+# kernel has no link address for, by unicast, every two minutes, for as long
+# as the file lists it. The file is written by the hub's own user and read
+# here as root, so the loop takes a line only if it is exactly a link-local
+# address and a MAC, and reads no more than 16 KiB of it.
+#
 # The gratuitous ARP stays: it is what keeps the router from losing the hub in
 # the first place. The ping at the gateway that sat beside it is gone. It was
 # the first attempt at that outage, shipped on a theory the next commit
@@ -1459,17 +1476,21 @@ keep_wifi_reachable() {
     warn "This hub could not ask the kernel to re-check a neighbour, so a phone that has not talked to the hub for 20 minutes may not find it for a while, on a router that is slow to pass broadcasts on."
   fi
 
-  # The body is quoted, so it is written exactly as it reads. The one value
-  # baked in at install time is the `arping` resolved above, by path — see
-  # `find_arping` for why it is never looked up at run time. **No line in it
-  # may begin with `}`**: the suites lift this function out of the file with
-  # `sed '/^keep_wifi_reachable() {/,/^}/p'`, which would end it there — which
-  # is why the loop below has no functions of its own.
+  # The body is quoted, so it is written exactly as it reads. Two values are
+  # baked in at install time: the `arping` resolved above, by path — see
+  # `find_arping` for why it is never looked up at run time — and where the
+  # hub keeps its list of Matter accessories (`src/adapters/matter/
+  # neighbours.ts`, `MATTER_NEIGHBOURS_FILE`; the suite holds the two names
+  # together). **No line in it may begin with `}`**: the suites lift this
+  # function out of the file with `sed '/^keep_wifi_reachable() {/,/^}/p'`,
+  # which would end it there — which is why the loop below has no functions
+  # of its own.
   $SUDO mkdir -p "$(dirname "$script")"
   if ! {
     printf '#!/bin/sh\n'
     printf '# Installed by GetHome. deploy/install.sh says why in full.\n'
     printf 'arping_bin="%s"\n' "${arping_bin:-/nonexistent}"
+    printf 'matter_neighbours="%s"\n' "${DATA_DIR}/matter-neighbours"
     cat <<'KEEPALIVE'
 #
 # The short version: a router can sit on the broadcasts it owes this hub's
@@ -1493,15 +1514,26 @@ keep_wifi_reachable() {
 # through the same stuck queue: a Wi-Fi accessory that has lost its record of
 # this hub asks for it the way a phone does, and a hub that has lost its record
 # of the accessory asks back the same way. A stale IPv6 entry re-checked by
-# unicast carries this hub's link address to the accessory as well, and a plug
-# that comes back from being switched off is found by its old address within
-# two minutes rather than whenever the router lets a multicast through.
+# unicast carries this hub's link address to the accessory as well.
+#
+# **And every Matter accessory the hub owns, however long it has been gone.**
+# A day in /run covers a phone; it does not cover a plug switched off for a
+# week, or any accessory after this board reboots, and either was left to
+# multicast — measured reaching a plug 7 times in 30, which kept one that had
+# been off for days unreachable for eight and a half minutes after it was
+# back. So the hub writes down where each accessory it owns can be reached —
+# the link-local address and link address it reports about itself — and every
+# two minutes this asks for each the kernel has no link address for, by
+# unicast. The file is the hub's and this runs as root, so a line counts only
+# if it is exactly a link-local address and a MAC.
 #
 # Everything is re-read each round rather than captured, so a lease or an
 # interface that moves does not leave this announcing an address it no longer
 # has.
 # $state holds one "address link-address last-reached" per neighbour.
 state="${GETHOME_NEIGH_STATE:-/run/gethome-wifi-neighbours}"
+# $matter holds one "link-local-address link-address" per accessory.
+matter="${GETHOME_MATTER_NEIGHBOURS:-$matter_neighbours}"
 round=0
 while :; do
   iface=$(ip route show default 2>/dev/null |
@@ -1543,6 +1575,23 @@ while :; do
           ip neigh show "$addr" dev "$iface" 2>/dev/null | grep -q INCOMPLETE && continue
           ip neigh replace "$addr" lladdr "$mac" nud probe dev "$iface" 2>/dev/null
         done < "$state"
+      fi
+      # The hub's Matter accessories, on the same two-minute beat, skipping
+      # any the kernel holds a link address for or the loop above just asked
+      # about. Bounded, because the file is somebody else's to write.
+      if [ $((round % 6)) -eq 0 ] && [ -f "$matter" ]; then
+        head -c 16384 "$matter" 2>/dev/null | while read -r addr mac rest; do
+          case "$addr" in fe80:*) ;; *) continue ;; esac
+          case "$addr" in *[!0-9a-f:]*) continue ;; esac
+          [ "${#addr}" -le 39 ] || continue
+          case "$mac" in
+            [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]) ;;
+            *) continue ;;
+          esac
+          awk -v a="$addr" '$1 == a { found = 1 } END { exit !found }' "$fresh" && continue
+          ip neigh show "$addr" dev "$iface" 2>/dev/null | grep -q INCOMPLETE && continue
+          ip neigh replace "$addr" lladdr "$mac" nud probe dev "$iface" 2>/dev/null
+        done
       fi
       mv -f "$fresh" "$state"
     fi

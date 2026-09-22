@@ -103,5 +103,29 @@ update it in the same change.
   a second scanner beside the hub's own took fifteen seconds of neighbourhood
   advertisements from 231 down to 2 on a Zero 2 W, and a starved scan reports
   an *empty list* — the wrong answer in the one direction somebody acts on.
+- **The hub writes down where every accessory it owns is on the link, because
+  finding one again starts with a multicast.** To reach an accessory the kernel
+  needs its link address, and IPv6 asks for that by multicast — which the
+  router on the hub this came from passed to a plug 7 times in 30. A plug off
+  for days was back on the network at 09:58 by its own uptime and reached at
+  10:07, every two-minute retry in between dying in neighbour discovery. So
+  `neighbours.ts` writes `<data>/matter-neighbours`, one link-local address and
+  MAC per line, and the Wi-Fi keep-alive asks after each by unicast whenever the
+  kernel has lost it — see `deploy/CLAUDE.md`, which holds the root half.
+  Five rules. **What the accessory says about itself**: General Diagnostics
+  `NetworkInterfaces`, from matter.js's cache, so an accessory switched off
+  right now is listed — plus the address matter.js reaches it at, when there is
+  exactly one MAC to pair it with, for firmware that leaves its own list short;
+  a Thread interface is skipped and **IPv4 never listed**, since a lease moves
+  to another device. **Spelled as the kernel prints it** (RFC 5952): the
+  keep-alive compares the two as strings. **Nothing is written until every
+  commissioned node has attached** (or thirty seconds have passed) — so the file
+  is never rewritten on the way up with fewer accessories than the hub owns, and
+  a controller that owns none still empties a stale list — and after that only
+  when the contents change, through a temporary file and a rename. **Nothing in
+  it may throw**: it helps reach accessories, and nothing about reaching them
+  waits on it. And **the file object is made in `start()`**, not the
+  constructor, because the API reads this adapter before it has started and
+  a test constructs one with no data directory at all.
 - The Matter reducer (`src/adapters/matter/reducer.ts`) is a 1:1 port of the
   iOS `MatterStateReducer` — keep them in lockstep if either changes.

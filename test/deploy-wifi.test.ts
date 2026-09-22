@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, st
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { MATTER_NEIGHBOURS_FILE } from '../src/adapters/matter/neighbours.js';
 
 /**
  * The Wi-Fi decisions in `deploy/install.sh`: power save, and staying findable.
@@ -198,6 +199,10 @@ function keepalive(options: { route: string; wireless: string[]; arping?: boolea
        SUDO=""
        say()  { printf 'SAY %s\n' "$*"; }
        warn() { printf 'WARN %s\n' "$*"; }
+       # The installer's own data directory, not a copy of it: the keep-alive
+       # bakes in where the hub writes its Matter accessories, and the point
+       # of asking is that the two agree.
+       eval "$(grep -m1 '^DATA_DIR=' "$1")"
        for fn in lan_wifi_iface find_arping keep_wifi_reachable; do
          prog="/^$fn() {/,/^}/p"
          eval "$(sed -n "$prog" "$1")"
@@ -354,17 +359,22 @@ describe('keeping the hub reachable after a quiet spell', () => {
 /**
  * Run one round of the keep-alive the installer wrote, for real, under `sh`.
  *
- * `neigh` is what the kernel's neighbour table says (`ip -4 neigh show dev
- * wlan0`), and `state` what the previous rounds remembered. Returns every
- * command the round ran, in order, and what it remembered afterwards.
+ * `neigh` is what the kernel's neighbour table says (`ip neigh show dev
+ * wlan0`), `state` what the previous rounds remembered, and `matter` the list
+ * the hub keeps of its Matter accessories. Returns every command the round
+ * ran, in order, and what it remembered afterwards.
  */
-function oneRound(options: { neigh: string; state?: string }): { calls: string[]; state: string } {
+function oneRound(options: { neigh: string; state?: string; matter?: string }): { calls: string[]; state: string } {
   const written = keepalive({ route: WIFI_ROUTE, wireless: ['wlan0'] });
   const dir = mkdtempSync(path.join(tmpdir(), 'gethome-round-'));
   dirs.push(dir);
   const bin = path.join(dir, 'bin');
   const calls = path.join(dir, 'calls');
   const state = path.join(dir, 'neighbours');
+  // Always pointed somewhere the test owns, so a machine that happens to have
+  // a real hub's data directory never lends this round its accessories.
+  const matter = path.join(dir, MATTER_NEIGHBOURS_FILE);
+  if (options.matter !== undefined) writeFileSync(matter, options.matter);
   mkdirSync(bin, { recursive: true });
   script_(
     path.join(bin, 'ip'),
@@ -392,6 +402,7 @@ function oneRound(options: { neigh: string; state?: string }): { calls: string[]
       FAKE_NEIGH: options.neigh,
       GETHOME_KEEPALIVE_ONCE: '1',
       GETHOME_NEIGH_STATE: state,
+      GETHOME_MATTER_NEIGHBOURS: matter,
     },
   });
   return {
@@ -559,6 +570,128 @@ describe("keeping every neighbour's record of the hub warm", () => {
     expect(writes(round.calls)).toContain('ip neigh replace 192.168.0.145 lladdr 02:00:00:00:01:45 nud probe dev wlan0');
     expect(writes(round.calls)).toContain('ip neigh replace 192.168.0.166 lladdr 02:00:00:00:01:66 nud probe dev wlan0');
     expect(round.state).not.toContain('192.168.0.9 ');
+  });
+});
+
+/**
+ * **A Matter accessory is found again by unicast however long it was gone.**
+ *
+ * Found on the hub the rest of this file came from: a plug switched off for
+ * days came back at 09:58 by its own uptime and was reached at 10:07. The hub
+ * retried at the right address every two minutes, and every retry died in
+ * IPv6 neighbour discovery — multicast, which that router passed from the hub
+ * to the plug 7 times in 30 while unicast went 30 in 30. The day this loop
+ * remembers a neighbour for had long run out, and a reboot empties it for
+ * every accessory at once. So the hub writes down each accessory it owns — the
+ * link-local address and link address the accessory reports about itself —
+ * and the round asks after every one the kernel has no link address for.
+ */
+describe('finding a Matter accessory that has been gone for longer than a day', () => {
+  const MATTER = [
+    '# Written by the GetHome hub: every Matter accessory it owns, at its link address.',
+    'fe80::81b:2cff:fe3d:4e5f 0a:1b:2c:3d:4e:5f',
+    '',
+  ].join('\n');
+  const PLUG_PROBE = 'ip neigh replace fe80::81b:2cff:fe3d:4e5f lladdr 0a:1b:2c:3d:4e:5f nud probe dev wlan0';
+
+  it('asks for it by unicast at the address it reported, with no memory of it at all', () => {
+    const round = oneRound({ neigh: 'fe80::81b:2cff:fe3d:4e5f FAILED\n', matter: MATTER });
+    expect(writes(round.calls)).toEqual(['arping -U -c 1 -I wlan0 192.168.0.200', PLUG_PROBE]);
+  });
+
+  /** After a reboot the kernel has never heard of it, and neither has this loop. */
+  it('and when the kernel has no entry for it either', () => {
+    expect(writes(oneRound({ neigh: '', matter: MATTER }).calls)).toContain(PLUG_PROBE);
+  });
+
+  /** Two minutes, like the neighbours it remembers: often enough to matter, rarely enough to cost nothing. */
+  it('asks on the same two-minute beat as everything else it remembers', () => {
+    expect(keepalive({ route: WIFI_ROUTE, wireless: ['wlan0'] }).script).toMatch(
+      /if \[ \$\(\(round % 6\)\) -eq 0 \] && \[ -f "\$matter" \]; then/,
+    );
+  });
+
+  /** One the kernel holds a link address for is the stale re-check's, and asked about once. */
+  it('leaves an accessory the kernel knows to the re-check that already covers it', () => {
+    const reachable = oneRound({ neigh: 'fe80::81b:2cff:fe3d:4e5f lladdr 0a:1b:2c:3d:4e:5f REACHABLE\n', matter: MATTER });
+    expect(writes(reachable.calls)).toEqual(['arping -U -c 1 -I wlan0 192.168.0.200']);
+    const stale = oneRound({ neigh: 'fe80::81b:2cff:fe3d:4e5f lladdr 0a:1b:2c:3d:4e:5f STALE\n', matter: MATTER });
+    expect(writes(stale.calls).filter((call) => call === PLUG_PROBE)).toHaveLength(1);
+  });
+
+  it('asks once about an accessory it also remembers', () => {
+    const round = oneRound({
+      neigh: 'fe80::81b:2cff:fe3d:4e5f FAILED\n',
+      state: `fe80::81b:2cff:fe3d:4e5f 0a:1b:2c:3d:4e:5f ${now() - 600}\n`,
+      matter: MATTER,
+    });
+    expect(writes(round.calls).filter((call) => call === PLUG_PROBE)).toHaveLength(1);
+  });
+
+  it('leaves alone an accessory the kernel is already resolving', () => {
+    const round = oneRound({ neigh: 'fe80::81b:2cff:fe3d:4e5f INCOMPLETE\n', matter: MATTER });
+    expect(writes(round.calls)).toEqual(['arping -U -c 1 -I wlan0 192.168.0.200']);
+  });
+
+  /**
+   * **The file is the hub's and this runs as root**, so a line counts only if
+   * it is exactly a link-local address and a MAC — never a keyword `ip` would
+   * read as something else, never an IPv4 lease that may be somebody else's by
+   * now, and never a word the shell could be talked into running.
+   */
+  it('takes nothing from the file but a link-local address and a MAC', () => {
+    const round = oneRound({
+      neigh: '',
+      matter: [
+        '# a comment',
+        '192.168.0.218 0a:1b:2c:3d:4e:5f',
+        '2001:db8::1 0a:1b:2c:3d:4e:5f',
+        'fe80::81b:2cff:fe3d:4e5f%wlan0 0a:1b:2c:3d:4e:5f',
+        'FE80::1 02:00:00:00:00:01',
+        'fe80::2 02:00:00:00:00:2',
+        'fe80::3 02:00:00:00:00:03:04',
+        'fe80::4 02-00-00-00-00-04',
+        'fe80::5;touch${IFS}/tmp/gethome-pwned 02:00:00:00:00:05',
+        'fe80::6 $(touch /tmp/gethome-pwned)',
+        'proxy fe80::7 02:00:00:00:00:07',
+        `fe80:${':1'.repeat(20)} 02:00:00:00:00:08`,
+        'fe80::9 02:00:00:00:00:09 and anything after',
+        '',
+      ].join('\n'),
+    });
+    expect(writes(round.calls)).toEqual([
+      'arping -U -c 1 -I wlan0 192.168.0.200',
+      'ip neigh replace fe80::9 lladdr 02:00:00:00:00:09 nud probe dev wlan0',
+    ]);
+    expect(existsSync('/tmp/gethome-pwned')).toBe(false);
+  });
+
+  it('reads no more of the file than a home could need', () => {
+    const round = oneRound({ neigh: '', matter: `${'#'.repeat(20_000)}\nfe80::9 02:00:00:00:00:09\n` });
+    expect(writes(round.calls)).toEqual(['arping -U -c 1 -I wlan0 192.168.0.200']);
+  });
+
+  it('goes on as before on a hub that has written no list', () => {
+    const round = oneRound({ neigh: '192.168.0.145 lladdr 02:00:00:00:01:45 STALE\n' });
+    expect(writes(round.calls)).toEqual([
+      'arping -U -c 1 -I wlan0 192.168.0.200',
+      'ip neigh replace 192.168.0.145 lladdr 02:00:00:00:01:45 nud probe dev wlan0',
+    ]);
+  });
+
+  /**
+   * **Two sides of one path.** The hub writes the list into its data directory
+   * under `MATTER_NEIGHBOURS_FILE`, and the installer bakes the same path into
+   * the keep-alive from its own `DATA_DIR` — which is also the `DATA_DIR` it
+   * hands the hub in `hub.env`. Renaming either side alone would leave a
+   * keep-alive reading nothing, and saying nothing about it.
+   */
+  it('reads the list where the hub writes it', () => {
+    const dataDir = /^DATA_DIR="([^"]+)"$/m.exec(readFileSync(INSTALLER, 'utf8'))![1];
+    expect(keepalive({ route: WIFI_ROUTE, wireless: ['wlan0'] }).script).toContain(
+      `matter_neighbours="${dataDir}/${MATTER_NEIGHBOURS_FILE}"`,
+    );
+    expect(readFileSync(INSTALLER, 'utf8')).toMatch(/^DATA_DIR=\$\{DATA_DIR\}$/m);
   });
 });
 

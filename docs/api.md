@@ -916,6 +916,19 @@ not marked offline at all until the bridge itself goes down. Two to four
 minutes is the *tightest* answer this hub currently gives about a device that
 has silently stopped answering.
 
+#### And how long it takes to notice one is back
+
+A socket plugged back in reads online **within a few minutes — usually two,
+rarely more than four** — however long it was out: matter.js retries an
+unreachable node every two minutes, and on a Wi-Fi hub the keep-alive asks for
+each accessory the kernel has lost by unicast on the same two-minute beat, so
+the first retry after that answer goes through. Before the keep-alive knew about Matter accessories, that
+second half was a multicast, and behind a router that loses them it was
+luck — a plug out for days came back on the network at 09:58 and was reached at
+10:07. An app has nothing to do about either: `reachabilityChanged` turns it
+online the moment the session is back, as it always has. See
+[matter.md](matter.md#the-network-matter-needs-and-what-the-hub-does-about-each-part).
+
 #### A device that is meant to be offline
 
 Somebody unplugs a heater for the summer. It is offline, and it is not a fault

@@ -2,6 +2,7 @@ import path from 'node:path';
 import { CommissioningController } from '@project-chip/matter.js';
 import { NodeStates, type Endpoint, type PairedNode } from '@project-chip/matter.js/device';
 import { Environment, Millis, ServerAddress } from '@matter/main';
+import { GeneralDiagnostics } from '@matter/main/clusters';
 import { ActiveDiscoveries } from '@matter/main/node';
 import { ClusterId, NodeId } from '@matter/main/types';
 import type { AdapterBus, ProtocolAdapter } from '../adapter.js';
@@ -25,9 +26,22 @@ import {
 } from './setup-code.js';
 import type { WifiCredentials } from '../../core/wifi.js';
 import { commissioningFor } from './commissioning-options.js';
+import { MATTER_NEIGHBOURS_FILE, MatterNeighbourFile, neighboursOf } from './neighbours.js';
 import type { Logger } from '../../logging.js';
 
 const SWITCH_CLUSTER = 0x003b;
+
+/** General Diagnostics, and its `NetworkInterfaces` attribute — where an accessory says where it is. */
+const GENERAL_DIAGNOSTICS_CLUSTER = 0x0033;
+const NETWORK_INTERFACES_ATTRIBUTE = 0x0000;
+
+/**
+ * How long the neighbour file waits for the commissioned nodes to attach
+ * before it is written anyway, so one that never does cannot keep the rest
+ * from the keep-alive. Attaching reads the cache and is well under a second
+ * each on a Zero 2 W; this is a bound, not an expectation.
+ */
+const NEIGHBOURS_OPEN_MS = 30 * 1000;
 
 /** Switch cluster feature bits (Matter spec 1.13.4). */
 const SWITCH_FEATURE = {
@@ -220,6 +234,12 @@ export class MatterAdapter implements ProtocolAdapter {
    * person doing it is standing next to it.
    */
   private inFlight: { cancel: (failure: CommissionFailure) => void } | null = null;
+  /**
+   * Where every node can be reached on the link, for the Wi-Fi keep-alive —
+   * see `neighbours.ts`. Made in `start()`, because the constructor must stay
+   * free of side effects: the API reads this adapter before it has started.
+   */
+  private neighbours: MatterNeighbourFile | null = null;
 
   constructor(private readonly options: MatterAdapterOptions) {}
 
@@ -324,12 +344,17 @@ export class MatterAdapter implements ProtocolAdapter {
       });
       await this.controller.start();
 
-      for (const nodeId of this.controller.getCommissionedNodes()) {
+      this.neighbours = new MatterNeighbourFile(
+        path.join(this.options.dataDir, MATTER_NEIGHBOURS_FILE),
+        this.options.log,
+      );
+      const attaching = this.controller.getCommissionedNodes().map((nodeId) =>
         // Attach in the background — an unreachable device must not stall boot.
-        void this.attachNode(nodeId).catch((error) => {
+        this.attachNode(nodeId).catch((error) => {
           this.options.log.warn({ err: error }, `Could not attach Matter node ${nodeId}`);
-        });
-      }
+        }),
+      );
+      void this.openNeighbours(this.neighbours, attaching);
       // **After** the nodes are attached, not before: `attachNode` is what
       // subscribes to the state changes that end the settling window, so a
       // stamp taken earlier would be counting time nothing could report in.
@@ -349,6 +374,10 @@ export class MatterAdapter implements ProtocolAdapter {
 
   async stop(): Promise<void> {
     await this.controller?.close();
+    // Kept on disk: the accessories are still commissioned, and a hub on its
+    // way back up — or with Matter switched off for now — still owns them.
+    await this.neighbours?.close();
+    this.neighbours = null;
     this.controller = null;
     this.nodes.clear();
     this.connectedOnce.clear();
@@ -368,6 +397,7 @@ export class MatterAdapter implements ProtocolAdapter {
     if (!this.controller) return;
     await this.controller.removeNode(NodeId(BigInt(externalId)), true);
     this.nodes.delete(externalId);
+    this.neighbours?.delete(externalId);
   }
 
   /**
@@ -617,7 +647,10 @@ export class MatterAdapter implements ProtocolAdapter {
     const node = await this.controller.getNode(nodeId);
     this.nodes.set(externalId, node);
 
-    node.events.initializedFromRemote.on(() => this.announceNode(externalId, node));
+    node.events.initializedFromRemote.on(() => {
+      this.announceNode(externalId, node);
+      this.recordNeighbours(externalId, node);
+    });
     node.events.structureChanged.on(() => this.announceNode(externalId, node));
     node.events.stateChanged.on((nodeState) => {
       const connected = nodeState === NodeStates.Connected;
@@ -627,8 +660,18 @@ export class MatterAdapter implements ProtocolAdapter {
       // offline, and saying so is the whole point of the window ending.
       if (connected) this.connectedOnce.add(externalId);
       this.bus?.reachabilityChanged('matter', externalId, connected);
+      // Where it answered this time, which one that was switched off may have
+      // come back with changed. Unchanged, it costs no write.
+      if (connected) this.recordNeighbours(externalId, node);
     });
     node.events.attributeChanged.on(({ path: attributePath, value }) => {
+      if (
+        attributePath.endpointId === 0 &&
+        attributePath.clusterId === GENERAL_DIAGNOSTICS_CLUSTER &&
+        attributePath.attributeId === NETWORK_INTERFACES_ATTRIBUTE
+      ) {
+        this.recordNeighbours(externalId, node, value);
+      }
       const report: AttributeReport = {
         endpointId: attributePath.endpointId,
         clusterId: attributePath.clusterId,
@@ -644,8 +687,48 @@ export class MatterAdapter implements ProtocolAdapter {
       }
     });
 
+    // From the cache, before it has connected: an accessory that is switched
+    // off right now is exactly the one the keep-alive needs to know about.
+    this.recordNeighbours(externalId, node);
     if (!node.isConnected) node.connect();
     if (node.initialized) this.announceNode(externalId, node);
+  }
+
+  /**
+   * Tell the neighbour file where this node is on the link — see
+   * `neighbours.ts`. From matter.js's cache unless a report has just said, and
+   * never allowed to throw: it helps the hub reach the accessory, and nothing
+   * about reaching it may wait on it.
+   */
+  private recordNeighbours(externalId: string, node: PairedNode, reported?: unknown): void {
+    if (!this.neighbours) return;
+    try {
+      const interfaces =
+        reported ?? node.getRootClusterClient(GeneralDiagnostics.Complete)?.attributes.networkInterfaces?.getLocal();
+      const known = (node.state.commissioning.addresses ?? []).flatMap((address) =>
+        'ip' in address ? [address.ip] : [],
+      );
+      this.neighbours.set(externalId, neighboursOf(interfaces, known));
+    } catch (error) {
+      this.options.log.debug({ err: error }, `Could not read where Matter node ${externalId} is on the network.`);
+    }
+  }
+
+  /**
+   * Start writing the neighbour file once every commissioned node has been
+   * asked where it is, or after `NEIGHBOURS_OPEN_MS` if one never answers
+   * that. The file is the one this `start()` made: a hub stopped and started
+   * again in the meantime has a newer one, and this must not open that.
+   */
+  private async openNeighbours(file: MatterNeighbourFile, attaching: Promise<void>[]): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const bound = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, NEIGHBOURS_OPEN_MS);
+      timer.unref?.();
+    });
+    await Promise.race([Promise.allSettled(attaching), bound]);
+    clearTimeout(timer);
+    if (this.neighbours === file) await file.open();
   }
 
   private announceNode(externalId: string, node: PairedNode): void {
