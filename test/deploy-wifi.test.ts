@@ -376,6 +376,10 @@ function oneRound(options: { neigh: string; state?: string; matter?: string }): 
   const matter = path.join(dir, MATTER_NEIGHBOURS_FILE);
   if (options.matter !== undefined) writeFileSync(matter, options.matter);
   mkdirSync(bin, { recursive: true });
+  // A table the round can change, as the kernel's is: an entry it has seeded
+  // reads back with the link address it was given, so a later loop in the same
+  // round sees what the kernel would show it rather than the table it began from.
+  const seeded = path.join(dir, 'seeded');
   script_(
     path.join(bin, 'ip'),
     `echo "ip $*" >> "${calls}"
@@ -383,7 +387,10 @@ function oneRound(options: { neigh: string; state?: string; matter?: string }): 
        "route show default") printf '%s' "$FAKE_ROUTE" ;;
        "-4 -o addr show wlan0") echo "3: wlan0    inet 192.168.0.200/24 brd 192.168.0.255 scope global wlan0" ;;
        "neigh show dev wlan0") printf '%s' "$FAKE_NEIGH" ;;
-       "neigh show "*" dev wlan0") printf '%s' "$FAKE_NEIGH" | awk -v a="$3" '$1 == a' ;;
+       "neigh show "*" dev wlan0")
+         hit=$(awk -v a="$3" '$1 == a' "${seeded}" 2>/dev/null | tail -n 1)
+         if [ -n "$hit" ]; then echo "$hit"; else printf '%s' "$FAKE_NEIGH" | awk -v a="$3" '$1 == a'; fi ;;
+       "neigh replace "*) echo "$3 lladdr $5 PROBE" >> "${seeded}" ;;
      esac`,
   );
   script_(path.join(bin, 'arping'), `echo "arping $*" >> "${calls}"`);
@@ -628,9 +635,26 @@ describe('finding a Matter accessory that has been gone for longer than a day', 
     expect(writes(round.calls).filter((call) => call === PLUG_PROBE)).toHaveLength(1);
   });
 
-  it('leaves alone an accessory the kernel is already resolving', () => {
+  /**
+   * **Over a resolution in flight too**, unlike a remembered neighbour: the
+   * link address is the accessory's own word, and one the hub is busy trying
+   * to reach is resolving nearly all the time — its traffic starts a new
+   * multicast round the moment the last one fails — so waiting for a quiet
+   * moment would be waiting for ever.
+   */
+  it('asks for it even while the kernel is resolving it', () => {
     const round = oneRound({ neigh: 'fe80::81b:2cff:fe3d:4e5f INCOMPLETE\n', matter: MATTER });
-    expect(writes(round.calls)).toEqual(['arping -U -c 1 -I wlan0 192.168.0.200']);
+    expect(writes(round.calls)).toEqual(['arping -U -c 1 -I wlan0 192.168.0.200', PLUG_PROBE]);
+  });
+
+  /** The same accessory remembered for the day as well: the loop that remembers it waits, this one does not. */
+  it('asks for one it also remembers while the kernel is resolving it', () => {
+    const round = oneRound({
+      neigh: 'fe80::81b:2cff:fe3d:4e5f INCOMPLETE\n',
+      state: `fe80::81b:2cff:fe3d:4e5f 0a:1b:2c:3d:4e:5f ${now() - 60}\n`,
+      matter: MATTER,
+    });
+    expect(writes(round.calls).filter((call) => call === PLUG_PROBE)).toHaveLength(1);
   });
 
   /**

@@ -456,8 +456,15 @@ in `deploy/install.sh` must stay accurate.
   (General Diagnostics `NetworkInterfaces`, cached by matter.js for as long as
   it is commissioned), written to `<DATA_DIR>/matter-neighbours` by
   `src/adapters/matter/neighbours.ts`, and every sixth round the loop seeds
-  each one the kernel holds no link address for into PROBE, skipping any it
-  just asked about and any the kernel is resolving. Four rules hold it up.
+  each one the kernel holds no link address for into PROBE — asking the
+  kernel itself, so one the day-memory loop has just seeded is not asked
+  twice. Five rules hold it up. **Over a resolution in flight too**, unlike
+  the day-memory loop, which waits: this link address is the accessory's own
+  word rather than a memory that may have gone stale, and an accessory the
+  hub is busy trying to reach is resolving nearly all the time — its traffic
+  starts a new multicast round the moment the last fails — so a loop that
+  waited for a quiet moment would wait for ever, and seeding sends what the
+  kernel had queued at once.
   **The path is baked in** beside `arping_bin`, from the same `DATA_DIR` that
   `hub.env` hands the hub, and `test/deploy-wifi.test.ts` holds it against
   `MATTER_NEIGHBOURS_FILE` — a keep-alive reading the wrong path says nothing.
@@ -471,9 +478,8 @@ in `deploy/install.sh` must stay accurate.
   writes it, never this**: nothing in `deploy/` edits the list, and it is kept
   across a Matter switch-off, because the accessories are still commissioned.
   An accessory that returns is reached within the loop's two minutes plus
-  matter.js's own two-minute retry — a round more when the loop lands on a
-  resolution the kernel is already making, which it never interrupts — instead
-  of however long the router takes to let a multicast through.
+  matter.js's own two-minute retry, instead of however long the router takes
+  to let a multicast through.
   **Two things make this hard to see from the hub, and both misled once.** The
   brcmfmac firmware answers ARP for the hub itself (`arpoe=1`, `arp_ol=0x9`), so
   a phone's ARP request never reaches Linux — `tcpdump` on the hub shows none

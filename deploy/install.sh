@@ -1576,24 +1576,29 @@ while :; do
           ip neigh replace "$addr" lladdr "$mac" nud probe dev "$iface" 2>/dev/null
         done < "$state"
       fi
-      # The hub's Matter accessories, on the same two-minute beat, skipping
-      # any the kernel holds a link address for or the loop above just asked
-      # about. Bounded, because the file is somebody else's to write.
-      if [ $((round % 6)) -eq 0 ] && [ -f "$matter" ]; then
-        head -c 16384 "$matter" 2>/dev/null | while read -r addr mac rest; do
-          case "$addr" in fe80:*) ;; *) continue ;; esac
-          case "$addr" in *[!0-9a-f:]*) continue ;; esac
-          [ "${#addr}" -le 39 ] || continue
-          case "$mac" in
-            [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]) ;;
-            *) continue ;;
-          esac
-          awk -v a="$addr" '$1 == a { found = 1 } END { exit !found }' "$fresh" && continue
-          ip neigh show "$addr" dev "$iface" 2>/dev/null | grep -q INCOMPLETE && continue
-          ip neigh replace "$addr" lladdr "$mac" nud probe dev "$iface" 2>/dev/null
-        done
-      fi
       mv -f "$fresh" "$state"
+    fi
+    # The hub's Matter accessories, on the same two-minute beat: every one the
+    # kernel holds no link address for, which includes one the loop above has
+    # just seeded. **Over a resolution in flight too**, unlike that loop: this
+    # link address is the accessory's own word rather than a memory gone
+    # stale, and one the hub is busy trying to reach is resolving nearly all
+    # the time — its traffic starts a new multicast round the moment the last
+    # fails — so waiting for a quiet moment would be waiting for ever. Seeding
+    # sends what the kernel had queued at once. Bounded, because the file is
+    # somebody else's to write.
+    if [ $((round % 6)) -eq 0 ] && [ -f "$matter" ]; then
+      head -c 16384 "$matter" 2>/dev/null | while read -r addr mac rest; do
+        case "$addr" in fe80:*) ;; *) continue ;; esac
+        case "$addr" in *[!0-9a-f:]*) continue ;; esac
+        [ "${#addr}" -le 39 ] || continue
+        case "$mac" in
+          [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]) ;;
+          *) continue ;;
+        esac
+        ip neigh show "$addr" dev "$iface" 2>/dev/null | grep -q lladdr && continue
+        ip neigh replace "$addr" lladdr "$mac" nud probe dev "$iface" 2>/dev/null
+      done
     fi
   fi
   # One round and out, for the suite that runs this file.

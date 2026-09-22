@@ -234,11 +234,12 @@ than on the one it was written on:
     (`src/adapters/matter/neighbours.ts`), and the keep-alive, which runs as
     root, takes a line only if it is exactly a link-local address and a MAC.
     Link-local only: an IPv4 lease can belong to another device by the time an
-    accessory is switched back on. So one that comes back after any length of
-    time is reached in a few minutes — up to two for the keep-alive's round and
-    two for matter.js's retry, and a round more when one lands on a resolution
-    the kernel is already making — rather than whenever the router lets a
-    multicast through.
+    accessory is switched back on. The keep-alive asks even while the kernel
+    is resolving the address itself, because one the hub is busy trying to
+    reach is resolving nearly all the time. So one that comes back after any
+    length of time is reached in a few minutes — up to two for the
+    keep-alive's round and two for matter.js's retry — rather than whenever
+    the router lets a multicast through.
 
   **A wired hub has neither half**, because the keep-alive is installed only
   where the hub itself is on Wi-Fi. Its multicast to a Wi-Fi accessory goes
