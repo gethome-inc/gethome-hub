@@ -37,6 +37,15 @@ hub can control them.
   Only a device's own published description is ever sent; the hub's traffic is
   structurally incapable of reaching the agent.
   ([docs/ai-adaptation.md](docs/ai-adaptation.md))
+- **Fast decisions** — with a TypeSafe key, the hub reads what you said against
+  your own rooms and devices *before* a language model is asked: about 180 ms
+  and a fiftieth of a penny, so a plain "switch the kitchen light off" happens
+  while the reply is still being written, rather than after a round spent
+  working out which light you meant. It is a short cut over a path that already
+  works — no key, or an unsure answer, and the hub does exactly what it did
+  before — and it is never allowed to read a number out of a sentence, decide
+  who may do something, or act on half a sentence somebody is still saying.
+  ([docs/jev.md](docs/jev.md))
 - **Device portraits** — an AI-drawn picture of each device, the floating object
   the GetHome app shows on a device's page. Drawn on the hub with the home's
   OpenAI key and **stored on the hub**, so everybody in the home sees the same

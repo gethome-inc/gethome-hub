@@ -157,7 +157,7 @@ than no button.
 | `GET /members` · `PATCH /members/me` · `DELETE /members/me` · `DELETE /members/:id` | floor · floor (itself) · floor (itself) · `member.remove` | rows carry `isSelf`, `roleId` and `roleName`; `PATCH` takes `{name}` and renames **the caller**; `DELETE` on either route answers `204` and revokes that member's tokens; the owner cannot be removed, by anyone or by itself. See [below](#which-member-you-are-isself-and-patch-membersme) |
 | `GET /invites` · `POST /invites` | `member.invite` · see notes | `POST {roleId?}` → `201 {code, expiresAt, roleId, roleName, memberId: null, memberName: null}`. Omitting `roleId` mints a **Member** invite, which is what every invite this hub has ever made was. An **owner** invite is allowed and needs the caller to be one (`403 not_owner`). **`POST {memberId}` mints a sign-in code** for somebody already here — `roleId` beside it is `400 invalid_target`, an unknown one is `404 unknown_member`, and the answer carries `memberId`/`memberName` with `roleId: null`. Who may ask is asked of the body: your own (`memberId: "me"` is accepted) is the **floor**, somebody else's is `member.invite`, an **owner's** needs an owner. `GET` lists the live codes, each with `memberId` — null for an invite — and `memberName`. See [below](#signing-in-again-post-invites-with-a-memberid) |
 | `GET /activity?limit=&before=` | floor · `activity.read` | reverse-chronological, cursor = `before` id; rows carry `data` — see [below](#the-activity-log) |
-| `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | `hub.ai` | The home's AI: two credentials, two models, which provider recognises devices, and the switch. **PATCH is the write** — every field optional, absence means "leave this alone": `{enabled?, recordExchanges?, anthropicApiKey?, openaiApiKey?, anthropicModel?, openaiModel?, model?, mappingProvider?, clear?}`. `model` is `anthropicModel` under the name this route has always used; `clear: "anthropic"\|"openai"` forgets one credential and leaves the other; `recordExchanges` starts or stops keeping what each round said, and is off unless asked; `mappingProvider` naming a provider with no key is `400 provider_not_configured`. Keys are told apart by prefix, so one pasted in the other's field is a 400 rather than a 401 an hour later, and a `sk-ant-oat…` subscription token is still refused. **PUT is unchanged** (`{apiKey, model?}`, an Anthropic key, required) for apps that have not moved. See [the answer's shape](#the-ai-settings-answer) |
+| `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | `hub.ai` | The home's AI: three credentials, two models, which provider recognises devices, and the switches. **PATCH is the write** — every field optional, absence means "leave this alone": `{enabled?, decisionsEnabled?, recordExchanges?, anthropicApiKey?, openaiApiKey?, typesafeApiKey?, anthropicModel?, openaiModel?, model?, mappingProvider?, clear?}`. `model` is `anthropicModel` under the name this route has always used; `clear: "anthropic"\|"openai"\|"typesafe"` forgets one credential and leaves the others; `typesafeApiKey` is the [decision model](#the-decision-model-is-not-a-provider), which has **no model field** beside it and is **not** a value `mappingProvider` accepts; `decisionsEnabled` is its own pause switch, separate from `enabled`; `recordExchanges` starts or stops keeping what each round said, and is off unless asked; `mappingProvider` naming a provider with no key is `400 provider_not_configured`. Keys are told apart by prefix, so one pasted in the other's field is a 400 rather than a 401 an hour later, and a `sk-ant-oat…` subscription token is still refused. **PUT is unchanged** (`{apiKey, model?}`, an Anthropic key, required) for apps that have not moved. See [the answer's shape](#the-ai-settings-answer) |
 | `GET /ai/runs?limit=` | `hub.ai` | what the mapping agent did, newest first: `{id, at, kind, vendor, model, exposesHash, provider, modelId, effort, via, ok, costUsd, turns, durationMs, errorKind, errorMessage, steps, exchanges}`. A summary, never a transcript — see [ai-adaptation.md](ai-adaptation.md). `exchanges` is how many **rounds** this run kept, `0` unless recording was on when it ran. `effort` (`low`/`medium`/`high`) and `via` (`voice`/`typed`) say what that turn ran at and how it was asked — both **null** on a row written before them and on a run the idea does not apply to: a portrait has no effort, a device recognition nobody asked for has no `via`, and the `voice` meter is a line rather than a generation, so it carries `via` and no effort |
 | `GET /ai/runs/:id/exchanges` | `hub.ai` | what that run actually said, round by round, oldest first: `[{seq, at, durationMs, provider, modelId, status, ok, inputTokens, outputTokens, sent, received}]`. `sent`/`received` are `[{kind, label, text?, bytes?}]` — the round's **main data**, not its bodies; `bytes` is present only on a part that was cut, and is what it weighed whole. A run is a *loop*, so one recognition is several rounds and a failed one is followed by the next in the same list. Empty is the ordinary answer — recording is off unless the owner asked, and rounds age out after a week. See [ai-adaptation.md](ai-adaptation.md) |
 | `GET /automations` | floor | every rule in the home, plus `unreadable` — rules a **newer** build wrote that this one cannot parse. They are kept and not run; listing them is what stops a rule silently vanishing after `install.sh` rolls a build back. Each carries `summary` (a whole sentence — the contract) beside `document` (the structure — the convenience), the `activity.message` rule applied to rules, [`outline`](automations.md#a-rule-as-a-storyboard) — the same rule as a **storyboard** so an app can *draw* it rather than print it — `icon` — the mark somebody chose, or `null` for the one the app derives — and `roomId`, [the one room the rule is about](#which-room-a-rule-is-in) or `null` for a rule about the whole house |
@@ -2243,3 +2243,32 @@ role — a home that has edited its matrix may have granted it to Guest and
 withheld it from Member. `403 owner_only` was the old shape and is gone; a
 client that still recognises it loses nothing by keeping the branch for older
 hubs.
+
+
+### The decision model is not a provider
+
+`GET /settings/ai` carries a `decision` block:
+
+```jsonc
+"decision": { "hasKey": false, "model": "jev-1.13.0", "enabled": true }
+```
+
+It is a **sibling of `providers`, never a member of it**, and that placement is
+the contract. An app that iterates `providers` to draw a key row per provider
+would draw one for a model that has no list to pick from and cannot answer a
+chat — so the third credential sits outside that object and an older app never
+sees it at all.
+
+Three things follow, and an app should hold all three:
+
+- **It never appears in a model picker.** `assistant.choices` and
+  `automations.choices` are the generative providers and stay two; `mapping`
+  likewise. `PATCH {mappingProvider: "typesafe"}` is a `400`.
+- **It has no model to choose.** `model` is reported so an app can say what
+  answered, and is pinned in the hub's build — the thresholds it is used with
+  are calibrated against it and calibration does not transfer.
+- **`enabled` is its own switch**, so pausing the spend and forgetting the key
+  stay two different requests, exactly as `enabled` does for adaptation.
+
+Adding the key changes nothing about what the home can do; it changes how fast
+some of it happens. `docs/jev.md` is canonical.

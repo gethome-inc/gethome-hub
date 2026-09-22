@@ -702,6 +702,67 @@ a person watching a rule being written when they asked a question. And
 member whose role cannot hand a job over gets a sentence the model reads out,
 rather than a capability that is silently absent for reasons nobody explains.
 
+There is a fourth field now, `decisionCriterion`, and it exists because the
+same job has to be described twice for two readers. `description` is written
+for a model reading tool documentation and says what the agent is *not* for —
+"Not for switching something on now, and not for questions about a rule" —
+which is two negatives in one clause, and a documented weakness of the
+[decision model](jev.md) that also has to choose between these agents.
+`decisionCriterion` is the same job as a plain positive statement. Both come
+off the same entry, so a third agent is still one edit.
+
+## Deciding before the model is asked
+
+A typed turn and a spoken one both begin with one request to a decision model,
+carrying the routing questions and every branch's action question at once
+(see [jev.md](jev.md)). Most sentences come back with nothing to act on and the
+round runs exactly as it always did. Two do not:
+
+- **A plain single-device command** is carried out immediately, through the
+  same `control` path the model's own tool uses, and the round is then primed
+  with "you have already done this" so the model writes the sentence and
+  nothing else. One round instead of two, and the light moves first.
+- **A self-contained automation request** is handed straight to the automations
+  agent through `delegate` — the same call, so the permission check and the
+  resume behaviour are unchanged. Typed only: `spoken()` drops a `handoff` row,
+  because the handoff arm writes its own `agent` row, so skipping the round out
+  loud would leave `askAloud` with nothing to say and the voice would announce
+  that it could not work it out, over a job handed over correctly.
+
+The hub writes **no prose** on either path. A hub-written "I have passed that
+on" is words in the model's mouth, which is the rule the automations agent's
+own prose arm is built around.
+
+Every gate falls through to the round that would have happened anyway, so
+being unsure, being wrong about the shape, or getting no answer at all each
+cost exactly what the hub cost before.
+
+## Getting ready while somebody is still talking
+
+The sideband already receives the person's transcript in fragments, several
+times a second, well before the model says the sentence has finished. That gap
+is where the expensive part of a spoken exchange sits: the conversation has to
+exist, the transport has to be built, the vendor client has to be imported for
+the first time on a 1 GHz core, and the home's current readings have to be
+gathered. None of it depends on how the sentence ends.
+
+`VoiceDelegationHost.warmForSpeech` does exactly that, and **cannot do anything
+else** — the interface is narrowed so a warm has no way to reach the home at
+all. "Turn the bedroom light on — no, off" is an ordinary thing to say, and a
+hub that acted on the first half would make the lamp flash; the write waits for
+`session.delegation.created`, which is the model saying the sentence is
+finished.
+
+Bounded four ways: one at a time, a minimum gap, a cap per utterance, and never
+while a delegation is being answered. The per-utterance cap is the one that
+matters — a room with a film on produces transcript fragments indefinitely,
+which is the voice prompt's own "don't treat a television as a request" hazard
+one layer down.
+
+Because the warm is a side effect on the session map, `askAloud`'s own lookup
+simply hits when the real sentence arrives — so there is no second parameter to
+thread and **no way for a warmed session to be the wrong one**.
+
 ## Refusals
 
 **Two kinds, and they are not the same thing.** A *classifier* refusal is the

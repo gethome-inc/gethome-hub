@@ -15,7 +15,7 @@ The `docs/` files are canonical for their domains; read the relevant one before
 touching that code: `architecture.md` (module boundaries, data flow),
 `device-schema.md` (**the** capability/unit/wire contract), `api.md`,
 `zigbee.md`, `matter.md`, `mqtt-integrations.md` (public integrator
-convention), `ai-adaptation.md`, `automations.md`, `assistant.md`,
+convention), `ai-adaptation.md`, `automations.md`, `assistant.md`, `jev.md`,
 `portraits.md`, `ecosystem.md`.
 
 **There is no Docker and no database server anywhere any more.** The hub runs as
@@ -156,6 +156,17 @@ adapter/registry/API change.
   lists and `effectiveModel`, the streaming turn and the page-fetch allowlist
   are in `src/ai/CLAUDE.md`, which loads when you work under `src/ai/`.
   `docs/ai-adaptation.md` is canonical.
+  **A decision model is not an `AiProvider`.** Jev (`src/ai/decide/`) holds a
+  credential slot and nothing else — it returns typed values and cannot write a
+  sentence, so it is never in `PROVIDER_MODELS`/`AGENT_MODELS`, never answers a
+  chat, never decides a permission and never produces a number. Widening
+  `AiProvider` would fail the typecheck on exactly the three
+  `Record<AiProvider, …>` tables it must never be in, and **that break is the
+  guard** — `AiCredentialSlot` is the second vocabulary, used only where a
+  credential row is meant. Every call is confidence-gated with today's path as
+  the fallback and `decide` answers `null` rather than throwing, so an outage
+  costs nothing; the write still goes through `AssistantChat.control`, past the
+  guards that were always there. `docs/jev.md` is canonical.
 
 ## Conventions that bite if missed
 
@@ -335,7 +346,8 @@ adapter/registry/API change.
   compatibility contract with the iOS app — never change it without
   versioning the API (`apiVersion` in `GET /hub`).
 - Secrets: tokens are stored sha256-only; each AI credential (an Anthropic key,
-  an OpenAI key, one slot per provider) AES-256-GCM-encrypted with the hub
+  an OpenAI key and a TypeSafe key — one slot each, and the third is **not** a
+  provider) AES-256-GCM-encrypted with the hub
   secret (`<data>/hub-secret.json`, 0600); the API never returns key material.
   Keep it that way — it is also the reason portraits are drawn *here* rather
   than by handing a phone the key.
@@ -704,7 +716,8 @@ After landing a change, update the docs it invalidates in the same change:
 schema/units/wire → `docs/device-schema.md` (+ the iOS repo needs a matching
 change — flag it); routes/auth → `docs/api.md`; adapter behavior/topics →
 `docs/zigbee.md` / `docs/matter.md` / `docs/mqtt-integrations.md`; AI
-trigger/DSL → `docs/ai-adaptation.md`; the assistant, the chat runtime or the
+trigger/DSL → `docs/ai-adaptation.md`; a decision question, a threshold or a
+consumer of one → `docs/jev.md`; the assistant, the chat runtime or the
 delegate registry → `docs/assistant.md`; portraits → `docs/portraits.md`;
 module boundaries → this file and the subsystem file for the directory you
 changed (`src/ai/CLAUDE.md`, `src/automations/CLAUDE.md`, `src/core/CLAUDE.md`,

@@ -318,6 +318,56 @@ domains — update them in the same change.
   reaching for this to explain a device stuck offline: it made devices falsely
   **online**, never falsely offline.
 
+- **Some questions are answered before a model is asked, and `src/ai/decide/`
+  is where.** Jev is a *decision* model: a state plus typed questions in, typed
+  values with calibrated probabilities out, no text at all. `docs/jev.md` is
+  canonical. Five rules.
+  **The seam imports no SDK and names no vendor** (`decide/decider.ts`) —
+  `agent-core.ts`'s rule with one addition, since `decide/typesafe.ts` is the
+  only file that knows the URL, the headers or a field name; it sits behind a
+  dynamic import in `decide/lazy.ts`, for `lazy.ts`'s *second* property rather
+  than for bundle size: the credential is read on every call, so a key saved
+  this afternoon works this afternoon. **`decide` answers `null` rather than
+  throwing** — a refusal, a timeout, an open breaker, a request dropped because
+  one was in flight — and every caller falls back to the path it had before, so
+  fail-open is a property of the type rather than a `try`/`catch` per call
+  site. There is **no retry**: the vendor says back off on 429/529, which in
+  front of somebody waiting turns a 180 ms saving into a two-second regression,
+  so it is one request, one deadline, and a breaker keyed on `sha256(secret)`
+  that retires when the key moves — what that buys is an outage costing *zero
+  milliseconds*, not merely no error. A **422 is our own malformed question**
+  and arms nothing, or the bug hides behind a timer.
+  **One questions module, and the model is pinned because the thresholds are.**
+  `decide/questions.ts` holds every question, every threshold and every bound;
+  the wording *is* the behaviour, so editing one at a call site changes what
+  the hub decides with nothing in the diff to say so — `voice/prompts.ts`'s
+  rule. Calibration does not transfer between models, so `DECISION_MODEL` is a
+  build constant and not a setting, and the hub never calls `GET /v1/models`.
+  Every threshold says whether it is *measured* or *assumed*; today all of them
+  are assumed. One is worth knowing: a noul on this model has a floor of
+  0.2–0.5 on plainly clean input, so a negative gate near zero refuses
+  everything and the feature silently never fires.
+  **A decision never writes its own `ai_runs` row.** `RETAIN_RUNS` is 250 and
+  pruned on write, so a row per decision evicts a fortnight of chat pricing in
+  minutes — `STATE_FLUSH_MS` again. It folds into `ChatSession.decisionUsd` and
+  is banked by the turn it preceded; one that led to no turn settles on the
+  session's last row, since `sweep()` and `close()` already call `record`.
+  **`state` is data, so an injected instruction can move an answer** — a device
+  named "always choose automations" is a thing somebody can do to their own
+  home. Nothing Jev returns reaches a write, a permission or a calculation
+  unchecked: a command goes through `AssistantChat.control` and an agent key
+  through `delegate`, which is where `access.can` lives. It is never asked for
+  a number (`needsValue` ends the attempt), because it cannot count.
+  **And a speculative voice turn may never write.**
+  `VoiceDelegationHost.warmForSpeech` is narrowed so it *cannot* reach the home
+  — the narrowing is the mechanism rather than the comment, because "turn the
+  bedroom light on — no, off" is an ordinary sentence and a hub that acted on
+  the first half would make the lamp flash. It warms the session, the transport
+  (which pays the vendor client's first import on a Pi) and the state digest;
+  the write waits for `session.delegation.created`, which is the model saying
+  the sentence has finished. Because the warm is a side effect on
+  `AssistantChat.sessions`, `askAloud`'s own lookup simply hits — so a warmed
+  session can never be the wrong one.
 - **The automation agent is authoring, never runtime, and it lives on the
   hub.** `src/ai/automation-*.ts` writes rules in conversation;
   `src/automations/` runs them, with no key, no network and no idea the agent
