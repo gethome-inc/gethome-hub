@@ -1687,8 +1687,76 @@ DISPATCH
   $SUDO env GETHOME_GROUP="$SERVICE_USER" "$helper" --conf "$CONF_DIR" || true
 }
 
+# ── IPv6, which is the network Matter actually runs on ─────────────────────
+# **Matter is IPv6, and on one Wi-Fi the link-local address is all it needs** —
+# no IPv6 from the internet provider, no DHCPv6. What more it needs is for one
+# kind of accessory: a **Thread** one lives behind a border router (an Apple TV
+# or HomePod, a Google Nest hub, …), and the border router tells the LAN how to
+# reach its Thread network with a Route Information Option in its router
+# advertisements. The kernel ignores those unless it is told to take prefixes
+# up to /64 — `accept_ra_rt_info_max_plen`, which is 0 by default everywhere
+# (matter.js's and OpenThread's own troubleshooting pages both lead with it) —
+# so without this a Thread accessory shared into GetHome from Apple Home or
+# Google Home pairs through the phone and is then never heard from again.
+#
+# **Routes and nothing else**: no address, no listener, no forwarding, so the
+# rule that the API answers on IPv4 only (`BIND_ADDRESS`, `mdns/advertiser.ts`)
+# is untouched. `default` covers an interface that appears after boot applied
+# this, and each physical interface is named as well, because systemd re-applies
+# a per-interface key when that interface appears and `default` alone is too
+# late for one that already existed. A NetworkManager profile with
+# `ipv6.method=auto` handles advertisements itself and learns these routes on
+# its own; Raspberry Pi OS's Imager writes `ignore`, which leaves them to the
+# kernel — the case this is for.
+matter_ipv6() {
+  local conf="${GETHOME_SYSCTL_MATTER:-/etc/sysctl.d/61-gethome-matter.conf}"
+  local proc="${GETHOME_PROC_IPV6:-/proc/sys/net/ipv6/conf}"
+  local net_dir="${GETHOME_NET_DIR:-/sys/class/net}"
+  local body entry iface lan
+
+  # No IPv6 at all is the one thing Matter cannot work around.
+  if [[ ! -d "$proc" ]]; then
+    warn "IPv6 is switched off on this machine, and Matter runs on IPv6, so the hub cannot pair or control Matter accessories. Zigbee is unaffected."
+    return 0
+  fi
+  if [[ ! -e "$proc/default/accept_ra_rt_info_max_plen" ]]; then
+    warn "This kernel cannot learn routes from IPv6 router advertisements, so a Matter accessory on Thread behind a border router, such as an Apple TV or HomePod, will not be reachable from the hub. Wi-Fi Matter accessories are unaffected."
+    return 0
+  fi
+
+  body="net.ipv6.conf.default.accept_ra_rt_info_max_plen = 64"
+  for entry in "$net_dir"/*; do
+    iface="${entry##*/}"
+    [[ -e "$net_dir/$iface/device" && -e "$proc/$iface/accept_ra_rt_info_max_plen" ]] || continue
+    body+=$'\n'"net.ipv6.conf.${iface}.accept_ra_rt_info_max_plen = 64"
+  done
+  if printf '# Installed by GetHome: routes to Thread networks. deploy/install.sh (matter_ipv6) says why.\n%s\n' "$body" \
+    | $SUDO tee "$conf" >/dev/null 2>&1; then
+    # And now, rather than at the next boot.
+    for entry in "$proc"/*/accept_ra_rt_info_max_plen; do
+      printf '64' | $SUDO tee "$entry" >/dev/null 2>&1 || true
+    done
+    say "The hub will learn routes to Thread networks from your border routers, so Matter accessories on Thread can be reached."
+  fi
+
+  # Forwarding quietly undoes it: with it on the kernel ignores advertisements
+  # unless `accept_ra` is 2, and stops probing whether a border router that has
+  # gone away is still there — matter.js documents outages of half an hour.
+  if [[ "$(cat "$proc/all/forwarding" 2>/dev/null || echo 0)" == "1" ]]; then
+    warn "IPv6 forwarding is on here, which stops this machine learning routes to Thread accessories and noticing when a border router goes away, so Matter over Thread may be unreliable until it is off (net.ipv6.conf.all.forwarding=0)."
+  fi
+  # And a LAN interface with IPv6 disabled has no link-local address, which
+  # Matter will not start without.
+  lan="$(ip -o route show default 2>/dev/null \
+    | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }' || true)"
+  if [[ -n "$lan" && "$(cat "$proc/$lan/disable_ipv6" 2>/dev/null || echo 0)" == "1" ]]; then
+    warn "IPv6 is disabled on ${lan}, and Matter needs at least its link-local address there, so the hub cannot reach Matter accessories until it is turned back on."
+  fi
+}
+
 matter_bluetooth
 share_wifi_for_matter
+matter_ipv6
 
 
 # ── mDNS ───────────────────────────────────────────────────────────────────

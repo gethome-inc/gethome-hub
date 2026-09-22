@@ -415,7 +415,7 @@ cmd_uninstall() {
   # The one file that is not ours by name: without it NetworkManager goes on
   # running a script for a hub that is gone, on every association.
   $SUDO rm -f /etc/NetworkManager/dispatcher.d/50-gethome-wifi-awake
-  $SUDO rm -f /etc/sysctl.d/60-gethome.conf
+  $SUDO rm -f /etc/sysctl.d/60-gethome.conf /etc/sysctl.d/61-gethome-matter.conf
   $SUDO rm -f /usr/local/lib/gethome-zigbee-detect.sh /usr/local/lib/gethome-zram.sh \
     /usr/local/lib/gethome-wifi-keepalive.sh
   # The keep-alive's memory of who is on the network. It is in /run, so a

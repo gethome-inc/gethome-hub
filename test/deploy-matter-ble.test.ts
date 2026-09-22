@@ -370,6 +370,119 @@ describe('a network the accessory can actually join', () => {
 });
 
 /**
+ * Run `matter_ipv6` out of install.sh against a fake `/proc/sys/net/ipv6/conf`
+ * and `/sys/class/net`. `interfaces` names the interfaces the fake knows,
+ * `physical` the ones with a `device` link, as a real NIC has.
+ */
+function ipv6(options: {
+  interfaces?: string[];
+  physical?: string[];
+  noIpv6?: boolean;
+  noRouteInfo?: boolean;
+  forwarding?: boolean;
+  disabledOn?: string;
+}): { output: string; conf: string; live: Record<string, string> } {
+  const dir = scratch('gethome-ipv6-');
+  const bin = path.join(dir, 'bin');
+  const proc = path.join(dir, 'proc');
+  const net = path.join(dir, 'net');
+  const conf = path.join(dir, 'sysctl.d', '61-gethome-matter.conf');
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(path.dirname(conf), { recursive: true });
+  const interfaces = options.interfaces ?? ['lo', 'wlan0'];
+  const physical = options.physical ?? ['wlan0'];
+  if (options.noIpv6 !== true) {
+    for (const name of ['all', 'default', ...interfaces]) {
+      mkdirSync(path.join(proc, name), { recursive: true });
+      if (options.noRouteInfo !== true) writeFileSync(path.join(proc, name, 'accept_ra_rt_info_max_plen'), '0');
+      writeFileSync(path.join(proc, name, 'forwarding'), options.forwarding === true ? '1' : '0');
+      writeFileSync(path.join(proc, name, 'disable_ipv6'), options.disabledOn === name ? '1' : '0');
+    }
+  }
+  for (const name of interfaces) {
+    mkdirSync(path.join(net, name), { recursive: true });
+    if (physical.includes(name)) writeFileSync(path.join(net, name, 'device'), '');
+  }
+  script_(path.join(bin, 'ip'), `printf 'default via 192.168.0.1 dev wlan0 proto dhcp metric 600\\n'`);
+
+  const output = execFileSync(
+    'bash',
+    [
+      '-c',
+      `set -euo pipefail
+       SUDO=""
+       say()  { printf 'SAY %s\\n' "$*"; }
+       warn() { printf 'WARN %s\\n' "$*"; }
+       prog="/^matter_ipv6() {/,/^}/p"
+       eval "$(sed -n "$prog" "$1")"
+       matter_ipv6`,
+      'bash',
+      INSTALLER,
+    ],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH ?? ''}`,
+        GETHOME_SYSCTL_MATTER: conf,
+        GETHOME_PROC_IPV6: proc,
+        GETHOME_NET_DIR: net,
+      },
+    },
+  );
+  const live: Record<string, string> = {};
+  for (const name of ['default', ...interfaces]) {
+    const file = path.join(proc, name, 'accept_ra_rt_info_max_plen');
+    if (existsSync(file)) live[name] = readFileSync(file, 'utf8').trim();
+  }
+  return { output, conf: existsSync(conf) ? readFileSync(conf, 'utf8') : '', live };
+}
+
+/**
+ * **A Thread accessory is reached through a route its border router
+ * announces**, as a Route Information Option in its router advertisements —
+ * which Linux ignores by default (`accept_ra_rt_info_max_plen` is 0; matter.js
+ * and OpenThread both put setting it to 64 first in their troubleshooting). A
+ * Thread plug shared into GetHome from Apple Home would pair through the phone
+ * and then never be heard from again.
+ */
+describe('reaching a Thread accessory through its border router', () => {
+  it('takes routes up to /64, now and after every boot, on each physical interface', () => {
+    const run = ipv6({ interfaces: ['lo', 'eth0', 'wlan0', 'docker0'], physical: ['eth0', 'wlan0'] });
+    expect(run.conf).toContain('net.ipv6.conf.default.accept_ra_rt_info_max_plen = 64');
+    expect(run.conf).toContain('net.ipv6.conf.eth0.accept_ra_rt_info_max_plen = 64');
+    expect(run.conf).toContain('net.ipv6.conf.wlan0.accept_ra_rt_info_max_plen = 64');
+    // A virtual interface is not a LAN a border router is on.
+    expect(run.conf).not.toContain('docker0');
+    expect(run.conf).not.toContain('.lo.');
+    expect(run.live.wlan0).toBe('64');
+    expect(run.live.default).toBe('64');
+    expect(run.output).toContain('SAY');
+    expect(run.output).not.toContain('WARN');
+  });
+
+  it('says so when this machine has no IPv6 at all', () => {
+    const run = ipv6({ noIpv6: true });
+    expect(run.output).toMatch(/WARN IPv6 is switched off/);
+    expect(run.conf).toBe('');
+  });
+
+  it('says so when the kernel cannot learn routes from advertisements', () => {
+    const run = ipv6({ noRouteInfo: true });
+    expect(run.output).toMatch(/WARN This kernel cannot learn routes/);
+    expect(run.conf).toBe('');
+  });
+
+  it('warns about forwarding, which quietly undoes it', () => {
+    expect(ipv6({ forwarding: true }).output).toMatch(/WARN IPv6 forwarding is on/);
+  });
+
+  it('warns when the LAN interface has no IPv6, which Matter will not start without', () => {
+    expect(ipv6({ disabledOn: 'wlan0' }).output).toMatch(/WARN IPv6 is disabled on wlan0/);
+  });
+});
+
+/**
  * What the hub says about Bluetooth in the thirty seconds before it knows.
  *
  * The API listens **before** the adapters start — deliberately, so a slow
