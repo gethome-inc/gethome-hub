@@ -50,8 +50,8 @@ const SUMMARY: Record<CommissionFailureKind, string> = {
     'That accessory can only be found over Bluetooth, and this hub has none available. An accessory ' +
     'already on your network pairs without it.',
   'needs-wifi':
-    "The hub found the accessory but has no Wi-Fi password to give it, so the accessory has no network to " +
-    'join. Enter your Wi-Fi password and try again.',
+    'This accessory has to be given a Wi-Fi network, and the hub has none it can pass on. Enter your ' +
+    'Wi-Fi name and password — the 2.4 GHz network, if your router has two — and try again.',
   'bad-code':
     "That isn't a Matter setup code. Check the digits on the accessory or its box, or point the camera at " +
     'the QR code instead.',

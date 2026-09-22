@@ -26,7 +26,9 @@ update it in the same change.
   **Three refusals happen before anything is searched for**, because in each the
   answer cannot change while somebody waits: a code the hub cannot read, an
   accessory whose code says Bluetooth on a hub without it, and one with no
-  network that the hub has no Wi-Fi password to give. Everything else is bounded
+  network that the hub has no Wi-Fi network to give — no password on file, or a
+  network only 5 GHz can see, which `deploy/wifi-credentials.sh` declines to hand
+  over (see `docs/matter.md`). Everything else is bounded
   (three minutes' discovery, four and a half for the job), cancellable — which
   stops the *discovery*, not just the screen, and is why the hub pairs **one
   accessory at a time** — and classified into words somebody can act on
