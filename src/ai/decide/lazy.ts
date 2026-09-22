@@ -15,7 +15,7 @@ import { createHash } from 'node:crypto';
 import type { SettingsService } from '../../core/settings.js';
 import type { Logger } from '../../logging.js';
 import { DECISION_MODEL, type Decider, type DecisionResult, type Questions } from './decider.js';
-import { decisionRouteOf } from './routes.js';
+import { DECISION_ROUTES } from './routes.js';
 
 /**
  * How long the breaker stays open, and how many failures open it.
@@ -80,14 +80,20 @@ export function lazyDecider(options: { settings: SettingsService; log: Logger })
     }
 
     const ai = await options.settings.getAiSettings();
-    if (!ai.decision.hasKey || !ai.decision.enabled) return null;
-    // Read per call beside the credential, and for its reason: a route changed
-    // this afternoon takes effect this afternoon, with no restart.
-    const route = decisionRouteOf(ai.decision.route);
-    const secret = await options.settings.aiKey('typesafe');
-    if (secret === null) return null;
+    if (!ai.decision.usable || !ai.decision.enabled) return null;
+    // Read per call, the route with the credential it chose, and for the
+    // credential's reason: a route changed this afternoon takes effect this
+    // afternoon, with no restart — and the key and the address can never come
+    // from two different moments.
+    const connection = await options.settings.aiConnection('typesafe');
+    if (connection === null) return null;
+    const route = DECISION_ROUTES[connection.route];
+    const secret = connection.secret;
 
-    const credential = credentialId(secret);
+    // The route is part of what the judgement was about: the same key cannot
+    // be on both, but a breaker armed against the gateway must not outlive a
+    // move back to TypeSafe's own address.
+    const credential = `${route.id}:${credentialId(secret)}`;
     if (breaker !== undefined && breaker.credential !== credential) breaker = undefined;
     if (breaker !== undefined && Date.now() < breaker.openUntil) return null;
 

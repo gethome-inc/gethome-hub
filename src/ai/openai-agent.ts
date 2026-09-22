@@ -22,6 +22,7 @@ import {
   record,
   type ExchangePart,
 } from './agent-core.js';
+import { openAiUrl, routeName, wireModelId, type AiRoute } from './gateway.js';
 import { defaultModelFor, estimateCostUsd, isSupportedModel, supportedModelIds } from './models.js';
 import { FETCHABLE_HOSTS, fetchDocumentationPage } from './page-fetch.js';
 
@@ -56,7 +57,6 @@ import { FETCHABLE_HOSTS, fetchDocumentationPage } from './page-fetch.js';
  * thought across a tool call without anything being retained server-side.
  */
 
-const RESPONSES_URL = 'https://api.openai.com/v1/responses';
 
 /**
  * OpenAI's web search has no per-run use limit of its own, so what bounds the
@@ -179,7 +179,7 @@ export function createOpenAiMappingAgent(
           const added = run?.onExchange ? input.slice(recordedUpTo) : [];
           const firstRound = turns === 1;
           recordedUpTo = input.length;
-          const body = await askOpenAi(auth.secret, modelId, systemPrompt, input, controller.signal, {
+          const body = await askOpenAi(auth, modelId, systemPrompt, input, controller.signal, {
             run,
             seq: turns,
             modelId,
@@ -292,7 +292,9 @@ export function createOpenAiMappingAgent(
 
 /** One request/response round. Separated so the loop above reads as a loop. */
 async function askOpenAi(
-  apiKey: string,
+  /** The key, and whether it is asked of OpenAI or of the gateway. */
+  auth: { secret: string; route?: AiRoute },
+  /** The canonical id; the route's spelling of it is made on the wire. */
   modelId: string,
   systemPrompt: string,
   input: unknown[],
@@ -325,14 +327,17 @@ async function askOpenAi(
       ...(body?.usage?.input_tokens !== undefined ? { inputTokens: body.usage.input_tokens } : {}),
       ...(body?.usage?.output_tokens !== undefined ? { outputTokens: body.usage.output_tokens } : {}),
     }));
+  const route = auth.route ?? 'direct';
+  /** Who a refusal or a dead line is about, in the sentence that says so. */
+  const answering = routeName(route, 'OpenAI');
   let response: Response;
   try {
-    response = await fetch(RESPONSES_URL, {
+    response = await fetch(openAiUrl(route, '/responses'), {
       method: 'POST',
-      headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+      headers: { authorization: `Bearer ${auth.secret}`, 'content-type': 'application/json' },
       signal,
       body: JSON.stringify({
-        model: modelId,
+        model: wireModelId('openai', route, modelId),
         instructions: systemPrompt,
         input,
         // Required for a stateless multi-turn reasoning run: without this the
@@ -394,7 +399,7 @@ async function askOpenAi(
     }
     throw new AiUnavailableError(
       'network',
-      `could not reach OpenAI: ${error instanceof Error ? error.message : String(error)}`,
+      `could not reach ${answering}: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
 
@@ -403,7 +408,7 @@ async function askOpenAi(
     // The body verbatim, because a refusal is exactly the thing somebody
     // turned recording on to read.
     write(() => [exchangePart('error', `Refused with ${response.status}`, text)], false, response.status);
-    const message = messageIn(text) ?? `OpenAI answered ${response.status}.`;
+    const message = messageIn(text) ?? `${answering} answered ${response.status}.`;
     // The classifier branches on HTTP status rather than on any vendor's error
     // vocabulary, which is exactly why it is structural.
     throw classifyApiError({ status: response.status, headers: response.headers, message }) ??
@@ -415,7 +420,7 @@ async function askOpenAi(
     return body;
   } catch {
     write(() => [exchangePart('error', 'Not JSON', text)], false, response.status);
-    throw new Error('OpenAI answered with something that was not JSON');
+    throw new Error(`${answering} answered with something that was not JSON`);
   }
 }
 

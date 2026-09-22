@@ -157,7 +157,7 @@ than no button.
 | `GET /members` · `PATCH /members/me` · `DELETE /members/me` · `DELETE /members/:id` | floor · floor (itself) · floor (itself) · `member.remove` | rows carry `isSelf`, `roleId` and `roleName`; `PATCH` takes `{name}` and renames **the caller**; `DELETE` on either route answers `204` and revokes that member's tokens; the owner cannot be removed, by anyone or by itself. See [below](#which-member-you-are-isself-and-patch-membersme) |
 | `GET /invites` · `POST /invites` | `member.invite` · see notes | `POST {roleId?}` → `201 {code, expiresAt, roleId, roleName, memberId: null, memberName: null}`. Omitting `roleId` mints a **Member** invite, which is what every invite this hub has ever made was. An **owner** invite is allowed and needs the caller to be one (`403 not_owner`). **`POST {memberId}` mints a sign-in code** for somebody already here — `roleId` beside it is `400 invalid_target`, an unknown one is `404 unknown_member`, and the answer carries `memberId`/`memberName` with `roleId: null`. Who may ask is asked of the body: your own (`memberId: "me"` is accepted) is the **floor**, somebody else's is `member.invite`, an **owner's** needs an owner. `GET` lists the live codes, each with `memberId` — null for an invite — and `memberName`. See [below](#signing-in-again-post-invites-with-a-memberid) |
 | `GET /activity?limit=&before=` | floor · `activity.read` | reverse-chronological, cursor = `before` id; rows carry `data` — see [below](#the-activity-log) |
-| `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | `hub.ai` | The home's AI: three credentials, two models, which provider recognises devices, and the switches. **PATCH is the write** — every field optional, absence means "leave this alone": `{enabled?, decisionsEnabled?, decisionRoute?, recordExchanges?, anthropicApiKey?, openaiApiKey?, typesafeApiKey?, anthropicModel?, openaiModel?, model?, mappingProvider?, clear?}`. `model` is `anthropicModel` under the name this route has always used; `clear: "anthropic"\|"openai"\|"typesafe"` forgets one credential and leaves the others; `typesafeApiKey` is the [decision model](#the-decision-model-is-not-a-provider), which has **no model field** beside it and is **not** a value `mappingProvider` accepts; `decisionsEnabled` is its own pause switch, separate from `enabled`; `decisionRoute` is which of `decision.routes` sells the key — an **address, never a model**, and an id the hub does not serve is a 400; `recordExchanges` starts or stops keeping what each round said, and is off unless asked; `mappingProvider` naming a provider with no key is `400 provider_not_configured`. Generative keys are told apart by prefix, so one pasted in the other's field is a 400 rather than a 401 an hour later, and a `sk-ant-oat…` subscription token is still refused; `typesafeApiKey` is checked only for *not* being one of those, since a gateway's key does not look like TypeSafe's. **PUT is unchanged** (`{apiKey, model?}`, an Anthropic key, required) for apps that have not moved. See [the answer's shape](#the-ai-settings-answer) |
+| `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | `hub.ai` | The home's AI: four credentials (three vendors' own and [the gateway's](#the-gateway)), a route per vendor, two models, which provider recognises devices, and the switches. **PATCH is the write** — every field optional, absence means "leave this alone": `{enabled?, decisionsEnabled?, recordExchanges?, anthropicApiKey?, openaiApiKey?, typesafeApiKey?, vercelApiKey?, routes?, anthropicModel?, openaiModel?, model?, mappingProvider?, clear?}`. `model` is `anthropicModel` under the name this route has always used; `clear: "anthropic"\|"openai"\|"typesafe"\|"vercel"` forgets one credential and leaves the others (forgetting the gateway's also moves every vendor routed through it back to `direct`); `typesafeApiKey` is the [decision model](#the-decision-model-is-not-a-provider), which has **no model field** beside it and is **not** a value `mappingProvider` accepts; `decisionsEnabled` is its own pause switch, separate from `enabled`; `routes` is `{anthropic?, openai?, typesafe?}`, each `"direct"` or `"vercel"` — **whose key buys that vendor, never a model** — applied after the keys, and moving a vendor onto a gateway with no key is `400 gateway_not_configured`; `recordExchanges` starts or stops keeping what each round said, and is off unless asked; `mappingProvider` naming a provider with no credential on its route is `400 provider_not_configured`. Keys are told apart by prefix, so one pasted in another's field is a 400 rather than a 401 an hour later: the two generative keys refuse each other's, a `sk-ant-oat…` subscription token is still refused, the TypeSafe and gateway fields refuse both generative keys, and every vendor's own field refuses a gateway `vck_…` key — negative checks only, since nothing here asserts how a vendor's own key starts. **PUT is unchanged** (`{apiKey, model?}`, an Anthropic key, required) for apps that have not moved. See [the answer's shape](#the-ai-settings-answer) |
 | `GET /ai/runs?limit=` | `hub.ai` | what the mapping agent did, newest first: `{id, at, kind, vendor, model, exposesHash, provider, modelId, effort, via, ok, costUsd, turns, durationMs, errorKind, errorMessage, steps, exchanges}`. A summary, never a transcript — see [ai-adaptation.md](ai-adaptation.md). `exchanges` is how many **rounds** this run kept, `0` unless recording was on when it ran. `effort` (`low`/`medium`/`high`) and `via` (`voice`/`typed`) say what that turn ran at and how it was asked — both **null** on a row written before them and on a run the idea does not apply to: a portrait has no effort, a device recognition nobody asked for has no `via`, and the `voice` meter is a line rather than a generation, so it carries `via` and no effort |
 | `GET /ai/runs/:id/exchanges` | `hub.ai` | what that run actually said, round by round, oldest first: `[{seq, at, durationMs, provider, modelId, status, ok, inputTokens, outputTokens, sent, received}]`. `sent`/`received` are `[{kind, label, text?, bytes?}]` — the round's **main data**, not its bodies; `bytes` is present only on a part that was cut, and is what it weighed whole. A run is a *loop*, so one recognition is several rounds and a failed one is followed by the next in the same list. Empty is the ordinary answer — recording is off unless the owner asked, and rounds age out after a week. See [ai-adaptation.md](ai-adaptation.md) |
 | `GET /automations` | floor | every rule in the home, plus `unreadable` — rules a **newer** build wrote that this one cannot parse. They are kept and not run; listing them is what stops a rule silently vanishing after `install.sh` rolls a build back. Each carries `summary` (a whole sentence — the contract) beside `document` (the structure — the convenience), the `activity.message` rule applied to rules, [`outline`](automations.md#a-rule-as-a-storyboard) — the same rule as a **storyboard** so an app can *draw* it rather than print it — `icon` — the mark somebody chose, or `null` for the one the app derives — and `roomId`, [the one room the rule is about](#which-room-a-rule-is-in) or `null` for a rule about the whole house |
@@ -1497,12 +1497,15 @@ the second provider reads exactly what it read before — plus a per-provider ha
   "mappingChoosable": true,
 
   "providers": {
-    "anthropic": { "hasKey": true, "model": "claude-opus-5",
+    "anthropic": { "hasKey": true, "route": "direct", "usable": true, "model": "claude-opus-5",
                    "models": [ { "id": "claude-opus-5", "label": "Opus 5",
                                  "note": "The most thorough. Every recognition run uses it.",
                                  "recommended": true } ] },
-    "openai":    { "hasKey": true, "model": "gpt-5.6-sol", "models": [ … ] }
+    "openai":    { "hasKey": true, "route": "vercel", "usable": true, "model": "gpt-5.6-sol",
+                   "models": [ … ] }
   },
+  "gateway": { "id": "vercel", "label": "Vercel AI Gateway", "keyHint": "vercel.com/ai-gateway",
+               "keyPrefix": "vck_", "serves": ["anthropic", "openai", "typesafe"], "hasKey": true },
   "mapping":   { "provider": "anthropic", "choosable": true },
   "assistant": { "model": "claude-opus-5", "provider": "anthropic", "choosable": true,
                  "models": [ { "id": "claude-opus-5", "label": "Opus 5",
@@ -1588,9 +1591,12 @@ its picker on. A stored choice only counts while that provider still has a key,
 so clearing a credential moves the answer rather than leaving the hub pointed at
 something it cannot authenticate.
 
-**`hasKey` is "can the agent run at all"** — either credential — because that is
-the question `409 ai_not_configured` answers. Whether *Anthropic* is configured
-is `providers.anthropic.hasKey`.
+**`hasKey` is "can the agent run at all"** — a credential on either provider's
+route — because that is the question `409 ai_not_configured` answers. Whether
+*Anthropic has a key of its own* is `providers.anthropic.hasKey`, and whether it
+can answer at all is `providers.anthropic.usable`: a provider bought through
+the gateway works with `hasKey: false`, so an app gates "can it run" on
+`usable` and draws "is there a key of its own" from `hasKey`.
 
 **`enabled` governs adaptation only.** It exists because the agent runs by
 itself when an unknown device turns up; nobody draws a portrait by accident, so
@@ -1607,8 +1613,10 @@ already knows the device's canonical `kind`, so a caller sends nothing but
 "draw this device", optionally with a photo to restyle — which is also what
 keeps two apps from producing two different-looking homes.
 
-Drawing needs an **OpenAI** key (`gpt-image-2.5-flare`, which supports
-transparent backgrounds and is used for a clean cut-out).
+Drawing needs **OpenAI** (`gpt-image-2.5-flare`, which supports
+transparent backgrounds and is used for a clean cut-out) — the home's own key,
+or the gateway's when OpenAI is [routed through it](#the-gateway), which draws
+the same model at the gateway's copy of the Image API.
 Recognition may be running on Anthropic at the same time, which is why the
 refusal is `openai_not_configured` rather than `ai_not_configured`.
 
@@ -2251,16 +2259,11 @@ hubs.
 
 ```jsonc
 "decision": {
-  "hasKey": false,
-  "model": "jev-1.13.0",
-  "enabled": true,
-  "route": "typesafe",
-  "routes": [
-    { "id": "typesafe", "label": "TypeSafe",
-      "keyHint": "typesafe.ai",          "keyPrefix": "ts-"  },
-    { "id": "vercel",   "label": "Vercel AI Gateway",
-      "keyHint": "vercel.com/ai-gateway", "keyPrefix": "vck_" }
-  ]
+  "hasKey": false,        // TypeSafe's own key
+  "route": "vercel",      // whose key buys the decisions — see the gateway, below
+  "usable": true,         // a key on that route, so a decision can be asked at all
+  "model": "typesafe-ai/jev",
+  "enabled": true
 }
 ```
 
@@ -2276,30 +2279,69 @@ Three things follow, and an app should hold all three:
   `automations.choices` are the generative providers and stay two; `mapping`
   likewise. `PATCH {mappingProvider: "typesafe"}` is a `400`.
 - **It has no model to choose.** `model` is reported so an app can say what
-  answered, and is pinned in the hub's build — the thresholds it is used with
-  are calibrated against it and calibration does not transfer.
+  answered — the route's spelling of it, since the gateway names the same model
+  differently — and is pinned in the hub's build: the thresholds it is used
+  with are calibrated against it and calibration does not transfer.
 - **`enabled` is its own switch**, so pausing the spend and forgetting the key
   stay two different requests, exactly as `enabled` does for adaptation.
 
-**And a route is not a model.** The same model is sold in more than one place,
-so `routes` is the hub's table of *addresses* — rendered by an app rather than
-shipped in one, the `GET /permissions` rule the model lists already follow, so
-a gateway added later needs no app release. `PATCH {decisionRoute: "<id>"}`
-writes it and an id the hub does not serve is a `400`. What a route changes is
-where the request goes and whose key pays; **every route serves the same
-model**, which is what keeps the pin above meaningful rather than contradicted
-by a picker one line down. `keyHint` is where to buy that route's key and `keyPrefix` what one starts
-with, so the sheet asking for a key can name the right shop and put the right
-placeholder in the box. Three consequences worth holding. The key-prefix
-*check* asserts nothing about how a decision key starts — `keyPrefix` is for a
-placeholder, never a guard, because a vendor can change a prefix faster than a
-hub can be updated; it still refuses an `sk-ant-`/`sk-proj-` key in that field.
-Clearing the credential (`clear: "typesafe"`) unsets the stored route with it,
-since a route with no key is a preference about nothing. And **the two belong
-in one request**: `{typesafeApiKey, decisionRoute}` applies the key and then
-the route, and a refused key rejects both — which is what lets a client
-guarantee that a stored key is never left pointing at an address it cannot
-authenticate to. The iOS app writes `decisionRoute` only that way.
+**And a route is not a model.** Where the decisions are bought is the same
+per-vendor route every vendor has (below); both addresses serve the same model,
+which is what keeps the pin above meaningful rather than contradicted by a
+switch. A home that routes Jev through the gateway decides with `hasKey: false`,
+and forgetting TypeSafe's own key (`clear: "typesafe"`) leaves the route alone —
+the route says whose key buys the decisions, and that key is still there.
+`decision.routes` and `PATCH {decisionRoute}` belonged to the first cut of
+this, which stored the route beside the TypeSafe key and so kept a Vercel key in
+the TypeSafe slot; both are gone, and a hub that ran it moves that key to the
+gateway's slot once, at boot.
+
+### The gateway
+
+A gateway sells other vendors' models behind one key. The hub knows one,
+Vercel's AI Gateway, and describes it in its own block — **a fourth key, not a
+fourth vendor**: it answers nothing itself.
+
+```jsonc
+"gateway": {
+  "id": "vercel", "label": "Vercel AI Gateway",
+  "keyHint": "vercel.com/ai-gateway", "keyPrefix": "vck_",
+  "serves": ["anthropic", "openai", "typesafe"],
+  "hasKey": true
+}
+```
+
+**Which vendors go through it is each vendor's own `route`**, stated where that
+vendor is described (`providers.anthropic.route`, `providers.openai.route`,
+`decision.route`), so "who pays for Claude" has one answer rather than one here
+and another there. `direct` is the vendor's own API on its own key; `vercel` is
+the gateway's copy of the same API on the gateway's key — the Messages API, the
+Responses API, the Image API and a TypeSafe-compatible endpoint — so a route
+moves the address, the credential and the model's spelling on the wire
+(`openai/gpt-5.6-sol`) and **nothing about what answers**: prices, run records
+and every model field here keep the canonical id. `PATCH {routes: {openai:
+"vercel"}}` writes one; `"direct"` is stored as the row's absence.
+
+Five rules an app should hold.
+
+- **Saving the gateway's key moves nothing.** Every route is `direct` until
+  somebody moves it, so a home that worked yesterday is not quietly re-routed by
+  a key saved for something else — including the agents' resolution, which
+  reads the routes rather than the keys that happen to exist.
+- **Both keys can be held, and the route decides.** A home with its own OpenAI
+  key and OpenAI routed through the gateway is asked on the gateway's key;
+  moving it back is one write and no key has to be re-entered.
+- **Nothing can point at a gateway with no key** — `400 gateway_not_configured`
+  — and forgetting its key (`clear: "vercel"`) sends every vendor it carried
+  back to `direct`, where one with no key of its own stops.
+- **Talking out loud never goes through it.** GPT-Live's WebRTC offer and the
+  sideband beside it are OpenAI's own API, so the voice always uses the home's
+  own OpenAI key: `providers.openai.hasKey` is what an app asks before offering
+  the microphone, and a home routing OpenAI through the gateway with no key of
+  its own gets `409 openai_not_configured` there, with a sentence saying so.
+- **`keyHint` and `keyPrefix` are for the sheet that asks for the key**, the
+  hub's words for where to buy one and what goes in an empty field — a
+  placeholder, never a check.
 
 Adding the key changes nothing about what the home can do; it changes how fast
 some of it happens. `docs/jev.md` is canonical.

@@ -9,6 +9,7 @@ import type { HubEventBus } from '../core/bus.js';
 import type { Logger } from '../logging.js';
 import type { DeviceKind } from '../schema/index.js';
 import type { AiProvider } from '../core/settings.js';
+import type { AiRoute } from '../ai/gateway.js';
 import { drawPortrait, portraitCostUsd, PortraitDrawError, PORTRAIT_MODEL } from './openai-images.js';
 import { EDIT_PROMPT, generatePrompt } from './prompts.js';
 
@@ -87,6 +88,12 @@ export interface DrawInput {
   deviceId: string;
   kind: DeviceKind;
   apiKey: string;
+  /**
+   * Whether the drawing is asked of OpenAI or of the gateway that sells the
+   * same image model. Absent means direct. The model, the prompt and the
+   * record are the same either way — see `src/ai/gateway.ts`.
+   */
+  route?: AiRoute;
   photo?: { bytes: Buffer; contentType: string };
   /** Who asked. Recorded on the portrait, which outlives the log row about it. */
   member?: { id: string; name: string };
@@ -233,6 +240,7 @@ export class PortraitService {
       // `fetch` and two prompt strings.
       drawing = await drawPortrait({
         apiKey: input.apiKey,
+        ...(input.route !== undefined ? { route: input.route } : {}),
         prompt: input.photo ? EDIT_PROMPT : generatePrompt(input.kind),
         ...(input.photo !== undefined ? { photo: input.photo } : {}),
       });

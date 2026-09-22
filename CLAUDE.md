@@ -162,9 +162,11 @@ adapter/registry/API change.
   chat, never decides a permission and never produces a number. Widening
   `AiProvider` would fail the typecheck on exactly the three
   `Record<AiProvider, …>` tables it must never be in, and **that break is the
-  guard** — `AiCredentialSlot` is the second vocabulary, used only where a
-  credential row is meant. Every call is confidence-gated with today's path as
-  the fallback and `decide` answers `null` rather than throwing, so an outage
+  guard** — `AiVendor` (whose model answers) is the second vocabulary and
+  `AiCredentialSlot` (a row holding a key, the gateway's included) the third,
+  each used only where it is meant. Every call is confidence-gated with
+  today's path as the fallback and `decide` answers `null` rather than
+  throwing, so an outage
   costs nothing; the write still goes through `AssistantChat.control`, past the
   guards that were always there. `docs/jev.md` is canonical.
 
@@ -346,11 +348,25 @@ adapter/registry/API change.
   compatibility contract with the iOS app — never change it without
   versioning the API (`apiVersion` in `GET /hub`).
 - Secrets: tokens are stored sha256-only; each AI credential (an Anthropic key,
-  an OpenAI key and a TypeSafe key — one slot each, and the third is **not** a
-  provider) AES-256-GCM-encrypted with the hub
+  an OpenAI key, a TypeSafe key and a Vercel AI Gateway key — one slot each;
+  the third is **not** a provider and the fourth is not even a vendor, it buys
+  the other three's models) AES-256-GCM-encrypted with the hub
   secret (`<data>/hub-secret.json`, 0600); the API never returns key material.
   Keep it that way — it is also the reason portraits are drawn *here* rather
   than by handing a phone the key.
+- **A route is whose key buys a vendor, never what answers.** Each vendor —
+  Anthropic, OpenAI, TypeSafe — is `direct` (its own key, its own API) or
+  `vercel` (the gateway's key, at the gateway's copy of the same API),
+  stored per vendor and absent meaning direct, so saving the gateway's key
+  moves nothing until somebody moves a vendor onto it. Anything that asks a
+  vendor for a model reads `SettingsService.aiConnection(vendor)`, which
+  answers the key and the route from one read — **never `aiKey()`**, or a home
+  routed through the gateway is answered on a key it chose not to spend. The
+  one exception is the voice: GPT-Live's WebRTC offer and sideband are
+  OpenAI's own, so it always uses the home's own OpenAI key.
+  `src/ai/gateway.ts` holds the addresses and `wireModelId` — the canonical id
+  is what every price, `ai_runs` row and API field reads, and only a request
+  carries the gateway's spelling. `docs/api.md` (*The gateway*) is canonical.
 - **The token is the identity, so `me` is a member id.** A client that claimed
   over SSH never learns its member id — `gethome-hubctl claim` prints the hub id
   and the token and nothing else — so it held a working token and could not pick

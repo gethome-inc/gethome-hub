@@ -551,6 +551,16 @@ next month reaches the microphone with no app release — and the phone ends up
 holding an audio connection it was never given a credential of any kind for,
 which is a stronger containment than an expiring secret was.
 
+**It is also the one AI surface that never takes a route.** A home can move
+OpenAI onto Vercel's AI Gateway ([the gateway](api.md#the-gateway)), and every
+chat round, recognition run and portrait follows it there — but the WebRTC
+offer and the sideband attached beside it are GPT-Live's own API, which the
+gateway does not carry. So the session is always opened on the home's **own**
+OpenAI key, and a home routing OpenAI through the gateway with no key of its own
+gets `409 openai_not_configured` here while its typed assistant answers
+perfectly well. The turns the voice delegates are ordinary assistant turns, so
+*they* go wherever the assistant's vendor is routed.
+
 It is the better transport by some distance too, which is a bonus rather than
 the argument: a WebSocket carries 24 kHz PCM16 as base64 over TCP — about 64 kB
 a second, with head-of-line blocking, retransmission instead of concealment and

@@ -1,6 +1,7 @@
 import { StringDecoder } from 'node:string_decoder';
 import { z } from 'zod';
 import { mappingDescriptorSchema, sanityCheckDescriptor } from './descriptor.js';
+import type { AiRoute } from './gateway.js';
 
 /**
  * Everything about a mapping run that is not one vendor's API.
@@ -297,11 +298,19 @@ export interface MappingProvider {
 
 export interface AgentAuth {
   /**
-   * The provider's API key. Anthropic subscription tokens are not accepted —
-   * the Messages API cannot authenticate one, and `settings.ts` reports a
-   * stored one as `legacySubscriptionToken` rather than failing with a 401.
+   * The key the request is made with — the provider's own, or the gateway's
+   * when the route goes through it. Anthropic subscription tokens are not
+   * accepted — the Messages API cannot authenticate one, and `settings.ts`
+   * reports a stored one as `legacySubscriptionToken` rather than failing with
+   * a 401.
    */
   secret: string;
+  /**
+   * Which way it goes — `SettingsService.aiConnection` answers both halves
+   * together, so a key is never sent to an address it was not bought for.
+   * Absent means direct.
+   */
+  route?: AiRoute;
 }
 
 /** The last candidate the model submitted, valid or not. */

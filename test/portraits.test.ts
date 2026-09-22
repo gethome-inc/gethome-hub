@@ -277,6 +277,24 @@ describe.skipIf(!handle)('device portraits', () => {
   });
 
   /**
+   * A home that routes OpenAI through the gateway draws there, on the
+   * gateway's key — and only because it said so: a gateway key saved for
+   * something else does not make portraits drawable on its own.
+   */
+  it('draws on the gateway’s key when OpenAI is routed through it, and only then', async () => {
+    await settings.setAiKey('vercel', 'vck_gateway_1234567890');
+    expect((await draw()).statusCode).toBe(409);
+    expect(drawMock).not.toHaveBeenCalled();
+
+    await settings.setAiRoute('openai', 'vercel');
+    expect((await draw()).statusCode).toBe(200);
+    expect(drawMock.mock.calls[0]?.[0]).toMatchObject({
+      apiKey: 'vck_gateway_1234567890',
+      route: 'vercel',
+    });
+  });
+
+  /**
    * `ai_enabled` is the *adaptation* switch: it exists because the agent runs
    * by itself when a device turns up. Nobody draws a portrait by accident, so
    * there is nothing for that switch to protect here.

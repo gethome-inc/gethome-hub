@@ -59,6 +59,39 @@ describe('OpenAI portrait generation', () => {
     expect(init.headers).not.toHaveProperty('content-type');
   });
 
+  it('draws through the gateway on its key, the same model spelled the gateway’s way', async () => {
+    // Both endpoints, the same fields and the same base64 answer — the
+    // gateway's copy of the Image API — so only the host, the key and the
+    // model's spelling move, and the picture is the one the home would have
+    // had anyway.
+    await drawPortrait({ apiKey: 'vck_gateway', route: 'vercel', prompt: 'A smart wall plug.' });
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://ai-gateway.vercel.sh/v1/images/generations');
+    expect(init.headers).toMatchObject({ authorization: 'Bearer vck_gateway' });
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      model: `openai/${PORTRAIT_MODEL}`,
+      background: 'transparent',
+      output_format: 'png',
+    });
+
+    await drawPortrait({
+      apiKey: 'vck_gateway',
+      route: 'vercel',
+      prompt: 'Restyle this device.',
+      photo: { bytes: Buffer.from('photo'), contentType: 'image/jpeg' },
+    });
+    const [editUrl, editInit] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(editUrl).toBe('https://ai-gateway.vercel.sh/v1/images/edits');
+    expect((editInit.body as FormData).get('model')).toBe(`openai/${PORTRAIT_MODEL}`);
+  });
+
+  it('names the gateway, not OpenAI, when the gateway refuses', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('upstream went away', { status: 502 }));
+    await expect(
+      drawPortrait({ apiKey: 'vck_gateway', route: 'vercel', prompt: 'A plug.' }),
+    ).rejects.toThrow(/Vercel AI Gateway answered 502/);
+  });
+
   /**
    * What a drawing cost is read off the provider's own answer rather than
    * estimated from the size and quality we asked for — 2.5 bills per token, so

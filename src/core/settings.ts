@@ -8,11 +8,13 @@ import { decryptSecret, encryptSecret, type EncryptedValue } from './crypto.js';
 // model that will *run* rather than the column — the mapper's one expensive
 // bug was exactly that gap between the two.
 import { effectiveAgentModel, type UsableProviders } from '../ai/models.js';
-// The pinned decision model's id, for the same reason as the line above: the
-// API answers what will *run*. It lives in `decide/decider.ts` — the seam,
-// which imports nothing — rather than in the vendor client, so reporting it
-// never loads the client a hub without a Jev key has no use for.
-import { decisionRouteOf } from '../ai/decide/routes.js';
+// What the decision model is called on each route, for the same reason as the
+// line above: the API answers what will *run*. The table sits beside the seam
+// (`decide/decider.ts`), which imports nothing — never in the vendor client —
+// so reporting it never loads the client a hub without a Jev key has no use for.
+import { DECISION_ROUTES } from '../ai/decide/routes.js';
+// Where each vendor's requests go. Types and a parser, nothing that dials.
+import { aiRouteOf, type AiConnection, type AiRoute } from '../ai/gateway.js';
 
 /**
  * The providers the hub can hold a credential for.
@@ -28,14 +30,14 @@ export type AiProvider = 'anthropic' | 'openai';
 export const AI_PROVIDERS = ['anthropic', 'openai'] as const satisfies readonly AiProvider[];
 
 /**
- * A row in the settings table that holds an AI credential.
+ * Whose model answers: the two generative providers, and the decision model.
  *
  * **Wider than `AiProvider`, and that is the point.** Jev is a decision model:
  * it returns typed answers and cannot write a sentence, so it is never in
  * `PROVIDER_MODELS` or `AGENT_MODELS` and can never answer a chat — but the
- * hub holds a key for it, and that key belongs in the same encrypted store as
- * the other two. Keeping the two vocabularies apart is what stops somebody's
- * assistant being pointed at a model that cannot talk.
+ * hub holds a key for it, and a route to it (`src/ai/gateway.ts`), exactly as
+ * it does for the other two. Keeping the two vocabularies apart is what stops
+ * somebody's assistant being pointed at a model that cannot talk.
  *
  * **Do not widen `AiProvider` to make this shorter.** `PRICING`,
  * `PROVIDER_MODELS` and `AGENT_MODELS` in `src/ai/models.ts` are all
@@ -44,12 +46,26 @@ export const AI_PROVIDERS = ['anthropic', 'openai'] as const satisfies readonly 
  * the guard, and it is invisible unless somebody says so here.
  * `docs/jev.md` is canonical.
  */
-export type AiCredentialSlot = AiProvider | 'typesafe';
+export type AiVendor = AiProvider | 'typesafe';
+
+export const AI_VENDORS = ['anthropic', 'openai', 'typesafe'] as const satisfies readonly AiVendor[];
+
+/**
+ * A row in the settings table that holds an AI credential: each vendor's own
+ * key, and the gateway's.
+ *
+ * **The gateway is a fourth key and not a fourth vendor.** It answers nothing
+ * itself — it buys the three vendors' models with one key — so it is a slot a
+ * route can point at (`ai_route_<vendor>`) and never something a picker offers
+ * as a model. `docs/api.md` is canonical for the wire.
+ */
+export type AiCredentialSlot = AiVendor | 'vercel';
 
 export const AI_CREDENTIAL_SLOTS = [
   'anthropic',
   'openai',
   'typesafe',
+  'vercel',
 ] as const satisfies readonly AiCredentialSlot[];
 
 /**
@@ -80,16 +96,55 @@ const SLOTS: Record<AiProvider, { key: string; model: string }> = {
  */
 const DECISION_KEY_ROW = 'ai_typesafe_key_encrypted';
 
+/** Where the gateway's key lives — one key, whichever vendors it buys for. */
+const GATEWAY_KEY_ROW = 'ai_vercel_key_encrypted';
+
+/**
+ * Where one vendor's route is stored. **Absent means direct**, so a hub
+ * configured before routes existed reads exactly as it did, and a route is only
+ * ever written as the one value that is not the default.
+ */
+function routeRowOf(vendor: AiVendor): string {
+  return `ai_route_${vendor}`;
+}
+
+/**
+ * The first cut of the gateway: a route stored beside the TypeSafe key, which
+ * therefore held a Vercel key on a home buying its decisions that way. Read
+ * once, at boot, by `adoptLegacyDecisionRoute`, and never written again.
+ */
+const LEGACY_DECISION_ROUTE_ROW = 'ai_decision_route';
+
 /** The settings row holding one slot's secret. */
 function keyRowOf(slot: AiCredentialSlot): string {
-  return slot === 'typesafe' ? DECISION_KEY_ROW : SLOTS[slot].key;
+  switch (slot) {
+    case 'typesafe':
+      return DECISION_KEY_ROW;
+    case 'vercel':
+      return GATEWAY_KEY_ROW;
+    default:
+      return SLOTS[slot].key;
+  }
 }
 
 export interface AiProviderSettings {
-  /** Whether a key is configured — the secret itself is never exposed. */
+  /**
+   * Whether the provider's **own** key is configured — the secret itself is
+   * never exposed. A provider reached through the gateway can work with this
+   * false; `usable` is the question "can it answer".
+   */
   hasKey: boolean;
   /** The model this provider runs the mapping agent on; null means the default. */
   model: string | null;
+  /** Whose key buys it: its own (`direct`) or the gateway's. */
+  route: AiRoute;
+  /**
+   * Whether an agent can authenticate to it on that route: the gateway's key
+   * when it goes through the gateway, its own key otherwise — and never a
+   * stored Claude subscription token, which is a key the hub holds and cannot
+   * use.
+   */
+  usable: boolean;
 }
 
 /**
@@ -131,16 +186,21 @@ export interface AiAgentSettings {
  * is the first step towards a picker that offers a model which cannot write.
  */
 export interface AiDecisionSettings {
-  /** Whether a key is configured — the secret itself is never exposed. */
+  /**
+   * Whether TypeSafe's **own** key is configured — the secret itself is never
+   * exposed. Decisions bought through the gateway work with this false.
+   */
   hasKey: boolean;
   /**
-   * Where the home buys its decisions — `DECISION_ROUTES`' own id.
+   * Whose key buys the decisions — TypeSafe's own, or the gateway's.
    *
-   * **Not a model choice.** Every route serves the same model; this says which
+   * **Not a model choice.** Both routes serve the same model; this says which
    * address and which key, because a home may already hold a gateway key and
    * ought not to open a second account to reach a model it can already buy.
    */
-  route: string;
+  route: AiRoute;
+  /** Whether there is a key on that route, so a decision can be asked at all. */
+  usable: boolean;
   /**
    * What the chosen route calls the model, which is the same model either way.
    *
@@ -216,6 +276,14 @@ export interface AiSettings {
    * means every one of those paths runs exactly as it did before.
    */
   decision: AiDecisionSettings;
+  /**
+   * The gateway's own key, which buys any vendor whose route points at it.
+   *
+   * Only `hasKey`: which vendors use it is each vendor's `route`, stated where
+   * that vendor is described, so there is one answer to "who pays for Claude"
+   * rather than one here and another there.
+   */
+  gateway: { hasKey: boolean };
   /** What the assistant runs on. Its own choice, not the mapper's. */
   assistant: AiAgentSettings;
   /** What writes the home's rules. Its own choice, not the assistant's. */
@@ -332,12 +400,36 @@ export class SettingsService {
   async getAiSettings(): Promise<AiSettings> {
     const authType = await this.get<string>('ai_auth_type');
     const enabled = await this.get<boolean>('ai_enabled');
-    const anthropic = await this.providerSettings('anthropic');
-    const openai = await this.providerSettings('openai');
+    const anthropic = await this.ownKeyAndModel('anthropic');
+    const openai = await this.ownKeyAndModel('openai');
     const chosen = await this.get<AiProvider>('ai_mapping_provider');
     const decisionKey = await this.get<EncryptedValue>(DECISION_KEY_ROW);
     const decisionsEnabled = await this.get<boolean>('ai_decisions_enabled');
-    const decisionRoute = decisionRouteOf(await this.get<string>('ai_decision_route'));
+    const gatewayHasKey = (await this.get<EncryptedValue>(GATEWAY_KEY_ROW)) !== null;
+    const routes = await this.routes();
+    /**
+     * Whether a vendor has a credential **on its route**: the gateway's key
+     * when it goes through the gateway, its own otherwise.
+     *
+     * One rule for all three, and asked of the route rather than of the keys
+     * that happen to exist — a gateway key does not make Claude reachable on a
+     * home that has not moved Claude onto it, which is the whole of "only if
+     * somebody wants it".
+     */
+    const reaches = (vendor: AiVendor, ownKey: boolean) =>
+      routes[vendor] === 'vercel' ? gatewayHasKey : ownKey;
+    const reachable: UsableProviders = {
+      anthropic: reaches('anthropic', anthropic.hasKey),
+      openai: reaches('openai', openai.hasKey),
+    };
+    /**
+     * A Claude subscription token is only in the way when it is what Claude
+     * would be asked with. On the gateway it is simply a row nobody reads, and
+     * reporting it then would tell an app the home cannot talk to a model it
+     * is talking to perfectly well.
+     */
+    const legacy =
+      anthropic.hasKey && authType === LEGACY_OAUTH_AUTH_TYPE && routes.anthropic === 'direct';
     /**
      * Which providers an *agent* could authenticate as.
      *
@@ -347,59 +439,76 @@ export class SettingsService {
      * vendor that answers 401 while a working OpenAI key sat beside it.
      */
     const usable: UsableProviders = {
-      anthropic: anthropic.hasKey && authType !== LEGACY_OAUTH_AUTH_TYPE,
-      openai: openai.hasKey,
+      anthropic: reachable.anthropic && !legacy,
+      openai: reachable.openai,
     };
     return {
-      provider: this.resolveMappingProvider(chosen, anthropic, openai),
+      provider: this.resolveMappingProvider(chosen, reachable),
       model: anthropic.model,
-      // **Generative keys only, and that is load-bearing.** `lazy.ts` and the
-      // API's `ai_not_configured` check both read this to mean "can an agent
-      // run at all". A Jev key making it true would build a mapper and let
-      // `openConversation` past its own check, to fail at the provider.
-      hasKey: anthropic.hasKey || openai.hasKey,
+      // **Generative credentials only, and that is load-bearing.** `lazy.ts`
+      // and the API's `ai_not_configured` check both read this to mean "can an
+      // agent run at all". A Jev key making it true would build a mapper and
+      // let `openConversation` past its own check, to fail at the provider —
+      // which is also why a gateway key counts only for a provider routed
+      // through it.
+      hasKey: reachable.anthropic || reachable.openai,
       enabled: enabled !== false,
       recordExchanges: (await this.get<boolean>('ai_record_exchanges')) === true,
-      legacySubscriptionToken: anthropic.hasKey && authType === LEGACY_OAUTH_AUTH_TYPE,
-      anthropic,
-      openai,
+      legacySubscriptionToken: legacy,
+      anthropic: { ...anthropic, route: routes.anthropic, usable: usable.anthropic },
+      openai: { ...openai, route: routes.openai, usable: usable.openai },
       decision: {
         hasKey: decisionKey !== null,
-        route: decisionRoute.id,
-        model: decisionRoute.modelId,
+        route: routes.typesafe,
+        usable: reaches('typesafe', decisionKey !== null),
+        model: DECISION_ROUTES[routes.typesafe].modelId,
         enabled: decisionsEnabled !== false,
       },
-      // Both *generative* keys: which model reads a device's exposes tree is
-      // a choice between those two and Jev is not one of them.
-      mappingChoosable: anthropic.hasKey && openai.hasKey,
+      gateway: { hasKey: gatewayHasKey },
+      // Both *generative* providers: which model reads a device's exposes tree
+      // is a choice between those two and Jev is not one of them.
+      mappingChoosable: reachable.anthropic && reachable.openai,
       assistant: agentSettings(await this.get<string>('ai_assistant_model'), usable),
       automations: agentSettings(await this.get<string>('ai_automations_model'), usable),
     };
   }
 
-  private async providerSettings(provider: AiProvider): Promise<AiProviderSettings> {
+  private async ownKeyAndModel(provider: AiProvider): Promise<{ hasKey: boolean; model: string | null }> {
     const slot = SLOTS[provider];
     const encrypted = await this.get<EncryptedValue>(slot.key);
     return { hasKey: encrypted !== null, model: await this.get<string>(slot.model) };
   }
 
+  /** Every vendor's route, as stored — absent reading as `direct`. */
+  private async routes(): Promise<Record<AiVendor, AiRoute>> {
+    return {
+      anthropic: aiRouteOf(await this.get<string>(routeRowOf('anthropic'))),
+      openai: aiRouteOf(await this.get<string>(routeRowOf('openai'))),
+      typesafe: aiRouteOf(await this.get<string>(routeRowOf('typesafe'))),
+    };
+  }
+
   /**
    * Which provider recognises devices.
    *
-   * A stored choice only counts while the provider it names still has a key —
-   * otherwise clearing one credential would leave the hub pointed at a
-   * provider it cannot authenticate, with nothing on screen saying so. With
-   * one key there is no choice to make; with none there is no provider.
+   * A stored choice only counts while the provider it names still has a
+   * credential on its route — otherwise clearing one would leave the hub
+   * pointed at a provider it cannot authenticate, with nothing on screen
+   * saying so. With one there is no choice to make; with none there is no
+   * provider.
+   *
+   * **Reachable, not usable**, deliberately: a Claude subscription token still
+   * counts here, so the mapper reaches the one place that says what is wrong
+   * with it instead of skipping recognition with nothing recorded.
    */
   private resolveMappingProvider(
     chosen: AiProvider | null,
-    anthropic: AiProviderSettings,
-    openai: AiProviderSettings,
+    reachable: UsableProviders,
   ): AiProvider | null {
-    if (chosen === 'openai' && openai.hasKey) return 'openai';
-    if (chosen === 'anthropic' && anthropic.hasKey) return 'anthropic';
-    if (anthropic.hasKey) return 'anthropic';
-    if (openai.hasKey) return 'openai';
+    if (chosen === 'openai' && reachable.openai) return 'openai';
+    if (chosen === 'anthropic' && reachable.anthropic) return 'anthropic';
+    if (reachable.anthropic) return 'anthropic';
+    if (reachable.openai) return 'openai';
     return null;
   }
 
@@ -415,9 +524,50 @@ export class SettingsService {
     await this.set('ai_decisions_enabled', enabled);
   }
 
-  /** Where decisions are bought. See `AiDecisionSettings.route`. */
-  async setDecisionRoute(route: string): Promise<void> {
-    await this.set('ai_decision_route', route);
+  /**
+   * Whose key buys one vendor's models: its own, or the gateway's.
+   *
+   * `direct` is written as the row's absence, so the default is the only
+   * value that never needs storing and a hub rolled back to a build that
+   * predates routes simply never sees one.
+   */
+  async setAiRoute(vendor: AiVendor, route: AiRoute): Promise<void> {
+    if (route === 'direct') await this.unset(routeRowOf(vendor));
+    else await this.set(routeRowOf(vendor), route);
+    // A different credential answers a generative vendor now, so what the
+    // mapper last said about the old one is stale — the rule saving a key
+    // already follows. The decision model keeps no status of its own; its
+    // breaker is keyed on the secret and retires itself.
+    if (vendor !== 'typesafe') await this.unset('ai_status');
+  }
+
+  /**
+   * Move a key from the first cut of the gateway to where it belongs, once.
+   *
+   * That cut stored a route beside the TypeSafe key, so a home buying its
+   * decisions through Vercel held a Vercel key in the **TypeSafe** slot — the
+   * row an app then had to rename to stay truthful. The key moves to the
+   * gateway's own slot and the decision route to the per-vendor row, which
+   * leaves the home deciding exactly as it did the minute before. Called at
+   * boot; a hub that never ran that cut has no row and does nothing.
+   *
+   * The ciphertext moves as it is: it is sealed with the hub's key and names
+   * no row, so re-encrypting it would be the same bytes' worth of work to
+   * produce the same secret.
+   */
+  async adoptLegacyDecisionRoute(): Promise<void> {
+    const legacy = await this.get<string>(LEGACY_DECISION_ROUTE_ROW);
+    if (legacy === null) return;
+    if (legacy === 'vercel') {
+      const held = await this.get<EncryptedValue>(DECISION_KEY_ROW);
+      const gateway = await this.get<EncryptedValue>(GATEWAY_KEY_ROW);
+      if (held !== null && gateway === null) {
+        await this.set(GATEWAY_KEY_ROW, held);
+        await this.unset(DECISION_KEY_ROW);
+      }
+      if (held !== null || gateway !== null) await this.set(routeRowOf('typesafe'), 'vercel');
+    }
+    await this.unset(LEGACY_DECISION_ROUTE_ROW);
   }
 
   async setAiEnabled(enabled: boolean): Promise<void> {
@@ -501,10 +651,24 @@ export class SettingsService {
   async clearAiCredential(slot: AiCredentialSlot): Promise<void> {
     if (slot === 'typesafe') {
       // No model row and no legacy marker: the decision model has neither.
-      // The route goes with the key: it names where *that* key is from, and
-      // leaving it behind would point the next key at the wrong address.
+      // And the route stays: it says whose key buys the decisions, and a home
+      // buying them through the gateway keeps deciding when TypeSafe's own
+      // key goes.
       await this.unset(DECISION_KEY_ROW);
-      await this.unset('ai_decision_route');
+      return;
+    }
+    if (slot === 'vercel') {
+      await this.unset(GATEWAY_KEY_ROW);
+      // **Nothing is left pointing at a gateway with no key.** Every vendor
+      // it carried goes back to its own key — and a vendor with none stops,
+      // which is what removing the only key that bought it means, rather than
+      // a route that answers 401 on every request with nothing on screen
+      // saying why.
+      const routes = await this.routes();
+      for (const vendor of AI_VENDORS) {
+        if (routes[vendor] !== 'direct') await this.unset(routeRowOf(vendor));
+      }
+      await this.unset('ai_status');
       return;
     }
     if (slot === 'anthropic') {
@@ -520,6 +684,8 @@ export class SettingsService {
     await this.clearAiCredential('anthropic');
     await this.clearAiCredential('openai');
     await this.clearAiCredential('typesafe');
+    // Last, because it is what takes the routes with it.
+    await this.clearAiCredential('vercel');
     await this.unset('ai_mapping_provider');
     await this.unset('ai_decisions_enabled');
     // Back to the default. Leaving a stale `false` behind would mean a hub
@@ -528,11 +694,34 @@ export class SettingsService {
     await this.unset('ai_enabled');
   }
 
-  /** Decrypt one slot's key — in-process use only. */
+  /**
+   * Decrypt one slot's key — in-process use only.
+   *
+   * **Read a slot only for the things that never take a route**, which today
+   * is the voice alone: GPT-Live's WebRTC offer and its sideband are
+   * OpenAI's own. Everything that asks a vendor for a model asks
+   * `aiConnection`, or a home routed through the gateway would be answered on
+   * a key it had chosen not to use.
+   */
   async aiKey(slot: AiCredentialSlot = 'anthropic'): Promise<string | null> {
     const encrypted = await this.get<EncryptedValue>(keyRowOf(slot));
     if (!encrypted) return null;
     return decryptSecret(encrypted, this.aesKey);
+  }
+
+  /**
+   * The credential one vendor is asked with, and which way it goes.
+   *
+   * The route decides the slot: the vendor's own key when it is `direct`, the
+   * gateway's when it goes through the gateway — never "whichever exists",
+   * because a home that routed Claude through Vercel and still holds an
+   * Anthropic key has said which one it wants spent. `null` when that slot is
+   * empty, which every caller already reads as "not configured".
+   */
+  async aiConnection(vendor: AiVendor): Promise<AiConnection | null> {
+    const route = aiRouteOf(await this.get<string>(routeRowOf(vendor)));
+    const secret = await this.aiKey(route === 'vercel' ? 'vercel' : vendor);
+    return secret === null ? null : { secret, route };
   }
 
   async getAiStatus(): Promise<AiStatus> {

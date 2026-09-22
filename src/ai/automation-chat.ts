@@ -1,4 +1,5 @@
 import type { AiProvider } from '../core/settings.js';
+import type { AiRoute } from './gateway.js';
 import type { AiRunKind } from '../core/ai-runs.js';
 import type { AutomationEngine } from '../automations/engine.js';
 import type { AutomationStore } from '../automations/store.js';
@@ -50,6 +51,8 @@ export interface AutomationChatOptions extends ChatRuntimeOptions {
     provider: AiProvider;
     modelId: string;
     secret: string;
+    /** Whether the conversation would go through the gateway. */
+    route: AiRoute;
     systemPrompt: string;
     taskPrompt: string;
   }) => AutomationConversation;
@@ -267,8 +270,11 @@ export class AutomationChat extends ChatRuntime<AutomationTurn> {
           'token is not an API key. Add an Anthropic or OpenAI API key in the home’s AI settings.',
       );
     }
-    const secret = await this.options.settings.aiKey(provider);
-    if (!secret) throw new AgentNotConfiguredError('ai_not_configured');
+    // The key and the address together — see the assistant's note: a vendor
+    // routed through the gateway is asked on the gateway's key.
+    const connection = await this.options.settings.aiConnection(provider);
+    if (!connection) throw new AgentNotConfiguredError('ai_not_configured');
+    const { secret, route } = connection;
 
     /**
      * **This agent's own model, and it did not have one.**
@@ -332,12 +338,12 @@ export class AutomationChat extends ChatRuntime<AutomationTurn> {
      * with no test at all and reached a phone as a 500.
      */
     if (this.options.createConversation) {
-      return this.options.createConversation({ provider, modelId, secret, systemPrompt, taskPrompt });
+      return this.options.createConversation({ provider, modelId, secret, route, systemPrompt, taskPrompt });
     }
 
     const { createAutomationConversation } = await import('./automation-agent.js');
     return createAutomationConversation({
-      auth: { secret },
+      auth: { secret, route },
       provider,
       modelId,
       systemPrompt,

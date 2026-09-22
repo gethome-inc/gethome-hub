@@ -16,6 +16,7 @@ import { PermitJoinService } from '../src/core/permit-join.js';
 import { AiRunLog } from '../src/core/ai-runs.js';
 import { writeRadioStandDown } from '../src/core/radio.js';
 import { MappingLibrary } from '../src/ai/library.js';
+import { DECISION_MODEL } from '../src/ai/decide/decider.js';
 import type { AdapterBus, ProtocolAdapter } from '../src/adapters/adapter.js';
 import type { HubCommand } from '../src/schema/index.js';
 import {
@@ -1165,63 +1166,36 @@ describe.skipIf(!handle)('hub API', () => {
       detail: expect.stringContaining('Anthropic or OpenAI key'),
     });
 
-    // **And that is the only prefix it may judge.** This key can come from
-    // TypeSafe or from a gateway reselling the same model, and those share no
-    // prefix — so a key that is merely unfamiliar has to be accepted.
+    // **A gateway key does not belong here any more**, and saying so is the
+    // point: the first cut of the gateway asked for a Vercel key in this very
+    // field, which is how the TypeSafe slot came to hold somebody else's key.
+    // The gateway has a slot of its own, and a key that is certainly the
+    // gateway's is refused here with a sentence naming it.
     const gatewayKey = await app.inject({
       method: 'PATCH',
       url: '/api/v1/settings/ai',
       headers: auth(memberToken),
       payload: { typesafeApiKey: 'vck_gateway_0123456789' },
     });
-    expect(gatewayKey.statusCode).toBe(200);
-
-    // The route is a closed vocabulary the hub owns, offered as a table an app
-    // renders — and it is never a model picker: both serve the same model.
-    const routed = await app.inject({
-      method: 'PATCH',
-      url: '/api/v1/settings/ai',
-      headers: auth(memberToken),
-      payload: { decisionRoute: 'vercel' },
-    });
-    expect(routed.json()).toMatchObject({
-      decision: { route: 'vercel', model: 'typesafe-ai/jev' },
-    });
-    // The table an app renders: a name, where to buy a key, and what one
-    // starts with — the placeholder for the field that asks for it, which is
-    // the hub's answer rather than the app's guess.
-    expect(routed.json().decision.routes).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ id: 'typesafe', keyHint: 'typesafe.ai', keyPrefix: 'ts-' }),
-        expect.objectContaining({ id: 'vercel', keyPrefix: 'vck_' }),
-      ]),
-    );
-
-    // **The key and the route in one request, which is the only way the app
-    // ever changes a route.** A gateway key is refused nowhere on the way —
-    // the prefix guard asserts only that it is not one of the other two — and
-    // both land together, so a stored key can never be left pointing at an
-    // address it cannot authenticate to.
-    const bought = await app.inject({
-      method: 'PATCH',
-      url: '/api/v1/settings/ai',
-      headers: auth(memberToken),
-      payload: { typesafeApiKey: 'vck_gateway_key', decisionRoute: 'vercel' },
-    });
-    expect(bought.statusCode).toBe(200);
-    expect(bought.json()).toMatchObject({
-      decision: { hasKey: true, route: 'vercel', model: 'typesafe-ai/jev' },
+    expect(gatewayKey.statusCode).toBe(400);
+    expect(gatewayKey.json()).toMatchObject({
+      error: 'invalid_body',
+      detail: expect.stringContaining('Vercel AI Gateway key'),
     });
 
-    // An address the hub does not serve is a 400 rather than a silent
-    // fallback: every request would otherwise go somewhere that is not there.
-    const nowhere = await app.inject({
-      method: 'PATCH',
+    // And the decision block says whose key buys the decisions, beside the
+    // model that address calls — the same model either way.
+    const described = await app.inject({
+      method: 'GET',
       url: '/api/v1/settings/ai',
       headers: auth(memberToken),
-      payload: { decisionRoute: 'somewhere-else' },
     });
-    expect(nowhere.statusCode).toBe(400);
+    expect(described.json()).toMatchObject({
+      decision: { hasKey: true, usable: true, route: 'direct', model: DECISION_MODEL },
+    });
+    // No route table any more: where a decision is bought is the gateway's
+    // question, answered once for every vendor.
+    expect(described.json().decision).not.toHaveProperty('routes');
 
     // Pausing it is not forgetting it — two requests with very different
     // costs to undo.
@@ -1240,6 +1214,207 @@ describe.skipIf(!handle)('hub API', () => {
       payload: { clear: 'typesafe' },
     });
     expect(forgotten.json()).toMatchObject({ decision: { hasKey: false } });
+  });
+
+  it('holds one gateway key, and moves a vendor onto it only when asked', async () => {
+    // **A fourth key and not a fourth vendor.** The gateway answers nothing
+    // itself — it buys the other three vendors' models — so the hub describes
+    // it in its own block and says, per vendor, whose key buys that vendor.
+    const before = await app.inject({
+      method: 'GET',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+    });
+    expect(before.json()).toMatchObject({
+      gateway: {
+        id: 'vercel',
+        label: 'Vercel AI Gateway',
+        keyHint: 'vercel.com/ai-gateway',
+        keyPrefix: 'vck_',
+        serves: ['anthropic', 'openai', 'typesafe'],
+        hasKey: false,
+      },
+      providers: { openai: { hasKey: false, route: 'direct', usable: false } },
+      decision: { hasKey: false, route: 'direct', usable: false },
+    });
+
+    // Nothing may be pointed at a gateway with no key: stored, it would answer
+    // 401 on every request with nothing on screen to say the switch was why.
+    const early = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { routes: { openai: 'vercel' } },
+    });
+    expect(early.statusCode).toBe(400);
+    expect(early.json()).toMatchObject({ error: 'gateway_not_configured', gateway: 'vercel' });
+
+    // The ordinary mistakes with four boxes on one page, each refused with a
+    // sentence about the box it landed in.
+    const generativeInGateway = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { vercelApiKey: 'sk-proj-0123456789' },
+    });
+    expect(generativeInGateway.statusCode).toBe(400);
+    expect(generativeInGateway.json()).toMatchObject({
+      detail: expect.stringContaining('Vercel AI Gateway key'),
+    });
+    const gatewayInOpenAi = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { openaiApiKey: 'vck_live_0123456789' },
+    });
+    expect(gatewayInOpenAi.statusCode).toBe(400);
+    expect(gatewayInOpenAi.json()).toMatchObject({
+      detail: expect.stringContaining("gateway's own field"),
+    });
+
+    // **Saving the key moves nothing by itself.** A home that worked yesterday
+    // is not quietly re-routed by a key somebody saved for something else.
+    const saved = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { vercelApiKey: 'vck_live_0123456789' },
+    });
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json()).toMatchObject({
+      gateway: { hasKey: true },
+      providers: { openai: { hasKey: false, route: 'direct', usable: false } },
+      decision: { route: 'direct', usable: false },
+      mappingChoosable: false,
+    });
+    expect(JSON.stringify(saved.json())).not.toContain('vck_live');
+
+    // Moving two vendors onto it at once. OpenAI now answers with no key of
+    // its own, Jev is bought through the gateway's TypeSafe-compatible
+    // address — the same model, spelled the way that address spells it — and
+    // recognising a device is a choice between two reachable providers.
+    const moved = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { routes: { openai: 'vercel', typesafe: 'vercel' } },
+    });
+    expect(moved.statusCode).toBe(200);
+    expect(moved.json()).toMatchObject({
+      providers: {
+        anthropic: { route: 'direct' },
+        openai: { hasKey: false, route: 'vercel', usable: true },
+      },
+      decision: { hasKey: false, route: 'vercel', usable: true, model: 'typesafe-ai/jev' },
+      mapping: { choosable: true },
+      assistant: { choosable: true },
+    });
+
+    // A provider reachable only through the gateway is a provider the home
+    // can choose to recognise devices with — and the route and the choice can
+    // arrive in one request, since routes are written first.
+    const recogniser = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { routes: { openai: 'vercel' }, mappingProvider: 'openai' },
+    });
+    expect(recogniser.statusCode).toBe(200);
+    expect(recogniser.json()).toMatchObject({ mapping: { provider: 'openai', choosable: true } });
+
+    // **Talking out loud never goes through it.** GPT-Live's WebRTC offer and
+    // its sideband are OpenAI's own, so a home whose OpenAI requests go
+    // through the gateway still needs an OpenAI key of its own to speak.
+    const spoken = await app.inject({
+      method: 'POST',
+      url: '/api/v1/assistant/voice/session',
+      headers: auth(memberToken),
+      payload: { sdp: 'v=0' },
+    });
+    expect(spoken.statusCode).toBe(409);
+    expect(spoken.json()).toMatchObject({ error: 'openai_not_configured' });
+
+    // Both keys held, and the route — not which keys exist — says which pays.
+    const own = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { openaiApiKey: 'sk-proj-0123456789' },
+    });
+    expect(own.json()).toMatchObject({
+      providers: { openai: { hasKey: true, route: 'vercel', usable: true } },
+    });
+    const back = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { routes: { openai: 'direct' } },
+    });
+    expect(back.json()).toMatchObject({
+      providers: { openai: { hasKey: true, route: 'direct', usable: true } },
+      decision: { route: 'vercel' },
+    });
+
+    // A route the hub does not serve, or a vendor it does not have, is a 400
+    // rather than an address that is not there.
+    for (const routes of [{ openai: 'openrouter' }, { voice: 'vercel' }]) {
+      const refused = await app.inject({
+        method: 'PATCH',
+        url: '/api/v1/settings/ai',
+        headers: auth(memberToken),
+        payload: { routes },
+      });
+      expect(refused.statusCode).toBe(400);
+    }
+
+    // **Forgetting the gateway's key takes every route that pointed at it**,
+    // so nothing is left asking a gateway it has no key for. Jev had no key of
+    // its own, so it simply stops — which is what removing the only key that
+    // bought it means.
+    const forgotten = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { clear: 'vercel' },
+    });
+    expect(forgotten.json()).toMatchObject({
+      gateway: { hasKey: false },
+      providers: { openai: { hasKey: true, route: 'direct' } },
+      decision: { route: 'direct', usable: false },
+    });
+
+    // And the key with the route in one request, which is the shape a single
+    // tap on an app's switch needs when the key is being added at the same
+    // moment.
+    const together = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { vercelApiKey: 'vck_second_0123456789', routes: { anthropic: 'vercel' } },
+    });
+    expect(together.statusCode).toBe(200);
+    expect(together.json()).toMatchObject({
+      gateway: { hasKey: true },
+      providers: { anthropic: { route: 'vercel', usable: true } },
+    });
+
+    // Left as the tests after this one expect to find it: no OpenAI key, and
+    // nothing routed anywhere.
+    await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { clear: 'openai' },
+    });
+    const tidy = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { clear: 'vercel' },
+    });
+    expect(tidy.json()).toMatchObject({
+      providers: { anthropic: { route: 'direct' }, openai: { hasKey: false } },
+    });
   });
 
   it('refuses to point the agent at a provider with no key', async () => {

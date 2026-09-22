@@ -15,10 +15,11 @@ import type { PairingService } from '../core/pairing.js';
 import type { ActivityService } from '../core/activity.js';
 import type { HomeService } from '../core/home.js';
 import type { FavoritesService } from '../core/favorites.js';
-import { DECISION_ROUTES, DECISION_ROUTE_IDS } from '../ai/decide/routes.js';
+import { AI_ROUTES, GATEWAY } from '../ai/gateway.js';
 import {
   AI_CREDENTIAL_SLOTS,
   AI_PROVIDERS,
+  AI_VENDORS,
   type AiCredentialSlot,
   type AiProvider,
   type SettingsService,
@@ -1245,8 +1246,11 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       // be perfectly configured for one and not the other. And deliberately not
       // gated on `ai_enabled`, which is the *adaptation* switch — nobody draws
       // a portrait by accident, so there is nothing to switch off.
-      const apiKey = await deps.settings.aiKey('openai');
-      if (!apiKey) return reply.code(409).send({ error: 'openai_not_configured' });
+      // The key and the address together: a home that routes OpenAI through
+      // the gateway draws there, on the gateway's key — the same image model,
+      // so the same picture and the same record.
+      const connection = await deps.settings.aiConnection('openai');
+      if (!connection) return reply.code(409).send({ error: 'openai_not_configured' });
 
       const kind = device.endpoints[0]?.deviceKind;
       if (!kind) return reply.code(409).send({ error: 'device_has_no_kind' });
@@ -1255,7 +1259,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         const portrait = await deps.portraits.draw({
           deviceId: id,
           kind,
-          apiKey,
+          apiKey: connection.secret,
+          route: connection.route,
           // Recorded on the picture as well as in the log below: the log is
           // bounded at 30 days and a portrait is not, so this is the copy that
           // is still there when somebody asks who drew it.
@@ -2114,8 +2119,18 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       choices: { anthropic: AGENT_MODELS.anthropic.choices, openai: AGENT_MODELS.openai.choices },
       choosable: ai.mappingChoosable,
     });
+    /**
+     * `hasKey` is the provider's **own** key, which is what its row in an app
+     * says; `route` and `usable` are the two facts a gateway added. A provider
+     * bought through the gateway works with `hasKey: false`, and an app that
+     * gated anything on `hasKey` alone would switch off a home that is
+     * answering perfectly well — so `usable` is the question for "can it
+     * run", and `hasKey` for "is there a key of its own to show".
+     */
     const forProvider = (provider: AiProvider) => ({
       hasKey: ai[provider].hasKey,
+      route: ai[provider].route,
+      usable: ai[provider].usable,
       model: effectiveModel(provider, ai[provider].model),
       models: PROVIDER_MODELS[provider].choices,
     });
@@ -2127,21 +2142,22 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       // that object to draw a key row per provider would draw one for a model
       // that has no list to pick from and cannot answer a chat — which is the
       // confusion the two vocabularies are kept apart to avoid. It rides
-      // `...ai` above; named here so this stays where somebody would look.
-      //
-      // `routes` is the table, rendered by an app rather than shipped in one —
-      // the `GET /permissions` rule the model lists already follow, so a
-      // gateway added later needs no app release. It is **not** a model
-      // picker: every route serves the same model, and `keyHint` is there so
-      // the sheet that asks for a key can say where to get *that* one.
-      decision: {
-        ...ai.decision,
-        routes: DECISION_ROUTES.map((route) => ({
-          id: route.id,
-          label: route.label,
-          keyHint: route.keyHint,
-          keyPrefix: route.keyPrefix,
-        })),
+      // `...ai` above (`hasKey`, `route`, `usable`, `model`, `enabled`); named
+      // here so this stays where somebody would look.
+      decision: ai.decision,
+      // **The gateway is a fourth key, not a fourth vendor** — it answers
+      // nothing itself, it buys the others' models. Described here, rendered
+      // by an app (the `GET /permissions` rule, so the name, the shop and the
+      // placeholder are the hub's words), and **never where it is used**:
+      // which vendors go through it is each vendor's own `route`, so "who pays
+      // for Claude" has one answer rather than one here and one there.
+      gateway: {
+        id: GATEWAY.id,
+        label: GATEWAY.label,
+        keyHint: GATEWAY.keyHint,
+        keyPrefix: GATEWAY.keyPrefix,
+        serves: GATEWAY.serves,
+        hasKey: ai.gateway.hasKey,
       },
       mapping: { provider: ai.provider, choosable: ai.mappingChoosable },
       // What answers in the assistant, and what it could answer on. Its own
@@ -2192,23 +2208,31 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       .refine((key) => (provider === 'openai' ? !key.trim().startsWith('sk-ant-') : true), {
         message: 'that looks like an Anthropic key — it belongs in the Anthropic field',
       })
-      // The decision model's field. Pasting one of the other two in here is
-      // the ordinary mistake — the same argument the two arms above make,
-      // pointed at the new box.
-      //
-      // **And that is all it may check.** This key can come from TypeSafe or
-      // from a gateway that resells the same model, and those do not share a
-      // prefix — so asserting what a decision key *starts* with would refuse a
-      // perfectly good gateway key with a sentence about the wrong vendor.
-      // Only the route-independent mistake is caught.
+      // The decision model's field and the gateway's. Pasting one of the two
+      // generative keys into either is the ordinary mistake — the same
+      // argument the arms above make, pointed at the newer boxes.
       .refine(
         (key) =>
-          provider === 'typesafe'
+          provider === 'typesafe' || provider === 'vercel'
             ? !key.trim().startsWith('sk-ant-') && !key.trim().startsWith('sk-proj-')
             : true,
         {
           message:
-            'that is an Anthropic or OpenAI key; this field wants the key for your decision route',
+            provider === 'vercel'
+              ? `that is an Anthropic or OpenAI key; this field wants your ${GATEWAY.label} key`
+              : 'that is an Anthropic or OpenAI key; this field wants your TypeSafe key',
+        },
+      )
+      // **A gateway key in a vendor's own box**, which is the mistake four
+      // boxes on one page invite — and the one the first cut of the gateway
+      // made structural, by asking for a Vercel key in the TypeSafe field.
+      // A *negative* check on a known prefix, the shape of every arm above:
+      // it refuses what is certainly the gateway's and asserts nothing about
+      // what a vendor's own key looks like.
+      .refine(
+        (key) => (provider === 'vercel' ? true : !key.trim().startsWith(GATEWAY.keyPrefix)),
+        {
+          message: `that looks like a ${GATEWAY.label} key — it belongs in the gateway's own field`,
         },
       )
       .optional();
@@ -2235,15 +2259,26 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     openaiApiKey: apiKeyField('openai'),
     /** The fast decision model's key. It has no model beside it — see `docs/jev.md`. */
     typesafeApiKey: apiKeyField('typesafe'),
+    /** The gateway's key, which buys whichever vendors are routed to it. */
+    vercelApiKey: apiKeyField('vercel'),
     /**
-     * Where decisions are bought.
+     * Whose key buys each vendor's models: its own (`direct`) or the gateway's.
      *
-     * Validated against the offered list, unlike a *model* id — this is a
-     * closed vocabulary the hub owns and an unknown one would send every
-     * request to an address that does not exist, which is worth a 400 rather
-     * than a silent fallback.
+     * Validated against the closed vocabulary, unlike a *model* id — an
+     * unknown route would send every request to an address that does not
+     * exist, which is worth a 400 rather than a silent fallback. Partial: a
+     * vendor left out is left alone. **Applied after the keys**, so one
+     * request can save the gateway's key and move a vendor onto it, and a
+     * vendor moved onto a gateway with no key is refused rather than stored.
      */
-    decisionRoute: z.enum(DECISION_ROUTE_IDS).optional(),
+    routes: z
+      .object({
+        anthropic: z.enum(AI_ROUTES).optional(),
+        openai: z.enum(AI_ROUTES).optional(),
+        typesafe: z.enum(AI_ROUTES).optional(),
+      })
+      .strict()
+      .optional(),
     /**
      * **Generative providers only, deliberately.**
      *
@@ -2304,8 +2339,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * Change anything about the hub's AI without re-entering everything else.
    *
    * Every field is optional and absence means "leave this alone", which is what
-   * lets one route carry two credentials, two models, the mapping provider and
-   * the switch. `PUT` requires an `apiKey`, so the only way to stop the agent
+   * lets one route carry four credentials, the routes between them, the
+   * models, the mapping provider and the switches. `PUT` requires an `apiKey`, so the only way to stop the agent
    * running used to be `DELETE` — which is a different request. "Stop spending
    * my money on this for now" and "forget my credential" have very different
    * costs to undo, and an owner who wanted the first had to pay the second.
@@ -2322,6 +2357,23 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (body.openaiApiKey !== undefined) await deps.settings.setAiKey('openai', body.openaiApiKey);
     if (body.typesafeApiKey !== undefined) {
       await deps.settings.setAiKey('typesafe', body.typesafeApiKey);
+    }
+    if (body.vercelApiKey !== undefined) await deps.settings.setAiKey('vercel', body.vercelApiKey);
+    if (body.routes !== undefined) {
+      // Asked after the key writes above, so a request can save the gateway's
+      // key and move a vendor onto it at once. A vendor moved onto a gateway
+      // with no key is refused rather than stored — the `mappingProvider`
+      // rule: stored, it would answer 401 on every request with nothing on
+      // screen to say the switch was the cause.
+      const ai = await deps.settings.getAiSettings();
+      const wanted = AI_VENDORS.filter((vendor) => body.routes?.[vendor] !== undefined);
+      if (!ai.gateway.hasKey && wanted.some((vendor) => body.routes?.[vendor] === 'vercel')) {
+        return reply.code(400).send({ error: 'gateway_not_configured', gateway: GATEWAY.id });
+      }
+      for (const vendor of wanted) {
+        const route = body.routes[vendor];
+        if (route !== undefined) await deps.settings.setAiRoute(vendor, route);
+      }
     }
     const anthropicModel = body.anthropicModel !== undefined ? body.anthropicModel : body.model;
     if (anthropicModel !== undefined) await deps.settings.setAiModel(anthropicModel, 'anthropic');
@@ -2341,8 +2393,15 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       // point the agent at it. A provider with no credential is refused rather
       // than stored: the hub would answer with the *other* provider on the next
       // read, and the app would show a picker that silently sprang back.
+      //
+      // "A credential" is the one on the provider's **route** — its own key,
+      // or the gateway's for a provider routed through it — and the routes
+      // above are already written, so one request can move OpenAI onto the
+      // gateway and make it the recogniser.
       const ai = await deps.settings.getAiSettings();
-      if (!ai[body.mappingProvider].hasKey) {
+      const chosen = ai[body.mappingProvider];
+      const reachable = chosen.route === 'vercel' ? ai.gateway.hasKey : chosen.hasKey;
+      if (!reachable) {
         return reply.code(400).send({ error: 'provider_not_configured', provider: body.mappingProvider });
       }
       await deps.settings.setMappingProvider(body.mappingProvider);
@@ -2350,9 +2409,6 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (body.enabled !== undefined) await deps.settings.setAiEnabled(body.enabled);
     if (body.decisionsEnabled !== undefined) {
       await deps.settings.setDecisionsEnabled(body.decisionsEnabled);
-    }
-    if (body.decisionRoute !== undefined) {
-      await deps.settings.setDecisionRoute(body.decisionRoute);
     }
     if (body.recordExchanges !== undefined) {
       await deps.settings.setAiRecordExchanges(body.recordExchanges);
@@ -3406,12 +3462,18 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       .parse(request.body ?? {});
     const ai = await deps.settings.getAiSettings();
     if (!ai.enabled) return reply.code(409).send({ error: 'ai_disabled' });
+    // **The home's own OpenAI key, whatever OpenAI's route says** — the one
+    // thing here that never goes through the gateway. The WebRTC offer and the
+    // sideband attached beside it are GPT-Live's own API, which the gateway
+    // does not carry, so a home that routes OpenAI through Vercel still talks
+    // out loud on its own key, and one without such a key cannot.
     if (!ai.openai.hasKey) {
       return reply.code(409).send({
         error: 'openai_not_configured',
         detail:
-          'Talking out loud runs on OpenAI’s voice model, so this home needs an OpenAI key — ' +
-          'even if the assistant itself answers on Anthropic. Add one in the home’s AI settings.',
+          'Talking out loud runs on OpenAI’s voice model, so this home needs an OpenAI key of its ' +
+          'own — even if the assistant answers on Anthropic or through a gateway. Add one in the ' +
+          'home’s AI settings.',
       });
     }
     const secret = await deps.settings.aiKey('openai');
@@ -3424,8 +3486,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       return reply.code(409).send({
         error: 'openai_not_configured',
         detail:
-          'Talking out loud runs on OpenAI’s voice model, so this home needs an OpenAI key — ' +
-          'even if the assistant itself answers on Anthropic. Add one in the home’s AI settings.',
+          'Talking out loud runs on OpenAI’s voice model, so this home needs an OpenAI key of its ' +
+          'own — even if the assistant answers on Anthropic or through a gateway. Add one in the ' +
+          'home’s AI settings.',
       });
     }
 

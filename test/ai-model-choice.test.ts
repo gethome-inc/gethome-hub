@@ -255,3 +255,155 @@ describe.skipIf(!handle)('a hub that holds only a decision key', () => {
     expect(ai.decision.enabled).toBe(true);
   });
 });
+
+/**
+ * A vendor bought through the gateway.
+ *
+ * The route decides which key a vendor is asked with — its own, or the
+ * gateway's — and *only* the route: a gateway key saved for Jev must not make
+ * Claude reachable on a home that never moved Claude onto it, and a home that
+ * holds both an OpenAI key and a gateway routed for OpenAI has said which one
+ * it wants spent.
+ */
+describe.skipIf(!handle)('a vendor bought through the gateway', () => {
+  const db = handle?.db!;
+  let settings: InstanceType<typeof SettingsService>;
+
+  beforeEach(async () => {
+    await resetDb(db);
+    createMappingAgent.mockClear();
+    createOpenAiMappingAgent.mockClear();
+    settings = new SettingsService(db, Buffer.alloc(32).toString('base64'));
+  });
+
+  it('reaches nothing until a vendor is moved onto it', async () => {
+    await settings.setAiKey('vercel', 'vck_gateway_key_0000');
+    const ai = await settings.getAiSettings();
+    expect(ai.gateway.hasKey).toBe(true);
+    // Still a hub with no AI: nothing is routed, so no vendor has a credential
+    // on its route — `lazy.ts` must not build a mapper over this.
+    expect(ai.hasKey).toBe(false);
+    expect(ai.provider).toBeNull();
+    expect(ai.assistant.provider).toBeNull();
+    expect(ai.decision.usable).toBe(false);
+    expect(await settings.aiConnection('openai')).toBeNull();
+  });
+
+  it('asks a routed vendor on the gateway key, even with its own key beside it', async () => {
+    await settings.setAiKey('openai', 'sk-proj-own-key-0000');
+    await settings.setAiKey('vercel', 'vck_gateway_key_0000');
+    expect(await settings.aiConnection('openai')).toEqual({
+      secret: 'sk-proj-own-key-0000',
+      route: 'direct',
+    });
+
+    await settings.setAiRoute('openai', 'vercel');
+    expect(await settings.aiConnection('openai')).toEqual({
+      secret: 'vck_gateway_key_0000',
+      route: 'vercel',
+    });
+
+    // And the mapper is handed that pair, which is what puts the request on
+    // the gateway's address with the gateway's spelling of the same model.
+    const mapper = new AiDeviceMapper(db, settings, log);
+    await mapper.requestMapping(lamp, mapExposes(lamp), { force: true });
+    expect(createOpenAiMappingAgent.mock.calls[0]?.[0]).toEqual({
+      secret: 'vck_gateway_key_0000',
+      route: 'vercel',
+    });
+    // The model is the canonical id: only the wire spells it the gateway's way.
+    expect(modelsGiven(createOpenAiMappingAgent)[0]).toBe(defaultModelFor('openai'));
+  });
+
+  it('lets an agent run on a vendor that has no key of its own', async () => {
+    await settings.setAiKey('vercel', 'vck_gateway_key_0000');
+    await settings.setAiRoute('anthropic', 'vercel');
+    const ai = await settings.getAiSettings();
+    expect(ai.hasKey).toBe(true);
+    expect(ai.anthropic).toMatchObject({ hasKey: false, route: 'vercel', usable: true });
+    expect(ai.assistant.provider).toBe('anthropic');
+    expect(ai.automations.provider).toBe('anthropic');
+    expect(ai.provider).toBe('anthropic');
+  });
+
+  it('does not let a Claude subscription token stand in the way of the gateway', async () => {
+    // The token is only a problem when it is what Claude would be asked with.
+    // On the gateway it is a row nobody reads, and reporting it then would
+    // tell an app the home cannot talk to a model it is talking to.
+    await settings.setAiKey('anthropic', 'legacy-subscription-token');
+    await settings.set('ai_auth_type', 'oauth_token');
+    expect((await settings.getAiSettings()).legacySubscriptionToken).toBe(true);
+    expect((await settings.getAiSettings()).anthropic.usable).toBe(false);
+
+    // Saving the gateway's key is not saving an Anthropic key, so the marker
+    // stays — and is simply no longer what Claude is asked with once routed.
+    await settings.setAiKey('vercel', 'vck_gateway_key_0000');
+    await settings.setAiRoute('anthropic', 'vercel');
+    const routed = await settings.getAiSettings();
+    expect(routed.legacySubscriptionToken).toBe(false);
+    expect(routed.anthropic.usable).toBe(true);
+    expect(routed.assistant.provider).toBe('anthropic');
+  });
+
+  it('sends every vendor it carried back to its own key when its key is forgotten', async () => {
+    await settings.setAiKey('openai', 'sk-proj-own-key-0000');
+    await settings.setAiKey('vercel', 'vck_gateway_key_0000');
+    await settings.setAiRoute('openai', 'vercel');
+    await settings.setAiRoute('typesafe', 'vercel');
+
+    await settings.clearAiCredential('vercel');
+    const ai = await settings.getAiSettings();
+    expect(ai.gateway.hasKey).toBe(false);
+    expect(ai.openai).toMatchObject({ route: 'direct', usable: true });
+    expect(ai.decision).toMatchObject({ route: 'direct', usable: false });
+    expect(await settings.aiConnection('openai')).toEqual({
+      secret: 'sk-proj-own-key-0000',
+      route: 'direct',
+    });
+  });
+
+  it('keeps deciding through the gateway when TypeSafe’s own key goes', async () => {
+    // The route says whose key buys the decisions; forgetting a key that was
+    // not being used for them changes nothing about where they come from.
+    await settings.setAiKey('typesafe', 'ts-own-key-0000');
+    await settings.setAiKey('vercel', 'vck_gateway_key_0000');
+    await settings.setAiRoute('typesafe', 'vercel');
+    await settings.clearAiCredential('typesafe');
+    const ai = await settings.getAiSettings();
+    expect(ai.decision).toMatchObject({ hasKey: false, route: 'vercel', usable: true });
+    expect(ai.decision.model).toBe('typesafe-ai/jev');
+  });
+
+  it('moves a key the first cut of the gateway left in the TypeSafe slot', async () => {
+    // That cut stored a route beside the TypeSafe key, so a home buying its
+    // decisions through Vercel held a Vercel key in TypeSafe's slot. After the
+    // move the home decides exactly as it did — through the gateway, on the
+    // same key — and the TypeSafe slot is empty, as it always really was.
+    await settings.setAiKey('typesafe', 'vck_gateway_key_0000');
+    await settings.set('ai_decision_route', 'vercel');
+
+    await settings.adoptLegacyDecisionRoute();
+    const ai = await settings.getAiSettings();
+    expect(ai.gateway.hasKey).toBe(true);
+    expect(ai.decision).toMatchObject({ hasKey: false, route: 'vercel', usable: true });
+    expect(await settings.aiConnection('typesafe')).toEqual({
+      secret: 'vck_gateway_key_0000',
+      route: 'vercel',
+    });
+    expect(await settings.get('ai_decision_route')).toBeNull();
+
+    // Once: a second boot finds nothing to do.
+    await settings.adoptLegacyDecisionRoute();
+    expect((await settings.getAiSettings()).decision.route).toBe('vercel');
+  });
+
+  it('leaves a TypeSafe key where it is when the first cut had it on TypeSafe', async () => {
+    await settings.setAiKey('typesafe', 'ts-own-key-0000');
+    await settings.set('ai_decision_route', 'typesafe');
+    await settings.adoptLegacyDecisionRoute();
+    const ai = await settings.getAiSettings();
+    expect(ai.gateway.hasKey).toBe(false);
+    expect(ai.decision).toMatchObject({ hasKey: true, route: 'direct', usable: true });
+    expect(await settings.get('ai_decision_route')).toBeNull();
+  });
+});

@@ -86,6 +86,9 @@ export async function createAutomationConversation(
   const controller = new AbortController();
   const transport = await createChatTransport(provider, {
     secret: auth.secret,
+    // Straight to the vendor or through the gateway, whichever the home chose
+    // for this vendor; the conversation is the same either way.
+    ...(auth.route !== undefined ? { route: auth.route } : {}),
     modelId,
     systemPrompt,
     tools: AUTOMATION_TOOLS,

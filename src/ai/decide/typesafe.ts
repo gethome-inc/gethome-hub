@@ -157,7 +157,7 @@ export async function runDecision<Q extends Questions>(input: {
   // question about something else, which is worse than no answer at all.
   if (state.length > MAX_STATE_CHARS) throw new DecisionStateTooLargeError(state.length);
 
-  const route = input.route ?? DECISION_ROUTES[0];
+  const route = input.route ?? DECISION_ROUTES.direct;
   const started = Date.now();
   const controller = new AbortController();
   const watchdog = setTimeout(() => controller.abort(), input.timeoutMs);

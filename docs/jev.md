@@ -76,14 +76,18 @@ guard**, and `src/core/settings.ts` says so where somebody would try it.
 If it were forced through, somebody would pick Jev as their assistant model and
 get an assistant that cannot talk — a failure other integrators have shipped.
 
-`AiCredentialSlot = AiProvider | 'typesafe'` is the second vocabulary, used
-only where a *credential row* is meant. Three things must never change with it:
+`AiVendor = AiProvider | 'typesafe'` is the second vocabulary — whose model
+answers, which is what a key and a route are held for — and
+`AiCredentialSlot = AiVendor | 'vercel'` the third, used only where a
+*credential row* is meant (the gateway holds a key and answers nothing). Three
+things must never change with them:
 
-- flat `AiSettings.hasKey` stays `anthropic.hasKey || openai.hasKey` — `lazy.ts`
-  and the API's `ai_not_configured` check both read it as "can an agent run at
-  all", and a Jev key making it true would build a mapper that then fails at
-  the provider;
-- `mappingChoosable` stays both *generative* keys;
+- flat `AiSettings.hasKey` stays the *generative* providers only — each one's
+  own key, or the gateway's key for a provider routed through it — because
+  `lazy.ts` and the API's `ai_not_configured` check both read it as "can an
+  agent run at all", and a Jev key (or a gateway key routed for Jev alone)
+  making it true would build a mapper that then fails at the provider;
+- `mappingChoosable` stays both *generative* providers;
 - `UsableProviders` keeps exactly two fields, which is what makes
   `effectiveAgentModel` structurally unable to select Jev.
 
@@ -101,9 +105,10 @@ under `decision`:
 
 | Field | What it is |
 |---|---|
-| `hasKey` | whether a decision credential is stored (`typesafeApiKey` writes it, `clear: "typesafe"` forgets it) |
+| `hasKey` | whether TypeSafe's **own** key is stored (`typesafeApiKey` writes it, `clear: "typesafe"` forgets it) |
+| `route` | whose key buys the decisions — `direct` (TypeSafe's) or `vercel` (the gateway's); `routes: {typesafe}` writes it |
+| `usable` | whether there is a key on that route, so a decision can be asked at all |
 | `enabled` | the owner's pause switch — `decisionsEnabled` writes it, and it defaults to **on** |
-| `route` / `routes` | where the key was bought, and the table of places it could be — `decisionRoute` writes it |
 
 **`enabled` is deliberately not the credential**, the argument `ai_enabled`
 already made one field up: "stop spending my money on this for now" and "forget
@@ -111,8 +116,11 @@ my key" have very different costs to undo. Off, every plain request still
 happens; it just takes a model round, which is what the app's own copy says.
 
 `model` is reported and never settable — see *Calibration* below for why that
-is not a gap. Clearing the credential also unsets the stored route, because a
-route with no key is a preference about nothing.
+is not a gap. **The route is not the key's**, which is the change the first cut
+of this got wrong: forgetting TypeSafe's own key leaves a home that buys its
+decisions through the gateway deciding exactly as it did, and forgetting the
+*gateway's* key sends every vendor it carried back to its own key — Jev
+included, which then stops if it has none.
 
 ---
 
@@ -208,10 +216,10 @@ Two things follow that are easy to get wrong:
 The same model is sold in more than one place, so `routes.ts` is a table of
 **addresses**, not of models:
 
-| id | Base URL | Model id on the wire | Key starts |
+| route | Base URL | Model id on the wire | Key |
 |---|---|---|---|
-| `typesafe` | `https://api.typesafe.ai` | `jev-1.13.0` | `ts-` |
-| `vercel` | `https://ai-gateway.vercel.sh/typesafe` | `typesafe-ai/jev` | `vck_` |
+| `direct` | `https://api.typesafe.ai` | `jev-1.13.0` | TypeSafe's own (`ts-…`) |
+| `vercel` | `https://ai-gateway.vercel.sh/typesafe` | `typesafe-ai/jev` | the gateway's (`vck_…`) |
 
 Vercel's AI Gateway serves a **TypeSafe-compatible** endpoint, so the body and
 the native `noul`/`choice`/`score` answers are unchanged — only the host, the
@@ -221,35 +229,33 @@ moves `confidence` into `providerMetadata`: reading that shape would mean a
 second parser for the one file nobody can check by running the hub.
 
 Everything above about pinning still holds, and this is why the distinction
-has to be said out loud rather than left to be inferred from a picker: a route
+has to be said out loud rather than left to be inferred from a switch: a route
 changes **where the request goes and whose key pays**, and never what answers.
 If a route ever served a different model, the thresholds below would silently
 stop meaning what they say — so a route that did that would be a different
 feature, not a new row in this table.
 
-The hub owns the vocabulary (`GET /settings/ai` answers `decision.routes`), the
-`GET /permissions` rule the model lists already follow, so a gateway added
-later needs no app release. Two consequences in code: `typesafe.ts` takes the
-route rather than reading a constant, and the key-prefix check keeps only the
-route-independent guard — it refuses an `sk-ant-`/`sk-proj-` key in the wrong
-box and asserts nothing about how a decision key *starts*, because a gateway's
-does not look like TypeSafe's.
+**The route is the same per-vendor setting Claude and OpenAI have**
+(`src/ai/gateway.ts`, stored as `ai_route_typesafe`, absent meaning `direct`),
+and the key comes from the route's own slot: TypeSafe's for `direct`, the
+gateway's for `vercel`. It used to be a route stored beside the TypeSafe key,
+so a home buying through Vercel held a *Vercel* key in the *TypeSafe* slot and
+an app had to rename that row to stay truthful. One gateway key for every
+vendor is the fix: each key is exactly what its slot says, and whether a vendor
+goes through the gateway is a switch rather than a property of the key pasted
+into its box. `SettingsService.adoptLegacyDecisionRoute` moves a key the first
+cut left behind, once, at boot. `lazy.ts` asks `aiConnection('typesafe')`,
+which answers the route and its key from one read, so the two can never come
+from different moments.
 
-**`keyPrefix` is a placeholder and nothing more**, and the two halves of that
-sentence are both deliberate. It is on the route so an app can put `vck_…` in
-an empty field rather than guessing or leaving it blank — the same reason
-`keyHint` is there. It is *not* wired into the check above: a vendor can change
-a prefix faster than a hub can be updated, and a positive assertion would then
-refuse a perfectly good key with no way past it. Being wrong about a
-placeholder costs a moment's confusion; being wrong about a guard costs
-somebody their key.
-
-**And the route is only ever written with a key.** `PATCH /settings/ai` takes
-both in one request (the key first, then the route), and a key the hub refuses
-rejects the whole request — so a stored credential can never be left pointing
-at an address it cannot authenticate to. The iOS app relies on that and offers
-the choice nowhere else: the picker lives in the sheet that asks for the key,
-and there is no control anywhere that moves a route on its own.
+Two consequences in code. The key-prefix checks are **negative** only: the
+TypeSafe field refuses an `sk-ant-`/`sk-proj-` key and a gateway `vck_` key
+(each certainly somebody else's), and asserts nothing about how TypeSafe's own
+keys start. And the gateway's `keyPrefix` is a **placeholder and nothing
+more**: it is in `GET /settings/ai` so an app can put `vck_…` in an empty field,
+and it is not a positive check, because a vendor can change a prefix faster
+than a hub can be updated — being wrong about a placeholder costs a moment's
+confusion; being wrong about a guard costs somebody their key.
 
 **And one diagnostic, because the failure mode here is silence.** `typesafe.ts`
 drops an answer it cannot place — a `choice` with no `confidence`, a score off
