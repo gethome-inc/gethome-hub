@@ -33,6 +33,22 @@ export interface DelegateAgent {
   title: string;
   /** What it is for, and what it is not. Goes into the tool description. */
   description: string;
+  /**
+   * The same job, described for a model that only picks.
+   *
+   * **Separate from `description`, and the separation is the point.** That one
+   * is written for a generative model reading tool documentation, so it says
+   * what the agent is *not* for — "Not for switching something on now, and not
+   * for questions about a rule" — which is two negatives in one clause and a
+   * documented weakness of the decision model that reads this. This one is a
+   * plain positive statement of what belongs here, because that is the only
+   * shape that survives being read literally.
+   *
+   * It lives on the registry rather than in `decide/questions.ts` for the
+   * reason `delegate`'s generated description does: adding an agent stays one
+   * entry rather than an entry plus an edit somewhere else that drifts.
+   */
+  decisionCriterion: string;
   /** What a member needs to hand it a job. */
   permission: PermissionKey;
   /**
@@ -69,6 +85,10 @@ export function delegateAgents(deps: { automationChat: AutomationChat }): Delega
         'It knows the rule format and checks a draft against the guards that protect the ' +
         'devices, neither of which you can see. Not for switching something on now, and not ' +
         'for questions about a rule — you can read and press those yourself.',
+      decisionCriterion:
+        'The person wants the home to do something by itself from now on — on a schedule, ' +
+        'when a sensor sees something, or as a scene they can press — or wants an existing ' +
+        'rule changed, explained or switched off.',
       permission: 'automation.manage',
       async start(input) {
         const reply = await deps.automationChat.start({

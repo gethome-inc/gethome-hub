@@ -36,15 +36,18 @@ interface Harness {
   closes: number;
   asked: { sessionId: string; memberId: string; question: string }[];
   spend: { sessionId: string; seconds: number }[];
+  /** Every read-only warm the partial transcript asked for. */
+  warmed: { sessionId: string; memberId: string; partial: string }[];
 }
 
-/** One conversation, with the two host calls recorded and the wire in an array. */
+/** One conversation, with the three host calls recorded and the wire in an array. */
 function harness(
   answers: (question: string) => Promise<string | null> = async () => 'It is off now.',
 ): Harness {
   const sent: Record<string, unknown>[] = [];
   const asked: Harness['asked'] = [];
   const spend: Harness['spend'] = [];
+  const warmed: Harness['warmed'] = [];
   let closes = 0;
 
   const delegation = new VoiceDelegation({
@@ -58,6 +61,12 @@ function harness(
       },
       recordVoiceSpend: async (input) => {
         spend.push(input);
+      },
+      // **Recorded, and that is all it may do.** The interface is narrowed so
+      // a warm cannot reach the home; a stub that could would be testing the
+      // stub rather than the rule — this file's own lesson, one module over.
+      warmForSpeech: async (input) => {
+        warmed.push(input);
       },
     },
     send: (frame) => {
@@ -75,6 +84,7 @@ function harness(
     sent,
     asked,
     spend,
+    warmed,
     get closes() {
       return closes;
     },

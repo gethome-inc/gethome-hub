@@ -525,8 +525,8 @@ describe('starting a conversation', () => {
     });
 
   afterEach(async () => {
-    await settings.clearAiProvider('anthropic');
-    await settings.clearAiProvider('openai');
+    await settings.clearAiCredential('anthropic');
+    await settings.clearAiCredential('openai');
     await settings.setAiEnabled(true);
   });
 

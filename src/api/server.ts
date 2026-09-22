@@ -15,7 +15,13 @@ import type { PairingService } from '../core/pairing.js';
 import type { ActivityService } from '../core/activity.js';
 import type { HomeService } from '../core/home.js';
 import type { FavoritesService } from '../core/favorites.js';
-import { AI_PROVIDERS, type AiProvider, type SettingsService } from '../core/settings.js';
+import {
+  AI_CREDENTIAL_SLOTS,
+  AI_PROVIDERS,
+  type AiCredentialSlot,
+  type AiProvider,
+  type SettingsService,
+} from '../core/settings.js';
 import type { HomeStructure, HubEventBus } from '../core/bus.js';
 import type { Logger } from '../logging.js';
 import { commandSchema } from '../schema/index.js';
@@ -2116,6 +2122,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       ...ai,
       status,
       providers: { anthropic: forProvider('anthropic'), openai: forProvider('openai') },
+      // **A sibling of `providers`, never a member of it.** An app iterating
+      // that object to draw a key row per provider would draw one for a model
+      // that has no list to pick from and cannot answer a chat — which is the
+      // confusion the two vocabularies are kept apart to avoid. It rides
+      // `...ai` above; named here so this stays where somebody would look.
+      decision: ai.decision,
       mapping: { provider: ai.provider, choosable: ai.mappingChoosable },
       // What answers in the assistant, and what it could answer on. Its own
       // block rather than more fields on `providers`, because it is a
@@ -2144,7 +2156,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       .nullable()
       .optional();
 
-  const apiKeyField = (provider: AiProvider) =>
+  const apiKeyField = (provider: AiCredentialSlot) =>
     z
       .string()
       .min(8)
@@ -2165,6 +2177,19 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       .refine((key) => (provider === 'openai' ? !key.trim().startsWith('sk-ant-') : true), {
         message: 'that looks like an Anthropic key — it belongs in the Anthropic field',
       })
+      // The decision model's field. Its key looks like neither of the other
+      // two, and pasting one of those in here is the ordinary mistake — the
+      // same argument the two arms above make, pointed at the new box.
+      .refine(
+        (key) =>
+          provider === 'typesafe'
+            ? !key.trim().startsWith('sk-ant-') && !key.trim().startsWith('sk-proj-')
+            : true,
+        {
+          message:
+            'that is an Anthropic or OpenAI key; this field wants a TypeSafe key, from the TypeSafe console',
+        },
+      )
       .optional();
 
   const aiPatchSchema = z.object({
@@ -2187,9 +2212,21 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     automationsModel: z.string().min(1).max(120).nullable().optional(),
     anthropicApiKey: apiKeyField('anthropic'),
     openaiApiKey: apiKeyField('openai'),
+    /** The fast decision model's key. It has no model beside it — see `docs/jev.md`. */
+    typesafeApiKey: apiKeyField('typesafe'),
+    /**
+     * **Generative providers only, deliberately.**
+     *
+     * Recognising a device means reading an exposes tree and writing a
+     * mapping, which a decision model cannot do. Widening this to the
+     * credential slots would be the one failure the split of those two
+     * vocabularies exists to prevent.
+     */
     mappingProvider: z.enum(AI_PROVIDERS).optional(),
-    /** Forget one provider's key and model, leaving the other one alone. */
-    clear: z.enum(AI_PROVIDERS).optional(),
+    /** The owner's pause switch for the decision model, separate from `enabled`. */
+    decisionsEnabled: z.boolean().optional(),
+    /** Forget one slot's key and model, leaving the others alone. */
+    clear: z.enum(AI_CREDENTIAL_SLOTS).optional(),
     /** Keep what each round of a run sent and received — see `GET /ai/runs`. */
     recordExchanges: z.boolean().optional(),
   });
@@ -2250,9 +2287,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    */
   app.patch('/api/v1/settings/ai', needs('hub.ai'), async (request, reply) => {
     const body = aiPatchSchema.parse(request.body);
-    if (body.clear !== undefined) await deps.settings.clearAiProvider(body.clear);
+    if (body.clear !== undefined) await deps.settings.clearAiCredential(body.clear);
     if (body.anthropicApiKey !== undefined) await deps.settings.setAiKey('anthropic', body.anthropicApiKey);
     if (body.openaiApiKey !== undefined) await deps.settings.setAiKey('openai', body.openaiApiKey);
+    if (body.typesafeApiKey !== undefined) {
+      await deps.settings.setAiKey('typesafe', body.typesafeApiKey);
+    }
     const anthropicModel = body.anthropicModel !== undefined ? body.anthropicModel : body.model;
     if (anthropicModel !== undefined) await deps.settings.setAiModel(anthropicModel, 'anthropic');
     if (body.openaiModel !== undefined) await deps.settings.setAiModel(body.openaiModel, 'openai');
@@ -2278,6 +2318,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       await deps.settings.setMappingProvider(body.mappingProvider);
     }
     if (body.enabled !== undefined) await deps.settings.setAiEnabled(body.enabled);
+    if (body.decisionsEnabled !== undefined) {
+      await deps.settings.setDecisionsEnabled(body.decisionsEnabled);
+    }
     if (body.recordExchanges !== undefined) {
       await deps.settings.setAiRecordExchanges(body.recordExchanges);
     }

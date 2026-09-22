@@ -1113,6 +1113,77 @@ describe.skipIf(!handle)('hub API', () => {
     });
   });
 
+  it('holds a decision key in its own slot, which is never a provider', async () => {
+    // Its own block, a *sibling* of `providers` rather than a member of it: an
+    // app iterating that object to draw a key row per provider would draw one
+    // for a model with no list to pick from that cannot answer a chat.
+    const before = await app.inject({
+      method: 'GET',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+    });
+    expect(before.json()).toMatchObject({ decision: { hasKey: false, enabled: true } });
+    expect(before.json().providers).not.toHaveProperty('typesafe');
+
+    const saved = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { typesafeApiKey: 'ts-live-0123456789' },
+    });
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json()).toMatchObject({ decision: { hasKey: true } });
+    // The key never comes back out, the rule every credential here follows.
+    expect(JSON.stringify(saved.json())).not.toContain('ts-live');
+    // And it has changed nothing about the generative half: recognising a
+    // device is still a choice between the two that can, which here is one.
+    expect(saved.json()).toMatchObject({ mappingChoosable: false });
+
+    // Recognising a device means reading an exposes tree and writing a
+    // mapping. Offering a decision model for it is the one failure the split
+    // between these two vocabularies exists to prevent.
+    const misrouted = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { mappingProvider: 'typesafe' },
+    });
+    expect(misrouted.statusCode).toBe(400);
+    expect(misrouted.json()).toMatchObject({ error: 'invalid_body' });
+
+    // Pasting one of the other two keys in here is the ordinary mistake, and
+    // the sentence has to be about the box it was pasted into.
+    const wrongKey = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { typesafeApiKey: 'sk-ant-api-1234567890' },
+    });
+    expect(wrongKey.statusCode).toBe(400);
+    expect(wrongKey.json()).toMatchObject({
+      error: 'invalid_body',
+      detail: expect.stringContaining('TypeSafe key'),
+    });
+
+    // Pausing it is not forgetting it — two requests with very different
+    // costs to undo.
+    const paused = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { decisionsEnabled: false },
+    });
+    expect(paused.json()).toMatchObject({ decision: { hasKey: true, enabled: false } });
+
+    const forgotten = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { clear: 'typesafe' },
+    });
+    expect(forgotten.json()).toMatchObject({ decision: { hasKey: false } });
+  });
+
   it('refuses to point the agent at a provider with no key', async () => {
     const refused = await app.inject({
       method: 'PATCH',

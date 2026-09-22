@@ -1355,7 +1355,7 @@ describe('the chat service', () => {
     });
 
     await settings.setAiEnabled(true);
-    await settings.clearAiProvider('anthropic');
+    await settings.clearAiCredential('anthropic');
     await expect(chat.start({ memberId: memberId, message: 'go' })).rejects.toMatchObject({
       code: 'ai_not_configured',
     });

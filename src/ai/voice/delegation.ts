@@ -1,5 +1,10 @@
 import type { Logger } from '../../logging.js';
 import { LIVE_APPEND_CHARS, LIVE_AUDIO_EVENTS, LIVE_EVENTS } from './live-wire.js';
+import {
+  SPECULATE_EVERY_MS,
+  SPECULATIONS_PER_UTTERANCE,
+  SPECULATION_MIN_CHARS,
+} from '../decide/questions.js';
 
 /**
  * What a live voice session's frames *mean*, with no connection in it.
@@ -27,7 +32,7 @@ import { LIVE_APPEND_CHARS, LIVE_AUDIO_EVENTS, LIVE_EVENTS } from './live-wire.j
  *   send any.
  */
 
-/** What answering a delegation needs from the hub, narrowed to two calls. */
+/** What answering a delegation needs from the hub, narrowed to three calls. */
 export interface VoiceDelegationHost {
   askAloud(input: {
     sessionId: string;
@@ -35,6 +40,21 @@ export interface VoiceDelegationHost {
     question: string;
   }): Promise<string | null>;
   recordVoiceSpend(input: { sessionId: string; seconds: number }): Promise<void>;
+  /**
+   * Get ready for a sentence that is still being said.
+   *
+   * **Read-only, and the narrowing is the mechanism rather than the comment.**
+   * There is deliberately nothing here that can reach the home: a speculative
+   * turn may never write, because "turn the bedroom light on — no, off" is a
+   * sentence that would otherwise make the lamp flash. What it buys is
+   * everything *around* the answer — the session, the transport, the vendor
+   * client's first import, the state digest — so that when the sentence does
+   * finish, the only thing left to do is the thing that had to wait for it.
+   *
+   * It answers nothing and it never throws: a warm that did not happen costs
+   * exactly the hub before it existed.
+   */
+  warmForSpeech(input: { sessionId: string; memberId: string; partial: string }): Promise<void>;
 }
 
 export interface VoiceDelegationOptions {
@@ -149,6 +169,19 @@ export class VoiceDelegation {
   private askedUntil: number | undefined;
   private seconds: number | undefined;
   private spent = false;
+  /**
+   * Bumped when what has been heard changes **structurally** — a new utterance
+   * opened, one retired, one dropped by the bound, a delegation taken.
+   *
+   * Deliberately **not** on an append: a warm that was right for "turn off the
+   * kitch" is still right for "turn off the kitchen light", because the second
+   * is the first continued. What it is not right for is the sentence having
+   * been replaced, which is exactly what each of the four cases above means.
+   */
+  private revision = 0;
+  /** When the last speculation went out, and how many this utterance has had. */
+  private lastSpeculationAt = 0;
+  private speculationsThisUtterance = 0;
 
   constructor(private readonly options: VoiceDelegationOptions) {}
 
@@ -302,6 +335,10 @@ export class VoiceDelegation {
     const newest = this.heard[this.heard.length - 1];
     if (opens || newest === undefined) {
       this.heard.push({ text: delta, start, end, answered: false });
+      // A different sentence is being said now, so anything warmed for the
+      // last one is about something else.
+      this.revision += 1;
+      this.speculationsThisUtterance = 0;
       // **Opening a new one is what retires the last**, and it has to be here
       // as well as on the voice's own speech: at the moment the voice answers,
       // the sentence it is answering is still the newest — which `retire`
@@ -314,6 +351,7 @@ export class VoiceDelegation {
       if (end !== undefined) newest.end = Math.max(newest.end ?? end, end);
     }
     this.bound();
+    this.speculate();
   }
 
   /**
@@ -341,7 +379,10 @@ export class VoiceDelegation {
       // nothing is retired. The old behaviour, which is the conservative
       // direction: a request with too much context beats one with too little.
       if (saidFrom === undefined || utterance.end === undefined) continue;
-      if (saidFrom >= utterance.end) utterance.answered = true;
+      if (saidFrom >= utterance.end) {
+        utterance.answered = true;
+        this.revision += 1;
+      }
     }
   }
 
@@ -372,7 +413,55 @@ export class VoiceDelegation {
     while (total > CONTEXT_CHARS && this.heard.length > 1) {
       const dropped = this.heard.shift();
       total -= dropped?.text.length ?? 0;
+      this.revision += 1;
     }
+  }
+
+  /**
+   * Get the hub ready while somebody is still talking.
+   *
+   * **The trick the demo videos are built on, with the write taken out of it.**
+   * A spoken exchange is dominated by what happens *after* the sentence ends:
+   * the session has to exist, the transport has to be built, the vendor client
+   * has to be imported for the first time on a 1 GHz core, and the home's
+   * current readings have to be gathered. None of that depends on how the
+   * sentence finishes, and all of it can happen while it is still being said.
+   *
+   * What deliberately does **not** happen here is the answer, and above all
+   * the action: `warmForSpeech` is narrowed so it cannot reach the home at
+   * all. "Turn the bedroom light on — no, off" is an ordinary thing to say,
+   * and a hub that acted on the first half would make the lamp flash. The
+   * write waits for `session.delegation.created`, which is the model saying
+   * the sentence is finished.
+   *
+   * Four bounds, and the per-utterance one is the one that matters: the voice
+   * prompt's own "don't treat a television as a request" hazard, one layer
+   * down — a room with a film on produces transcript deltas indefinitely, and
+   * a rate limit alone would turn a negligible cost into a bill.
+   */
+  private speculate(): void {
+    if (this.spent) return;
+    // Already asked; the answer is on its way and the sentence is finished.
+    if (this.askedUntil !== undefined && this.latestEnd !== undefined) {
+      if (this.latestEnd <= this.askedUntil) return;
+    }
+    if (this.speculationsThisUtterance >= SPECULATIONS_PER_UTTERANCE) return;
+    const now = Date.now();
+    if (now - this.lastSpeculationAt < SPECULATE_EVERY_MS) return;
+    const partial = this.question();
+    if (partial.length < SPECULATION_MIN_CHARS) return;
+
+    this.lastSpeculationAt = now;
+    this.speculationsThisUtterance += 1;
+    // Deliberately not awaited: nothing is waiting on it, and a warm that
+    // takes longer than the sentence has simply missed its own point.
+    void this.options.host
+      .warmForSpeech({
+        sessionId: this.options.sessionId,
+        memberId: this.options.memberId,
+        partial,
+      })
+      .catch(() => undefined);
   }
 
   private async answer(delegationId: string, offset?: number): Promise<void> {
@@ -395,6 +484,9 @@ export class VoiceDelegation {
     // when it carries one, and otherwise the furthest point anybody had been
     // transcribed to.
     this.askedUntil = offset ?? this.latestEnd ?? this.latestStart;
+    // The sentence has been taken. Anything warmed for it is now history.
+    this.revision += 1;
+    this.speculationsThisUtterance = 0;
     const askedUntil = this.askedUntil;
 
     // See `PATIENCE_MS`: a round that outlives the phone's idle clock has to

@@ -34,12 +34,20 @@ vi.mock('../src/ai/openai-agent.js', () => ({ createOpenAiMappingAgent }));
 const { SettingsService } = await import('../src/core/settings.js');
 const { AiDeviceMapper } = await import('../src/ai/mapper.js');
 const { defaultModelFor, effectiveModel, modelLabel } = await import('../src/ai/models.js');
+const { DECISION_MODEL } = await import('../src/ai/decide/decider.js');
 const { openTestDb, resetDb } = await import('./helpers/db.js');
 const { mapExposes } = await import('../src/adapters/zigbee/exposes-mapper.js');
 type Z2mDevice = import('../src/adapters/zigbee/exposes-mapper.js').Z2mDevice;
 
 const handle = await openTestDb();
 const log = pino({ level: 'silent' });
+
+// **Closed at file scope, not inside a suite.** The handle is shared by every
+// describe below, so a suite that closed it on its own way out left the ones
+// after it talking to a database that had gone.
+afterAll(async () => {
+  await handle?.close();
+});
 
 /** An address, a published schema, and one property nothing static can place —
  *  which is what makes this device ask for a run at all. */
@@ -70,10 +78,6 @@ describe.skipIf(!handle)('which model a run is given', () => {
     createMappingAgent.mockClear();
     createOpenAiMappingAgent.mockClear();
     settings = new SettingsService(db, Buffer.alloc(32).toString('base64'));
-  });
-
-  afterAll(async () => {
-    await handle?.close();
   });
 
   it('runs the model the hub offers, not a retired one it still has stored', async () => {
@@ -170,5 +174,84 @@ describe('naming a model that has already run', () => {
     // The column is read back as a plain string, so a provider retired
     // between the row being written and it being read must not throw.
     expect(modelLabel('mistral', 'some-model-9')).toBe('some-model-9');
+  });
+});
+
+/**
+ * A decision model is not a provider, and the hub has to keep behaving as if
+ * it had no key at all everywhere a *generative* one is meant.
+ *
+ * This suite already owns this class of bug — a setting that reports one thing
+ * and runs another — which is why the cases belong here rather than in a file
+ * of their own.
+ */
+describe.skipIf(!handle)('a hub that holds only a decision key', () => {
+  const db = handle?.db!;
+  let settings: InstanceType<typeof SettingsService>;
+
+  beforeEach(async () => {
+    await resetDb(db);
+    settings = new SettingsService(db, Buffer.alloc(32).toString('base64'));
+  });
+
+  it('is still a hub with no AI key', async () => {
+    // The flat `hasKey` means "can an agent run at all". If a decision key
+    // made it true, `lazy.ts` would build a mapper and `openConversation`
+    // would pass its own `ai_not_configured` check and fail at the provider.
+    await settings.setAiKey('typesafe', 'ts-some-key-value');
+    const ai = await settings.getAiSettings();
+    expect(ai.decision.hasKey).toBe(true);
+    expect(ai.hasKey).toBe(false);
+    expect(ai.provider).toBeNull();
+    expect(ai.assistant.provider).toBeNull();
+    expect(ai.automations.provider).toBeNull();
+  });
+
+  it('never makes recognition a choice', async () => {
+    // `mappingChoosable` is "there are two generative keys and somebody has to
+    // pick" — a third slot that cannot read an exposes tree is not a choice.
+    await settings.setAiKey('typesafe', 'ts-some-key-value');
+    await settings.setAiKey('anthropic', 'sk-ant-api-key-0000');
+    const ai = await settings.getAiSettings();
+    expect(ai.mappingChoosable).toBe(false);
+  });
+
+  it('reports the model it will run, which nobody may change', async () => {
+    // Pinned in the build because the thresholds are calibrated against it,
+    // and calibration does not transfer.
+    const ai = await settings.getAiSettings();
+    expect(ai.decision.model).toBe(DECISION_MODEL);
+  });
+
+  it('is on unless the owner has said otherwise, and forgetting the key is a different act', async () => {
+    await settings.setAiKey('typesafe', 'ts-some-key-value');
+    expect((await settings.getAiSettings()).decision.enabled).toBe(true);
+
+    await settings.setDecisionsEnabled(false);
+    const paused = await settings.getAiSettings();
+    // Switched off, with the key still there — the two have very different
+    // costs to undo, which is `ai_enabled`'s own argument.
+    expect(paused.decision.enabled).toBe(false);
+    expect(paused.decision.hasKey).toBe(true);
+  });
+
+  it('forgets one slot without touching the others', async () => {
+    await settings.setAiKey('anthropic', 'sk-ant-api-key-0000');
+    await settings.setAiKey('typesafe', 'ts-some-key-value');
+    await settings.clearAiCredential('typesafe');
+    const ai = await settings.getAiSettings();
+    expect(ai.decision.hasKey).toBe(false);
+    expect(ai.anthropic.hasKey).toBe(true);
+  });
+
+  it('is cleared along with everything else', async () => {
+    await settings.setAiKey('typesafe', 'ts-some-key-value');
+    await settings.setDecisionsEnabled(false);
+    await settings.clearAiSettings();
+    const ai = await settings.getAiSettings();
+    expect(ai.decision.hasKey).toBe(false);
+    // Back to the default rather than a stale `false`, the reason
+    // `clearAiSettings` already unsets `ai_enabled`.
+    expect(ai.decision.enabled).toBe(true);
   });
 });

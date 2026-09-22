@@ -529,7 +529,7 @@ describe('the assistant', () => {
     });
 
     await settings.setAiEnabled(true);
-    await settings.clearAiProvider('anthropic');
+    await settings.clearAiCredential('anthropic');
     await expect(assistant.start({ memberId, message: 'go' })).rejects.toMatchObject({
       code: 'ai_not_configured',
     });
@@ -586,7 +586,7 @@ describe('the assistant', () => {
 
     // End to end: the same home, through the settings route both agents read.
     await settings.setAiKey('openai', 'sk-proj-test');
-    await settings.clearAiProvider('anthropic');
+    await settings.clearAiCredential('anthropic');
     const ai = await settings.getAiSettings();
     expect(ai.assistant.provider).toBe('openai');
     expect(ai.automations.provider).toBe('openai');

@@ -8,6 +8,11 @@ import { decryptSecret, encryptSecret, type EncryptedValue } from './crypto.js';
 // model that will *run* rather than the column — the mapper's one expensive
 // bug was exactly that gap between the two.
 import { effectiveAgentModel, type UsableProviders } from '../ai/models.js';
+// The pinned decision model's id, for the same reason as the line above: the
+// API answers what will *run*. It lives in `decide/decider.ts` — the seam,
+// which imports nothing — rather than in the vendor client, so reporting it
+// never loads the client a hub without a Jev key has no use for.
+import { DECISION_MODEL } from '../ai/decide/decider.js';
 
 /**
  * The providers the hub can hold a credential for.
@@ -21,6 +26,31 @@ import { effectiveAgentModel, type UsableProviders } from '../ai/models.js';
 export type AiProvider = 'anthropic' | 'openai';
 
 export const AI_PROVIDERS = ['anthropic', 'openai'] as const satisfies readonly AiProvider[];
+
+/**
+ * A row in the settings table that holds an AI credential.
+ *
+ * **Wider than `AiProvider`, and that is the point.** Jev is a decision model:
+ * it returns typed answers and cannot write a sentence, so it is never in
+ * `PROVIDER_MODELS` or `AGENT_MODELS` and can never answer a chat — but the
+ * hub holds a key for it, and that key belongs in the same encrypted store as
+ * the other two. Keeping the two vocabularies apart is what stops somebody's
+ * assistant being pointed at a model that cannot talk.
+ *
+ * **Do not widen `AiProvider` to make this shorter.** `PRICING`,
+ * `PROVIDER_MODELS` and `AGENT_MODELS` in `src/ai/models.ts` are all
+ * `Record<AiProvider, …>`, so adding a member there fails the typecheck on
+ * exactly the three tables a decision model must never be in. That break is
+ * the guard, and it is invisible unless somebody says so here.
+ * `docs/jev.md` is canonical.
+ */
+export type AiCredentialSlot = AiProvider | 'typesafe';
+
+export const AI_CREDENTIAL_SLOTS = [
+  'anthropic',
+  'openai',
+  'typesafe',
+] as const satisfies readonly AiCredentialSlot[];
 
 /**
  * Legacy value of the removed `ai_auth_type` setting. Hubs configured before
@@ -37,6 +67,23 @@ const SLOTS: Record<AiProvider, { key: string; model: string }> = {
   anthropic: { key: 'ai_key_encrypted', model: 'ai_model' },
   openai: { key: 'ai_openai_key_encrypted', model: 'ai_openai_model' },
 };
+
+/**
+ * Where the decision model's credential lives.
+ *
+ * **No model row beside it**, unlike `SLOTS`: the model is pinned in the build
+ * (`DECISION_MODEL`), because the thresholds in `src/ai/decide/questions.ts`
+ * are calibrated against it and calibration does not transfer between models.
+ * A settable model would silently invalidate every threshold in that file —
+ * the `src/portraits/CLAUDE.md` pinned-image-model argument, and the same one
+ * as "Effort is `high` on both and is not exposed".
+ */
+const DECISION_KEY_ROW = 'ai_typesafe_key_encrypted';
+
+/** The settings row holding one slot's secret. */
+function keyRowOf(slot: AiCredentialSlot): string {
+  return slot === 'typesafe' ? DECISION_KEY_ROW : SLOTS[slot].key;
+}
 
 export interface AiProviderSettings {
   /** Whether a key is configured — the secret itself is never exposed. */
@@ -73,6 +120,29 @@ export interface AiAgentSettings {
    * case and not a setting anybody chose.
    */
   provider: AiProvider | null;
+}
+
+/**
+ * The decision model, as the API reports it.
+ *
+ * **Deliberately a different shape from `AiProviderSettings`**, which carries
+ * a `model` the owner chooses from a list. Nothing should be able to loop over
+ * "the providers and Jev": they answer different questions, and a shared shape
+ * is the first step towards a picker that offers a model which cannot write.
+ */
+export interface AiDecisionSettings {
+  /** Whether a key is configured — the secret itself is never exposed. */
+  hasKey: boolean;
+  /** Pinned in the build. Reported so an app can say what answered. */
+  model: string;
+  /**
+   * The owner's pause switch, absent meaning on.
+   *
+   * `ai_enabled`'s shape, for `ai_enabled`'s reason: "stop spending my money
+   * on this for now" and "forget my API key" have very different costs to
+   * undo, and deleting the key must not be the only way to ask for the first.
+   */
+  enabled: boolean;
 }
 
 export interface AiSettings {
@@ -124,6 +194,14 @@ export interface AiSettings {
   legacySubscriptionToken: boolean;
   anthropic: AiProviderSettings;
   openai: AiProviderSettings;
+  /**
+   * The fast decision model, which is **not** one of the two above.
+   *
+   * It never answers a chat, recognises a device or draws a portrait — it
+   * routes what somebody said before a generative model is asked. Absent key
+   * means every one of those paths runs exactly as it did before.
+   */
+  decision: AiDecisionSettings;
   /** What the assistant runs on. Its own choice, not the mapper's. */
   assistant: AiAgentSettings;
   /** What writes the home's rules. Its own choice, not the assistant's. */
@@ -243,6 +321,8 @@ export class SettingsService {
     const anthropic = await this.providerSettings('anthropic');
     const openai = await this.providerSettings('openai');
     const chosen = await this.get<AiProvider>('ai_mapping_provider');
+    const decisionKey = await this.get<EncryptedValue>(DECISION_KEY_ROW);
+    const decisionsEnabled = await this.get<boolean>('ai_decisions_enabled');
     /**
      * Which providers an *agent* could authenticate as.
      *
@@ -258,12 +338,23 @@ export class SettingsService {
     return {
       provider: this.resolveMappingProvider(chosen, anthropic, openai),
       model: anthropic.model,
+      // **Generative keys only, and that is load-bearing.** `lazy.ts` and the
+      // API's `ai_not_configured` check both read this to mean "can an agent
+      // run at all". A Jev key making it true would build a mapper and let
+      // `openConversation` past its own check, to fail at the provider.
       hasKey: anthropic.hasKey || openai.hasKey,
       enabled: enabled !== false,
       recordExchanges: (await this.get<boolean>('ai_record_exchanges')) === true,
       legacySubscriptionToken: anthropic.hasKey && authType === LEGACY_OAUTH_AUTH_TYPE,
       anthropic,
       openai,
+      decision: {
+        hasKey: decisionKey !== null,
+        model: DECISION_MODEL,
+        enabled: decisionsEnabled !== false,
+      },
+      // Both *generative* keys: which model reads a device's exposes tree is
+      // a choice between those two and Jev is not one of them.
       mappingChoosable: anthropic.hasKey && openai.hasKey,
       assistant: agentSettings(await this.get<string>('ai_assistant_model'), usable),
       automations: agentSettings(await this.get<string>('ai_automations_model'), usable),
@@ -294,6 +385,18 @@ export class SettingsService {
     if (anthropic.hasKey) return 'anthropic';
     if (openai.hasKey) return 'openai';
     return null;
+  }
+
+  /**
+   * The decision model's own pause switch.
+   *
+   * Separate from `ai_enabled`, which governs device *adaptation*: a home may
+   * well want the fast routing while it has stopped paying for recognition,
+   * and one switch for two budgets is a switch somebody turns off to fix one
+   * thing and finds out about the other.
+   */
+  async setDecisionsEnabled(enabled: boolean): Promise<void> {
+    await this.set('ai_decisions_enabled', enabled);
   }
 
   async setAiEnabled(enabled: boolean): Promise<void> {
@@ -351,8 +454,8 @@ export class SettingsService {
    * Store one provider's key, leaving the other provider — and the model, and
    * the owner's switch — exactly as they were.
    */
-  async setAiKey(provider: AiProvider, apiKey: string): Promise<void> {
-    if (provider === 'anthropic') {
+  async setAiKey(slot: AiCredentialSlot, apiKey: string): Promise<void> {
+    if (slot === 'anthropic') {
       // Kept for the rolled-back build, which reads this row to decide whether
       // it has a provider at all. An OpenAI-only hub leaves it absent, so that
       // build correctly runs no agent rather than trying the wrong key.
@@ -361,8 +464,10 @@ export class SettingsService {
       // API key, so the hub must stop reporting the subscription problem.
       await this.unset('ai_auth_type');
     }
-    await this.set(SLOTS[provider].key, encryptSecret(apiKey, this.aesKey));
-    // A fresh credential wipes stale health state.
+    await this.set(keyRowOf(slot), encryptSecret(apiKey, this.aesKey));
+    // A fresh credential wipes stale health state. That includes the decision
+    // model's breaker, which is keyed on the secret and retires itself — see
+    // `src/ai/decide/lazy.ts`; nothing to clear here.
     await this.unset('ai_status');
   }
 
@@ -371,30 +476,37 @@ export class SettingsService {
     await this.setAiKey('anthropic', input.apiKey);
   }
 
-  /** Forget one provider's credential and model; the other one is untouched. */
-  async clearAiProvider(provider: AiProvider): Promise<void> {
-    if (provider === 'anthropic') {
+  /** Forget one slot's credential and model; the other slots are untouched. */
+  async clearAiCredential(slot: AiCredentialSlot): Promise<void> {
+    if (slot === 'typesafe') {
+      // No model row and no legacy marker: the decision model has neither.
+      await this.unset(DECISION_KEY_ROW);
+      return;
+    }
+    if (slot === 'anthropic') {
       await this.unset('ai_provider');
       await this.unset('ai_auth_type');
     }
-    await this.unset(SLOTS[provider].key);
-    await this.unset(SLOTS[provider].model);
+    await this.unset(SLOTS[slot].key);
+    await this.unset(SLOTS[slot].model);
     await this.unset('ai_status');
   }
 
   async clearAiSettings(): Promise<void> {
-    await this.clearAiProvider('anthropic');
-    await this.clearAiProvider('openai');
+    await this.clearAiCredential('anthropic');
+    await this.clearAiCredential('openai');
+    await this.clearAiCredential('typesafe');
     await this.unset('ai_mapping_provider');
+    await this.unset('ai_decisions_enabled');
     // Back to the default. Leaving a stale `false` behind would mean a hub
     // whose owner cleared the credential and saved a new one got no AI
     // adaptation and no indication why.
     await this.unset('ai_enabled');
   }
 
-  /** Decrypt one provider's key — in-process use only. */
-  async aiKey(provider: AiProvider = 'anthropic'): Promise<string | null> {
-    const encrypted = await this.get<EncryptedValue>(SLOTS[provider].key);
+  /** Decrypt one slot's key — in-process use only. */
+  async aiKey(slot: AiCredentialSlot = 'anthropic'): Promise<string | null> {
+    const encrypted = await this.get<EncryptedValue>(keyRowOf(slot));
     if (!encrypted) return null;
     return decryptSecret(encrypted, this.aesKey);
   }

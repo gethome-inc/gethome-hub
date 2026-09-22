@@ -1,0 +1,368 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { Logger } from '../src/logging.js';
+import { DECISION_MODEL } from '../src/ai/decide/decider.js';
+import {
+  MAX_STATE_CHARS,
+  estimateDecisionCostUsd,
+  runDecision,
+} from '../src/ai/decide/typesafe.js';
+import { lazyDecider } from '../src/ai/decide/lazy.js';
+import type { SettingsService } from '../src/core/settings.js';
+
+/**
+ * The wire to a decision model, which is the one thing here nobody can check
+ * by running the hub.
+ *
+ * `fetch` is stubbed with **real `Response` objects** rather than parsed
+ * bodies, for the reason `test/ai-openai-chat.test.ts` learned the hard way: a
+ * mock laxer than the thing it stands in for tests the mock. Every case below
+ * is either something the vendor can send that the hub has to survive, or
+ * something the hub must never send.
+ */
+
+const log = {
+  debug: () => undefined,
+  info: () => undefined,
+  warn: () => undefined,
+  error: () => undefined,
+} as unknown as Logger;
+
+interface Call {
+  url: string;
+  headers: Record<string, string>;
+  body: Record<string, unknown>;
+}
+
+/** Stub `fetch`, recording exactly what was sent. */
+function stub(responder: (call: Call) => Response): { calls: Call[] } {
+  const calls: Call[] = [];
+  vi.stubGlobal(
+    'fetch',
+    (async (input: unknown, init?: RequestInit) => {
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      const call: Call = {
+        url: String(input),
+        headers,
+        body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+      };
+      calls.push(call);
+      return responder(call);
+    }) as unknown as typeof fetch,
+  );
+  return { calls };
+}
+
+const ok = (body: unknown): Response =>
+  new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'content-type': 'application/json', 'x-typesafe-request-id': 'req-42' },
+  });
+
+const questions = {
+  urgent: { type: 'noul', instructions: 'It needs doing now.' },
+  where: {
+    type: 'choice',
+    instructions: 'Which room?',
+    criteria: { kitchen: 'The kitchen.', hall: 'The hall.' },
+  },
+  severity: {
+    type: 'score',
+    instructions: 'How bad is it?',
+    criteria: ['Fine.', 'Awkward.', 'Broken.'],
+  },
+} as const;
+
+const answered = {
+  model: DECISION_MODEL,
+  answers: {
+    urgent: { type: 'noul', noul: 0.91 },
+    where: {
+      type: 'choice',
+      choice: 'kitchen',
+      probabilities: { kitchen: 0.97, hall: 0.03 },
+      confidence: 0.96,
+    },
+    severity: {
+      type: 'score',
+      score: 1.4,
+      probabilities: { '0': 0.1, '1': 0.5, '2': 0.4 },
+      confidence: 0.6,
+    },
+  },
+  usage: { input_tokens: 1000, output_tokens: 21 },
+};
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe('the request', () => {
+  it('sends every question in one request, with the pinned model', async () => {
+    const { calls } = stub(() => ok(answered));
+    await runDecision({ secret: 'ts-key', state: 'the kitchen light', questions, timeoutMs: 500, log });
+
+    expect(calls).toHaveLength(1);
+    const [call] = calls;
+    expect(call?.url).toBe('https://api.typesafe.ai/v1/systemone');
+    expect(call?.headers['authorization']).toBe('Bearer ts-key');
+    // An alias is the vendor's to re-point, and re-pointing it would move the
+    // model every threshold was calibrated against.
+    expect(call?.body['model']).toBe(DECISION_MODEL);
+    expect(Object.keys(call?.body['questions'] as object)).toEqual([
+      'urgent',
+      'where',
+      'severity',
+    ]);
+  });
+
+  it('sends a noul without criteria, and the other two with theirs', async () => {
+    const { calls } = stub(() => ok(answered));
+    await runDecision({ secret: 'k', state: 's', questions, timeoutMs: 500, log });
+    const sent = calls[0]?.body['questions'] as Record<string, Record<string, unknown>>;
+    expect(sent['urgent']).toEqual({ type: 'noul', instructions: 'It needs doing now.' });
+    expect(sent['where']?.['criteria']).toEqual({ kitchen: 'The kitchen.', hall: 'The hall.' });
+    expect(sent['severity']?.['criteria']).toEqual(['Fine.', 'Awkward.', 'Broken.']);
+  });
+
+  it('refuses an oversized state without making a request at all', async () => {
+    const { calls } = stub(() => ok(answered));
+    // The guard has to run *before* the fetch, which is the only thing an
+    // empty call list can prove — `test/ai-page-fetch.test.ts`'s shape.
+    await expect(
+      runDecision({
+        secret: 'k',
+        state: 'x'.repeat(MAX_STATE_CHARS + 1),
+        questions,
+        timeoutMs: 500,
+        log,
+      }),
+    ).rejects.toThrow(/over the/);
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe('reading the answers', () => {
+  it('returns each answer in its own shape, and the request id', async () => {
+    stub(() => ok(answered));
+    const result = await runDecision({ secret: 'k', state: 's', questions, timeoutMs: 500, log });
+    expect(result.answers.urgent).toEqual({ type: 'noul', noul: 0.91 });
+    expect(result.answers.where?.choice).toBe('kitchen');
+    expect(result.answers.where?.confidence).toBe(0.96);
+    expect(result.answers.severity?.score).toBe(1.4);
+    // Rebuilt from the criteria we sent: the index is the level.
+    expect(result.answers.severity?.legend).toEqual({ '0': 'Fine.', '1': 'Awkward.', '2': 'Broken.' });
+    expect(result.requestId).toBe('req-42');
+  });
+
+  it('a noul carries no confidence, so nothing can read one off it', async () => {
+    stub(() => ok(answered));
+    const result = await runDecision({ secret: 'k', state: 's', questions, timeoutMs: 500, log });
+    expect(result.answers.urgent).not.toHaveProperty('confidence');
+  });
+
+  it('drops a choice outside the criteria rather than coercing it', async () => {
+    // The type says the answer is one of the keys we offered. This is what
+    // makes that true at runtime — a name we never offered is not an answer,
+    // and a caller that switches on it has no arm for it.
+    stub(() =>
+      ok({
+        ...answered,
+        answers: {
+          ...answered.answers,
+          where: {
+            type: 'choice',
+            choice: 'garage',
+            probabilities: { garage: 1 },
+            confidence: 0.99,
+          },
+        },
+      }),
+    );
+    const result = await runDecision({ secret: 'k', state: 's', questions, timeoutMs: 500, log });
+    expect(result.answers.where).toBeUndefined();
+    // The others in the same response still arrive.
+    expect(result.answers.urgent?.noul).toBe(0.91);
+  });
+
+  it('drops a noul outside 0..1 and a score off the end of the rubric', async () => {
+    stub(() =>
+      ok({
+        ...answered,
+        answers: {
+          urgent: { type: 'noul', noul: 1.4 },
+          severity: {
+            type: 'score',
+            score: 9,
+            probabilities: { '0': 1 },
+            confidence: 0.9,
+          },
+        },
+      }),
+    );
+    const result = await runDecision({ secret: 'k', state: 's', questions, timeoutMs: 500, log });
+    expect(result.answers.urgent).toBeUndefined();
+    expect(result.answers.severity).toBeUndefined();
+  });
+
+  it('survives a response that answered only some of what was asked', async () => {
+    stub(() => ok({ model: DECISION_MODEL, answers: { urgent: { type: 'noul', noul: 0.2 } }, usage: {} }));
+    const result = await runDecision({ secret: 'k', state: 's', questions, timeoutMs: 500, log });
+    expect(result.answers.urgent?.noul).toBe(0.2);
+    expect(result.answers.where).toBeUndefined();
+  });
+});
+
+describe('what a decision costs', () => {
+  it('counts input tokens only — output is reported and not billed', () => {
+    expect(estimateDecisionCostUsd({ inputTokens: 1_000_000 })).toBeCloseTo(0.042, 6);
+    expect(estimateDecisionCostUsd({ inputTokens: 0 })).toBe(0);
+  });
+
+  it('prices a real response off its own usage', async () => {
+    stub(() => ok(answered));
+    const result = await runDecision({ secret: 'k', state: 's', questions, timeoutMs: 500, log });
+    // 1000 input tokens at $0.042/M. The 21 output tokens cost nothing.
+    expect(result.costUsd).toBeCloseTo(0.000042, 9);
+  });
+});
+
+describe('failures', () => {
+  const statuses: [number, string][] = [
+    [401, 'auth_failed'],
+    [429, 'rate_limited'],
+    [529, 'overloaded'],
+    [503, 'overloaded'],
+  ];
+  for (const [status, kind] of statuses) {
+    it(`classifies ${status} as ${kind}`, async () => {
+      stub(() => new Response('{"error":"no"}', { status }));
+      await expect(
+        runDecision({ secret: 'k', state: 's', questions, timeoutMs: 500, log }),
+      ).rejects.toMatchObject({ kind });
+    });
+  }
+
+  it('a 422 is our own malformed question, and is not an availability failure', async () => {
+    // It must never arm anything: a gate over a bug the hub has just shipped
+    // would hide that bug behind a retry timer.
+    stub(() => new Response('{"error":"bad questions"}', { status: 422 }));
+    await expect(
+      runDecision({ secret: 'k', state: 's', questions, timeoutMs: 500, log }),
+    ).rejects.not.toHaveProperty('kind');
+  });
+
+  it('throws on a body that is not JSON', async () => {
+    stub(() => new Response('<html>oops</html>', { status: 200 }));
+    await expect(
+      runDecision({ secret: 'k', state: 's', questions, timeoutMs: 500, log }),
+    ).rejects.toThrow(/not JSON/);
+  });
+});
+
+describe('the wrapper, which is what makes an outage invisible', () => {
+  const settingsWith = (input: {
+    hasKey?: boolean;
+    enabled?: boolean;
+    secret?: string | null;
+  }): SettingsService =>
+    ({
+      getAiSettings: async () => ({
+        decision: {
+          hasKey: input.hasKey ?? true,
+          enabled: input.enabled ?? true,
+          model: DECISION_MODEL,
+        },
+      }),
+      aiKey: async () => (input.secret === undefined ? 'ts-key' : input.secret),
+    }) as unknown as SettingsService;
+
+  const one = { urgent: { type: 'noul', instructions: 'Now?' } } as const;
+
+  it('answers null with no key, and makes no request', async () => {
+    const { calls } = stub(() => ok(answered));
+    const decider = lazyDecider({ settings: settingsWith({ hasKey: false }), log });
+    expect(await decider.decide({ state: 's', questions: one, timeoutMs: 500 })).toBeNull();
+    expect(calls).toHaveLength(0);
+  });
+
+  it('answers null while the owner has it switched off', async () => {
+    const { calls } = stub(() => ok(answered));
+    const decider = lazyDecider({ settings: settingsWith({ enabled: false }), log });
+    expect(await decider.decide({ state: 's', questions: one, timeoutMs: 500 })).toBeNull();
+    expect(calls).toHaveLength(0);
+  });
+
+  it('turns a refusal into null rather than throwing', async () => {
+    // Every caller falls back to the path it had before, so a throw here would
+    // put a try/catch at every call site instead of making it a property.
+    stub(() => new Response('nope', { status: 500 }));
+    const decider = lazyDecider({ settings: settingsWith({}), log });
+    expect(await decider.decide({ state: 's', questions: one, timeoutMs: 500 })).toBeNull();
+  });
+
+  it('opens a breaker after repeated failures, and then costs no request at all', async () => {
+    // "Invisible" has to mean no added *latency*, not merely no error: a
+    // revoked key must stop costing every turn a full timeout.
+    const { calls } = stub(() => new Response('nope', { status: 401 }));
+    const decider = lazyDecider({ settings: settingsWith({}), log });
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await decider.decide({ state: 's', questions: one, timeoutMs: 500 });
+    }
+    expect(calls).toHaveLength(3);
+    await decider.decide({ state: 's', questions: one, timeoutMs: 500 });
+    expect(calls).toHaveLength(3);
+  });
+
+  it('retires the breaker when the key changes', async () => {
+    // A judgement about an account must not outlive the account — otherwise
+    // the gate silences the very fix somebody was told to make.
+    let secret = 'old-key';
+    const settings = {
+      getAiSettings: async () => ({
+        decision: { hasKey: true, enabled: true, model: DECISION_MODEL },
+      }),
+      aiKey: async () => secret,
+    } as unknown as SettingsService;
+    const { calls } = stub((call) =>
+      call.headers['authorization'] === 'Bearer new-key'
+        ? ok(answered)
+        : new Response('nope', { status: 401 }),
+    );
+    const decider = lazyDecider({ settings, log });
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await decider.decide({ state: 's', questions: one, timeoutMs: 500 });
+    }
+    await decider.decide({ state: 's', questions: one, timeoutMs: 500 });
+    expect(calls).toHaveLength(3);
+
+    secret = 'new-key';
+    const result = await decider.decide({ state: 's', questions: one, timeoutMs: 500 });
+    expect(calls).toHaveLength(4);
+    expect(result?.answers.urgent?.noul).toBe(0.91);
+  });
+
+  it('drops a second concurrent call rather than queueing it', async () => {
+    // A queued decision arrives after the thing it was deciding, which is the
+    // one behaviour that could make this slower than not having it at all.
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { calls } = stub(() => ok(answered));
+    vi.stubGlobal('fetch', (async () => {
+      calls.push({ url: '', headers: {}, body: {} });
+      await held;
+      return ok(answered);
+    }) as unknown as typeof fetch);
+
+    const decider = lazyDecider({ settings: settingsWith({}), log });
+    const first = decider.decide({ state: 's', questions: one, timeoutMs: 500 });
+    // Let the first get as far as the fetch before the second asks.
+    await new Promise((resolve) => setImmediate(resolve));
+    const second = await decider.decide({ state: 's', questions: one, timeoutMs: 500 });
+    expect(second).toBeNull();
+    release?.();
+    expect((await first)?.answers.urgent?.noul).toBe(0.91);
+    expect(calls).toHaveLength(1);
+  });
+});

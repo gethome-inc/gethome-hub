@@ -382,6 +382,22 @@ export interface ChatSession<Turn> {
    * `record` writes the delta since the last one.
    */
   recordedUsd: number;
+  /**
+   * What this conversation has spent on *decisions* that no row carries yet.
+   *
+   * **Separate from `recordedUsd`, which is the transport's watermark.** That
+   * one is a running total read back off the conversation; this one is an
+   * amount waiting to be banked and then cleared. Adding them into one field
+   * would break the delta arithmetic the whole ledger rests on.
+   *
+   * There is deliberately **no `ai_runs` row per decision**. `RETAIN_RUNS` is
+   * 250 and pruned on write, so a row per decision would evict a fortnight of
+   * chat pricing within minutes of somebody talking to their house — the
+   * mistake `STATE_FLUSH_MS` and the activity log each exist to avoid. It
+   * folds into the turn it preceded, and a decision that led to no turn
+   * settles on whatever row the session writes last.
+   */
+  decisionUsd: number;
   /** How many artefacts this conversation has delivered — rules, handoffs. */
   produced: number;
   /**
@@ -574,6 +590,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       startedAt: Date.now(),
       inFlight: Promise.resolve(),
       recordedUsd: 0,
+      decisionUsd: 0,
       steps: [],
       produced: 0,
       ...(topic !== undefined ? { topic } : {}),
@@ -637,6 +654,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       startedAt: Date.now(),
       inFlight: Promise.resolve(),
       recordedUsd: 0,
+      decisionUsd: 0,
       steps: [],
       produced: 0,
       priming: recapOf(rows),
@@ -923,12 +941,74 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     if (session.steps.length > TURN_STEP_LIMIT) session.steps.shift();
   }
 
+  /**
+   * Put a line on the round's working from outside the model's own loop —
+   * kept *and* sent, exactly as `onStep` does it.
+   *
+   * What a subclass does before the provider is asked is still part of the
+   * round: it fills the same wait and belongs in the same trail read back a
+   * week later. Two copies of this would be two places for the bound and the
+   * clipping to differ.
+   */
+  protected note(session: ChatSession<Turn>, step: ChatStepWire): void {
+    this.keep(session, {
+      text: clip(step.text, STEP_TEXT_LIMIT),
+      kind: step.kind,
+      ...(step.detail !== undefined ? { detail: clip(step.detail, STEP_DETAIL_LIMIT) } : {}),
+    });
+    this.emit({
+      sessionId: session.id,
+      phase: 'step',
+      at: new Date().toISOString(),
+      text: step.text,
+      kind: step.kind,
+      ...(step.detail !== undefined ? { detail: step.detail } : {}),
+    });
+  }
+
+  /**
+   * Anything settled before the model is asked — how hard this round should
+   * work, or a turn that does not need the model at all.
+   *
+   * A no-op by default, because deciding ahead of a round is one agent's
+   * business rather than every agent's: the runtime owns what *every* agent
+   * shares, and this is the seam for what one of them does first.
+   *
+   * **Here rather than in `say`**, for `session.origin`'s own reason: a turn
+   * is resolved when it *begins*, not when it was queued, which is the rule
+   * that makes `awaitingAnswer()` correct one method up. And it takes `how`
+   * because that is the direct signal for the one case nothing may skip —
+   * `answer` closes a `tool_use` the model is waiting on, and a request
+   * carrying an unanswered call is refused outright.
+   *
+   * Returning a `turn` finishes the round without the provider, through the
+   * same `recordTurn → bank → settle` the ordinary path takes, so an agent
+   * cannot get those three subtly different by taking a short cut.
+   */
+  protected async beforeRound(
+    _session: ChatSession<Turn>,
+    _text: string,
+    _how: 'send' | 'answer',
+    _origin: TurnOrigin | undefined,
+  ): Promise<{ origin?: TurnOrigin; turn?: Turn } | undefined> {
+    return undefined;
+  }
+
   private async runExchange(
     session: ChatSession<Turn>,
     text: string,
     how: 'send' | 'answer',
     origin?: TurnOrigin,
   ): Promise<void> {
+    // A round's working belongs to that round, and what `beforeRound` does is
+    // part of this one — so the clear happens before it rather than after,
+    // where it would wipe the very steps the hook had just put on screen.
+    session.steps = [];
+    // Whatever was decided ahead of the round. It never throws — the seam
+    // answers with nothing rather than failing — so there is no catch here,
+    // and every arm below runs exactly as it did before when it does.
+    const ahead = await this.beforeRound(session, text, how, origin);
+    if (ahead?.origin !== undefined) origin = ahead.origin;
     // **What this turn was, for the row it is about to write.** Kept on the
     // session because `record` runs after the turn and takes only the
     // session; turns are chained per conversation, so the value cannot belong
@@ -939,10 +1019,15 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       // honest default: `askAloud` is the only caller that says otherwise.
       via: origin?.via ?? 'typed',
     };
-    // A round's working belongs to that round. Cleared here rather than after
-    // the rows are written, so a turn that throws between the two cannot hand
-    // its steps to the next answer.
-    session.steps = [];
+    if (ahead?.turn !== undefined) {
+      // Answered without the provider. Through the ordinary ending, so the
+      // row, the spend and the `turn` frame are the same ones every other
+      // round writes — the whole point of the hook returning a turn rather
+      // than the caller short-circuiting around the runtime.
+      session.lastAt = Date.now();
+      await this.finishTurn(session, ahead.turn);
+      return;
+    }
     let turn: Turn;
     /**
      * The model's reasoning since the last step, waiting for something to
@@ -1063,6 +1148,20 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     }
 
     session.lastAt = Date.now();
+    await this.finishTurn(session, turn);
+  }
+
+  /**
+   * The three things that end every successful round, in the one order they
+   * may happen in.
+   *
+   * Factored out so a turn the provider never produced — `beforeRound`
+   * answering on its own — ends **identically** to one it did: the same rows,
+   * the same ledger delta, the same `turn` frame. A short cut that wrote its
+   * own ending is how those three come to differ, which is the whole reason
+   * the runtime owns them rather than each agent.
+   */
+  private async finishTurn(session: ChatSession<Turn>, turn: Turn): Promise<void> {
     await this.recordTurn(session, turn);
     await this.bank(session, true);
     this.settle(session, turn.kind);
@@ -1250,11 +1349,17 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
   /** One `ai_runs` row per delivery, so the home's AI spend stays one list
    *  rather than several screens answering one question. */
   protected async record(session: ChatSession<Turn>, ok: boolean): Promise<void> {
-    const spent = session.conversation.costUsd() - session.recordedUsd;
+    // The transport's delta, plus whatever decisions this turn made. Folding
+    // a non-token charge into a run's cost is what `estimateCostUsd` already
+    // does for a web search — one number per row, answering "what did this
+    // cost", rather than a second ledger to read beside it.
+    const spent = session.conversation.costUsd() - session.recordedUsd + session.decisionUsd;
     // Nothing new to say. A conversation is recorded when it delivers and
     // again when it ends, and the second of those is usually zero.
     if (spent <= 0 && session.recordedUsd > 0) return;
     session.recordedUsd = session.conversation.costUsd();
+    // Banked with this row. Left behind, it would be counted again by the next.
+    session.decisionUsd = 0;
 
     const handle = this.base.runs.begin({
       kind: this.runKind,
