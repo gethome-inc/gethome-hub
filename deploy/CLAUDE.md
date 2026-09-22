@@ -508,6 +508,27 @@ in `deploy/install.sh` must stay accurate.
   code while it was written: bash 3.2 keeps the quotes of a quoted replacement
   in `${var//pattern/"$x"}`, so escaping the name in the shell produced
   `My"\:"Net` on macOS and `My\:Net` on the Pi.)
+- **A Thread accessory is reached through a route the border router
+  announces, and Linux ignores it by default.** An Apple TV, HomePod or Google
+  hub tells the LAN how to reach its Thread network with a Route Information
+  Option in its router advertisements, and `accept_ra_rt_info_max_plen` is 0
+  out of the box — matter.js's and OpenThread's troubleshooting pages both lead
+  with setting it to 64 — so a Thread accessory shared in from Apple Home paired
+  through the phone and was never heard from again. `matter_ipv6()` writes
+  `/etc/sysctl.d/61-gethome-matter.conf` on every hub: `default` for interfaces
+  that appear later, and each physical interface by name, because systemd
+  re-applies a per-interface key when the interface appears and `default` is
+  too late for one that already existed. **Routes and nothing else** — no
+  address, no listener, no forwarding — which is why it does not touch the
+  IPv4-only rule for the API. It is the kernel's job only because Raspberry Pi
+  OS's Imager writes NetworkManager profiles with `ipv6.method=ignore`; a
+  profile on `auto` handles advertisements in NetworkManager itself (1.42+).
+  It warns where Matter cannot work at all (no IPv6, a kernel without
+  route-information support, IPv6 disabled on the LAN interface) and where it
+  quietly stops working (IPv6 forwarding on, which makes the kernel ignore
+  advertisements and stop probing a border router that has gone). Unverifiable
+  end to end on the hub it was written on, which has no border router — measured
+  there: 0 router advertisements in three days.
 - **The detector exits 1 for an ordinary state, so the unit says
   `SuccessExitStatus=1`.** "Zigbee is not the radio here" — no coordinator, or
   one plugged into a board the owner has set to Matter — is correct and

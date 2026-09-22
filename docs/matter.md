@@ -159,9 +159,55 @@ to shorten, are in
   (5353); hubd runs directly on the host network for this
   reason. IPv6 link-local must be available (it is on standard Raspberry Pi
   OS / Debian; some containers/VMs disable IPv6 — the adapter will fail to
-  start and the hub continues without Matter).
+  start and the hub continues without Matter). The installer warns when IPv6
+  is off on the machine or on the LAN interface.
 - Fabric storage lives in `<data>/matter/`; keep the `/data` volume to keep
   your fabric.
+
+## The network Matter needs, and what the hub does about each part
+
+Matter is IPv6 on the local network and nothing more: no IPv6 from the
+internet provider, no DHCPv6, no cloud. What it needs of the network, and what
+this hub does about each part, so it works across boards and routers rather
+than on the one it was written on:
+
+- **Two bands, and the accessory's is the one that counts.** Almost every
+  Wi-Fi Matter accessory is 2.4 GHz only. The hub's own band does not matter to
+  operation — it reaches a 2.4 GHz accessory through the router like any other
+  client — and the hub does not pick one: NetworkManager does, and pinning 5 GHz
+  would strand a hub at the edge of its range. What the band *does* decide is
+  the network an accessory is handed: a hub on a 5 GHz-only name withholds it
+  (above), and an accessory that still cannot join — wrong password, a router
+  out of reach — fails as `cannot-join-wifi`, which an app answers with the
+  same Wi-Fi sheet as `needs-wifi`. matter.js scans *with the accessory* before
+  it hands the network over, and says so in `detail` when the accessory could
+  not see it.
+- **The country the accessory is in.** `SetRegulatoryConfig` carries one, and
+  an accessory told nothing is told `XX`, which lets it keep to the channels
+  every country allows — so a router on channel 12 or 13, ordinary in Europe
+  and much of Asia, is a network it cannot see. The hub passes the country its
+  own Wi-Fi is set for (`/sys/module/cfg80211/parameters/ieee80211_regdom`,
+  which Raspberry Pi Imager writes from the country somebody picked);
+  matter.js retries with `XX` when an accessory refuses a real one.
+- **Thread accessories are reached through a border router** (an Apple TV or
+  HomePod, a Google Nest hub, …), which announces the route to its Thread
+  network as a Route Information Option in its router advertisements. Linux
+  ignores those by default; the installer sets `accept_ra_rt_info_max_plen=64`
+  (`/etc/sysctl.d/61-gethome-matter.conf`), which adds routes and nothing else
+  — no address, no listener — so the API's IPv4-only rule is untouched. It
+  warns when IPv6 forwarding is on, which undoes this. A NetworkManager profile
+  with `ipv6.method=auto` learns these routes itself (1.42 or later, which
+  Bookworm and Trixie both ship).
+- **Multicast has to cross the router**, because discovery (mDNS) and IPv6
+  neighbour discovery are multicast. Three router features break it, and none
+  can be fixed from the hub: a guest network or client isolation (nothing can
+  reach anything), multicast filtering between the two bands, and the stuck
+  2.4 GHz group queue measured on a TP-Link Archer C6 (openwrt/mt76#598), which
+  delivers group traffic tens of seconds late. The hub narrows the last one: its
+  keep-alive re-checks every stale IPv4 **and IPv6** neighbour by unicast, so an
+  accessory the hub knows never has to be found by multicast again, and one that
+  comes back from being unplugged is asked for at its old link address within
+  two minutes (`deploy/install.sh`, `keep_wifi_reachable`).
 
 ## How devices map
 

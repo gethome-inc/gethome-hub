@@ -600,6 +600,7 @@ beside it:
 | `not-found` | nothing answered anywhere the hub could look. Nearly always: the accessory was not in pairing mode |
 | `needs-bluetooth` | the code says Bluetooth and this hub has none. **Refused before searching** |
 | `needs-wifi` | the accessory has no network and the hub has no password to give it. Refused before searching; ask for one and retry |
+| `cannot-join-wifi` | it was given a network and could not join it — a network only 5 GHz reaches, a wrong password, a router out of its reach. **Offer the same Wi-Fi sheet as for `needs-wifi`** and retry with the network somebody picks; `detail` carries matter.js's words, including its hint when the accessory's own scan did not find the network |
 | `bad-code` | not a Matter setup code, or its checksum is wrong. Refused before searching |
 | `wrong-code` | it answered and would not accept that passcode |
 | `already-paired` | still commissioned elsewhere, or out of fabric slots |

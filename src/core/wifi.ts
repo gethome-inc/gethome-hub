@@ -65,3 +65,33 @@ export function readWifiCredentials(file: string = WIFI_ENV_FILE): WifiCredentia
   if (ssid.length === 0 || passphrase.length === 0) return undefined;
   return { ssid, passphrase };
 }
+
+/**
+ * Where the kernel says which country's Wi-Fi rules this board follows:
+ * `cfg80211.ieee80211_regdom=GE` on the kernel command line, which Raspberry Pi
+ * Imager writes from the country somebody picked. Readable by any user, so the
+ * hub reads it directly, with no root helper in between.
+ */
+export const WIFI_COUNTRY_FILE = '/sys/module/cfg80211/parameters/ieee80211_regdom';
+
+/**
+ * The country this hub's Wi-Fi is set for, or nothing.
+ *
+ * **Handed to a Matter accessory as it is commissioned.** `SetRegulatoryConfig`
+ * carries a country code, and an accessory told nothing is told `XX`
+ * (unknown), which lets it keep to the channels every country allows. In Europe
+ * and much of Asia a router on channel 12 or 13 is ordinary, and an accessory
+ * keeping to 1–11 cannot see it: the pairing fails at the network step, and
+ * nothing says why. `00` is the world domain and says nothing either. An
+ * accessory that cannot take a country is handled by matter.js itself, which
+ * retries with `XX`.
+ */
+export function readWifiCountry(file: string = WIFI_COUNTRY_FILE): string | undefined {
+  let raw: string;
+  try {
+    raw = readFileSync(file, 'utf8').trim().toUpperCase();
+  } catch {
+    return undefined;
+  }
+  return /^[A-Z]{2}$/.test(raw) ? raw : undefined;
+}
