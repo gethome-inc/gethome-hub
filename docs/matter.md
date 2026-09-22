@@ -213,11 +213,38 @@ than on the one it was written on:
   can be fixed from the hub: a guest network or client isolation (nothing can
   reach anything), multicast filtering between the two bands, and the stuck
   2.4 GHz group queue measured on a TP-Link Archer C6 (openwrt/mt76#598), which
-  delivers group traffic tens of seconds late. The hub narrows the last one: its
-  keep-alive re-checks every stale IPv4 **and IPv6** neighbour by unicast, so an
-  accessory the hub knows never has to be found by multicast again, and one that
-  comes back from being unplugged is asked for at its old link address within
-  two minutes (`deploy/install.sh`, `keep_wifi_reachable`).
+  delivers group traffic tens of seconds late or not at all — measured again
+  for Matter on that hub, its multicast reached its plug 7 times in 30, its
+  mDNS queries 2 in 30, and a Mac on 5 GHz fared no better at 3 in 30, while
+  the same questions by unicast went 30 in 30 every time. The hub narrows the
+  last one, in two halves (`deploy/install.sh`, `keep_wifi_reachable`):
+  - its keep-alive re-checks every stale IPv4 **and IPv6** neighbour by
+    unicast, so an accessory the hub is talking to never has to be found by
+    multicast again;
+  - and it asks after **every accessory the hub owns** by unicast every two
+    minutes whenever the kernel has no link address for it. That is the half a
+    day's memory did not cover: a plug switched off for days came back at 09:58
+    by its own uptime, and the hub — retrying at the right address every two
+    minutes, each retry dying in neighbour discovery — reached it at 10:07,
+    when a multicast finally got through. A reboot is the same case for every
+    accessory at once. The hub writes each accessory's link-local address and
+    MAC — as the accessory reports them itself, in General Diagnostics
+    `NetworkInterfaces`, which matter.js keeps for as long as it is
+    commissioned — to `<data>/matter-neighbours`
+    (`src/adapters/matter/neighbours.ts`), and the keep-alive, which runs as
+    root, takes a line only if it is exactly a link-local address and a MAC.
+    Link-local only: an IPv4 lease can belong to another device by the time an
+    accessory is switched back on. The keep-alive asks even while the kernel
+    is resolving the address itself, because one the hub is busy trying to
+    reach is resolving nearly all the time. So one that comes back after any
+    length of time is reached in a few minutes — up to two for the
+    keep-alive's round and two for matter.js's retry — rather than whenever
+    the router lets a multicast through.
+
+  **A wired hub has neither half**, because the keep-alive is installed only
+  where the hub itself is on Wi-Fi. Its multicast to a Wi-Fi accessory goes
+  through the same group queue, so the second half would help there too; that
+  is unmeasured and not built.
 
 ## How devices map
 

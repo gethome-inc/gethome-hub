@@ -661,7 +661,7 @@ The full contract — the installer's marker vocabulary, the radio budget,
 Zigbee detection, memory limits and cgroups, mosquitto's two accounts, Wi-Fi
 power save and reachability, mDNS, bundles, versioning and rollback — is in
 `deploy/CLAUDE.md`, which loads when you work under `deploy/`. Read it before
-touching anything there. Four of its rules have a `src/` half and bind code
+touching anything there. Five of its rules have a `src/` half and bind code
 outside `deploy/`, so they stay here:
 
 - **`install.sh`'s `@@…@@` markers are a wire protocol.** GetHome Studio
@@ -680,6 +680,16 @@ outside `deploy/`, so they stay here:
   oneshot runs it; `<data>/update/enabled` is the capability. What is running
   afterwards is read back from `GET /hub`, never from the log, and a rollback
   is its own outcome that only the `@@ROLLBACK@@` marker can report.
+- **The hub records where its Matter accessories are, and the keep-alive asks
+  after them.** `src/adapters/matter/neighbours.ts` writes each accessory's
+  link-local address and MAC to `<data>/matter-neighbours`, and the root
+  keep-alive seeds every one the kernel has lost into PROBE, by unicast, every
+  two minutes — because finding an accessory again otherwise starts with a
+  multicast, which a router was measured passing 7 times in 30. The file name
+  is baked into the keep-alive and shared with `MATTER_NEIGHBOURS_FILE`
+  (`test/deploy-wifi.test.ts` holds them together), and the keep-alive takes a
+  line only if it is exactly a link-local address and a MAC, because the hub's
+  user writes it and root reads it.
 - **A migration has to be readable by the build before it.** The hub migrates
   at boot (`src/index.ts`), which is *before* the health check that decides
   whether the new build is any good — so by the time `install.sh` rolls back,

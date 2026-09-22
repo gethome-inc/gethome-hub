@@ -439,7 +439,47 @@ in `deploy/install.sh` must stay accurate.
   at a neighbour**: that is the path that is broken, and it wakes every
   sleeping device in the house. The install makes one real re-check, of the
   gateway, and warns if the kernel refuses it, since the loop would otherwise
-  fail quietly into the outage. A wired hub gets none of it.
+  fail quietly into the outage. A wired hub gets none of it — including the
+  Matter half below, which a wired hub's multicast to a Wi-Fi accessory would
+  need just as much; that is unmeasured and not built.
+  **A day covers a phone and not a Matter accessory, so the hub writes its
+  accessories down and the loop asks after them for as long as it does.**
+  Reaching an accessory starts with IPv6 neighbour discovery, which is
+  multicast, and on the hub this came from the hub's multicast reached its plug
+  7 times in 30 against 30 in 30 by unicast. That plug had been switched off
+  for days, so neither the kernel nor `/run/gethome-wifi-neighbours` had it
+  when it came back: by its own uptime it was on the network at 09:58, and the
+  hub — retrying at the right address every two minutes, every retry dying in
+  neighbour discovery — reached it at 10:07. A reboot is the same case for
+  every accessory at once. The hub keeps what neither memory can: each
+  accessory's link-local address and MAC as the accessory reports them
+  (General Diagnostics `NetworkInterfaces`, cached by matter.js for as long as
+  it is commissioned), written to `<DATA_DIR>/matter-neighbours` by
+  `src/adapters/matter/neighbours.ts`, and every sixth round the loop seeds
+  each one the kernel holds no link address for into PROBE — asking the
+  kernel itself, so one the day-memory loop has just seeded is not asked
+  twice. Five rules hold it up. **Over a resolution in flight too**, unlike
+  the day-memory loop, which waits: this link address is the accessory's own
+  word rather than a memory that may have gone stale, and an accessory the
+  hub is busy trying to reach is resolving nearly all the time — its traffic
+  starts a new multicast round the moment the last fails — so a loop that
+  waited for a quiet moment would wait for ever, and seeding sends what the
+  kernel had queued at once.
+  **The path is baked in** beside `arping_bin`, from the same `DATA_DIR` that
+  `hub.env` hands the hub, and `test/deploy-wifi.test.ts` holds it against
+  `MATTER_NEIGHBOURS_FILE` — a keep-alive reading the wrong path says nothing.
+  **The file is the hub user's and the loop is root's**, so a line counts only
+  if the address is `fe80:` followed by lowercase hex and colons, at most 39
+  characters, and the MAC is exactly six lowercase hex pairs; anything else —
+  a keyword `ip` would parse, a zone, shell metacharacters — is skipped, and no
+  more than 16 KiB of the file is read. **Link-local only**: an IPv4 lease can
+  belong to another device by the time an accessory comes back, and seeding it
+  with the accessory's MAC would send the new owner's traffic there. **The hub
+  writes it, never this**: nothing in `deploy/` edits the list, and it is kept
+  across a Matter switch-off, because the accessories are still commissioned.
+  An accessory that returns is reached within the loop's two minutes plus
+  matter.js's own two-minute retry, instead of however long the router takes
+  to let a multicast through.
   **Two things make this hard to see from the hub, and both misled once.** The
   brcmfmac firmware answers ARP for the hub itself (`arpoe=1`, `arp_ol=0x9`), so
   a phone's ARP request never reaches Linux — `tcpdump` on the hub shows none
