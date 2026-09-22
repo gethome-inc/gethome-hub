@@ -258,6 +258,14 @@ export class AutomationChat extends ChatRuntime<AutomationTurn> {
      * from this agent's own stored model, and from whichever key the home
      * actually has when that model's vendor is not one of them.
      *
+     * **And nothing below asks the vendor again.** The refusal outlived the
+     * loop it was written for: a second check further down still turned an
+     * OpenAI home away with "needs an Anthropic key" — the assistant's twin had
+     * lost it, this one had not, and a test pinned it as correct — so a home
+     * whose one key was OpenAI's could talk to the assistant and not write a
+     * rule, while the assistant offered to hand it the job. Whatever this line
+     * resolves is what runs.
+     *
      * A subscription token is not an API key — the loops authenticate with a
      * key — so a home holding only that has, for this purpose, no Anthropic key
      * at all, and `getAiSettings` has already decided that.
@@ -315,18 +323,6 @@ export class AutomationChat extends ChatRuntime<AutomationTurn> {
         : {}),
     });
 
-    if (provider !== 'anthropic') {
-      // The OpenAI half of this agent is not written yet. It is a *refusal*
-      // rather than a failure — the home is configured, just not for this — so
-      // it carries a code an app can branch on and a sentence naming the one
-      // thing to do about it.
-      throw new AgentNotConfiguredError(
-        'automation_needs_anthropic',
-        'Writing automations needs an Anthropic key at the moment. Add one in the home’s AI ' +
-          'settings; device portraits and recognition carry on using OpenAI.',
-      );
-    }
-
     /**
      * The test seam, and it sits **after** every configuration check on
      * purpose.
@@ -334,7 +330,7 @@ export class AutomationChat extends ChatRuntime<AutomationTurn> {
      * It stands in for the network, not for the rules. Above the checks it was
      * a bypass: a suite could reach a conversation on a home the real hub
      * would have refused, which is the "a mock laxer than the thing it stands
-     * in for tests the mock" trap — and it is why the refusal below shipped
+     * in for tests the mock" trap — and it is why an early refusal here shipped
      * with no test at all and reached a phone as a 500.
      */
     if (this.options.createConversation) {

@@ -455,7 +455,10 @@ does not know it exists, runs without a key, and keeps running when the key is
 taken away. `ai_enabled: false` stops rules being written and touches nothing
 that is already running.
 
-On the hub, as a plain Messages API loop. Not the Claude Agent SDK, for the
+On the hub, as a plain API loop on whichever vendor answers — Anthropic's
+Messages API or OpenAI's Responses API, behind one `ChatTransport`
+(`chat/transport.ts`), so the loop never branches on which. Not the Claude
+Agent SDK, for the
 reason `agent.ts` is not — a 276 MB binary and a ~315 MB subprocess per run is
 unusable on the smallest board this hub supports — and **not a cloud agent**,
 for a reason of its own: this agent's tools are the home, the home is on a
@@ -488,6 +491,18 @@ the conversation: the model fixes the document and resubmits without the person
 ever seeing that it got it wrong once. Deliberately not a `strict` tool, the
 `submit_mapping` reasoning — strict mode guarantees the shape and cannot express
 "the target must have that capability".
+
+**Its schema's `definitions` sit at the tool's root, because that is where a
+`$ref` looks.** A condition nests conditions, so the generated document schema
+names the recursive one once under `definitions` and points at it with
+`#/definitions/__schema0` — a pointer from the root of whatever schema it is in.
+Nested under `properties.document`, as the tool nests it, every one of those
+pointers dangled; the Anthropic loop never noticed, since the model reads the
+schema as text, and a schema whose references resolve to nothing is still an
+invalid one to hand a vendor that resolves them. `submitSchema()` hoists the
+table, and `test/automation-agent.test.ts` walks every tool's schema for a
+reference that lands on nothing. Any tool that nests a generated schema has to
+do the same.
 
 The distinction cost a real conversation. Asked "how does this work?" about a
 rule, the model reasoned — in words the person could read on their own screen —
@@ -931,19 +946,35 @@ repositories gets wrong once and then disagrees about for ever.
 ### Which provider it runs on, and it is not the mapper's
 
 **This agent picks its own, deliberately.** `ai.provider` answers "which model
-reads a device's exposes tree" — a real choice, because both halves of *that*
-are written. Only one half of this one is, so reading the same field turned an
-unrelated preference into a refusal: a home with both keys that recognised
-devices with OpenAI could not write a rule at all, with a perfectly good
-Anthropic key sitting beside it. So it runs on Anthropic whenever the home has
-a key that can, and switching the *mapping* provider changes nothing about
-whether rules can be written, in either direction. A legacy subscription token
-is not such a key — the loop authenticates with `x-api-key` — so a home holding
-only that counts as having none.
+reads a device's exposes tree" — a different question, and reading the same
+field once turned an unrelated preference into a refusal: a home with both keys
+that recognised devices with OpenAI could not write a rule at all, with a
+perfectly good Anthropic key sitting beside it. It reads **its own model**
+instead (`ai.automations`, chosen on the AI page from `AGENT_MODELS`), and the
+vendor follows the model id. Resolution is **key-aware**: a stored choice
+counts only while its vendor has a usable key, and otherwise falls to the one
+that has — so a home whose one key is OpenAI's runs on OpenAI, and switching the
+*mapping* provider changes nothing about whether rules can be written, in
+either direction.
+
+**Either vendor runs it, and nothing after that line asks again.** Both loops
+have existed since the assistant got its `ChatTransport`, but a second check
+further down `openConversation` still refused anything but Anthropic with "needs
+an Anthropic key" — the assistant's twin of it had gone, this one had not, and a
+test pinned the refusal as correct — so for a week an OpenAI home could talk to
+the assistant and could not write a rule, while the assistant offered to hand
+it the job. What the provider line resolves is what runs.
+
+**`automation_needs_anthropic` is kept, and narrowed to what is still true of
+it**: a Claude *subscription token* with nothing usable beside it. That is a
+credential the hub holds and cannot use — the loops authenticate with an API
+key — so a home holding only that is told which *kind* of key to add rather
+than that it has none; an OpenAI key beside it simply runs. The code keeps its
+name because both apps branch on it.
 
 **And every way this can be refused is an `AutomationNotConfiguredError`**,
 which the route turns into a `409` with a code *and a sentence*. That is the
-whole of the fix for a real bug: the OpenAI case used to throw an
+whole of the fix for a real bug: an OpenAI home once threw an
 `AiUnavailableError` past the refusal handler, Fastify answered
 `{"statusCode":500,…}`, and the app printed "The hub answered 500." over a hub
 that was working perfectly and had just said exactly what was wrong.

@@ -13,8 +13,9 @@ import { DeviceRegistry } from '../src/core/registry.js';
 import { PermitJoinService } from '../src/core/permit-join.js';
 import { AiRunLog } from '../src/core/ai-runs.js';
 import { MappingLibrary } from '../src/ai/library.js';
-import { automations as automationsTable } from '../src/db/schema.js';
+import { automations as automationsTable, settings as settingsTable } from '../src/db/schema.js';
 import type { AutomationEngine } from '../src/automations/engine.js';
+import type { AutomationChat } from '../src/ai/automation-chat.js';
 import {
   bootedHome,
   loadedAccess,
@@ -39,7 +40,10 @@ const log = pino({ level: 'silent' });
 
 let app: FastifyInstance;
 let engine: AutomationEngine;
+let chat: AutomationChat;
 let token: string;
+/** Which vendor the last conversation was opened on — the stand-in's record. */
+let openedOn: string | null = null;
 
 const auth = (value: string) => ({ authorization: `Bearer ${value}` });
 
@@ -58,8 +62,25 @@ beforeAll(async () => {
     store: automationStore,
     chat: automationChat,
     assistant: assistantChat,
-  } = await startedAutomations(db, events, registry, activity, { settings });
+  } = await startedAutomations(db, events, registry, activity, {
+    settings,
+    // Stands in for a provider, so a conversation this suite starts never
+    // reaches one — and notes whose it was, which is what one test is about.
+    createConversation: ({ provider, modelId }) => {
+      openedOn = provider;
+      return {
+        provider,
+        modelId,
+        effort: 'medium' as const,
+        awaitingAnswer: () => false,
+        costUsd: () => 0,
+        send: async () => ({ kind: 'said' as const, text: 'On it.' }),
+        answer: async () => ({ kind: 'said' as const, text: 'On it.' }),
+      };
+    },
+  });
   engine = automations;
+  chat = automationChat;
 
   app = await buildServer({
     db,
@@ -505,13 +526,14 @@ describe('a rule this build cannot read', () => {
 });
 
 /**
- * Starting a conversation, and the two ways it can be refused.
+ * Starting a conversation, and the ways it can be refused.
  *
  * **The route must never answer 500 for a home that is merely configured for
  * something else.** It did: a home whose only key is OpenAI's threw an
  * `AiUnavailableError` past the refusal handler, Fastify turned it into
  * `{"statusCode":500,…}`, and the app — which reads `error`/`detail` — printed
- * "The hub answered 500." over a hub that was working perfectly.
+ * "The hub answered 500." over a hub that was working perfectly. That home is
+ * not refused at all now: either vendor runs this agent.
  */
 describe('starting a conversation', () => {
   const settings = new SettingsService(handle!.db, Buffer.alloc(32).toString('base64'));
@@ -536,18 +558,40 @@ describe('starting a conversation', () => {
     expect(response.json()).toMatchObject({ error: 'ai_not_configured' });
   });
 
-  it('refuses a home whose only key is OpenAI’s with a code and a sentence', async () => {
-    await settings.setAiKey('openai', 'sk-openai-only');
+  it('starts one on a home whose only key is OpenAI’s', async () => {
+    // It answered `409 automation_needs_anthropic` here for a week after the
+    // agent could run on either vendor — the one agent in the house an OpenAI
+    // home could not use.
+    await settings.setAiKey('openai', 'sk-proj-only');
+    openedOn = null;
 
     const response = await start();
 
-    // 409 and not 500: the home is configured, just not for this.
+    expect(response.statusCode).toBe(201);
+    expect(openedOn).toBe('openai');
+    // The turn runs on after the acknowledgement; let it finish before the
+    // key it was opened with is cleared.
+    await chat.idle();
+  });
+
+  it('refuses a home whose only credential is a subscription token, with a code and a sentence', async () => {
+    // What the code still means: a key the hub holds and cannot use — the
+    // loops authenticate with an API key — with nothing usable beside it.
+    await settings.setAiKey('anthropic', 'legacy-subscription-token');
+    await handle!.db
+      .insert(settingsTable)
+      .values({ key: 'ai_auth_type', value: 'oauth_token' })
+      .onConflictDoUpdate({ target: settingsTable.key, set: { value: 'oauth_token' } });
+
+    const response = await start();
+
+    // 409 and not 500: the home is configured, just not usably.
     expect(response.statusCode).toBe(409);
     const body = response.json() as { error: string; detail?: string };
     expect(body.error).toBe('automation_needs_anthropic');
     // The sentence rides along, so an app that has never met the code still
     // shows something true rather than a status number.
-    expect(body.detail).toMatch(/Anthropic key/);
+    expect(body.detail).toMatch(/subscription token/);
   });
 
   it('says AI is switched off rather than unconfigured', async () => {

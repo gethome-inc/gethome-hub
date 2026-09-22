@@ -29,7 +29,10 @@ import {
 import { automationShape, describeAutomation } from '../automations/summarize.js';
 
 /**
- * The automation agent: a tool-use conversation on the Anthropic Messages API.
+ * The automation agent: a tool-use conversation on whichever vendor answers —
+ * Anthropic's Messages API or OpenAI's Responses API, behind one
+ * `ChatTransport` (`chat/transport.ts`), so nothing in this file branches on
+ * which.
  *
  * A plain API loop for the reason `agent.ts` is one — the Claude Agent SDK
  * ships a 276 MB native binary and spawns a ~315 MB subprocess per run, which
