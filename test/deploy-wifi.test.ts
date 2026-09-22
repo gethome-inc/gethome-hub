@@ -149,27 +149,13 @@ function run(options: {
 
 const WIFI_ROUTE = 'default via 192.168.0.1 dev wlan0 proto dhcp src 192.168.0.200 metric 600\n';
 
-/** `ip neigh help` from the iproute2 a Raspberry Pi OS hub has, which knows `use`. */
-const NEIGH_HELP = `Usage: ip neigh { add | del | change | replace }
-                { ADDR [ lladdr LLADDR ] [ nud STATE ] proxy ADDR }
-                [ dev DEV ] [ router ] [ use ] [ managed ] [ extern_learn ]
-                [ protocol PROTO ]`;
-
-/**
- * The same from an `ip` that has never heard of `use` — and still says
- * "Usage", which is why the installer looks for the word rather than the
- * letters.
- */
-const NEIGH_HELP_WITHOUT_USE = `Usage: ip neigh { add | del | change | replace }
-                { ADDR [ lladdr LLADDR ] [ nud STATE ] | proxy ADDR } [ dev DEV ]`;
-
 /**
  * Run `keep_wifi_reachable` out of install.sh against files the test owns.
  *
  * Returns the unit and the script it writes, or empty strings for the wired
  * hub that must get neither.
  */
-function keepalive(options: { route: string; wireless: string[]; arping?: boolean; ipKnowsUse?: boolean }): {
+function keepalive(options: { route: string; wireless: string[]; arping?: boolean; kernelProbes?: boolean }): {
   unit: string;
   script: string;
   scriptMode: string;
@@ -186,12 +172,15 @@ function keepalive(options: { route: string; wireless: string[]; arping?: boolea
   mkdirSync(bin, { recursive: true });
   for (const iface of options.wireless) mkdirSync(path.join(net, iface, 'wireless'), { recursive: true });
   const systemctl = path.join(dir, 'systemctl-calls');
-  // `ip neigh help` prints to stderr and exits non-zero, the way the real one
-  // does — which is the half that would read as "no" under `pipefail`.
+  // The install re-checks the gateway once, for real, so the fake has the
+  // gateway's entry to show and a kernel that can refuse the re-check.
   script_(
     path.join(bin, 'ip'),
-    `[ "$*" = "neigh help" ] && { printf '%s\\n' "$FAKE_NEIGH_HELP" >&2; exit 255; }
-     printf '%s' "$FAKE_ROUTE"`,
+    `case "$*" in
+       "-4 neigh show 192.168.0.1 dev wlan0") echo "192.168.0.1 lladdr 02:00:00:00:00:01 REACHABLE" ;;
+       "neigh replace "*) [ "$FAKE_PROBE_REFUSED" = "yes" ] && exit 2; exit 0 ;;
+       *) printf '%s' "$FAKE_ROUTE" ;;
+     esac`,
   );
   script_(path.join(bin, 'systemctl'), `echo "$*" >> "${systemctl}"`);
   // Stubbed rather than borrowed from the host: whether this machine happens
@@ -223,7 +212,7 @@ function keepalive(options: { route: string; wireless: string[]; arping?: boolea
         ...process.env,
         PATH: `${bin}:${process.env.PATH ?? ''}`,
         FAKE_ROUTE: options.route,
-        FAKE_NEIGH_HELP: options.ipKnowsUse === false ? NEIGH_HELP_WITHOUT_USE : NEIGH_HELP,
+        FAKE_PROBE_REFUSED: options.kernelProbes === false ? 'yes' : 'no',
         GETHOME_NET_DIR: net,
         GETHOME_KEEPALIVE_UNIT: unit,
         GETHOME_KEEPALIVE_SCRIPT: script,
@@ -306,23 +295,24 @@ describe('keeping the hub reachable after a quiet spell', () => {
 
   /**
    * **The other half has to be able to happen, and the install has to say when
-   * it cannot.** An `ip` that has never heard of `use` fails every call the
-   * loop makes, silently, which leaves each phone's record of the hub to expire
-   * — the outage itself, behind an install log with nothing in it.
+   * it cannot.** It tries one real re-check, of the gateway: a kernel or an
+   * `ip` that refuses it would fail every call the loop makes, silently, which
+   * leaves each phone's record of the hub to expire — the outage itself, behind
+   * an install log with nothing in it.
    */
   it('says so when the kernel cannot be asked to re-check a neighbour', () => {
-    const result = keepalive({ route: WIFI_ROUTE, wireless: ['wlan0'], ipKnowsUse: false });
-    expect(result.output).toMatch(/WARN .*cannot ask the kernel to re-check a neighbour/);
+    const result = keepalive({ route: WIFI_ROUTE, wireless: ['wlan0'], kernelProbes: false });
+    expect(result.output).toMatch(/WARN .*could not ask the kernel to re-check a neighbour/);
     // The broadcast half still installs: a hub with one of the two is better
     // off than a hub with neither.
     expect(result.script).not.toBe('');
   });
 
-  it('stays quiet about it on an ip that knows use', () => {
+  it('stays quiet about it when the kernel takes the re-check', () => {
     const result = keepalive({ route: WIFI_ROUTE, wireless: ['wlan0'] });
     // Only this warning: whether the arping one fires depends on whether the
     // machine running the suite has a real `/usr/bin/arping` to fail with.
-    expect(result.output).not.toMatch(/cannot ask the kernel/);
+    expect(result.output).not.toMatch(/could not ask the kernel/);
   });
 
   /**
@@ -419,11 +409,13 @@ const now = (): number => Math.floor(Date.now() / 1000);
 
 /**
  * **What keeps a phone's record of the hub alive is a question addressed to the
- * phone, and the kernel already knows how to ask one.** A stale neighbour
- * re-checked with `ip neigh change … use` gets an ARP request by unicast five
- * seconds later — measured on the hub: STALE, DELAY, then REACHABLE, and the
- * Mac's entry for the hub back at 1200 seconds from minus 345. Nothing in it is
- * broadcast, so a router sitting on its broadcasts never sees it.
+ * phone, and the kernel already knows how to ask one.** A stale neighbour put
+ * into PROBE at the link address the kernel holds (`ip neigh replace … nud
+ * probe`) gets an ARP request by unicast at once — measured on the hub: STALE
+ * to REACHABLE inside a second, and the Mac's entry for the hub back at 1200
+ * seconds from minus 345. Nothing in it is broadcast, so a router sitting on
+ * its broadcasts never sees it. (`ip neigh change … use` asks the same more
+ * politely, but only iproute2 5.17 and later know it.)
  */
 describe("keeping every neighbour's record of the hub warm", () => {
   it('re-checks every stale neighbour by unicast, and nothing else', () => {
@@ -440,8 +432,8 @@ describe("keeping every neighbour's record of the hub warm", () => {
     });
     expect(writes(round.calls)).toEqual([
       'arping -U -c 1 -I wlan0 192.168.0.200',
-      'ip neigh change 192.168.0.145 dev wlan0 use',
-      'ip neigh change 192.168.0.166 dev wlan0 use',
+      'ip neigh replace 192.168.0.145 lladdr 02:00:00:00:01:45 nud probe dev wlan0',
+      'ip neigh replace 192.168.0.166 lladdr 02:00:00:00:01:66 nud probe dev wlan0',
     ]);
   });
 
@@ -484,18 +476,20 @@ describe("keeping every neighbour's record of the hub warm", () => {
   /**
    * **A phone that comes home rejoins with an empty cache**, and the kernel has
    * long since given up on it. So the hub asks for it at the address and link
-   * address it had — seeded back as stale, then re-checked, which is a unicast
-   * question — and does it on the round it starts with and every sixth after,
-   * which is two minutes at 20 seconds a round.
+   * address it had — seeded straight into PROBE, which is a unicast question
+   * (measured: a deleted entry REACHABLE again within two seconds) — and does
+   * it on the round it starts with and every sixth after, which is two minutes
+   * at 20 seconds a round.
    */
   it('asks about a neighbour the kernel has given up on, at the address it had', () => {
     const round = oneRound({
       neigh: '192.168.0.166 FAILED\n',
       state: `192.168.0.166 02:00:00:00:01:66 ${now() - 600}\n`,
     });
-    expect(writes(round.calls)).toContain('ip neigh replace 192.168.0.166 lladdr 02:00:00:00:01:66 nud stale dev wlan0');
-    const replace = round.calls.indexOf('ip neigh replace 192.168.0.166 lladdr 02:00:00:00:01:66 nud stale dev wlan0');
-    expect(round.calls[replace + 1]).toBe('ip neigh change 192.168.0.166 dev wlan0 use');
+    expect(writes(round.calls)).toEqual([
+      'arping -U -c 1 -I wlan0 192.168.0.200',
+      'ip neigh replace 192.168.0.166 lladdr 02:00:00:00:01:66 nud probe dev wlan0',
+    ]);
     expect(round.state).toContain('192.168.0.166 02:00:00:00:01:66');
     expect(keepalive({ route: WIFI_ROUTE, wireless: ['wlan0'] }).script).toContain('$((round % 6))');
   });
@@ -504,8 +498,7 @@ describe("keeping every neighbour's record of the hub warm", () => {
     const round = oneRound({ neigh: '', state: `192.168.0.166 02:00:00:00:01:66 ${now() - 600}\n` });
     expect(writes(round.calls)).toEqual([
       'arping -U -c 1 -I wlan0 192.168.0.200',
-      'ip neigh replace 192.168.0.166 lladdr 02:00:00:00:01:66 nud stale dev wlan0',
-      'ip neigh change 192.168.0.166 dev wlan0 use',
+      'ip neigh replace 192.168.0.166 lladdr 02:00:00:00:01:66 nud probe dev wlan0',
     ]);
   });
 
@@ -532,8 +525,8 @@ describe("keeping every neighbour's record of the hub warm", () => {
       neigh: '192.168.0.145 lladdr 02:00:00:00:01:45 STALE\n',
       state: `192.168.0.9 aa:bb:cc:dd:ee:09 yesterday\n192.168.0.166 02:00:00:00:01:66 ${now() - 600}\n`,
     });
-    expect(writes(round.calls)).toContain('ip neigh change 192.168.0.145 dev wlan0 use');
-    expect(writes(round.calls)).toContain('ip neigh change 192.168.0.166 dev wlan0 use');
+    expect(writes(round.calls)).toContain('ip neigh replace 192.168.0.145 lladdr 02:00:00:00:01:45 nud probe dev wlan0');
+    expect(writes(round.calls)).toContain('ip neigh replace 192.168.0.166 lladdr 02:00:00:00:01:66 nud probe dev wlan0');
     expect(round.state).not.toContain('192.168.0.9 ');
   });
 });

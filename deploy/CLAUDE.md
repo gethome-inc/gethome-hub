@@ -422,17 +422,21 @@ in `deploy/install.sh` must stay accurate.
   1200 seconds the moment the hub sent an ARP request *addressed to the Mac*.
   That is exactly what the kernel sends when it re-checks a stale neighbour —
   by unicast, which the stuck queue never sees — so `keep_wifi_reachable()`'s
-  loop runs `ip neigh change <addr> dev <if> use` for every neighbour whose
-  entry has gone stale (measured on the hub: STALE, DELAY, REACHABLE, and the
-  Mac's entry from −345 back to 1200), and **remembers the ones the kernel gives
-  up on for a day** in `/run/gethome-wifi-neighbours`, seeding each back at the
-  link address it had and re-checking it every sixth round — because a phone
-  that comes home rejoins with an empty cache, and this is what makes the hub
-  known to it again before anybody opens the app. **Nothing is ever broadcast
+  loop puts every neighbour whose entry has gone stale into PROBE at the link
+  address the kernel already holds — `ip neigh replace <addr> lladdr <mac> nud
+  probe dev <if>`, measured on the hub: STALE to REACHABLE inside a second, and
+  the Mac's entry from −345 back to 1200 — and **remembers the ones the kernel
+  gives up on for a day** in `/run/gethome-wifi-neighbours`, seeding each
+  straight into PROBE at the link address it had every sixth round, because a
+  phone that comes home rejoins with an empty cache, and this is what makes the
+  hub known to it again before anybody opens the app. **`nud probe`, not `ip
+  neigh change … use`**: the second asks the same thing more politely, but only
+  iproute2 5.17 and later know it, so on Bullseye (5.10) or Ubuntu 22.04 (5.15)
+  the loop would fail every call and say nothing. **Nothing is ever broadcast
   at a neighbour**: that is the path that is broken, and it wakes every
-  sleeping device in the house. The install asks whether `ip` knows `use` and
-  warns when it does not, since the loop would otherwise fail quietly into the
-  outage. A wired hub gets none of it.
+  sleeping device in the house. The install makes one real re-check, of the
+  gateway, and warns if the kernel refuses it, since the loop would otherwise
+  fail quietly into the outage. A wired hub gets none of it.
   **Two things make this hard to see from the hub, and both misled once.** The
   brcmfmac firmware answers ARP for the hub itself (`arpoe=1`, `arp_ol=0x9`), so
   a phone's ARP request never reaches Linux — `tcpdump` on the hub shows none

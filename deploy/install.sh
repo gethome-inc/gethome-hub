@@ -1400,14 +1400,19 @@ UNIT
 # reply; it went back to 1200 seconds the moment the hub sent an ARP request
 # *addressed to the Mac* — which is what the kernel sends when it re-checks a
 # stale neighbour, by unicast, so the stuck queue never sees it. `ip neigh
-# change … use` asks for exactly that. So every round the keep-alive has the
-# kernel re-check each neighbour whose entry has gone stale, and it remembers
-# the ones the kernel has given up on for a day, asking about them by unicast
-# at the address they had every two minutes: a phone that comes home rejoins
-# with an empty cache, and this is what makes the hub known to it again before
-# anybody opens the app. **Nothing is ever broadcast at a neighbour** — that
-# is the path that is broken, and it would wake every sleeping device in the
-# house besides.
+# replace <addr> lladdr <mac> nud probe` asks for exactly that, at the link
+# address the kernel already holds: the entry goes to PROBE and the kernel
+# sends its unicast question at once (measured on the hub: STALE to REACHABLE
+# inside a second). `ip neigh change … use` would ask the same thing more
+# politely, but only iproute2 5.17 and later know it — not Bullseye's 5.10 and
+# not Ubuntu 22.04's 5.15 — while `nud probe` is older than both. So every
+# round the keep-alive has the kernel re-check each neighbour whose entry has
+# gone stale, and it remembers the ones the kernel has given up on for a day,
+# asking about them by unicast at the address they had every two minutes: a
+# phone that comes home rejoins with an empty cache, and this is what makes the
+# hub known to it again before anybody opens the app. **Nothing is ever
+# broadcast at a neighbour** — that is the path that is broken, and it would
+# wake every sleeping device in the house besides.
 #
 # The gratuitous ARP stays: it is what keeps the router from losing the hub in
 # the first place. The ping at the gateway that sat beside it is gone. It was
@@ -1416,10 +1421,8 @@ UNIT
 # is a neighbour like any other now and is re-checked with the rest. A wired
 # hub gets none of this, for the reason it gets no dispatcher.
 keep_wifi_reachable() {
-  local iface self arping_bin neigh_help unit="${GETHOME_KEEPALIVE_UNIT:-/etc/systemd/system/gethome-wifi-keepalive.service}"
+  local iface self arping_bin gateway gateway_mac unit="${GETHOME_KEEPALIVE_UNIT:-/etc/systemd/system/gethome-wifi-keepalive.service}"
   local script="${GETHOME_KEEPALIVE_SCRIPT:-/usr/local/lib/gethome-wifi-keepalive.sh}"
-  # A word, not a substring: the same help text says "Usage".
-  local use_word='(^|[^[:alnum:]_])use([^[:alnum:]_]|$)'
 
   iface="$(lan_wifi_iface)"
   [[ -n "$iface" ]] || return 0
@@ -1444,15 +1447,16 @@ keep_wifi_reachable() {
     arping_bin=""
   fi
 
-  # Ask, never assume, for the other half too. An `ip` that does not know
-  # `use` fails every call the loop makes and the loop says nothing, leaving
-  # each phone's record of this hub to expire — the fault itself, behind a
-  # clean install log. Captured before it is matched rather than piped into the
-  # test: `ip neigh help` exits non-zero by design, and under `pipefail` that
-  # reads as "no" whatever it printed.
-  neigh_help="$(ip neigh help 2>&1 || true)"
-  if [[ ! "$neigh_help" =~ $use_word ]]; then
-    warn "This hub's 'ip' command cannot ask the kernel to re-check a neighbour, so a phone that has not talked to the hub for 20 minutes may not find it for a while, on a router that is slow to pass broadcasts on."
+  # Ask, never assume, for the other half too: one real re-check, of the
+  # gateway, which is the one neighbour certain to be there (the bundle was
+  # just downloaded through it). A kernel or an `ip` that refuses it would fail
+  # every call the loop makes, and the loop says nothing — leaving each phone's
+  # record of this hub to expire, which is the fault itself behind a clean
+  # install log. No entry to try it on is not a refusal, so it says nothing.
+  gateway="$(ip route show default 2>/dev/null | awk '/^default/ { print $3; exit }')"
+  gateway_mac="$(ip -4 neigh show "${gateway:-0.0.0.0}" dev "$iface" 2>/dev/null | awk '$2 == "lladdr" { print $3; exit }')"
+  if [[ -n "$gateway_mac" ]] && ! $SUDO ip neigh replace "$gateway" lladdr "$gateway_mac" nud probe dev "$iface" >/dev/null 2>&1; then
+    warn "This hub could not ask the kernel to re-check a neighbour, so a phone that has not talked to the hub for 20 minutes may not find it for a while, on a router that is slow to pass broadcasts on."
   fi
 
   # The body is quoted, so it is written exactly as it reads. The one value
@@ -1515,7 +1519,7 @@ while :; do
         esac
         echo "$addr $mac $seen" >> "$fresh"
         case " $rest " in
-          *" STALE "*) ip neigh change "$addr" dev "$iface" use 2>/dev/null ;;
+          *" STALE "*) ip neigh replace "$addr" lladdr "$mac" nud probe dev "$iface" 2>/dev/null ;;
         esac
       done
       if [ -r "$state" ]; then
@@ -1527,8 +1531,7 @@ while :; do
           [ $((round % 6)) -eq 0 ] || continue
           # Never over a resolution the kernel is already making.
           ip -4 neigh show "$addr" dev "$iface" 2>/dev/null | grep -q INCOMPLETE && continue
-          ip neigh replace "$addr" lladdr "$mac" nud stale dev "$iface" 2>/dev/null &&
-            ip neigh change "$addr" dev "$iface" use 2>/dev/null
+          ip neigh replace "$addr" lladdr "$mac" nud probe dev "$iface" 2>/dev/null
         done < "$state"
       fi
       mv -f "$fresh" "$state"
