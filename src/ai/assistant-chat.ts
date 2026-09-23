@@ -819,23 +819,37 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
   ): Promise<void> {
     await this.options.registry.execute(deviceId, endpointId, command);
     const device = this.options.engine.homeView().devices.find((entry) => entry.id === deviceId);
-    const name = (await this.memberName(memberId)) ?? 'Somebody';
-    await this.options.activity.record({
-      kind: 'device.command',
-      // **Named for the person, not for the agent.** They asked for it, the
-      // feed is read a week later, and "the assistant" is not somebody anyone
-      // in the home can go and ask about it. `via` says how it was asked, for
-      // an app that wants to draw the difference.
-      message: `${name} · ${device?.name ?? deviceId}: ${command.type}`,
-      ...(device !== undefined ? { deviceId: device.id } : {}),
-      memberId,
-      data: {
-        command,
-        deviceName: device?.name ?? deviceId,
-        memberName: name,
-        via,
-      },
-    });
+    /**
+     * **Written down, but never at the price of the answer.** The device has
+     * taken the command by now; a row that could not be written — a busy
+     * card, a device removed a moment ago — is bookkeeping, and letting it
+     * throw told the model, and so the person, that a lamp which had just
+     * gone off had not. `ChatRuntime.bank`'s rule, one table over.
+     */
+    try {
+      const name = (await this.memberName(memberId)) ?? 'Somebody';
+      await this.options.activity.record({
+        kind: 'device.command',
+        // **Named for the person, not for the agent.** They asked for it, the
+        // feed is read a week later, and "the assistant" is not somebody anyone
+        // in the home can go and ask about it. `via` says how it was asked, for
+        // an app that wants to draw the difference.
+        message: `${name} · ${device?.name ?? deviceId}: ${command.type}`,
+        ...(device !== undefined ? { deviceId: device.id } : {}),
+        memberId,
+        data: {
+          command,
+          deviceName: device?.name ?? deviceId,
+          memberName: name,
+          via,
+        },
+      });
+    } catch (error) {
+      this.options.log.warn(
+        { err: error, deviceId },
+        'a command the assistant carried out could not be written to the activity log',
+      );
+    }
   }
 
   /** The member's own name, for anything written in the home's voice. */
