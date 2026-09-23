@@ -8,7 +8,7 @@ import { AGENT_EFFORT } from './chat/chat-runtime.js';
 import type { AgentConversation, ChatTurnContext } from './chat/chat-runtime.js';
 import { askUserInput, type AskUser } from './automation-tools.js';
 import {
-  ASSISTANT_MAX_COMMANDS_PER_TURN,
+  ASSISTANT_MAX_COMMANDS_PER_DEVICE,
   assistantToolStep,
   assistantTools,
   delegateInput,
@@ -125,16 +125,17 @@ export async function createAssistantConversation(
     watchdog.unref?.();
 
     /**
-     * What this whole turn has handed over, and how many devices it has
-     * worked.
+     * What this whole turn has handed over, and how many commands it has sent
+     * each device.
      *
      * Both are per *turn* rather than per round, because both are about what
-     * one reply does to somebody's house: a model that has misread "everything
-     * off" would otherwise spend its cap, be told no, and spend it again on
-     * the next round of the same reply.
+     * one reply does to somebody's house: a model working one lamp over and
+     * over would otherwise be told no, and start again on the next round of
+     * the same reply. See `ASSISTANT_MAX_COMMANDS_PER_DEVICE` for why there is
+     * no bound on how many devices one reply may work.
      */
     const handoffs: AssistantHandoff[] = [];
-    const budget = { commands: 0 };
+    const budget = { perDevice: new Map<string, number>() };
 
     try {
       for (let turn = 1; turn <= ASSISTANT_MAX_TURNS; turn += 1) {
@@ -336,4 +337,4 @@ export async function createAssistantConversation(
   return conversation;
 }
 
-export { ASSISTANT_MAX_COMMANDS_PER_TURN };
+export { ASSISTANT_MAX_COMMANDS_PER_DEVICE };

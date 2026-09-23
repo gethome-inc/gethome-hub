@@ -669,6 +669,55 @@ describe('the assistant', () => {
     expect(started.sessionId).toBeTruthy();
   });
 
+  it('does not report a command as failed because the activity log could not take its row', async () => {
+    // The lamp has gone off by the time the row is written. A write that
+    // fails there is bookkeeping, and it once told the model — and so the
+    // person — that a light which had just gone off had not. Here the device
+    // is one the registry knows and the store does not (removed a moment
+    // ago), so the row's foreign key refuses it.
+    const light = randomUUID();
+    const warn = vi.spyOn(log, 'warn');
+    const { assistant } = await assistantFor([{ kind: 'said', text: 'Done.' }], {
+      devices: [
+        {
+          id: light,
+          name: 'Ceiling light',
+          roomId: null,
+          online: true,
+          endpoints: [
+            {
+              endpointId: 1,
+              deviceKind: 'light',
+              capabilities: ['onOff'],
+              state: { reachable: true, sensors: {}, onOff: true },
+            },
+          ],
+        },
+      ],
+    });
+    const started = await assistant.start({ memberId, message: 'lights off' });
+    await assistant.idle();
+
+    const tools = (
+      assistant as unknown as {
+        toolContext: (
+          id: string,
+          sessionId: string,
+        ) => { control: (deviceId: string, endpointId: number, command: object) => Promise<void> };
+      }
+    ).toolContext(memberId, started.sessionId);
+    await expect(tools.control(light, 1, { type: 'power', on: false })).resolves.toBeUndefined();
+
+    expect(commanded).toEqual([{ deviceId: light, endpointId: 1, type: 'power' }]);
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ deviceId: light }),
+      'a command the assistant carried out could not be written to the activity log',
+    );
+    const rows = await handle!.db.select().from(activityTable);
+    expect(rows.find((row) => row.kind === 'device.command')).toBeUndefined();
+    warn.mockRestore();
+  });
+
   // ── The handoff ────────────────────────────────────────────────────────────
 
   it('hands a job over without waiting for it, and says so on a card', async () => {

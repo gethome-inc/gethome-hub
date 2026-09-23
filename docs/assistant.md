@@ -162,11 +162,25 @@ asked**. That last part matters: the feed is read a week later, and "the
 assistant" is not somebody anybody in the home can go and ask about it. `data`
 carries `via: "assistant"` for an app that wants to draw the difference.
 
-It is bounded at `ASSISTANT_MAX_COMMANDS_PER_TURN` (8) per *turn*. Not a guard
-against a person — a person tapping quickly is a person, which is the whole
-reason the automations engine's limits can be as tight as they are. This is a
-guard against a misread: "turn everything off" understood as the whole house
-when it meant the kitchen is a model's mistake landing on forty relays at once.
+It is bounded **per device**, at `ASSISTANT_MAX_COMMANDS_PER_DEVICE` (6) in one
+reply, and deliberately not per reply. It was eight commands per reply, as a
+guard against "turn everything off" read as the whole house when the kitchen
+was meant — and it cut short every real request bigger than eight: "turn off
+all the lights" in a flat with fifteen bulbs switched off eight and asked
+permission for the rest, so a whole-home request could not be made in one
+message at all. The model reads the whole home and the whole sentence and can
+be asked for everything at once; what one reply should not do is work the same
+device over and over, which is a loop rather than a request, and that is all
+the bound stops.
+
+**And one response carries every device a request covers.** Every call in a
+response is carried out, in the order it was sent, while a message may take
+only `ASSISTANT_MAX_TURNS` (10) rounds — so a model left to work one device a
+round would run out of rounds at about nine devices, with nothing wrong except
+the pacing, and a long list would end in "I have used all 10 steps". The
+system prompt and `control_device`'s own description both ask for all of a
+request's devices in the same response, however many there are, and
+`test/assistant-tools.test.ts` drives twenty through one round.
 
 **`delegate`** is below. `run_automation` presses a rule somebody could press,
 through the engine's own `runManually`. `ask_user` is the automations agent's

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { pino } from 'pino';
 import { HubEventBus } from '../src/core/bus.js';
 import { ActivityService } from '../src/core/activity.js';
@@ -18,6 +18,7 @@ import type {
 } from '../src/ai/automation-conversation.js';
 import { automationSystemPrompt } from '../src/ai/automation-prompts.js';
 import { AUTOMATION_TOOLS } from '../src/ai/automation-tools.js';
+import { AGENT_MODELS } from '../src/ai/models.js';
 
 /**
  * The automation agent: the loop over a mocked SDK, and the conversation
@@ -662,6 +663,179 @@ afterAll(async () => {
   // test against the bus's cap of a hundred.
   await Promise.allSettled(startedEngines.map((engine) => engine.stop()));
   await handle?.close();
+});
+
+// ── The same loop on OpenAI ─────────────────────────────────────────────────
+
+/**
+ * The loop over the other vendor, with the wire as the fixture.
+ *
+ * Everything above runs on the mocked Anthropic SDK. This runs the *same*
+ * conversation over `fetch` stubbed with a real Responses stream, because what
+ * can go wrong with this agent on OpenAI goes wrong on the wire — a schema the
+ * API cannot resolve, a call that arrives as a string of JSON, a rule accepted
+ * and never handed back. `test/ai-openai-chat.test.ts` owns the transport;
+ * this owns the agent on it, which went a week refusing every OpenAI home
+ * while its transport was tested and green.
+ */
+describe('the automation conversation on OpenAI', () => {
+  /** One SSE frame, exactly as the Responses stream writes it. */
+  const frame = (type: string, data: unknown) =>
+    `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
+
+  /** A fresh streamed body per request: a `ReadableStream` is read once. */
+  const answering = (output: unknown[]) => () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          new TextEncoder().encode(
+            frame('response.completed', {
+              response: {
+                status: 'completed',
+                output,
+                usage: { input_tokens: 100, output_tokens: 50 },
+              },
+            }),
+          ),
+        );
+        controller.close();
+      },
+    });
+    return Promise.resolve(
+      new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
+    );
+  };
+
+  const said = (value: string) => ({
+    type: 'message',
+    content: [{ type: 'output_text', text: value }],
+  });
+  const submission = (callId: string) => ({
+    type: 'function_call',
+    call_id: callId,
+    name: 'submit_automation',
+    // A string of JSON on this API, never an object.
+    arguments: JSON.stringify({ document: goodDocument, replaces: null }),
+  });
+
+  const openAiConversation = () =>
+    createAutomationConversation({
+      auth: { secret: 'sk-proj-test' },
+      provider: 'openai',
+      modelId: AGENT_MODELS.openai.default,
+      systemPrompt: 'system',
+      taskPrompt: 'this home',
+      log,
+      tools: {
+        home: () => ({ devices: [], rooms: [], zones: [], automations: [] }),
+        timezone: () => 'UTC',
+        stateOf: () => undefined,
+      },
+    });
+
+  /** What request `index` carried, parsed. */
+  const requestBody = (fetchMock: ReturnType<typeof vi.fn>, index: number) => {
+    const init = fetchMock.mock.calls[index]?.[1] as RequestInit | undefined;
+    return JSON.parse(String(init?.body)) as {
+      model: string;
+      input: Record<string, unknown>[];
+      tools: { name: string; strict: boolean; parameters: Record<string, unknown> }[];
+    };
+  };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('writes a rule, and hands it back with what it said about it', async () => {
+    const fetchMock = vi.fn(answering([said('Here is a button for the evening.'), submission('call_1')]));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const turn = await (await openAiConversation()).send('a button for the evening');
+
+    expect(turn.kind).toBe('submitted');
+    const submitted = turn as Extract<AutomationTurn, { kind: 'submitted' }>;
+    expect(submitted.text).toBe('Here is a button for the evening.');
+    expect(submitted.rules).toHaveLength(1);
+    expect((submitted.rules[0]?.document as { name?: string }).name).toBe('Evening lights');
+    expect(submitted.rules[0]?.replaces).toBeNull();
+
+    // OpenAI's own address, on the home's own key, asking for this agent's
+    // model — and every tool the Anthropic loop is given, none of them strict.
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('https://api.openai.com/v1/responses');
+    expect((init.headers as Record<string, string>)['authorization']).toBe('Bearer sk-proj-test');
+    const body = requestBody(fetchMock, 0);
+    expect(body.model).toBe(AGENT_MODELS.openai.default);
+    expect(body.tools.map((tool) => tool.name)).toEqual(AUTOMATION_TOOLS.map((tool) => tool.name));
+    expect(body.tools.every((tool) => tool.strict === false)).toBe(true);
+  });
+
+  it('closes the call before asking for the sentence a silent rule was missing', async () => {
+    // A rule submitted with nothing said about it is kept, its call answered,
+    // and the model given one round to say what it did — and on this API a
+    // call left without its output refuses the *next* request, so the output
+    // has to be in that request rather than merely queued.
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(answering([submission('call_quiet')]))
+      .mockImplementationOnce(answering([said('That logs “Evening” whenever you press it.')]));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const turn = await (await openAiConversation()).send('a button for the evening');
+
+    expect(turn.kind).toBe('submitted');
+    expect((turn as Extract<AutomationTurn, { kind: 'submitted' }>).text).toBe(
+      'That logs “Evening” whenever you press it.',
+    );
+    const second = requestBody(fetchMock, 1);
+    expect(second.input).toContainEqual(
+      expect.objectContaining({ type: 'function_call_output', call_id: 'call_quiet' }),
+    );
+  });
+
+  it('sends a rule schema whose every reference lands on something', () => {
+    // A condition nests conditions, so the generated schema names the
+    // recursive one under `definitions` and points at it from the *root*.
+    // Nested under `properties.document` those pointers dangled — which the
+    // Anthropic loop never noticed, and which is exactly what a vendor that
+    // resolves them trips on.
+    const resolve = (root: unknown, ref: string) =>
+      ref
+        .replace(/^#\//, '')
+        .split('/')
+        .reduce<unknown>(
+          (node, key) =>
+            node !== null && typeof node === 'object'
+              ? (node as Record<string, unknown>)[key]
+              : undefined,
+          root,
+        );
+    const dangling: string[] = [];
+    let references = 0;
+    for (const tool of AUTOMATION_TOOLS) {
+      const root = tool.schema();
+      const walk = (node: unknown): void => {
+        if (Array.isArray(node)) {
+          node.forEach(walk);
+          return;
+        }
+        if (node === null || typeof node !== 'object') return;
+        for (const [key, value] of Object.entries(node)) {
+          if (key === '$ref' && typeof value === 'string') {
+            references += 1;
+            if (resolve(root, value) === undefined) dangling.push(`${tool.name}: ${value}`);
+          }
+          walk(value);
+        }
+      };
+      walk(root);
+    }
+    // Guards the test as well as the schema: with no references at all this
+    // would pass by checking nothing.
+    expect(references).toBeGreaterThan(0);
+    expect(dangling).toEqual([]);
+  });
 });
 
 describe('the chat service', () => {
@@ -1530,7 +1704,7 @@ describe('AutomationChat provider selection', () => {
    *  which key a conversation would have run on without making a request. */
   let chatFor: () => Promise<{
     chat: InstanceType<typeof AutomationChat>;
-    handed: { secret?: string; modelId?: string };
+    handed: { provider?: string; secret?: string; modelId?: string };
   }>;
 
   beforeEach(async () => {
@@ -1546,7 +1720,7 @@ describe('AutomationChat provider selection', () => {
       const registry = { listDevices: () => [], execute: async () => {} };
       const { engine, store } = await startedAutomations(handle.db, events, registry, activity);
       startedEngines.push(engine);
-      const handed: { secret?: string; modelId?: string } = {};
+      const handed: { provider?: string; secret?: string; modelId?: string } = {};
       const chat = new AutomationChat({
         db: handle.db,
         settings,
@@ -1555,11 +1729,12 @@ describe('AutomationChat provider selection', () => {
         events,
         runs: new AiRunLog(handle.db, events),
         log,
-        createConversation: ({ secret, modelId }) => {
+        createConversation: ({ provider, secret, modelId }) => {
+          handed.provider = provider;
           handed.secret = secret;
           handed.modelId = modelId;
           return {
-            provider: 'anthropic',
+            provider,
             modelId,
             effort: 'medium' as const,
             awaitingAnswer: () => false,
@@ -1598,13 +1773,77 @@ describe('AutomationChat provider selection', () => {
     expect(handed.secret).toBe('sk-ant-api03-the-right-one');
   });
 
-  it('refuses a home whose only key is OpenAI’s, in words and with a code', async () => {
-    await settings.setAiKey('openai', 'sk-openai-only');
+  it('runs on OpenAI when that is the only key the home has', async () => {
+    // This used to pin the opposite: a home whose one key was OpenAI's was told
+    // to add an Anthropic key, a week after the loop could run on either — and
+    // the assistant beside it, which had already lost the same check, offered
+    // to hand it the rule it could not write.
+    await settings.setAiKey('openai', 'sk-proj-the-only-one');
+
+    const { chat, handed } = await chatFor();
+    await chat.start({ memberId, message: 'lights at ten please' });
+    await chat.idle();
+
+    expect(handed.provider).toBe('openai');
+    expect(handed.secret).toBe('sk-proj-the-only-one');
+    // Resolved against the key the home actually has: the stored default is a
+    // Claude id nobody chose, and it must not be sent to OpenAI.
+    expect(handed.modelId).toBe(AGENT_MODELS.openai.default);
+  });
+
+  it('runs on OpenAI when this agent’s own model is OpenAI’s, with both keys saved', async () => {
+    // The choice the AI page's picker writes: the model says the vendor, and
+    // the key follows it rather than defaulting to Anthropic's.
+    await settings.setAiKey('anthropic', 'sk-ant-api03-not-this-one');
+    await settings.setAiKey('openai', 'sk-proj-this-one');
+    await settings.setAutomationsModel('gpt-5.6-terra');
+
+    const { chat, handed } = await chatFor();
+    await chat.start({ memberId, message: 'lights at ten please' });
+    await chat.idle();
+
+    expect(handed.provider).toBe('openai');
+    expect(handed.secret).toBe('sk-proj-this-one');
+    expect(handed.modelId).toBe('gpt-5.6-terra');
+  });
+
+  /** A Claude subscription token, stored the way an upgraded hub carries it. */
+  const storeSubscriptionToken = async () => {
+    await settings.setAiKey('anthropic', 'legacy-subscription-token');
+    await handle.db
+      .insert(settingsTable)
+      .values({ key: 'ai_auth_type', value: 'oauth_token' })
+      .onConflictDoUpdate({ target: settingsTable.key, set: { value: 'oauth_token' } });
+    expect((await settings.getAiSettings()).legacySubscriptionToken).toBe(true);
+  };
+
+  it('runs on OpenAI rather than on a subscription token saved beside it', async () => {
+    // The loops authenticate with an API key, so the subscription token a hub
+    // configured before the Agent SDK was removed still holds cannot run
+    // either of them — and an OpenAI key beside it is a home that can write
+    // rules, not one to refuse. The state only exists on an upgraded hub, so
+    // the test writes the stored setting the way that hub carries it.
+    await settings.setAiKey('openai', 'sk-proj-the-usable-one');
+    await storeSubscriptionToken();
+
+    const { chat, handed } = await chatFor();
+    await chat.start({ memberId, message: 'lights at ten please' });
+    await chat.idle();
+
+    expect(handed.provider).toBe('openai');
+    expect(handed.secret).toBe('sk-proj-the-usable-one');
+  });
+
+  it('refuses a home whose only credential is a subscription token, in words and with a code', async () => {
+    // What `automation_needs_anthropic` still means: a key the hub holds and
+    // cannot use, with nothing usable beside it — told which *kind* of key to
+    // add, not that it has none.
+    await storeSubscriptionToken();
 
     const { chat } = await chatFor();
     const error = await refusal(chat);
 
-    // A *refusal*, not a failure: the home is configured, just not for this.
+    // A *refusal*, not a failure: the home is configured, just not usably.
     // The route turns this into a 409 an app can branch on; anything else
     // reaches a phone as "The hub answered 500."
     expect(error).toBeInstanceOf(AutomationNotConfiguredError);
@@ -1612,30 +1851,9 @@ describe('AutomationChat provider selection', () => {
       'automation_needs_anthropic',
     );
     // And it carries a sentence, so an app that has never met the code still
-    // has something true to print.
-    expect((error as Error).message).toMatch(/Anthropic key/);
-  });
-
-  it('treats a legacy subscription token as no Anthropic key at all', async () => {
-    // The loop authenticates with `x-api-key`, so the subscription token a
-    // hub configured before the Agent SDK was removed still holds cannot run
-    // it — and a home in that state needs to be told which *kind* of key to
-    // add, not that it has none. The state only exists on an upgraded hub, so
-    // the test writes the stored setting the way that hub carries it.
-    await settings.setAiKey('openai', 'sk-openai-only');
-    await settings.setAiKey('anthropic', 'legacy-subscription-token');
-    await handle.db
-      .insert(settingsTable)
-      .values({ key: 'ai_auth_type', value: 'oauth_token' })
-      .onConflictDoUpdate({ target: settingsTable.key, set: { value: 'oauth_token' } });
-    expect((await settings.getAiSettings()).legacySubscriptionToken).toBe(true);
-
-    const { chat } = await chatFor();
-    const error = await refusal(chat);
-
-    expect((error as InstanceType<typeof AutomationNotConfiguredError>).code).toBe(
-      'automation_needs_anthropic',
-    );
+    // has something true to print — naming both kinds of key that would work.
+    expect((error as Error).message).toMatch(/subscription token/);
+    expect((error as Error).message).toMatch(/Anthropic or OpenAI API key/);
   });
 
   it('says nothing is configured when the home has no key at all', async () => {
