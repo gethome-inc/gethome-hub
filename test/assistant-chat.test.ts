@@ -1442,6 +1442,55 @@ describe('the assistant', () => {
     expect(efforts).toEqual([undefined]);
   });
 
+  /**
+   * **"Everything" is narrowed, never silently.** The fridge on a plug is not
+   * what somebody means by "turn everything off", so the hub leaves it — and
+   * tells the model, which reads the sentence and can still reach it when the
+   * message plainly asked for it too.
+   */
+  it('tells the model what "everything" left as it was', async () => {
+    const light = randomUUID();
+    const fridge = randomUUID();
+    await settings.setAiKey('typesafe', 'ts-test-key');
+    const decisions = jev(() => ({
+      ...offBoth(),
+      everything: noul(0.92),
+    }));
+    const devices = [
+      ...oneLight(light),
+      {
+        ...oneLight(fridge)[0]!,
+        name: 'Fridge plug',
+        endpoints: [
+          {
+            endpointId: 1,
+            deviceKind: 'outlet' as const,
+            capabilities: ['onOff' as const],
+            state: { reachable: true, sensors: {}, onOff: true },
+          },
+        ],
+      },
+    ];
+    const { assistant, sent, efforts } = await assistantFor([{ kind: 'said', text: 'All off.' }], {
+      devices,
+      decisions: decisions.transport,
+    });
+
+    const started = await assistant.start({ memberId, message: 'turn everything off' });
+    await assistant.idle();
+
+    expect(commanded).toEqual([{ deviceId: light, endpointId: 1, type: 'power' }]);
+    expect(sent[0]).toContain('- Ceiling light: switched off.');
+    expect(sent[0]).toContain(
+      '"Everything" is not taken to reach "Fridge plug", so the hub left it as it was',
+    );
+    expect(sent[0]).not.toContain('That was everything');
+    expect(efforts).toEqual([undefined]);
+    const rows = await assistant.transcript(started.sessionId);
+    const steps = (rows[1]?.data as { steps: ChatStepWire[] }).steps;
+    expect(steps[0]?.detail).toContain('left Fridge plug as it was');
+  });
+
   // ── Several requests in one sentence ──────────────────────────────────────
 
   /**

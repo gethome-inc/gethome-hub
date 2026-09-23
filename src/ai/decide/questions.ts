@@ -204,27 +204,6 @@ export const SPLIT_MIN = 0.6;
 export const MAX_PARTS = 4;
 
 /**
- * The most devices one request may move.
- *
- * "Turn off all the lights" in a large home is a real request, and this is
- * sized for it; a reading that resolves to more is a place misheard as the
- * whole house, and stands down rather than guessing. Every command still goes
- * through the ordinary path one device at a time. Assumed.
- */
-export const MAX_COMMANDS = 24;
-
-/**
- * The most devices one request may switch **on** — or open, unlock, play, set.
- *
- * Switching off is the direction that is safe to get wrong: a light somebody
- * wanted on is one tap back. Switching on is not — every lamp in every bedroom
- * at once is a misreading with people at the end of it — so a reading that
- * would switch on more than this stands down, and the model reads it, or asks.
- * "Turn on the kitchen lights" fits; "turn everything on" does not. Assumed.
- */
-export const ON_TARGETS_MAX = 6;
-
-/**
  * How many devices may be offered as options.
  *
  * The API's own ceiling is 255. This is lower because a long list is also a

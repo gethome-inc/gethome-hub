@@ -419,11 +419,11 @@ function spokenReading(state: EndpointState): Record<string, unknown> | undefine
 }
 
 /** Names as a person lists them — `"Lamp"`, `"Lamp" or "Fan"`, `"Lamp", "Fan" or "TV"`. */
-function listOf(names: readonly string[]): string {
+function listOf(names: readonly string[], joiner: 'or' | 'and' = 'or'): string {
   const quoted = names.map((name) => `"${name}"`);
   return quoted.length <= 1
     ? (quoted[0] ?? '')
-    : `${quoted.slice(0, -1).join(', ')} or ${quoted[quoted.length - 1]!}`;
+    : `${quoted.slice(0, -1).join(', ')} ${joiner} ${quoted[quoted.length - 1]!}`;
 }
 
 /**
@@ -468,9 +468,16 @@ export function fastPathPriming(input: {
   complete: boolean;
   /** Devices the fast path was not sure they meant as well, and left alone. */
   doubt: readonly string[];
+  /**
+   * Devices "everything" deliberately stepped around — the fridge on a plug,
+   * the heating — which the model is told about so a message that really
+   * meant them too still reaches them.
+   */
+  spared?: readonly string[] | undefined;
   /** A spoken turn, whose readings above were taken a moment before this. */
   spoken: boolean;
 }): string {
+  const spared = input.spared ?? [];
   const lines = input.done.map((entry) => {
     const where = entry.room !== undefined ? ` (${entry.room})` : '';
     if (entry.offline === true) {
@@ -496,7 +503,7 @@ export function fastPathPriming(input: {
           'as you normally would:',
           ...input.left.map((request) => `- "${request}"`),
         ]
-      : input.complete && input.doubt.length === 0
+      : input.complete && input.doubt.length === 0 && spared.length === 0
         ? ['That was everything their message asked for.']
         : [
             'Their message may ask for more than this: read it, and handle anything else it asks for as',
@@ -508,6 +515,15 @@ export function fastPathPriming(input: {
             input.doubt.length === 1 ? 'it' : 'them'
           } alone: if their message asks for ${input.doubt.length === 1 ? 'it' : 'those'} too, do it; if you`,
           'cannot tell, ask.',
+        ]
+      : []),
+    ...(spared.length > 0
+      ? [
+          `"Everything" is not taken to reach ${listOf(spared, 'and')}, so the hub left ${
+            spared.length === 1 ? 'it' : 'them'
+          } as ${spared.length === 1 ? 'it was' : 'they were'}: change ${
+            spared.length === 1 ? 'it' : 'them'
+          } only if their message clearly asks for that too, and say what you left.`,
         ]
       : []),
     '',

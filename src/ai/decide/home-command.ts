@@ -47,13 +47,11 @@ import {
   EFFORT_QUESTION,
   EFFORT_SIMPLE_MAX,
   FAMILIES,
-  MAX_COMMANDS,
   MAX_DEVICE_OPTIONS,
   MAX_PARTS,
   MAX_TARGET_QUESTIONS,
   NEGATIVE_NOUL_MAX,
   NONE_OF_THESE,
-  ON_TARGETS_MAX,
   PART_CANDIDATES_MAX,
   POSITIVE_NOUL_MIN,
   SELF_CONTAINED_QUESTION,
@@ -167,6 +165,13 @@ export interface CommandPlan {
    */
   doubt: string[];
   /**
+   * Devices "everything" deliberately stepped around — the fridge on a plug,
+   * the heating — that the request would otherwise have moved. Left as they
+   * were, and named to the model, so a message that really meant them too
+   * ("everything, the heating as well") still reaches them, through it.
+   */
+  spared: string[];
+  /**
    * The weakest link in the chain of answers the plan rests on — which is the
    * honest one to report, and the vendor's own function-calling cookbook's
    * rule: one wrong argument spoils the call.
@@ -197,8 +202,7 @@ export interface StandDown {
   question: string;
   /**
    * - `missed` — no reading came back; `miss` says why when the decider did.
-   * - `size` — the home was empty, too big to offer as options, or the set of
-   *   devices was bigger than one request may move.
+   * - `size` — the home was empty, or too big to offer as options.
    * - `unanswered` — the reading left out a question this path needs.
    * - `unsure` — the answer did not clear its bar.
    * - `declined` — sure, and sure it was not a device command: the ordinary
@@ -263,8 +267,8 @@ export type SubjectReading = { kind: 'act'; plan: CommandPlan } | { kind: 'none'
 export type HomeDecision =
   /**
    * Carry these out — one device or several. `complete` when the sentence was
-   * surely one request and nothing it might also have meant was left alone:
-   * the model is then told that was everything.
+   * surely one request and nothing was left for the model to judge (see
+   * `leftNothing`): the model is then told that was everything.
    */
   | ({ kind: 'act'; plan: CommandPlan; complete: boolean; effort: EffortHint } & Reading)
   /** Hand the whole sentence to this agent, as its own brief. */
@@ -337,10 +341,12 @@ const KIND_WORDS: Readonly<Record<DeviceKind, { one: string; many: string }>> = 
 /**
  * What "everything" reaches.
  *
- * **Read narrowly, and that is a safety rule rather than a gap.** "Turn
- * everything off in the kitchen" means the lights, the TV and the fan — not the
- * fridge on a smart plug, the heating, or the lock on the back door. A plug, an
- * appliance or a thermostat is only moved when it is named for what it is.
+ * **Read narrowly, because that is what the word means.** "Turn everything
+ * off in the kitchen" means the lights, the TV and the fan — not the fridge on
+ * a smart plug, the heating, or the lock on the back door. A plug, an
+ * appliance or a thermostat is moved when it is named for what it is, and
+ * what "everything" steps around is named to the model (`CommandPlan.spared`),
+ * never silently dropped.
  */
 const EVERYTHING_KINDS: ReadonlySet<DeviceKind> = new Set([
   'light',
@@ -783,24 +789,12 @@ function nameOfSet(
 }
 
 /**
- * Whether a command only ever switches something off or shuts it — the
- * direction that is safe to get wrong, since a light somebody wanted on is one
- * tap back. Pausing, locking and a mode of 0 are the same direction.
+ * Whether a plan left nothing for the model to judge: no device it was unsure
+ * about, and none that "everything" stepped around. Half of `complete` — the
+ * other half is whether the sentence was one request at all.
  */
-function switchesOff(command: HubCommand): boolean {
-  switch (command.type) {
-    case 'power':
-      return !command.on;
-    case 'playPause':
-      return !command.play;
-    case 'lock':
-      return command.engage;
-    case 'setFanMode':
-    case 'setSystemMode':
-      return command.mode === 0;
-    default:
-      return false;
-  }
+export function leftNothing(plan: CommandPlan): boolean {
+  return plan.doubt.length === 0 && plan.spared.length === 0;
 }
 
 /**
@@ -887,41 +881,45 @@ function readSubject(input: {
   if ('reason' in targets) return stood(targets);
   let devices = targets.devices;
 
+  const families = new Map<Family, ChoiceRead | undefined>(
+    FAMILIES.map((family) => [family, answers.choice(family)]),
+  );
+  const amountKind = input.amount !== undefined ? answers.choice('amount') : undefined;
+  const numbers = { amount: input.amount, kind: amountKind };
+
   /**
-   * **"Everything" is narrowed in code.** A device's own yes/no answering yes
-   * for the fridge plug in "everything off in the kitchen" is answering the
-   * sentence correctly; what somebody means by it is the things they switch
-   * off leaving a room, and that list is ours.
+   * **"Everything" is narrowed in code, and the model is told what it left.**
+   * A device's own yes/no answering yes for the fridge plug in "everything off
+   * in the kitchen" is answering the sentence correctly; what somebody means by
+   * the word is the things they switch off leaving a room, and that list is
+   * ours (`EVERYTHING_KINDS`). What it steps around and would otherwise have
+   * moved is named in `spared`, so "everything, the heating too" still reaches
+   * the heating — through the model, which reads the whole sentence.
    */
-  let everything = false;
+  const spared: string[] = [];
   if (devices.length > 1) {
     const all = answers.noul('everything');
-    const beyond = devices.some((device) => {
+    const reached = (device: DecidableDevice): boolean => {
       const kind = kindOf(device);
-      return kind === undefined || !EVERYTHING_KINDS.has(kind);
-    });
+      return kind !== undefined && EVERYTHING_KINDS.has(kind);
+    };
     if (all !== undefined && all.noul >= TARGET_YES) {
-      everything = true;
-      devices = devices.filter((device) => {
-        const kind = kindOf(device);
-        return kind !== undefined && EVERYTHING_KINDS.has(kind);
-      });
+      for (const device of devices) {
+        if (reached(device)) continue;
+        const would = planDevice({ device, families, numbers, home, catalog, group: true });
+        if (!('reason' in would)) spared.push(device.name);
+      }
+      devices = devices.filter(reached);
       if (devices.length === 0) {
         return stood({ question: 'everything', reason: 'blocked', because: 'nothing that "everything" reaches was asked for' });
       }
-    } else if (beyond) {
+    } else if (!devices.every(reached)) {
       if (all === undefined) return stood({ question: 'everything', reason: 'unanswered' });
       if (all.noul > TARGET_NO) {
         return stood({ question: 'everything', reason: 'unsure', value: all.noul, min: TARGET_YES, max: TARGET_NO });
       }
     }
   }
-
-  const families = new Map<Family, ChoiceRead | undefined>(
-    FAMILIES.map((family) => [family, answers.choice(family)]),
-  );
-  const amountKind = input.amount !== undefined ? answers.choice('amount') : undefined;
-  const numbers = { amount: input.amount, kind: amountKind };
   const several = devices.length > 1;
 
   const actions: DeviceAction[] = [];
@@ -929,7 +927,7 @@ function readSubject(input: {
   const confidences: number[] = [targets.confidence];
   let wordings: Wording[] | undefined;
   for (const device of devices) {
-    const planned = planDevice({ device, families, numbers, home, catalog, group: several, everything });
+    const planned = planDevice({ device, families, numbers, home, catalog, group: several });
     if ('reason' in planned) {
       // A device the action does not apply to — a light that cannot dim, in
       // "dim the lights" — is left alone when several were asked for; anything
@@ -964,29 +962,23 @@ function readSubject(input: {
     return stood({ question: 'action', reason: 'blocked', because: 'none of those devices can do that' });
   }
 
-  // **A set of locks is never unlocked.** Locking every door is the thing
-  // somebody asks when they leave; unlocking every door is a misreading with a
-  // front door at the end of it, and the model can ask.
+  /**
+   * **A set of locks is never unlocked here — the one rule about how many.**
+   * Every other mistake a reading can make is one tap to put right; a front
+   * door unlocked because a sentence was misheard is not, so unlocking more
+   * than one lock is left to the model, which reads the sentence itself and
+   * can ask. Locking every door is what somebody asks leaving the house, and
+   * goes ahead. There is deliberately **no count** beside it: the model has no
+   * tool that moves more than one device, so a cap on how many lights a
+   * reading may switch sent exactly the biggest requests — "turn off all the
+   * lights" in a large home — to the slowest road, while the per-device
+   * questions, the relative choice and `single` are what guard the misreading.
+   */
   const unlocks = actions.filter((action) =>
     action.commands.some(({ command }) => command.type === 'lock' && !command.engage),
   );
   if (unlocks.length > 1) {
     return stood({ question: 'lock', reason: 'blocked', because: 'several locks are never unlocked at once' });
-  }
-  // **Switching on is bounded; switching off is not.** See `ON_TARGETS_MAX`.
-  const on = actions.filter((action) => action.commands.some(({ command }) => !switchesOff(command)));
-  if (on.length > ON_TARGETS_MAX) {
-    return stood({
-      question: 'action',
-      reason: 'size',
-      value: on.length,
-      max: ON_TARGETS_MAX,
-      because: `more than ${ON_TARGETS_MAX} devices are never switched on at once`,
-    });
-  }
-  const commandCount = actions.reduce((sum, action) => sum + action.commands.length, 0);
-  if (commandCount > MAX_COMMANDS) {
-    return stood({ question: 'action', reason: 'size', value: commandCount, max: MAX_COMMANDS });
   }
 
   const acted = devices.filter((device) => actions.some((action) => action.deviceId === device.id));
@@ -1002,6 +994,7 @@ function readSubject(input: {
       wordings: several ? wordings : actions[0]!.wordings,
       offline,
       doubt: targets.doubt,
+      spared,
       confidence: Math.min(...confidences),
     },
   };
@@ -1035,8 +1028,6 @@ function planDevice(input: {
   home: DecidableHome;
   catalog: Catalog;
   group: boolean;
-  /** "Everything in the kitchen": only switched on or off, and paused. */
-  everything?: boolean;
 }): DevicePlan {
   const { device, families, home } = input;
   const has = (capability: CapabilityKind) =>
@@ -1064,24 +1055,6 @@ function planDevice(input: {
     wanted.set(family, answer);
   }
   if (wanted.size === 0) return { question: 'action', reason: 'blocked', device: device.name };
-
-  // "Everything" is switched on or off, or paused — never set to a brightness,
-  // a colour or a temperature all at once, which is a sentence the model reads.
-  if (input.everything === true) {
-    for (const [family, answer] of wanted) {
-      const allowed = family === 'power' || (family === 'playback' && answer.choice === 'pause');
-      if (!allowed) {
-        return {
-          question: family,
-          reason: 'blocked',
-          answer: answer.choice,
-          label: OPTION_WORDS[answer.choice] ?? answer.choice,
-          device: device.name,
-          because: 'only switching on or off, and pausing, apply to everything',
-        };
-      }
-    }
-  }
 
   /**
    * The endpoints that carry a capability — exactly one for a single device,
@@ -1169,19 +1142,8 @@ function planDevice(input: {
 
   const lock = wanted.get('lock');
   if (lock !== undefined) {
-    // **A whole group is never unlocked.** Locking every door is the thing
-    // somebody asks when they leave; unlocking every door is a misreading
-    // with a front door at the end of it, and the model can ask.
-    if (lock.choice === 'unlock' && input.group) {
-      return {
-        question: 'lock',
-        reason: 'blocked',
-        answer: 'unlock',
-        label: 'unlock',
-        device: device.name,
-        because: 'a group of locks is never unlocked at once',
-      };
-    }
+    // Several locks unlocked at once is refused by the reading as a whole —
+    // see `readSubject` — so one lock in a set is worked like any other device.
     const engage = lock.choice === 'lock';
     const failed = add(
       'doorLock',
@@ -1819,10 +1781,11 @@ export async function decideHomeCommand(input: {
    * One thing to do — surely on its own (`one`), or beside a question or a
    * remark (`more`), whose other half is the model's whatever happens here.
    *
-   * **`complete` only for the first, with nothing left in doubt**: that is when
-   * the model is told the reading was everything they asked for and runs its
-   * round only to say so. Anything less and it is told what was done and left
-   * to read the rest of the sentence itself.
+   * **`complete` only for the first, with nothing left for the model to
+   * judge** — no device in doubt, none that "everything" stepped around: that
+   * is when the model is told the reading was everything they asked for and
+   * runs its round only to say so. Anything less and it is told what was done
+   * and left to read the rest of the sentence itself.
    */
   const alone = share(SHAPE_ONE) >= ACT_CONFIDENCE_MIN;
   const read = readSubject({ answers: subject, catalog, home, amount, mode: alone ? 'one' : 'more' });
@@ -1830,7 +1793,7 @@ export async function decideHomeCommand(input: {
   return {
     kind: 'act',
     plan: { ...read.plan, confidence: Math.min(read.plan.confidence, something) },
-    complete: alone && read.plan.doubt.length === 0,
+    complete: alone && leftNothing(read.plan),
     effort,
     ...reading,
   };
@@ -2124,17 +2087,6 @@ export function describeStandDown(standDown: StandDown): StandDownWords {
             : told("didn't answer", 'shown');
       }
     case 'size':
-      if (standDown.question === 'action') {
-        return standDown.because !== undefined
-          ? told(`stood down: ${standDown.because}`, 'shown', [
-              standDown.value !== undefined ? `${standDown.value} devices` : undefined,
-              took,
-            ])
-          : told('found more devices than one request may move', 'shown', [
-              `${standDown.value ?? '?'} commands, up to ${standDown.max ?? MAX_COMMANDS}`,
-              took,
-            ]);
-      }
       return standDown.value === undefined || standDown.value === 0
         ? told('had no devices to choose from', 'quiet')
         : told("isn't offered a home this large", 'shown', [

@@ -6,12 +6,10 @@ import {
   DECISION_TIMEOUT_MS,
   DEVICE_LEAN_MIN,
   FAMILIES,
-  MAX_COMMANDS,
   MAX_PARTS,
   MAX_TARGET_QUESTIONS,
   NEGATIVE_NOUL_MAX,
   NONE_OF_THESE,
-  ON_TARGETS_MAX,
   PART_CANDIDATES_MAX,
   POSITIVE_NOUL_MIN,
   SHAPE_NOTHING,
@@ -474,8 +472,6 @@ describe('the questions themselves', () => {
     // never alone.
     expect(DEVICE_LEAN_MIN).toBeGreaterThan(0.5);
     expect(DEVICE_LEAN_MIN).toBeLessThan(ACT_CONFIDENCE_MIN);
-    // Switching on is bounded well inside what one request may move at all.
-    expect(ON_TARGETS_MAX).toBeLessThan(MAX_COMMANDS);
   });
 
   it('gives a decision time to reach the vendor from a Pi, and no more', () => {
@@ -658,6 +654,7 @@ describe('one device', () => {
     expect(plan.plural).toBe(false);
     expect(plan.offline).toEqual([]);
     expect(plan.doubt).toEqual([]);
+    expect(plan.spared).toEqual([]);
     // The weakest link in the chain of answers it rests on.
     expect(plan.confidence).toBe(0.96);
     expect(phrase(plan.wordings, plan.target, plan.plural)).toBe('switched off Kitchen light');
@@ -1163,33 +1160,33 @@ describe('several devices', () => {
     });
   });
 
-  it(`switches a few on, and never more than ${ON_TARGETS_MAX} at once`, async () => {
-    const few = await read(SET(['d1', 'd2'], { power: choice('on', 0.97) }), 'kitchen lights on');
-    expect(movedBy(few)).toEqual(['kitchen-light', 'spots']);
-
-    const count = ON_TARGETS_MAX + 2;
-    const many = await read(
+  /**
+   * **No count, in either direction.** The model has no tool that moves more
+   * than one device, so a cap on how many a reading may switch sent exactly the
+   * biggest requests to the slowest road — thirty tool calls for "turn off all
+   * the lights" — while guarding against nothing the per-device questions, the
+   * relative choice and `single` do not already guard against.
+   */
+  it('switches on every light it was asked to, however many, in one reading', async () => {
+    const count = 12;
+    const decision = await read(
       SET(Array.from({ length: count }, (_, index) => `d${index + 1}`), { power: choice('on', 0.97) }, count),
       'turn on all the lights',
       homeWith({ devices: lights(count) }),
     );
-    expect(standDownOf(many)).toMatchObject({
-      question: 'action',
-      reason: 'size',
-      value: count,
-      max: ON_TARGETS_MAX,
-      because: `more than ${ON_TARGETS_MAX} devices are never switched on at once`,
-    });
+    expect(movedBy(decision)).toHaveLength(count);
+    expect(decision).toMatchObject({ kind: 'act', complete: true });
   });
 
-  it('switches any number off, which is the direction that is safe to get wrong', async () => {
-    const count = ON_TARGETS_MAX + 2;
+  it('switches off every light in a large home in one reading', async () => {
+    const count = 30;
     const decision = await read(
       SET(Array.from({ length: count }, (_, index) => `d${index + 1}`), {}, count),
       'turn off all the lights',
       homeWith({ devices: lights(count) }),
     );
-    expect(movedBy(decision)).toHaveLength(count);
+    expect(commandsOf(decision)).toHaveLength(count);
+    expect(planOf(decision).target).toBe(`${count} lights in the Kitchen`);
   });
 
   it('dims the lights that can dim and leaves the rest alone', async () => {
@@ -1202,21 +1199,28 @@ describe('several devices', () => {
     ]);
   });
 
-  it('reads "everything" narrowly: what a person switches off leaving a room', async () => {
+  it('reads "everything" narrowly, and tells the model what it left as it was', async () => {
     const decision = await read(
-      SET(['d3', 'd4', 'd5', 'd8'], { everything: noul(0.92) }),
+      SET(['d3', 'd4', 'd5', 'd8'], { everything: noul(0.92), climate: choice('off', 0.95) }),
       'turn everything off in the living room',
     );
     // The light and the TV — not the blind, not the thermostat.
     expect(movedBy(decision)).toEqual(['tv-light', 'tv']);
+    // The heating would have gone off, so it is named: "everything, the
+    // heating too" still reaches it, through the model. The blind had nothing
+    // "off" could do to it, so there is nothing to say about it.
+    expect(planOf(decision).spared).toEqual(['Thermostat']);
+    // And the model reads the sentence to decide, so this was not everything.
+    expect(decision).toMatchObject({ kind: 'act', complete: false });
   });
 
-  it('never reaches a fridge on a plug through "everything"', async () => {
+  it('never reaches a fridge on a plug through "everything", and says so', async () => {
     const decision = await read(
       SET(['d1', 'd2', 'd10'], { everything: noul(0.92) }),
       'everything off in the kitchen',
     );
     expect(movedBy(decision)).toEqual(['kitchen-light', 'spots']);
+    expect(planOf(decision).spared).toEqual(['Fridge plug']);
   });
 
   it('asks when it cannot tell whether "everything" was meant and a plug would be reached', async () => {
@@ -1232,16 +1236,15 @@ describe('several devices', () => {
     expect(movedBy(decision)).toEqual(['kitchen-light', 'plug']);
   });
 
-  it('only switches everything on or off — never gives it all a colour', async () => {
+  it('gives everything that can take a colour that colour, and leaves the rest alone', async () => {
     const decision = await read(
       SET(['d3', 'd4'], { everything: noul(0.92), power: choice(UNCHANGED), colour: choice('red', 0.95) }),
       'make everything red',
     );
-    expect(standDownOf(decision)).toMatchObject({
-      question: 'colour',
-      reason: 'blocked',
-      because: 'only switching on or off, and pausing, apply to everything',
-    });
+    // The TV has no colour to give, so it is simply not moved.
+    expect(commandsOf(decision)).toEqual([
+      { deviceId: 'tv-light', endpointId: 1, command: { type: 'setHueSaturation', hue: 0, saturation: 254 } },
+    ]);
   });
 
   it('locks every lock, and never unlocks them all', async () => {
@@ -1257,12 +1260,25 @@ describe('several devices', () => {
       { deviceId: 'door', endpointId: 1, command: { type: 'lock', engage: true } },
       { deviceId: 'back-door', endpointId: 1, command: { type: 'lock', engage: true } },
     ]);
+    // The one rule about how many: a door unlocked by a misheard sentence is
+    // not one tap to put right, so several are the model's to read, or ask.
     const unlocked = await read(locks('unlock'), 'unlock the doors', home);
     expect(standDownOf(unlocked)).toMatchObject({
       question: 'lock',
       reason: 'blocked',
-      because: 'a group of locks is never unlocked at once',
+      because: 'several locks are never unlocked at once',
     });
+  });
+
+  it('unlocks one door beside the other devices it was asked to work', async () => {
+    const decision = await read(
+      SET(['d7', 'd1'], { power: choice('on', 0.97), lock: choice('unlock', 0.95) }),
+      'unlock the front door and put the kitchen light on',
+    );
+    expect(commandsOf(decision)).toEqual([
+      { deviceId: 'kitchen-light', endpointId: 1, command: { type: 'power', on: true } },
+      { deviceId: 'door', endpointId: 1, command: { type: 'lock', engage: false } },
+    ]);
   });
 
   it('works every endpoint of a two-gang switch in a set', async () => {
@@ -1297,20 +1313,6 @@ describe('several devices', () => {
     });
   });
 
-  it('stands down on more commands than one request may send', async () => {
-    const count = MAX_COMMANDS + 6;
-    const decision = await read(
-      SET(Array.from({ length: count }, (_, index) => `d${index + 1}`), {}, count),
-      'kitchen lights off',
-      homeWith({ devices: lights(count) }),
-    );
-    expect(standDownOf(decision)).toMatchObject({
-      question: 'action',
-      reason: 'size',
-      value: count,
-      max: MAX_COMMANDS,
-    });
-  });
 });
 
 /* ------------------------------------------------------------------ */
@@ -1891,25 +1893,6 @@ describe('saying why it stood down', () => {
       part: 'the other thing',
     });
     expect(words.detail).toBe('a device command: 0.60, needs 0.85 · 180 ms · for “the other thing”');
-  });
-
-  it('says a request was too big, and by how much', () => {
-    const words = describeStandDown({ ...base, question: 'action', reason: 'size', value: 30, max: MAX_COMMANDS });
-    expect(words.text).toBe('Jev found more devices than one request may move');
-    expect(words.detail).toBe(`30 commands, up to ${MAX_COMMANDS} · 180 ms`);
-  });
-
-  it('says it never switches that many on at once', () => {
-    const words = describeStandDown({
-      ...base,
-      question: 'action',
-      reason: 'size',
-      value: 8,
-      max: ON_TARGETS_MAX,
-      because: `more than ${ON_TARGETS_MAX} devices are never switched on at once`,
-    });
-    expect(words.text).toBe(`Jev stood down: more than ${ON_TARGETS_MAX} devices are never switched on at once`);
-    expect(words.detail).toBe('8 devices · 180 ms');
   });
 
   /**

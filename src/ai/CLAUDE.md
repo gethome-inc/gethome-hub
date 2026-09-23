@@ -367,13 +367,18 @@ domains — update them in the same change.
   four gated questions — how many, where, what kind, which — that stood down on
   distinctions changing nothing ("no place or the whole home: 0.77"); don't
   rebuild a gate that has to clear a bar the answer does not depend on. A set is
-  read narrowly: "everything" is narrowed in code to what a person switches off
-  leaving a room, never more than `ON_TARGETS_MAX` switched *on* (switching off
-  is unbounded up to `MAX_COMMANDS`), never a set unlocked, and a member the hub
-  knows is offline is named rather than tried. **It acts only on what it is
-  sure of**: a device it could not rule out is left alone and named to the
+  read narrowly and **never bounded by a count**: "everything" is narrowed in
+  code to what a person switches off leaving a room, and what it steps around is
+  named to the model (`CommandPlan.spared`) rather than dropped; Jev never
+  unlocks several locks at once, the one rule about how many, because an
+  unlocked door is the one misreading a tap does not undo; and a member the hub
+  knows is offline is named rather than tried. There were caps — six switched
+  on, 24 commands — and they sent exactly the biggest requests to a model that
+  can only answer them a tool call per device; don't put one back without a
+  reason the per-device questions do not already answer. **It acts only on what
+  it is sure of**: a device it could not rule out is left alone and named to the
   model (`CommandPlan.doubt`), and `complete` says whether the reading was the
-  whole message. **The split is the last resort** — only several *different*
+  whole message (`leftNothing`). **The split is the last resort** — only several *different*
   things (`shape` at `SPLIT_MIN`) go to the conversation's own model
   (`decide/split.ts`: structured output, lowest effort, one deadline, parts
   re-checked, told the device names so a name is never cut in two), and the
@@ -1078,5 +1083,9 @@ domains — update them in the same change.
   **`control_device` is the one tool that writes to the home**, through the
   registry's ordinary path and into the activity log **named for the person who
   asked** — the feed is read a week later and "the assistant" is nobody anyone
-  can go and ask. Bounded per *turn*, not as a guard against a person tapping
-  quickly but against a model reading "everything off" as the whole house.
+  can go and ask. **Bounded per device, never per reply**
+  (`ASSISTANT_MAX_COMMANDS_PER_DEVICE`): it was eight commands a reply, which
+  cut every whole-home request short — fifteen bulbs, eight switched off and
+  permission asked for the rest — so a sentence somebody can say in one breath
+  could not be carried out in one reply. One device worked over and over is a
+  loop, and that is all the bound stops.

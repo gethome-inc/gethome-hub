@@ -17,6 +17,7 @@ import {
   decideHomeCommand,
   decideParts,
   describeStandDown,
+  leftNothing,
   participle,
   phrase,
   type CommandPlan,
@@ -1253,7 +1254,7 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
     await this.prime(
       session,
       [{ outcomes, offline: plan.offline }],
-      { left: [], complete, doubt: plan.doubt },
+      { left: [], complete, doubt: plan.doubt, spared: plan.spared },
       how.via,
     );
     return complete ? how.confirming : how.carry(undefined);
@@ -1311,7 +1312,7 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
         this.reportStandDown(session, decision.whole.standDown, via, how.reused);
         return carry(undefined);
       }
-      return this.actOn(session, decision.whole.plan, decision.whole.plan.doubt.length === 0, {
+      return this.actOn(session, decision.whole.plan, leftNothing(decision.whole.plan), {
         reading: decision,
         ...how,
       });
@@ -1335,6 +1336,7 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
     const done: { outcomes: ActionOutcome[]; offline: CommandPlan['offline'] }[] = [];
     const left: string[] = [];
     const doubt: string[] = [];
+    const spared: string[] = [];
     // In the order they were said: "turn the light on and then dim it" is a
     // sequence, and the second part may well be about the first.
     for (const part of read.parts) {
@@ -1348,6 +1350,7 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
         });
         done.push({ outcomes, offline: part.reading.plan.offline });
         doubt.push(...part.reading.plan.doubt.filter((name) => !doubt.includes(name)));
+        spared.push(...part.reading.plan.spared.filter((name) => !spared.includes(name)));
       } else {
         left.push(part.text);
         this.reportStandDown(session, part.reading.standDown, via, false);
@@ -1356,8 +1359,8 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
     // Nothing carried out: the round is the ordinary one, over the whole
     // sentence, exactly as if none of this had happened.
     if (done.length === 0) return carry(undefined);
-    const complete = left.length === 0 && doubt.length === 0;
-    await this.prime(session, done, { left, complete, doubt }, via);
+    const complete = left.length === 0 && doubt.length === 0 && spared.length === 0;
+    await this.prime(session, done, { left, complete, doubt, spared }, via);
     return complete ? confirming : carry(undefined);
   }
 
@@ -1469,6 +1472,10 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
           : `${plan.offline.length} offline and not tried`,
       // What it was not sure they meant as well, and left for the model to judge.
       plan.doubt.length === 0 ? undefined : `left ${plan.doubt.join(', ')} to the model`,
+      // What "everything" stepped around — the model is told, and reads the sentence.
+      plan.spared.length === 0
+        ? undefined
+        : `left ${plan.spared.join(', ')} as ${plan.spared.length === 1 ? 'it was' : 'they were'}`,
     ]
       .filter((part): part is string => part !== undefined)
       .join(' · ');
@@ -1487,6 +1494,7 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
           })),
           ...(plan.offline.length > 0 ? { offline: plan.offline.map((entry) => entry.deviceName) } : {}),
           ...(plan.doubt.length > 0 ? { doubt: plan.doubt } : {}),
+          ...(plan.spared.length > 0 ? { spared: plan.spared } : {}),
           confidence: plan.confidence,
           durationMs: reading.durationMs,
           ...(reading.newConnection !== undefined ? { newConnection: reading.newConnection } : {}),
@@ -1517,6 +1525,8 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
       complete: boolean;
       /** Devices the reading was not sure they meant as well, and left alone. */
       doubt: readonly string[];
+      /** Devices "everything" deliberately stepped around. */
+      spared: readonly string[];
     },
     via: ChatVia,
   ): Promise<void> {
@@ -1541,6 +1551,7 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
       left: rest.left,
       complete: rest.complete,
       doubt: rest.doubt,
+      spared: rest.spared,
       spoken: via === 'voice',
     });
     session.priming = session.priming === undefined ? line : `${session.priming}\n\n${line}`;

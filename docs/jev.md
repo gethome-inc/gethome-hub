@@ -386,7 +386,8 @@ which names one device and never a set.
 | **Effort** | the score says the work is plainly small | the round runs at `low` | the transport's own `medium` |
 
 **An act says whether it was the whole message** (`complete`): `shape` sure it
-was one thing on its own, and nothing left in doubt. Only then is the model
+was one thing on its own, nothing left in doubt, and nothing that "everything"
+stepped around (`leftNothing`). Only then is the model
 told *that was everything* and the round run at the lowest effort. A command
 beside a question — "switch the fan off and tell me the time", which `shape`
 calls `one_and_more` and is not split — or a device the reading left alone, and
@@ -404,29 +405,49 @@ its percentage otherwise. Brightness and colour on a light that is off switch
 it on first — "make it red" means a red light — but "dim it" does not. **Off
 wins**: switched off is the whole request, whatever else the families said.
 
-### A set of devices is read narrowly, and that is a safety rule rather than a gap
+### How a set of devices is read — and nothing here refuses anybody
+
+**None of these rules stops a request.** What Jev does not carry out itself is
+the model's, which reads the whole sentence and does the rest with its own
+tools — and neither road puts a number on how many devices one message may
+move. There used to be three: Jev switched on at most six devices and sent at
+most 24 commands, and the model's own `control_device` stopped after eight per
+reply. The first two sent exactly the biggest requests — "turn off all the
+lights" in a large home, which the model can only answer with a tool call per
+device — to the slowest road, and the third then cut them short: a flat with
+fifteen bulbs had eight switched off and was asked permission for the rest, so
+a sentence somebody can say in one breath could not be carried out in one
+reply. They guarded against a misreading that the per-device questions, the
+relative choice and `single` now guard against directly, so they are gone; the
+model's tool is bounded per *device* instead (`ASSISTANT_MAX_COMMANDS_PER_DEVICE`),
+which stops a loop and never a request. What is left is about meaning, and one
+thing about safety:
 
 - **"Everything" is what a person switches off leaving a room** — lights,
   switches, TVs, speakers, fans, air purifiers (`EVERYTHING_KINDS`). A device's
   own yes/no that says yes for the fridge plug in "everything off in the
-  kitchen" is answering the sentence correctly; what somebody *means* is
-  narrower, so when `everything` is a yes the set is narrowed in code, and when
-  it is in doubt and the set holds anything else, the reading stands down. A
-  plug, an appliance, a lock or the heating is moved only when it is named for
-  what it is. And everything is only ever switched on or off, or paused — never
-  given a colour or a temperature all at once.
-- **Switching on is bounded; switching off is not.** No reading switches on —
-  or opens, unlocks, plays, sets — more than `ON_TARGETS_MAX` (6) devices:
-  every lamp in every bedroom at once is a misreading with people at the end of
-  it, and the model can read it or ask. Switching off is the direction that is
-  safe to get wrong, so "turn off the lights" (or "выключи свет") with no place
-  said is every light in the home, which is how the assistants people already
-  use read it too.
-- **A set of locks is never unlocked.** Locking every door is the thing
-  somebody asks when they leave; unlocking every door is a misreading with a
-  front door at the end of it, and the model can ask.
+  kitchen" is answering the sentence correctly; what somebody *means* by the
+  word is narrower, so when `everything` is a yes the set is narrowed in code,
+  and when it is in doubt and the set holds anything else, the reading stands
+  down. **What it steps around is never dropped silently**: every device it
+  left that the request would otherwise have moved — the fridge plug, the
+  heating — is named to the model (`CommandPlan.spared`), which reads the
+  sentence and still reaches it when the message plainly asked for it too
+  ("everything off, the heating as well"), and otherwise says what it left.
+  Named for what it is — "the plugs in the kitchen" — a plug is moved like
+  anything else. And "everything" takes any setting the devices can take:
+  "make everything red" colours every light that can show a colour.
+- **Several locks are never unlocked by Jev** — the one rule about how many,
+  and it is about what cannot be put right. Every other misreading is one tap
+  to undo; a front door unlocked because a sentence was misheard is not. So
+  "unlock the doors" is the model's to read, or to ask about, and locking every
+  door — what somebody asks leaving the house — goes ahead. One door, alone or
+  beside other devices, is unlocked like any other command.
 - **One device asked for is never several.** Several clear yeses to a sentence
   `single` hears as one device is "which one?", and that is the model's to ask.
+- **Switching off is the direction that is safe to get wrong**, so "turn off
+  the lights" (or "выключи свет") with no place said is every light in the
+  home, which is how the assistants people already use read it too.
 - **A member the action does not apply to is left alone** — a light that
   cannot dim, in "dim the lights" — and **a member the hub knows is offline is
   not tried**: a command to a device that cannot hear it is at best an error
@@ -435,8 +456,6 @@ wins**: switched off is the whole request, whatever else the families said.
   that says the lights are off. It is named in the account the model is given,
   so the reply can say which one did not go off. Every member offline, and it
   stands down.
-- **`MAX_COMMANDS` (24) bounds one request.** A reading that resolves to more
-  is a place misheard as the whole house.
 - **A two-gang switch named on its own stands down** ("which half?" is the
   model's to ask); in a set, every endpoint is worked.
 
@@ -501,13 +520,16 @@ things: the requests of a split sentence that were **not** carried out, quoted,
 as its to handle; *that was everything their message asked for*, when the
 reading was complete; or *their message may ask for more than this*, when it was
 not. And the devices the reading was not sure they meant as well, named — *left
-alone: if their message asks for those too, do it; if you cannot tell, ask.* It
+alone: if their message asks for those too, do it; if you cannot tell, ask* —
+and what "everything" stepped around, named too: *left as they were; change
+them only if their message clearly asks for that, and say what you left.* It
 is told not to do any of it again and that there is no need to check it with
 `get_device`; out loud, that the digest above was read a moment before.
 
 When the reading was everything, the round runs at the lowest effort: the work
 is finished, and what is left is a sentence. When anything is left — a part, a
-question beside the command, a device in doubt — the round is the ordinary one.
+question beside the command, a device in doubt, a device "everything" stepped
+around — the round is the ordinary one.
 
 **A prompt is a request rather than a guarantee**, so `control` keeps a record
 of what this turn carried out and drops a repeat of the same command on the
@@ -633,9 +655,12 @@ turn that uses it.
    road for below it, the probability is decoration. A plan's confidence is the
    **weakest link** of the answers it rests on — the function-calling
    cookbook's rule: one wrong argument spoils the call.
-5. **A set of devices is bounded and read narrowly** — see *A set of devices
-   is read narrowly* above. Widening "everything", raising `ON_TARGETS_MAX`,
-   or letting a set unlock, wants measurement on real homes, not a default.
+5. **A set of devices is read narrowly, and never bounded by a count** — see
+   *How a set of devices is read* above. Widening "everything", or letting Jev
+   unlock several locks at once, wants measurement on real homes, not a
+   default; putting a number back on how many devices may move wants a reason
+   the per-device questions do not already answer, because every one of those
+   numbers made the biggest requests slow or impossible.
 6. **The one step that writes is checked, never trusted.** A split is read back
    by Jev part by part against every bar a sentence has to clear, and a split
    in a shape the hub will not read is the sentence, whole.
