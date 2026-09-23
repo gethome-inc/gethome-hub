@@ -52,6 +52,18 @@ function stub(responder: (call: Call) => Response): { calls: Call[] } {
   return { calls };
 }
 
+/** A `fetch` that never answers, and rejects the way the real one does when aborted. */
+function stallUntilAborted(): void {
+  vi.stubGlobal('fetch', (async (_input: unknown, init?: RequestInit) => {
+    await new Promise((_, reject) => {
+      (init?.signal as AbortSignal | undefined)?.addEventListener('abort', () =>
+        reject(new DOMException('This operation was aborted', 'AbortError')),
+      );
+    });
+    return new Response('{}');
+  }) as unknown as typeof fetch);
+}
+
 const ok = (body: unknown): Response =>
   new Response(JSON.stringify(body), {
     status: 200,
@@ -257,6 +269,16 @@ describe('failures', () => {
       runDecision({ secret: 'k', state: 's', questions, timeoutMs: 500, log }),
     ).rejects.toThrow(/not JSON/);
   });
+
+  it('says a deadline passed as itself, not as the abort it caused', async () => {
+    // The watchdog aborts the request, and an aborted `fetch` throws the same
+    // `AbortError` a speculation overtaken by a live call does — so without
+    // its own error, "it was too slow" and "we cancelled it" read alike.
+    stallUntilAborted();
+    await expect(
+      runDecision({ secret: 'k', state: 's', questions, timeoutMs: 20, log }),
+    ).rejects.toMatchObject({ name: 'DecisionTimeoutError', timeoutMs: 20 });
+  });
 });
 
 describe('the wrapper, which is what makes an outage invisible', () => {
@@ -359,8 +381,15 @@ describe('the wrapper, which is what makes an outage invisible', () => {
     const first = decider.decide({ state: 's', questions: one, timeoutMs: 500 });
     // Let the first get as far as the fetch before the second asks.
     await new Promise((resolve) => setImmediate(resolve));
-    const second = await decider.decide({ state: 's', questions: one, timeoutMs: 500 });
+    const heard: string[] = [];
+    const second = await decider.decide({
+      state: 's',
+      questions: one,
+      timeoutMs: 500,
+      onMiss: (why) => heard.push(why),
+    });
     expect(second).toBeNull();
+    expect(heard).toEqual(['busy']);
     release?.();
     expect((await first)?.answers.urgent?.noul).toBe(0.91);
     expect(calls).toHaveLength(1);
@@ -442,5 +471,82 @@ describe('the wrapper, which is what makes an outage invisible', () => {
     // Still answering: nothing was armed.
     const after = await decider.decide({ state: 's', questions: one, timeoutMs: 500 });
     expect(after).not.toBeNull();
+  });
+
+  /**
+   * **Every `null` says which one it was, and none of them answers any
+   * differently.** The reason is for a log line and a trail step — "why was
+   * that not instant?" deserves better than a guess — and never for a branch,
+   * so the contract stays exactly `null`.
+   */
+  it('says why it answered nothing', async () => {
+    const heard: string[] = [];
+    const onMiss = (why: string): void => {
+      heard.push(why);
+    };
+    stub(() => ok(answered));
+    await lazyDecider({ settings: settingsWith({ hasKey: false }), log }).decide({
+      state: 's',
+      questions: one,
+      timeoutMs: 500,
+      onMiss,
+    });
+    await lazyDecider({ settings: settingsWith({ enabled: false }), log }).decide({
+      state: 's',
+      questions: one,
+      timeoutMs: 500,
+      onMiss,
+    });
+
+    stub(() => new Response('nope', { status: 401 }));
+    const failing = lazyDecider({ settings: settingsWith({}), log });
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      expect(
+        await failing.decide({ state: 's', questions: one, timeoutMs: 500, onMiss }),
+      ).toBeNull();
+    }
+    // Three that failed, and then the breaker — which asked nobody.
+    expect(heard).toEqual(['off', 'off', 'failed', 'failed', 'failed', 'resting']);
+  });
+
+  it('tells a timeout from a failure', async () => {
+    stallUntilAborted();
+    const heard: string[] = [];
+    const result = await lazyDecider({ settings: settingsWith({}), log }).decide({
+      state: 's',
+      questions: one,
+      timeoutMs: 20,
+      onMiss: (why) => heard.push(why),
+    });
+    expect(result).toBeNull();
+    expect(heard).toEqual(['timeout']);
+  });
+
+  it('calls a speculation that gave way busy, not failed', async () => {
+    vi.stubGlobal('fetch', (async (_url: unknown, init?: RequestInit) => {
+      await new Promise((_, reject) => {
+        (init?.signal as AbortSignal | undefined)?.addEventListener('abort', () =>
+          reject(new Error('aborted')),
+        );
+      });
+      return ok(answered);
+    }) as unknown as typeof fetch);
+    const decider = lazyDecider({ settings: settingsWith({}), log });
+    const heard: string[] = [];
+    const speculation = decider.decide({
+      state: 's',
+      questions: one,
+      timeoutMs: 500,
+      priority: 'speculative',
+      onMiss: (why) => heard.push(why),
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    // A live call overtakes it. That one then stalls until its own deadline,
+    // which is its own business — it is awaited only so nothing outlives the
+    // test, and only the speculation's reason is asserted.
+    const live = decider.decide({ state: 's', questions: one, timeoutMs: 20 });
+    expect(await speculation).toBeNull();
+    expect(heard).toEqual(['busy']);
+    await live;
   });
 });

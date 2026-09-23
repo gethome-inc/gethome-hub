@@ -321,6 +321,18 @@ async function streamResponse(request: {
 
   let completed: ResponseBody | null = null;
   let failure: string | null = null;
+  /**
+   * Which part of the reasoning summary the deltas are in.
+   *
+   * **A summary arrives as parts, and the deltas do not say where one ends.**
+   * Each part opens on a heading of its own — `**Checking the lights**` — so
+   * two parts joined as they arrive ran the second heading straight onto the
+   * last sentence of the first ("…in the living room.**Checking the lights**"),
+   * and no amount of care downstream can tell where the join was. A blank line
+   * between parts is what the vendor's own rendering puts there, and it is what
+   * lets an app start each heading on a line of its own.
+   */
+  let summaryPart: string | undefined;
 
   for await (const event of serverSentEvents(response.body)) {
     switch (event.type) {
@@ -331,7 +343,11 @@ async function streamResponse(request: {
       }
       case 'response.reasoning_summary_text.delta': {
         const delta = event.data['delta'];
-        if (typeof delta === 'string') request.onThinking?.(delta);
+        if (typeof delta !== 'string') break;
+        const part = `${String(event.data['item_id'])}#${String(event.data['summary_index'])}`;
+        if (summaryPart !== undefined && part !== summaryPart) request.onThinking?.('\n\n');
+        summaryPart = part;
+        request.onThinking?.(delta);
         break;
       }
       case 'response.completed': {

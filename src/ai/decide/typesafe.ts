@@ -49,6 +49,22 @@ export function estimateDecisionCostUsd(usage: { inputTokens: number }): number 
   return (usage.inputTokens / 1_000_000) * DECISION_INPUT_PER_MTOK;
 }
 
+/**
+ * Raised when the deadline passed with nothing back.
+ *
+ * Its own class rather than the `AbortError` the aborted `fetch` throws,
+ * because that one is also what a speculation overtaken by a live call throws —
+ * and "it was too slow" and "we cancelled it" are different lines in a log.
+ * `lazy.ts` reads it by `name`, since it only ever holds this module behind a
+ * dynamic import.
+ */
+export class DecisionTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`no decision within ${timeoutMs} ms`);
+    this.name = 'DecisionTimeoutError';
+  }
+}
+
 /** Raised when the state is too big. Deliberately not an availability failure. */
 export class DecisionStateTooLargeError extends Error {
   constructor(chars: number) {
@@ -160,7 +176,11 @@ export async function runDecision<Q extends Questions>(input: {
 
   const started = Date.now();
   const controller = new AbortController();
-  const watchdog = setTimeout(() => controller.abort(), input.timeoutMs);
+  let timedOut = false;
+  const watchdog = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, input.timeoutMs);
   // The caller's own reason to stop, folded into the same controller as the
   // deadline: a speculation that a live call has overtaken is cancelled the
   // same way a slow one is, and the request never reaches the network twice.
@@ -182,6 +202,11 @@ export async function runDecision<Q extends Questions>(input: {
       }),
       signal: controller.signal,
     });
+  } catch (error) {
+    // The deadline, said as itself. Anything else — the caller's own abort
+    // included — goes up exactly as it came.
+    if (timedOut) throw new DecisionTimeoutError(input.timeoutMs);
+    throw error;
   } finally {
     clearTimeout(watchdog);
     input.signal?.removeEventListener('abort', relay);

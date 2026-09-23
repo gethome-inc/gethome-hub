@@ -17,7 +17,11 @@ import { openTestDb, resetDb, startedAutomations, type TestDb } from './helpers/
 import { AssistantChat } from '../src/ai/assistant-chat.js';
 import { AutomationNotConfiguredError } from '../src/ai/automation-chat.js';
 import type { AssistantTurn } from '../src/ai/assistant-agent.js';
-import type { AgentConversation, ChatTurnContext } from '../src/ai/chat/chat-runtime.js';
+import type {
+  AgentConversation,
+  ChatStepWire,
+  ChatTurnContext,
+} from '../src/ai/chat/chat-runtime.js';
 import { refusalSentence } from '../src/ai/chat/agent-loop.js';
 import type { AutomationConversation, AutomationTurn } from '../src/ai/automation-conversation.js';
 import type { EngineRegistry } from '../src/automations/engine.js';
@@ -94,6 +98,36 @@ function decidesCommand(deviceId: string): { calls: string[] } {
     }) as unknown as typeof fetch,
   );
   return { calls };
+}
+
+/**
+ * A decision model that answers whatever a case needs, over a real `Response`
+ * for `decidesCommand`'s reason.
+ */
+function decidesWith(answers: Record<string, unknown>): void {
+  vi.stubGlobal(
+    'fetch',
+    (async () =>
+      new Response(JSON.stringify({ model: DECISION_MODEL, answers, usage: { input_tokens: 900 } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json', 'x-typesafe-request-id': 'req-7' },
+      })) as unknown as typeof fetch,
+  );
+}
+
+const sure = (choice: string, confidence: number) => ({
+  type: 'choice',
+  choice,
+  probabilities: { [choice]: confidence },
+  confidence,
+});
+
+/** Two lights a sentence can plausibly mean either of. */
+function twoLights(tv: string, ceiling: string): ReturnType<EngineRegistry['listDevices']> {
+  return [...oneLight(tv), ...oneLight(ceiling)].map((device, index) => ({
+    ...device,
+    name: index === 0 ? 'TV light' : 'Ceiling light',
+  }));
 }
 
 /** One light, which is all a device question needs to be answerable. */
@@ -1137,6 +1171,112 @@ describe('the assistant', () => {
     expect(wire.calls).toHaveLength(2);
     expect(wire.calls[1]).toContain('turn the ceiling light off');
     expect(commanded).toEqual([{ deviceId, endpointId: 1, type: 'power' }]);
+  });
+
+  // ── Saying why the fast path stood down ───────────────────────────────────
+
+  /**
+   * **A stand-down used to leave no trace**, so a light that took four seconds
+   * rather than one looked the same whether Jev was off, slow, or 0.41 sure
+   * between two lamps — and "why not Jev?" had no answer short of replaying
+   * the sentence by hand. Now it is a line in the log every time, and a quiet
+   * step in the round's working when it is one somebody could have expected
+   * to go the other way.
+   */
+  it('says why Jev stood down, in the log and as a quiet step', async () => {
+    const tv = randomUUID();
+    const ceiling = randomUUID();
+    await settings.setAiKey('typesafe', 'ts-test-key');
+    decidesWith({
+      intent: sure('device_command', 0.97),
+      multiple: { type: 'noul', noul: 0.05 },
+      needsValue: { type: 'noul', noul: 0.05 },
+      scope: sure('specific_device', 0.95),
+      device: {
+        type: 'choice',
+        choice: tv,
+        probabilities: { [tv]: 0.48, [ceiling]: 0.45 },
+        confidence: 0.41,
+      },
+      switchAction: sure('turn_on', 0.97),
+      route: sure('here', 0.99),
+    });
+    const info = vi.spyOn(log, 'info');
+    const { assistant } = await assistantFor([{ kind: 'said', text: 'The TV light is on.' }], {
+      devices: twoLights(tv, ceiling),
+    });
+
+    const started = await assistant.start({ memberId, message: 'turn the light on' });
+    await assistant.idle();
+
+    // Nothing was carried out on a guess.
+    expect(commanded).toEqual([]);
+    const rows = await assistant.transcript(started.sessionId);
+    const steps = (rows[1]?.data as { steps: ChatStepWire[] }).steps;
+    // First in the round's working, because it happened first — and in the
+    // same shape as every other step, so the stored trail draws it too.
+    expect(steps[0]).toEqual({
+      text: "Jev wasn't sure which device",
+      kind: 'deferred',
+      detail: expect.stringMatching(/^TV light or Ceiling light: 0\.41, needs 0\.85 · \d+ ms$/),
+    });
+    expect(steps[1]?.text).toBe('Reading your home');
+
+    expect(info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        jev: expect.objectContaining({
+          question: 'device',
+          reason: 'unsure',
+          value: 0.41,
+          min: 0.85,
+          requestId: 'req-7',
+        }),
+        via: 'typed',
+      }),
+      expect.stringContaining("Jev stood down — wasn't sure which device"),
+    );
+    info.mockRestore();
+  });
+
+  it('logs a sentence it read as a question, and keeps it out of the trail', async () => {
+    // Most of what anybody says to an assistant is not a device command, and
+    // a step on every one of those turns would bury the one that matters.
+    const light = randomUUID();
+    await settings.setAiKey('typesafe', 'ts-test-key');
+    decidesWith({ intent: sure('home_question', 0.97), route: sure('here', 0.99) });
+    const info = vi.spyOn(log, 'info');
+    const { assistant } = await assistantFor([{ kind: 'said', text: 'It is on.' }], {
+      devices: oneLight(light),
+    });
+
+    const started = await assistant.start({ memberId, message: 'is the light on?' });
+    await assistant.idle();
+
+    const rows = await assistant.transcript(started.sessionId);
+    const steps = (rows[1]?.data as { steps: ChatStepWire[] }).steps;
+    expect(steps.map((step) => step.kind)).toEqual(['thinking']);
+    expect(info).toHaveBeenCalledWith(
+      expect.objectContaining({ jev: expect.objectContaining({ reason: 'declined' }) }),
+      expect.stringContaining('Jev stood down — read it as a question about the home'),
+    );
+    info.mockRestore();
+  });
+
+  it('says nothing about Jev on a hub that has no key for it', async () => {
+    const light = randomUUID();
+    const info = vi.spyOn(log, 'info');
+    const { assistant } = await assistantFor([{ kind: 'said', text: 'It is on.' }], {
+      devices: oneLight(light),
+    });
+
+    const started = await assistant.start({ memberId, message: 'turn the light on' });
+    await assistant.idle();
+
+    const rows = await assistant.transcript(started.sessionId);
+    const steps = (rows[1]?.data as { steps: ChatStepWire[] }).steps;
+    expect(steps.map((step) => step.kind)).toEqual(['thinking']);
+    expect(info).not.toHaveBeenCalledWith(expect.anything(), expect.stringContaining('Jev'));
+    info.mockRestore();
   });
 
   it('refuses a handover the member’s role cannot make, in a sentence', async () => {

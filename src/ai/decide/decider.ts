@@ -129,6 +129,22 @@ export interface DecisionResult<Q extends Questions> {
   readonly durationMs: number;
 }
 
+/**
+ * Why a decision came back empty — for a log line and a trail step, **never for
+ * a branch**.
+ *
+ * Every miss falls back exactly the same way, which is what keeps `null` the
+ * whole of `decide`'s contract; this only says which of the reasons it was, so
+ * "why did the fast path not answer?" has an answer that is not a guess.
+ *
+ * - `off` — no key, or the owner has paused it. Nobody asked for an answer.
+ * - `busy` — another call was in flight and this one gave way.
+ * - `resting` — the breaker is open after repeated failures.
+ * - `timeout` — nothing came back inside the deadline.
+ * - `failed` — the request failed: refused, rate-limited or unreachable.
+ */
+export type DecisionMiss = 'off' | 'busy' | 'resting' | 'timeout' | 'failed';
+
 /** What a decision cost, in the shape the ledger folds in. */
 export interface DecisionUsage {
   readonly inputTokens: number;
@@ -166,5 +182,11 @@ export interface Decider {
      * speculation is in flight.
      */
     priority?: 'live' | 'speculative';
+    /**
+     * Told why, when the answer is `null`. Informational only — see
+     * `DecisionMiss` — so a decider that never calls it is still correct, and
+     * a caller that ignores it loses a log line rather than a behaviour.
+     */
+    onMiss?: (why: DecisionMiss) => void;
   }): Promise<DecisionResult<Q> | null>;
 }

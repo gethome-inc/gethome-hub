@@ -123,7 +123,7 @@ src/ai/decide/
   typesafe.ts     the only file that names TypeSafe's API. Plain fetch. Throws.
   lazy.ts         the Decider a caller holds: fail-open, priority, breaker.
   questions.ts    every question and every threshold. The wording is the contract.
-  home-command.ts reading one sentence against one home.
+  home-command.ts reading one sentence against one home — and why it did nothing.
 ```
 
 `decider.ts` is SDK-free *and* vendor-free — `agent-core.ts`'s rule with one
@@ -137,6 +137,15 @@ thing here nobody can check by running the hub.
 dropped because one was already in flight. **Every caller falls back to the
 path it had before.** A seam that threw would put a `try`/`catch` at every call
 site instead of making fail-open a property of the type.
+
+**And it says which.** `onMiss` is told `off`, `busy`, `resting`, `timeout` or
+`failed` (`DecisionMiss`) — for a log line and a trail step, **never for a
+branch**: every miss falls back identically, so the contract is still `null`
+and a decider that never calls it is still correct. A timeout is its own error
+(`DecisionTimeoutError`, read by name) rather than the `AbortError` the
+watchdog causes, because an aborted `fetch` is also exactly what a speculation
+overtaken by a live call throws, and "too slow" and "we cancelled it" are
+different lines.
 
 `DecisionResult.answers` is **optional per question**, on purpose: a 200 that
 answered a subset is a real shape, and `answers.route!.choice` is how that
@@ -291,6 +300,45 @@ The warm also opens the conversation, builds the transport and gathers the
 state digest, which is where most of the wall-clock saving is. That part is
 worth doing on its own — but it is **not** the justification for spending a
 decision on a partial sentence. Keeping the answer is.
+
+---
+
+## When it stands down, it says why
+
+Every `none` carries a `StandDown`: the question that settled it, what it
+answered — by id and in words — the number it was measured by, the bar that
+number had to clear, and the runner-up when the distribution was split (an
+unsure answer is usually two answers, and naming the second is what turns
+`0.41` into a reason). **A stand-down used to leave no trace.** The round that
+follows one is exactly the round a hub with no key runs, so four seconds for a
+light looked the same whether Jev was off, timed out, or was 0.41 sure between
+two lamps — and "why not Jev?" meant replaying the sentence by hand.
+
+`AssistantChat` writes it down on every turn, and `describeStandDown` decides
+who hears it:
+
+| Audience | When | Where it goes |
+|---|---|---|
+| `quiet` | Jev is off, or the home has no devices | a `debug` line |
+| `logged` | read confidently as not a device command (`declined`) | an `info` line |
+| `shown` | everything else — unsure, blocked, unanswered, disagreed, too big, timed out, failed, resting, busy | an `info` line **and** a trail step |
+
+The line reads `Jev stood down — wasn't sure which device (TV light or
+Ceiling light: 0.41, needs 0.85 · 212 ms)`, with the whole `StandDown` beside
+it as `jev` — the vendor's `requestId` included, so a reading can be traced —
+plus `via`, the session and `reused` when the reading was a speculation's
+(whose timing is then the speculation's, not the turn's). So
+`journalctl -u gethome-hubd | grep 'Jev stood down'` is the whole of "why not
+Jev?" for a home, and the first thing to read before re-sweeping a threshold.
+
+The step is `kind: 'deferred'`, in the place `routing` would have taken — the
+same act, not taken — with the phrase as its text and the numbers as its
+detail. Two things are deliberate. **The model is not told**: what it would do
+with the fact is apologise for it, and the reply is its to write. And **a
+question is not a stand-down anybody sees**: most of what people say to an
+assistant is not a device command, and a step on every one of those turns
+would bury the one that matters. Speculative readings of a sentence still being
+said log nothing; the one that is kept is reported by the turn that uses it.
 
 ---
 

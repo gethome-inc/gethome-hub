@@ -321,7 +321,7 @@ domains — update them in the same change.
 - **Some questions are answered before a model is asked, and `src/ai/decide/`
   is where.** Jev is a *decision* model: a state plus typed questions in, typed
   values with calibrated probabilities out, no text at all. `docs/jev.md` is
-  canonical. Five rules.
+  canonical. Six rules.
   **The seam imports no SDK and names no vendor** (`decide/decider.ts`) —
   `agent-core.ts`'s rule with one addition, since `decide/typesafe.ts` is the
   only file that knows the URL, the headers or a field name; it sits behind a
@@ -345,6 +345,18 @@ domains — update them in the same change.
   that retires when the key moves — what that buys is an outage costing *zero
   milliseconds*, not merely no error. A **422 is our own malformed question**
   and arms nothing, or the bug hides behind a timer.
+  **Every `none` says why, and saying so changes nothing.** `decideHomeCommand`
+  returns a `StandDown` — the question that settled it, its answer in words, the
+  number and the bar it missed, the runner-up — and `decide` tells `onMiss`
+  why a `null` was one (`off`, `busy`, `resting`, `timeout`, `failed`). Both are
+  **informational and never a branch**: every stand-down falls through to the
+  same round, so a decider that never calls `onMiss` is still correct.
+  `AssistantChat.reportStandDown` writes one log line per turn and, when
+  `describeStandDown` says somebody could have expected the other road, a
+  `kind: 'deferred'` step where `routing` would have been; a sentence read
+  confidently as a question is logged and not drawn, because that is most of
+  them and a step on each would bury the one that matters. A stand-down used to
+  leave no trace, which made "why was that light slow?" a replay by hand.
   **One questions module, and the model is pinned because the thresholds are.**
   `decide/questions.ts` holds every question, every threshold and every bound;
   the wording *is* the behaviour, so editing one at a call site changes what

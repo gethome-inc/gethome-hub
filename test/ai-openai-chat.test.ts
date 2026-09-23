@@ -111,6 +111,35 @@ describe('the OpenAI chat transport', () => {
     expect(transport.costUsd()).toBeGreaterThan(0);
   });
 
+  it('keeps each part of a reasoning summary on a line of its own', async () => {
+    // The parts carry no separator, and each opens on its own bold heading —
+    // joined as they arrive, the second heading ran onto the last sentence of
+    // the first and nothing downstream could tell where the join had been.
+    const part = (index: number, delta: string): string =>
+      frame('response.reasoning_summary_text.delta', {
+        item_id: 'rs_1',
+        summary_index: index,
+        delta,
+      });
+    const frames = [
+      part(0, '**Clarifying the light**\n\nTwo lamps match.'),
+      part(0, ' The TV one is on.'),
+      part(1, '**Switching it on**\n\nOne call does it.'),
+      frame('response.completed', { response: { status: 'completed', output: [] } }),
+    ];
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(streamOf(frames)));
+
+    const transport = transportFor();
+    const thinking: string[] = [];
+    transport.pushUser('turn the light on');
+    await transport.round({ onThinking: (delta) => thinking.push(delta) });
+
+    expect(thinking.join('')).toBe(
+      '**Clarifying the light**\n\nTwo lamps match. The TV one is on.' +
+        '\n\n**Switching it on**\n\nOne call does it.',
+    );
+  });
+
   it('asks for the two things that make a chat legible on this vendor', async () => {
     vi.stubGlobal(
       'fetch',
