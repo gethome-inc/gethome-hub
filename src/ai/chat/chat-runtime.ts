@@ -115,6 +115,10 @@ export interface ChatStepWire {
   /**
    * `reading` · `checking` · `writing` · `asking` · `thinking`, and open.
    *
+   * The assistant writes two of its own before the model is asked: `routing`
+   * when the fast path acted, and `deferred` when it stood down where somebody
+   * could have expected it to act.
+   *
    * **`said` is the one that is never sent as a frame.** It marks prose from a
    * round that then went on to call a tool: the words reached the app as
    * deltas while they were being written, and this is the copy that outlives

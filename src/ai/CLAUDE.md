@@ -321,7 +321,7 @@ domains — update them in the same change.
 - **Some questions are answered before a model is asked, and `src/ai/decide/`
   is where.** Jev is a *decision* model: a state plus typed questions in, typed
   values with calibrated probabilities out, no text at all. `docs/jev.md` is
-  canonical. Five rules.
+  canonical. Six rules.
   **The seam imports no SDK and names no vendor** (`decide/decider.ts`) —
   `agent-core.ts`'s rule with one addition, since `decide/typesafe.ts` is the
   only file that knows the URL, the headers or a field name; it sits behind a
@@ -345,33 +345,24 @@ domains — update them in the same change.
   that retires when the key moves — what that buys is an outage costing *zero
   milliseconds*, not merely no error. A **422 is our own malformed question**
   and arms nothing, or the bug hides behind a timer.
+  **Every `none` says why, and saying so changes nothing.** `decideHomeCommand`
+  returns a `StandDown` — the question that settled it, its answer in words, the
+  number and the bar it missed, the runner-up — and `decide` tells `onMiss`
+  why a `null` was one (`off`, `busy`, `resting`, `timeout`, `failed`). Both are
+  **informational and never a branch**: every stand-down falls through to the
+  same round, so a decider that never calls `onMiss` is still correct.
+  `AssistantChat.reportStandDown` writes one log line per turn and, when
+  `describeStandDown` says somebody could have expected the other road, a
+  `kind: 'deferred'` step where `routing` would have been; a sentence read
+  confidently as a question is logged and not drawn, because that is most of
+  them and a step on each would bury the one that matters. A stand-down used to
+  leave no trace, which made "why was that light slow?" a replay by hand.
   **One questions module, and the model is pinned because the thresholds are.**
   `decide/questions.ts` holds every question, every threshold and every bound;
   the wording *is* the behaviour, so editing one at a call site changes what
   the hub decides with nothing in the diff to say so — `voice/prompts.ts`'s
   rule. Calibration does not transfer between models, so `DECISION_MODEL` is a
   build constant and not a setting, and the hub never calls `GET /v1/models`.
-  **A route is not a model, and that distinction is what keeps the pin
-  honest.** The same model is sold in more than one place — `decide/routes.ts`
-  is a table of *addresses* (`typesafe`, and Vercel's AI Gateway, whose
-  `/typesafe/v1/systemone` is TypeSafe-compatible so the body and the native
-  answers are unchanged), stored as `ai_decision_route` and answered on
-  `decision.routes` for an app to render, the `GET /permissions` rule. What a
-  route changes is where the request goes and whose key pays; it never changes
-  what answers, so a picker that looked like a model picker would be inviting
-  somebody to invalidate every threshold below without knowing it. **A route is
-  written only with a key** — `PATCH /settings/ai` takes both in one request and
-  a refused key rejects both, which is what stops a stored credential being left
-  at an address it cannot authenticate to; `keyPrefix` rides the table for the
-  field's *placeholder* and is deliberately not a guard, since a vendor can
-  change a prefix faster than a hub can be updated. Two things
-  follow in code: the key-prefix check keeps only the route-independent guard
-  (an `sk-ant-`/`sk-proj-` key in the wrong box) and asserts nothing about how
-  a decision key *starts*, since a gateway's does not look like TypeSafe's; and
-  a response whose answers are **dropped** for a field the client could not
-  place is logged at `warn` with the route and the counts, because a gateway
-  omitting `confidence` would otherwise mean every fast path quietly never
-  firing with nothing in the log.
   Every threshold says whether it is *measured* or *assumed*; today all of them
   are assumed. One is worth knowing: a noul on this model has a floor of
   0.2–0.5 on plainly clean input, so a negative gate near zero refuses
@@ -529,6 +520,12 @@ domains — update them in the same change.
   conversation, so the model fixes its document and resubmits without the
   person seeing it got it wrong; `dry_run` is the agent checking its own work
   against the same rules, and it hands back the sentence the apps will show.
+  **A generated schema nested under a property takes its `definitions` to the
+  tool's root** (`submitSchema()`): a `$ref` is a pointer from the root of the
+  schema it sits in, and nested under `properties.document` every one of the
+  rule schema's dangled — invisible on Anthropic, where the model reads the
+  schema as text, and an invalid schema to hand a vendor that resolves them.
+  A suite walks every tool's schema for a reference that lands on nothing.
   The prompt is built from `catalogAsPrompt()`, names the refusals rather than
   begging for care (the guards are enforced, and a prompt implying otherwise
   reads as the only thing between somebody and a burnt-out relay), and says
@@ -805,6 +802,13 @@ domains — update them in the same change.
   conversation and a name over the next. One `ai_runs` table, two surfaces
   asking one question of it, so the answer is the union. Effort is `medium` here
   against the mapper's `high`, and is exposed by neither.
+  **What the provider line resolves is what runs**, and `openConversation` asks
+  the vendor exactly once. The automations agent kept a second
+  `provider !== 'anthropic'` refusal for a week after both loops existed — the
+  assistant's twin of it had gone, and a test pinned this one as correct — so an
+  OpenAI home could talk to the assistant and not write a rule, while the
+  assistant offered to hand it the job. `automation_needs_anthropic` now means
+  only a subscription token with nothing usable beside it, on both agents.
   **And the same assistant can be talked to.** `src/ai/voice/` opens a GPT-Live
   session for the phone: the hub takes the phone's **WebRTC offer**, attaches
   the whole session — model, voice, instructions, history, delegation mode —

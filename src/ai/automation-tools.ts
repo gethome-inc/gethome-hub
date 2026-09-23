@@ -10,7 +10,7 @@ import type { AutomationStepKind } from './automation-conversation.js';
  * The automation agent's tools, and **no SDK is imported here**.
  *
  * The `agent-core.ts` rule: everything that is not one vendor's API lives
- * where both loops can reach it, so the OpenAI half — when it arrives — gets
+ * where both loops can reach it, so the Anthropic and OpenAI transports get
  * the same tool surface without a second copy of it to keep in step. What a
  * vendor loop does with these is declare them in its own shape and call
  * `runAutomationTool` with whatever the model sent.
@@ -143,14 +143,27 @@ function json(schema: z.ZodType): Record<string, unknown> {
  * numeric constraints this schema uses. A real sentence explaining what is
  * wrong is worth more than a narrowed schema, and the validate-and-resubmit
  * loop is what delivers it.
+ *
+ * **Its `definitions` move to the root, because that is where a `$ref` looks.**
+ * A condition nests conditions, so the generator writes the recursive one once
+ * under `definitions` and points at it with `#/definitions/__schema0` — a
+ * pointer from the root of the schema it sits in. That is right while the
+ * document *is* the root, and every one of those pointers dangled once it was
+ * nested under `properties.document` here, with the table they name one level
+ * down where nothing looks. The Anthropic loop never noticed, since the model
+ * reads the schema as text; a schema whose references resolve to nothing is
+ * still an invalid one, and this is the tool the OpenAI transport sends too.
+ * Hoisted, every pointer lands on the table it names, for either vendor.
  */
 function submitSchema(): Record<string, unknown> {
+  const { definitions, ...document } = json(automationDocumentSchema);
   return {
     type: 'object',
     additionalProperties: false,
     required: ['document', 'replaces'],
+    ...(definitions !== undefined ? { definitions } : {}),
     properties: {
-      document: json(automationDocumentSchema),
+      document,
       note: { type: 'string', maxLength: 200, description: 'One line for the version history.' },
       replaces: {
         type: ['string', 'null'],

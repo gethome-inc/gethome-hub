@@ -101,9 +101,9 @@ under `decision`:
 
 | Field | What it is |
 |---|---|
-| `hasKey` | whether a decision credential is stored (`typesafeApiKey` writes it, `clear: "typesafe"` forgets it) |
+| `hasKey` | whether TypeSafe's key is stored (`typesafeApiKey` writes it, `clear: "typesafe"` forgets it) |
 | `enabled` | the owner's pause switch — `decisionsEnabled` writes it, and it defaults to **on** |
-| `route` / `routes` | where the key was bought, and the table of places it could be — `decisionRoute` writes it |
+| `model` | the pinned model id, reported so an app can say what answered |
 
 **`enabled` is deliberately not the credential**, the argument `ai_enabled`
 already made one field up: "stop spending my money on this for now" and "forget
@@ -111,8 +111,7 @@ my key" have very different costs to undo. Off, every plain request still
 happens; it just takes a model round, which is what the app's own copy says.
 
 `model` is reported and never settable — see *Calibration* below for why that
-is not a gap. Clearing the credential also unsets the stored route, because a
-route with no key is a preference about nothing.
+is not a gap.
 
 ---
 
@@ -123,9 +122,8 @@ src/ai/decide/
   decider.ts      the seam — no SDK, no vendor. Types, and the pinned model id.
   typesafe.ts     the only file that names TypeSafe's API. Plain fetch. Throws.
   lazy.ts         the Decider a caller holds: fail-open, priority, breaker.
-  routes.ts       where the same model can be bought. Not a model list.
   questions.ts    every question and every threshold. The wording is the contract.
-  home-command.ts reading one sentence against one home.
+  home-command.ts reading one sentence against one home — and why it did nothing.
 ```
 
 `decider.ts` is SDK-free *and* vendor-free — `agent-core.ts`'s rule with one
@@ -139,6 +137,15 @@ thing here nobody can check by running the hub.
 dropped because one was already in flight. **Every caller falls back to the
 path it had before.** A seam that threw would put a `try`/`catch` at every call
 site instead of making fail-open a property of the type.
+
+**And it says which.** `onMiss` is told `off`, `busy`, `resting`, `timeout` or
+`failed` (`DecisionMiss`) — for a log line and a trail step, **never for a
+branch**: every miss falls back identically, so the contract is still `null`
+and a decider that never calls it is still correct. A timeout is its own error
+(`DecisionTimeoutError`, read by name) rather than the `AbortError` the
+watchdog causes, because an aborted `fetch` is also exactly what a speculation
+overtaken by a live call throws, and "too slow" and "we cancelled it" are
+different lines.
 
 `DecisionResult.answers` is **optional per question**, on purpose: a 200 that
 answered a subset is a real shape, and `answers.route!.choice` is how that
@@ -202,64 +209,6 @@ Two things follow that are easy to get wrong:
   model is a build constant (`DECISION_MODEL`), not a setting: a settable model
   would silently invalidate every number in `questions.ts`. This is the
   `src/portraits/CLAUDE.md` pinned-image-model argument.
-
-### A route is not a model
-
-The same model is sold in more than one place, so `routes.ts` is a table of
-**addresses**, not of models:
-
-| id | Base URL | Model id on the wire | Key starts |
-|---|---|---|---|
-| `typesafe` | `https://api.typesafe.ai` | `jev-1.13.0` | `ts-` |
-| `vercel` | `https://ai-gateway.vercel.sh/typesafe` | `typesafe-ai/jev` | `vck_` |
-
-Vercel's AI Gateway serves a **TypeSafe-compatible** endpoint, so the body and
-the native `noul`/`choice`/`score` answers are unchanged — only the host, the
-key and the string that names the model differ. Deliberately **not** the AI
-SDK's normalised `/v1/evaluate`, which renames `noul` to `probability` and
-moves `confidence` into `providerMetadata`: reading that shape would mean a
-second parser for the one file nobody can check by running the hub.
-
-Everything above about pinning still holds, and this is why the distinction
-has to be said out loud rather than left to be inferred from a picker: a route
-changes **where the request goes and whose key pays**, and never what answers.
-If a route ever served a different model, the thresholds below would silently
-stop meaning what they say — so a route that did that would be a different
-feature, not a new row in this table.
-
-The hub owns the vocabulary (`GET /settings/ai` answers `decision.routes`), the
-`GET /permissions` rule the model lists already follow, so a gateway added
-later needs no app release. Two consequences in code: `typesafe.ts` takes the
-route rather than reading a constant, and the key-prefix check keeps only the
-route-independent guard — it refuses an `sk-ant-`/`sk-proj-` key in the wrong
-box and asserts nothing about how a decision key *starts*, because a gateway's
-does not look like TypeSafe's.
-
-**`keyPrefix` is a placeholder and nothing more**, and the two halves of that
-sentence are both deliberate. It is on the route so an app can put `vck_…` in
-an empty field rather than guessing or leaving it blank — the same reason
-`keyHint` is there. It is *not* wired into the check above: a vendor can change
-a prefix faster than a hub can be updated, and a positive assertion would then
-refuse a perfectly good key with no way past it. Being wrong about a
-placeholder costs a moment's confusion; being wrong about a guard costs
-somebody their key.
-
-**And the route is only ever written with a key.** `PATCH /settings/ai` takes
-both in one request (the key first, then the route), and a key the hub refuses
-rejects the whole request — so a stored credential can never be left pointing
-at an address it cannot authenticate to. The iOS app relies on that and offers
-the choice nowhere else: the picker lives in the sheet that asks for the key,
-and there is no control anywhere that moves a route on its own.
-
-**And one diagnostic, because the failure mode here is silence.** `typesafe.ts`
-drops an answer it cannot place — a `choice` with no `confidence`, a score off
-the rubric — which is right, and would mean that a gateway omitting a field
-left *every* fast path quietly never firing with nothing in the log. A response
-whose answers are dropped is logged at `warn` with the route, the model and how
-many were asked against how many were placed. That is the difference between
-"measure it" and "find out".
-
----
 
 **Every threshold in this repository is assumed, not measured**, and
 `questions.ts` says so beside each one. They are the first thing to re-sweep
@@ -351,6 +300,45 @@ The warm also opens the conversation, builds the transport and gathers the
 state digest, which is where most of the wall-clock saving is. That part is
 worth doing on its own — but it is **not** the justification for spending a
 decision on a partial sentence. Keeping the answer is.
+
+---
+
+## When it stands down, it says why
+
+Every `none` carries a `StandDown`: the question that settled it, what it
+answered — by id and in words — the number it was measured by, the bar that
+number had to clear, and the runner-up when the distribution was split (an
+unsure answer is usually two answers, and naming the second is what turns
+`0.41` into a reason). **A stand-down used to leave no trace.** The round that
+follows one is exactly the round a hub with no key runs, so four seconds for a
+light looked the same whether Jev was off, timed out, or was 0.41 sure between
+two lamps — and "why not Jev?" meant replaying the sentence by hand.
+
+`AssistantChat` writes it down on every turn, and `describeStandDown` decides
+who hears it:
+
+| Audience | When | Where it goes |
+|---|---|---|
+| `quiet` | Jev is off, or the home has no devices | a `debug` line |
+| `logged` | read confidently as not a device command (`declined`) | an `info` line |
+| `shown` | everything else — unsure, blocked, unanswered, disagreed, too big, timed out, failed, resting, busy | an `info` line **and** a trail step |
+
+The line reads `Jev stood down — wasn't sure which device (TV light or
+Ceiling light: 0.41, needs 0.85 · 212 ms)`, with the whole `StandDown` beside
+it as `jev` — the vendor's `requestId` included, so a reading can be traced —
+plus `via`, the session and `reused` when the reading was a speculation's
+(whose timing is then the speculation's, not the turn's). So
+`journalctl -u gethome-hubd | grep 'Jev stood down'` is the whole of "why not
+Jev?" for a home, and the first thing to read before re-sweeping a threshold.
+
+The step is `kind: 'deferred'`, in the place `routing` would have taken — the
+same act, not taken — with the phrase as its text and the numbers as its
+detail. Two things are deliberate. **The model is not told**: what it would do
+with the fact is apologise for it, and the reply is its to write. And **a
+question is not a stand-down anybody sees**: most of what people say to an
+assistant is not a device command, and a step on every one of those turns
+would bury the one that matters. Speculative readings of a sentence still being
+said log nothing; the one that is kept is reported by the turn that uses it.
 
 ---
 

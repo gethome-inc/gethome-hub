@@ -737,6 +737,15 @@ Every gate falls through to the round that would have happened anyway, so
 being unsure, being wrong about the shape, or getting no answer at all each
 cost exactly what the hub cost before.
 
+**And the round's working says which road it took.** Acting puts a step up
+first — `kind: 'routing'`, *Understood in 212 ms.* — and so does standing down
+where somebody could have expected the other road: `kind: 'deferred'`, *Jev
+wasn't sure which device*, with the answers and the bar they missed as its
+detail. Every stand-down is also a line in the hub's log with the question that
+settled it and its number; a sentence read confidently as a question is logged
+and not drawn, since that is most of them. The model is told neither — the
+reply is its to write. `docs/jev.md` has the table.
+
 ## Getting ready while somebody is still talking
 
 The sideband already receives the person's transcript in fragments, several

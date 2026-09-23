@@ -157,7 +157,7 @@ than no button.
 | `GET /members` · `PATCH /members/me` · `DELETE /members/me` · `DELETE /members/:id` | floor · floor (itself) · floor (itself) · `member.remove` | rows carry `isSelf`, `roleId` and `roleName`; `PATCH` takes `{name}` and renames **the caller**; `DELETE` on either route answers `204` and revokes that member's tokens; the owner cannot be removed, by anyone or by itself. See [below](#which-member-you-are-isself-and-patch-membersme) |
 | `GET /invites` · `POST /invites` | `member.invite` · see notes | `POST {roleId?}` → `201 {code, expiresAt, roleId, roleName, memberId: null, memberName: null}`. Omitting `roleId` mints a **Member** invite, which is what every invite this hub has ever made was. An **owner** invite is allowed and needs the caller to be one (`403 not_owner`). **`POST {memberId}` mints a sign-in code** for somebody already here — `roleId` beside it is `400 invalid_target`, an unknown one is `404 unknown_member`, and the answer carries `memberId`/`memberName` with `roleId: null`. Who may ask is asked of the body: your own (`memberId: "me"` is accepted) is the **floor**, somebody else's is `member.invite`, an **owner's** needs an owner. `GET` lists the live codes, each with `memberId` — null for an invite — and `memberName`. See [below](#signing-in-again-post-invites-with-a-memberid) |
 | `GET /activity?limit=&before=` | floor · `activity.read` | reverse-chronological, cursor = `before` id; rows carry `data` — see [below](#the-activity-log) |
-| `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | `hub.ai` | The home's AI: three credentials, two models, which provider recognises devices, and the switches. **PATCH is the write** — every field optional, absence means "leave this alone": `{enabled?, decisionsEnabled?, decisionRoute?, recordExchanges?, anthropicApiKey?, openaiApiKey?, typesafeApiKey?, anthropicModel?, openaiModel?, model?, mappingProvider?, clear?}`. `model` is `anthropicModel` under the name this route has always used; `clear: "anthropic"\|"openai"\|"typesafe"` forgets one credential and leaves the others; `typesafeApiKey` is the [decision model](#the-decision-model-is-not-a-provider), which has **no model field** beside it and is **not** a value `mappingProvider` accepts; `decisionsEnabled` is its own pause switch, separate from `enabled`; `decisionRoute` is which of `decision.routes` sells the key — an **address, never a model**, and an id the hub does not serve is a 400; `recordExchanges` starts or stops keeping what each round said, and is off unless asked; `mappingProvider` naming a provider with no key is `400 provider_not_configured`. Generative keys are told apart by prefix, so one pasted in the other's field is a 400 rather than a 401 an hour later, and a `sk-ant-oat…` subscription token is still refused; `typesafeApiKey` is checked only for *not* being one of those, since a gateway's key does not look like TypeSafe's. **PUT is unchanged** (`{apiKey, model?}`, an Anthropic key, required) for apps that have not moved. See [the answer's shape](#the-ai-settings-answer) |
+| `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | `hub.ai` | The home's AI: three credentials, two models, which provider recognises devices, and the switches. **PATCH is the write** — every field optional, absence means "leave this alone": `{enabled?, decisionsEnabled?, recordExchanges?, anthropicApiKey?, openaiApiKey?, typesafeApiKey?, anthropicModel?, openaiModel?, model?, mappingProvider?, clear?}`. `model` is `anthropicModel` under the name this route has always used; `clear: "anthropic"\|"openai"\|"typesafe"` forgets one credential and leaves the others; `typesafeApiKey` is the [decision model](#the-decision-model-is-not-a-provider), which has **no model field** beside it and is **not** a value `mappingProvider` accepts; `decisionsEnabled` is its own pause switch, separate from `enabled`; `recordExchanges` starts or stops keeping what each round said, and is off unless asked; `mappingProvider` naming a provider with no key is `400 provider_not_configured`. Keys are told apart by prefix, so one pasted in the other's field is a 400 rather than a 401 an hour later, and a `sk-ant-oat…` subscription token is still refused. **PUT is unchanged** (`{apiKey, model?}`, an Anthropic key, required) for apps that have not moved. See [the answer's shape](#the-ai-settings-answer) |
 | `GET /ai/runs?limit=` | `hub.ai` | what the mapping agent did, newest first: `{id, at, kind, vendor, model, exposesHash, provider, modelId, effort, via, ok, costUsd, turns, durationMs, errorKind, errorMessage, steps, exchanges}`. A summary, never a transcript — see [ai-adaptation.md](ai-adaptation.md). `exchanges` is how many **rounds** this run kept, `0` unless recording was on when it ran. `effort` (`low`/`medium`/`high`) and `via` (`voice`/`typed`) say what that turn ran at and how it was asked — both **null** on a row written before them and on a run the idea does not apply to: a portrait has no effort, a device recognition nobody asked for has no `via`, and the `voice` meter is a line rather than a generation, so it carries `via` and no effort |
 | `GET /ai/runs/:id/exchanges` | `hub.ai` | what that run actually said, round by round, oldest first: `[{seq, at, durationMs, provider, modelId, status, ok, inputTokens, outputTokens, sent, received}]`. `sent`/`received` are `[{kind, label, text?, bytes?}]` — the round's **main data**, not its bodies; `bytes` is present only on a part that was cut, and is what it weighed whole. A run is a *loop*, so one recognition is several rounds and a failed one is followed by the next in the same list. Empty is the ordinary answer — recording is off unless the owner asked, and rounds age out after a week. See [ai-adaptation.md](ai-adaptation.md) |
 | `GET /automations` | floor | every rule in the home, plus `unreadable` — rules a **newer** build wrote that this one cannot parse. They are kept and not run; listing them is what stops a rule silently vanishing after `install.sh` rolls a build back. Each carries `summary` (a whole sentence — the contract) beside `document` (the structure — the convenience), the `activity.message` rule applied to rules, [`outline`](automations.md#a-rule-as-a-storyboard) — the same rule as a **storyboard** so an app can *draw* it rather than print it — `icon` — the mark somebody chose, or `null` for the one the app derives — and `roomId`, [the one room the rule is about](#which-room-a-rule-is-in) or `null` for a rule about the whole house |
@@ -2250,18 +2250,7 @@ hubs.
 `GET /settings/ai` carries a `decision` block:
 
 ```jsonc
-"decision": {
-  "hasKey": false,
-  "model": "jev-1.13.0",
-  "enabled": true,
-  "route": "typesafe",
-  "routes": [
-    { "id": "typesafe", "label": "TypeSafe",
-      "keyHint": "typesafe.ai",          "keyPrefix": "ts-"  },
-    { "id": "vercel",   "label": "Vercel AI Gateway",
-      "keyHint": "vercel.com/ai-gateway", "keyPrefix": "vck_" }
-  ]
-}
+"decision": { "hasKey": false, "model": "jev-1.13.0", "enabled": true }
 ```
 
 It is a **sibling of `providers`, never a member of it**, and that placement is
@@ -2280,26 +2269,6 @@ Three things follow, and an app should hold all three:
   are calibrated against it and calibration does not transfer.
 - **`enabled` is its own switch**, so pausing the spend and forgetting the key
   stay two different requests, exactly as `enabled` does for adaptation.
-
-**And a route is not a model.** The same model is sold in more than one place,
-so `routes` is the hub's table of *addresses* — rendered by an app rather than
-shipped in one, the `GET /permissions` rule the model lists already follow, so
-a gateway added later needs no app release. `PATCH {decisionRoute: "<id>"}`
-writes it and an id the hub does not serve is a `400`. What a route changes is
-where the request goes and whose key pays; **every route serves the same
-model**, which is what keeps the pin above meaningful rather than contradicted
-by a picker one line down. `keyHint` is where to buy that route's key and `keyPrefix` what one starts
-with, so the sheet asking for a key can name the right shop and put the right
-placeholder in the box. Three consequences worth holding. The key-prefix
-*check* asserts nothing about how a decision key starts — `keyPrefix` is for a
-placeholder, never a guard, because a vendor can change a prefix faster than a
-hub can be updated; it still refuses an `sk-ant-`/`sk-proj-` key in that field.
-Clearing the credential (`clear: "typesafe"`) unsets the stored route with it,
-since a route with no key is a preference about nothing. And **the two belong
-in one request**: `{typesafeApiKey, decisionRoute}` applies the key and then
-the route, and a refused key rejects both — which is what lets a client
-guarantee that a stored key is never left pointing at an address it cannot
-authenticate to. The iOS app writes `decisionRoute` only that way.
 
 Adding the key changes nothing about what the home can do; it changes how fast
 some of it happens. `docs/jev.md` is canonical.

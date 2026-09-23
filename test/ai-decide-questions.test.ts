@@ -16,7 +16,12 @@ import {
   roomQuestion,
   routeQuestion,
 } from '../src/ai/decide/questions.js';
-import { decideHomeCommand } from '../src/ai/decide/home-command.js';
+import {
+  OPTION_WORDS,
+  decideHomeCommand,
+  describeStandDown,
+  type StandDown,
+} from '../src/ai/decide/home-command.js';
 
 /**
  * The wording is the contract, and the thresholds are only meaningful beside
@@ -227,20 +232,29 @@ describe('reading a sentence against a home', () => {
     expect(result.command.command).toEqual({ type: 'lock', engage: true });
   });
 
-  const standsDown: [string, Record<string, unknown>][] = [
-    ['the sentence carries a number', { needsValue: noul(0.9) }],
-    ['it asked for more than one thing', { multiple: noul(0.9) }],
-    ['it is about a whole room', { scope: choice('room', 0.99) }],
-    ['it is about the whole home', { scope: choice('whole_home', 0.99) }],
-    ['no device was picked out', { device: choice(NONE_OF_THESE, 0.99) }],
-    ['the device is a guess', { device: choice('lamp', 0.5) }],
-    ['the action is a guess', { switchAction: choice('turn_off', 0.5) }],
-    ['the intent is a guess', { intent: choice('device_command', 0.4) }],
-    ['it is a question rather than a command', { intent: choice('home_question', 0.99) }],
-    ['it is about something else entirely', { intent: choice('other', 0.99) }],
+  /**
+   * Every gate, and **the reason it gives**. A stand-down used to be a bare
+   * `none`, so "why was that not instant?" had no answer short of replaying
+   * the sentence by hand; the question and the reason are what the log line
+   * and the trail step are drawn from, so they are pinned here with the gate.
+   */
+  const standsDown: [string, Record<string, unknown>, StandDown['question'], StandDown['reason']][] = [
+    ['the sentence carries a number', { needsValue: noul(0.9) }, 'needsValue', 'blocked'],
+    ['it asked for more than one thing', { multiple: noul(0.9) }, 'multiple', 'blocked'],
+    ['it is about a whole room', { scope: choice('room', 0.99) }, 'scope', 'blocked'],
+    ['it is about the whole home', { scope: choice('whole_home', 0.99) }, 'scope', 'blocked'],
+    ['the scope is a guess', { scope: choice('specific_device', 0.6) }, 'scope', 'unsure'],
+    ['no device was picked out', { device: choice(NONE_OF_THESE, 0.99) }, 'device', 'blocked'],
+    ['the device is a guess', { device: choice('lamp', 0.5) }, 'device', 'unsure'],
+    ['the action is a guess', { switchAction: choice('turn_off', 0.5) }, 'switchAction', 'unsure'],
+    ['the action is neither', { switchAction: choice('neither', 0.95) }, 'switchAction', 'blocked'],
+    ['the intent is a guess', { intent: choice('device_command', 0.4) }, 'intent', 'unsure'],
+    ['it is a question rather than a command', { intent: choice('home_question', 0.99) }, 'intent', 'declined'],
+    ['it is about something else entirely', { intent: choice('other', 0.99) }, 'intent', 'declined'],
+    ['a question it needs went unanswered', { device: undefined }, 'device', 'unanswered'],
   ];
-  for (const [why, override] of standsDown) {
-    it(`stands down when ${why}`, async () => {
+  for (const [why, override, question, reason] of standsDown) {
+    it(`stands down when ${why}, and says so`, async () => {
       const result = await decideHomeCommand({
         decider: decider({ ...CONFIDENT_OFF, ...override }),
         home: HOME,
@@ -248,6 +262,11 @@ describe('reading a sentence against a home', () => {
         said: 'something',
       });
       expect(result.kind).toBe('none');
+      if (result.kind !== 'none') return;
+      expect(result.standDown).toMatchObject({ question, reason });
+      // The reading's own timing rides along on every one, for a log line
+      // that can be set against the round that followed.
+      expect(result.standDown.durationMs).toBe(180);
     });
   }
 
@@ -259,7 +278,67 @@ describe('reading a sentence against a home', () => {
       delegates: DELEGATES,
       said: 'switch the kitchen light off',
     });
-    expect(result).toEqual({ kind: 'none', costUsd: 0, effort: undefined });
+    expect(result).toEqual({
+      kind: 'none',
+      costUsd: 0,
+      effort: undefined,
+      standDown: { question: 'model', reason: 'missed' },
+    });
+  });
+
+  it('passes on why nothing came back, when the decider says', async () => {
+    // A timeout is the one miss with a duration worth reporting: how long the
+    // turn waited for an answer that never came.
+    const slow: Decider = {
+      modelId: DECISION_MODEL,
+      decide: async (input) => {
+        input.onMiss?.('timeout');
+        return null;
+      },
+    };
+    const result = await decideHomeCommand({
+      decider: slow,
+      home: HOME,
+      delegates: DELEGATES,
+      said: 'switch the kitchen light off',
+      timeoutMs: 650,
+    });
+    expect(result.kind === 'none' && result.standDown).toEqual({
+      question: 'model',
+      reason: 'missed',
+      miss: 'timeout',
+      durationMs: 650,
+    });
+  });
+
+  it('names what it was unsure between, and the bar it missed', async () => {
+    // An unsure answer is usually two answers. Naming the second is what turns
+    // a bare 0.5 into a reason somebody can act on — rename one of them.
+    const result = await decideHomeCommand({
+      decider: {
+        ...decider({
+          ...CONFIDENT_OFF,
+          device: {
+            type: 'choice',
+            choice: 'lamp',
+            probabilities: { lamp: 0.52, door: 0.4, [NONE_OF_THESE]: 0.08 },
+            confidence: 0.5,
+          },
+        }),
+      },
+      home: HOME,
+      delegates: DELEGATES,
+      said: 'turn it off',
+    });
+    expect(result.kind === 'none' && result.standDown).toMatchObject({
+      question: 'device',
+      reason: 'unsure',
+      answer: 'lamp',
+      label: 'Kitchen light',
+      runnerUp: 'Front door',
+      value: 0.5,
+      min: ACT_CONFIDENCE_MIN,
+    });
   });
 
   it('stands down on a home too big to offer as options', async () => {
@@ -281,7 +360,12 @@ describe('reading a sentence against a home', () => {
       delegates: DELEGATES,
       said: 'lights off',
     });
-    expect(result.kind).toBe('none');
+    expect(result.kind === 'none' && result.standDown).toEqual({
+      question: 'home',
+      reason: 'size',
+      value: 400,
+      max: 180,
+    });
     expect(stub.asked).toHaveLength(0);
   });
 
@@ -299,7 +383,13 @@ describe('reading a sentence against a home', () => {
       delegates: DELEGATES,
       said: 'turn the hallway light off',
     });
-    expect(result.kind).toBe('none');
+    expect(result.kind === 'none' && result.standDown).toMatchObject({
+      question: 'room',
+      reason: 'disagreed',
+      label: 'Hallway',
+      device: 'Kitchen light',
+      deviceRoom: 'Kitchen',
+    });
   });
 
   it('acts when the room abstains rather than objecting', async () => {
@@ -362,7 +452,42 @@ describe('reading a sentence against a home', () => {
       delegates: DELEGATES,
       said: 'make it half past instead',
     });
-    expect(result.kind).toBe('none');
+    // And it says the handover is what fell short, rather than that the
+    // sentence was not a device command — which is true and not the reason.
+    expect(result.kind === 'none' && result.standDown).toMatchObject({
+      question: 'selfContained',
+      reason: 'unsure',
+      answer: 'automations',
+      value: 0.3,
+      min: POSITIVE_NOUL_MIN,
+    });
+  });
+
+  it('says so when the device is one it cannot work', async () => {
+    // A thermostat or a sensor: there is nothing to switch, open, lock or
+    // play, which is a device the assistant can still work — just not here.
+    const result = await decideHomeCommand({
+      decider: decider({ ...CONFIDENT_OFF, device: choice('dial', 0.97), room: choice('kitchen', 0.9) }),
+      home: {
+        rooms: HOME.rooms,
+        devices: [
+          ...HOME.devices,
+          {
+            id: 'dial',
+            name: 'Dimmer',
+            roomId: 'kitchen',
+            endpoints: [{ endpointId: 1, capabilities: ['level' as const] }],
+          },
+        ],
+      },
+      delegates: DELEGATES,
+      said: 'turn the dimmer off',
+    });
+    expect(result.kind === 'none' && result.standDown).toMatchObject({
+      question: 'action',
+      reason: 'blocked',
+      device: 'Dimmer',
+    });
   });
 
   it('never asks for more thinking, only less', async () => {
@@ -388,5 +513,123 @@ describe('reading a sentence against a home', () => {
     });
     // Not "high" — there is no such answer to give.
     expect(hard.effort).toBeUndefined();
+  });
+});
+
+/* ------------------------------------------------------------------ */
+
+describe('saying why it stood down', () => {
+  const base = { durationMs: 180 };
+
+  it('names what it was unsure between, the number and the bar', () => {
+    const words = describeStandDown({
+      ...base,
+      question: 'device',
+      reason: 'unsure',
+      answer: 'lamp',
+      label: 'Light TV',
+      runnerUp: 'Ceiling light',
+      value: 0.41,
+      min: ACT_CONFIDENCE_MIN,
+    });
+    expect(words).toEqual({
+      phrase: "wasn't sure which device",
+      text: "Jev wasn't sure which device",
+      detail: 'Light TV or Ceiling light: 0.41, needs 0.85 · 180 ms',
+      audience: 'shown',
+    });
+  });
+
+  it('says what a yes/no was the probability of, so the number never stands alone', () => {
+    const words = describeStandDown({
+      ...base,
+      question: 'multiple',
+      reason: 'blocked',
+      value: 0.9,
+      max: NEGATIVE_NOUL_MAX,
+    });
+    expect(words.text).toBe('Jev heard more than one request');
+    expect(words.detail).toBe('more than one request: 0.90, needs at most 0.40 · 180 ms');
+  });
+
+  it('names the device an unsure action was about', () => {
+    const words = describeStandDown({
+      ...base,
+      question: 'switchAction',
+      reason: 'unsure',
+      answer: 'turn_on',
+      label: 'turn on',
+      value: 0.55,
+      min: ACT_CONFIDENCE_MIN,
+      device: 'Light TV',
+    });
+    expect(words.text).toBe("Jev wasn't sure what to do with Light TV");
+    expect(words.detail).toBe('turn on: 0.55, needs 0.85 · 180 ms');
+  });
+
+  it('says where a device really is when the room it heard disagrees', () => {
+    const words = describeStandDown({
+      ...base,
+      question: 'room',
+      reason: 'disagreed',
+      answer: 'kitchen',
+      label: 'Kitchen',
+      value: 0.96,
+      device: 'Ceiling light',
+      deviceRoom: 'Hallway',
+    });
+    expect(words.detail).toBe('Kitchen: 0.96 · Ceiling light is in Hallway · 180 ms');
+  });
+
+  it('says a timeout as a deadline, not as a reading', () => {
+    const words = describeStandDown({
+      question: 'model',
+      reason: 'missed',
+      miss: 'timeout',
+      durationMs: 700,
+    });
+    expect(words.text).toBe("Jev didn't answer in time");
+    expect(words.detail).toBe('nothing back within 700 ms');
+    expect(words.audience).toBe('shown');
+  });
+
+  /**
+   * **Most stand-downs are the design working**, and the trail is where a
+   * person reads. A step on every question somebody asks would bury the one
+   * that matters — so a sentence read confidently as not a command is logged
+   * and not drawn, and a hub without Jev switched on says nothing at all.
+   */
+  it('keeps the ordinary ones out of the trail', () => {
+    expect(
+      describeStandDown({
+        ...base,
+        question: 'intent',
+        reason: 'declined',
+        answer: 'home_question',
+        label: 'a question about the home',
+        value: 0.97,
+      }),
+    ).toMatchObject({ phrase: 'read it as a question about the home', audience: 'logged' });
+    expect(describeStandDown({ question: 'model', reason: 'missed', miss: 'off' }).audience).toBe('quiet');
+    expect(describeStandDown({ question: 'home', reason: 'size', value: 0, max: 180 }).audience).toBe(
+      'quiet',
+    );
+  });
+
+  it('has words for every option the battery can answer', () => {
+    // An option added to a question without words here would reach a trail
+    // as an identifier — `specific_device: 0.62` is a sentence only its
+    // author can read.
+    const options = [
+      INTENT_QUESTION,
+      SCOPE_QUESTION,
+      SWITCH_ACTION_QUESTION,
+      COVERING_ACTION_QUESTION,
+      LOCK_ACTION_QUESTION,
+      PLAYBACK_ACTION_QUESTION,
+    ].flatMap((question) => Object.keys(question.criteria));
+    for (const option of [...options, 'here', NONE_OF_THESE]) {
+      expect(OPTION_WORDS[option], option).toBeDefined();
+    }
   });
 });

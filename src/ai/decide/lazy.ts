@@ -14,8 +14,13 @@
 import { createHash } from 'node:crypto';
 import type { SettingsService } from '../../core/settings.js';
 import type { Logger } from '../../logging.js';
-import { DECISION_MODEL, type Decider, type DecisionResult, type Questions } from './decider.js';
-import { decisionRouteOf } from './routes.js';
+import {
+  DECISION_MODEL,
+  type Decider,
+  type DecisionMiss,
+  type DecisionResult,
+  type Questions,
+} from './decider.js';
 
 /**
  * How long the breaker stays open, and how many failures open it.
@@ -58,8 +63,15 @@ export function lazyDecider(options: { settings: SettingsService; log: Logger })
     questions: Q;
     timeoutMs: number;
     priority?: 'live' | 'speculative';
+    onMiss?: (why: DecisionMiss) => void;
   }): Promise<DecisionResult<Q> | null> {
     const priority = input.priority ?? 'live';
+    // Every `null` below says which one it is. Told, never branched on — see
+    // `DecisionMiss`.
+    const miss = (why: DecisionMiss): null => {
+      input.onMiss?.(why);
+      return null;
+    };
     /**
      * **Dropped, not queued — and a guess gives way to the real thing.**
      *
@@ -75,21 +87,18 @@ export function lazyDecider(options: { settings: SettingsService; log: Logger })
      * started for — the feature making the thing it helps slower.
      */
     if (inFlight !== undefined) {
-      if (priority === 'speculative' || inFlight.priority === 'live') return null;
+      if (priority === 'speculative' || inFlight.priority === 'live') return miss('busy');
       inFlight.stop.abort();
     }
 
     const ai = await options.settings.getAiSettings();
-    if (!ai.decision.hasKey || !ai.decision.enabled) return null;
-    // Read per call beside the credential, and for its reason: a route changed
-    // this afternoon takes effect this afternoon, with no restart.
-    const route = decisionRouteOf(ai.decision.route);
+    if (!ai.decision.hasKey || !ai.decision.enabled) return miss('off');
     const secret = await options.settings.aiKey('typesafe');
-    if (secret === null) return null;
+    if (secret === null) return miss('off');
 
     const credential = credentialId(secret);
     if (breaker !== undefined && breaker.credential !== credential) breaker = undefined;
-    if (breaker !== undefined && Date.now() < breaker.openUntil) return null;
+    if (breaker !== undefined && Date.now() < breaker.openUntil) return miss('resting');
 
     const stop = new AbortController();
     inFlight = { priority, stop };
@@ -101,7 +110,6 @@ export function lazyDecider(options: { settings: SettingsService; log: Logger })
         questions: input.questions,
         timeoutMs: input.timeoutMs,
         signal: stop.signal,
-        route,
         log: options.log,
       });
       breaker = undefined;
@@ -110,18 +118,24 @@ export function lazyDecider(options: { settings: SettingsService; log: Logger })
       // A speculation a live call overtook is not a failure of anything, and
       // must not count towards the breaker — otherwise a talkative minute
       // would open it against a perfectly good key.
-      if (stop.signal.aborted && priority === 'speculative') return null;
+      if (stop.signal.aborted && priority === 'speculative') return miss('busy');
       const failures = (breaker?.credential === credential ? breaker.failures : 0) + 1;
       breaker = {
         credential,
         failures,
         openUntil: failures >= BREAKER_FAILURES ? Date.now() + BREAKER_OPEN_MS : 0,
       };
+      // Read by name: `typesafe.ts` is only ever held behind the import above,
+      // and a static import of its class would load the client on a hub with
+      // no key.
+      const timedOut = error instanceof Error && error.name === 'DecisionTimeoutError';
       options.log.warn(
         { err: error, failures },
-        'decision model unavailable — falling back to the ordinary path',
+        timedOut
+          ? 'decision model did not answer in time — falling back to the ordinary path'
+          : 'decision model unavailable — falling back to the ordinary path',
       );
-      return null;
+      return miss(timedOut ? 'timeout' : 'failed');
     } finally {
       // Only if it is still *this* call's: a live call that overtook a
       // speculation has already replaced the entry, and the loser clearing it

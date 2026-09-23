@@ -12,7 +12,12 @@ import type { AssistantToolContext, DelegateOutcome } from './assistant-tools.js
 import { delegateAgents, type DelegateAgent } from './agents/registry.js';
 import type { Decider } from './decide/decider.js';
 import { lazyDecider } from './decide/lazy.js';
-import { decideHomeCommand, type HomeDecision } from './decide/home-command.js';
+import {
+  decideHomeCommand,
+  describeStandDown,
+  type HomeDecision,
+  type StandDown,
+} from './decide/home-command.js';
 import { SPECULATION_REUSE_MS, SPECULATION_TIMEOUT_MS } from './decide/questions.js';
 import { LIVE_MODEL, LIVE_USD_PER_MINUTE, SIDEBAND_MAX_SECONDS } from './voice/live-wire.js';
 import type { AutomationChat } from './automation-chat.js';
@@ -984,7 +989,9 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
     this.actedThisTurn.set(session.id, new Set());
     if (how === 'answer') return undefined;
 
-    const decision = (await this.reuseSpeculation(session.id, text)) ??
+    const reused = await this.reuseSpeculation(session.id, text);
+    const decision =
+      reused ??
       (await decideHomeCommand({
         decider: this.decider,
         home: this.options.engine.homeView(),
@@ -1012,7 +1019,10 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
     const carry = (result: { turn?: AssistantTurn } | undefined) =>
       eased === undefined ? result : { ...result, origin: eased };
 
-    if (decision.kind === 'none') return carry(undefined);
+    if (decision.kind === 'none') {
+      this.reportStandDown(session, decision.standDown, via, reused !== undefined);
+      return carry(undefined);
+    }
 
     if (decision.kind === 'route') {
       // **Typed only.** `spoken()` drops a `handoff` row — the handoff arm
@@ -1059,6 +1069,52 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
       'in your own words, and do not call a tool to do it again.';
     session.priming = session.priming === undefined ? done : `${session.priming}\n\n${done}`;
     return carry(undefined);
+  }
+
+  /**
+   * Say why the fast path did not act — in the log on every turn, and in the
+   * trail when somebody could have expected it to.
+   *
+   * **A stand-down used to leave no trace**, which is what made "why was that
+   * not instant?" unanswerable: the round that followed was exactly the one a
+   * hub with no key runs, so four seconds for a light looked the same whether
+   * Jev was switched off, timed out, or was 0.41 sure between two lamps with
+   * one name. The line says which question settled it, what it answered and
+   * the number against its bar; `describeStandDown` decides who hears it.
+   *
+   * **A step, never a sentence in the reply.** It is `kind: 'deferred'`, drawn
+   * beside `routing`'s bolt as the same act not taken, and it goes on the
+   * round's working through `note` like every other line the hub writes before
+   * the model is asked. The model is not told: what it would do with the fact
+   * is apologise for it, and the reply is the model's to write.
+   */
+  private reportStandDown(
+    session: ChatSession<AssistantTurn>,
+    standDown: StandDown,
+    via: string,
+    reused: boolean,
+  ): void {
+    const words = describeStandDown(standDown);
+    const context = {
+      jev: standDown,
+      sessionId: session.id,
+      via,
+      // A reading made while the sentence was still being said, and kept for
+      // this turn — so its timing is the speculation's, not this round's.
+      ...(reused ? { reused } : {}),
+    };
+    const line = `Jev stood down — ${words.phrase}${words.detail !== undefined ? ` (${words.detail})` : ''}`;
+    if (words.audience === 'quiet') {
+      this.options.log.debug(context, line);
+      return;
+    }
+    this.options.log.info(context, line);
+    if (words.audience !== 'shown') return;
+    this.note(session, {
+      text: words.text,
+      kind: 'deferred',
+      ...(words.detail !== undefined ? { detail: words.detail } : {}),
+    });
   }
 
   /**
