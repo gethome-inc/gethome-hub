@@ -2250,7 +2250,7 @@ hubs.
 `GET /settings/ai` carries a `decision` block:
 
 ```jsonc
-"decision": { "hasKey": false, "model": "jev-1.13.0", "enabled": true }
+"decision": { "hasKey": false, "model": "jev-1.13.0", "label": "Jev", "enabled": true }
 ```
 
 It is a **sibling of `providers`, never a member of it**, and that placement is
@@ -2266,7 +2266,10 @@ Three things follow, and an app should hold all three:
   likewise. `PATCH {mappingProvider: "typesafe"}` is a `400`.
 - **It has no model to choose.** `model` is reported so an app can say what
   answered, and is pinned in the hub's build — the thresholds it is used with
-  are calibrated against it and calibration does not transfer.
+  are calibrated against it and calibration does not transfer. `label` is the
+  name a person reads, so an app naming the assistant's model can say
+  **"Opus 5 + Jev"** while a key is stored and `enabled` in the hub's own
+  words rather than one it ships.
 - **`enabled` is its own switch**, so pausing the spend and forgetting the key
   stay two different requests, exactly as `enabled` does for adaptation.
 

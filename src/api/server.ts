@@ -3312,8 +3312,20 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     return answered;
   });
 
-  /** Listed before the `:id` route below, or Fastify parses `chats` as a uuid. */
-  app.get('/api/v1/assistant/chats', needs('hub.ai'), async () => deps.assistantChat.list());
+  /**
+   * Listed before the `:id` route below, or Fastify parses `chats` as a uuid.
+   *
+   * **And it is how the hub learns somebody has opened the assistant**, since
+   * the page reads this list the moment it appears — so it is where the
+   * decision connection is opened, while they are still reading the page
+   * rather than on the first thing they say (`AssistantChat.prepare`). The
+   * warm-up is fire-and-forget and decides for itself whether there is
+   * anything to do; the list answers exactly as it always did.
+   */
+  app.get('/api/v1/assistant/chats', needs('hub.ai'), async () => {
+    deps.assistantChat.prepare();
+    return deps.assistantChat.list();
+  });
 
   app.get('/api/v1/assistant/chat/:id', needs('hub.ai'), async (request) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
@@ -3373,6 +3385,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       .parse(request.body ?? {});
     const ai = await deps.settings.getAiSettings();
     if (!ai.enabled) return reply.code(409).send({ error: 'ai_disabled' });
+    // Somebody is about to talk: open the decision connection now, so the
+    // first thing they say is read on a warm socket. Fire-and-forget.
+    deps.assistantChat.prepare();
     if (!ai.openai.hasKey) {
       return reply.code(409).send({
         error: 'openai_not_configured',

@@ -32,10 +32,30 @@
  */
 export const DECISION_MODEL = 'jev-1.13.0';
 
+/**
+ * What a person reads for it — "Opus 5 + Jev" on the assistant's page, where
+ * the model that answers is named and the one that read the sentence first
+ * belongs beside it.
+ *
+ * The hub's word rather than each app's, the rule `AGENT_MODELS`' labels
+ * follow: an app that shipped its own name for a pinned id would be naming
+ * something this build may already have moved past.
+ */
+export const DECISION_MODEL_LABEL = 'Jev';
+
 /** A yes/no judgement, answered with the probability that it holds. */
 export interface NoulQuestion {
   readonly type: 'noul';
   readonly instructions: string;
+  /**
+   * What a yes and a no each mean, when saying so helps.
+   *
+   * Optional on the wire, and the place the vendor says a boundary case goes
+   * for a model that reads literally: "turn off all the lights" is *one*
+   * request, and a question about "more than one thing" answers that better
+   * with the example written down beside it than with a longer sentence.
+   */
+  readonly criteria?: { readonly true: string; readonly false: string };
 }
 
 /** One option from a set the caller defines. */
@@ -127,6 +147,14 @@ export interface DecisionResult<Q extends Questions> {
   /** The vendor's own id for the request, for a log line that can be traced. */
   readonly requestId?: string | undefined;
   readonly durationMs: number;
+  /**
+   * Whether the request had to open a connection first.
+   *
+   * The handshake is most of a decision's latency when it happens, so a slow
+   * reading with this set is a cold hub rather than a slow model — the first
+   * question anybody asks of a log line that says "212 ms" or "1400 ms".
+   */
+  readonly newConnection?: boolean;
 }
 
 /**
@@ -145,6 +173,12 @@ export interface DecisionResult<Q extends Questions> {
  */
 export type DecisionMiss = 'off' | 'busy' | 'resting' | 'timeout' | 'failed';
 
+/** What else is known about a miss — for the same log line, never for a branch. */
+export interface DecisionMissDetail {
+  /** The request had to open a connection first. See `DecisionResult.newConnection`. */
+  readonly newConnection?: boolean;
+}
+
 /** What a decision cost, in the shape the ledger folds in. */
 export interface DecisionUsage {
   readonly inputTokens: number;
@@ -153,6 +187,15 @@ export interface DecisionUsage {
 
 export interface Decider {
   readonly modelId: string;
+  /**
+   * Get ready for a decision somebody is about to ask for — open the
+   * connection, so the first sentence does not pay for the handshake.
+   *
+   * Optional, and it never throws: a decider that cannot warm is still
+   * correct, and a warm-up that fails costs exactly the cold start it was
+   * trying to save.
+   */
+  warm?(): Promise<void>;
   /**
    * One request carrying every question, and **it never throws**.
    *
@@ -175,11 +218,11 @@ export interface Decider {
      * Whether somebody is waiting for this.
      *
      * **`live` is the default, and the asymmetry is the point.** A speculation
-     * is a guess about a sentence that has not finished, so it gives way to
-     * anything real; a live call is the turn itself and must never be dropped
-     * for a guess — which is exactly what a plain one-at-a-time rule does,
-     * silently, to the third of spoken commands that happen to arrive while a
-     * speculation is in flight.
+     * is a guess about a sentence that has not finished, so it is dropped when
+     * anything else is already out; a live call is the turn itself and always
+     * goes — never dropped for a guess, and never turned away because another
+     * live call is out, since a second person talking to the same house is an
+     * ordinary thing and not a reason for their light to take four seconds.
      */
     priority?: 'live' | 'speculative';
     /**
@@ -187,6 +230,6 @@ export interface Decider {
      * `DecisionMiss` — so a decider that never calls it is still correct, and
      * a caller that ignores it loses a log line rather than a behaviour.
      */
-    onMiss?: (why: DecisionMiss) => void;
+    onMiss?: (why: DecisionMiss, detail?: DecisionMissDetail) => void;
   }): Promise<DecisionResult<Q> | null>;
 }

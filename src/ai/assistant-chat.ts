@@ -10,15 +10,27 @@ import type { HubCommand } from '../schema/index.js';
 import type { AssistantTurn } from './assistant-agent.js';
 import type { AssistantToolContext, DelegateOutcome } from './assistant-tools.js';
 import { delegateAgents, type DelegateAgent } from './agents/registry.js';
+import type { DecisionTransport } from './decide/connection.js';
 import type { Decider } from './decide/decider.js';
 import { lazyDecider } from './decide/lazy.js';
 import {
   decideHomeCommand,
+  decideParts,
   describeStandDown,
+  participle,
+  phrase,
+  type CommandPlan,
+  type DecidableHome,
+  type DeviceAction,
   type HomeDecision,
   type StandDown,
 } from './decide/home-command.js';
-import { SPECULATION_REUSE_MS, SPECULATION_TIMEOUT_MS } from './decide/questions.js';
+import {
+  SPECULATION_REUSE_MS,
+  SPECULATION_TIMEOUT_MS,
+  SPECULATION_WAIT_MS,
+} from './decide/questions.js';
+import type { SplitInput, SplitResult } from './decide/split.js';
 import { LIVE_MODEL, LIVE_USD_PER_MINUTE, SIDEBAND_MAX_SECONDS } from './voice/live-wire.js';
 import type { AutomationChat } from './automation-chat.js';
 import {
@@ -27,6 +39,7 @@ import {
   type AgentConversation,
   type AgentSurface,
   type TurnOrigin,
+  type ChatVia,
   type ChatMessageWire,
   type ChatRuntimeOptions,
   type ChatSession,
@@ -97,6 +110,62 @@ export interface AssistantChatOptions extends ChatRuntimeOptions {
     systemPrompt: string;
     taskPrompt: string;
   }) => AgentConversation<AssistantTurn>;
+  /**
+   * What carries a decision to the vendor. Overridden in tests, which stand in
+   * for the network and nothing else — every rule about what a reading means
+   * still runs.
+   */
+  decisionTransport?: DecisionTransport;
+  /** Overridden in tests: the generative split of a sentence that is several requests. */
+  splitRequest?: (input: SplitInput) => Promise<SplitResult | null>;
+}
+
+/**
+ * The most devices the fast path works at once.
+ *
+ * A group is carried out device by device through `control`, and "every light
+ * in the house" all at once is forty writes queued on one radio in the same
+ * instant. A few at a time finishes in about the same wall-clock time and is a
+ * queue a Zigbee network can take.
+ */
+const FAST_PATH_CONCURRENCY = 6;
+
+/** What happened to one device the fast path worked. */
+interface ActionOutcome {
+  action: DeviceAction;
+  /** Why it did not take it, in the adapter's own words. Absent when it did. */
+  error?: string;
+}
+
+/**
+ * Two readings of the same sentence, give or take punctuation and case.
+ *
+ * **The whole rule for reusing a speculation, and it is equality rather than
+ * a prefix.** It used to be `startsWith`, on the reasoning that carrying on
+ * talking produces a superset of what was read — and a superset is exactly
+ * where the meaning changes: "turn the bedroom light on" read while somebody
+ * was still saying "— no, off" was acted on as *on*, and "turn off the kitchen
+ * light" read before "and the hall light" moved one light of two. What a
+ * speculation buys now is the open connection, the session and the digest —
+ * and its reading, when the sentence turned out to be the one it read.
+ */
+function sameSentence(a: string, b: string): boolean {
+  const normal = (text: string) =>
+    text
+      .normalize('NFKC')
+      .toLowerCase()
+      .replace(/[\p{P}\p{S}]+/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  return normal(a) === normal(b);
+}
+
+/** A wait nothing has to cancel, and that keeps no process alive. */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
 }
 
 /**
@@ -171,21 +240,33 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
   /**
    * What a sentence still being said has already been read as.
    *
-   * **This is what makes speculating worth anything.** Without it the warm
-   * paid for a full reading of every partial and threw all of them away, so
-   * the finished sentence was read from scratch — the feature costing money to
-   * change nothing. The answer is kept here and the real turn uses it when the
-   * sentence it ran on turns out to have been the beginning of this one.
+   * Kept so the real turn can use it when the finished sentence turns out to
+   * be *the same sentence* (`sameSentence`) — which is often the case, since
+   * the voice asks for help a beat after somebody stops, and the last partial
+   * read is usually the whole of what they said.
    */
   private readonly speculated = new Map<
     string,
     { partial: string; decision: HomeDecision; at: number }
   >();
 
+  /**
+   * A speculation still out, per conversation.
+   *
+   * The real turn waits for it briefly (`SPECULATION_WAIT_MS`): it is holding
+   * the one open connection, and it may have read exactly this sentence — so
+   * a short wait is usually faster than a second request beside it.
+   */
+  private readonly pendingSpeculation = new Map<string, Promise<void>>();
+
   constructor(private readonly options: AssistantChatOptions) {
     super(options);
     this.delegates = delegateAgents({ automationChat: options.automationChat });
-    this.decider = lazyDecider({ settings: options.settings, log: options.log });
+    this.decider = lazyDecider({
+      settings: options.settings,
+      log: options.log,
+      ...(options.decisionTransport !== undefined ? { transport: options.decisionTransport } : {}),
+    });
     // The other agent's own frames say when one of its turns has landed.
     // Nothing is polled and nothing new is emitted: this is the same `turn`
     // frame the app is already drawing from.
@@ -198,30 +279,56 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
   // ── The handoff ────────────────────────────────────────────────────────────
 
   /**
-   * The reading a partial sentence already produced, when it is still about
-   * this one.
+   * The reading a partial sentence already produced, when it was a reading of
+   * this very sentence.
    *
-   * **`startsWith` is the whole invalidation rule, and it is enough.**
-   * `VoiceDelegation.question()` joins the utterances it has kept, so somebody
-   * who carried on talking produces a *superset* of what was speculated on —
-   * which is a hit. Every way the sentence can have changed underneath instead
-   * produces a string that is not a superset: a new utterance opened, an
-   * earlier one retired because the voice answered it, one dropped by the
-   * context bound. Each of those is a miss, and a miss simply decides live.
+   * **Equality, never a prefix** — see `sameSentence` for the two ways a
+   * prefix went wrong. Anything else is a miss, and a miss simply decides live
+   * on the connection the speculation left open, which is most of what it was
+   * for.
    *
    * Consumed once. A second turn must not be answered from a reading of the
-   * first, however well the prefixes happen to line up.
+   * first, however alike the two happen to be.
    */
-  private async reuseSpeculation(
-    sessionId: string,
-    text: string,
-  ): Promise<HomeDecision | undefined> {
+  private reuseSpeculation(sessionId: string, text: string): HomeDecision | undefined {
     const cached = this.speculated.get(sessionId);
     if (cached === undefined) return undefined;
     this.speculated.delete(sessionId);
-    if (!text.startsWith(cached.partial)) return undefined;
+    if (!sameSentence(text, cached.partial)) return undefined;
     if (Date.now() - cached.at > SPECULATION_REUSE_MS) return undefined;
     return cached.decision;
+  }
+
+  /**
+   * The home, as a reading needs it — the catalog, and what each device
+   * reports now, for "brighter" and "warmer".
+   */
+  private decidableHome(): DecidableHome {
+    const view = this.options.engine.homeView();
+    return {
+      rooms: view.rooms,
+      zones: view.zones,
+      devices: view.devices,
+      stateOf: (deviceId, endpointId) => this.options.engine.stateFor(deviceId, endpointId),
+    };
+  }
+
+  /**
+   * Somebody has opened the assistant, or started talking to it: get the
+   * decision connection ready.
+   *
+   * **The first sentence was the slow one.** Nothing had reached the vendor
+   * for minutes, so the connection a decision needs was closed and the first
+   * thing said paid for DNS, TCP and TLS from a Pi before the question was
+   * even sent — which is most of what "Jev didn't answer in time" was. Opening
+   * it while somebody is still reading the page costs nothing they can see.
+   *
+   * Fire-and-forget, and it never throws: the warm-up decides for itself
+   * whether there is a key, whether decisions are on and whether a connection
+   * is already open.
+   */
+  prepare(): void {
+    void this.decider.warm?.().catch(() => undefined);
   }
 
   /**
@@ -754,29 +861,42 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
     /**
      * And the reading itself, **kept** for the turn that follows.
      *
-     * `speculative` so it gives way to a live call rather than taking the
-     * fast path away from it, and the answer is stored rather than discarded —
-     * if the person finishes the sentence this began, the real turn spends no
-     * request at all and acts on what is already here.
+     * `speculative`, so it is dropped when anything else is already out and
+     * never stands in a real turn's way. It reads nothing that could write:
+     * what is kept is a *reading*, and the write still happens on the real
+     * turn, after the voice says the sentence is finished, through `control`
+     * and past every guard. Its first job is the connection, which it opens
+     * for the real turn whatever it concludes.
      */
-    const decision = await decideHomeCommand({
+    const reading = decideHomeCommand({
       decider: this.decider,
-      home: this.options.engine.homeView(),
+      home: this.decidableHome(),
       delegates: this.delegates,
       said: input.partial,
       timeoutMs: SPECULATION_TIMEOUT_MS,
       priority: 'speculative',
     });
-    session.decisionUsd +=
-      decision.kind === 'command' ? decision.command.costUsd : decision.costUsd;
-    // A dropped or overtaken speculation answers `none` at no cost; keeping
-    // that would hand the real turn a "nothing to do" it never earned.
-    if (decision.kind !== 'none' || decision.costUsd > 0) {
-      this.speculated.set(input.sessionId, {
-        partial: input.partial,
-        decision,
-        at: Date.now(),
-      });
+    const settled = reading.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.pendingSpeculation.set(input.sessionId, settled);
+    try {
+      const decision = await reading;
+      session.decisionUsd += decision.costUsd;
+      // A dropped speculation answers `none` at no cost; keeping that would
+      // hand the real turn a "nothing to do" it never earned.
+      if (decision.kind !== 'none' || decision.costUsd > 0) {
+        this.speculated.set(input.sessionId, {
+          partial: input.partial,
+          decision,
+          at: Date.now(),
+        });
+      }
+    } finally {
+      if (this.pendingSpeculation.get(input.sessionId) === settled) {
+        this.pendingSpeculation.delete(input.sessionId);
+      }
     }
   }
 
@@ -947,36 +1067,41 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
   }
 
   /**
-   * Work a device, and write it down.
-   *
-   * Through the registry's ordinary command path — already serialised per
-   * device, already the one place a command reaches an adapter — and into the
-   * activity log as `device.command`, which is the log's own rule: it records
-   * what was *asked*. A command nobody can see the origin of is the one thing
-   * an agent with a relay must not produce.
-   */
-  /**
-   * Read the sentence before the model is asked, and act on it when there is
+   * Read the sentence before the model is asked, and act on what there is
    * nothing left to be unsure about.
    *
    * **This is the whole latency argument.** "Turn the kitchen light off" costs
-   * two model rounds today — one to call the tool, one to say it happened —
-   * and the first of those is answering a question with one right answer over
-   * a catalog the hub is holding in memory. A decision model answers it in
-   * about a fifth of a second for a fiftieth of a penny, so the light moves
-   * while the sentence is still being written.
+   * two model rounds without it — one to call the tool, one to say it happened
+   * — and the first of those is answering a question with one right answer
+   * over a catalog the hub is holding in memory. A decision model answers it in
+   * a few hundred milliseconds for a fiftieth of a penny, so the light moves
+   * before the model has been asked anything, and the one round left is the
+   * reply — run at the lowest effort, since it has nothing to work out.
+   *
+   * Three roads, which are the vendor's own smart-home demo:
+   *
+   * - **One request, read confidently** — one device, or every device of one
+   *   kind in a room, a zone or the house — is carried out here.
+   * - **Several requests, at least one a command,** are split by the
+   *   conversation's own model (`splitAhead`), the parts are read in one more
+   *   request, and every part read confidently is carried out. What is left —
+   *   a question, a rule, a part it was unsure of — is the model's.
+   * - **Everything else** is the model's, exactly as it would have been, with
+   *   the reason written down (`reportStandDown`).
+   *
+   * Whatever was carried out, the model is told precisely what, device by
+   * device, and writes the reply itself (`fastPathPriming`).
    *
    * Four things it does **not** do, each deliberate:
    *
-   * - It never writes the reply. The hub acting and the hub speaking are
-   *   different jobs, and a canned "All done" is words in the model's mouth —
-   *   the rule the automations agent's own prose arm is built around. What
-   *   this leaves behind is a primed round that has nothing to look up.
-   * - It never decides who may do something. The command goes through
-   *   `control`, which is the same path the model's own tool takes, past the
-   *   same guards and into the same activity row named for the person.
-   * - It never reads a number out of a sentence. `needsValue` is what ends the
-   *   attempt, because this model is documented as unreliable at quantities.
+   * - It never writes the reply. A canned "All done" is words in the model's
+   *   mouth — the rule the automations agent's own prose arm is built around.
+   * - It never decides who may do something. Every command goes through
+   *   `control`, the path the model's own tool takes, past the same guards and
+   *   into the same activity row named for the person.
+   * - It never lets the decision model read a number. A number somebody said
+   *   is found in code and every calculation is code; the model says only what
+   *   it is a number *of*.
    * - It never fast-paths an `answer`. That closes a `tool_use` the provider
    *   is waiting on, and a request carrying an unanswered call is refused.
    */
@@ -988,20 +1113,50 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
   ): Promise<{ origin?: TurnOrigin; turn?: AssistantTurn } | undefined> {
     this.actedThisTurn.set(session.id, new Set());
     if (how === 'answer') return undefined;
+    /**
+     * **The seam never throws, and this is what makes that true.** A throw
+     * out of here is not a fallback — `exchange` catches it as a turn that
+     * could not be saved, writes a note and runs no round at all, so a lookup
+     * that failed on the way to a lamp would leave somebody with no answer.
+     * Anything that goes wrong is the model's sentence, whole. Whatever was
+     * already carried out stays carried out, and `actedThisTurn` makes the
+     * model's own call for the same thing a no-op rather than a second switch.
+     */
+    try {
+      return await this.fastPath(session, text, origin);
+    } catch (error) {
+      this.options.log.warn(
+        { err: error, sessionId: session.id },
+        'Jev: the fast path failed — the model has the sentence',
+      );
+      return undefined;
+    }
+  }
 
-    const reused = await this.reuseSpeculation(session.id, text);
+  private async fastPath(
+    session: ChatSession<AssistantTurn>,
+    text: string,
+    origin: TurnOrigin | undefined,
+  ): Promise<{ origin?: TurnOrigin; turn?: AssistantTurn } | undefined> {
+    // A speculation still out on this conversation is worth a short wait: it
+    // holds the open connection, and it may have read exactly this sentence.
+    const pending = this.pendingSpeculation.get(session.id);
+    if (pending !== undefined) await Promise.race([pending, delay(SPECULATION_WAIT_MS)]);
+
+    const reused = this.reuseSpeculation(session.id, text);
     const decision =
       reused ??
       (await decideHomeCommand({
         decider: this.decider,
-        home: this.options.engine.homeView(),
+        home: this.decidableHome(),
         delegates: this.delegates,
         said: text,
       }));
     // Paid for whatever it concluded, including nothing. Banked on this turn's
-    // own row rather than on a row of its own — see `decisionUsd`.
-    session.decisionUsd +=
-      decision.kind === 'command' ? decision.command.costUsd : decision.costUsd;
+    // own row rather than on a row of its own — see `decisionUsd`. A reused
+    // reading was paid for when it was made (`warmForSpeech`), and counting
+    // it again here charged the home twice for one request.
+    if (reused === undefined) session.decisionUsd += decision.costUsd;
 
     /**
      * How hard this round should work, if the reading had a view.
@@ -1013,62 +1168,303 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
      */
     const via = origin?.via ?? 'typed';
     const eased: TurnOrigin | undefined =
-      decision.effort === 'low' && via !== 'voice'
-        ? { effort: 'low', via: origin?.via ?? 'typed' }
-        : undefined;
+      decision.effort === 'low' && via !== 'voice' ? { effort: 'low', via } : undefined;
     const carry = (result: { turn?: AssistantTurn } | undefined) =>
       eased === undefined ? result : { ...result, origin: eased };
+    /**
+     * A round whose only job is to say what was done: the lowest effort,
+     * whatever this turn was otherwise going to run at. The work is finished;
+     * what is left is a sentence.
+     */
+    const confirming: { origin: TurnOrigin } = { origin: { effort: 'low', via } };
 
-    if (decision.kind === 'none') {
-      this.reportStandDown(session, decision.standDown, via, reused !== undefined);
-      return carry(undefined);
+    switch (decision.kind) {
+      case 'none':
+        this.reportStandDown(session, decision.standDown, via, reused !== undefined);
+        return carry(undefined);
+
+      case 'route': {
+        // **Typed only.** `spoken()` drops a `handoff` row — the handoff arm
+        // writes its own `agent` row saying what was handed over — so skipping
+        // the round out loud would leave `askAloud` with nothing to say and
+        // the voice would announce that it could not work it out, over a job
+        // handed over correctly.
+        if (via === 'voice') return carry(undefined);
+        if (session.conversation.awaitingAnswer()) return carry(undefined);
+        const handed = await this.routeAhead(session, decision.agentKey, text, decision);
+        return handed === undefined ? carry(undefined) : { turn: handed };
+      }
+
+      case 'act': {
+        const outcomes = await this.carryOut(session, decision.plan.actions, via);
+        this.reportActed(session, decision.plan, outcomes, {
+          durationMs: decision.durationMs,
+          newConnection: decision.newConnection,
+          via,
+          reused: reused !== undefined,
+        });
+        await this.prime(session, [{ outcomes, offline: decision.plan.offline }], [], via);
+        return confirming;
+      }
+
+      case 'split':
+        return this.splitAhead(session, text, via, carry, confirming);
     }
+  }
 
-    if (decision.kind === 'route') {
-      // **Typed only.** `spoken()` drops a `handoff` row — the handoff arm
-      // writes its own `agent` row saying what was handed over — so skipping
-      // the round out loud would leave `askAloud` with nothing to say and the
-      // voice would announce that it could not work it out, over a job handed
-      // over correctly.
-      if (via === 'voice') return carry(undefined);
-      if (session.conversation.awaitingAnswer()) return carry(undefined);
-      const handed = await this.routeAhead(session, decision.agentKey, text, decision);
-      return handed === undefined ? carry(undefined) : { turn: handed };
-    }
-
-    const { command } = decision;
-    this.note(session, {
-      text: `Understood in ${Math.round(command.durationMs)} ms.`,
-      kind: 'routing',
-      detail: `${command.deviceName} · ${command.command.type} · confidence ${command.confidence.toFixed(2)}`,
-    });
-    try {
-      await this.control(
-        session.memberId,
-        session.id,
-        command.deviceId,
-        command.endpointId,
-        command.command,
-        via === 'voice' ? 'voice' : 'assistant',
+  /**
+   * Several requests in one sentence: split it, read the parts, carry out
+   * what is sure, and leave the rest to the model.
+   *
+   * The split is writing, so it is the conversation's own model that does it
+   * (`decide/split.ts`) — the model and key the home chose, at the lowest
+   * effort. The parts then go back to Jev in **one** request, every part read
+   * in parallel. Nothing here is worse than not splitting: a split that fails
+   * sends the sentence to the model whole, and a part Jev is unsure of is
+   * simply left for it, quoted, beside the rest of the sentence.
+   */
+  private async splitAhead(
+    session: ChatSession<AssistantTurn>,
+    text: string,
+    via: ChatVia,
+    carry: (result: { turn?: AssistantTurn } | undefined) => { origin?: TurnOrigin; turn?: AssistantTurn } | undefined,
+    confirming: { origin: TurnOrigin },
+  ): Promise<{ origin?: TurnOrigin; turn?: AssistantTurn } | undefined> {
+    const split = await this.splitSentence(session, text);
+    if (split === null) {
+      this.reportStandDown(
+        session,
+        { question: 'split', reason: 'missed', because: 'the model did not split it' },
+        via,
+        false,
       );
-    } catch (error) {
-      // The device refused, is unreachable, or the adapter threw. Nothing is
-      // primed and the ordinary round runs, which is where a failure has
-      // always been explained — this layer has no business writing that
-      // sentence either.
-      this.options.log.warn({ err: error }, 'fast path could not work the device');
       return carry(undefined);
     }
+    session.decisionUsd += split.costUsd;
+    // **One part is no split.** The model read it as a single request, and
+    // reading that request again would ask Jev what it has just answered —
+    // more than one thing, or several devices named one by one — so it would
+    // stand down a second time for the price of another request. The model
+    // has the sentence whole, which is where it was going anyway.
+    if (split.parts.length < 2) {
+      this.reportStandDown(
+        session,
+        { question: 'split', reason: 'blocked', durationMs: split.durationMs },
+        via,
+        false,
+      );
+      return carry(undefined);
+    }
+    this.note(session, {
+      text: `Jev heard ${split.parts.length} requests`,
+      kind: 'routing',
+      detail: [...split.parts.map((part) => `“${part}”`), `split in ${Math.round(split.durationMs)} ms`].join(
+        ' · ',
+      ),
+    });
 
-    // **Priming rather than a message.** It reaches the model and is never
-    // written down, so the transcript row stays what the person actually
-    // said — `rememberSaved`'s channel, for its reason.
-    const done =
-      `You have already done this, just now: ${command.deviceName} — ` +
-      `${command.command.type}. It is carried out. Tell them briefly that it is done, ` +
-      'in your own words, and do not call a tool to do it again.';
-    session.priming = session.priming === undefined ? done : `${session.priming}\n\n${done}`;
-    return carry(undefined);
+    const read = await decideParts({
+      decider: this.decider,
+      home: this.decidableHome(),
+      parts: split.parts,
+    });
+    session.decisionUsd += read.costUsd;
+
+    const done: { outcomes: ActionOutcome[]; offline: CommandPlan['offline'] }[] = [];
+    const left: string[] = [];
+    // In the order they were said: "turn the light on and then dim it" is a
+    // sequence, and the second part may well be about the first.
+    for (const part of read.parts) {
+      if (part.reading.kind === 'act') {
+        const outcomes = await this.carryOut(session, part.reading.plan.actions, via);
+        this.reportActed(session, part.reading.plan, outcomes, {
+          durationMs: read.durationMs,
+          newConnection: read.newConnection,
+          via,
+          reused: false,
+        });
+        done.push({ outcomes, offline: part.reading.plan.offline });
+      } else {
+        left.push(part.text);
+        this.reportStandDown(session, part.reading.standDown, via, false);
+      }
+    }
+    // Nothing carried out: the round is the ordinary one, over the whole
+    // sentence, exactly as if none of this had happened.
+    if (done.length === 0) return carry(undefined);
+    await this.prime(session, done, left, via);
+    return left.length === 0 ? confirming : carry(undefined);
+  }
+
+  /**
+   * Split a sentence with the conversation's own model and key, or say it
+   * could not be — null means "read it whole".
+   */
+  private async splitSentence(
+    session: ChatSession<AssistantTurn>,
+    text: string,
+  ): Promise<SplitResult | null> {
+    const provider = session.conversation.provider;
+    if (provider !== 'anthropic' && provider !== 'openai') return null;
+    const secret = await this.options.settings.aiKey(provider);
+    if (secret === null || secret === '') return null;
+    const run = this.options.splitRequest ?? (await import('./decide/split.js')).splitRequest;
+    return run({
+      provider,
+      modelId: session.conversation.modelId,
+      secret,
+      said: text,
+      log: this.options.log,
+    });
+  }
+
+  /**
+   * Carry out a reading's commands, device by device, and say what each did.
+   *
+   * **Through `control`, every one** — the path the model's own tool takes,
+   * with its activity row named for the person and its once-per-turn record —
+   * so the model calling the tool anyway afterwards is a no-op rather than a
+   * lamp that flickers. A device's own commands run in order (on, then 40%);
+   * devices run a few at a time (`FAST_PATH_CONCURRENCY`). A device that
+   * refuses is written down with the adapter's own words and the rest carry
+   * on: one unreachable bulb is not a reason to leave the other lights on.
+   */
+  private async carryOut(
+    session: ChatSession<AssistantTurn>,
+    actions: readonly DeviceAction[],
+    via: ChatVia,
+  ): Promise<ActionOutcome[]> {
+    const outcomes: ActionOutcome[] = new Array<ActionOutcome>(actions.length);
+    let next = 0;
+    const work = async (): Promise<void> => {
+      while (next < actions.length) {
+        const index = next;
+        next += 1;
+        const action = actions[index]!;
+        try {
+          for (const { endpointId, command } of action.commands) {
+            await this.control(
+              session.memberId,
+              session.id,
+              action.deviceId,
+              endpointId,
+              command,
+              via === 'voice' ? 'voice' : 'assistant',
+            );
+          }
+          outcomes[index] = { action };
+        } catch (error) {
+          this.options.log.warn(
+            { err: error, deviceId: action.deviceId },
+            'fast path could not work the device',
+          );
+          const said = error instanceof Error ? error.message : String(error);
+          outcomes[index] = { action, error: said.length > 200 ? `${said.slice(0, 199)}…` : said };
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(FAST_PATH_CONCURRENCY, actions.length) }, () => work()),
+    );
+    return outcomes;
+  }
+
+  /**
+   * Say what the fast path did — a step in the trail, and a line in the log.
+   *
+   * The step is the one a person reads while the reply is still being
+   * written: what was done and to what, named — "Jev switched off 4 lights in
+   * the Kitchen" — with how long the reading took and how sure it was
+   * underneath. The log line is `Jev carried out — …`, so `grep Jev` over the
+   * hub's journal shows the turns it acted on beside the ones it stood down on.
+   */
+  private reportActed(
+    session: ChatSession<AssistantTurn>,
+    plan: CommandPlan,
+    outcomes: readonly ActionOutcome[],
+    reading: { durationMs: number; newConnection?: boolean | undefined; via: ChatVia; reused: boolean },
+  ): void {
+    const failed = outcomes.filter((outcome) => outcome.error !== undefined);
+    const words = phrase(plan.wordings, plan.target, plan.plural);
+    const took = `${Math.round(reading.durationMs)} ms${reading.newConnection === true ? ', new connection' : ''}`;
+    const detail = [
+      reading.reused ? 'read while it was being said' : took,
+      `confidence ${plan.confidence.toFixed(2)}`,
+      failed.length === 0
+        ? undefined
+        : failed.length === outcomes.length
+          ? `failed: ${failed[0]!.error}`
+          : `${failed.length} of ${outcomes.length} failed`,
+      plan.offline.length === 0
+        ? undefined
+        : plan.offline.length === 1
+          ? `${plan.offline[0]!.deviceName} is offline and was not tried`
+          : `${plan.offline.length} offline and not tried`,
+    ]
+      .filter((part): part is string => part !== undefined)
+      .join(' · ');
+    this.note(session, {
+      text: failed.length === outcomes.length ? `Jev couldn't get ${plan.target} to do it` : `Jev ${words}`,
+      kind: 'routing',
+      detail,
+    });
+    this.options.log.info(
+      {
+        jev: {
+          devices: outcomes.map((outcome) => ({
+            device: outcome.action.deviceName,
+            commands: outcome.action.commands.map((entry) => entry.command.type),
+            ...(outcome.error !== undefined ? { error: outcome.error } : {}),
+          })),
+          ...(plan.offline.length > 0 ? { offline: plan.offline.map((entry) => entry.deviceName) } : {}),
+          confidence: plan.confidence,
+          durationMs: reading.durationMs,
+          ...(reading.newConnection !== undefined ? { newConnection: reading.newConnection } : {}),
+        },
+        sessionId: session.id,
+        via: reading.via,
+        ...(reading.reused ? { reused: true } : {}),
+      },
+      `Jev carried out — ${words}${failed.length > 0 ? ` (${failed.length} failed)` : ''}`,
+    );
+  }
+
+  /**
+   * Tell the round that follows what was already done, and what is left.
+   *
+   * **Priming rather than a message.** It reaches the model and is never
+   * written down, so the transcript row stays what the person actually said —
+   * `rememberSaved`'s channel, for its reason. `fastPathPriming` is where the
+   * wording lives, with the other prompts.
+   */
+  private async prime(
+    session: ChatSession<AssistantTurn>,
+    plans: readonly { outcomes: readonly ActionOutcome[]; offline: CommandPlan['offline'] }[],
+    left: readonly string[],
+    via: ChatVia,
+  ): Promise<void> {
+    // Loaded on demand, like `open()`'s call to the same module: this file's
+    // rule is that a prompt is not part of its graph.
+    const { fastPathPriming } = await import('./assistant-prompts.js');
+    const line = fastPathPriming({
+      done: plans.flatMap((plan) => [
+        ...plan.outcomes.map((outcome) => ({
+          device: outcome.action.deviceName,
+          room: outcome.action.roomName,
+          did: participle(outcome.action.wordings),
+          error: outcome.error,
+        })),
+        ...plan.offline.map((entry) => ({
+          device: entry.deviceName,
+          room: entry.roomName,
+          did: participle(entry.wordings),
+          offline: true,
+        })),
+      ]),
+      left,
+      spoken: via === 'voice',
+    });
+    session.priming = session.priming === undefined ? line : `${session.priming}\n\n${line}`;
   }
 
   /**
@@ -1141,9 +1537,9 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
     const agent = this.delegates.find((entry) => entry.key === agentKey);
     if (agent === undefined) return undefined;
     this.note(session, {
-      text: `Understood in ${Math.round(read.durationMs)} ms.`,
+      text: `Jev passed this to the ${agent.title}`,
       kind: 'routing',
-      detail: `${agent.title} · confidence ${read.confidence.toFixed(2)}`,
+      detail: `${Math.round(read.durationMs)} ms · confidence ${read.confidence.toFixed(2)}`,
     });
     const outcome = await this.delegate({
       memberId: session.memberId,
@@ -1161,6 +1557,15 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
     };
   }
 
+  /**
+   * Work a device, and write it down.
+   *
+   * Through the registry's ordinary command path — already serialised per
+   * device, already the one place a command reaches an adapter — and into the
+   * activity log as `device.command`, which is the log's own rule: it records
+   * what was *asked*. A command nobody can see the origin of is the one thing
+   * an agent with a relay must not produce.
+   */
   private async control(
     memberId: string,
     sessionId: string,
@@ -1185,25 +1590,48 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
     const acted = this.actedThisTurn.get(sessionId);
     if (acted?.has(signature) === true) return;
     acted?.add(signature);
-    await this.options.registry.execute(deviceId, endpointId, command);
+    try {
+      await this.options.registry.execute(deviceId, endpointId, command);
+    } catch (error) {
+      // **Only what happened is remembered.** A command the device refused
+      // was never carried out, so asking for it again is a real second try —
+      // and a model that does gets the adapter's own answer rather than a
+      // silent success over a lamp that is still on.
+      acted?.delete(signature);
+      throw error;
+    }
     const device = this.options.engine.homeView().devices.find((entry) => entry.id === deviceId);
-    const name = (await this.memberName(memberId)) ?? 'Somebody';
-    await this.options.activity.record({
-      kind: 'device.command',
-      // **Named for the person, not for the agent.** They asked for it, the
-      // feed is read a week later, and "the assistant" is not somebody anyone
-      // in the home can go and ask about it. `via` says how it was asked, for
-      // an app that wants to draw the difference.
-      message: `${name} · ${device?.name ?? deviceId}: ${command.type}`,
-      ...(device !== undefined ? { deviceId: device.id } : {}),
-      memberId,
-      data: {
-        command,
-        deviceName: device?.name ?? deviceId,
-        memberName: name,
-        via,
-      },
-    });
+    /**
+     * **Written down, but never at the price of the answer.** The device has
+     * taken the command by now; a row that could not be written — a busy
+     * card, a device removed a moment ago — is bookkeeping, and letting it
+     * throw told the model, and so the person, that a lamp which had just
+     * gone off had not. `ChatRuntime.bank`'s rule, one table over.
+     */
+    try {
+      const name = (await this.memberName(memberId)) ?? 'Somebody';
+      await this.options.activity.record({
+        kind: 'device.command',
+        // **Named for the person, not for the agent.** They asked for it, the
+        // feed is read a week later, and "the assistant" is not somebody anyone
+        // in the home can go and ask about it. `via` says how it was asked, for
+        // an app that wants to draw the difference.
+        message: `${name} · ${device?.name ?? deviceId}: ${command.type}`,
+        ...(device !== undefined ? { deviceId: device.id } : {}),
+        memberId,
+        data: {
+          command,
+          deviceName: device?.name ?? deviceId,
+          memberName: name,
+          via,
+        },
+      });
+    } catch (error) {
+      this.options.log.warn(
+        { err: error, deviceId },
+        'a command the assistant carried out could not be written to the activity log',
+      );
+    }
   }
 
   /** The member's own name, for anything written in the home's voice. */

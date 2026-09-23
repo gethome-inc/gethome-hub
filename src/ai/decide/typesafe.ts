@@ -4,9 +4,11 @@
  * `voice/live-wire.ts`'s containment rule, for the same reason: this is the
  * one thing here nobody can check by running the suite, so the wire lives in a
  * file small enough to read in one go and the rest of the subsystem talks to
- * `Decider`. Plain `fetch` and **no dependency** — `src/ai/CLAUDE.md` refuses a
- * second SDK for a Pi to download, twice over, and a decision model is a POST
- * with a JSON body.
+ * `Decider`. **No dependency** — `src/ai/CLAUDE.md` refuses a second SDK for a
+ * Pi to download, twice over, and a decision model is a POST with a JSON body.
+ * What carries the POST is `connection.ts`'s kept-alive socket rather than the
+ * global `fetch`, whose four-second idle limit put a fresh TLS handshake in
+ * front of nearly every decision.
  *
  * It **throws**; `lazy.ts` is what turns a failure into `null`. Splitting them
  * that way is what lets the wrapper classify the throw, arm its breaker and
@@ -14,6 +16,7 @@
  */
 import { classifyApiError } from '../errors.js';
 import type { Logger } from '../../logging.js';
+import { keepAliveTransport, type DecisionFetch } from './connection.js';
 import {
   DECISION_MODEL,
   type DecisionQuestion,
@@ -52,9 +55,9 @@ export function estimateDecisionCostUsd(usage: { inputTokens: number }): number 
 /**
  * Raised when the deadline passed with nothing back.
  *
- * Its own class rather than the `AbortError` the aborted `fetch` throws,
- * because that one is also what a speculation overtaken by a live call throws —
- * and "it was too slow" and "we cancelled it" are different lines in a log.
+ * Its own class rather than the `AbortError` the aborted request throws,
+ * because that one is also what a caller's own cancellation throws — and "it
+ * was too slow" and "somebody stopped it" are different lines in a log.
  * `lazy.ts` reads it by `name`, since it only ever holds this module behind a
  * dynamic import.
  */
@@ -84,14 +87,24 @@ interface WireBody {
   usage?: WireUsage;
 }
 
-/** The request body, which is the questions exactly as the caller wrote them. */
+/**
+ * The request body, which is the questions exactly as the caller wrote them.
+ *
+ * A noul's `criteria` is optional on the wire and sent only when a question
+ * carries one — what a yes and a no each mean, which is where the vendor says
+ * a boundary case belongs for a model that reads literally.
+ */
 function wireQuestions(questions: Questions): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [id, question] of Object.entries(questions)) {
-    out[id] =
-      question.type === 'noul'
-        ? { type: 'noul', instructions: question.instructions }
-        : { type: question.type, instructions: question.instructions, criteria: question.criteria };
+    if (question.type === 'noul') {
+      out[id] =
+        question.criteria === undefined
+          ? { type: 'noul', instructions: question.instructions }
+          : { type: 'noul', instructions: question.instructions, criteria: question.criteria };
+      continue;
+    }
+    out[id] = { type: question.type, instructions: question.instructions, criteria: question.criteria };
   }
   return out;
 }
@@ -165,8 +178,14 @@ export async function runDecision<Q extends Questions>(input: {
   state: string | Readonly<Record<string, unknown>> | readonly unknown[];
   questions: Q;
   timeoutMs: number;
-  /** Cancelled from outside — a speculation giving way to a live call. */
+  /** Cancelled from outside. Nothing in the hub cancels one today. */
   signal?: AbortSignal;
+  /**
+   * What carries the request — the kept-alive connection unless a test hands
+   * in its own. A real `fetch` signature, so a stub returns a real `Response`
+   * and the parsing below is exercised exactly as it runs.
+   */
+  fetch?: DecisionFetch;
   log: Logger;
 }): Promise<DecisionResult<Q>> {
   const state = typeof input.state === 'string' ? input.state : JSON.stringify(input.state);
@@ -182,14 +201,16 @@ export async function runDecision<Q extends Questions>(input: {
     controller.abort();
   }, input.timeoutMs);
   // The caller's own reason to stop, folded into the same controller as the
-  // deadline: a speculation that a live call has overtaken is cancelled the
-  // same way a slow one is, and the request never reaches the network twice.
+  // deadline, so either one ends the request the same way. Nothing in the hub
+  // cancels a decision today — `lazy.ts` lets a speculation finish rather than
+  // abort it, since aborting destroys the connection a live call would reuse.
   const relay = () => controller.abort();
   input.signal?.addEventListener('abort', relay, { once: true });
   if (input.signal?.aborted === true) controller.abort();
+  const send = input.fetch ?? keepAliveTransport.fetch;
   let response: Response;
   try {
-    response = await fetch(DECISION_URL, {
+    response = await send(DECISION_URL, {
       method: 'POST',
       headers: {
         authorization: `Bearer ${input.secret}`,

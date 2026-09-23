@@ -417,3 +417,71 @@ function spokenReading(state: EndpointState): Record<string, unknown> | undefine
 
   return Object.keys(reading).length === 0 ? undefined : reading;
 }
+
+/**
+ * What the fast path already did, for the round that follows it.
+ *
+ * **The model writes the reply; this is what it writes it from.** Jev carries
+ * a command out before the model is asked, and the reply is still the model's
+ * — a canned "All done" is words in its mouth, the rule the automations
+ * agent's own prose arm is built around. So the round is told *exactly* what
+ * happened: every device by name and room, what was done to it in words
+ * rather than as a command type, and which ones did not take it and why. The
+ * first version said "Light TV — power", which left the model to work out
+ * from the person's sentence whether the light had gone on or off.
+ *
+ * **And what is still the model's**, when a sentence was split: the requests
+ * the fast path left alone — a question, a rule, a command it was unsure of —
+ * quoted as the split wrote them, so the model answers those and does not
+ * redo the rest. It reads the person's whole sentence as well, below this.
+ *
+ * On `ChatSession.priming`, so it reaches the model and never the transcript:
+ * the row this turn writes is what the person said.
+ */
+export function fastPathPriming(input: {
+  done: readonly {
+    device: string;
+    room?: string | undefined;
+    did: string;
+    /** The adapter's own words, when the device did not take it. */
+    error?: string | undefined;
+    /** A member of a group the hub knew was offline, and so did not try. */
+    offline?: boolean | undefined;
+  }[];
+  /** Requests from the same message the fast path did not carry out. */
+  left: readonly string[];
+  /** A spoken turn, whose readings above were taken a moment before this. */
+  spoken: boolean;
+}): string {
+  const lines = input.done.map((entry) => {
+    const where = entry.room !== undefined ? ` (${entry.room})` : '';
+    if (entry.offline === true) {
+      return `- ${entry.device}${where}: NOT done — it was to be ${entry.did}, but it is offline, so the hub did not try.`;
+    }
+    return entry.error === undefined
+      ? `- ${entry.device}${where}: ${entry.did}.`
+      : `- ${entry.device}${where}: NOT done — it was to be ${entry.did}, and the hub could not: ${entry.error}`;
+  });
+  const failed = input.done.some((entry) => entry.error !== undefined || entry.offline === true);
+  return [
+    'ALREADY DONE BEFORE YOU WERE ASKED',
+    'The hub carried this much of their message out itself, just now, through the same path',
+    'control_device uses:',
+    ...lines,
+    ...(input.spoken
+      ? ['The readings above were taken a moment before this, so they may not show it yet.']
+      : []),
+    ...(input.left.length > 0
+      ? [
+          '',
+          'Their message also asked for these, which were NOT carried out — they are yours to handle',
+          'as you normally would:',
+          ...input.left.map((request) => `- "${request}"`),
+        ]
+      : ['Nothing else in their message needs doing.']),
+    '',
+    'Tell them what was done in your own words, briefly and in their language' +
+      (failed ? ', and say plainly what could not be done' : '') +
+      '. Do not call a tool to do any of it again, and there is no need to check it with get_device.',
+  ].join('\n');
+}

@@ -1,5 +1,5 @@
 /**
- * The decider a caller actually holds: fail-open, single-flight, and behind a
+ * The decider a caller actually holds: fail-open, bounded, and behind a
  * dynamic import.
  *
  * `src/ai/lazy.ts`'s shape and `chat/transport.ts`'s import. The honest reason
@@ -14,10 +14,12 @@
 import { createHash } from 'node:crypto';
 import type { SettingsService } from '../../core/settings.js';
 import type { Logger } from '../../logging.js';
+import type { DecisionTransport } from './connection.js';
 import {
   DECISION_MODEL,
   type Decider,
   type DecisionMiss,
+  type DecisionMissDetail,
   type DecisionResult,
   type Questions,
 } from './decider.js';
@@ -47,61 +49,77 @@ function credentialId(secret: string): string {
   return createHash('sha256').update(secret).digest('hex').slice(0, 16);
 }
 
-export function lazyDecider(options: { settings: SettingsService; log: Logger }): Decider {
+export function lazyDecider(options: {
+  settings: SettingsService;
+  log: Logger;
+  /**
+   * What carries the requests. The kept-alive connection unless a test hands
+   * in its own — which stands in for the network and nothing else, the
+   * `createConversation` rule.
+   */
+  transport?: DecisionTransport;
+}): Decider {
   let breaker: { credential: string; failures: number; openUntil: number } | undefined;
   /**
-   * The one call in flight, if there is one, and what it is worth.
+   * How many requests are out right now.
    *
-   * One at a time hub-wide, because concurrent requests queue at the other end
-   * anyway — but *which* one gives way is a decision rather than a race. See
-   * `decide`.
+   * **A count, not a slot, and nothing in flight is ever aborted.** The first
+   * version ran one call at a time and aborted a speculation when a live call
+   * arrived — and aborting a request mid-flight destroys the connection under
+   * it, so the live call that was supposed to be helped then paid for a fresh
+   * handshake instead. Now a live call simply goes, alongside whatever is out.
    */
-  let inFlight: { priority: 'live' | 'speculative'; stop: AbortController } | undefined;
+  let inFlight = 0;
+  let warming: Promise<void> | undefined;
+
+  const transport = async (): Promise<DecisionTransport> =>
+    options.transport ?? (await import('./connection.js')).keepAliveTransport;
+
+  /** The key, when a decision may be made at all. */
+  async function credential(): Promise<string | null> {
+    const ai = await options.settings.getAiSettings();
+    if (!ai.decision.hasKey || !ai.decision.enabled) return null;
+    return options.settings.aiKey('typesafe');
+  }
 
   async function decide<Q extends Questions>(input: {
     state: string | Readonly<Record<string, unknown>> | readonly unknown[];
     questions: Q;
     timeoutMs: number;
     priority?: 'live' | 'speculative';
-    onMiss?: (why: DecisionMiss) => void;
+    onMiss?: (why: DecisionMiss, detail?: DecisionMissDetail) => void;
   }): Promise<DecisionResult<Q> | null> {
     const priority = input.priority ?? 'live';
     // Every `null` below says which one it is. Told, never branched on — see
     // `DecisionMiss`.
-    const miss = (why: DecisionMiss): null => {
-      input.onMiss?.(why);
+    const miss = (why: DecisionMiss, detail?: DecisionMissDetail): null => {
+      input.onMiss?.(why, detail);
       return null;
     };
     /**
-     * **Dropped, not queued — and a guess gives way to the real thing.**
+     * **A guess gives way; the real thing never does.**
      *
-     * A queued decision arrives after the thing it was deciding, which is
-     * `Request superseded` one subsystem over: a newer ask taking this one's
-     * place is not a failure, and waiting for a slot is the one behaviour that
-     * could make this slower than not having it at all.
-     *
-     * The asymmetry is what was missing. A speculation runs on a sentence
-     * somebody is still saying, so it steps aside for anything real; a live
-     * call is the turn itself. Treating them alike meant a speculation in
-     * flight silently took the fast path away from the very command it was
-     * started for — the feature making the thing it helps slower.
+     * A speculation is a reading of a sentence somebody is still saying, so
+     * while anything else is out it is simply dropped — dropped rather than
+     * queued, because a queued decision arrives after the thing it was
+     * deciding. A live call is the turn itself and always goes: it is never
+     * dropped for a speculation, and never turned away because a second
+     * person in the house is talking to it at the same moment.
      */
-    if (inFlight !== undefined) {
-      if (priority === 'speculative' || inFlight.priority === 'live') return miss('busy');
-      inFlight.stop.abort();
-    }
+    if (priority === 'speculative' && inFlight > 0) return miss('busy');
 
-    const ai = await options.settings.getAiSettings();
-    if (!ai.decision.hasKey || !ai.decision.enabled) return miss('off');
-    const secret = await options.settings.aiKey('typesafe');
+    const secret = await credential();
     if (secret === null) return miss('off');
 
-    const credential = credentialId(secret);
-    if (breaker !== undefined && breaker.credential !== credential) breaker = undefined;
+    const id = credentialId(secret);
+    if (breaker !== undefined && breaker.credential !== id) breaker = undefined;
     if (breaker !== undefined && Date.now() < breaker.openUntil) return miss('resting');
 
-    const stop = new AbortController();
-    inFlight = { priority, stop };
+    const wire = await transport();
+    // Asked before the request is sent: once it is out, the socket it took is
+    // no longer free, so "was there one?" can only be answered now.
+    const newConnection = !wire.isWarm();
+    inFlight += 1;
     try {
       const { runDecision } = await import('./typesafe.js');
       const result = await runDecision({
@@ -109,19 +127,15 @@ export function lazyDecider(options: { settings: SettingsService; log: Logger })
         state: input.state,
         questions: input.questions,
         timeoutMs: input.timeoutMs,
-        signal: stop.signal,
+        fetch: wire.fetch,
         log: options.log,
       });
       breaker = undefined;
-      return result;
+      return { ...result, newConnection };
     } catch (error) {
-      // A speculation a live call overtook is not a failure of anything, and
-      // must not count towards the breaker — otherwise a talkative minute
-      // would open it against a perfectly good key.
-      if (stop.signal.aborted && priority === 'speculative') return miss('busy');
-      const failures = (breaker?.credential === credential ? breaker.failures : 0) + 1;
+      const failures = (breaker?.credential === id ? breaker.failures : 0) + 1;
       breaker = {
-        credential,
+        credential: id,
         failures,
         openUntil: failures >= BREAKER_FAILURES ? Date.now() + BREAKER_OPEN_MS : 0,
       };
@@ -130,19 +144,49 @@ export function lazyDecider(options: { settings: SettingsService; log: Logger })
       // no key.
       const timedOut = error instanceof Error && error.name === 'DecisionTimeoutError';
       options.log.warn(
-        { err: error, failures },
+        { err: error, failures, priority, newConnection },
         timedOut
           ? 'decision model did not answer in time — falling back to the ordinary path'
           : 'decision model unavailable — falling back to the ordinary path',
       );
-      return miss(timedOut ? 'timeout' : 'failed');
+      return miss(timedOut ? 'timeout' : 'failed', { newConnection });
     } finally {
-      // Only if it is still *this* call's: a live call that overtook a
-      // speculation has already replaced the entry, and the loser clearing it
-      // on the way out would leave the winner unguarded.
-      if (inFlight?.stop === stop) inFlight = undefined;
+      inFlight -= 1;
     }
   }
 
-  return { modelId: DECISION_MODEL, decide };
+  /**
+   * Open the connection before anybody is waiting on it.
+   *
+   * **The first sentence was the slow one**, every time: the connection a
+   * decision needs had been closed for minutes, so what somebody noticed as
+   * "Jev is slow" was the hub dialling a vendor from a Pi. The assistant's page
+   * opening is the moment somebody is about to ask something, and a warm-up
+   * then costs nothing a person can see.
+   *
+   * It does nothing without a key, while the owner has decisions paused, while
+   * the breaker is resting, when a connection is already open, or while
+   * anything is out — and it never throws.
+   */
+  async function warm(): Promise<void> {
+    if (warming !== undefined) return warming;
+    warming = (async () => {
+      try {
+        const secret = await credential();
+        if (secret === null) return;
+        if (breaker !== undefined && Date.now() < breaker.openUntil) return;
+        const wire = await transport();
+        if (inFlight > 0 || wire.isWarm()) return;
+        const { warmConnection } = await import('./connection.js');
+        await warmConnection({ secret, transport: wire });
+      } catch {
+        // A warm-up is a convenience. The decision after it dials as it would have.
+      }
+    })().finally(() => {
+      warming = undefined;
+    });
+    return warming;
+  }
+
+  return { modelId: DECISION_MODEL, decide, warm };
 }

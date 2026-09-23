@@ -276,7 +276,11 @@ does not exist in this API. What replaces it is not slow for the reason it
 looks: the assistant's own `control_device` is an in-process call to the
 registry that is already there, so a lamp is one model round rather than two
 network hops — and the voice is told to say "one moment" and keep listening
-while it happens, which the API is built for.
+while it happens, which the API is built for. And with a decision key stored there is a fast
+path again, one layer further in and for typed and spoken turns alike: the hub
+reads the delegated sentence before the assistant is asked and carries a plain
+command out first, so what is left of the round is the sentence the voice reads
+back (see *Deciding before the model is asked*).
 
 ## The sideband, and where the loop belongs
 
@@ -714,37 +718,56 @@ off the same entry, so a third agent is still one edit.
 ## Deciding before the model is asked
 
 A typed turn and a spoken one both begin with one request to a decision model,
-carrying the routing questions and every branch's action question at once
-(see [jev.md](jev.md)). Most sentences come back with nothing to act on and the
-round runs exactly as it always did. Two do not:
+carrying the routing questions, the guards, the home's catalog and every action
+family at once (see [jev.md](jev.md)). Most sentences come back with nothing to
+act on and the round runs exactly as it always did. Four do not:
 
-- **A plain single-device command** is carried out immediately, through the
-  same `control` path the model's own tool uses, and the round is then primed
-  with "you have already done this" so the model writes the sentence and
-  nothing else. One round instead of two, and the light moves first.
+- **A plain command — to one device, or to every device of one kind in a
+  room, a zone or the house** — is carried out immediately, through the same
+  `control` path the model's own tool uses, and the round is then primed with
+  an exact account of what was done (`fastPathPriming`: every device by name,
+  what was done in words, what failed and why, what was offline and not tried)
+  so the model writes the sentence and nothing else, at the lowest effort. One
+  round instead of two, and the light moves first.
+- **A sentence that is several requests with a command among them** is split
+  by the conversation's own model into its parts, the parts are read in one
+  more request, and every part read confidently is carried out; what is left —
+  a question, a rule, a part it was unsure of — is the model's, quoted in the
+  same account. "Turn off the light and what's the temperature?" is the light
+  off before the model is asked, and the model answering the question.
 - **A self-contained automation request** is handed straight to the automations
   agent through `delegate` — the same call, so the permission check and the
   resume behaviour are unchanged. Typed only: `spoken()` drops a `handoff` row,
   because the handoff arm writes its own `agent` row, so skipping the round out
   loud would leave `askAloud` with nothing to say and the voice would announce
   that it could not work it out, over a job handed over correctly.
+- **A plainly small request** runs its round at the lowest effort.
 
-The hub writes **no prose** on either path. A hub-written "I have passed that
-on" is words in the model's mouth, which is the rule the automations agent's
-own prose arm is built around.
+The hub writes **no prose** on any path. A hub-written "I have passed that on"
+or "Done" is words in the model's mouth, which is the rule the automations
+agent's own prose arm is built around. Out loud the voice then says what the
+model wrote, so a spoken command is a light going off and a sentence about it
+that the assistant composed from what actually happened.
 
 Every gate falls through to the round that would have happened anyway, so
-being unsure, being wrong about the shape, or getting no answer at all each
-cost exactly what the hub cost before.
+being unsure, being wrong about the shape, getting no answer at all, or the
+fast path failing outright each cost exactly what the hub cost before — the
+whole of it sits under one `catch` whose answer is the model's sentence, whole.
+And a command it carried out is never carried out twice: `control` remembers
+what this turn did, so the model calling the tool anyway is a no-op, while a
+command the device refused stays a real second try.
 
 **And the round's working says which road it took.** Acting puts a step up
-first — `kind: 'routing'`, *Understood in 212 ms.* — and so does standing down
-where somebody could have expected the other road: `kind: 'deferred'`, *Jev
-wasn't sure which device*, with the answers and the bar they missed as its
-detail. Every stand-down is also a line in the hub's log with the question that
-settled it and its number; a sentence read confidently as a question is logged
-and not drawn, since that is most of them. The model is told neither — the
-reply is its to write. `docs/jev.md` has the table.
+first — `kind: 'routing'`, *Jev switched off 2 lights in the Kitchen*, with the
+reading's time and confidence beneath it — and so does splitting (*Jev heard 2
+requests*, over the parts) and handing over (*Jev passed this to the
+Automations agent*); standing down where somebody could have expected the other
+road is `kind: 'deferred'`, *Jev wasn't sure which device*, with the answers
+and the bar they missed as its detail. Every road is also a line in the hub's
+log (`Jev carried out — …`, `Jev stood down — …`); a sentence read confidently
+as a question is logged and not drawn, since that is most of them. The model is
+told what was done and never why something was not — the reply is its to write.
+`docs/jev.md` has the tables.
 
 ## Getting ready while somebody is still talking
 

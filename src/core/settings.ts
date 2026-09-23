@@ -12,7 +12,7 @@ import { effectiveAgentModel, type UsableProviders } from '../ai/models.js';
 // API answers what will *run*. It lives in `decide/decider.ts` — the seam,
 // which imports nothing — rather than in the vendor client, so reporting it
 // never loads the client a hub without a Jev key has no use for.
-import { DECISION_MODEL } from '../ai/decide/decider.js';
+import { DECISION_MODEL, DECISION_MODEL_LABEL } from '../ai/decide/decider.js';
 
 /**
  * The providers the hub can hold a credential for.
@@ -135,6 +135,11 @@ export interface AiDecisionSettings {
   hasKey: boolean;
   /** Pinned in the build. Reported so an app can say what answered. */
   model: string;
+  /**
+   * The name a person reads beside the model that answers — "Opus 5 + Jev" —
+   * so the apps draw the hub's word rather than shipping one of their own.
+   */
+  label: string;
   /**
    * The owner's pause switch, absent meaning on.
    *
@@ -351,6 +356,7 @@ export class SettingsService {
       decision: {
         hasKey: decisionKey !== null,
         model: DECISION_MODEL,
+        label: DECISION_MODEL_LABEL,
         enabled: decisionsEnabled !== false,
       },
       // Both *generative* keys: which model reads a device's exposes tree is

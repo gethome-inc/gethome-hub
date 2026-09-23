@@ -174,11 +174,11 @@ export class VoiceDelegation {
    *
    * There is deliberately **no revision counter beside these**. One was
    * written here for a cache that then landed somewhere better: the reading is
-   * kept on the conversation and reused only when the finished sentence
-   * *extends* the partial it ran on, so every structural change this would
-   * have tracked — a new utterance, a retirement, a drop by the bound — is
-   * already a string that is not a superset. A second mechanism agreeing with
-   * that one is a second mechanism to get wrong.
+   * kept on the conversation and reused only when the finished sentence *is*
+   * the partial it ran on (`sameSentence` in `assistant-chat.ts`), so every
+   * structural change this would have tracked — a new utterance, a retirement,
+   * a drop by the bound, one more word — is already a different string. A
+   * second mechanism agreeing with that one is a second mechanism to get wrong.
    */
   private lastSpeculationAt = 0;
   private speculationsThisUtterance = 0;

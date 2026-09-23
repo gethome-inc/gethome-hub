@@ -221,6 +221,9 @@ describe.skipIf(!handle)('a hub that holds only a decision key', () => {
     // and calibration does not transfer.
     const ai = await settings.getAiSettings();
     expect(ai.decision.model).toBe(DECISION_MODEL);
+    // And the name an app draws beside the model that answers — "Opus 5 +
+    // Jev" — is the hub's word, not one each app ships.
+    expect(ai.decision.label).toBe('Jev');
   });
 
   it('is on unless the owner has said otherwise, and forgetting the key is a different act', async () => {

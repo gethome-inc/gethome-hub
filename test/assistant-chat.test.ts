@@ -9,6 +9,7 @@ import { SettingsService } from '../src/core/settings.js';
 import {
   activity as activityTable,
   aiRuns as aiRunsTable,
+  devices as devicesTable,
   members as membersTable,
   roles as rolesTable,
 } from '../src/db/schema.js';
@@ -27,6 +28,9 @@ import type { AutomationConversation, AutomationTurn } from '../src/ai/automatio
 import type { EngineRegistry } from '../src/automations/engine.js';
 import { AGENT_MODELS, effectiveAgentModel } from '../src/ai/models.js';
 import { DECISION_MODEL } from '../src/ai/decide/decider.js';
+import type { DecisionTransport } from '../src/ai/decide/connection.js';
+import { FAMILIES, UNCHANGED } from '../src/ai/decide/questions.js';
+import type { SplitInput, SplitResult } from '../src/ai/decide/split.js';
 
 /**
  * The assistant: its conversation service over a stand-in for a provider, and
@@ -41,78 +45,95 @@ import { DECISION_MODEL } from '../src/ai/decide/decider.js';
 
 const log = pino({ level: 'silent' });
 
-/**
- * A decision model that answers, and a count of how many times it was asked.
- *
- * The count is the assertion in both tests below: what the reuse fixes is not
- * *what* the hub concludes but how many times it pays to conclude it, and a
- * suite that only checked the command would have passed just as well against
- * the version that threw every speculation away.
- *
- * `fetch` is stubbed with a real `Response` for `test/ai-decide.test.ts`'s
- * reason — a mock laxer than the thing it stands in for tests the mock.
- */
-function decidesCommand(deviceId: string): { calls: string[] } {
-  const calls: string[] = [];
-  vi.stubGlobal(
-    'fetch',
-    (async (_input: unknown, init?: RequestInit) => {
-      calls.push(
-        JSON.stringify((JSON.parse(String(init?.body)) as { state?: unknown }).state),
-      );
-      return new Response(
-        JSON.stringify({
-          model: DECISION_MODEL,
-          answers: {
-            intent: {
-              type: 'choice',
-              choice: 'device_command',
-              probabilities: { device_command: 0.97 },
-              confidence: 0.97,
-            },
-            multiple: { type: 'noul', noul: 0.02 },
-            needsValue: { type: 'noul', noul: 0.03 },
-            scope: {
-              type: 'choice',
-              choice: 'specific_device',
-              probabilities: { specific_device: 0.96 },
-              confidence: 0.96,
-            },
-            device: {
-              type: 'choice',
-              choice: deviceId,
-              probabilities: { [deviceId]: 0.95 },
-              confidence: 0.95,
-            },
-            switchAction: {
-              type: 'choice',
-              choice: 'turn_off',
-              probabilities: { turn_off: 0.96 },
-              confidence: 0.96,
-            },
-          },
-          usage: { input_tokens: 900 },
-        }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      );
-    }) as unknown as typeof fetch,
-  );
-  return { calls };
+/** One request the decision model was sent, as it arrived. */
+interface DecisionCall {
+  state: unknown;
+  questions: string[];
 }
 
 /**
- * A decision model that answers whatever a case needs, over a real `Response`
- * for `decidesCommand`'s reason.
+ * A decision model that answers each request with whatever a case needs, and
+ * a record of what it was asked.
+ *
+ * It is handed in as the decider's **transport** — the one seam
+ * `AssistantChatOptions` has for it — so every rule about what a reading means
+ * still runs, and it answers with a real `Response` for `test/ai-decide.
+ * test.ts`'s reason: a mock laxer than the thing it stands in for tests the
+ * mock. The count is the assertion in several tests below: what the reuse and
+ * the one-request fan-out fix is not *what* the hub concludes but how many
+ * times it pays to conclude it.
  */
-function decidesWith(answers: Record<string, unknown>): void {
-  vi.stubGlobal(
-    'fetch',
-    (async () =>
-      new Response(JSON.stringify({ model: DECISION_MODEL, answers, usage: { input_tokens: 900 } }), {
-        status: 200,
-        headers: { 'content-type': 'application/json', 'x-typesafe-request-id': 'req-7' },
-      })) as unknown as typeof fetch,
-  );
+function jev(answer: (call: DecisionCall) => Record<string, unknown>): {
+  seen: { calls: DecisionCall[]; warmups: number };
+  transport: DecisionTransport;
+} {
+  const seen = { calls: [] as DecisionCall[], warmups: 0 };
+  const transport: DecisionTransport = {
+    isWarm: () => false,
+    fetch: async (_url, init) => {
+      // A warm-up asks for the model list and reads nothing back.
+      if (init.method === 'GET') {
+        seen.warmups += 1;
+        return new Response('{"data":[]}', { status: 200 });
+      }
+      const body = JSON.parse(String(init.body)) as { state: unknown; questions: Record<string, unknown> };
+      const call = { state: body.state, questions: Object.keys(body.questions) };
+      seen.calls.push(call);
+      return new Response(
+        JSON.stringify({ model: DECISION_MODEL, answers: answer(call), usage: { input_tokens: 900 } }),
+        {
+          status: 200,
+          headers: { 'content-type': 'application/json', 'x-typesafe-request-id': 'req-7' },
+        },
+      );
+    },
+  };
+  return { seen, transport };
+}
+
+/** What one decision costs at 900 input tokens — see `estimateDecisionCostUsd`. */
+const DECISION_USD = (900 * 0.042) / 1_000_000;
+
+/** A decider transport for the suites that never set a key: it must never be reached. */
+const NO_NETWORK: DecisionTransport = {
+  isWarm: () => false,
+  fetch: async () => {
+    throw new Error('a suite never reaches the decision model');
+  },
+};
+
+/** Whether a decision request was for the sentence or for the parts it was split into. */
+const isParts = (call: DecisionCall): boolean =>
+  typeof call.state === 'object' && call.state !== null && 'parts' in call.state;
+
+const noul = (value: number) => ({ type: 'noul', noul: value });
+
+/** Every action family, answered "not this". */
+const UNCHANGED_FAMILIES = Object.fromEntries(
+  FAMILIES.map((family) => [family, { type: 'choice', choice: UNCHANGED, probabilities: { [UNCHANGED]: 0.97 }, confidence: 0.97 }]),
+);
+
+/**
+ * Everything a plain "turn off <that device>" answers — under a prefix when it
+ * is one part of a split sentence.
+ */
+function offAnswers(deviceKey = 'd1', prefix = ''): Record<string, unknown> {
+  const plain: Record<string, unknown> = {
+    intent: sure('device_command', 0.97),
+    later: noul(0.2),
+    negated: noul(0.2),
+    scope: sure('one_device', 0.96),
+    place: sure('not_said', 0.9),
+    deviceType: sure('lights', 0.9),
+    device: sure(deviceKey, 0.95),
+    ...UNCHANGED_FAMILIES,
+    power: sure('off', 0.96),
+    multiple: noul(0.1),
+    anyCommand: noul(0.95),
+    route: sure('here', 0.99),
+    selfContained: noul(0.9),
+  };
+  return Object.fromEntries(Object.entries(plain).map(([id, value]) => [`${prefix}${id}`, value]));
 }
 
 const sure = (choice: string, confidence: number) => ({
@@ -164,6 +185,8 @@ describe('the assistant', () => {
   let activity: ActivityService;
   let memberId: string;
   let commanded: { deviceId: string; endpointId: number; type: string }[];
+  /** Every command that reached the registry, refused or not. */
+  let attempted: { deviceId: string; endpointId: number; type: string }[];
 
   let assistantFor: (
     turns: AssistantTurn[],
@@ -181,6 +204,13 @@ describe('the assistant', () => {
        *  and `capabilities` are closed vocabularies and a widened `string`
        *  makes this the only stub in the file that does not typecheck. */
       devices?: ReturnType<EngineRegistry['listDevices']>;
+      /** The decision model's transport. A suite that sets no key never
+       *  reaches it, and one that does must say what it answers. */
+      decisions?: DecisionTransport;
+      /** The generative split of a sentence that is several requests. */
+      split?: (input: SplitInput) => Promise<SplitResult | null>;
+      /** The adapter's own words for a device that will not take a command. */
+      refuse?: (deviceId: string) => string | undefined;
     },
   ) => Promise<{
     assistant: AssistantChat;
@@ -207,15 +237,27 @@ describe('the assistant', () => {
     await access.load();
     activity = new ActivityService(handle.db, events);
     commanded = [];
+    attempted = [];
     // A real row: `automation_chat_messages.member_id` is a foreign key, and a
     // made-up id makes every transcript write fail silently into its own catch.
     memberId = randomUUID();
     await handle.db.insert(membersTable).values({ id: memberId, name: 'Anna', role: 'owner' });
 
     assistantFor = async (turns, options) => {
+      // The registry is a stand-in, but the activity log's `device_id` is a
+      // real foreign key — so the devices it lists are rows as well, as they
+      // are on a hub.
+      for (const device of options?.devices ?? []) {
+        await handle!.db
+          .insert(devicesTable)
+          .values({ id: device.id, adapter: 'test', externalId: device.id, name: device.name });
+      }
       const registry = {
         listDevices: () => options?.devices ?? [],
         execute: async (deviceId: string, endpointId: number, command: { type: string }) => {
+          attempted.push({ deviceId, endpointId, type: command.type });
+          const refusal = options?.refuse?.(deviceId);
+          if (refusal !== undefined) throw new Error(refusal);
           commanded.push({ deviceId, endpointId, type: command.type });
         },
       };
@@ -276,6 +318,8 @@ describe('the assistant', () => {
         engine,
         automationChat,
         createConversation: () => scripted,
+        decisionTransport: options?.decisions ?? NO_NETWORK,
+        ...(options?.split !== undefined ? { splitRequest: options.split } : {}),
       });
       return { assistant, automationChat, efforts, sent };
     };
@@ -1098,79 +1142,590 @@ describe('the assistant', () => {
     );
   });
 
-  // ── Speculating while somebody is still talking ────────────────────────────
+  // ── The fast path: Jev reads the sentence before the model is asked ───────
 
   /**
-   * **What a half-finished sentence worked out is used when it finishes.**
-   *
-   * This is the whole of what the warm buys, and for a while it bought none of
-   * it: `warmForSpeech` read a partial, paid for a full reading of it, kept the
-   * price and threw the answer away — so the finished sentence was read from
-   * scratch and the feature cost money to change nothing. Worse, the decider
-   * single-flights, so a speculation still in the air made the *real* turn's
-   * reading return `null`: speaking to a hub with this switched on was slower
-   * than speaking to one without it.
-   *
-   * One request is the assertion. The command landing is what says the reused
-   * answer was a real one rather than an empty hit.
+   * **This is the whole latency argument, end to end.** "Turn off the ceiling
+   * light" used to cost two model rounds — one to call the tool, one to say it
+   * happened. With a decision model in front, the light goes off before the
+   * model has been asked anything, and the one round left writes the reply
+   * from an exact account of what was done, at the lowest effort, since what
+   * is left is a sentence.
    */
-  it('reuses what a half-finished sentence already decided', async () => {
-    const deviceId = randomUUID();
+  it('carries out a plain command first, and tells the model exactly what was done', async () => {
+    const light = randomUUID();
     await settings.setAiKey('typesafe', 'ts-test-key');
-    const wire = decidesCommand(deviceId);
-    const { assistant } = await assistantFor([{ kind: 'said', text: 'The ceiling light is off.' }], {
-      devices: oneLight(deviceId),
+    const decisions = jev(() => offAnswers('d1'));
+    const info = vi.spyOn(log, 'info');
+    const { assistant, sent, efforts } = await assistantFor(
+      [{ kind: 'said', text: 'The ceiling light is off.' }],
+      { devices: oneLight(light), decisions: decisions.transport },
+    );
+
+    const started = await assistant.start({ memberId, message: 'turn off the ceiling light' });
+    await assistant.idle();
+
+    // One request, one command, through the registry.
+    expect(decisions.seen.calls).toHaveLength(1);
+    expect(decisions.seen.calls[0]?.state).toEqual({ said: 'turn off the ceiling light' });
+    expect(commanded).toEqual([{ deviceId: light, endpointId: 1, type: 'power' }]);
+
+    // The model is told what happened, in words, and still reads their sentence.
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain('ALREADY DONE BEFORE YOU WERE ASKED');
+    expect(sent[0]).toContain('- Ceiling light: switched off.');
+    expect(sent[0]).toContain('Nothing else in their message needs doing.');
+    expect(sent[0]).toContain('Do not call a tool to do any of it again');
+    expect(sent[0]?.endsWith('turn off the ceiling light')).toBe(true);
+    expect(efforts).toEqual(['low']);
+
+    // The transcript is what they said and what the model answered — the
+    // account it was given is not a message.
+    const rows = await assistant.transcript(started.sessionId);
+    expect(rows.map((row) => [row.role, row.text])).toEqual([
+      ['user', 'turn off the ceiling light'],
+      ['agent', 'The ceiling light is off.'],
+    ]);
+    const steps = (rows[1]?.data as { steps: ChatStepWire[] }).steps;
+    expect(steps[0]).toEqual({
+      text: 'Jev switched off Ceiling light',
+      kind: 'routing',
+      detail: expect.stringMatching(/^\d+ ms, new connection · confidence 0\.95$/),
     });
-    const sessionId = assistant.beginVoice();
+    expect(steps[1]?.text).toBe('Reading your home');
 
-    await assistant.warmForSpeech({ sessionId, memberId, partial: 'turn the ceiling light' });
-    expect(wire.calls).toHaveLength(1);
+    // In the log beside every stand-down, so `grep Jev` tells the whole story.
+    expect(info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        jev: expect.objectContaining({ devices: [{ device: 'Ceiling light', commands: ['power'] }] }),
+        via: 'typed',
+      }),
+      'Jev carried out — switched off Ceiling light',
+    );
+    info.mockRestore();
 
-    await assistant.askAloud({
-      sessionId,
-      memberId,
-      question: 'turn the ceiling light off',
+    // Into the activity log named for the person, like any other command.
+    const activityRows = await handle!.db.select().from(activityTable);
+    const command = activityRows.find((row) => row.kind === 'device.command');
+    expect(command?.message).toBe('Anna · Ceiling light: power');
+    expect((command?.data as { via?: string } | null)?.via).toBe('assistant');
+
+    // And banked with the round it preceded, never as a row of its own.
+    const runs = await handle!.db.select().from(aiRunsTable);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.costUsd).toBeCloseTo(0.04 + DECISION_USD, 9);
+  });
+
+  it('does not switch a lamp twice when the model calls the tool anyway', async () => {
+    // The model is told it is done, and a prompt is a request rather than a
+    // guarantee. The record of what this turn did is what enforces it.
+    const light = randomUUID();
+    await settings.setAiKey('typesafe', 'ts-test-key');
+    const decisions = jev(() => offAnswers('d1'));
+    const { assistant } = await assistantFor([{ kind: 'said', text: 'Off.' }], {
+      devices: oneLight(light),
+      decisions: decisions.transport,
+    });
+    const started = await assistant.start({ memberId, message: 'turn off the ceiling light' });
+    await assistant.idle();
+
+    const tools = (
+      assistant as unknown as {
+        toolContext: (
+          id: string,
+          sessionId: string,
+        ) => { control: (deviceId: string, endpointId: number, command: object) => Promise<void> };
+      }
+    ).toolContext(memberId, started.sessionId);
+    await tools.control(light, 1, { type: 'power', on: false });
+    expect(attempted).toHaveLength(1);
+    // A different command is a person changing their mind, and goes through.
+    await tools.control(light, 1, { type: 'power', on: true });
+    expect(attempted).toHaveLength(2);
+  });
+
+  it('says what a device would not take, and lets it be tried again', async () => {
+    const light = randomUUID();
+    await settings.setAiKey('typesafe', 'ts-test-key');
+    const decisions = jev(() => offAnswers('d1'));
+    const { assistant, sent, efforts } = await assistantFor([{ kind: 'said', text: 'It did not answer.' }], {
+      devices: oneLight(light),
+      decisions: decisions.transport,
+      refuse: () => 'the light did not answer',
     });
 
-    // The finished sentence is a superset of the partial, so it spent nothing:
-    // still the speculation's one request.
-    expect(wire.calls).toHaveLength(1);
-    // And the light really went off, through the registry, on the reading the
-    // speculation had already made.
-    expect(commanded).toEqual([{ deviceId, endpointId: 1, type: 'power' }]);
+    const started = await assistant.start({ memberId, message: 'turn off the ceiling light' });
+    await assistant.idle();
+
+    expect(commanded).toEqual([]);
+    expect(sent[0]).toContain(
+      '- Ceiling light: NOT done — it was to be switched off, and the hub could not: the light did not answer',
+    );
+    expect(sent[0]).toContain('say plainly what could not be done');
+    expect(efforts).toEqual(['low']);
+    const rows = await assistant.transcript(started.sessionId);
+    const steps = (rows[1]?.data as { steps: ChatStepWire[] }).steps;
+    expect(steps[0]).toMatchObject({
+      text: "Jev couldn't get Ceiling light to do it",
+      kind: 'routing',
+      detail: expect.stringContaining('failed: the light did not answer'),
+    });
+
+    // A command that was refused was never carried out, so asking again is a
+    // real second try rather than a silent success over a lamp still on.
+    const tools = (
+      assistant as unknown as {
+        toolContext: (
+          id: string,
+          sessionId: string,
+        ) => { control: (deviceId: string, endpointId: number, command: object) => Promise<void> };
+      }
+    ).toolContext(memberId, started.sessionId);
+    await expect(tools.control(light, 1, { type: 'power', on: false })).rejects.toThrow('did not answer');
+    expect(attempted).toHaveLength(2);
+  });
+
+  it('does not report a command as failed because the activity log could not take its row', async () => {
+    // The lamp has gone off by the time the row is written. A write that
+    // fails there is bookkeeping, and it once told the model — and so the
+    // person — that a light which had just gone off had not.
+    const light = randomUUID();
+    await settings.setAiKey('typesafe', 'ts-test-key');
+    const decisions = jev(() => offAnswers('d1'));
+    const warn = vi.spyOn(log, 'warn');
+    const { assistant, sent } = await assistantFor([{ kind: 'said', text: 'Off.' }], {
+      devices: oneLight(light),
+      decisions: decisions.transport,
+    });
+    // Gone from the store a moment ago, so the row's foreign key refuses it.
+    await handle!.db.delete(devicesTable).where(eq(devicesTable.id, light));
+
+    await assistant.start({ memberId, message: 'turn off the ceiling light' });
+    await assistant.idle();
+
+    expect(commanded).toEqual([{ deviceId: light, endpointId: 1, type: 'power' }]);
+    expect(sent[0]).toContain('- Ceiling light: switched off.');
+    expect(sent[0]).not.toContain('NOT done');
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ deviceId: light }),
+      'a command the assistant carried out could not be written to the activity log',
+    );
+    warn.mockRestore();
+  });
+
+  it('switches off every light in the home in one reading, and names them as a group', async () => {
+    const tv = randomUUID();
+    const ceiling = randomUUID();
+    await settings.setAiKey('typesafe', 'ts-test-key');
+    const decisions = jev(() => ({
+      ...offAnswers(),
+      scope: sure('group', 0.95),
+      place: sure('whole_home', 0.94),
+      deviceType: sure('lights', 0.96),
+      device: sure('none_of_these', 0.9),
+    }));
+    const { assistant, sent } = await assistantFor([{ kind: 'said', text: 'All off.' }], {
+      devices: twoLights(tv, ceiling),
+      decisions: decisions.transport,
+    });
+
+    const started = await assistant.start({ memberId, message: 'turn off all the lights' });
+    await assistant.idle();
+
+    expect(commanded).toEqual([
+      { deviceId: tv, endpointId: 1, type: 'power' },
+      { deviceId: ceiling, endpointId: 1, type: 'power' },
+    ]);
+    expect(sent[0]).toContain('- TV light: switched off.');
+    expect(sent[0]).toContain('- Ceiling light: switched off.');
+    const rows = await assistant.transcript(started.sessionId);
+    const steps = (rows[1]?.data as { steps: ChatStepWire[] }).steps;
+    expect(steps[0]?.text).toBe('Jev switched off 2 lights across the home');
+  });
+
+  it('does not wait on a light the hub knows is offline, and says which one', async () => {
+    const tv = randomUUID();
+    const ceiling = randomUUID();
+    await settings.setAiKey('typesafe', 'ts-test-key');
+    const decisions = jev(() => ({
+      ...offAnswers(),
+      scope: sure('group', 0.95),
+      place: sure('whole_home', 0.94),
+      deviceType: sure('lights', 0.96),
+    }));
+    const devices = twoLights(tv, ceiling).map((device) =>
+      device.id === ceiling ? { ...device, online: false } : device,
+    );
+    const { assistant, sent } = await assistantFor([{ kind: 'said', text: 'One is off.' }], {
+      devices,
+      decisions: decisions.transport,
+    });
+
+    const started = await assistant.start({ memberId, message: 'turn off all the lights' });
+    await assistant.idle();
+
+    expect(attempted).toEqual([{ deviceId: tv, endpointId: 1, type: 'power' }]);
+    expect(sent[0]).toContain('- TV light: switched off.');
+    expect(sent[0]).toContain(
+      '- Ceiling light: NOT done — it was to be switched off, but it is offline, so the hub did not try.',
+    );
+    const rows = await assistant.transcript(started.sessionId);
+    const steps = (rows[1]?.data as { steps: ChatStepWire[] }).steps;
+    expect(steps[0]?.text).toBe('Jev switched off TV light');
+    expect(steps[0]?.detail).toContain('Ceiling light is offline and was not tried');
+  });
+
+  // ── Several requests in one sentence ──────────────────────────────────────
+
+  /**
+   * **The vendor's own smart-home demo, step for step.** Jev says the sentence
+   * is several requests with a command among them; the conversation's own
+   * model splits it; the parts go back to Jev in **one** request; what it is
+   * sure of is carried out, and what is left — here a question — goes to the
+   * model quoted, beside the account of what was done.
+   */
+  it('splits a sentence, carries out the command in it, and leaves the question to the model', async () => {
+    const light = randomUUID();
+    await settings.setAiKey('typesafe', 'ts-test-key');
+    const decisions = jev((call) =>
+      isParts(call)
+        ? { ...offAnswers('d1', 'p0_'), p1_intent: sure('home_question', 0.96) }
+        : { ...offAnswers('d1'), multiple: noul(0.9), anyCommand: noul(0.95) },
+    );
+    const splits: SplitInput[] = [];
+    const { assistant, sent, efforts } = await assistantFor(
+      [{ kind: 'said', text: 'Off, and it is 21 degrees.' }],
+      {
+        devices: oneLight(light),
+        decisions: decisions.transport,
+        split: async (input) => {
+          splits.push(input);
+          return {
+            parts: ['turn off the ceiling light', 'what is the temperature?'],
+            costUsd: 0.001,
+            durationMs: 850,
+          };
+        },
+      },
+    );
+
+    const message = 'turn off the ceiling light and what is the temperature?';
+    const started = await assistant.start({ memberId, message });
+    await assistant.idle();
+
+    // Split on the home's own model and key, the one it chose and pays for.
+    expect(splits).toHaveLength(1);
+    expect(splits[0]).toMatchObject({
+      provider: 'anthropic',
+      modelId: 'claude-opus-5',
+      secret: 'sk-ant-api03-test',
+      said: message,
+    });
+    // Two requests in all: the sentence, then every part at once.
+    expect(decisions.seen.calls).toHaveLength(2);
+    expect(decisions.seen.calls[1]?.state).toEqual({
+      parts: ['turn off the ceiling light', 'what is the temperature?'],
+    });
+    expect(commanded).toEqual([{ deviceId: light, endpointId: 1, type: 'power' }]);
+
+    expect(sent[0]).toContain('- Ceiling light: switched off.');
+    expect(sent[0]).toContain('which were NOT carried out');
+    expect(sent[0]).toContain('- "what is the temperature?"');
+    // The model still has something to work out, so the round is not eased.
+    expect(efforts).toEqual([undefined]);
+
+    const rows = await assistant.transcript(started.sessionId);
+    const steps = (rows[1]?.data as { steps: ChatStepWire[] }).steps;
+    expect(steps.map((step) => step.text)).toEqual([
+      'Jev heard 2 requests',
+      'Jev switched off Ceiling light',
+      'Reading your home',
+    ]);
+    expect(steps[0]?.detail).toBe('“turn off the ceiling light” · “what is the temperature?” · split in 850 ms');
+
+    // The split is paid for with the rest of the turn.
+    const runs = await handle!.db.select().from(aiRunsTable);
+    expect(runs[0]?.costUsd).toBeCloseTo(0.04 + 2 * DECISION_USD + 0.001, 9);
+  });
+
+  it('carries out two commands from one sentence and eases the round that says so', async () => {
+    const tv = randomUUID();
+    const ceiling = randomUUID();
+    await settings.setAiKey('typesafe', 'ts-test-key');
+    const decisions = jev((call) =>
+      isParts(call)
+        ? { ...offAnswers('d1', 'p0_'), ...offAnswers('d2', 'p1_') }
+        : { ...offAnswers(), scope: sure('several_devices', 0.93) },
+    );
+    const { assistant, sent, efforts } = await assistantFor([{ kind: 'said', text: 'Both off.' }], {
+      devices: twoLights(tv, ceiling),
+      decisions: decisions.transport,
+      split: async () => ({
+        parts: ['turn off the TV light', 'turn off the ceiling light'],
+        costUsd: 0.001,
+        durationMs: 700,
+      }),
+    });
+
+    await assistant.start({ memberId, message: 'turn off the TV light and the ceiling light' });
+    await assistant.idle();
+
+    expect(commanded).toEqual([
+      { deviceId: tv, endpointId: 1, type: 'power' },
+      { deviceId: ceiling, endpointId: 1, type: 'power' },
+    ]);
+    expect(sent[0]).toContain('Nothing else in their message needs doing.');
+    expect(efforts).toEqual(['low']);
+  });
+
+  it('reads a sentence the model gives back whole as one request, and asks Jev nothing more', async () => {
+    const light = randomUUID();
+    await settings.setAiKey('typesafe', 'ts-test-key');
+    const decisions = jev(() => ({ ...offAnswers('d1'), multiple: noul(0.8), anyCommand: noul(0.9) }));
+    const message = 'turn off the ceiling light please and thank you';
+    const { assistant, sent } = await assistantFor([{ kind: 'said', text: 'Done.' }], {
+      devices: oneLight(light),
+      decisions: decisions.transport,
+      split: async () => ({ parts: [message], costUsd: 0.001, durationMs: 600 }),
+    });
+
+    const started = await assistant.start({ memberId, message });
+    await assistant.idle();
+
+    expect(decisions.seen.calls).toHaveLength(1);
+    expect(commanded).toEqual([]);
+    // The ordinary round, over the sentence as it was said.
+    expect(sent).toEqual([message]);
+    const rows = await assistant.transcript(started.sessionId);
+    const steps = (rows[1]?.data as { steps: ChatStepWire[] }).steps;
+    expect(steps[0]).toEqual({
+      text: 'Jev was told it is one request after all',
+      kind: 'deferred',
+      detail: 'split in 600 ms',
+    });
+  });
+
+  it('hands the whole sentence to the model when it cannot be split', async () => {
+    const light = randomUUID();
+    await settings.setAiKey('typesafe', 'ts-test-key');
+    const decisions = jev(() => ({ ...offAnswers('d1'), multiple: noul(0.8), anyCommand: noul(0.9) }));
+    const message = 'turn off the ceiling light and tell me a joke';
+    const { assistant, sent } = await assistantFor([{ kind: 'said', text: 'Done.' }], {
+      devices: oneLight(light),
+      decisions: decisions.transport,
+      split: async () => null,
+    });
+
+    const started = await assistant.start({ memberId, message });
+    await assistant.idle();
+
+    expect(commanded).toEqual([]);
+    expect(sent).toEqual([message]);
+    const rows = await assistant.transcript(started.sessionId);
+    const steps = (rows[1]?.data as { steps: ChatStepWire[] }).steps;
+    expect(steps[0]).toEqual({
+      text: "Jev couldn't have the request split",
+      kind: 'deferred',
+      detail: 'the model did not split it',
+    });
   });
 
   /**
-   * **And a sentence that turned out to be a different one pays again.**
-   *
-   * `startsWith` is the whole invalidation rule: every way the transcript can
-   * move under a speculation — a new utterance, one retired because the voice
-   * answered it, one dropped by the context bound — produces a string that is
-   * not a superset. A miss simply decides live, which is what the hub did
-   * before any of this existed.
-   *
-   * The entry is consumed either way, which is the second half: a reading of
-   * the first sentence must never be waiting for the second one.
+   * **The seam never throws**, and this is the half of that the hub owns: a
+   * throw out of the fast path used to be caught one level up as a turn that
+   * could not be saved — a note, and no answer at all. Now it is the model's
+   * sentence, whole, which is exactly the hub before any of this.
    */
-  it('decides live when the sentence turned out not to be that one', async () => {
-    const deviceId = randomUUID();
+  it('gives the model the sentence when anything in the fast path fails', async () => {
+    const light = randomUUID();
     await settings.setAiKey('typesafe', 'ts-test-key');
-    const wire = decidesCommand(deviceId);
+    const decisions = jev(() => ({ ...offAnswers('d1'), multiple: noul(0.8), anyCommand: noul(0.9) }));
+    const warn = vi.spyOn(log, 'warn');
+    const message = 'turn off the ceiling light and the fan';
+    const { assistant, sent } = await assistantFor([{ kind: 'said', text: 'Done.' }], {
+      devices: oneLight(light),
+      decisions: decisions.transport,
+      split: async () => {
+        throw new Error('the split fell over');
+      },
+    });
+
+    const started = await assistant.start({ memberId, message });
+    await assistant.idle();
+
+    expect(sent).toEqual([message]);
+    const rows = await assistant.transcript(started.sessionId);
+    expect(rows.map((row) => [row.role, row.text])).toEqual([
+      ['user', message],
+      ['agent', 'Done.'],
+    ]);
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: started.sessionId }),
+      'Jev: the fast path failed — the model has the sentence',
+    );
+    warn.mockRestore();
+  });
+
+  // ── Handing a job over without a round ────────────────────────────────────
+
+  it('hands an automation request straight to the agent that writes rules', async () => {
+    const light = randomUUID();
+    await settings.setAiKey('typesafe', 'ts-test-key');
+    const decisions = jev(() => ({
+      intent: sure('automation_work', 0.97),
+      route: sure('automations', 0.96),
+      selfContained: noul(0.93),
+      multiple: noul(0.1),
+      anyCommand: noul(0.1),
+    }));
+    const { assistant, automationChat, sent } = await assistantFor([], {
+      devices: oneLight(light),
+      decisions: decisions.transport,
+      delegated: [{ kind: 'said', text: 'Which days?' }],
+    });
+
+    const brief = 'turn the ceiling light off every night at eleven';
+    const started = await assistant.start({ memberId, message: brief });
+    await assistant.idle();
+    await automationChat.idle();
+
+    // No round of this agent's at all: the job went over in the person's words.
+    expect(sent).toEqual([]);
+    const rows = await assistant.transcript(started.sessionId);
+    expect(rows.map((row) => row.role)).toEqual(['user', 'handoff']);
+    const card = rows[1]?.data as { sessionId: string; brief: string };
+    expect(card.brief).toBe(brief);
+    expect((await automationChat.transcript(card.sessionId))[0]?.text).toBe(brief);
+  });
+
+  // ── Spoken ─────────────────────────────────────────────────────────────────
+
+  it('works the device first out loud too, and the answer is still the model’s', async () => {
+    const light = randomUUID();
+    await settings.setAiKey('typesafe', 'ts-test-key');
+    const decisions = jev(() => offAnswers('d1'));
+    const { assistant, sent, efforts } = await assistantFor(
+      [{ kind: 'said', text: 'The ceiling light is off.' }],
+      { devices: oneLight(light), decisions: decisions.transport },
+    );
+    const sessionId = assistant.beginVoice();
+
+    const answer = await assistant.askAloud({ sessionId, memberId, question: 'turn off the ceiling light' });
+
+    expect(answer).toBe('The ceiling light is off.');
+    expect(commanded).toEqual([{ deviceId: light, endpointId: 1, type: 'power' }]);
+    expect(sent[0]).toContain('spoken aloud');
+    expect(sent[0]).toContain('- Ceiling light: switched off.');
+    // The digest above it was read a moment before the light went off.
+    expect(sent[0]).toContain('may not show it yet');
+    expect(efforts).toEqual(['low']);
+    const logged = await handle!.db.select().from(activityTable);
+    const command = logged.find((row) => row.kind === 'device.command');
+    expect((command?.data as { via?: string } | null)?.via).toBe('voice');
+  });
+
+  // ── Speculating while somebody is still talking ────────────────────────────
+
+  /**
+   * **What a half-finished sentence worked out is used when it finishes** —
+   * when it turns out to be the same sentence.
+   *
+   * A reading of a partial used to be paid for and thrown away, so the
+   * finished sentence was read from scratch and the feature cost money to
+   * change nothing. The voice asks for help a beat after somebody stops, so
+   * the last partial read is usually the whole of what they said — and then
+   * the turn spends no request at all.
+   */
+  it('reuses a reading of the very sentence that was finished', async () => {
+    const light = randomUUID();
+    await settings.setAiKey('typesafe', 'ts-test-key');
+    const decisions = jev(() => offAnswers('d1'));
     const { assistant } = await assistantFor([{ kind: 'said', text: 'The ceiling light is off.' }], {
-      devices: oneLight(deviceId),
+      devices: oneLight(light),
+      decisions: decisions.transport,
     });
     const sessionId = assistant.beginVoice();
 
-    await assistant.warmForSpeech({ sessionId, memberId, partial: 'what is the hall doing' });
-    await assistant.askAloud({
-      sessionId,
-      memberId,
-      question: 'turn the ceiling light off',
-    });
+    await assistant.warmForSpeech({ sessionId, memberId, partial: 'Turn off the ceiling light' });
+    expect(decisions.seen.calls).toHaveLength(1);
+    // Nothing is done while the sentence is still being said.
+    expect(commanded).toEqual([]);
 
-    expect(wire.calls).toHaveLength(2);
-    expect(wire.calls[1]).toContain('turn the ceiling light off');
-    expect(commanded).toEqual([{ deviceId, endpointId: 1, type: 'power' }]);
+    await assistant.askAloud({ sessionId, memberId, question: 'turn off the ceiling light.' });
+
+    // Still the speculation's one request — punctuation and case aside, it was
+    // the same sentence — and the light really went off on that reading.
+    expect(decisions.seen.calls).toHaveLength(1);
+    expect(commanded).toEqual([{ deviceId: light, endpointId: 1, type: 'power' }]);
+    // And paid for once: when it was made, not again when it was used.
+    const runs = await handle!.db.select().from(aiRunsTable);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.costUsd).toBeCloseTo(0.04 + DECISION_USD, 9);
+  });
+
+  /**
+   * **And a sentence that carried on past the reading pays again.**
+   *
+   * The rule used to be `startsWith`, on the reasoning that carrying on
+   * talking produces a superset — and a superset is exactly where the meaning
+   * changes: "turn the bedroom light on" read while somebody was still saying
+   * "— no, off" was acted on as *on*. Only the same sentence is reused now; a
+   * longer one is read live, on the connection the speculation left open.
+   */
+  it('reads a sentence live when it carried on past the reading', async () => {
+    const light = randomUUID();
+    await settings.setAiKey('typesafe', 'ts-test-key');
+    const decisions = jev(() => offAnswers('d1'));
+    const { assistant } = await assistantFor([{ kind: 'said', text: 'Off.' }], {
+      devices: oneLight(light),
+      decisions: decisions.transport,
+    });
+    const sessionId = assistant.beginVoice();
+
+    await assistant.warmForSpeech({ sessionId, memberId, partial: 'turn off the ceiling' });
+    await assistant.askAloud({ sessionId, memberId, question: 'turn off the ceiling light' });
+
+    expect(decisions.seen.calls).toHaveLength(2);
+    expect(decisions.seen.calls[1]?.state).toEqual({ said: 'turn off the ceiling light' });
+    expect(commanded).toEqual([{ deviceId: light, endpointId: 1, type: 'power' }]);
+  });
+
+  it('never answers the next sentence from a reading of the last one', async () => {
+    const light = randomUUID();
+    await settings.setAiKey('typesafe', 'ts-test-key');
+    const decisions = jev(() => offAnswers('d1'));
+    const { assistant } = await assistantFor(
+      [
+        { kind: 'said', text: 'Off.' },
+        { kind: 'said', text: 'Off again.' },
+      ],
+      { devices: oneLight(light), decisions: decisions.transport },
+    );
+    const sessionId = assistant.beginVoice();
+
+    await assistant.warmForSpeech({ sessionId, memberId, partial: 'turn off the ceiling light' });
+    await assistant.askAloud({ sessionId, memberId, question: 'turn off the ceiling light' });
+    await assistant.askAloud({ sessionId, memberId, question: 'turn off the ceiling light' });
+
+    // The reading was consumed by the first; the second asked for its own.
+    expect(decisions.seen.calls).toHaveLength(2);
+  });
+
+  // ── Getting the connection ready ──────────────────────────────────────────
+
+  it('opens the connection when somebody opens the page, and only with a key', async () => {
+    const decisions = jev(() => ({}));
+    const { assistant } = await assistantFor([], { decisions: decisions.transport });
+    assistant.prepare();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(decisions.seen.warmups).toBe(0);
+
+    await settings.setAiKey('typesafe', 'ts-test-key');
+    assistant.prepare();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(decisions.seen.warmups).toBe(1);
+    // A warm-up is not a decision, and costs nothing.
+    expect(decisions.seen.calls).toHaveLength(0);
   });
 
   // ── Saying why the fast path stood down ───────────────────────────────────
@@ -1187,30 +1742,28 @@ describe('the assistant', () => {
     const tv = randomUUID();
     const ceiling = randomUUID();
     await settings.setAiKey('typesafe', 'ts-test-key');
-    decidesWith({
-      intent: sure('device_command', 0.97),
-      multiple: { type: 'noul', noul: 0.05 },
-      needsValue: { type: 'noul', noul: 0.05 },
-      scope: sure('specific_device', 0.95),
+    const decisions = jev(() => ({
+      ...offAnswers(),
+      power: sure('on', 0.97),
       device: {
         type: 'choice',
-        choice: tv,
-        probabilities: { [tv]: 0.48, [ceiling]: 0.45 },
+        choice: 'd1',
+        probabilities: { d1: 0.48, d2: 0.45 },
         confidence: 0.41,
       },
-      switchAction: sure('turn_on', 0.97),
-      route: sure('here', 0.99),
-    });
+    }));
     const info = vi.spyOn(log, 'info');
-    const { assistant } = await assistantFor([{ kind: 'said', text: 'The TV light is on.' }], {
+    const { assistant, sent } = await assistantFor([{ kind: 'said', text: 'The TV light is on.' }], {
       devices: twoLights(tv, ceiling),
+      decisions: decisions.transport,
     });
 
     const started = await assistant.start({ memberId, message: 'turn the light on' });
     await assistant.idle();
 
-    // Nothing was carried out on a guess.
+    // Nothing was carried out on a guess, and the model had the sentence whole.
     expect(commanded).toEqual([]);
+    expect(sent).toEqual(['turn the light on']);
     const rows = await assistant.transcript(started.sessionId);
     const steps = (rows[1]?.data as { steps: ChatStepWire[] }).steps;
     // First in the round's working, because it happened first — and in the
@@ -1218,7 +1771,7 @@ describe('the assistant', () => {
     expect(steps[0]).toEqual({
       text: "Jev wasn't sure which device",
       kind: 'deferred',
-      detail: expect.stringMatching(/^TV light or Ceiling light: 0\.41, needs 0\.85 · \d+ ms$/),
+      detail: expect.stringMatching(/^TV light or Ceiling light: 0\.41, needs 0\.85 · \d+ ms, new connection$/),
     });
     expect(steps[1]?.text).toBe('Reading your home');
 
@@ -1243,10 +1796,11 @@ describe('the assistant', () => {
     // a step on every one of those turns would bury the one that matters.
     const light = randomUUID();
     await settings.setAiKey('typesafe', 'ts-test-key');
-    decidesWith({ intent: sure('home_question', 0.97), route: sure('here', 0.99) });
+    const decisions = jev(() => ({ intent: sure('home_question', 0.97), route: sure('here', 0.99) }));
     const info = vi.spyOn(log, 'info');
     const { assistant } = await assistantFor([{ kind: 'said', text: 'It is on.' }], {
       devices: oneLight(light),
+      decisions: decisions.transport,
     });
 
     const started = await assistant.start({ memberId, message: 'is the light on?' });

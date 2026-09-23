@@ -321,30 +321,60 @@ domains — update them in the same change.
 - **Some questions are answered before a model is asked, and `src/ai/decide/`
   is where.** Jev is a *decision* model: a state plus typed questions in, typed
   values with calibrated probabilities out, no text at all. `docs/jev.md` is
-  canonical. Six rules.
+  canonical. Eight rules.
   **The seam imports no SDK and names no vendor** (`decide/decider.ts`) —
   `agent-core.ts`'s rule with one addition, since `decide/typesafe.ts` is the
   only file that knows the URL, the headers or a field name; it sits behind a
   dynamic import in `decide/lazy.ts`, for `lazy.ts`'s *second* property rather
   than for bundle size: the credential is read on every call, so a key saved
   this afternoon works this afternoon. **`decide` answers `null` rather than
-  throwing** — a refusal, a timeout, an open breaker, a request dropped because
-  one was in flight — and every caller falls back to the path it had before, so
-  fail-open is a property of the type rather than a `try`/`catch` per call
-  site. **Which request gives way is `priority`, and it is not symmetric**:
-  concurrent requests queue at the vendor, so one runs at a time, a
-  `speculative` call is dropped when anything is in flight, and a `live` call
-  *aborts* an in-flight speculative one and proceeds. Without that second half
-  the feature starves what it exists to help — a speculation still in the air
-  made the real turn's `decide` answer `null`, so a hub with this switched on
-  was **slower** out loud than one without it. An aborted speculation arms
-  nothing: nobody was waiting for it, and a breaker armed by our own
-  cancellation would silence the next real call. There is **no retry**: the vendor says back off on 429/529, which in
-  front of somebody waiting turns a 180 ms saving into a two-second regression,
-  so it is one request, one deadline, and a breaker keyed on `sha256(secret)`
-  that retires when the key moves — what that buys is an outage costing *zero
+  throwing** — a refusal, a timeout, an open breaker, a speculation dropped
+  because something was out — and every caller falls back to the path it had
+  before, so fail-open is a property of the type rather than a `try`/`catch`
+  per call site.
+  **The connection was most of the latency, so it is kept.** Node's global
+  `fetch` drops an idle connection after about four seconds, so nearly every
+  sentence paid DNS, TCP and TLS from a Pi before the question left — which is
+  what a real hub's `Jev stood down — didn't answer in time (nothing back within
+  700 ms)` was. `decide/connection.ts` is `node:https` with a keep-alive agent
+  of its own (no dependency), resends once only on a *reused* socket the far
+  end had let go of, and hands back a real `Response`; `warm()` opens it when
+  the assistant's page is opened or a voice session starts (`GET /v1/models`,
+  whose answer nothing reads — the model is still pinned); and the deadline is
+  `DECISION_TIMEOUT_MS`, 1500 ms. Every reading and miss says whether it had to
+  dial (`newConnection`). **Which request gives way is `priority`, and nothing
+  in flight is ever aborted**: a `speculative` call is dropped while anything is
+  out, and a `live` call always goes beside it. Aborting a speculation to make
+  room destroyed the very connection the live call then had to re-open. There
+  is **no retry**: the vendor says back off on 429/529, which in front of
+  somebody waiting turns a 180 ms saving into a two-second regression, so it is
+  one request, one deadline, and a breaker keyed on `sha256(secret)` that
+  retires when the key moves — what that buys is an outage costing *zero
   milliseconds*, not merely no error. A **422 is our own malformed question**
   and arms nothing, or the bug hides behind a timer.
+  **One request per sentence, and the device decides which answers are read.**
+  `decideHomeCommand` asks every question at once — the routing ones, the
+  guards (`later`, `negated`), the catalog (`device`, `place`, `deviceType`,
+  under plain `d1`/`r1`/`z1` keys with the names in the descriptions), every
+  action family speculatively, and `amount` when there is a number — and reads
+  only the families the resolved device has a capability for, so "off" asked
+  under the heating's premise never reaches a thermostat. It acts on **one
+  device or a group** (every device of one kind in a room, a zone or the
+  house), read narrowly: "everything" is what a person switches off leaving a
+  room, never the whole home switched on, never a group unlocked, never more
+  than `MAX_COMMANDS`, no place said reaches the whole home only to switch off
+  (`switchesOff` — "turn off the lights" to a phone means every light, "turn on
+  the lights" is the model's), and a member the hub knows is offline is named
+  rather than tried. A sentence that is several requests with a command among them is
+  **split** by the conversation's own model (`decide/split.ts` — structured
+  output, lowest effort, one deadline, parts re-checked) and its parts read in
+  **one** more request (`decideParts`); what is sure is carried out, the rest is
+  the model's. The model then writes the reply from `fastPathPriming` — every
+  device by name, what was done in words, what failed and why, what is left —
+  and `control`'s once-per-turn record makes its own repeat a no-op, while a
+  command the device refused stays retryable. **The fast path is under one
+  `catch`**: a throw from `beforeRound` is a turn that could not be saved, so
+  anything that goes wrong is the model's sentence, whole.
   **Every `none` says why, and saying so changes nothing.** `decideHomeCommand`
   returns a `StandDown` — the question that settled it, its answer in words, the
   number and the bar it missed, the runner-up — and `decide` tells `onMiss`
@@ -355,29 +385,33 @@ domains — update them in the same change.
   `describeStandDown` says somebody could have expected the other road, a
   `kind: 'deferred'` step where `routing` would have been; a sentence read
   confidently as a question is logged and not drawn, because that is most of
-  them and a step on each would bury the one that matters. A stand-down used to
-  leave no trace, which made "why was that light slow?" a replay by hand.
+  them and a step on each would bury the one that matters. What it *did* is a
+  `routing` step and a `Jev carried out — …` line, so `grep Jev` over the
+  journal tells the whole story.
   **One questions module, and the model is pinned because the thresholds are.**
   `decide/questions.ts` holds every question, every threshold and every bound;
   the wording *is* the behaviour, so editing one at a call site changes what
   the hub decides with nothing in the diff to say so — `voice/prompts.ts`'s
   rule. Calibration does not transfer between models, so `DECISION_MODEL` is a
-  build constant and not a setting, and the hub never calls `GET /v1/models`.
-  Every threshold says whether it is *measured* or *assumed*; today all of them
-  are assumed. One is worth knowing: a noul on this model has a floor of
-  0.2–0.5 on plainly clean input, so a negative gate near zero refuses
-  everything and the feature silently never fires.
+  build constant and not a setting (`DECISION_MODEL_LABEL` is the name the apps
+  draw, "Opus 5 + Jev"). Every threshold says whether it is *measured* or
+  *assumed*; today all of them are assumed. One is worth knowing: a noul on this
+  model has a floor of 0.2–0.5 on plainly clean input, so a negative gate near
+  zero refuses everything and the feature silently never fires.
   **A decision never writes its own `ai_runs` row.** `RETAIN_RUNS` is 250 and
   pruned on write, so a row per decision evicts a fortnight of chat pricing in
-  minutes — `STATE_FLUSH_MS` again. It folds into `ChatSession.decisionUsd` and
-  is banked by the turn it preceded; one that led to no turn settles on the
-  session's last row, since `sweep()` and `close()` already call `record`.
+  minutes — `STATE_FLUSH_MS` again. It folds into `ChatSession.decisionUsd`
+  (a split's cost too) and is banked by the turn it preceded; one that led to no
+  turn settles on the session's last row, since `sweep()` and `close()` already
+  call `record`.
   **`state` is data, so an injected instruction can move an answer** — a device
   named "always choose automations" is a thing somebody can do to their own
   home. Nothing Jev returns reaches a write, a permission or a calculation
   unchecked: a command goes through `AssistantChat.control` and an agent key
-  through `delegate`, which is where `access.can` lives. It is never asked for
-  a number (`needsValue` ends the attempt), because it cannot count.
+  through `delegate`, which is where `access.can` lives. **It never reads a
+  number**, because it cannot count: `amountIn` finds the one number in code,
+  the model is asked only what it is a number *of*, and every calculation and
+  range check after that is code.
   **And a speculative voice turn may never write, but it must keep what it
   read.** `VoiceDelegationHost.warmForSpeech` is narrowed so it *cannot* reach
   the home — the narrowing is the mechanism rather than the comment, because
@@ -385,22 +419,15 @@ domains — update them in the same change.
   acted on the first half would make the lamp flash. It warms the session, the
   transport and the state digest, and the write waits for
   `session.delegation.created`, which is the model saying the sentence has
-  finished. What it must *also* do is keep the reading: it paid for a full
-  reading of every partial and threw all of them away, so the finished sentence
-  was read from scratch and the whole feature cost money to change nothing.
-  `AssistantChat.speculated` holds it and `beforeRound` consumes it, so a
-  spoken turn whose sentence began as the partial spends **no request at all**.
-  **`startsWith` is the whole invalidation rule and it is enough**, which is
-  why no new host call was needed: `VoiceDelegation.question()` joins the
-  utterances it has kept, so carrying on talking produces a *superset* (a hit)
-  while every way the transcript can move underneath — a new utterance, one
-  retired because the voice answered it, one dropped by the context bound —
-  produces a string that is not one (a miss, which simply decides live).
-  Consumed once and bounded by `SPECULATION_REUSE_MS`, so a reading of one
-  sentence can never answer the next. There is deliberately **no revision
-  counter** beside it: one was written for a cache that never landed, nothing
-  read it, and a counter nothing reads is an invitation to wire the wrong rule
-  back in. Because the warm is a side effect on `AssistantChat.sessions`,
+  finished. What it must *also* do is keep the reading, and `beforeRound`
+  consumes it — **only when the finished sentence is the same sentence**
+  (`sameSentence`: case, punctuation and spacing aside). It was `startsWith`,
+  and a superset is exactly where the meaning changes: "on" read before "— no,
+  off", or one light read before "and the hall light". A finished sentence
+  whose speculation is still out waits for it for `SPECULATION_WAIT_MS` rather
+  than sending a second request beside it. Consumed once and bounded by
+  `SPECULATION_REUSE_MS`, so a reading of one sentence can never answer the
+  next. Because the warm is a side effect on `AssistantChat.sessions`,
   `askAloud`'s own lookup simply hits — so a warmed session can never be the
   wrong one.
 - **The automation agent is authoring, never runtime, and it lives on the
