@@ -955,5 +955,9 @@ domains — update them in the same change.
   **`control_device` is the one tool that writes to the home**, through the
   registry's ordinary path and into the activity log **named for the person who
   asked** — the feed is read a week later and "the assistant" is nobody anyone
-  can go and ask. Bounded per *turn*, not as a guard against a person tapping
-  quickly but against a model reading "everything off" as the whole house.
+  can go and ask. **Bounded per device, never per reply**
+  (`ASSISTANT_MAX_COMMANDS_PER_DEVICE`): it was eight commands a reply, which
+  cut every whole-home request short — fifteen bulbs, eight switched off and
+  permission asked for the rest — so a sentence somebody can say in one breath
+  could not be carried out in one reply. One device worked over and over is a
+  loop, and that is all the bound stops.

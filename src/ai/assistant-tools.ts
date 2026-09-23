@@ -56,15 +56,21 @@ export interface AssistantToolContext {
 }
 
 /**
- * How many devices one turn may command.
+ * How many commands one reply may send to any one device.
  *
- * Not a guard against a person — a person tapping quickly is a person, which
- * is the whole reason the automations engine's limits can be as tight as they
- * are. This is a guard against a *misread*: "turn everything off" understood
- * as the whole house when it meant the kitchen is a model's mistake landing on
- * forty relays at once. Eight covers every real request and stops that one.
+ * **Per device, never per reply.** It was eight commands per reply, as a guard
+ * against a model reading "turn everything off" as the whole house when the
+ * kitchen was meant — and it cut short every real request bigger than that:
+ * "turn off all the lights" in a flat with fifteen bulbs switched off eight
+ * and asked permission for the rest, so a whole-home request could not be made
+ * in one message at all. The model reads the whole home and the whole sentence,
+ * and it can be asked for everything at once.
+ *
+ * What one reply should not do is work the same device over and over — that is
+ * a loop, not a request, and it is all this bounds: switched on, dimmed, given
+ * a colour and corrected once is four, and six leaves room.
  */
-export const ASSISTANT_MAX_COMMANDS_PER_TURN = 8;
+export const ASSISTANT_MAX_COMMANDS_PER_DEVICE = 6;
 
 // ── Schemas ──────────────────────────────────────────────────────────────────
 
@@ -222,7 +228,7 @@ export async function runAssistantTool(
   name: string,
   rawInput: unknown,
   context: AssistantToolContext,
-  budget: { commands: number },
+  budget: { perDevice: Map<string, number> },
 ): Promise<AutomationToolResult> {
   try {
     switch (name) {
@@ -265,17 +271,18 @@ export async function runAssistantTool(
               .join('; ')}`,
           };
         }
-        if (budget.commands >= ASSISTANT_MAX_COMMANDS_PER_TURN) {
-          return {
-            isError: true,
-            text:
-              `That is more than ${ASSISTANT_MAX_COMMANDS_PER_TURN} devices in one reply. The ` +
-              'ones already sent have gone; tell them what you did and ask before doing more.',
-          };
-        }
         const device = context.home().devices.find((entry) => entry.id === parsed.data.deviceId);
         if (!device) {
           return { isError: true, text: 'There is no device with that id in this home.' };
+        }
+        const sent = budget.perDevice.get(device.id) ?? 0;
+        if (sent >= ASSISTANT_MAX_COMMANDS_PER_DEVICE) {
+          return {
+            isError: true,
+            text:
+              `${device.name} has already been sent ${sent} commands in this reply. The ones sent ` +
+              'have gone; tell them what you did, and ask before doing more to it.',
+          };
         }
         const endpointId = parsed.data.endpointId ?? device.endpoints[0]?.endpointId ?? 1;
         try {
@@ -283,7 +290,7 @@ export async function runAssistantTool(
         } catch (error) {
           return { isError: true, text: `The hub refused that: ${(error as Error).message}` };
         }
-        budget.commands += 1;
+        budget.perDevice.set(device.id, sent + 1);
         return {
           detail: `${device.name}: ${parsed.data.command.type}`,
           text: `Sent. Note that reaching a battery device can take until it next wakes.`,
