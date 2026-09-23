@@ -1,6 +1,5 @@
 import type { AiProvider } from '../../core/settings.js';
 import type { Logger } from '../../logging.js';
-import type { AiRoute } from '../gateway.js';
 import type { ChatEffort, ChatTurnContext } from './chat-runtime.js';
 
 /**
@@ -115,13 +114,6 @@ export interface ChatTransport {
 /** What every transport needs to be built. */
 export interface ChatTransportOptions {
   secret: string;
-  /**
-   * Which way the conversation goes — the vendor's own API, or the gateway
-   * that sells the same model. Absent means direct. It moves the address and
-   * the model's spelling on the wire and nothing else: `modelId` below stays
-   * the canonical id every price and every recorded run reads.
-   */
-  route?: AiRoute;
   modelId: string;
   systemPrompt: string;
   /** The first user message: this home, and what was asked. Pushed by the

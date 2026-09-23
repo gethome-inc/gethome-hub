@@ -98,9 +98,6 @@ async function main(): Promise<void> {
   // The home's timezone, read into memory once: the automation scheduler asks
   // for it on every tick and it must never become a database read.
   await settings.loadTimezone();
-  // A hub that ran the first cut of the gateway held a Vercel key in the
-  // TypeSafe slot; it moves to the gateway's own once, before anything asks.
-  await settings.adoptLegacyDecisionRoute();
   // Who may do what. Loaded before the pairing service, which writes a
   // `role_id` on every claim and has to be able to ask for one — and before
   // anything can serve a request, since every authenticated route asks this.

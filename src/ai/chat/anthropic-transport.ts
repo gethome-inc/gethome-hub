@@ -1,7 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { AiUnavailableError, classifyApiError } from '../errors.js';
 import { MAX_OUTPUT_TOKENS } from '../agent-core.js';
-import { anthropicBaseUrl, wireModelId } from '../gateway.js';
 import { estimateCostUsd } from '../models.js';
 import {
   refusalSentence,
@@ -84,15 +83,8 @@ function stopOf(reason: string | null | undefined): ChatStop {
 
 export function createAnthropicTransport(options: ChatTransportOptions): ChatTransport {
   const { secret, modelId, systemPrompt, tools, label, timeoutMs, effort, signal, log } = options;
-  const route = options.route ?? 'direct';
 
-  // The gateway serves the Messages API itself, so the SDK is unchanged and
-  // only its address moves — the two cache breakpoints, the streamed turn and
-  // `display: 'summarized'` all go through exactly as written.
-  const baseURL = anthropicBaseUrl(route);
-  const client = new Anthropic({ apiKey: secret, maxRetries: 3, ...(baseURL ? { baseURL } : {}) });
-  /** What this route calls the model; `modelId` stays what is priced. */
-  const wireModel = wireModelId('anthropic', route, modelId);
+  const client = new Anthropic({ apiKey: secret, maxRetries: 3 });
   const definitions: Anthropic.Tool[] = tools.map((tool) => ({
     name: tool.name,
     description: tool.description,
@@ -150,7 +142,7 @@ export function createAnthropicTransport(options: ChatTransportOptions): ChatTra
       try {
         const stream = client.messages.stream(
           {
-            model: wireModel,
+            model: modelId,
             max_tokens: MAX_OUTPUT_TOKENS,
             system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
             cache_control: { type: 'ephemeral' },

@@ -27,19 +27,14 @@ import {
 // mock that accepts what the real client refuses does not test the code, it
 // tests the mock. `create` therefore throws exactly as the SDK does, and every
 // reply goes through `stream`.
-const { createMock, clientOptions, nonStreamingCeiling } = vi.hoisted(() => ({
+const { createMock, nonStreamingCeiling } = vi.hoisted(() => ({
   createMock: vi.fn(),
-  /** What each client was built with — the one place a route's address shows. */
-  clientOptions: [] as Record<string, unknown>[],
   // The SDK's arithmetic: a request is refused when its expected generation
   // time (an hour per 128K output tokens) exceeds the ten-minute default.
   nonStreamingCeiling: Math.floor((600_000 * 128_000) / 3_600_000),
 }));
 vi.mock('@anthropic-ai/sdk', () => ({
   default: class MockAnthropic {
-    constructor(options: Record<string, unknown>) {
-      clientOptions.push(options);
-    }
     messages = {
       create: async (params: { max_tokens: number }) => {
         if (params.max_tokens > nonStreamingCeiling) {
@@ -671,34 +666,6 @@ describe('the mapping agent loop', () => {
     const toolTypes = sent[0]!.tools.map((tool: Record<string, unknown>) => tool.type ?? tool.name);
     expect(toolTypes).toEqual(['web_search_20260209', 'web_fetch_20260209', 'submit_mapping']);
     expect(sent[0]!.system[0].cache_control).toEqual({ type: 'ephemeral' });
-    expect(sent[0]!.model).toBe(DEFAULT_MODEL);
-  });
-
-  it('goes through the gateway on its key, spelling the same model the gateway’s way', async () => {
-    // The gateway serves the Messages API itself, so the SDK is unchanged and
-    // only its address, its key and the model's spelling move — the research
-    // tools and both cache breakpoints go through exactly as written.
-    clientOptions.length = 0;
-    queue(reply({ stop_reason: 'tool_use', content: [submitCall(validDescriptor)] }));
-    await createMappingAgent({ secret: 'vck_gateway', route: 'vercel' }, null, log).generate(
-      'system prompt',
-      'user',
-    );
-
-    expect(clientOptions.at(-1)).toMatchObject({
-      apiKey: 'vck_gateway',
-      baseURL: 'https://ai-gateway.vercel.sh',
-    });
-    expect(sent[0]!.model).toBe(`anthropic/${DEFAULT_MODEL}`);
-    const toolTypes = sent[0]!.tools.map((tool: Record<string, unknown>) => tool.type ?? tool.name);
-    expect(toolTypes).toEqual(['web_search_20260209', 'web_fetch_20260209', 'submit_mapping']);
-  });
-
-  it('leaves the SDK on its own address on the direct route', async () => {
-    clientOptions.length = 0;
-    queue(reply({ stop_reason: 'tool_use', content: [submitCall(validDescriptor)] }));
-    await agent().generate('system prompt', 'user');
-    expect(clientOptions.at(-1)).not.toHaveProperty('baseURL');
     expect(sent[0]!.model).toBe(DEFAULT_MODEL);
   });
 

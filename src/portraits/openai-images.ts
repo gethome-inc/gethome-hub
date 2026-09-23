@@ -30,7 +30,6 @@
  */
 
 import { classifyApiError } from '../ai/errors.js';
-import { openAiUrl, routeName, wireModelId, type AiRoute } from '../ai/gateway.js';
 
 export const PORTRAIT_MODEL = 'gpt-image-2.5-flare';
 
@@ -57,6 +56,9 @@ const QUALITY = 'high';
  * under a model pin without anybody noticing.
  */
 const OUTPUT_FORMAT = 'png';
+
+const GENERATIONS_URL = 'https://api.openai.com/v1/images/generations';
+const EDITS_URL = 'https://api.openai.com/v1/images/edits';
 
 /**
  * Ten minutes, and the number comes from this hub rather than from the web.
@@ -98,13 +100,6 @@ export class PortraitDrawError extends Error {
 
 export interface DrawOptions {
   apiKey: string;
-  /**
-   * OpenAI's own Image API, or the gateway's copy of it. The same two
-   * endpoints, the same fields and the same base64 answer either way — only
-   * the host and the model's spelling (`openai/gpt-image-2.5-flare`) move.
-   * Absent means direct.
-   */
-  route?: AiRoute;
   prompt: string;
   /** A photo to restyle. Absent means draw from the prompt alone. */
   photo?: { bytes: Buffer; contentType: string };
@@ -166,18 +161,13 @@ export function portraitCostUsd(usage: PortraitUsage | undefined): number | unde
 export async function drawPortrait(options: DrawOptions): Promise<PortraitDrawing> {
   const abort = AbortSignal.timeout(TIMEOUT_MS);
   const signal = options.signal ? AbortSignal.any([options.signal, abort]) : abort;
-  const route = options.route ?? 'direct';
-  /** What this route calls the pinned model — the model is the same either way. */
-  const model = wireModelId('openai', route, PORTRAIT_MODEL);
-  /** Who a refusal or a dead line is about, in the sentence a person reads. */
-  const answering = routeName(route, 'OpenAI');
   const request: RequestInit = options.photo
-    ? { method: 'POST', body: editForm(model, options.prompt, options.photo) }
+    ? { method: 'POST', body: editForm(options.prompt, options.photo) }
     : {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          model,
+          model: PORTRAIT_MODEL,
           prompt: options.prompt,
           size: SIZE,
           n: 1,
@@ -189,7 +179,7 @@ export async function drawPortrait(options: DrawOptions): Promise<PortraitDrawin
 
   let response: Response;
   try {
-    response = await fetch(openAiUrl(route, options.photo ? '/images/edits' : '/images/generations'), {
+    response = await fetch(options.photo ? EDITS_URL : GENERATIONS_URL, {
       ...request,
       headers: { ...(request.headers as Record<string, string>), authorization: `Bearer ${options.apiKey}` },
       signal,
@@ -198,15 +188,15 @@ export async function drawPortrait(options: DrawOptions): Promise<PortraitDrawin
     // A refused DNS lookup, a hub with no route out, or our own deadline.
     throw new PortraitDrawError(
       error instanceof Error && error.name === 'TimeoutError'
-        ? `${answering} took too long to answer.`
-        : `Could not reach ${answering}: ${error instanceof Error ? error.message : String(error)}`,
+        ? 'OpenAI took too long to answer.'
+        : `Could not reach OpenAI: ${error instanceof Error ? error.message : String(error)}`,
       'network',
     );
   }
 
   const body = await response.text();
   if (!response.ok) {
-    const detail = messageIn(body) ?? `${answering} answered ${response.status}.`;
+    const detail = messageIn(body) ?? `OpenAI answered ${response.status}.`;
     // Reuse the mapper's classifier: it branches on HTTP status rather than on
     // any vendor's error vocabulary, which is exactly why it is structural.
     const kind = classifyApiError({ status: response.status, message: detail })?.kind ?? 'refused';
@@ -214,13 +204,13 @@ export async function drawPortrait(options: DrawOptions): Promise<PortraitDrawin
   }
 
   const drawing = readDrawing(body);
-  if (!drawing) throw new PortraitDrawError(`${answering} answered without an image.`, 'refused');
+  if (!drawing) throw new PortraitDrawError('OpenAI answered without an image.', 'refused');
   return drawing;
 }
 
-function editForm(model: string, prompt: string, photo: { bytes: Buffer; contentType: string }): FormData {
+function editForm(prompt: string, photo: { bytes: Buffer; contentType: string }): FormData {
   const form = new FormData();
-  form.set('model', model);
+  form.set('model', PORTRAIT_MODEL);
   form.set('prompt', prompt);
   form.set('size', SIZE);
   form.set('n', '1');

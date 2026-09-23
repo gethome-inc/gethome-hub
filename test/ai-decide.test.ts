@@ -260,31 +260,20 @@ describe('failures', () => {
 });
 
 describe('the wrapper, which is what makes an outage invisible', () => {
-  /**
-   * The two things the wrapper asks: whether a decision can be asked at all,
-   * and the connection it is asked on — the route with the key that route
-   * chose, from one call, so the two can never come from different moments.
-   */
   const settingsWith = (input: {
     hasKey?: boolean;
     enabled?: boolean;
-    route?: 'direct' | 'vercel';
     secret?: string | null;
   }): SettingsService =>
     ({
       getAiSettings: async () => ({
         decision: {
           hasKey: input.hasKey ?? true,
-          usable: input.hasKey ?? true,
           enabled: input.enabled ?? true,
-          route: input.route ?? 'direct',
           model: DECISION_MODEL,
         },
       }),
-      aiConnection: async () => {
-        const secret = input.secret === undefined ? 'ts-key' : input.secret;
-        return secret === null ? null : { secret, route: input.route ?? 'direct' };
-      },
+      aiKey: async () => (input.secret === undefined ? 'ts-key' : input.secret),
     }) as unknown as SettingsService;
 
   const one = { urgent: { type: 'noul', instructions: 'Now?' } } as const;
@@ -330,9 +319,9 @@ describe('the wrapper, which is what makes an outage invisible', () => {
     let secret = 'old-key';
     const settings = {
       getAiSettings: async () => ({
-        decision: { hasKey: true, usable: true, enabled: true, route: 'direct', model: DECISION_MODEL },
+        decision: { hasKey: true, enabled: true, model: DECISION_MODEL },
       }),
-      aiConnection: async () => ({ secret, route: 'direct' }),
+      aiKey: async () => secret,
     } as unknown as SettingsService;
     const { calls } = stub((call) =>
       call.headers['authorization'] === 'Bearer new-key'
@@ -350,38 +339,6 @@ describe('the wrapper, which is what makes an outage invisible', () => {
     const result = await decider.decide({ state: 's', questions: one, timeoutMs: 500 });
     expect(calls).toHaveLength(4);
     expect(result?.answers.urgent?.noul).toBe(0.91);
-  });
-
-  it('sends the route\'s own address and model id, on the key that route chose', async () => {
-    // A route is not a model: both serve the same one, and only the address,
-    // the key and the string that address expects differ.
-    const { calls } = stub(() => ok(answered));
-    const decider = lazyDecider({
-      settings: settingsWith({ route: 'vercel', secret: 'vck_gateway' }),
-      log,
-    });
-    await decider.decide({ state: 's', questions: one, timeoutMs: 500 });
-    expect(calls[0]?.url).toBe('https://ai-gateway.vercel.sh/typesafe/v1/systemone');
-    expect(calls[0]?.body['model']).toBe('typesafe-ai/jev');
-    expect(calls[0]?.headers['authorization']).toBe('Bearer vck_gateway');
-  });
-
-  it('asks TypeSafe itself on the direct route', async () => {
-    const { calls } = stub(() => ok(answered));
-    const decider = lazyDecider({ settings: settingsWith({}), log });
-    expect(await decider.decide({ state: 's', questions: one, timeoutMs: 500 })).not.toBeNull();
-    expect(calls[0]?.url).toBe('https://api.typesafe.ai/v1/systemone');
-    expect(calls[0]?.body['model']).toBe(DECISION_MODEL);
-  });
-
-  it('answers null when the route it is on has no key, and makes no request', async () => {
-    // A home that moved Jev onto the gateway and then removed the gateway's
-    // key is back on TypeSafe's own — but one caught between the two reads
-    // must fail open rather than send a request with nothing to sign it.
-    const { calls } = stub(() => ok(answered));
-    const decider = lazyDecider({ settings: settingsWith({ secret: null }), log });
-    expect(await decider.decide({ state: 's', questions: one, timeoutMs: 500 })).toBeNull();
-    expect(calls).toHaveLength(0);
   });
 
   it('drops a second concurrent call rather than queueing it', async () => {

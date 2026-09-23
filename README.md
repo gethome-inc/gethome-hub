@@ -28,10 +28,7 @@ hub can control them.
   researches it on the web (starting from the device's own Zigbee2MQTT
   page), and submits a validated mapping. **Bring your own account** — an
   Anthropic or an OpenAI API key, stored encrypted on the hub and used only for
-  this; with both, you choose which one does the research. Or **one Vercel AI
-  Gateway key** that can stand in for either, and for TypeSafe's below — each
-  vendor goes through it only when you switch that vendor over, so it can sit
-  beside keys of their own. No credential →
+  this; with both, you choose which one does the research. No credential →
   devices still appear, flagged "needs review". It can be switched off without
   deleting the key, every run is recorded (what it searched for, what it read,
   what it cost), and the answers are a **library** you can download from one
@@ -40,8 +37,7 @@ hub can control them.
   Only a device's own published description is ever sent; the hub's traffic is
   structurally incapable of reaching the agent.
   ([docs/ai-adaptation.md](docs/ai-adaptation.md))
-- **Fast decisions** — with a TypeSafe key (or the gateway's, switched over for
-  it), the hub reads what you said against
+- **Fast decisions** — with a TypeSafe key, the hub reads what you said against
   your own rooms and devices *before* a language model is asked: about 180 ms
   and a fiftieth of a penny, so a plain "switch the kitchen light off" happens
   while the reply is still being written, rather than after a round spent
@@ -52,8 +48,7 @@ hub can control them.
   ([docs/jev.md](docs/jev.md))
 - **Device portraits** — an AI-drawn picture of each device, the floating object
   the GetHome app shows on a device's page. Drawn on the hub with the home's
-  OpenAI key — or through the gateway, when OpenAI is switched over to it — and
-  **stored on the hub**, so everybody in the home sees the same
+  OpenAI key and **stored on the hub**, so everybody in the home sees the same
   kettle rather than one person's phone holding the only copy. Bounded on
   purpose — a few per device, a few hundred megabytes in total, and it refuses
   to draw at all when the card is nearly full.

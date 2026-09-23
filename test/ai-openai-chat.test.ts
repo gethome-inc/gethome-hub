@@ -49,12 +49,9 @@ function sentBody(): Record<string, unknown> {
   return JSON.parse(String(init?.body)) as Record<string, unknown>;
 }
 
-function transportFor(
-  route: ChatTransportOptions['route'] = undefined,
-): ReturnType<typeof createOpenAiTransport> {
+function transportFor(): ReturnType<typeof createOpenAiTransport> {
   const options: ChatTransportOptions = {
-    secret: route === 'vercel' ? 'vck_gateway' : 'sk-proj-test',
-    ...(route !== undefined ? { route } : {}),
+    secret: 'sk-proj-test',
     modelId: 'gpt-5.6-sol',
     systemPrompt: 'system',
     tools: [
@@ -135,42 +132,6 @@ describe('the OpenAI chat transport', () => {
     // by them.
     expect(body['store']).toBe(false);
     expect(body['include']).toEqual(['reasoning.encrypted_content']);
-  });
-
-  it('goes through the gateway on its key, and prices the model it is', async () => {
-    // Only the wire spells the model the gateway's way; the canonical id is
-    // what the conversation reports and what its rounds are priced at, which
-    // is what makes a route change invisible to everything but the bill.
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(
-        streamOf([
-          frame('response.completed', {
-            response: { status: 'completed', output: [], usage: { input_tokens: 100, output_tokens: 20 } },
-          }),
-        ]),
-      ),
-    );
-    const transport = transportFor('vercel');
-    transport.pushUser('hello');
-    await transport.round(undefined);
-
-    const call = vi.mocked(globalThis.fetch).mock.calls.at(-1);
-    expect(call?.[0]).toBe('https://ai-gateway.vercel.sh/v1/responses');
-    expect((call?.[1] as RequestInit).headers).toMatchObject({ authorization: 'Bearer vck_gateway' });
-    expect(sentBody()['model']).toBe('openai/gpt-5.6-sol');
-    expect(transport.modelId).toBe('gpt-5.6-sol');
-    expect(transport.costUsd()).toBeGreaterThan(0);
-  });
-
-  it('names the gateway, not OpenAI, when the gateway refuses', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(new Response('<html>bad gateway</html>', { status: 502 })),
-    );
-    const transport = transportFor('vercel');
-    transport.pushUser('hello');
-    await expect(transport.round(undefined)).rejects.toThrow(/Vercel AI Gateway answered 502/);
   });
 
   it('hands a tool call back parsed, and sends its result as the call it answers', async () => {

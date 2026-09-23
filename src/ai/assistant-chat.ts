@@ -6,7 +6,6 @@ import type { AccessService } from '../core/access.js';
 import type { ActivityService } from '../core/activity.js';
 import type { AutomationEngine } from '../automations/engine.js';
 import type { AiProvider } from '../core/settings.js';
-import type { AiRoute } from './gateway.js';
 import type { HubCommand } from '../schema/index.js';
 import type { AssistantTurn } from './assistant-agent.js';
 import type { AssistantToolContext, DelegateOutcome } from './assistant-tools.js';
@@ -90,8 +89,6 @@ export interface AssistantChatOptions extends ChatRuntimeOptions {
     provider: AiProvider;
     modelId: string;
     secret: string;
-    /** Whether the conversation would go through the gateway. */
-    route: AiRoute;
     systemPrompt: string;
     taskPrompt: string;
   }) => AgentConversation<AssistantTurn>;
@@ -483,12 +480,8 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
           'token is not an API key. Add an Anthropic or OpenAI API key in the home’s AI settings.',
       );
     }
-    // The key **and** the address together: a home that routes this vendor
-    // through the gateway is asked on the gateway's key, never on a key of
-    // the vendor's own it happens to still hold.
-    const connection = await this.options.settings.aiConnection(provider);
-    if (!connection) throw new AgentNotConfiguredError('ai_not_configured');
-    const { secret, route } = connection;
+    const secret = await this.options.settings.aiKey(provider);
+    if (!secret) throw new AgentNotConfiguredError('ai_not_configured');
 
     // What will *run*, never the stored column — the one gap that cost the
     // mapper a release, and `getAiSettings` has already closed it here.
@@ -515,12 +508,12 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
      * shipped untested and reached a phone as a 500.
      */
     if (this.options.createConversation) {
-      return this.options.createConversation({ provider, modelId, secret, route, systemPrompt, taskPrompt });
+      return this.options.createConversation({ provider, modelId, secret, systemPrompt, taskPrompt });
     }
 
     const { createAssistantConversation } = await import('./assistant-agent.js');
     return createAssistantConversation({
-      auth: { secret, route },
+      auth: { secret },
       provider,
       modelId,
       systemPrompt,

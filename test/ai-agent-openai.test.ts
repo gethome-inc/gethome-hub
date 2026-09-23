@@ -207,34 +207,6 @@ describe('the mapping agent on OpenAI', () => {
     expect(request.model).toBe(defaultModelFor('openai'));
   });
 
-  it('goes through the gateway on its key, spelling the same model the gateway’s way', async () => {
-    // A route moves the address, the key and the model's spelling on the wire
-    // — and nothing else: the tools, the effort and what is stored are the
-    // request above, byte for byte.
-    queue(ok([submitCall(validDescriptor)]));
-    await createOpenAiMappingAgent({ secret: 'vck_gateway', route: 'vercel' }, null, log).generate(
-      'a system prompt',
-      'user',
-    );
-
-    const [url, init] = fetchMock.mock.calls[0] as [string, { headers: Record<string, string> }];
-    expect(url).toBe('https://ai-gateway.vercel.sh/v1/responses');
-    expect(init.headers['authorization']).toBe('Bearer vck_gateway');
-    expect(sent[0]!.model).toBe(`openai/${defaultModelFor('openai')}`);
-    expect(sent[0]!.tools.map((tool) => tool.type ?? tool.name)).toEqual([
-      'web_search',
-      'function',
-      'function',
-    ]);
-    expect(sent[0]!.store).toBe(false);
-  });
-
-  it('goes to OpenAI itself on the direct route', async () => {
-    queue(ok([submitCall(validDescriptor)]));
-    await agent().generate('a system prompt', 'user');
-    expect(fetchMock.mock.calls[0]?.[0]).toBe('https://api.openai.com/v1/responses');
-  });
-
   /**
    * Stateless mode is the whole reason reasoning has to travel: OpenAI keeps
    * no copy, so a run that dropped these items would lose the model's own

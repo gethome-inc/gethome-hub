@@ -457,11 +457,7 @@ When a mapping is generated, the following leaves the machine:
 Searches execute **server-side, on the provider's infrastructure**, and on
 Anthropic so do page fetches — so a hub configured for Anthropic needs no
 outbound access beyond `api.anthropic.com` (drawing a portrait is
-`api.openai.com` too). A provider the home routes through **Vercel's AI
-Gateway** is asked at `ai-gateway.vercel.sh` instead, which passes the same
-request — tools and all — to the same provider: one more company sees the
-device's published schema on its way through, and nothing else about the run
-changes ([the gateway](api.md#the-gateway)).
+`api.openai.com` too).
 
 **On OpenAI the hub makes one further kind of request, and this is the whole
 of it.** OpenAI's hosted tool set has search and no fetch equivalent, which

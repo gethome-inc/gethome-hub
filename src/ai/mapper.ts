@@ -362,10 +362,8 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
       );
       return null;
     }
-    // The key and the address together: a provider routed through the gateway
-    // is asked on the gateway's key, never on its own key left beside it.
-    const connection = await this.settings.aiConnection(provider);
-    if (!connection) return null;
+    const secret = await this.settings.aiKey(provider);
+    if (!secret) return null;
     // Imported here rather than at the top, so a home running on one provider
     // never loads the other's client — which for Anthropic means not loading
     // its SDK at all. The provider-neutral half both share is `agent-core.ts`,
@@ -383,28 +381,24 @@ export class AiDeviceMapper implements ZigbeeAiAssist {
     const modelId = effectiveModel(provider, ai[provider].model);
     if (provider === 'openai') {
       const { createOpenAiMappingAgent } = await import('./openai-agent.js');
-      return createOpenAiMappingAgent(connection, modelId, this.log);
+      return createOpenAiMappingAgent({ secret }, modelId, this.log);
     }
     const { createMappingAgent } = await import('./agent.js');
-    return createMappingAgent(connection, modelId, this.log);
+    return createMappingAgent({ secret }, modelId, this.log);
   }
 
   /**
-   * Which credential the gate is about: the provider, the route, the model it
-   * would run, and a digest of the secret. Never the secret itself — this is
-   * compared and logged nowhere, but a key held in a field is a key that can
-   * be printed. The route is in it because moving a provider onto the gateway
-   * (or off it) is exactly the switch somebody reaches for after "this account
-   * is unavailable", and a judgement about the old way in must not silence it.
+   * Which credential the gate is about: the provider, the model it would run,
+   * and a digest of the secret. Never the secret itself — this is compared and
+   * logged nowhere, but a key held in a field is a key that can be printed.
    */
   private async credentialId(): Promise<string> {
     const ai = await this.settings.getAiSettings();
     const provider = ai.provider;
     if (!provider) return 'none';
-    const connection = await this.settings.aiConnection(provider);
-    const digest = createHash('sha256').update(connection?.secret ?? '').digest('hex').slice(0, 16);
-    const route = connection?.route ?? 'direct';
-    return `${provider}:${route}:${effectiveModel(provider, ai[provider].model)}:${digest}`;
+    const secret = (await this.settings.aiKey(provider)) ?? '';
+    const digest = createHash('sha256').update(secret).digest('hex').slice(0, 16);
+    return `${provider}:${effectiveModel(provider, ai[provider].model)}:${digest}`;
   }
 
   /**

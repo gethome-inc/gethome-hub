@@ -1,7 +1,6 @@
 import type { Logger } from '../../logging.js';
 import { AiUnavailableError, classifyApiError } from '../errors.js';
 import { MAX_OUTPUT_TOKENS } from '../agent-core.js';
-import { openAiUrl, routeName, wireModelId, type AiRoute } from '../gateway.js';
 import { estimateCostUsd } from '../models.js';
 import {
   refusalSentence,
@@ -37,6 +36,8 @@ import {
  * verbatim on the next round, which is what keeps the model's own chain of
  * thought across a tool call without anything being retained server-side.
  */
+
+const RESPONSES_URL = 'https://api.openai.com/v1/responses';
 
 interface ResponsesUsage {
   input_tokens?: number;
@@ -103,7 +104,6 @@ class RunUsage {
 
 export function createOpenAiTransport(options: ChatTransportOptions): ChatTransport {
   const { secret, modelId, systemPrompt, tools, label, timeoutMs, effort, signal, log } = options;
-  const route = options.route ?? 'direct';
 
   const definitions = tools.map((tool) => ({
     type: 'function' as const,
@@ -182,7 +182,6 @@ export function createOpenAiTransport(options: ChatTransportOptions): ChatTransp
       try {
         body = await streamResponse({
           secret,
-          route,
           modelId,
           systemPrompt,
           input,
@@ -264,9 +263,6 @@ export function createOpenAiTransport(options: ChatTransportOptions): ChatTransp
  */
 async function streamResponse(request: {
   secret: string;
-  /** Which address the round goes to; the stream answers alike on both. */
-  route: AiRoute;
-  /** The canonical id — the route's spelling of it is made here, on the wire. */
   modelId: string;
   systemPrompt: string;
   input: unknown[];
@@ -280,16 +276,14 @@ async function streamResponse(request: {
   onDelta: ((delta: string) => void) | undefined;
   onThinking: ((delta: string) => void) | undefined;
 }): Promise<ResponseBody> {
-  /** Who a refusal or a dead line is about, in the sentence that says so. */
-  const answering = routeName(request.route, 'OpenAI');
   let response: Response;
   try {
-    response = await fetch(openAiUrl(request.route, '/responses'), {
+    response = await fetch(RESPONSES_URL, {
       method: 'POST',
       headers: { authorization: `Bearer ${request.secret}`, 'content-type': 'application/json' },
       signal: request.signal,
       body: JSON.stringify({
-        model: wireModelId('openai', request.route, request.modelId),
+        model: request.modelId,
         instructions: request.systemPrompt,
         input: request.input,
         tools: request.tools,
@@ -309,13 +303,13 @@ async function streamResponse(request: {
   } catch (error) {
     throw new AiUnavailableError(
       'network',
-      `could not reach ${answering}: ${error instanceof Error ? error.message : String(error)}`,
+      `could not reach OpenAI: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
 
   if (!response.ok) {
     const text = await response.text();
-    const message = messageIn(text) ?? `${answering} answered ${response.status}.`;
+    const message = messageIn(text) ?? `OpenAI answered ${response.status}.`;
     // The classifier branches on HTTP status rather than on any vendor's error
     // vocabulary, which is exactly why it is structural.
     throw (
@@ -323,7 +317,7 @@ async function streamResponse(request: {
       new Error(message)
     );
   }
-  if (!response.body) throw new Error(`${answering} answered with no body to stream`);
+  if (!response.body) throw new Error('OpenAI answered with no body to stream');
 
   let completed: ResponseBody | null = null;
   let failure: string | null = null;
@@ -386,8 +380,8 @@ async function streamResponse(request: {
     }
   }
 
-  if (failure !== null) throw new Error(`${answering} response ${failure}`);
-  if (completed === null) throw new Error(`${answering} stream ended without completing the response`);
+  if (failure !== null) throw new Error(`OpenAI response ${failure}`);
+  if (completed === null) throw new Error('OpenAI stream ended without completing the response');
   return completed;
 }
 

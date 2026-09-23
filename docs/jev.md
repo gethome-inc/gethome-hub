@@ -76,18 +76,14 @@ guard**, and `src/core/settings.ts` says so where somebody would try it.
 If it were forced through, somebody would pick Jev as their assistant model and
 get an assistant that cannot talk — a failure other integrators have shipped.
 
-`AiVendor = AiProvider | 'typesafe'` is the second vocabulary — whose model
-answers, which is what a key and a route are held for — and
-`AiCredentialSlot = AiVendor | 'vercel'` the third, used only where a
-*credential row* is meant (the gateway holds a key and answers nothing). Three
-things must never change with them:
+`AiCredentialSlot = AiProvider | 'typesafe'` is the second vocabulary, used
+only where a *credential row* is meant. Three things must never change with it:
 
-- flat `AiSettings.hasKey` stays the *generative* providers only — each one's
-  own key, or the gateway's key for a provider routed through it — because
-  `lazy.ts` and the API's `ai_not_configured` check both read it as "can an
-  agent run at all", and a Jev key (or a gateway key routed for Jev alone)
-  making it true would build a mapper that then fails at the provider;
-- `mappingChoosable` stays both *generative* providers;
+- flat `AiSettings.hasKey` stays `anthropic.hasKey || openai.hasKey` — `lazy.ts`
+  and the API's `ai_not_configured` check both read it as "can an agent run at
+  all", and a Jev key making it true would build a mapper that then fails at
+  the provider;
+- `mappingChoosable` stays both *generative* keys;
 - `UsableProviders` keeps exactly two fields, which is what makes
   `effectiveAgentModel` structurally unable to select Jev.
 
@@ -105,10 +101,9 @@ under `decision`:
 
 | Field | What it is |
 |---|---|
-| `hasKey` | whether TypeSafe's **own** key is stored (`typesafeApiKey` writes it, `clear: "typesafe"` forgets it) |
-| `route` | whose key buys the decisions — `direct` (TypeSafe's) or `vercel` (the gateway's); `routes: {typesafe}` writes it |
-| `usable` | whether there is a key on that route, so a decision can be asked at all |
+| `hasKey` | whether TypeSafe's key is stored (`typesafeApiKey` writes it, `clear: "typesafe"` forgets it) |
 | `enabled` | the owner's pause switch — `decisionsEnabled` writes it, and it defaults to **on** |
+| `model` | the pinned model id, reported so an app can say what answered |
 
 **`enabled` is deliberately not the credential**, the argument `ai_enabled`
 already made one field up: "stop spending my money on this for now" and "forget
@@ -116,11 +111,7 @@ my key" have very different costs to undo. Off, every plain request still
 happens; it just takes a model round, which is what the app's own copy says.
 
 `model` is reported and never settable — see *Calibration* below for why that
-is not a gap. **The route is not the key's**, which is the change the first cut
-of this got wrong: forgetting TypeSafe's own key leaves a home that buys its
-decisions through the gateway deciding exactly as it did, and forgetting the
-*gateway's* key sends every vendor it carried back to its own key — Jev
-included, which then stops if it has none.
+is not a gap.
 
 ---
 
@@ -131,7 +122,6 @@ src/ai/decide/
   decider.ts      the seam — no SDK, no vendor. Types, and the pinned model id.
   typesafe.ts     the only file that names TypeSafe's API. Plain fetch. Throws.
   lazy.ts         the Decider a caller holds: fail-open, priority, breaker.
-  routes.ts       where the same model can be bought. Not a model list.
   questions.ts    every question and every threshold. The wording is the contract.
   home-command.ts reading one sentence against one home.
 ```
@@ -210,62 +200,6 @@ Two things follow that are easy to get wrong:
   model is a build constant (`DECISION_MODEL`), not a setting: a settable model
   would silently invalidate every number in `questions.ts`. This is the
   `src/portraits/CLAUDE.md` pinned-image-model argument.
-
-### A route is not a model
-
-The same model is sold in more than one place, so `routes.ts` is a table of
-**addresses**, not of models:
-
-| route | Base URL | Model id on the wire | Key |
-|---|---|---|---|
-| `direct` | `https://api.typesafe.ai` | `jev-1.13.0` | TypeSafe's own (`ts-…`) |
-| `vercel` | `https://ai-gateway.vercel.sh/typesafe` | `typesafe-ai/jev` | the gateway's (`vck_…`) |
-
-Vercel's AI Gateway serves a **TypeSafe-compatible** endpoint, so the body and
-the native `noul`/`choice`/`score` answers are unchanged — only the host, the
-key and the string that names the model differ. Deliberately **not** the AI
-SDK's normalised `/v1/evaluate`, which renames `noul` to `probability` and
-moves `confidence` into `providerMetadata`: reading that shape would mean a
-second parser for the one file nobody can check by running the hub.
-
-Everything above about pinning still holds, and this is why the distinction
-has to be said out loud rather than left to be inferred from a switch: a route
-changes **where the request goes and whose key pays**, and never what answers.
-If a route ever served a different model, the thresholds below would silently
-stop meaning what they say — so a route that did that would be a different
-feature, not a new row in this table.
-
-**The route is the same per-vendor setting Claude and OpenAI have**
-(`src/ai/gateway.ts`, stored as `ai_route_typesafe`, absent meaning `direct`),
-and the key comes from the route's own slot: TypeSafe's for `direct`, the
-gateway's for `vercel`. It used to be a route stored beside the TypeSafe key,
-so a home buying through Vercel held a *Vercel* key in the *TypeSafe* slot and
-an app had to rename that row to stay truthful. One gateway key for every
-vendor is the fix: each key is exactly what its slot says, and whether a vendor
-goes through the gateway is a switch rather than a property of the key pasted
-into its box. `SettingsService.adoptLegacyDecisionRoute` moves a key the first
-cut left behind, once, at boot. `lazy.ts` asks `aiConnection('typesafe')`,
-which answers the route and its key from one read, so the two can never come
-from different moments.
-
-Two consequences in code. The key-prefix checks are **negative** only: the
-TypeSafe field refuses an `sk-ant-`/`sk-proj-` key and a gateway `vck_` key
-(each certainly somebody else's), and asserts nothing about how TypeSafe's own
-keys start. And the gateway's `keyPrefix` is a **placeholder and nothing
-more**: it is in `GET /settings/ai` so an app can put `vck_…` in an empty field,
-and it is not a positive check, because a vendor can change a prefix faster
-than a hub can be updated — being wrong about a placeholder costs a moment's
-confusion; being wrong about a guard costs somebody their key.
-
-**And one diagnostic, because the failure mode here is silence.** `typesafe.ts`
-drops an answer it cannot place — a `choice` with no `confidence`, a score off
-the rubric — which is right, and would mean that a gateway omitting a field
-left *every* fast path quietly never firing with nothing in the log. A response
-whose answers are dropped is logged at `warn` with the route, the model and how
-many were asked against how many were placed. That is the difference between
-"measure it" and "find out".
-
----
 
 **Every threshold in this repository is assumed, not measured**, and
 `questions.ts` says so beside each one. They are the first thing to re-sweep

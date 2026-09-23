@@ -351,23 +351,6 @@ domains — update them in the same change.
   the hub decides with nothing in the diff to say so — `voice/prompts.ts`'s
   rule. Calibration does not transfer between models, so `DECISION_MODEL` is a
   build constant and not a setting, and the hub never calls `GET /v1/models`.
-  **A route is not a model, and that distinction is what keeps the pin
-  honest.** The same model is sold in more than one place — `decide/routes.ts`
-  is a table of *addresses* (`direct`, and Vercel's AI Gateway, whose
-  `/typesafe/v1/systemone` is TypeSafe-compatible so the body and the native
-  answers are unchanged), keyed by the same per-vendor route every vendor has
-  (`ai_route_typesafe`, see the gateway bullet below). What a route changes is
-  where the request goes and whose key pays; it never changes what answers, so
-  a control that looked like a model picker would be inviting somebody to
-  invalidate every threshold below without knowing it. `lazy.ts` asks
-  `aiConnection('typesafe')` for the key and the route in one read, and keys
-  its breaker on both. It used to be a route stored *beside the TypeSafe key*,
-  which kept a Vercel key in the TypeSafe slot on a home buying through the
-  gateway — `SettingsService.adoptLegacyDecisionRoute` moves such a key once,
-  at boot. A response whose answers are **dropped** for a field the client
-  could not place is logged at `warn` with the route and the counts, because a
-  gateway omitting `confidence` would otherwise mean every fast path quietly
-  never firing with nothing in the log.
   Every threshold says whether it is *measured* or *assumed*; today all of them
   are assumed. One is worth knowing: a noul on this model has a floor of
   0.2–0.5 on plainly clean input, so a negative gate near zero refuses
@@ -408,31 +391,6 @@ domains — update them in the same change.
   back in. Because the warm is a side effect on `AssistantChat.sessions`,
   `askAloud`'s own lookup simply hits — so a warmed session can never be the
   wrong one.
-- **Every vendor can be bought through one gateway, and the route is per
-  vendor.** `src/ai/gateway.ts` imports nothing but types and holds the whole
-  of it: `AiRoute` (`direct` | `vercel`), `GATEWAY` (the name, the shop, the
-  placeholder and which vendors it serves, for an app to render), and the three
-  address helpers — `anthropicBaseUrl` for the SDK's `baseURL`, `openAiUrl` for
-  the Responses and Image APIs, and `wireModelId`, the gateway's spelling of a
-  model (`anthropic/claude-opus-5`). Four rules. **`aiConnection`, never
-  `aiKey`**, for anything that asks a vendor for a model — the chat transports,
-  both mapping agents, portraits and the decider all take `{secret, route}`
-  together (`AgentAuth.route`, `ChatTransportOptions.route`, absent meaning
-  direct), so a key is never sent to an address it was not bought for. **The
-  canonical id is what is priced and recorded**: a transport's `modelId`,
-  `RunUsage`, `ai_runs.modelId` and every API field keep `gpt-5.6-sol`, and
-  only the request body carries `openai/gpt-5.6-sol`, which is what makes a
-  route change invisible to everything but the bill it lands on. **The route
-  is in every judgement about a credential** — the mapper's backoff gate is
-  `provider:route:model:sha256(secret)` and the decider's breaker
-  `route:sha256(secret)` — because moving a vendor onto or off the gateway is
-  exactly the switch somebody reaches for after "this account is unavailable".
-  And **the voice never takes a route**: GPT-Live's WebRTC offer and its
-  sideband are OpenAI's own API, so `POST /assistant/voice/session` reads
-  `aiKey('openai')` and a home routing OpenAI through the gateway still needs
-  its own key to talk. A failure names who answered (`routeName`), so a 502
-  from the gateway does not read as OpenAI's. `docs/api.md` (*The gateway*) is
-  canonical.
 - **The automation agent is authoring, never runtime, and it lives on the
   hub.** `src/ai/automation-*.ts` writes rules in conversation;
   `src/automations/` runs them, with no key, no network and no idea the agent

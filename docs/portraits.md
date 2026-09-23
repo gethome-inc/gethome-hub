@@ -29,13 +29,6 @@ sharing the key:
 Homes with no hub are unchanged: the GetHome app keeps its Keychain key and its
 local store for Apple Home exports and demo homes, and says so.
 
-**A home that routes OpenAI through the gateway draws there**
-(`aiConnection('openai')`, [the gateway](api.md#the-gateway)): Vercel's AI
-Gateway serves the same Image API with the same pinned model, spelled
-`openai/gpt-image-2.5-flare` on its wire, so the prompt, the transparent PNG,
-the store and the `ai_runs` row are all exactly what they would have been — only
-the address, the key and who a failure is named after change.
-
 ## The prompts (`src/portraits/prompts.ts`)
 
 Ported from the app, unchanged in substance:

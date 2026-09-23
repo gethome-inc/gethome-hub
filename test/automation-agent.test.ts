@@ -31,18 +31,13 @@ import { AGENT_MODELS } from '../src/ai/models.js';
  * testing the mock. Every reply here goes through `stream`, and `create`
  * throws exactly as the SDK does.
  */
-const { streamMock, clientOptions, nonStreamingCeiling } = vi.hoisted(() => ({
+const { streamMock, nonStreamingCeiling } = vi.hoisted(() => ({
   streamMock: vi.fn(),
-  /** What each client was built with — the one place a route's address shows. */
-  clientOptions: [] as Record<string, unknown>[],
   nonStreamingCeiling: Math.floor((600_000 * 128_000) / 3_600_000),
 }));
 
 vi.mock('@anthropic-ai/sdk', () => ({
   default: class MockAnthropic {
-    constructor(options: Record<string, unknown>) {
-      clientOptions.push(options);
-    }
     messages = {
       create: async (params: { max_tokens: number }) => {
         if (params.max_tokens > nonStreamingCeiling) {
@@ -141,12 +136,9 @@ const toolUse = (name: string, input: unknown, id: string = randomUUID()) => ({
 /** Set to make the home lookup throw — the "a tool blew up mid-round" path. */
 let homeThrows = false;
 
-function conversationFor(
-  homeDevices: { id: string; name: string }[] = [],
-  auth: { secret: string; route?: 'direct' | 'vercel' } = { secret: 'sk-ant-test' },
-) {
+function conversationFor(homeDevices: { id: string; name: string }[] = []) {
   return createAutomationConversation({
-    auth,
+    auth: { secret: 'sk-ant-test' },
     provider: 'anthropic',
     modelId: 'claude-opus-5',
     systemPrompt: 'system',
@@ -200,23 +192,6 @@ describe('the automation conversation', () => {
     // where it means the answer channel went unused.
     expect((turn as { text: string }).text).toContain('Which lamp');
     expect(deltas.join('')).toContain('Which lamp');
-  });
-
-  it('goes through the gateway on its key, and is the same conversation there', async () => {
-    // The Messages API is the gateway's own too, so a conversation routed
-    // through it streams, caches and thinks exactly as it does direct — only
-    // the address, the key and the model's spelling move.
-    clientOptions.length = 0;
-    streamMock.mockReturnValueOnce(assistant([text('hello')], 'end_turn'));
-    await (await conversationFor([], { secret: 'vck_gateway', route: 'vercel' })).send('hi');
-
-    expect(clientOptions.at(-1)).toMatchObject({
-      apiKey: 'vck_gateway',
-      baseURL: 'https://ai-gateway.vercel.sh',
-    });
-    const sent = streamMock.mock.calls[0]?.[0] as { model: string; thinking: unknown };
-    expect(sent.model).toBe('anthropic/claude-opus-5');
-    expect(sent.thinking).toEqual({ type: 'adaptive', display: 'summarized' });
   });
 
   it('never uses the non-streaming call, whose ceiling it would exceed', async () => {

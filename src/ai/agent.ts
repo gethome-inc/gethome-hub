@@ -24,7 +24,6 @@ import {
   type MappingProvider,
   type SubmitCapture,
 } from './agent-core.js';
-import { anthropicBaseUrl, wireModelId } from './gateway.js';
 import { DEFAULT_MODEL, estimateCostUsd, isSupportedModel, supportedModelIds } from './models.js';
 
 /**
@@ -53,8 +52,7 @@ import { DEFAULT_MODEL, estimateCostUsd, isSupportedModel, supportedModelIds } f
  *    in the conversation, so naming it is what makes it reachable;
  *  - the model researches with the server-side `web_search` / `web_fetch`
  *    tools, which run on Anthropic's infrastructure — the hub itself needs
- *    no egress beyond api.anthropic.com (or the gateway, on a home that
- *    routes Claude through it — `src/ai/gateway.ts`);
+ *    no egress beyond api.anthropic.com;
  *  - the only client-side tool, and the only way to answer, is
  *    `submit_mapping`, whose input schema *is* the descriptor's zod schema
  *    and whose handler re-validates and hands errors back so the model can
@@ -285,13 +283,7 @@ export function createMappingAgent(
         );
       }
 
-      // The gateway serves the Messages API itself — research tools, cache
-      // breakpoints and all — so only the address and the model's spelling
-      // move; everything priced and recorded keeps the canonical id.
-      const route = auth.route ?? 'direct';
-      const baseURL = anthropicBaseUrl(route);
-      const client = new Anthropic({ apiKey: auth.secret, maxRetries: 3, ...(baseURL ? { baseURL } : {}) });
-      const wireModel = wireModelId('anthropic', route, modelId);
+      const client = new Anthropic({ apiKey: auth.secret, maxRetries: 3 });
       const controller = new AbortController();
       const watchdog = setTimeout(() => controller.abort(), AGENT_TIMEOUT_MS);
       watchdog.unref();
@@ -339,7 +331,7 @@ export function createMappingAgent(
             // below is unchanged.
             const stream = client.messages.stream(
               {
-                model: wireModel,
+                model: modelId,
                 max_tokens: MAX_OUTPUT_TOKENS,
                 // Two breakpoints, which is what the Messages API asks of an
                 // agent loop. The explicit one covers the tool definitions
