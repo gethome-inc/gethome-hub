@@ -2,14 +2,23 @@
  * Splitting one sentence into the separate requests in it — the one step of
  * the fast path a decision model cannot take, because it is writing.
  *
- * **This is the vendor's own smart-home demo, step for step.** A noul asks
- * whether the sentence holds more than one request; when it does, a
- * generative model splits it into atomic requests, and those go back to the
- * decision model to be read one by one — all in one more request
- * (`decideParts`). So "turn off the TV and close the blinds" is two commands
- * carried out before the conversation's model has been asked anything, and
- * "turn off the light and what's the temperature?" is one command carried out
+ * **This is the vendor's own smart-home demo, step for step.** The decision
+ * model asks how many different things the sentence asks to be done
+ * (`shapeQuestion`); when it is fairly sure there are several, a generative
+ * model splits it into atomic requests, and those go back to the decision
+ * model to be read one by one — all in one more request (`decideParts`). So
+ * "turn off the TV and close the blinds" is two commands carried out before
+ * the conversation's model has been asked anything, and "turn off the light,
+ * close the blinds and what's the temperature?" is two commands carried out
  * and one question left for the model to answer.
+ *
+ * **It is the last resort, not the first.** One action on several devices is
+ * one request, which the decision model reads whole; so is one thing done
+ * beside a question. Only several *different* things come here — and the
+ * model is told the home's device names that are several words long, because
+ * it was not, and "turn on the light tv" (the device called *Light TV*) came
+ * back as "turn on the light" and "turn on the tv", neither of which named
+ * anything in the home.
  *
  * Four things keep it small:
  *
@@ -57,29 +66,56 @@ const RESPONSES_URL = 'https://api.openai.com/v1/responses';
  * Its whole job is to rewrite one sentence as a list, so everything here is
  * about fidelity: their words and their language, nothing added, nothing
  * dropped, nothing answered. The one liberty it is given is the one a part
- * needs to stand on its own — carrying the verb and the place across, so "the
- * hall one" becomes "turn off the hall light". A group stays one request,
- * which is what `multipleQuestion` also says, so the two cannot disagree about
- * "all the lights in the kitchen".
+ * needs to stand on its own — carrying the verb and the place across, so "turn
+ * off the lamp there" becomes "turn off the lamp in the bedroom".
+ *
+ * **What counts as one request is what `shapeQuestion` says**, so the two
+ * cannot disagree: one action on several devices is one request, whether they
+ * are named one by one or as "all the lights in the kitchen", and a device's
+ * name is one thing however many words it has. The names that could be misread
+ * come with the message (`splitMessage`) rather than in here, so this stays the
+ * same bytes for every home and every call.
  */
 export const SPLIT_SYSTEM_PROMPT = [
   'You split a message somebody said to the assistant in their smart home into the separate',
   'requests it holds.',
   '',
   'Return each separate request as one item of `parts`, in the order they were said, each written',
-  'so it makes sense on its own: carry the verb and the place across, so "turn off the kitchen',
-  'light and the hall one" becomes "turn off the kitchen light" and "turn off the hall light".',
+  'so it makes sense on its own: carry the verb and the place across, so "close the blinds in the',
+  'bedroom and turn off the lamp there" becomes "close the blinds in the bedroom" and "turn off the',
+  'lamp in the bedroom".',
   '',
   'Keep their words and their language. Do not add anything they did not ask for, do not drop',
   'anything, do not merge requests, and do not answer or change any of them — a question stays a',
   'question.',
   '',
-  'A request about every device of one kind in one place is one request: "turn off all the lights',
-  'in the kitchen" stays whole.',
+  'One thing done to several devices is one request: "turn off the kitchen light and the hall light"',
+  'stays whole, and so does "turn off all the lights in the kitchen".',
+  '',
+  'You may be given the names of devices in this home that are several words long. Each is one',
+  'device however many words it has, so never split a name: with a device called "Light TV", "turn',
+  'on the light tv" is one request. Split only the message, never the list of names.',
   '',
   `If it is really one request, return it unchanged as the only item. If it holds more than ${MAX_PARTS}`,
   'requests, return the whole message unchanged as the only item.',
 ].join('\n');
+
+/**
+ * The message as the model is given it: the device names that could be
+ * misread first, when the home has any, then the message itself.
+ *
+ * Labelled, so the model splits the message and never the list above it —
+ * and quoted, so a name with a comma in it is still one name.
+ */
+export function splitMessage(said: string, deviceNames: readonly string[] = []): string {
+  if (deviceNames.length === 0) return said;
+  return [
+    `Device names in this home: ${deviceNames.map((name) => `"${name}"`).join(', ')}.`,
+    '',
+    'The message:',
+    said,
+  ].join('\n');
+}
 
 /** The answer's shape — the same schema for both vendors. */
 const PARTS_SCHEMA = {
@@ -94,6 +130,11 @@ export interface SplitInput {
   modelId: string;
   secret: string;
   said: string;
+  /**
+   * The home's device names that are several words long — the ones a split
+   * could cut in two. See `multiWordNames` in `home-command.ts`.
+   */
+  deviceNames?: readonly string[];
   log: Logger;
   timeoutMs?: number;
   /** What carries the request. The global `fetch` unless a test hands in its own. */
@@ -167,7 +208,7 @@ async function viaAnthropic(input: SplitInput, timeoutMs: number): Promise<Answe
     model: input.modelId,
     max_tokens: SPLIT_MAX_TOKENS,
     system: SPLIT_SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: input.said }],
+    messages: [{ role: 'user', content: splitMessage(input.said, input.deviceNames) }],
     // A rewrite, not a problem to work out: every token of thinking would be
     // a moment somebody waits for their lights with nothing to show for it.
     thinking: { type: 'disabled' },
@@ -203,7 +244,7 @@ async function viaOpenAi(input: SplitInput, timeoutMs: number): Promise<Answered
     body: JSON.stringify({
       model: input.modelId,
       instructions: SPLIT_SYSTEM_PROMPT,
-      input: input.said,
+      input: splitMessage(input.said, input.deviceNames),
       reasoning: { effort: 'low' },
       text: { format: { type: 'json_schema', name: 'parts', schema: PARTS_SCHEMA, strict: true } },
       max_output_tokens: SPLIT_MAX_TOKENS,

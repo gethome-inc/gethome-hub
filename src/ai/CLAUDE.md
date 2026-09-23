@@ -353,28 +353,40 @@ domains — update them in the same change.
   milliseconds*, not merely no error. A **422 is our own malformed question**
   and arms nothing, or the bug hides behind a timer.
   **One request per sentence, and the device decides which answers are read.**
-  `decideHomeCommand` asks every question at once — the routing ones, the
-  guards (`later`, `negated`), the catalog (`device`, `place`, `deviceType`,
-  under plain `d1`/`r1`/`z1` keys with the names in the descriptions), every
-  action family speculatively, and `amount` when there is a number — and reads
-  only the families the resolved device has a capability for, so "off" asked
-  under the heating's premise never reaches a thermostat. It acts on **one
-  device or a group** (every device of one kind in a room, a zone or the
-  house), read narrowly: "everything" is what a person switches off leaving a
-  room, never the whole home switched on, never a group unlocked, never more
-  than `MAX_COMMANDS`, no place said reaches the whole home only to switch off
-  (`switchesOff` — "turn off the lights" to a phone means every light, "turn on
-  the lights" is the model's), and a member the hub knows is offline is named
-  rather than tried. A sentence that is several requests with a command among them is
-  **split** by the conversation's own model (`decide/split.ts` — structured
-  output, lowest effort, one deadline, parts re-checked) and its parts read in
-  **one** more request (`decideParts`); what is sure is carried out, the rest is
-  the model's. The model then writes the reply from `fastPathPriming` — every
-  device by name, what was done in words, what failed and why, what is left —
-  and `control`'s once-per-turn record makes its own repeat a no-op, while a
-  command the device refused stays retryable. **The fast path is under one
-  `catch`**: a throw from `beforeRound` is a turn that could not be saved, so
-  anything that goes wrong is the model's sentence, whole.
+  `decideHomeCommand` asks every question at once — the routing ones, `shape`
+  (how many *different* things, told the device names of more than one word),
+  the guards (`later`, `negated`), the devices, every action family
+  speculatively, and `amount` when there is a number — and reads only the
+  families the resolved device has a capability for, so "off" asked under the
+  heating's premise never reaches a thermostat. **Which devices is a relative
+  `device` choice beside one absolute `target_dN` yes/no per device**, each
+  naming the devices it could be mistaken for (`resolveTargets`): the choice
+  settles *which one* ("the light tv" is *Light TV*, not *TV*), the yes/nos
+  *which ones* ("the kitchen light and the hall light", "all the lights"), and
+  `single` vetoes a set when one device was asked for. It replaced a chain of
+  four gated questions — how many, where, what kind, which — that stood down on
+  distinctions changing nothing ("no place or the whole home: 0.77"); don't
+  rebuild a gate that has to clear a bar the answer does not depend on. A set is
+  read narrowly: "everything" is narrowed in code to what a person switches off
+  leaving a room, never more than `ON_TARGETS_MAX` switched *on* (switching off
+  is unbounded up to `MAX_COMMANDS`), never a set unlocked, and a member the hub
+  knows is offline is named rather than tried. **It acts only on what it is
+  sure of**: a device it could not rule out is left alone and named to the
+  model (`CommandPlan.doubt`), and `complete` says whether the reading was the
+  whole message. **The split is the last resort** — only several *different*
+  things (`shape` at `SPLIT_MIN`) go to the conversation's own model
+  (`decide/split.ts`: structured output, lowest effort, one deadline, parts
+  re-checked, told the device names so a name is never cut in two), and the
+  parts are read in **one** more request (`decideParts`) against the shortlist
+  the whole reading ranked (`candidates`). A split that comes back as one part
+  acts on the whole reading (`whole`) at no further cost. The model then writes
+  the reply from `fastPathPriming` — every device by name, what was done in
+  words, what failed and why, what is left, *that was everything* only when it
+  was, and the devices left in doubt — and `control`'s once-per-turn record
+  makes its own repeat a no-op, while a command the device refused stays
+  retryable. **The fast path is under one `catch`**: a throw from
+  `beforeRound` is a turn that could not be saved, so anything that goes wrong
+  is the model's sentence, whole.
   **Every `none` says why, and saying so changes nothing.** `decideHomeCommand`
   returns a `StandDown` — the question that settled it, its answer in words, the
   number and the bar it missed, the runner-up — and `decide` tells `onMiss`

@@ -418,6 +418,14 @@ function spokenReading(state: EndpointState): Record<string, unknown> | undefine
   return Object.keys(reading).length === 0 ? undefined : reading;
 }
 
+/** Names as a person lists them — `"Lamp"`, `"Lamp" or "Fan"`, `"Lamp", "Fan" or "TV"`. */
+function listOf(names: readonly string[]): string {
+  const quoted = names.map((name) => `"${name}"`);
+  return quoted.length <= 1
+    ? (quoted[0] ?? '')
+    : `${quoted.slice(0, -1).join(', ')} or ${quoted[quoted.length - 1]!}`;
+}
+
 /**
  * What the fast path already did, for the round that follows it.
  *
@@ -430,10 +438,16 @@ function spokenReading(state: EndpointState): Record<string, unknown> | undefine
  * first version said "Light TV — power", which left the model to work out
  * from the person's sentence whether the light had gone on or off.
  *
- * **And what is still the model's**, when a sentence was split: the requests
+ * **And what is still the model's.** When a sentence was split, the requests
  * the fast path left alone — a question, a rule, a command it was unsure of —
  * quoted as the split wrote them, so the model answers those and does not
- * redo the rest. It reads the person's whole sentence as well, below this.
+ * redo the rest. When it was not, one of two lines, and the difference is the
+ * point: *that was everything* only when the reading was sure the message was
+ * one request and left nothing in doubt, so the model says it was done and
+ * stops; otherwise it is told the message may ask for more, and reads it. The
+ * devices the reading was not sure they meant as well are named either way —
+ * left alone, and the model's to judge. It reads the person's whole sentence
+ * as well, below this.
  *
  * On `ChatSession.priming`, so it reaches the model and never the transcript:
  * the row this turn writes is what the person said.
@@ -450,6 +464,10 @@ export function fastPathPriming(input: {
   }[];
   /** Requests from the same message the fast path did not carry out. */
   left: readonly string[];
+  /** Whether that was surely everything the message asked for. */
+  complete: boolean;
+  /** Devices the fast path was not sure they meant as well, and left alone. */
+  doubt: readonly string[];
   /** A spoken turn, whose readings above were taken a moment before this. */
   spoken: boolean;
 }): string {
@@ -478,7 +496,20 @@ export function fastPathPriming(input: {
           'as you normally would:',
           ...input.left.map((request) => `- "${request}"`),
         ]
-      : ['Nothing else in their message needs doing.']),
+      : input.complete && input.doubt.length === 0
+        ? ['That was everything their message asked for.']
+        : [
+            'Their message may ask for more than this: read it, and handle anything else it asks for as',
+            'you normally would.',
+          ]),
+    ...(input.doubt.length > 0
+      ? [
+          `The hub was not sure whether they also meant ${listOf(input.doubt)}, and left ${
+            input.doubt.length === 1 ? 'it' : 'them'
+          } alone: if their message asks for ${input.doubt.length === 1 ? 'it' : 'those'} too, do it; if you`,
+          'cannot tell, ask.',
+        ]
+      : []),
     '',
     'Tell them what was done in your own words, briefly and in their language' +
       (failed ? ', and say plainly what could not be done' : '') +

@@ -137,6 +137,9 @@ interface ActionOutcome {
   error?: string;
 }
 
+/** What the fast path hands back to `ChatRuntime` for the round it runs next — see `beforeRound`. */
+type BeforeRound = { origin?: TurnOrigin; turn?: AssistantTurn } | undefined;
+
 /**
  * Two readings of the same sentence, give or take punctuation and case.
  *
@@ -1080,12 +1083,15 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
    *
    * Three roads, which are the vendor's own smart-home demo:
    *
-   * - **One request, read confidently** — one device, or every device of one
-   *   kind in a room, a zone or the house — is carried out here.
-   * - **Several requests, at least one a command,** are split by the
-   *   conversation's own model (`splitAhead`), the parts are read in one more
-   *   request, and every part read confidently is carried out. What is left —
-   *   a question, a rule, a part it was unsure of — is the model's.
+   * - **One thing to do, read confidently** — one device, or a set of them:
+   *   "the kitchen light and the hall light", "all the lights downstairs" — is
+   *   carried out here (`actOn`). When that was surely the whole message the
+   *   round only says so; when a question came with it, or a device the
+   *   reading was not sure about, the round does the rest.
+   * - **Several different things** are split by the conversation's own model
+   *   (`splitAhead`), the parts are read in one more request, and every part
+   *   read confidently is carried out. What is left — a question, a rule, a
+   *   part it was unsure of — is the model's.
    * - **Everything else** is the model's, exactly as it would have been, with
    *   the reason written down (`reportStandDown`).
    *
@@ -1195,42 +1201,90 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
         return handed === undefined ? carry(undefined) : { turn: handed };
       }
 
-      case 'act': {
-        const outcomes = await this.carryOut(session, decision.plan.actions, via);
-        this.reportActed(session, decision.plan, outcomes, {
-          durationMs: decision.durationMs,
-          newConnection: decision.newConnection,
+      case 'act':
+        return this.actOn(session, decision.plan, decision.complete, {
+          reading: decision,
           via,
           reused: reused !== undefined,
+          carry,
+          confirming,
         });
-        await this.prime(session, [{ outcomes, offline: decision.plan.offline }], [], via);
-        return confirming;
-      }
 
       case 'split':
-        return this.splitAhead(session, text, via, carry, confirming);
+        return this.splitAhead(session, text, decision, {
+          via,
+          reused: reused !== undefined,
+          carry,
+          confirming,
+        });
     }
   }
 
   /**
-   * Several requests in one sentence: split it, read the parts, carry out
-   * what is sure, and leave the rest to the model.
+   * Carry out one reading's plan, say so, and tell the round that follows.
+   *
+   * **The round is only a confirmation when the plan was everything.** A
+   * sentence read surely as one request, with nothing it might also have
+   * meant left alone, ends in the lowest-effort round, whose only job is to
+   * say it was done. Anything less — a question beside the command, a device
+   * the reading was not sure about — and the round is the one this turn would
+   * have run anyway, told exactly what was done, so it does the rest and
+   * nothing twice.
+   */
+  private async actOn(
+    session: ChatSession<AssistantTurn>,
+    plan: CommandPlan,
+    complete: boolean,
+    how: {
+      reading: { durationMs: number; newConnection?: boolean | undefined };
+      via: ChatVia;
+      reused: boolean;
+      carry: (result: { turn?: AssistantTurn } | undefined) => BeforeRound;
+      confirming: { origin: TurnOrigin };
+    },
+  ): Promise<BeforeRound> {
+    const outcomes = await this.carryOut(session, plan.actions, how.via);
+    this.reportActed(session, plan, outcomes, {
+      durationMs: how.reading.durationMs,
+      newConnection: how.reading.newConnection,
+      via: how.via,
+      reused: how.reused,
+    });
+    await this.prime(
+      session,
+      [{ outcomes, offline: plan.offline }],
+      { left: [], complete, doubt: plan.doubt },
+      how.via,
+    );
+    return complete ? how.confirming : how.carry(undefined);
+  }
+
+  /**
+   * Several different things in one sentence: split it, read the parts, carry
+   * out what is sure, and leave the rest to the model.
    *
    * The split is writing, so it is the conversation's own model that does it
    * (`decide/split.ts`) — the model and key the home chose, at the lowest
-   * effort. The parts then go back to Jev in **one** request, every part read
-   * in parallel. Nothing here is worse than not splitting: a split that fails
-   * sends the sentence to the model whole, and a part Jev is unsure of is
-   * simply left for it, quoted, beside the rest of the sentence.
+   * effort, told the home's device names that are several words long so a
+   * device called *Light TV* is never cut in two. The parts then go back to Jev
+   * in **one** request, every part read in parallel against the devices the
+   * sentence mentions at all. Nothing here is worse than not splitting: a
+   * split that fails sends the sentence to the model whole, and a part Jev is
+   * unsure of is simply left for it, quoted, beside the rest of the sentence.
    */
   private async splitAhead(
     session: ChatSession<AssistantTurn>,
     text: string,
-    via: ChatVia,
-    carry: (result: { turn?: AssistantTurn } | undefined) => { origin?: TurnOrigin; turn?: AssistantTurn } | undefined,
-    confirming: { origin: TurnOrigin },
-  ): Promise<{ origin?: TurnOrigin; turn?: AssistantTurn } | undefined> {
-    const split = await this.splitSentence(session, text);
+    decision: Extract<HomeDecision, { kind: 'split' }>,
+    how: {
+      via: ChatVia;
+      reused: boolean;
+      carry: (result: { turn?: AssistantTurn } | undefined) => BeforeRound;
+      confirming: { origin: TurnOrigin };
+    },
+  ): Promise<BeforeRound> {
+    const { via, carry, confirming } = how;
+    const split = await this.splitSentence(session, text, decision.deviceNames);
     if (split === null) {
       this.reportStandDown(
         session,
@@ -1241,19 +1295,26 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
       return carry(undefined);
     }
     session.decisionUsd += split.costUsd;
-    // **One part is no split.** The model read it as a single request, and
-    // reading that request again would ask Jev what it has just answered —
-    // more than one thing, or several devices named one by one — so it would
-    // stand down a second time for the price of another request. The model
-    // has the sentence whole, which is where it was going anyway.
+    /**
+     * **One part is one request after all** — the conversation's model, told
+     * the home's device names, read it as one thing where Jev heard several —
+     * so the reading of the whole sentence Jev already made is the one that
+     * counts, and acting on it costs nothing more. Asking Jev about the single
+     * part would only put the same question to it a second time.
+     */
     if (split.parts.length < 2) {
-      this.reportStandDown(
-        session,
-        { question: 'split', reason: 'blocked', durationMs: split.durationMs },
-        via,
-        false,
+      this.options.log.info(
+        { sessionId: session.id, splitMs: split.durationMs },
+        'Jev: the split came back as one request — reading the sentence whole',
       );
-      return carry(undefined);
+      if (decision.whole.kind === 'none') {
+        this.reportStandDown(session, decision.whole.standDown, via, how.reused);
+        return carry(undefined);
+      }
+      return this.actOn(session, decision.whole.plan, decision.whole.plan.doubt.length === 0, {
+        reading: decision,
+        ...how,
+      });
     }
     this.note(session, {
       text: `Jev heard ${split.parts.length} requests`,
@@ -1267,11 +1328,13 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
       decider: this.decider,
       home: this.decidableHome(),
       parts: split.parts,
+      candidates: decision.candidates,
     });
     session.decisionUsd += read.costUsd;
 
     const done: { outcomes: ActionOutcome[]; offline: CommandPlan['offline'] }[] = [];
     const left: string[] = [];
+    const doubt: string[] = [];
     // In the order they were said: "turn the light on and then dim it" is a
     // sequence, and the second part may well be about the first.
     for (const part of read.parts) {
@@ -1284,6 +1347,7 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
           reused: false,
         });
         done.push({ outcomes, offline: part.reading.plan.offline });
+        doubt.push(...part.reading.plan.doubt.filter((name) => !doubt.includes(name)));
       } else {
         left.push(part.text);
         this.reportStandDown(session, part.reading.standDown, via, false);
@@ -1292,8 +1356,9 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
     // Nothing carried out: the round is the ordinary one, over the whole
     // sentence, exactly as if none of this had happened.
     if (done.length === 0) return carry(undefined);
-    await this.prime(session, done, left, via);
-    return left.length === 0 ? confirming : carry(undefined);
+    const complete = left.length === 0 && doubt.length === 0;
+    await this.prime(session, done, { left, complete, doubt }, via);
+    return complete ? confirming : carry(undefined);
   }
 
   /**
@@ -1303,6 +1368,7 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
   private async splitSentence(
     session: ChatSession<AssistantTurn>,
     text: string,
+    deviceNames: readonly string[],
   ): Promise<SplitResult | null> {
     const provider = session.conversation.provider;
     if (provider !== 'anthropic' && provider !== 'openai') return null;
@@ -1314,6 +1380,7 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
       modelId: session.conversation.modelId,
       secret,
       said: text,
+      deviceNames,
       log: this.options.log,
     });
   }
@@ -1400,6 +1467,8 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
         : plan.offline.length === 1
           ? `${plan.offline[0]!.deviceName} is offline and was not tried`
           : `${plan.offline.length} offline and not tried`,
+      // What it was not sure they meant as well, and left for the model to judge.
+      plan.doubt.length === 0 ? undefined : `left ${plan.doubt.join(', ')} to the model`,
     ]
       .filter((part): part is string => part !== undefined)
       .join(' · ');
@@ -1417,6 +1486,7 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
             ...(outcome.error !== undefined ? { error: outcome.error } : {}),
           })),
           ...(plan.offline.length > 0 ? { offline: plan.offline.map((entry) => entry.deviceName) } : {}),
+          ...(plan.doubt.length > 0 ? { doubt: plan.doubt } : {}),
           confidence: plan.confidence,
           durationMs: reading.durationMs,
           ...(reading.newConnection !== undefined ? { newConnection: reading.newConnection } : {}),
@@ -1440,7 +1510,14 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
   private async prime(
     session: ChatSession<AssistantTurn>,
     plans: readonly { outcomes: readonly ActionOutcome[]; offline: CommandPlan['offline'] }[],
-    left: readonly string[],
+    rest: {
+      /** Parts of a split sentence that were not carried out, as the split wrote them. */
+      left: readonly string[];
+      /** Whether that was surely everything the message asked for. */
+      complete: boolean;
+      /** Devices the reading was not sure they meant as well, and left alone. */
+      doubt: readonly string[];
+    },
     via: ChatVia,
   ): Promise<void> {
     // Loaded on demand, like `open()`'s call to the same module: this file's
@@ -1461,7 +1538,9 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
           offline: true,
         })),
       ]),
-      left,
+      left: rest.left,
+      complete: rest.complete,
+      doubt: rest.doubt,
       spoken: via === 'voice',
     });
     session.priming = session.priming === undefined ? line : `${session.priming}\n\n${line}`;

@@ -114,26 +114,43 @@ const UNCHANGED_FAMILIES = Object.fromEntries(
 );
 
 /**
+ * Every device's own yes/no in the suites' homes, which have one or two — a
+ * clear no unless a case says otherwise.
+ */
+function targets(yes: Record<string, number> = {}): Record<string, unknown> {
+  return { target_d1: noul(yes['d1'] ?? 0.1), target_d2: noul(yes['d2'] ?? 0.1) };
+}
+
+/**
  * Everything a plain "turn off <that device>" answers — under a prefix when it
  * is one part of a split sentence.
  */
 function offAnswers(deviceKey = 'd1', prefix = ''): Record<string, unknown> {
   const plain: Record<string, unknown> = {
     intent: sure('device_command', 0.97),
+    shape: sure('one', 0.96),
     later: noul(0.2),
     negated: noul(0.2),
-    scope: sure('one_device', 0.96),
-    place: sure('not_said', 0.9),
-    deviceType: sure('lights', 0.9),
     device: sure(deviceKey, 0.95),
+    ...targets({ [deviceKey]: 0.95 }),
+    single: noul(0.9),
+    everything: noul(0.1),
     ...UNCHANGED_FAMILIES,
     power: sure('off', 0.96),
-    multiple: noul(0.1),
-    anyCommand: noul(0.95),
     route: sure('here', 0.99),
     selfContained: noul(0.9),
   };
   return Object.fromEntries(Object.entries(plain).map(([id, value]) => [`${prefix}${id}`, value]));
+}
+
+/** "Turn off all the lights": both devices a clear yes, the choice naming neither. */
+function offBoth(): Record<string, unknown> {
+  return {
+    ...offAnswers(),
+    device: sure('none_of_these', 0.9),
+    ...targets({ d1: 0.95, d2: 0.95 }),
+    single: noul(0.1),
+  };
 }
 
 const sure = (choice: string, confidence: number) => ({
@@ -1174,7 +1191,7 @@ describe('the assistant', () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]).toContain('ALREADY DONE BEFORE YOU WERE ASKED');
     expect(sent[0]).toContain('- Ceiling light: switched off.');
-    expect(sent[0]).toContain('Nothing else in their message needs doing.');
+    expect(sent[0]).toContain('That was everything their message asked for.');
     expect(sent[0]).toContain('Do not call a tool to do any of it again');
     expect(sent[0]?.endsWith('turn off the ceiling light')).toBe(true);
     expect(efforts).toEqual(['low']);
@@ -1313,17 +1330,11 @@ describe('the assistant', () => {
     warn.mockRestore();
   });
 
-  it('switches off every light in the home in one reading, and names them as a group', async () => {
+  it('switches off every light in the home in one reading, and names them', async () => {
     const tv = randomUUID();
     const ceiling = randomUUID();
     await settings.setAiKey('typesafe', 'ts-test-key');
-    const decisions = jev(() => ({
-      ...offAnswers(),
-      scope: sure('group', 0.95),
-      place: sure('whole_home', 0.94),
-      deviceType: sure('lights', 0.96),
-      device: sure('none_of_these', 0.9),
-    }));
+    const decisions = jev(() => offBoth());
     const { assistant, sent } = await assistantFor([{ kind: 'said', text: 'All off.' }], {
       devices: twoLights(tv, ceiling),
       decisions: decisions.transport,
@@ -1340,19 +1351,14 @@ describe('the assistant', () => {
     expect(sent[0]).toContain('- Ceiling light: switched off.');
     const rows = await assistant.transcript(started.sessionId);
     const steps = (rows[1]?.data as { steps: ChatStepWire[] }).steps;
-    expect(steps[0]?.text).toBe('Jev switched off 2 lights across the home');
+    expect(steps[0]?.text).toBe('Jev switched off TV light and Ceiling light');
   });
 
   it('does not wait on a light the hub knows is offline, and says which one', async () => {
     const tv = randomUUID();
     const ceiling = randomUUID();
     await settings.setAiKey('typesafe', 'ts-test-key');
-    const decisions = jev(() => ({
-      ...offAnswers(),
-      scope: sure('group', 0.95),
-      place: sure('whole_home', 0.94),
-      deviceType: sure('lights', 0.96),
-    }));
+    const decisions = jev(() => offBoth());
     const devices = twoLights(tv, ceiling).map((device) =>
       device.id === ceiling ? { ...device, online: false } : device,
     );
@@ -1375,6 +1381,67 @@ describe('the assistant', () => {
     expect(steps[0]?.detail).toContain('Ceiling light is offline and was not tried');
   });
 
+  /**
+   * **It does only what it is sure of, and says what it left.** The choice is
+   * sure of the TV light; the ceiling light's own yes/no sits between yes and
+   * no. The TV light goes on, the ceiling light is named to the model as its
+   * to judge, and the round is the ordinary one rather than a confirmation.
+   */
+  it('does the one it is sure of, and leaves the device it was unsure about to the model', async () => {
+    const tv = randomUUID();
+    const ceiling = randomUUID();
+    await settings.setAiKey('typesafe', 'ts-test-key');
+    const decisions = jev(() => ({
+      ...offAnswers('d1'),
+      power: sure('on', 0.96),
+      ...targets({ d1: 0.92, d2: 0.5 }),
+    }));
+    const { assistant, sent, efforts } = await assistantFor([{ kind: 'said', text: 'The TV light is on.' }], {
+      devices: twoLights(tv, ceiling),
+      decisions: decisions.transport,
+    });
+
+    const started = await assistant.start({ memberId, message: 'turn on the tv light' });
+    await assistant.idle();
+
+    expect(commanded).toEqual([{ deviceId: tv, endpointId: 1, type: 'power' }]);
+    expect(sent[0]).toContain('- TV light: switched on.');
+    expect(sent[0]).toContain('Their message may ask for more than this');
+    expect(sent[0]).toContain(
+      'The hub was not sure whether they also meant "Ceiling light", and left it alone',
+    );
+    expect(efforts).toEqual([undefined]);
+    const rows = await assistant.transcript(started.sessionId);
+    const steps = (rows[1]?.data as { steps: ChatStepWire[] }).steps;
+    expect(steps[0]?.text).toBe('Jev switched on TV light');
+    expect(steps[0]?.detail).toContain('left Ceiling light to the model');
+  });
+
+  it('does the command said beside a question, and leaves the question to the model', async () => {
+    const light = randomUUID();
+    await settings.setAiKey('typesafe', 'ts-test-key');
+    const decisions = jev(() => ({
+      ...offAnswers('d1'),
+      shape: sure('one_and_more', 0.93),
+      intent: sure('home_question', 0.6),
+    }));
+    const { assistant, sent, efforts } = await assistantFor([{ kind: 'said', text: 'Off. It is 21°.' }], {
+      devices: oneLight(light),
+      decisions: decisions.transport,
+    });
+
+    await assistant.start({ memberId, message: 'turn off the ceiling light and how warm is it?' });
+    await assistant.idle();
+
+    // One request, no split: the question is simply the model's.
+    expect(decisions.seen.calls).toHaveLength(1);
+    expect(commanded).toEqual([{ deviceId: light, endpointId: 1, type: 'power' }]);
+    expect(sent[0]).toContain('- Ceiling light: switched off.');
+    expect(sent[0]).toContain('Their message may ask for more than this');
+    expect(sent[0]).not.toContain('That was everything');
+    expect(efforts).toEqual([undefined]);
+  });
+
   // ── Several requests in one sentence ──────────────────────────────────────
 
   /**
@@ -1390,7 +1457,7 @@ describe('the assistant', () => {
     const decisions = jev((call) =>
       isParts(call)
         ? { ...offAnswers('d1', 'p0_'), p1_intent: sure('home_question', 0.96) }
-        : { ...offAnswers('d1'), multiple: noul(0.9), anyCommand: noul(0.95) },
+        : { ...offAnswers('d1'), shape: sure('several', 0.9) },
     );
     const splits: SplitInput[] = [];
     const { assistant, sent, efforts } = await assistantFor(
@@ -1420,6 +1487,8 @@ describe('the assistant', () => {
       modelId: 'claude-opus-5',
       secret: 'sk-ant-api03-test',
       said: message,
+      // Told the names a split could cut in two.
+      deviceNames: ['Ceiling light'],
     });
     // Two requests in all: the sentence, then every part at once.
     expect(decisions.seen.calls).toHaveLength(2);
@@ -1448,42 +1517,84 @@ describe('the assistant', () => {
     expect(runs[0]?.costUsd).toBeCloseTo(0.04 + 2 * DECISION_USD + 0.001, 9);
   });
 
-  it('carries out two commands from one sentence and eases the round that says so', async () => {
+  it('carries out two different commands from one sentence and eases the round that says so', async () => {
     const tv = randomUUID();
     const ceiling = randomUUID();
     await settings.setAiKey('typesafe', 'ts-test-key');
     const decisions = jev((call) =>
       isParts(call)
-        ? { ...offAnswers('d1', 'p0_'), ...offAnswers('d2', 'p1_') }
-        : { ...offAnswers(), scope: sure('several_devices', 0.93) },
+        ? { ...offAnswers('d1', 'p0_'), ...offAnswers('d2', 'p1_'), p1_power: sure('on', 0.96) }
+        : { ...offAnswers(), shape: sure('several', 0.93) },
     );
-    const { assistant, sent, efforts } = await assistantFor([{ kind: 'said', text: 'Both off.' }], {
+    const { assistant, sent, efforts } = await assistantFor([{ kind: 'said', text: 'Swapped.' }], {
       devices: twoLights(tv, ceiling),
       decisions: decisions.transport,
       split: async () => ({
-        parts: ['turn off the TV light', 'turn off the ceiling light'],
+        parts: ['turn off the TV light', 'turn on the ceiling light'],
         costUsd: 0.001,
         durationMs: 700,
       }),
     });
 
+    await assistant.start({ memberId, message: 'turn off the TV light and turn on the ceiling light' });
+    await assistant.idle();
+
+    expect(attempted).toEqual([
+      { deviceId: tv, endpointId: 1, type: 'power' },
+      { deviceId: ceiling, endpointId: 1, type: 'power' },
+    ]);
+    expect(sent[0]).toContain('- TV light: switched off.');
+    expect(sent[0]).toContain('- Ceiling light: switched on.');
+    expect(sent[0]).toContain('That was everything their message asked for.');
+    expect(efforts).toEqual(['low']);
+  });
+
+  /**
+   * **One action on several devices is one request**, read whole: "the TV
+   * light and the ceiling light" is a set the per-device questions carry, and
+   * splitting it only ever cost a model round.
+   */
+  it('reads one action on two devices in one request, with no split', async () => {
+    const tv = randomUUID();
+    const ceiling = randomUUID();
+    await settings.setAiKey('typesafe', 'ts-test-key');
+    const decisions = jev(() => offBoth());
+    const splits: SplitInput[] = [];
+    const { assistant, efforts } = await assistantFor([{ kind: 'said', text: 'Both off.' }], {
+      devices: twoLights(tv, ceiling),
+      decisions: decisions.transport,
+      split: async (input) => {
+        splits.push(input);
+        return null;
+      },
+    });
+
     await assistant.start({ memberId, message: 'turn off the TV light and the ceiling light' });
     await assistant.idle();
 
+    expect(splits).toEqual([]);
+    expect(decisions.seen.calls).toHaveLength(1);
     expect(commanded).toEqual([
       { deviceId: tv, endpointId: 1, type: 'power' },
       { deviceId: ceiling, endpointId: 1, type: 'power' },
     ]);
-    expect(sent[0]).toContain('Nothing else in their message needs doing.');
     expect(efforts).toEqual(['low']);
   });
 
-  it('reads a sentence the model gives back whole as one request, and asks Jev nothing more', async () => {
+  /**
+   * **A split that comes back whole is one request after all**, on the word of
+   * a model that was told the home's device names — so the reading of the
+   * whole sentence Jev had already made is the one to act on. It used to be
+   * dropped, and the sentence went to the ordinary round as if Jev had never
+   * read it.
+   */
+  it('acts on its reading of the sentence when the model gives it back whole, and asks Jev nothing more', async () => {
     const light = randomUUID();
     await settings.setAiKey('typesafe', 'ts-test-key');
-    const decisions = jev(() => ({ ...offAnswers('d1'), multiple: noul(0.8), anyCommand: noul(0.9) }));
+    const decisions = jev(() => ({ ...offAnswers('d1'), shape: sure('several', 0.8) }));
+    const info = vi.spyOn(log, 'info');
     const message = 'turn off the ceiling light please and thank you';
-    const { assistant, sent } = await assistantFor([{ kind: 'said', text: 'Done.' }], {
+    const { assistant, sent, efforts } = await assistantFor([{ kind: 'said', text: 'Done.' }], {
       devices: oneLight(light),
       decisions: decisions.transport,
       split: async () => ({ parts: [message], costUsd: 0.001, durationMs: 600 }),
@@ -1493,22 +1604,46 @@ describe('the assistant', () => {
     await assistant.idle();
 
     expect(decisions.seen.calls).toHaveLength(1);
+    expect(commanded).toEqual([{ deviceId: light, endpointId: 1, type: 'power' }]);
+    expect(sent[0]).toContain('- Ceiling light: switched off.');
+    expect(sent[0]).toContain('That was everything their message asked for.');
+    expect(efforts).toEqual(['low']);
+    const rows = await assistant.transcript(started.sessionId);
+    const steps = (rows[1]?.data as { steps: ChatStepWire[] }).steps;
+    expect(steps[0]?.text).toBe('Jev switched off Ceiling light');
+    expect(info).toHaveBeenCalledWith(
+      expect.objectContaining({ splitMs: 600 }),
+      'Jev: the split came back as one request — reading the sentence whole',
+    );
+    info.mockRestore();
+  });
+
+  it('says why, when a sentence given back whole could not have been acted on either', async () => {
+    const light = randomUUID();
+    await settings.setAiKey('typesafe', 'ts-test-key');
+    const decisions = jev(() => ({ ...offAnswers('d1'), shape: sure('several', 0.8), later: noul(0.9) }));
+    const message = 'turn off the ceiling light in ten minutes please';
+    const { assistant, sent } = await assistantFor([{ kind: 'said', text: 'Will do.' }], {
+      devices: oneLight(light),
+      decisions: decisions.transport,
+      split: async () => ({ parts: [message], costUsd: 0.001, durationMs: 600 }),
+    });
+
+    const started = await assistant.start({ memberId, message });
+    await assistant.idle();
+
     expect(commanded).toEqual([]);
     // The ordinary round, over the sentence as it was said.
     expect(sent).toEqual([message]);
     const rows = await assistant.transcript(started.sessionId);
     const steps = (rows[1]?.data as { steps: ChatStepWire[] }).steps;
-    expect(steps[0]).toEqual({
-      text: 'Jev was told it is one request after all',
-      kind: 'deferred',
-      detail: 'split in 600 ms',
-    });
+    expect(steps[0]).toMatchObject({ text: 'Jev heard a time, a delay or a condition', kind: 'deferred' });
   });
 
   it('hands the whole sentence to the model when it cannot be split', async () => {
     const light = randomUUID();
     await settings.setAiKey('typesafe', 'ts-test-key');
-    const decisions = jev(() => ({ ...offAnswers('d1'), multiple: noul(0.8), anyCommand: noul(0.9) }));
+    const decisions = jev(() => ({ ...offAnswers('d1'), shape: sure('several', 0.8) }));
     const message = 'turn off the ceiling light and tell me a joke';
     const { assistant, sent } = await assistantFor([{ kind: 'said', text: 'Done.' }], {
       devices: oneLight(light),
@@ -1539,7 +1674,7 @@ describe('the assistant', () => {
   it('gives the model the sentence when anything in the fast path fails', async () => {
     const light = randomUUID();
     await settings.setAiKey('typesafe', 'ts-test-key');
-    const decisions = jev(() => ({ ...offAnswers('d1'), multiple: noul(0.8), anyCommand: noul(0.9) }));
+    const decisions = jev(() => ({ ...offAnswers('d1'), shape: sure('several', 0.8) }));
     const warn = vi.spyOn(log, 'warn');
     const message = 'turn off the ceiling light and the fan';
     const { assistant, sent } = await assistantFor([{ kind: 'said', text: 'Done.' }], {
@@ -1573,10 +1708,9 @@ describe('the assistant', () => {
     await settings.setAiKey('typesafe', 'ts-test-key');
     const decisions = jev(() => ({
       intent: sure('automation_work', 0.97),
+      shape: sure('nothing', 0.9),
       route: sure('automations', 0.96),
       selfContained: noul(0.93),
-      multiple: noul(0.1),
-      anyCommand: noul(0.1),
     }));
     const { assistant, automationChat, sent } = await assistantFor([], {
       devices: oneLight(light),
@@ -1751,6 +1885,8 @@ describe('the assistant', () => {
         probabilities: { d1: 0.48, d2: 0.45 },
         confidence: 0.41,
       },
+      // Neither lamp's own yes/no is sure either way.
+      ...targets({ d1: 0.6, d2: 0.55 }),
     }));
     const info = vi.spyOn(log, 'info');
     const { assistant, sent } = await assistantFor([{ kind: 'said', text: 'The TV light is on.' }], {
@@ -1769,24 +1905,26 @@ describe('the assistant', () => {
     // First in the round's working, because it happened first — and in the
     // same shape as every other step, so the stored trail draws it too.
     expect(steps[0]).toEqual({
-      text: "Jev wasn't sure which device",
+      text: "Jev wasn't sure which devices were meant",
       kind: 'deferred',
-      detail: expect.stringMatching(/^TV light or Ceiling light: 0\.41, needs 0\.85 · \d+ ms, new connection$/),
+      detail: expect.stringMatching(
+        /^TV light 0\.60, Ceiling light 0\.55 — each needs 0\.75, or at most 0\.35 · \d+ ms, new connection$/,
+      ),
     });
     expect(steps[1]?.text).toBe('Reading your home');
 
     expect(info).toHaveBeenCalledWith(
       expect.objectContaining({
         jev: expect.objectContaining({
-          question: 'device',
+          question: 'targets',
           reason: 'unsure',
-          value: 0.41,
-          min: 0.85,
+          min: 0.75,
+          max: 0.35,
           requestId: 'req-7',
         }),
         via: 'typed',
       }),
-      expect.stringContaining("Jev stood down — wasn't sure which device"),
+      expect.stringContaining("Jev stood down — wasn't sure which devices were meant"),
     );
     info.mockRestore();
   });
@@ -1796,7 +1934,11 @@ describe('the assistant', () => {
     // a step on every one of those turns would bury the one that matters.
     const light = randomUUID();
     await settings.setAiKey('typesafe', 'ts-test-key');
-    const decisions = jev(() => ({ intent: sure('home_question', 0.97), route: sure('here', 0.99) }));
+    const decisions = jev(() => ({
+      intent: sure('home_question', 0.97),
+      shape: sure('nothing', 0.95),
+      route: sure('here', 0.99),
+    }));
     const info = vi.spyOn(log, 'info');
     const { assistant } = await assistantFor([{ kind: 'said', text: 'It is on.' }], {
       devices: oneLight(light),

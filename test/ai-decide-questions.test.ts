@@ -4,28 +4,35 @@ import {
   ACT_CONFIDENCE_MIN,
   CALIBRATED_AGAINST,
   DECISION_TIMEOUT_MS,
+  DEVICE_LEAN_MIN,
   FAMILIES,
   MAX_COMMANDS,
   MAX_PARTS,
+  MAX_TARGET_QUESTIONS,
   NEGATIVE_NOUL_MAX,
   NONE_OF_THESE,
-  NOT_SAID,
+  ON_TARGETS_MAX,
+  PART_CANDIDATES_MAX,
   POSITIVE_NOUL_MIN,
-  SPLIT_NOUL_MIN,
+  SHAPE_NOTHING,
+  SHAPE_ONE,
+  SHAPE_ONE_AND_MORE,
+  SHAPE_SEVERAL,
+  SPLIT_MIN,
+  TARGET_NO,
+  TARGET_YES,
   UNCHANGED,
-  WHOLE_HOME,
   amountField,
   amountIn,
   amountQuestion,
   deviceQuestion,
-  deviceTypeQuestion,
   familyQuestion,
   intentQuestion,
-  multipleQuestion,
-  placeQuestion,
   routeQuestion,
-  scopeQuestion,
+  shapeQuestion,
+  targetQuestion,
 } from '../src/ai/decide/questions.js';
+import { SPLIT_SYSTEM_PROMPT } from '../src/ai/decide/split.js';
 import {
   OPTION_WORDS,
   decideHomeCommand,
@@ -68,7 +75,7 @@ const DEVICES: DecidableDevice[] = [
     roomId: 'kitchen',
     endpoints: [{ endpointId: 1, deviceKind: 'light', capabilities: ['onOff'] }],
   },
-  // d3
+  // d3 — a light whose name has a TV in it, beside the TV itself.
   {
     id: 'tv-light',
     name: 'Light TV',
@@ -178,6 +185,31 @@ function homeWith(input: {
 
 const HOME = homeWith();
 
+/** `count` lights in the kitchen, for the cases about how many one request may move. */
+function lights(count: number): DecidableDevice[] {
+  return Array.from({ length: count }, (_, index) => ({
+    id: `light-${index}`,
+    name: `Light ${index}`,
+    roomId: 'kitchen',
+    endpoints: [{ endpointId: 1, deviceKind: 'light' as const, capabilities: ['onOff' as const] }],
+  }));
+}
+
+/** The home with one more device on the end — `d11`. */
+function homePlus(device: DecidableDevice): DecidableHome {
+  return homeWith({ devices: [...DEVICES, device] });
+}
+
+const DOUBLE_SWITCH: DecidableDevice = {
+  id: 'double',
+  name: 'Double switch',
+  roomId: 'kitchen',
+  endpoints: [
+    { endpointId: 1, deviceKind: 'wallSwitch', capabilities: ['onOff'] },
+    { endpointId: 2, deviceKind: 'wallSwitch', capabilities: ['onOff'] },
+  ],
+};
+
 const DELEGATES = [
   { key: 'automations', title: 'automations agent', decisionCriterion: 'Rules the home runs by itself.' },
 ];
@@ -204,31 +236,57 @@ const score = (value: number, confidence: number) => ({
 /** Every action family, answered "not this". */
 const UNCHANGED_ALL = Object.fromEntries(FAMILIES.map((family) => [family, choice(UNCHANGED)]));
 
+/**
+ * Every device's own yes/no — a clear no unless a case says otherwise, which
+ * is what a reading of a sentence about one or two devices looks like.
+ */
+function targets(yes: Record<string, number> = {}, count = DEVICES.length): Record<string, unknown> {
+  return Object.fromEntries(
+    Array.from({ length: count }, (_, index) => {
+      const key = `d${index + 1}`;
+      return [`target_${key}`, noul(yes[key] ?? 0.1)];
+    }),
+  );
+}
+
 /** Everything a plain "turn off the kitchen light" answers. */
 const OFF_KITCHEN_LIGHT: Record<string, unknown> = {
   intent: choice('device_command', 0.98),
+  shape: choice(SHAPE_ONE, 0.96),
   later: noul(0.2),
   negated: noul(0.2),
-  scope: choice('one_device', 0.97),
-  place: choice('r1', 0.95),
-  deviceType: choice('lights', 0.9),
   device: choice('d1', 0.96),
+  ...targets({ d1: 0.95 }),
+  single: noul(0.9),
+  everything: noul(0.1),
   ...UNCHANGED_ALL,
   power: choice('off', 0.97),
-  multiple: noul(0.25),
-  anyCommand: noul(0.95),
   route: choice('here', 0.99),
   selfContained: noul(0.9),
 };
 
-/** A group request: every light in one place, switched off. */
-const OFF_LIGHTS_IN = (place: string): Record<string, unknown> => ({
-  ...OFF_KITCHEN_LIGHT,
-  scope: choice('group', 0.95),
-  place: choice(place, 0.95),
-  deviceType: choice('lights', 0.95),
-  device: choice(NONE_OF_THESE, 0.9),
-});
+/** The same sentence about another single device. */
+function ONE(key: string, extra: Record<string, unknown> = {}, count = DEVICES.length): Record<string, unknown> {
+  return { ...OFF_KITCHEN_LIGHT, device: choice(key, 0.96), ...targets({ [key]: 0.95 }, count), ...extra };
+}
+
+/**
+ * A request about a set of devices: each one's own yes/no a clear yes, the
+ * relative choice naming none of them, and `single` hearing more than one.
+ */
+function SET(
+  keys: readonly string[],
+  extra: Record<string, unknown> = {},
+  count = DEVICES.length,
+): Record<string, unknown> {
+  return {
+    ...OFF_KITCHEN_LIGHT,
+    device: choice(NONE_OF_THESE, 0.9),
+    single: noul(0.1),
+    ...targets(Object.fromEntries(keys.map((key) => [key, 0.95])), count),
+    ...extra,
+  };
+}
 
 /** A decider that answers exactly what a case needs, and records the ask. */
 function decider(
@@ -273,7 +331,7 @@ function planOf(decision: HomeDecision) {
 
 function standDownOf(decision: HomeDecision) {
   if (decision.kind !== 'none') {
-    throw new Error(`expected a stand-down, got ${decision.kind}`);
+    throw new Error(`expected a stand-down, got ${JSON.stringify(decision)}`);
   }
   return decision.standDown;
 }
@@ -283,6 +341,11 @@ function commandsOf(decision: HomeDecision) {
   return planOf(decision).actions.flatMap((action) =>
     action.commands.map((entry) => ({ deviceId: action.deviceId, ...entry })),
   );
+}
+
+/** Which devices a plan moves, in order. */
+function movedBy(decision: HomeDecision): string[] {
+  return planOf(decision).actions.map((action) => action.deviceId);
 }
 
 /* ------------------------------------------------------------------ */
@@ -298,10 +361,8 @@ describe('the questions themselves', () => {
     // Without one, an unrelated sentence has to be forced into the nearest
     // box — which is how "who won the World Series" becomes a device command.
     expect(Object.keys(intentQuestion().criteria)).toContain('other');
-    expect(Object.keys(scopeQuestion().criteria)).toContain('none');
-    expect(Object.keys(deviceTypeQuestion().criteria)).toContain('other');
+    expect(Object.keys(shapeQuestion([]).criteria)).toContain(SHAPE_NOTHING);
     expect(Object.keys(amountQuestion().criteria)).toContain('other');
-    expect(Object.keys(placeQuestion([]).criteria)).toEqual([WHOLE_HOME, NOT_SAID]);
     expect(Object.keys(deviceQuestion([]).criteria)).toEqual([NONE_OF_THESE]);
     for (const family of FAMILIES) {
       expect(Object.keys(familyQuestion(family).criteria), family).toContain(UNCHANGED);
@@ -337,24 +398,52 @@ describe('the questions themselves', () => {
     // The vendor's advice for several questions with similar instructions:
     // point each at its own field rather than paraphrase.
     expect(intentQuestion('parts[1]').instructions).toContain('`parts[1]`');
+    expect(shapeQuestion([], 'parts[1]').instructions).toContain('`parts[1]`');
     expect(familyQuestion('power', 'parts[2]').instructions).toContain('`parts[2]`');
+    expect(
+      targetQuestion({ key: 'd1', name: 'Lamp', kindWords: 'A light' }, [], 'parts[2]').instructions,
+    ).toContain('`parts[2]`');
     expect(amountField('said')).toBe('amount');
     expect(amountField('parts[3]')).toBe('amounts[3]');
     expect(amountQuestion('parts[3]').instructions).toContain('`amounts[3]`');
   });
 
-  it('tells a group from several requests in the question that splits', () => {
-    // A group is one request however many devices it moves, and the split
-    // prompt says the same — the two cannot be allowed to disagree.
-    const multiple = multipleQuestion();
-    expect(multiple.criteria?.false).toContain('all the lights');
-    expect(multiple.criteria?.true).toContain('the kitchen light and the hall light');
+  it('counts one action on several devices as one thing, in the question and in the split alike', () => {
+    // It is the split that is the exception, and the two must never disagree
+    // about what is one request — a set of devices is carried by the per-device
+    // questions, and splitting it only costs a model round.
+    const shape = shapeQuestion([]);
+    expect(shape.criteria[SHAPE_ONE]).toContain('"turn off the kitchen light and the hall light"');
+    expect(shape.criteria[SHAPE_ONE]).toContain('"turn off all the lights"');
+    expect(shape.criteria[SHAPE_SEVERAL]).toContain('"turn off the TV and close the blinds"');
+    expect(SPLIT_SYSTEM_PROMPT).toContain('"turn off the kitchen light and the hall light"');
+    expect(SPLIT_SYSTEM_PROMPT).toContain('stays whole');
   });
 
-  it('reads "all the lights" with no room as the whole home, and a bare "the lights" as no place', () => {
-    const place = placeQuestion([]);
-    expect(place.criteria[WHOLE_HOME]).toContain('"All the lights"');
-    expect(place.criteria[NOT_SAID]).toContain('"turn off the lights"');
+  it('tells the question that splits which names are one device however many words they have', () => {
+    // "Turn on the light tv" was read as a light and a TV, split in two, and
+    // neither half named anything in the home.
+    const told = shapeQuestion(['Light TV', 'Kitchen light']).instructions;
+    expect(told).toContain('"Light TV", "Kitchen light"');
+    expect(told).toContain('one thing however many words it has');
+    expect(shapeQuestion([]).instructions).not.toContain('"');
+    expect(SPLIT_SYSTEM_PROMPT).toContain('never split a name');
+  });
+
+  it("describes each device in its own question, and names the ones it could be mistaken for", () => {
+    const light = { key: 'd3', name: 'Light TV', kindWords: 'A light', roomName: 'Living room', zoneName: 'Downstairs' };
+    const tv = { key: 'd4', name: 'TV', kindWords: 'A TV', roomName: 'Living room', zoneName: 'Downstairs' };
+    // A kind is lower-cased at its first letter only: "a TV", never "a tv".
+    expect(targetQuestion(tv, []).instructions).toBe(
+      '`said` asks for something to be done to "TV" — a TV in the Living room, Downstairs.',
+    );
+    const beside = targetQuestion(tv, [light]);
+    expect(beside.instructions).toContain(
+      'It is a different device from "Light TV" (a light in the Living room, Downstairs).',
+    );
+    expect(beside.criteria?.false).toContain('names a different device with a similar name');
+    // A set of them is one question per device — the whole kind, when asked.
+    expect(beside.criteria?.true).toContain('"turn off all the lights"');
   });
 
   it('builds the routing question from the registry rather than from a list here', () => {
@@ -376,8 +465,17 @@ describe('the questions themselves', () => {
     expect(NEGATIVE_NOUL_MAX).toBeGreaterThan(0.15);
     expect(NEGATIVE_NOUL_MAX).toBeLessThan(0.5);
     // A split sits between the two: being wrong about it is cheap both ways.
-    expect(SPLIT_NOUL_MIN).toBeGreaterThan(NEGATIVE_NOUL_MAX);
-    expect(SPLIT_NOUL_MIN).toBeLessThan(POSITIVE_NOUL_MIN);
+    expect(SPLIT_MIN).toBeGreaterThan(NEGATIVE_NOUL_MAX);
+    expect(SPLIT_MIN).toBeLessThan(ACT_CONFIDENCE_MIN);
+    // A device's own yes/no has a band in the middle that is neither.
+    expect(TARGET_NO).toBeLessThan(0.5);
+    expect(TARGET_YES).toBeGreaterThan(0.5);
+    // Leaning is lower than acting on the choice alone only because it is
+    // never alone.
+    expect(DEVICE_LEAN_MIN).toBeGreaterThan(0.5);
+    expect(DEVICE_LEAN_MIN).toBeLessThan(ACT_CONFIDENCE_MIN);
+    // Switching on is bounded well inside what one request may move at all.
+    expect(ON_TARGETS_MAX).toBeLessThan(MAX_COMMANDS);
   });
 
   it('gives a decision time to reach the vendor from a Pi, and no more', () => {
@@ -387,9 +485,9 @@ describe('the questions themselves', () => {
     expect(DECISION_TIMEOUT_MS).toBeLessThanOrEqual(2_000);
   });
 
-  it('keys rooms and devices plainly and puts the name in the description', () => {
+  it('keys devices plainly and puts the name in the description', () => {
     // A key is what comes back, so it has to survive the wire whatever
-    // somebody called their kitchen.
+    // somebody called their lamp.
     const devices = deviceQuestion([
       { key: 'd1', name: 'Лампа "у окна"', kindWords: 'A light', roomName: 'Кухня' },
       { key: 'd2', name: 'Kettle', kindWords: 'A plug or socket' },
@@ -397,15 +495,6 @@ describe('the questions themselves', () => {
     expect(Object.keys(devices.criteria)).toEqual(['d1', 'd2', NONE_OF_THESE]);
     expect(devices.criteria['d1']).toBe('"Лампа "у окна"" — a light in the Кухня.');
     expect(devices.criteria['d2']).toBe('"Kettle" — a plug or socket, in no particular room.');
-
-    const places = placeQuestion([
-      { key: 'r1', kind: 'room', name: 'Kitchen', zoneName: 'Downstairs' },
-      { key: 'r2', kind: 'room', name: 'Garage' },
-      { key: 'z1', kind: 'zone', name: 'Downstairs' },
-    ]);
-    expect(Object.keys(places.criteria)).toEqual(['r1', 'r2', 'z1', WHOLE_HOME, NOT_SAID]);
-    expect(places.criteria['r1']).toBe('"Kitchen", a room in "Downstairs".');
-    expect(places.criteria['z1']).toContain('every room in it');
   });
 });
 
@@ -442,15 +531,14 @@ describe('asking', () => {
     expect(stub.asked).toHaveLength(1);
     expect(Object.keys(stub.asked[0] ?? {})).toEqual([
       'intent',
+      'shape',
       'later',
       'negated',
-      'scope',
-      'place',
-      'deviceType',
       'device',
+      'single',
+      'everything',
+      ...DEVICES.map((_, index) => `target_d${index + 1}`),
       ...FAMILIES,
-      'multiple',
-      'anyCommand',
       'route',
       'selfContained',
       'effort',
@@ -465,15 +553,44 @@ describe('asking', () => {
       ...DEVICES.map((_, index) => `d${index + 1}`),
       NONE_OF_THESE,
     ]);
-    expect(asked['device']?.criteria['d1']).toBe('"Kitchen light" — a light in the Kitchen.');
+    expect(asked['device']?.criteria['d1']).toBe('"Kitchen light" — a light in the Kitchen, Downstairs.');
     expect(asked['device']?.criteria['d7']).toBe('"Front door" — a door lock, in no particular room.');
-    expect(Object.keys(asked['place']?.criteria ?? {})).toEqual(['r1', 'r2', 'r3', 'z1', 'z2', WHOLE_HOME, NOT_SAID]);
+  });
+
+  it("names, in each device's own question, the devices it could be mistaken for", async () => {
+    const stub = decider(OFF_KITCHEN_LIGHT);
+    await decideHomeCommand({ decider: stub, home: HOME, delegates: DELEGATES, said: 'turn on the light tv' });
+    const asked = stub.asked[0] as Record<string, { instructions: string }>;
+    // "The light tv" has to be able to say no to the TV…
+    expect(asked['target_d4']?.instructions).toBe(
+      '`said` asks for something to be done to "TV" — a TV in the Living room, Downstairs. ' +
+        'It is a different device from "Light TV" (a light in the Living room, Downstairs).',
+    );
+    // …and "switch the light on" has to know there is more than one light:
+    // the one sharing a word first, then the others of its kind, its own room
+    // before anywhere else.
+    expect(asked['target_d1']?.instructions).toContain(
+      'It is a different device from each of these: "Light TV" (a light in the Living room, Downstairs); ' +
+        '"Spots" (a light in the Kitchen, Downstairs); "Bedside lamp" (a light in the Bedroom, Upstairs).',
+    );
+    // A lock is nothing like a lamp, and is not named beside one.
+    expect(asked['target_d1']?.instructions).not.toContain('Front door');
+  });
+
+  it('tells the question that splits the names a split could cut in two', async () => {
+    const stub = decider(OFF_KITCHEN_LIGHT);
+    await decideHomeCommand({ decider: stub, home: HOME, delegates: DELEGATES, said: 'turn on the light tv' });
+    const asked = stub.asked[0] as Record<string, { instructions: string }>;
+    // The names of more than one word, and only those: "Spots" cannot be cut.
+    expect(asked['shape']?.instructions).toContain(
+      '"Kitchen light", "Light TV", "Bedside lamp", "Front door", "Ceiling fan", "Fridge plug"',
+    );
+    expect(asked['shape']?.instructions).not.toContain('"Spots"');
   });
 
   it('sends the sentence as the state and nothing else', async () => {
     // Accuracy falls as the state fills with content unrelated to the
-    // question, and the rooms and devices are already the criteria of their
-    // own questions.
+    // question, and the devices are already in their own questions.
     const stub = decider(OFF_KITCHEN_LIGHT);
     await decideHomeCommand({ decider: stub, home: HOME, delegates: DELEGATES, said: 'turn off the kitchen light' });
     expect(stub.states[0]).toEqual({ said: 'turn off the kitchen light' });
@@ -490,12 +607,42 @@ describe('asking', () => {
     expect(stub.states[0]).toEqual({ said: 'set the kitchen light to 40%', amount: '40%' });
     expect(Object.keys(stub.asked[0] ?? {})).toContain('amount');
   });
+
+  it('reads a home too large for a yes/no per device by the choice alone', async () => {
+    const big = homeWith({ devices: lights(MAX_TARGET_QUESTIONS + 1) });
+    const stub = decider({ ...OFF_KITCHEN_LIGHT, device: choice('d5', 0.95) });
+    const decision = await decideHomeCommand({
+      decider: stub,
+      home: big,
+      delegates: DELEGATES,
+      said: 'turn off the fifth light',
+    });
+    expect(Object.keys(stub.asked[0] ?? {}).some((id) => id.startsWith('target_'))).toBe(false);
+    expect(commandsOf(decision)).toEqual([
+      { deviceId: 'light-4', endpointId: 1, command: { type: 'power', on: false } },
+    ]);
+
+    // …which names one device and never a set, and has its own bar to clear.
+    const unsure = await read(
+      { ...OFF_KITCHEN_LIGHT, device: choice('d5', 0.6, { d5: 0.6, d6: 0.35, [NONE_OF_THESE]: 0.05 }) },
+      'turn off that light',
+      big,
+    );
+    expect(standDownOf(unsure)).toMatchObject({
+      question: 'device',
+      reason: 'unsure',
+      label: 'Light 4',
+      runnerUp: 'Light 5',
+      value: 0.6,
+      min: ACT_CONFIDENCE_MIN,
+    });
+  });
 });
 
 /* ------------------------------------------------------------------ */
 
 describe('one device', () => {
-  it('switches off the one it was asked to', async () => {
+  it('switches off the one it was asked to, and says that was everything', async () => {
     const decision = await read(OFF_KITCHEN_LIGHT, 'turn off the kitchen light');
     const plan = planOf(decision);
     expect(plan.actions).toEqual([
@@ -510,10 +657,11 @@ describe('one device', () => {
     expect(plan.target).toBe('Kitchen light');
     expect(plan.plural).toBe(false);
     expect(plan.offline).toEqual([]);
+    expect(plan.doubt).toEqual([]);
     // The weakest link in the chain of answers it rests on.
     expect(plan.confidence).toBe(0.96);
     expect(phrase(plan.wordings, plan.target, plan.plural)).toBe('switched off Kitchen light');
-    expect(decision.kind === 'act' && decision.durationMs).toBe(180);
+    expect(decision).toMatchObject({ kind: 'act', complete: true, durationMs: 180 });
   });
 
   it('carries the connection and the request id through, for the log line', async () => {
@@ -530,13 +678,7 @@ describe('one device', () => {
     // "Turn off the TV" read under the playback premise says "pause", and the
     // TV light read under the brightness premise may say "dimmer".
     const decision = await read(
-      {
-        ...OFF_KITCHEN_LIGHT,
-        device: choice('d4'),
-        place: choice('r2'),
-        playback: choice('pause', 0.95),
-        brightness: choice('dimmer', 0.95),
-      },
+      ONE('d4', { playback: choice('pause', 0.95), brightness: choice('dimmer', 0.95) }),
       'turn off the TV',
     );
     expect(commandsOf(decision)).toEqual([
@@ -548,7 +690,7 @@ describe('one device', () => {
     // A lock has no switch, so "off" read under the power premise is never
     // read for it: only the lock family is.
     const decision = await read(
-      { ...OFF_KITCHEN_LIGHT, device: choice('d7'), power: choice('off', 0.99), lock: choice('lock', 0.95) },
+      ONE('d7', { power: choice('off', 0.99), lock: choice('lock', 0.95) }),
       'lock the front door',
     );
     expect(commandsOf(decision)).toEqual([
@@ -561,14 +703,7 @@ describe('one device', () => {
     // Every family below answers something, and a thermostat has none of
     // their capabilities but its own — so only "heat" reaches it.
     const decision = await read(
-      {
-        ...OFF_KITCHEN_LIGHT,
-        device: choice('d8'),
-        place: choice('r2'),
-        power: choice('off', 0.99),
-        cover: choice('close', 0.95),
-        climate: choice('heat', 0.95),
-      },
+      ONE('d8', { power: choice('off', 0.99), cover: choice('close', 0.95), climate: choice('heat', 0.95) }),
       'put the heating on',
     );
     expect(commandsOf(decision)).toEqual([
@@ -601,14 +736,11 @@ describe('one device', () => {
 
     it('leaves a light that is already on alone', async () => {
       const decision = await read(
-        {
-          ...OFF_KITCHEN_LIGHT,
-          device: choice('d3'),
-          place: choice('r2'),
+        ONE('d3', {
           power: choice(UNCHANGED),
           brightness: choice('percent', 0.95),
           amount: choice('brightness', 0.96),
-        },
+        }),
         'set the TV light to 40%',
       );
       expect(commandsOf(decision)).toEqual([
@@ -648,13 +780,7 @@ describe('one device', () => {
 
     it('works "brighter" out from where the light is now', async () => {
       const decision = await read(
-        {
-          ...OFF_KITCHEN_LIGHT,
-          device: choice('d3'),
-          place: choice('r2'),
-          power: choice(UNCHANGED),
-          brightness: choice('brighter', 0.95),
-        },
+        ONE('d3', { power: choice(UNCHANGED), brightness: choice('brighter', 0.95) }),
         'brighter',
       );
       // 200 + a quarter of the range, held at the top of it.
@@ -675,13 +801,7 @@ describe('one device', () => {
 
     it('stands down on "brighter" when how bright it is now is not known', async () => {
       const decision = await read(
-        {
-          ...OFF_KITCHEN_LIGHT,
-          device: choice('d6'),
-          place: choice('r3'),
-          power: choice(UNCHANGED),
-          brightness: choice('brighter', 0.95),
-        },
+        ONE('d6', { power: choice(UNCHANGED), brightness: choice('brighter', 0.95) }),
         'make the bedside lamp brighter',
       );
       expect(standDownOf(decision)).toMatchObject({
@@ -695,13 +815,7 @@ describe('one device', () => {
   describe('colour', () => {
     it('gives a colour light a colour', async () => {
       const decision = await read(
-        {
-          ...OFF_KITCHEN_LIGHT,
-          device: choice('d3'),
-          place: choice('r2'),
-          power: choice(UNCHANGED),
-          colour: choice('red', 0.95),
-        },
+        ONE('d3', { power: choice(UNCHANGED), colour: choice('red', 0.95) }),
         'make the TV light red',
       );
       expect(commandsOf(decision)).toEqual([
@@ -737,10 +851,7 @@ describe('one device', () => {
 
   describe('blinds, media, locks', () => {
     it('sends a blind halfway', async () => {
-      const decision = await read(
-        { ...OFF_KITCHEN_LIGHT, device: choice('d5'), place: choice('r2'), cover: choice('half', 0.95) },
-        'blind halfway',
-      );
+      const decision = await read(ONE('d5', { cover: choice('half', 0.95) }), 'blind halfway');
       // 0 is fully open in these units, so halfway is 5000 either way round.
       expect(commandsOf(decision)).toEqual([
         { deviceId: 'blind', endpointId: 1, command: { type: 'setCoveringPercent', percent100ths: 5000 } },
@@ -750,13 +861,7 @@ describe('one device', () => {
 
     it('pauses a TV without switching it off', async () => {
       const decision = await read(
-        {
-          ...OFF_KITCHEN_LIGHT,
-          device: choice('d4'),
-          place: choice('r2'),
-          power: choice(UNCHANGED),
-          playback: choice('pause', 0.95),
-        },
+        ONE('d4', { power: choice(UNCHANGED), playback: choice('pause', 0.95) }),
         'pause the TV',
       );
       expect(commandsOf(decision)).toEqual([
@@ -765,10 +870,7 @@ describe('one device', () => {
     });
 
     it('unlocks one door it was asked to', async () => {
-      const decision = await read(
-        { ...OFF_KITCHEN_LIGHT, device: choice('d7'), lock: choice('unlock', 0.95) },
-        'unlock the front door',
-      );
+      const decision = await read(ONE('d7', { lock: choice('unlock', 0.95) }), 'unlock the front door');
       expect(commandsOf(decision)).toEqual([
         { deviceId: 'door', endpointId: 1, command: { type: 'lock', engage: false } },
       ]);
@@ -776,7 +878,7 @@ describe('one device', () => {
   });
 
   describe('climate', () => {
-    const thermostat = { ...OFF_KITCHEN_LIGHT, device: choice('d8'), place: choice('r2') };
+    const thermostat = ONE('d8');
 
     it('sets a temperature it found in code', async () => {
       const decision = await read(
@@ -841,7 +943,7 @@ describe('one device', () => {
   });
 
   describe('fans', () => {
-    const fan = { ...OFF_KITCHEN_LIGHT, device: choice('d9'), place: choice('r3'), power: choice(UNCHANGED) };
+    const fan = ONE('d9', { power: choice(UNCHANGED) });
 
     it('sets a speed', async () => {
       const decision = await read({ ...fan, fan: choice('high', 0.95) }, 'fan on high');
@@ -879,123 +981,220 @@ describe('one device', () => {
   });
 
   it('asks which part of a two-gang switch was meant, rather than guessing', async () => {
-    const home = homeWith({
-      devices: [
-        ...DEVICES,
-        {
-          id: 'double',
-          name: 'Double switch',
-          roomId: 'kitchen',
-          endpoints: [
-            { endpointId: 1, deviceKind: 'wallSwitch', capabilities: ['onOff'] },
-            { endpointId: 2, deviceKind: 'wallSwitch', capabilities: ['onOff'] },
-          ],
-        },
-      ],
-    });
-    const decision = await read({ ...OFF_KITCHEN_LIGHT, device: choice('d11') }, 'double switch off', home);
+    const decision = await read(ONE('d11', {}, 11), 'double switch off', homePlus(DOUBLE_SWITCH));
     expect(standDownOf(decision)).toMatchObject({
       question: 'action',
       reason: 'blocked',
       because: 'Double switch has 2 parts that could be meant',
     });
   });
+});
 
-  it('stands down when the place and the device disagree', async () => {
-    // The two are answered blind and cannot see each other, so when both are
-    // confident and point different ways, one is wrong and nothing can tell
-    // which. This is the shape a catalog gets wrong in a home with three
-    // lights called Ceiling light.
-    const decision = await read({ ...OFF_KITCHEN_LIGHT, place: choice('r2', 0.96) }, 'living room light off');
+/* ------------------------------------------------------------------ */
+
+describe('which device', () => {
+  it('hears "the light tv" as the one device called Light TV, not as a light and a TV', async () => {
+    // The sentence a real home's log stood down on: split into "turn on the
+    // light" and "turn on the tv", neither of which named anything.
+    const decision = await read(
+      ONE('d3', { device: choice('d3', 0.93), ...targets({ d3: 0.92, d4: 0.2 }), power: choice('on', 0.97) }),
+      'turn on the light tv',
+    );
+    expect(commandsOf(decision)).toEqual([
+      { deviceId: 'tv-light', endpointId: 1, command: { type: 'power', on: true } },
+    ]);
+    expect(decision).toMatchObject({ kind: 'act', complete: true });
+  });
+
+  it("trusts the choice over another device's yes, and leaves that one to the model", async () => {
+    // A yes/no cannot compare itself with the question beside it, so the TV's
+    // may say yes to "the light tv"; the choice weighed them against each
+    // other and is sure. The TV is named to the model rather than switched on.
+    const decision = await read(
+      ONE('d3', { device: choice('d3', 0.93), ...targets({ d3: 0.9, d4: 0.8 }), power: choice('on', 0.97) }),
+      'turn on the light tv',
+    );
+    expect(movedBy(decision)).toEqual(['tv-light']);
+    expect(planOf(decision).doubt).toEqual(['TV']);
+    // Something was left for the model to judge, so this was not everything.
+    expect(decision).toMatchObject({ kind: 'act', complete: false });
+  });
+
+  it("acts when the choice leans to a device and that device's own yes/no is the only clear yes", async () => {
+    const decision = await read(
+      ONE('d3', {
+        device: choice('d3', 0.7, { d3: 0.7, d4: 0.25, [NONE_OF_THESE]: 0.05 }),
+        ...targets({ d3: 0.9, d4: 0.5 }),
+        power: choice('on', 0.97),
+      }),
+      'turn on the light tv',
+    );
+    expect(movedBy(decision)).toEqual(['tv-light']);
+    expect(planOf(decision).doubt).toEqual(['TV']);
+    // Two readings leaning together are as sure as the less sure of them.
+    expect(planOf(decision).confidence).toBe(0.7);
+  });
+
+  it('does not lean on a choice below its bar', async () => {
+    const decision = await read(
+      ONE('d3', {
+        device: choice('d3', DEVICE_LEAN_MIN - 0.1),
+        ...targets({ d3: 0.9, d4: 0.5 }),
+        power: choice('on', 0.97),
+      }),
+      'turn on the tv light',
+    );
     expect(standDownOf(decision)).toMatchObject({
-      question: 'place',
-      reason: 'disagreed',
-      label: 'Living room',
-      device: 'Kitchen light',
-      deviceRoom: 'Kitchen',
+      question: 'targets',
+      reason: 'unsure',
+      devices: [
+        { name: 'Light TV', value: 0.9 },
+        { name: 'TV', value: 0.5 },
+      ],
+      min: TARGET_YES,
+      max: TARGET_NO,
     });
   });
 
-  it('acts when the place agrees, abstains, or is the zone the room is in', async () => {
-    for (const place of [
-      choice('z1', 0.96),
-      choice(NOT_SAID, 0.99),
-      choice(WHOLE_HOME, 0.95),
-      choice('r2', 0.4),
-    ]) {
-      const decision = await read({ ...OFF_KITCHEN_LIGHT, place }, 'kitchen light off');
-      expect(decision.kind, JSON.stringify(place)).toBe('act');
-    }
+  it('acts on the one clear yes when the choice cannot say', async () => {
+    const decision = await read(
+      { ...OFF_KITCHEN_LIGHT, device: choice(NONE_OF_THESE, 0.6), ...targets({ d6: 0.9 }) },
+      'turn off the lamp',
+    );
+    expect(movedBy(decision)).toEqual(['lamp']);
+    expect(planOf(decision)).toMatchObject({ target: 'Bedside lamp', plural: false, doubt: [] });
+  });
+
+  it("stands down when the choice is sure and the device's own yes/no is sure it was not asked for", async () => {
+    // One of the two is wrong, and nothing can tell which.
+    const decision = await read(
+      { ...OFF_KITCHEN_LIGHT, ...targets({ d1: 0.2 }) },
+      'turn off the kitchen light',
+    );
+    expect(standDownOf(decision)).toMatchObject({
+      question: 'targets',
+      reason: 'disagreed',
+      label: 'Kitchen light',
+      device: 'Kitchen light',
+      value: 0.2,
+    });
+  });
+
+  it('stands down when nothing in this home was named', async () => {
+    const decision = await read(
+      { ...OFF_KITCHEN_LIGHT, device: choice(NONE_OF_THESE, 0.95), ...targets() },
+      'turn off the garage light',
+    );
+    expect(standDownOf(decision)).toMatchObject({
+      question: 'targets',
+      reason: 'blocked',
+      label: 'none of these',
+      because: 'no device in this home was named',
+    });
   });
 });
 
 /* ------------------------------------------------------------------ */
 
-describe('a group', () => {
-  it('switches off every light in a room, and names them as a group', async () => {
-    const decision = await read(OFF_LIGHTS_IN('r1'), 'turn off the lights in the kitchen');
+describe('several devices', () => {
+  it('switches off two devices named one by one, in one reading and no split', async () => {
+    const decision = await read(SET(['d1', 'd4']), 'turn off the kitchen light and the TV');
     expect(commandsOf(decision)).toEqual([
       { deviceId: 'kitchen-light', endpointId: 1, command: { type: 'power', on: false } },
-      { deviceId: 'spots', endpointId: 1, command: { type: 'power', on: false } },
+      { deviceId: 'tv', endpointId: 1, command: { type: 'power', on: false } },
     ]);
     const plan = planOf(decision);
-    expect(plan.target).toBe('2 lights in the Kitchen');
+    expect(plan.target).toBe('Kitchen light and TV');
     expect(plan.plural).toBe(true);
-    expect(phrase(plan.wordings, plan.target, plan.plural)).toBe('switched off 2 lights in the Kitchen');
-    // The fridge on a plug in the same room is not a light.
-    expect(plan.actions.map((action) => action.deviceId)).not.toContain('plug');
+    expect(phrase(plan.wordings, plan.target, plan.plural)).toBe('switched off Kitchen light and TV');
+    expect(decision).toMatchObject({ kind: 'act', complete: true });
   });
 
-  it('reaches every room in a zone', async () => {
-    const plan = planOf(await read(OFF_LIGHTS_IN('z1'), 'lights off downstairs'));
-    expect(plan.actions.map((action) => action.deviceId)).toEqual(['kitchen-light', 'spots', 'tv-light']);
-    expect(plan.target).toBe('3 lights in Downstairs');
-  });
-
-  it('reaches the whole home when that is what was said', async () => {
-    const plan = planOf(await read(OFF_LIGHTS_IN(WHOLE_HOME), 'turn off all the lights'));
-    expect(plan.actions.map((action) => action.deviceId)).toEqual(['kitchen-light', 'spots', 'tv-light', 'lamp']);
-    expect(plan.target).toBe('4 lights across the home');
+  it('switches off the lights in a room, and leaves the fridge in it alone', async () => {
+    const decision = await read(SET(['d1', 'd2']), 'turn off the lights in the kitchen');
+    expect(movedBy(decision)).toEqual(['kitchen-light', 'spots']);
+    expect(planOf(decision).target).toBe('Kitchen light and Spots');
   });
 
   it('reads "turn off the lights" with no place as every light in the home', async () => {
-    // Said to a phone, there is nowhere else it could mean — and off is the
-    // direction that is safe to get wrong.
-    const plan = planOf(await read(OFF_LIGHTS_IN(NOT_SAID), 'выключи свет'));
-    expect(plan.actions.map((action) => action.deviceId)).toEqual(['kitchen-light', 'spots', 'tv-light', 'lamp']);
-    expect(plan.target).toBe('4 lights across the home');
+    // "No place said" and "the whole home" used to be two answers to one
+    // question, and a reading stood down when it could not choose between
+    // them — for a sentence where both meant the same lamps.
+    const decision = await read(SET(['d1', 'd2', 'd3', 'd6']), 'выключи свет');
+    expect(movedBy(decision)).toEqual(['kitchen-light', 'spots', 'tv-light', 'lamp']);
+    expect(planOf(decision).target).toBe('4 lights across the home');
   });
 
-  it('locks and pauses with no place, and leaves anything else with no place to the model', async () => {
-    const locked = await read(
-      { ...OFF_LIGHTS_IN(NOT_SAID), deviceType: choice('locks', 0.95), power: choice(UNCHANGED), lock: choice('lock', 0.95) },
-      'lock the doors',
+  it('names more than three devices in one room by the room', async () => {
+    const decision = await read(
+      SET(['d1', 'd2', 'd3', 'd4', 'd5'], {}, 6),
+      'turn off the kitchen lights',
+      homeWith({ devices: lights(6) }),
     );
-    expect(commandsOf(locked)).toEqual([
-      { deviceId: 'door', endpointId: 1, command: { type: 'lock', engage: true } },
-    ]);
+    expect(planOf(decision).target).toBe('5 lights in the Kitchen');
+  });
 
-    // "Turn on the lights" with every lamp in every bedroom at the end of it.
-    const on = await read({ ...OFF_LIGHTS_IN(NOT_SAID), power: choice('on', 0.97) }, 'turn on the lights');
-    expect(standDownOf(on)).toMatchObject({ question: 'place', reason: 'blocked', answer: NOT_SAID });
+  it('asks which one when one device was asked for and several fit', async () => {
+    // "Switch the light off" in a home with four lights: four clear yeses to a
+    // sentence that asked for one. Never all four.
+    const decision = await read(SET(['d1', 'd2', 'd3', 'd6'], { single: noul(0.9) }), 'switch the light off');
+    expect(standDownOf(decision)).toMatchObject({
+      question: 'single',
+      reason: 'unsure',
+      value: 0.9,
+      devices: [
+        { name: 'Kitchen light', value: 0.95 },
+        { name: 'Spots', value: 0.95 },
+        { name: 'Light TV', value: 0.95 },
+        { name: 'Bedside lamp', value: 0.95 },
+      ],
+    });
+  });
 
-    const opened = await read(
-      { ...OFF_LIGHTS_IN(NOT_SAID), deviceType: choice('blinds', 0.95), power: choice(UNCHANGED), cover: choice('open', 0.95) },
-      'open the blinds',
+  it('stands down when a device between yes and no could be in the set', async () => {
+    const decision = await read(SET(['d1'], { ...targets({ d1: 0.95, d2: 0.5 }) }), 'kitchen lights off');
+    expect(standDownOf(decision)).toMatchObject({
+      question: 'targets',
+      reason: 'unsure',
+      devices: [
+        { name: 'Kitchen light', value: 0.95 },
+        { name: 'Spots', value: 0.5 },
+      ],
+    });
+  });
+
+  it(`switches a few on, and never more than ${ON_TARGETS_MAX} at once`, async () => {
+    const few = await read(SET(['d1', 'd2'], { power: choice('on', 0.97) }), 'kitchen lights on');
+    expect(movedBy(few)).toEqual(['kitchen-light', 'spots']);
+
+    const count = ON_TARGETS_MAX + 2;
+    const many = await read(
+      SET(Array.from({ length: count }, (_, index) => `d${index + 1}`), { power: choice('on', 0.97) }, count),
+      'turn on all the lights',
+      homeWith({ devices: lights(count) }),
     );
-    expect(standDownOf(opened)).toMatchObject({ question: 'place', reason: 'blocked', answer: NOT_SAID });
+    expect(standDownOf(many)).toMatchObject({
+      question: 'action',
+      reason: 'size',
+      value: count,
+      max: ON_TARGETS_MAX,
+      because: `more than ${ON_TARGETS_MAX} devices are never switched on at once`,
+    });
+  });
 
-    // Dimming is not switching off, and a light that is off would be switched on to be seen.
-    const dimmed = await read(
-      { ...OFF_LIGHTS_IN(NOT_SAID), power: choice(UNCHANGED), brightness: choice('full', 0.95) },
-      'full brightness',
+  it('switches any number off, which is the direction that is safe to get wrong', async () => {
+    const count = ON_TARGETS_MAX + 2;
+    const decision = await read(
+      SET(Array.from({ length: count }, (_, index) => `d${index + 1}`), {}, count),
+      'turn off all the lights',
+      homeWith({ devices: lights(count) }),
     );
-    expect(standDownOf(dimmed)).toMatchObject({ question: 'place', reason: 'blocked' });
+    expect(movedBy(decision)).toHaveLength(count);
   });
 
   it('dims the lights that can dim and leaves the rest alone', async () => {
     const decision = await read(
-      { ...OFF_LIGHTS_IN('r1'), power: choice(UNCHANGED), brightness: choice('dimmer', 0.95) },
+      SET(['d1', 'd2'], { power: choice(UNCHANGED), brightness: choice('dimmer', 0.95) }),
       'dim the kitchen lights',
     );
     expect(commandsOf(decision)).toEqual([
@@ -1005,49 +1204,60 @@ describe('a group', () => {
 
   it('reads "everything" narrowly: what a person switches off leaving a room', async () => {
     const decision = await read(
-      { ...OFF_LIGHTS_IN('r2'), deviceType: choice('everything', 0.95) },
+      SET(['d3', 'd4', 'd5', 'd8'], { everything: noul(0.92) }),
       'turn everything off in the living room',
     );
-    const plan = planOf(decision);
     // The light and the TV — not the blind, not the thermostat.
-    expect(plan.actions.map((action) => action.deviceId)).toEqual(['tv-light', 'tv']);
-    expect(plan.target).toBe('everything in the Living room');
+    expect(movedBy(decision)).toEqual(['tv-light', 'tv']);
   });
 
   it('never reaches a fridge on a plug through "everything"', async () => {
-    const plan = planOf(
-      await read({ ...OFF_LIGHTS_IN('r1'), deviceType: choice('everything', 0.95) }, 'everything off in the kitchen'),
+    const decision = await read(
+      SET(['d1', 'd2', 'd10'], { everything: noul(0.92) }),
+      'everything off in the kitchen',
     );
-    expect(plan.actions.map((action) => action.deviceId)).toEqual(['kitchen-light', 'spots']);
+    expect(movedBy(decision)).toEqual(['kitchen-light', 'spots']);
   });
 
-  it('never switches everything in the home on at once', async () => {
+  it('asks when it cannot tell whether "everything" was meant and a plug would be reached', async () => {
     const decision = await read(
-      { ...OFF_LIGHTS_IN(WHOLE_HOME), deviceType: choice('everything', 0.95), power: choice('on', 0.97) },
-      'turn everything on',
+      SET(['d1', 'd2', 'd10'], { everything: noul(0.5) }),
+      'turn it all off in the kitchen',
+    );
+    expect(standDownOf(decision)).toMatchObject({ question: 'everything', reason: 'unsure', value: 0.5 });
+  });
+
+  it('moves a plug named for what it is', async () => {
+    const decision = await read(SET(['d1', 'd10']), 'turn off the kitchen light and the fridge plug');
+    expect(movedBy(decision)).toEqual(['kitchen-light', 'plug']);
+  });
+
+  it('only switches everything on or off — never gives it all a colour', async () => {
+    const decision = await read(
+      SET(['d3', 'd4'], { everything: noul(0.92), power: choice(UNCHANGED), colour: choice('red', 0.95) }),
+      'make everything red',
     );
     expect(standDownOf(decision)).toMatchObject({
-      question: 'power',
+      question: 'colour',
       reason: 'blocked',
-      because: 'everything in the home is never switched on at once',
+      because: 'only switching on or off, and pausing, apply to everything',
     });
   });
 
-  it('switches everything in one room on', async () => {
-    const decision = await read(
-      { ...OFF_LIGHTS_IN('r2'), deviceType: choice('everything', 0.95), power: choice('on', 0.97) },
-      'turn everything on in the living room',
-    );
-    expect(planOf(decision).actions.map((action) => action.deviceId)).toEqual(['tv-light', 'tv']);
-  });
-
   it('locks every lock, and never unlocks them all', async () => {
-    const locks = { ...OFF_LIGHTS_IN(WHOLE_HOME), deviceType: choice('locks', 0.95), power: choice(UNCHANGED) };
-    const locked = await read({ ...locks, lock: choice('lock', 0.95) }, 'lock all the doors');
+    const home = homePlus({
+      id: 'back-door',
+      name: 'Back door',
+      roomId: 'kitchen',
+      endpoints: [{ endpointId: 1, deviceKind: 'lock', capabilities: ['doorLock'] }],
+    });
+    const locks = (lock: string) => SET(['d7', 'd11'], { power: choice(UNCHANGED), lock: choice(lock, 0.95) }, 11);
+    const locked = await read(locks('lock'), 'lock the doors', home);
     expect(commandsOf(locked)).toEqual([
       { deviceId: 'door', endpointId: 1, command: { type: 'lock', engage: true } },
+      { deviceId: 'back-door', endpointId: 1, command: { type: 'lock', engage: true } },
     ]);
-    const unlocked = await read({ ...locks, lock: choice('unlock', 0.95) }, 'unlock all the doors');
+    const unlocked = await read(locks('unlock'), 'unlock the doors', home);
     expect(standDownOf(unlocked)).toMatchObject({
       question: 'lock',
       reason: 'blocked',
@@ -1055,39 +1265,8 @@ describe('a group', () => {
     });
   });
 
-  it('says when a place has none of that kind', async () => {
-    const decision = await read(
-      { ...OFF_LIGHTS_IN('r3'), deviceType: choice('blinds', 0.95), power: choice(UNCHANGED), cover: choice('close') },
-      'close the blinds in the bedroom',
-    );
-    expect(standDownOf(decision)).toMatchObject({
-      question: 'deviceType',
-      reason: 'blocked',
-      because: 'no blinds in the Bedroom',
-    });
-  });
-
-  it('works every endpoint of a two-gang switch in a group', async () => {
-    const home = homeWith({
-      devices: [
-        ...DEVICES,
-        {
-          id: 'double',
-          name: 'Double switch',
-          roomId: 'kitchen',
-          endpoints: [
-            { endpointId: 1, deviceKind: 'wallSwitch', capabilities: ['onOff'] },
-            { endpointId: 2, deviceKind: 'wallSwitch', capabilities: ['onOff'] },
-          ],
-        },
-      ],
-    });
-    const decision = await read(
-      { ...OFF_LIGHTS_IN('r1'), deviceType: choice('sockets', 0.95) },
-      'switch off the switches in the kitchen',
-      home,
-    );
-    // The fridge plug is named for what it is here, so it is in the group.
+  it('works every endpoint of a two-gang switch in a set', async () => {
+    const decision = await read(SET(['d10', 'd11'], {}, 11), 'switch off the kitchen switches', homePlus(DOUBLE_SWITCH));
     expect(commandsOf(decision)).toEqual([
       { deviceId: 'plug', endpointId: 1, command: { type: 'power', on: false } },
       { deviceId: 'double', endpointId: 1, command: { type: 'power', on: false } },
@@ -1095,43 +1274,40 @@ describe('a group', () => {
     ]);
   });
 
-  it('does not try a member the hub knows is offline, and names it', async () => {
+  it('does not try one the hub knows is offline, and names it', async () => {
     const home = homeWith({
       devices: DEVICES.map((device) => (device.id === 'spots' ? { ...device, online: false } : device)),
     });
-    const plan = planOf(await read(OFF_LIGHTS_IN('r1'), 'kitchen lights off', home));
+    const plan = planOf(await read(SET(['d1', 'd2']), 'kitchen lights off', home));
     expect(plan.actions.map((action) => action.deviceId)).toEqual(['kitchen-light']);
     expect(plan.offline).toEqual([
       { deviceName: 'Spots', roomName: 'Kitchen', wordings: [{ before: 'switched off', after: '' }] },
     ]);
   });
 
-  it('stands down when every member is offline', async () => {
+  it('stands down when every one of them is offline', async () => {
     const home = homeWith({
-      devices: DEVICES.map((device) =>
-        device.roomId === 'kitchen' ? { ...device, online: false } : device,
-      ),
+      devices: DEVICES.map((device) => (device.roomId === 'kitchen' ? { ...device, online: false } : device)),
     });
-    const decision = await read(OFF_LIGHTS_IN('r1'), 'kitchen lights off', home);
+    const decision = await read(SET(['d1', 'd2']), 'kitchen lights off', home);
     expect(standDownOf(decision)).toMatchObject({
       question: 'action',
       reason: 'blocked',
-      because: 'every one of the lights in the Kitchen is offline',
+      because: 'every device it was asked about is offline',
     });
   });
 
-  it('stands down on a group bigger than one request may move', async () => {
-    const lights = Array.from({ length: MAX_COMMANDS + 6 }, (_, index) => ({
-      id: `light-${index}`,
-      name: `Light ${index}`,
-      roomId: 'kitchen',
-      endpoints: [{ endpointId: 1, deviceKind: 'light' as const, capabilities: ['onOff' as const] }],
-    }));
-    const decision = await read(OFF_LIGHTS_IN('r1'), 'kitchen lights off', homeWith({ devices: lights }));
+  it('stands down on more commands than one request may send', async () => {
+    const count = MAX_COMMANDS + 6;
+    const decision = await read(
+      SET(Array.from({ length: count }, (_, index) => `d${index + 1}`), {}, count),
+      'kitchen lights off',
+      homeWith({ devices: lights(count) }),
+    );
     expect(standDownOf(decision)).toMatchObject({
-      question: 'group',
+      question: 'action',
       reason: 'size',
-      value: MAX_COMMANDS + 6,
+      value: count,
       max: MAX_COMMANDS,
     });
   });
@@ -1139,52 +1315,118 @@ describe('a group', () => {
 
 /* ------------------------------------------------------------------ */
 
-describe('the other roads', () => {
-  it('splits several requests when at least one is a command', async () => {
+describe('the shape of a sentence', () => {
+  it('splits several different things, and carries the reading of the whole along', async () => {
     const decision = await read(
-      { ...OFF_KITCHEN_LIGHT, multiple: noul(0.85), anyCommand: noul(0.93) },
-      'turn off the TV and close the blinds',
+      { ...OFF_KITCHEN_LIGHT, shape: choice(SHAPE_SEVERAL, 0.8) },
+      'turn off the kitchen light and close the blind',
     );
-    expect(decision).toMatchObject({ kind: 'split', confidence: 0.85 });
+    expect(decision).toMatchObject({ kind: 'split', confidence: 0.8 });
+    if (decision.kind !== 'split') throw new Error('expected a split');
+    // For a split that comes back as one part: nothing more to pay to act.
+    expect(decision.whole.kind).toBe('act');
+    // A small home's parts are asked about all of it…
+    expect(decision.candidates).toEqual(DEVICES.map((device) => device.id));
+    // …and the split is told the names it could cut in two.
+    expect(decision.deviceNames).toEqual([
+      'Kitchen light',
+      'Light TV',
+      'Bedside lamp',
+      'Front door',
+      'Ceiling fan',
+      'Fridge plug',
+    ]);
   });
 
-  it('splits two devices named one by one', async () => {
-    // "The kitchen light and the hall light" is one request about several
-    // devices — and two commands this path can carry out, once it is split.
+  it('carries the reason along when the whole sentence could not have been acted on', async () => {
     const decision = await read(
-      { ...OFF_KITCHEN_LIGHT, scope: choice('several_devices', 0.92), multiple: noul(0.3) },
-      'turn off the kitchen light and the spots',
+      { ...OFF_KITCHEN_LIGHT, shape: choice(SHAPE_SEVERAL, 0.8), later: noul(0.9) },
+      'turn off the light and close the blind at seven',
     );
-    expect(decision).toMatchObject({ kind: 'split', confidence: 0.92 });
+    if (decision.kind !== 'split') throw new Error('expected a split');
+    expect(decision.whole).toMatchObject({
+      kind: 'none',
+      standDown: { question: 'later', reason: 'blocked', durationMs: 180 },
+    });
   });
 
-  it('does not split what holds no command', async () => {
+  it('shortlists the devices a split sentence mentions, likeliest first, in a larger home', async () => {
+    const count = 40;
+    const decision = await read(
+      {
+        ...SET([], { device: choice(NONE_OF_THESE, 0.85, { [NONE_OF_THESE]: 0.85, d12: 0.15 }) }, count),
+        ...targets({ d7: 0.9, d3: 0.8 }, count),
+        shape: choice(SHAPE_SEVERAL, 0.8),
+      },
+      'turn off light 6 and light 2',
+      homeWith({ devices: lights(count) }),
+    );
+    if (decision.kind !== 'split') throw new Error('expected a split');
+    expect(decision.candidates).toHaveLength(PART_CANDIDATES_MAX);
+    expect(decision.candidates.slice(0, 3)).toEqual(['light-6', 'light-2', 'light-11']);
+  });
+
+  it('does not split one action on several devices', async () => {
+    const decision = await read(SET(['d1', 'd4']), 'turn off the kitchen light and the TV');
+    expect(decision.kind).toBe('act');
+  });
+
+  it('does the one thing said beside a question, and leaves the question to the model', async () => {
+    const decision = await read(
+      {
+        ...ONE('d9'),
+        shape: choice(SHAPE_ONE_AND_MORE, 0.9),
+        // Read whole, the sentence is as much a question as a command.
+        intent: choice('home_question', 0.6),
+      },
+      'switch the fan off and tell me the time',
+    );
+    expect(movedBy(decision)).toEqual(['fan']);
+    // The question is still the model's, so this was not everything.
+    expect(decision).toMatchObject({ kind: 'act', complete: false });
+  });
+
+  it('leaves a sentence that is neither clearly one thing nor clearly several to the model', async () => {
     const decision = await read(
       {
         ...OFF_KITCHEN_LIGHT,
-        intent: choice('home_question', 0.95),
-        multiple: noul(0.9),
-        anyCommand: noul(0.2),
+        shape: choice(SHAPE_ONE, 0.6, { [SHAPE_ONE]: 0.6, [SHAPE_SEVERAL]: 0.3, [SHAPE_NOTHING]: 0.1 }),
       },
-      'is the door locked and what is the temperature',
+      'kitchen light off and so on',
     );
-    expect(standDownOf(decision)).toMatchObject({ question: 'intent', reason: 'declined' });
+    expect(standDownOf(decision)).toMatchObject({
+      question: 'shape',
+      reason: 'unsure',
+      label: 'one thing to do',
+      runnerUp: 'several different things to do',
+      value: 0.6,
+      min: ACT_CONFIDENCE_MIN,
+    });
   });
 
-  it('leaves a sentence that is neither clearly one request nor clearly several to the model', async () => {
-    const decision = await read({ ...OFF_KITCHEN_LIGHT, multiple: noul(0.5) }, 'kitchen light off and so on');
-    expect(standDownOf(decision)).toMatchObject({
-      question: 'multiple',
-      reason: 'blocked',
-      value: 0.5,
-      max: NEGATIVE_NOUL_MAX,
+  it('reads a question as nothing to do, in its own words when it has them', async () => {
+    const question = await read(
+      { ...OFF_KITCHEN_LIGHT, shape: choice(SHAPE_NOTHING, 0.95), intent: choice('home_question', 0.95) },
+      'is the door locked and what is the temperature',
+    );
+    expect(standDownOf(question)).toMatchObject({
+      question: 'intent',
+      reason: 'declined',
+      label: 'a question about the home',
     });
+
+    const chat = await read(
+      { ...OFF_KITCHEN_LIGHT, shape: choice(SHAPE_NOTHING, 0.95), intent: choice('other', 0.6) },
+      'nice weather',
+    );
+    expect(standDownOf(chat)).toMatchObject({ question: 'shape', reason: 'declined', label: 'nothing to do' });
   });
 
   it('routes a confident, self-contained automation request', async () => {
     const decision = await read(
       {
         ...OFF_KITCHEN_LIGHT,
+        shape: choice(SHAPE_NOTHING, 0.9),
         intent: choice('automation_work', 0.98),
         route: choice('automations', 0.97),
         selfContained: noul(0.93),
@@ -1200,6 +1442,7 @@ describe('the other roads', () => {
     const decision = await read(
       {
         ...OFF_KITCHEN_LIGHT,
+        shape: choice(SHAPE_NOTHING, 0.9),
         intent: choice('automation_work', 0.98),
         route: choice('automations', 0.97),
         selfContained: noul(0.3),
@@ -1214,6 +1457,14 @@ describe('the other roads', () => {
       value: 0.3,
       min: POSITIVE_NOUL_MIN,
     });
+  });
+
+  it('never hands a device command away', async () => {
+    const decision = await read(
+      { ...OFF_KITCHEN_LIGHT, route: choice('automations', 0.97), selfContained: noul(0.95) },
+      'turn off the kitchen light',
+    );
+    expect(decision.kind).toBe('act');
   });
 
   it('never asks for more thinking, only less', async () => {
@@ -1236,16 +1487,22 @@ describe('standing down, and saying why', () => {
   const cases: [string, Record<string, unknown>, string, string][] = [
     ['it is for later', { later: noul(0.8) }, 'later', 'blocked'],
     ['it takes something back', { negated: noul(0.7) }, 'negated', 'blocked'],
-    ['it is about no device', { scope: choice('none', 0.95) }, 'scope', 'blocked'],
-    ['the scope is a guess', { scope: choice('one_device', 0.6) }, 'scope', 'unsure'],
-    ['no device was picked out', { device: choice(NONE_OF_THESE, 0.99) }, 'device', 'blocked'],
-    ['the device is a guess', { device: choice('d1', 0.5) }, 'device', 'unsure'],
+    ['no device of this home was named', { device: choice(NONE_OF_THESE, 0.95), ...targets() }, 'targets', 'blocked'],
+    ['it cannot tell which device', { device: choice('d1', 0.5), ...targets({ d1: 0.6 }) }, 'targets', 'unsure'],
     ['the action is a guess', { power: choice('off', 0.5) }, 'power', 'unsure'],
     ['it asks nothing of this device', { power: choice(UNCHANGED, 0.95) }, 'action', 'blocked'],
-    ['the intent is a guess', { intent: choice('device_command', 0.4) }, 'intent', 'unsure'],
+    ['it heard something other than a device command', { intent: choice('scene', 0.6) }, 'intent', 'unsure'],
     ['it is a question rather than a command', { intent: choice('home_question', 0.99) }, 'intent', 'declined'],
     ['it is about something else entirely', { intent: choice('other', 0.99) }, 'intent', 'declined'],
-    ['a question it needs went unanswered', { device: undefined }, 'device', 'unanswered'],
+    [
+      'it cannot tell how many things were asked',
+      { shape: choice(SHAPE_ONE, 0.6, { [SHAPE_ONE]: 0.6, [SHAPE_SEVERAL]: 0.4 }) },
+      'shape',
+      'unsure',
+    ],
+    ['how many things went unanswered', { shape: undefined }, 'shape', 'unanswered'],
+    ['the device choice went unanswered', { device: undefined }, 'device', 'unanswered'],
+    ["a device's own yes/no went unanswered", { target_d5: undefined }, 'targets', 'unanswered'],
     ['an action it needs went unanswered', { power: undefined }, 'power', 'unanswered'],
   ];
   for (const [why, override, question, reason] of cases) {
@@ -1261,21 +1518,21 @@ describe('standing down, and saying why', () => {
     });
   }
 
-  it('names what it was unsure between, and the bar it missed', async () => {
-    // An unsure answer is usually two answers. Naming the second is what turns
-    // a bare 0.5 into a reason somebody can act on — rename one of them.
+  it('names the devices it could not tell about, each with its own number', async () => {
     const decision = await read({
       ...OFF_KITCHEN_LIGHT,
-      device: choice('d1', 0.5, { d1: 0.52, d3: 0.4, [NONE_OF_THESE]: 0.08 }),
+      device: choice('d1', 0.5, { d1: 0.52, d2: 0.4, [NONE_OF_THESE]: 0.08 }),
+      ...targets({ d1: 0.62, d2: 0.55 }),
     });
     expect(standDownOf(decision)).toMatchObject({
-      question: 'device',
+      question: 'targets',
       reason: 'unsure',
-      answer: 'd1',
-      label: 'Kitchen light',
-      runnerUp: 'Light TV',
-      value: 0.5,
-      min: ACT_CONFIDENCE_MIN,
+      devices: [
+        { name: 'Kitchen light', value: 0.62 },
+        { name: 'Spots', value: 0.55 },
+      ],
+      min: TARGET_YES,
+      max: TARGET_NO,
     });
   });
 
@@ -1345,11 +1602,7 @@ describe('the parts of a split sentence', () => {
   const under = (prefix: string, answers: Record<string, unknown>) =>
     Object.fromEntries(Object.entries(answers).map(([id, answer]) => [`${prefix}${id}`, answer]));
 
-  const OFF_TV = {
-    ...OFF_KITCHEN_LIGHT,
-    device: choice('d4'),
-    place: choice('r2'),
-  };
+  const OFF_TV = ONE('d4');
   const QUESTION = { ...OFF_KITCHEN_LIGHT, intent: choice('home_question', 0.96) };
 
   it('reads every part in one request, each question pointed at its own part', async () => {
@@ -1363,21 +1616,43 @@ describe('the parts of a split sentence', () => {
     const ids = Object.keys(stub.asked[0] ?? {});
     expect(ids).toContain('p0_intent');
     expect(ids).toContain('p1_intent');
-    // A part is split to be one request, so it is asked as a guard…
-    expect(ids).toContain('p0_multiple');
+    // A part is split to be one thing, so how many things it asks is a guard…
+    expect(ids).toContain('p0_shape');
+    // …each part has its own yes/no for each device…
+    expect(ids).toContain('p0_target_d4');
+    expect(ids).toContain('p1_target_d1');
     // …and only the part with a number is asked what it is of.
     expect(ids).not.toContain('p0_amount');
     expect(ids).toContain('p1_amount');
     // The routing questions are the sentence's, not a part's.
     expect(ids).not.toContain('p0_route');
-    expect(ids).not.toContain('p0_anyCommand');
+    expect(ids).not.toContain('p0_effort');
     expect(stub.states[0]).toEqual({
       parts: ['turn off the TV', 'set the kitchen light to 40%'],
       amounts: [null, '40%'],
     });
     const asked = stub.asked[0] as Record<string, { instructions: string }>;
     expect(asked['p1_intent']?.instructions).toContain('`parts[1]`');
+    expect(asked['p1_target_d1']?.instructions).toContain('`parts[1]`');
     expect(asked['p1_amount']?.instructions).toContain('`amounts[1]`');
+  });
+
+  it('asks the parts about the shortlist rather than the whole house', async () => {
+    const stub = decider({});
+    await decideParts({
+      decider: stub,
+      home: HOME,
+      parts: ['turn off the TV', 'close the blind'],
+      // Likeliest first, and an id the home no longer has is simply not asked about.
+      candidates: ['tv', 'blind', 'no-such-device'],
+    });
+    const asked = stub.asked[0] as Record<string, { criteria: Record<string, string> }>;
+    expect(Object.keys(asked['p0_device']?.criteria ?? {})).toEqual(['d1', 'd2', NONE_OF_THESE]);
+    expect(asked['p0_device']?.criteria['d1']).toBe('"TV" — a TV in the Living room, Downstairs.');
+    expect(Object.keys(asked).filter((id) => id.startsWith('p0_target_'))).toEqual([
+      'p0_target_d1',
+      'p0_target_d2',
+    ]);
   });
 
   it('acts on the parts it is sure of and leaves the rest, quoted, for the model', async () => {
@@ -1419,15 +1694,28 @@ describe('the parts of a split sentence', () => {
     ]);
   });
 
-  it('leaves a part that is still several requests to the model', async () => {
+  it('leaves a part that still asks for several things to the model', async () => {
     const result = await decideParts({
-      decider: decider(under('p0_', { ...OFF_TV, multiple: noul(0.8) })),
+      decider: decider(under('p0_', { ...OFF_TV, shape: choice(SHAPE_SEVERAL, 0.8) })),
       home: HOME,
-      parts: ['turn off the TV and the lights'],
+      parts: ['turn off the TV and open the blind'],
     });
     expect(result.parts[0]?.reading).toMatchObject({
       kind: 'none',
-      standDown: { question: 'multiple', reason: 'blocked' },
+      standDown: { question: 'shape', reason: 'blocked', value: 0.8, max: NEGATIVE_NOUL_MAX },
+    });
+  });
+
+  it('leaves a part it is not sure is a command to the model', async () => {
+    // A part stands on its own, so it has to be sure of itself.
+    const result = await decideParts({
+      decider: decider(under('p0_', { ...OFF_TV, intent: choice('device_command', 0.6) })),
+      home: HOME,
+      parts: ['the TV'],
+    });
+    expect(result.parts[0]?.reading).toMatchObject({
+      kind: 'none',
+      standDown: { question: 'intent', reason: 'unsure', value: 0.6, min: ACT_CONFIDENCE_MIN },
     });
   });
 
@@ -1497,16 +1785,47 @@ describe('saying why it stood down', () => {
     });
   });
 
+  it('lists the devices it could not tell about, and the two bars they sat between', () => {
+    const words = describeStandDown({
+      ...base,
+      question: 'targets',
+      reason: 'unsure',
+      devices: [
+        { name: 'Kitchen light', value: 0.62 },
+        { name: 'Spots', value: 0.55 },
+      ],
+      min: TARGET_YES,
+      max: TARGET_NO,
+    });
+    expect(words.text).toBe("Jev wasn't sure which devices were meant");
+    expect(words.detail).toBe('Kitchen light 0.62, Spots 0.55 — each needs 0.75, or at most 0.35 · 180 ms');
+  });
+
+  it('says when one device was asked for and several fit', () => {
+    const words = describeStandDown({
+      ...base,
+      question: 'single',
+      reason: 'unsure',
+      value: 0.9,
+      devices: [
+        { name: 'Kitchen light', value: 0.95 },
+        { name: 'Spots', value: 0.9 },
+      ],
+    });
+    expect(words.text).toBe('Jev heard one device asked for, and more than one fits');
+    expect(words.detail).toBe('one device: 0.90 · Kitchen light 0.95, Spots 0.90 · 180 ms');
+  });
+
   it('says what a yes/no was the probability of, so the number never stands alone', () => {
     const words = describeStandDown({
       ...base,
-      question: 'multiple',
+      question: 'later',
       reason: 'blocked',
-      value: 0.9,
+      value: 0.8,
       max: NEGATIVE_NOUL_MAX,
     });
-    expect(words.text).toBe('Jev heard more than one request');
-    expect(words.detail).toBe('more than one request: 0.90, needs at most 0.40 · 180 ms');
+    expect(words.text).toBe('Jev heard a time, a delay or a condition');
+    expect(words.detail).toBe('later or on a condition: 0.80, needs at most 0.40 · 180 ms');
   });
 
   it('names the device an unsure action was about', () => {
@@ -1524,19 +1843,18 @@ describe('saying why it stood down', () => {
     expect(words.detail).toBe('on: 0.55, needs 0.85 · 180 ms');
   });
 
-  it('says where a device really is when the place it heard disagrees', () => {
+  it("says when the choice and the device's own yes/no pointed different ways", () => {
     const words = describeStandDown({
       ...base,
-      question: 'place',
+      question: 'targets',
       reason: 'disagreed',
-      answer: 'r1',
-      label: 'Kitchen',
-      value: 0.96,
-      device: 'Ceiling light',
-      deviceRoom: 'Hallway',
+      answer: 'd1',
+      label: 'Kitchen light',
+      value: 0.2,
+      device: 'Kitchen light',
     });
-    expect(words.text).toBe('Jev matched a device outside the place it heard');
-    expect(words.detail).toBe('Kitchen: 0.96 · Ceiling light is in Hallway · 180 ms');
+    expect(words.text).toBe('Jev picked Kitchen light, then read it as not asked for');
+    expect(words.detail).toBe('its own yes/no: 0.20 · 180 ms');
   });
 
   it('says a timeout as a deadline, and whether it had to connect first', () => {
@@ -1575,28 +1893,29 @@ describe('saying why it stood down', () => {
     expect(words.detail).toBe('a device command: 0.60, needs 0.85 · 180 ms · for “the other thing”');
   });
 
-  it('says a group was too big, and by how much', () => {
-    const words = describeStandDown({ ...base, question: 'group', reason: 'size', value: 30, max: MAX_COMMANDS });
+  it('says a request was too big, and by how much', () => {
+    const words = describeStandDown({ ...base, question: 'action', reason: 'size', value: 30, max: MAX_COMMANDS });
     expect(words.text).toBe('Jev found more devices than one request may move');
     expect(words.detail).toBe(`30 commands, up to ${MAX_COMMANDS} · 180 ms`);
   });
 
-  it('says what it found when a place has none of that kind', () => {
+  it('says it never switches that many on at once', () => {
     const words = describeStandDown({
       ...base,
-      question: 'deviceType',
-      reason: 'blocked',
-      label: 'blinds',
-      value: 0.95,
-      because: 'no blinds in the Bedroom',
+      question: 'action',
+      reason: 'size',
+      value: 8,
+      max: ON_TARGETS_MAX,
+      because: `more than ${ON_TARGETS_MAX} devices are never switched on at once`,
     });
-    expect(words.text).toBe('Jev found no blinds in the Bedroom');
+    expect(words.text).toBe(`Jev stood down: more than ${ON_TARGETS_MAX} devices are never switched on at once`);
+    expect(words.detail).toBe('8 devices · 180 ms');
   });
 
   /**
    * **Most stand-downs are the design working**, and the trail is where a
    * person reads. A step on every question somebody asks would bury the one
-   * that matters — so a sentence read confidently as not a command is logged
+   * that matters — so a sentence read confidently as nothing to do is logged
    * and not drawn, and a hub without Jev switched on says nothing at all.
    */
   it('keeps the ordinary ones out of the trail', () => {
@@ -1610,20 +1929,28 @@ describe('saying why it stood down', () => {
         value: 0.97,
       }),
     ).toMatchObject({ phrase: 'read it as a question about the home', audience: 'logged' });
+    expect(
+      describeStandDown({
+        ...base,
+        question: 'shape',
+        reason: 'declined',
+        answer: SHAPE_NOTHING,
+        label: 'nothing to do',
+        value: 0.95,
+      }),
+    ).toMatchObject({ phrase: 'read it as nothing to do', audience: 'logged' });
     expect(describeStandDown({ question: 'model', reason: 'missed', miss: 'off' }).audience).toBe('quiet');
     expect(describeStandDown({ question: 'home', reason: 'size', value: 0, max: 180 }).audience).toBe('quiet');
   });
 
   it('has words for every option the battery can answer', () => {
     // An option added to a question without words here would reach a trail
-    // as an identifier — `one_device: 0.62` is a sentence only its author can
-    // read.
+    // as an identifier — `one_and_more: 0.62` is a sentence only its author
+    // can read.
     const options = [
       intentQuestion(),
-      scopeQuestion(),
-      deviceTypeQuestion(),
+      shapeQuestion([]),
       amountQuestion(),
-      placeQuestion([]),
       deviceQuestion([]),
       routeQuestion([]),
       ...FAMILIES.map((family) => familyQuestion(family)),

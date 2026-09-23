@@ -28,13 +28,17 @@
  *    does not transfer between models, so a threshold is only meaningful next
  *    to the `DECISION_MODEL` it was set against. Each one says whether it was
  *    *measured* or *assumed* — today every one is assumed, and says so.
- * 4. **The state carries only what a question reads.** Accuracy falls as the
- *    state fills with content unrelated to the question, so the state is what
- *    the person said (and, when the sentence was split, its parts, and a
- *    number found in it) — nothing else. The rooms and the devices are the
- *    *criteria* of their own questions, which is where an answer space
- *    belongs. Questions name a field with backticks, the way the docs
- *    reference a nested path.
+ * 4. **The state is what was said; what a question needs to compare lives in
+ *    the question.** Accuracy falls as the state fills with content unrelated
+ *    to a question, and every question reads the whole state — so the state is
+ *    the sentence (or the parts it was split into) and the one number in it,
+ *    nothing else. What a question has to *know* to answer rides with that
+ *    question: the device list is the criteria of `device`, each device's own
+ *    description is in its own `target_` question along with the names it
+ *    could be confused with, and the names that are several words long are in
+ *    `shape`, so "turn on the Light TV" is not read as a light and a TV.
+ *    Questions name a field with backticks, the way the docs reference a
+ *    nested path.
  * 5. **Every closed question has a way out.** The model cannot abstain — it
  *    always answers — so each carries a no-match option, and each speculative
  *    action question carries `unchanged` with an example of the sentence that
@@ -150,17 +154,45 @@ export const NEGATIVE_NOUL_MAX = 0.4;
 export const POSITIVE_NOUL_MIN = 0.85;
 
 /**
- * How sure "this is several requests, and at least one is a command" has to be
- * before the sentence is split.
+ * How sure a device's own `target_` question has to be before the device is
+ * one the request acts on, and how far below the middle it must sit to be one
+ * it does not.
  *
- * **Lower than `POSITIVE_NOUL_MIN`, because being wrong here is cheap in both
- * directions.** A split that was not needed hands back the sentence as its only
- * part, which is then read exactly as it would have been; a split that was
- * needed and not made sends the whole thing to the ordinary round, which is the
- * hub before any of this. Between this and `NEGATIVE_NOUL_MAX` the sentence is
- * neither split nor acted on — it goes to the model whole. Assumed.
+ * **One yes/no per device, not a chain of gates.** The vendor's function-calling
+ * cookbook answers a list-valued argument — "compare nvda, amd and msft" — with
+ * one noul per candidate, and a request's devices are exactly that: "the
+ * kitchen light and the hall light", "all the lights", or the one lamp named
+ * "Light TV". Between the two numbers a device is *in doubt*, and a reading with
+ * a device in doubt acts only when the relative `device` choice settles it.
+ * Both assumed; the vendor's own worked example uses 0.8 and 0.2.
  */
-export const SPLIT_NOUL_MIN = 0.6;
+export const TARGET_YES = 0.75;
+export const TARGET_NO = 0.35;
+
+/**
+ * How sure the `device` choice has to be when that device's own `target_`
+ * question agrees with it.
+ *
+ * **Lower than `ACT_CONFIDENCE_MIN` because it is never alone.** Acting this
+ * way needs the relative choice to lean to one device *and* its own yes/no to
+ * be the only clear yes in the home — two readings of different kinds, both
+ * wrong in the same direction, before the wrong lamp moves. It is what lets
+ * "turn on the light tv" act when the choice is 0.8 sure of *Light TV* and the
+ * *TV* beside it is only in doubt. Assumed.
+ */
+export const DEVICE_LEAN_MIN = 0.6;
+
+/**
+ * How sure "several different things are asked" has to be before the
+ * sentence is split by a generative model.
+ *
+ * **Lower than `ACT_CONFIDENCE_MIN`, because being wrong is cheap both ways.**
+ * A split that was not needed comes back as one part, and the reading of the
+ * whole sentence is used after all; one that was needed and not made sends
+ * the sentence to the ordinary round, which is the hub before any of this.
+ * Assumed.
+ */
+export const SPLIT_MIN = 0.6;
 
 /**
  * The most parts a sentence is split into and still read here.
@@ -182,6 +214,17 @@ export const MAX_PARTS = 4;
 export const MAX_COMMANDS = 24;
 
 /**
+ * The most devices one request may switch **on** — or open, unlock, play, set.
+ *
+ * Switching off is the direction that is safe to get wrong: a light somebody
+ * wanted on is one tap back. Switching on is not — every lamp in every bedroom
+ * at once is a misreading with people at the end of it — so a reading that
+ * would switch on more than this stands down, and the model reads it, or asks.
+ * "Turn on the kitchen lights" fits; "turn everything on" does not. Assumed.
+ */
+export const ON_TARGETS_MAX = 6;
+
+/**
  * How many devices may be offered as options.
  *
  * The API's own ceiling is 255. This is lower because a long list is also a
@@ -189,6 +232,36 @@ export const MAX_COMMANDS = 24;
  * one the fast path stands down on rather than guesses in.
  */
 export const MAX_DEVICE_OPTIONS = 180;
+
+/**
+ * How many devices get a `target_` question of their own.
+ *
+ * One per device is what lets a request name several of them — and it is one
+ * more question each, about sixty tokens, in a request whose latency is flat
+ * in its question count. Past this a home is read with the `device` choice
+ * alone, which names one device and never a set. Assumed.
+ */
+export const MAX_TARGET_QUESTIONS = 120;
+
+/**
+ * The most devices the parts of a split sentence are asked about.
+ *
+ * The first reading has already said which devices the sentence mentions at
+ * all — anything its `target_` question did not answer with a clear no — so
+ * the parts are asked about those, not the whole house: the vendor's skill
+ * cookbook's shape, a cheap read of everything and then a close look at a
+ * few.
+ */
+export const PART_CANDIDATES_MAX = 24;
+
+/**
+ * The most device names `shape` is shown.
+ *
+ * Only names of more than one word are there at all — they are the ones that
+ * can be misread as two things — so this bounds a very large home rather than
+ * an ordinary one.
+ */
+export const SHAPE_NAMES_MAX = 60;
 
 /* ------------------------------------------------------------------ *
  * What was said, and what it is.
@@ -241,49 +314,59 @@ export function intentQuestion(subject: Subject = 'said'): ChoiceQuestion {
   };
 }
 
+/** How many things a sentence asks to be done — see `shapeQuestion`. */
+export const SHAPE_ONE = 'one';
+export const SHAPE_ONE_AND_MORE = 'one_and_more';
+export const SHAPE_SEVERAL = 'several';
+export const SHAPE_NOTHING = 'nothing';
+
 /**
- * Whether one sentence carries more than one request.
+ * How many different things the sentence asks to be done to the home.
  *
- * A high answer, with `ANY_COMMAND_QUESTION` beside it, is what **splits** the
- * sentence: a generative model writes the parts — splitting is writing, which
- * this model does not do — and they come back here to be read one by one in a
- * second request. That is the vendor's own smart-home demo, step for step.
+ * **This is the question that decides whether a sentence is split**, and the
+ * vendor's smart-home demo asks it as "more than one distinct action". It is a
+ * choice rather than a yes/no because the four answers lead four ways: one
+ * thing is read and done; one thing beside a question is done and the rest is
+ * the model's; several different things are split by a generative model and
+ * read part by part; nothing done is the model's.
  *
- * The false criterion carries the case that must not split: a group is *one*
- * request, however many devices it moves.
+ * **One action on several devices is one thing.** "Turn off the kitchen light
+ * and the hall light" is one action with a set of devices, which the
+ * `target_` questions carry, so it is never split.
+ *
+ * **And it is told the device names that are several words long**, because it
+ * was not, and "turn on the light tv" — the device called *Light TV* — was
+ * read as a light and a TV, split into two requests, and neither of them
+ * matched anything. A name is one device however many words it has.
  */
-export function multipleQuestion(subject: Subject = 'said'): NoulQuestion {
+export function shapeQuestion(
+  multiWordNames: readonly string[],
+  subject: Subject = 'said',
+): ChoiceQuestion {
+  const names =
+    multiWordNames.length > 0
+      ? ` A device's name is one thing however many words it has — this home has devices called ${multiWordNames
+          .map((name) => `"${name}"`)
+          .join(', ')}.`
+      : '';
   return {
-    type: 'noul',
-    instructions: `\`${subject}\` asks for more than one separate thing.`,
+    type: 'choice',
+    instructions: `How many different things does \`${subject}\` ask to be done to the home?${names}`,
     criteria: {
-      true:
-        'Two or more separate requests or questions — "turn off the TV and close the blinds", ' +
-        '"turn on the kitchen light and the hall light", "switch the fan off and tell me the time".',
-      false:
-        'One request, even a long one or one about many devices — "turn off all the lights in ' +
-        'the house", "dim the bedroom lamp".',
+      [SHAPE_ONE]:
+        'One thing, even to many devices — "turn off all the lights", "turn off the kitchen light ' +
+        'and the hall light", "set the bedroom lamp to 40%".',
+      [SHAPE_ONE_AND_MORE]:
+        'One thing done, and beside it a question or a remark that asks for nothing to be done — ' +
+        '"switch the fan off and tell me the time".',
+      [SHAPE_SEVERAL]:
+        'Two or more different things done — "turn off the TV and close the blinds", "turn on the ' +
+        'lamp and turn off the fan".',
+      [SHAPE_NOTHING]:
+        'Nothing done to the home now — a question, chat, or a rule for the home to follow later.',
     },
   };
 }
-
-/**
- * Whether any part of the sentence is a command to the home.
- *
- * Asked so a split is only paid for when it can save something: a sentence
- * that is two questions goes to the model whole, because nothing in it is a
- * command this path could carry out.
- */
-export const ANY_COMMAND_QUESTION: NoulQuestion = {
-  type: 'noul',
-  instructions:
-    'At least part of `said` asks for something in the home to be changed now — switched, ' +
-    'dimmed, coloured, opened, closed, locked, played, paused or set.',
-  criteria: {
-    true: 'Some of it is a command to a device, like "turn off the TV" in "turn off the TV and tell me the time".',
-    false: 'None of it is: it only asks questions, chats, or asks for a rule or a schedule.',
-  },
-};
 
 /**
  * Whether the request is for later, for a while, or on a condition.
@@ -325,115 +408,18 @@ export function negatedQuestion(subject: Subject = 'said'): NoulQuestion {
   };
 }
 
-/**
- * How much of the home the request is about.
- *
- * `one_device` and `group` are acted on; `several_devices` is split, since
- * "the kitchen light and the hall light" is two requests the way the vendor
- * demo reads it; `none` is a request about no device at all.
- */
-export function scopeQuestion(subject: Subject = 'said'): ChoiceQuestion {
-  return {
-    type: 'choice',
-    instructions: `How many devices does \`${subject}\` want changed?`,
-    criteria: {
-      one_device: 'One particular device, named or described — "the kitchen light", "the TV".',
-      several_devices:
-        'Two or more particular devices, named one by one — "the kitchen light and the hall light".',
-      group:
-        'Every device of one kind in a room, a zone or the whole home — "all the lights", "the ' +
-        'blinds in the bedroom", "everything in the living room", or "turn off the lights" with ' +
-        'no room named.',
-      none: 'No device at all.',
-    },
-  };
-}
-
-/** The place options that are not a room or a zone. */
-export const WHOLE_HOME = 'whole_home';
-export const NOT_SAID = 'not_said';
-/** The option every catalog question carries when nothing in it fits. */
+/** The option `device` carries when nothing in it fits. */
 export const NONE_OF_THESE = 'none_of_these';
 
 /**
- * One room or zone the place question offers, under the key the model answers
- * with.
+ * One device, as the questions describe it, under the key the model answers
+ * `device` with.
  *
- * **Keys are short and plain — `r1`, `z1` — and the name is in the
+ * **Keys are short and plain — `d1`, `d2` — and the name is in the
  * description.** A key is what comes back, so it has to survive the wire
- * whatever somebody called their kitchen: a name in Cyrillic, with quotes or
- * emoji in it, or shared with another room. The description carries the
- * meaning, which is what the model reads to choose.
- */
-export interface PlaceOption {
-  key: string;
-  kind: 'room' | 'zone';
-  name: string;
-  /** For a room, the zone it sits in. */
-  zoneName?: string | undefined;
-}
-
-/**
- * Which part of the home the request names.
- *
- * Built rather than written down, because the answer space *is* this home. It
- * does two jobs: for a group it says where the group is, and for one device it
- * is a **cross-check** — answered blind beside the device question, so when
- * both are confident and disagree, one of them is wrong and the hub stands
- * down rather than guessing which.
- */
-export function placeQuestion(
-  places: readonly PlaceOption[],
-  subject: Subject = 'said',
-): ChoiceQuestion {
-  const criteria: Record<string, string> = {};
-  for (const place of places) {
-    criteria[place.key] =
-      place.kind === 'zone'
-        ? `"${place.name}", a zone of the home — every room in it.`
-        : place.zoneName === undefined
-          ? `"${place.name}", a room.`
-          : `"${place.name}", a room in "${place.zoneName}".`;
-  }
-  criteria[WHOLE_HOME] =
-    'The whole home — every room. "All the lights", with no room named, means the whole home too.';
-  criteria[NOT_SAID] = 'No place at all — like "turn off the lights" or "open the blinds".';
-  return {
-    type: 'choice',
-    instructions: `Which part of the home does \`${subject}\` name?`,
-    criteria,
-  };
-}
-
-/**
- * What kind of device a group is made of.
- *
- * Asked every time and read only for a group: "turn off the lights in the
- * kitchen" is the kitchen's lights, not its fridge. `everything` is read
- * narrowly on purpose — see `home-command.ts` on what "everything" may touch.
- */
-export function deviceTypeQuestion(subject: Subject = 'said'): ChoiceQuestion {
-  return {
-    type: 'choice',
-    instructions: `Suppose \`${subject}\` is about a group of devices. What kind of device is the group?`,
-    criteria: {
-      lights: 'Lights and lamps.',
-      sockets: 'Plugs, sockets and switches that power something else.',
-      blinds: 'Blinds, curtains, shutters and garage doors.',
-      locks: 'Door locks.',
-      media: 'TVs and speakers.',
-      fans: 'Fans and air purifiers.',
-      climate: 'Heating, air conditioning and thermostats.',
-      everything: 'Everything, whatever kind it is — "everything in the kitchen", "all off".',
-      other: 'Some other kind, or no kind at all.',
-    },
-  };
-}
-
-/**
- * One device the device question offers, under the key the model answers
- * with — `d1`, `d2`, for `PlaceOption`'s reason: the key has to survive the
- * wire whatever the device is called, and the description is what is read.
+ * whatever somebody called the device: a name in Cyrillic, with quotes or emoji
+ * in it, or shared with another device. The description carries the meaning,
+ * which is what the model reads to choose.
  */
 export interface DeviceOption {
   key: string;
@@ -441,28 +427,36 @@ export interface DeviceOption {
   /** "A light", "A plug or socket" — see `KIND_WORDS` in `home-command.ts`. */
   kindWords: string;
   roomName?: string | undefined;
+  /** The zone the room is in, so "the lights downstairs" has something to match. */
+  zoneName?: string | undefined;
+}
+
+/** "a light in the Kitchen, Downstairs" — the one description every question uses. */
+export function describeDevice(device: DeviceOption): string {
+  // Only the first letter: "A TV" is "a TV", never "a tv".
+  const kind = device.kindWords.charAt(0).toLowerCase() + device.kindWords.slice(1);
+  if (device.roomName === undefined) return `${kind}, in no particular room`;
+  return device.zoneName === undefined
+    ? `${kind} in the ${device.roomName}`
+    : `${kind} in the ${device.roomName}, ${device.zoneName}`;
 }
 
 /**
- * Which one device, over the home's own names.
+ * Which **one** device, over the home's own names — the relative half of
+ * finding a request's devices.
  *
- * Each option is described by the device's **name**, what kind of thing it is
- * and where — which is what "the lamp" and "the one in the kitchen" are
- * matched against — under a short plain key. The keys used to be the devices'
- * UUIDs: forty tokens of noise per option in front of the one thing that
- * mattered, times every device in the house.
+ * A choice compares its options, which one yes/no per device cannot: asked
+ * separately, "turn on the light tv" is plausibly about a device called *TV*
+ * as well as the one called *Light TV*. So this settles *which* when one device
+ * is meant, and the `target_` questions settle *which ones* when several are —
+ * the jaggedness page's own pairing of the two.
  */
 export function deviceQuestion(
   devices: readonly DeviceOption[],
   subject: Subject = 'said',
 ): ChoiceQuestion {
   const criteria: Record<string, string> = {};
-  for (const device of devices) {
-    criteria[device.key] =
-      device.roomName === undefined
-        ? `"${device.name}" — ${device.kindWords.toLowerCase()}, in no particular room.`
-        : `"${device.name}" — ${device.kindWords.toLowerCase()} in the ${device.roomName}.`;
-  }
+  for (const device of devices) criteria[device.key] = `"${device.name}" — ${describeDevice(device)}.`;
   criteria[NONE_OF_THESE] = 'None of these, several of them, or a device that is not listed.';
   return {
     type: 'choice',
@@ -470,6 +464,91 @@ export function deviceQuestion(
       `Which one device in this home is \`${subject}\` about? Go by the name they used, the ` +
       'kind of device, and the room they mentioned.',
     criteria,
+  };
+}
+
+/**
+ * Whether the request is for something to be done to **this** device — one
+ * yes/no per device, which is how a request names a set of them.
+ *
+ * Yes for the device named, and for every device like it when the request is
+ * for all of a kind in a room, a zone or the house. The other devices it could
+ * be confused with — those sharing a word of its name — are named in the
+ * question, because a yes/no cannot compare itself with the question beside it
+ * and "the light tv" has to be heard as *Light TV* and not as *TV*.
+ */
+export function targetQuestion(
+  device: DeviceOption,
+  confusable: readonly DeviceOption[],
+  subject: Subject = 'said',
+): NoulQuestion {
+  // Semicolons between them, because a description has a comma of its own.
+  const others = confusable.map((other) => `"${other.name}" (${describeDevice(other)})`);
+  const apart =
+    others.length === 0
+      ? ''
+      : others.length === 1
+        ? ` It is a different device from ${others[0]!}.`
+        : ` It is a different device from each of these: ${others.join('; ')}.`;
+  return {
+    type: 'noul',
+    instructions:
+      `\`${subject}\` asks for something to be done to "${device.name}" — ${describeDevice(device)}.` +
+      apart,
+    criteria: {
+      true:
+        'It names this device, or asks for every device like it in its room, its zone or the whole ' +
+        'home — "turn off all the lights", "everything in the living room".',
+      false:
+        'It is about other devices, names a different device with a similar name, or asks for ' +
+        'nothing to be done.',
+    },
+  };
+}
+
+/**
+ * Whether the request is for one single device.
+ *
+ * **Read only when several devices' own `target_` questions said yes**, as a
+ * veto on acting on all of them. "Switch the light on" in a home with three
+ * lights is plausibly about each of them taken one at a time — three yeses to
+ * one question — and this is what hears that the sentence asked for one, so
+ * the model can ask which. It is never a gate on acting on one device: the
+ * chain it replaced stood down on "one device or a group" for a home with a
+ * single light in it.
+ */
+export function singleQuestion(subject: Subject = 'said'): NoulQuestion {
+  return {
+    type: 'noul',
+    instructions: `\`${subject}\` asks for something to be done to one single device.`,
+    criteria: {
+      true: 'One device — "turn off the lamp", "switch the light on", "close the bedroom blind".',
+      false:
+        'Several devices, or every device of a kind — "turn off the lights", "the lamp and the fan", ' +
+        '"everything in the kitchen".',
+    },
+  };
+}
+
+/**
+ * Whether the request is for *everything* — all devices at once, whatever
+ * their kind.
+ *
+ * **The one word read narrowly on purpose.** "Turn everything off in the
+ * kitchen" means the lights, the TV and the fan — not the fridge on a smart
+ * plug, the heating, or the lock on the back door — and a `target_` question
+ * answering yes for the fridge plug is answering the sentence correctly. So
+ * this is asked beside them, and when it is a yes the set is narrowed in code
+ * to what somebody switches off leaving a room (`EVERYTHING_KINDS`).
+ */
+export function everythingQuestion(subject: Subject = 'said'): NoulQuestion {
+  return {
+    type: 'noul',
+    instructions: `\`${subject}\` asks for everything to be changed at once, whatever kind of device it is.`,
+    criteria: {
+      true: 'Like "turn everything off", "all off", "everything in the kitchen".',
+      false: 'It names devices, or a kind of device — "the lights", "the TV and the lamp".',
+    },
   };
 }
 

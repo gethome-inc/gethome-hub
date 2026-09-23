@@ -722,19 +722,24 @@ carrying the routing questions, the guards, the home's catalog and every action
 family at once (see [jev.md](jev.md)). Most sentences come back with nothing to
 act on and the round runs exactly as it always did. Four do not:
 
-- **A plain command — to one device, or to every device of one kind in a
-  room, a zone or the house** — is carried out immediately, through the same
-  `control` path the model's own tool uses, and the round is then primed with
-  an exact account of what was done (`fastPathPriming`: every device by name,
-  what was done in words, what failed and why, what was offline and not tried)
-  so the model writes the sentence and nothing else, at the lowest effort. One
-  round instead of two, and the light moves first.
-- **A sentence that is several requests with a command among them** is split
-  by the conversation's own model into its parts, the parts are read in one
-  more request, and every part read confidently is carried out; what is left —
-  a question, a rule, a part it was unsure of — is the model's, quoted in the
-  same account. "Turn off the light and what's the temperature?" is the light
-  off before the model is asked, and the model answering the question.
+- **A plain command — to one device, or to a set of them: "the kitchen light
+  and the hall light", "all the lights downstairs"** — is carried out
+  immediately, through the same `control` path the model's own tool uses, and
+  the round is then primed with an exact account of what was done
+  (`fastPathPriming`: every device by name, what was done in words, what failed
+  and why, what was offline and not tried). When that was the whole message the
+  model is told so and writes the sentence at the lowest effort: one round
+  instead of two, and the light moves first. When it was not — a question came
+  with it ("turn off the light and what's the temperature?"), or there was a
+  device the reading could not rule out, which it names and leaves alone — the
+  round is the ordinary one and does the rest.
+- **A sentence that asks for several different things** is split by the
+  conversation's own model into its parts — told the home's device names of
+  more than one word, so a device called *Light TV* is never cut in two — the
+  parts are read in one more request, and every part read confidently is
+  carried out; what is left — a question, a rule, a part it was unsure of — is
+  the model's, quoted in the same account. One action on several devices is not
+  split: it is one request.
 - **A self-contained automation request** is handed straight to the automations
   agent through `delegate` — the same call, so the permission check and the
   resume behaviour are unchanged. Typed only: `spoken()` drops a `handoff` row,

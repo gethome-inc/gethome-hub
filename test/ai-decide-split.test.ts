@@ -4,6 +4,7 @@ import { MAX_PARTS } from '../src/ai/decide/questions.js';
 import {
   SPLIT_SYSTEM_PROMPT,
   checkParts,
+  splitMessage,
   splitRequest,
   type SplitInput,
 } from '../src/ai/decide/split.js';
@@ -134,6 +135,23 @@ describe('the prompt', () => {
     expect(SPLIT_SYSTEM_PROMPT).toContain('return it unchanged as the only item');
     expect(SPLIT_SYSTEM_PROMPT).toContain(`more than ${MAX_PARTS}`);
   });
+
+  it('keeps one action on several devices, and a name of several words, in one piece', () => {
+    // What `shapeQuestion` counts as one thing, so the two never disagree.
+    expect(SPLIT_SYSTEM_PROMPT).toContain('"turn off the kitchen light and the hall light"');
+    expect(SPLIT_SYSTEM_PROMPT).toContain('never split a name');
+  });
+
+  it('puts the names that could be cut in two ahead of the message, labelled apart from it', () => {
+    // "Turn on the light tv" came back as "turn on the light" and "turn on the
+    // tv" when the model had never been told there is a device called Light TV.
+    expect(splitMessage('turn on the light tv', ['Light TV', 'Kitchen light'])).toBe(
+      'Device names in this home: "Light TV", "Kitchen light".\n\nThe message:\nturn on the light tv',
+    );
+    // And a home with no such names sends the message exactly as it was said.
+    expect(splitMessage('turn on the light tv', [])).toBe('turn on the light tv');
+    expect(splitMessage('turn on the light tv')).toBe('turn on the light tv');
+  });
 });
 
 describe('on Anthropic', () => {
@@ -167,6 +185,16 @@ describe('on Anthropic', () => {
           },
         },
       },
+    });
+  });
+
+  it('sends the device names with the message, and never in the system prompt', async () => {
+    // The prompt stays the same bytes for every home and every call.
+    const { sent, fetch } = stubFetch(() => json(anthropicMessage(JSON.stringify({ parts: ['turn on the light tv'] }))));
+    await splitRequest(anthropic(fetch, { said: 'turn on the light tv', deviceNames: ['Light TV'] }));
+    expect(sent[0]?.body).toMatchObject({
+      system: SPLIT_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: splitMessage('turn on the light tv', ['Light TV']) }],
     });
   });
 
@@ -217,6 +245,15 @@ describe('on OpenAI', () => {
       text: { format: { type: 'json_schema', name: 'parts', strict: true } },
       // A split is not a conversation anybody will come back to.
       store: false,
+    });
+  });
+
+  it('sends the device names with the message there too', async () => {
+    const { sent, fetch } = stubFetch(() => json(openAiResponse(JSON.stringify({ parts: ['turn on the light tv'] }))));
+    await splitRequest(openai(fetch, { said: 'turn on the light tv', deviceNames: ['Light TV'] }));
+    expect(sent[0]?.body).toMatchObject({
+      instructions: SPLIT_SYSTEM_PROMPT,
+      input: splitMessage('turn on the light tv', ['Light TV']),
     });
   });
 
