@@ -1,10 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { pino } from 'pino';
 import type { AutomationHomeView } from '../src/automations/targets.js';
+import { ASSISTANT_MAX_TURNS, createAssistantConversation } from '../src/ai/assistant-agent.js';
+import { assistantSystemPrompt } from '../src/ai/assistant-prompts.js';
 import {
   ASSISTANT_MAX_COMMANDS_PER_DEVICE,
+  assistantTools,
   runAssistantTool,
   type AssistantToolContext,
 } from '../src/ai/assistant-tools.js';
+import { AGENT_MODELS } from '../src/ai/models.js';
 import type { HubCommand } from '../src/schema/index.js';
 
 /**
@@ -102,5 +107,91 @@ describe('working the home from a reply', () => {
     );
     expect(result).toMatchObject({ isError: true, text: 'There is no device with that id in this home.' });
     expect(budget.perDevice.size).toBe(0);
+  });
+});
+
+/**
+ * The same bound, seen from the loop: how many devices one *message* moves.
+ *
+ * `runAssistantTool` allows every device, but a message may take only
+ * `ASSISTANT_MAX_TURNS` rounds — so a model left to work one device a round
+ * would run out of them at about nine devices, with nothing wrong except the
+ * pacing. Every call in a response is carried out, so the answer is one
+ * response carrying all of them, and the prompt says so.
+ */
+describe('one message, the whole home', () => {
+  /** One SSE frame, exactly as the Responses stream writes it. */
+  const frame = (type: string, data: unknown) => `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
+
+  /** A fresh streamed body per request: a `ReadableStream` is read once. */
+  const answering = (output: unknown[]) => () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          new TextEncoder().encode(
+            frame('response.completed', {
+              response: { status: 'completed', output, usage: { input_tokens: 100, output_tokens: 50 } },
+            }),
+          ),
+        );
+        controller.close();
+      },
+    });
+    return Promise.resolve(
+      new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
+    );
+  };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('carries out every device one response names, in that one round', async () => {
+    // More devices than a message has rounds, so this cannot pass by pacing.
+    const count = ASSISTANT_MAX_TURNS * 2;
+    const home = homeOf(count);
+    const context = contextFor(home);
+    const calls = home.devices.map((device, index) => ({
+      type: 'function_call',
+      call_id: `call_${index}`,
+      name: 'control_device',
+      // A string of JSON on this API, never an object.
+      arguments: JSON.stringify({ deviceId: device.id, command: { type: 'power', on: false } }),
+    }));
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(answering(calls))
+      .mockImplementationOnce(
+        answering([{ type: 'message', content: [{ type: 'output_text', text: 'They are all off.' }] }]),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const conversation = await createAssistantConversation({
+      auth: { secret: 'sk-proj-test' },
+      provider: 'openai',
+      modelId: AGENT_MODELS.openai.default,
+      systemPrompt: 'system',
+      taskPrompt: 'this home',
+      tools: context,
+      log: pino({ level: 'silent' }),
+    });
+    const turn = await conversation.send('turn off all the lights');
+
+    expect(turn).toEqual({ kind: 'said', text: 'They are all off.' });
+    expect(context.sent.map((entry) => entry.deviceId)).toEqual(home.devices.map((device) => device.id));
+    // Two rounds: the one that did it, and the one that said so — with every
+    // call answered in the second request, or the API refuses the next one.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const init = fetchMock.mock.calls[1]?.[1] as RequestInit | undefined;
+    const second = JSON.parse(String(init?.body)) as { input: { type?: string }[] };
+    expect(second.input.filter((item) => item.type === 'function_call_output')).toHaveLength(count);
+  });
+
+  it('asks the model for every device in the same response', () => {
+    // The wording is the behaviour: without it a model may well pace itself a
+    // device a round, and the test above could never catch that.
+    expect(assistantSystemPrompt([])).toContain('in the same response, however many there are');
+    const control = assistantTools([]).find((tool) => tool.name === 'control_device');
+    expect(control?.description).toContain('all of them in the same response');
   });
 });

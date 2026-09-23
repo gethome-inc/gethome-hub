@@ -175,7 +175,8 @@ export function assistantTools(
       description:
         'Work one device — switch it, dim it, set a colour, move a blind, lock a lock. This ' +
         'really does it; there is no preview and nothing to confirm afterwards. Send one call ' +
-        'per device, and check the device has the capability first if you are not sure. Units ' +
+        'per device — for several devices, all of them in the same response — and check the ' +
+        'device has the capability first if you are not sure. Units ' +
         'are exact: levels are 1–254 and never percentages, temperatures are hundredths of a ' +
         'degree, a covering percent is hundredths of a percent with 0 fully open.',
       schema: () => json(controlDeviceInput),

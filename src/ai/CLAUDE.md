@@ -960,4 +960,8 @@ domains — update them in the same change.
   cut every whole-home request short — fifteen bulbs, eight switched off and
   permission asked for the rest — so a sentence somebody can say in one breath
   could not be carried out in one reply. One device worked over and over is a
-  loop, and that is all the bound stops.
+  loop, and that is all the bound stops. **And one response carries every
+  device a request covers**: a message has `ASSISTANT_MAX_TURNS` (10) rounds,
+  so a model pacing itself a device a round would run out of them at about
+  nine devices — the prompt and the tool's description both ask for all of
+  them in the same response, and a suite drives twenty through one round.

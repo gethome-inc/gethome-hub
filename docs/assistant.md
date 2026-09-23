@@ -173,6 +173,15 @@ be asked for everything at once; what one reply should not do is work the same
 device over and over, which is a loop rather than a request, and that is all
 the bound stops.
 
+**And one response carries every device a request covers.** Every call in a
+response is carried out, in the order it was sent, while a message may take
+only `ASSISTANT_MAX_TURNS` (10) rounds — so a model left to work one device a
+round would run out of rounds at about nine devices, with nothing wrong except
+the pacing, and a long list would end in "I have used all 10 steps". The
+system prompt and `control_device`'s own description both ask for all of a
+request's devices in the same response, however many there are, and
+`test/assistant-tools.test.ts` drives twenty through one round.
+
 **`delegate`** is below. `run_automation` presses a rule somebody could press,
 through the engine's own `runManually`. `ask_user` is the automations agent's
 schema **verbatim**, so a question the assistant asks draws with the same
