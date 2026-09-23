@@ -935,6 +935,14 @@ slot**: a tool's own `detail` is the better sentence wherever there is one, and
 the buffer is spent either way, since reasoning that belonged to a step which
 already had a detail belongs to nothing else either.
 
+**It is the model's own words, Markdown and all.** OpenAI's summary arrives in
+parts, each opening on a bold heading (`**Clarifying the light**`) and none
+saying where it ends — so the transport puts a blank line between parts, or the
+second heading ran onto the last sentence of the first and nothing downstream
+could tell where the join had been. Beyond that it is streamed and stored
+verbatim; an app draws it as plain lines, which is where the asterisks come
+off (the iOS app's `AgentStepRow.plain`).
+
 Both of these are what made `clip()` necessary. `slice` was enough while these
 fields held the hub's own fixed sentences, which never came near either bound;
 they hold model-written prose now, so a cut lands mid-word most times it happens
