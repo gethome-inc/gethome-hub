@@ -1,7 +1,7 @@
 import type { AiProvider } from '../core/settings.js';
 import type { Logger } from '../logging.js';
 import { type AgentAuth } from './agent-core.js';
-import { isSupportedModel, supportedModelIds } from './models.js';
+import { budgetScale, isSupportedModel, supportedModelIds } from './models.js';
 import { QuestionGate, type ChatToolResult } from './chat/agent-loop.js';
 import { createChatTransport } from './chat/transport.js';
 import { AGENT_EFFORT } from './chat/chat-runtime.js';
@@ -54,7 +54,8 @@ import {
 /** Provider rounds one *user message* may cost. A person is waiting, and this
  *  one is usually answering rather than building something. */
 export const ASSISTANT_MAX_TURNS = 10;
-/** What one conversation may spend, in total. */
+/** What one conversation may spend, in total — in Opus 5's dollars, which
+ *  `budgetScale` stretches for a model priced above it. */
 export const ASSISTANT_MAX_BUDGET_USD = 0.5;
 /** One turn's wall clock. Two minutes, not the automations agent's three: this
  *  one is not writing a document and a silent two minutes has already failed. */
@@ -119,6 +120,12 @@ export async function createAssistantConversation(
 
   const gate = new QuestionGate(transport);
   let opened = false;
+  /**
+   * The conversation's cap in its own model's dollars — see `budgetScale`.
+   * It was sized against Opus 5, and a model priced twice as high would
+   * otherwise end a conversation at half the rounds any other one allows.
+   */
+  const budgetUsd = ASSISTANT_MAX_BUDGET_USD * budgetScale(modelId);
 
   async function pump(context: ChatTurnContext | undefined): Promise<AssistantTurn> {
     const watchdog = setTimeout(() => controller.abort(), ASSISTANT_TIMEOUT_MS);
@@ -147,7 +154,7 @@ export async function createAssistantConversation(
          */
         context?.onStep?.(turn === 1 ? 'Reading your home' : 'Working it out', 'thinking');
 
-        if (transport.costUsd() >= ASSISTANT_MAX_BUDGET_USD) {
+        if (transport.costUsd() >= budgetUsd) {
           return {
             kind: 'stopped',
             reason: 'This conversation has reached its cost limit. Start a new one to carry on.',

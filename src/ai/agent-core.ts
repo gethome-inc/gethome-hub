@@ -43,7 +43,8 @@ export const EFFORT = 'high' as const;
 
 /** Agentic turns — one request/response round each. */
 export const AGENT_MAX_TURNS = 40;
-/** Hard ceiling per run, checked against the running cost estimate. */
+/** Hard ceiling per run, checked against the running cost estimate — in Opus
+ *  5's dollars, which `budgetScale` stretches for a model priced above it. */
 export const AGENT_MAX_BUDGET_USD = 2;
 export const AGENT_TIMEOUT_MS = 10 * 60 * 1000;
 

@@ -140,7 +140,7 @@ function conversationFor(homeDevices: { id: string; name: string }[] = []) {
   return createAutomationConversation({
     auth: { secret: 'sk-ant-test' },
     provider: 'anthropic',
-    modelId: 'claude-opus-5',
+    modelId: 'claude-opus-5-5',
     systemPrompt: 'system',
     taskPrompt: 'this home',
     log,
@@ -200,7 +200,7 @@ describe('the automation conversation', () => {
     // The parameters the loop actually sent — proof it went through `stream`,
     // since `create` would have thrown on the way in.
     expect(streamMock.mock.calls[0]?.[0]).toMatchObject({
-      model: 'claude-opus-5',
+      model: 'claude-opus-5-5',
       thinking: { type: 'adaptive', display: 'summarized' },
     });
   });
@@ -331,6 +331,54 @@ describe('the automation conversation', () => {
     expect(turn.kind).toBe('said');
     const second = streamMock.mock.calls[1]?.[0] as { messages: unknown[] };
     expect(JSON.stringify(second.messages)).toContain('changes continuously');
+  });
+
+  /**
+   * **Every request carries the one before it, unchanged, as its prefix.**
+   *
+   * Opus 5.5 binds each thinking block to everything ahead of it — the system
+   * prompt, the tools and every earlier message — and for accounts created
+   * after 31 August 2026 a request that replays a block after any of those has
+   * changed is refused outright. The loop has only ever appended, which is
+   * what makes it safe; this is what keeps it that way, since a well-meant
+   * "tidy the history" edit would pass every other test here and fail every
+   * conversation on the model the hub recommends.
+   *
+   * Snapshotted per request, because the loop hands the *same* array to each
+   * one and keeps pushing to it (see `closedToolIds`).
+   */
+  it('only ever appends to what it has already sent', async () => {
+    const sent: { system: string; tools: string; messages: unknown[] }[] = [];
+    const replies = [
+      assistant([thinking('Checking what is there.'), toolUse('list_devices', {})]),
+      assistant([toolUse('list_rooms_zones', {})]),
+      assistant([
+        text('Done — that lamp goes on in the evening.'),
+        toolUse('submit_automation', { document: goodDocument, replaces: null }),
+      ]),
+    ];
+    streamMock.mockImplementation((params: { system: unknown; tools: unknown; messages: unknown[] }) => {
+      sent.push({
+        system: JSON.stringify(params.system),
+        tools: JSON.stringify(params.tools),
+        messages: structuredClone(params.messages),
+      });
+      return replies[sent.length - 1] ?? assistant([text('nothing left to say')], 'end_turn');
+    });
+
+    const conversation = await conversationFor([{ id: deviceId, name: 'Kitchen lamp' }]);
+    await conversation.send('lights in the evening');
+    await conversation.send('and the hall too');
+
+    expect(sent.length).toBeGreaterThanOrEqual(4);
+    for (let index = 1; index < sent.length; index += 1) {
+      const before = sent[index - 1]!;
+      const after = sent[index]!;
+      expect(after.system).toBe(before.system);
+      expect(after.tools).toBe(before.tools);
+      expect(after.messages.slice(0, before.messages.length)).toEqual(before.messages);
+      expect(after.messages.length).toBeGreaterThan(before.messages.length);
+    }
   });
 
   it('answers an ordinary tool call and carries on', async () => {
@@ -913,7 +961,7 @@ describe('the chat service', () => {
       };
       const scripted: AutomationConversation = {
         provider: 'anthropic',
-        modelId: 'claude-opus-5',
+        modelId: 'claude-opus-5-5',
         effort: 'medium' as const,
         awaitingAnswer: () => false,
         costUsd: cost ?? (() => 0.12),
@@ -1411,8 +1459,8 @@ describe('the chat service', () => {
     // Read back as recorded — the provider and the id are facts about a run
     // that happened, and only the *label* is looked up.
     expect(summary?.spend?.provider).toBe('anthropic');
-    expect(summary?.spend?.modelId).toBe('claude-opus-5');
-    expect(summary?.spend?.model).toBe('Opus 5');
+    expect(summary?.spend?.modelId).toBe('claude-opus-5-5');
+    expect(summary?.spend?.model).toBe('Opus 5.5');
   });
 
   it('banks a turn as it lands, and still counts what is not on disk yet', async () => {
@@ -1456,7 +1504,7 @@ describe('the chat service', () => {
     spent = 0.2;
     const [summary] = await chat.list();
     expect(summary?.spend?.usd).toBeCloseTo(0.2);
-    expect(summary?.spend?.model).toBe('Opus 5');
+    expect(summary?.spend?.model).toBe('Opus 5.5');
   });
 
   it('records the delta on a second submission rather than the total twice', async () => {
@@ -1796,6 +1844,26 @@ describe('AutomationChat provider selection', () => {
     // the key follows it rather than defaulting to Anthropic's.
     await settings.setAiKey('anthropic', 'sk-ant-api03-not-this-one');
     await settings.setAiKey('openai', 'sk-proj-this-one');
+    await settings.setAutomationsModel('gpt-6-luna');
+
+    const { chat, handed } = await chatFor();
+    await chat.start({ memberId, message: 'lights at ten please' });
+    await chat.idle();
+
+    expect(handed.provider).toBe('openai');
+    expect(handed.secret).toBe('sk-proj-this-one');
+    expect(handed.modelId).toBe('gpt-6-luna');
+  });
+
+  /**
+   * **What an update does to a conversation's model, on the path that runs
+   * one.** A home that chose GPT-5.6 Terra before this build retired it is
+   * handed GPT-6 Sol — the model that replaced it, on the vendor they chose —
+   * rather than the retired id, and rather than Anthropic's default.
+   */
+  it('hands a conversation the successor of a retired model, on the vendor it chose', async () => {
+    await settings.setAiKey('anthropic', 'sk-ant-api03-not-this-one');
+    await settings.setAiKey('openai', 'sk-proj-this-one');
     await settings.setAutomationsModel('gpt-5.6-terra');
 
     const { chat, handed } = await chatFor();
@@ -1804,7 +1872,7 @@ describe('AutomationChat provider selection', () => {
 
     expect(handed.provider).toBe('openai');
     expect(handed.secret).toBe('sk-proj-this-one');
-    expect(handed.modelId).toBe('gpt-5.6-terra');
+    expect(handed.modelId).toBe('gpt-6-sol');
   });
 
   /** A Claude subscription token, stored the way an upgraded hub carries it. */

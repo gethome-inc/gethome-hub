@@ -284,7 +284,7 @@ export class AutomationChat extends ChatRuntime<AutomationTurn> {
      * It read `ai[provider].model` — the *mapper's* column, through the
      * mapper's list — so "which model recognises a device" and "which model
      * writes a rule" shared an answer. It never showed, because the mapper
-     * offers one model and Sonnet is not on its list, so `effectiveModel`
+     * offered one model and Sonnet was not on its list, so `effectiveModel`
      * handed back Opus whatever was stored. Now it reads its own column
      * through `AGENT_MODELS`, which is the same list the assistant is offered
      * and a choice made separately: answering questions about the house and

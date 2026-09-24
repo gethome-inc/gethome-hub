@@ -109,7 +109,7 @@ describe('the assistant', () => {
       };
       const scriptedDelegate: AutomationConversation = {
         provider: 'anthropic',
-        modelId: 'claude-opus-5',
+        modelId: 'claude-opus-5-5',
         effort: 'medium' as const,
         awaitingAnswer: () => false,
         costUsd: () => 0.02,
@@ -139,7 +139,7 @@ describe('the assistant', () => {
       };
       const scripted: AgentConversation<AssistantTurn> = {
         provider: 'anthropic',
-        modelId: 'claude-opus-5',
+        modelId: 'claude-opus-5-5',
         effort: 'medium' as const,
         awaitingAnswer: () => false,
         costUsd: options?.cost ?? (() => 0.04),
@@ -550,11 +550,11 @@ describe('the assistant', () => {
     });
     // A model this build no longer offers is stored happily and is simply not
     // what runs — silently keeping a home on a retired one is the failure. The
-    // *provider* survives it, off `PRICING`: the vendor was a real choice and
-    // the retired id was not.
+    // *provider* survives it, off the model table: the vendor was a real
+    // choice and the retired id was not. And it runs what replaced it.
     expect(effectiveAgentModel('claude-opus-4-6', both)).toEqual({
       provider: 'anthropic',
-      modelId: AGENT_MODELS.anthropic.default,
+      modelId: 'claude-opus-5-5',
     });
 
     await settings.setAssistantModel('claude-sonnet-5');
@@ -571,18 +571,23 @@ describe('the assistant', () => {
      * that is configured.
      */
     const onlyOpenAi = { anthropic: false, openai: true };
-    expect(effectiveAgentModel('claude-opus-5', onlyOpenAi)).toEqual({
+    expect(effectiveAgentModel('claude-opus-5-5', onlyOpenAi)).toEqual({
       provider: 'openai',
       modelId: AGENT_MODELS.openai.default,
     });
     // And a deliberate OpenAI choice is kept, rather than being read as a
     // fallback and moved to that provider's default.
+    expect(effectiveAgentModel('gpt-6-luna', onlyOpenAi)).toEqual({
+      provider: 'openai',
+      modelId: 'gpt-6-luna',
+    });
+    // A retired one of that vendor's moves to what replaced it, on that vendor.
     expect(effectiveAgentModel('gpt-5.6-terra', onlyOpenAi)).toEqual({
       provider: 'openai',
-      modelId: 'gpt-5.6-terra',
+      modelId: 'gpt-6-sol',
     });
     // Neither key is the only case with no answer — the caller refuses on it.
-    expect(effectiveAgentModel('claude-opus-5', { anthropic: false, openai: false })).toBeNull();
+    expect(effectiveAgentModel('claude-opus-5-5', { anthropic: false, openai: false })).toBeNull();
 
     // End to end: the same home, through the settings route both agents read.
     await settings.setAiKey('openai', 'sk-proj-test');
@@ -598,11 +603,11 @@ describe('the assistant', () => {
     // the rules it runs by itself are different jobs, and a home may want to
     // spend differently on them.
     await settings.setAssistantModel('claude-sonnet-5');
-    await settings.setAutomationsModel('claude-opus-5');
+    await settings.setAutomationsModel('claude-opus-5-5');
     let ai = await settings.getAiSettings();
     expect([ai.assistant.model, ai.automations.model]).toEqual([
       'claude-sonnet-5',
-      'claude-opus-5',
+      'claude-opus-5-5',
     ]);
 
     await settings.setAutomationsModel('claude-sonnet-5');
@@ -615,10 +620,10 @@ describe('the assistant', () => {
     // And the mapper's own choice reaches neither, in either direction: a
     // descriptor is cached against a device model for ever, which is why that
     // list offers one model and this one offers two.
-    await settings.setAiModel('claude-opus-5', 'anthropic');
+    await settings.setAiModel('claude-opus-5-5', 'anthropic');
     await settings.setAssistantModel(null);
     ai = await settings.getAiSettings();
-    expect(ai.anthropic.model).toBe('claude-opus-5');
+    expect(ai.anthropic.model).toBe('claude-opus-5-5');
     expect(ai.assistant.model).toBe(AGENT_MODELS.anthropic.default);
     expect(ai.automations.model).toBe('claude-sonnet-5');
   });

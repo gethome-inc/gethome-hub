@@ -35,8 +35,8 @@ import {
   AGENT_MODELS,
   effectiveModel,
   isSupportedModel,
+  offeredModelIds,
   PROVIDER_MODELS,
-  supportedModelIds,
 } from '../ai/models.js';
 // Local operations on stored JSON — zod only, no Anthropic SDK in this graph.
 // `MappingLibrary.repair` loads the agent on demand.
@@ -1236,8 +1236,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       // Its own refusal code, not `ai_not_configured`: portraits are drawn by
       // OpenAI and device recognition may be running on Anthropic, so a hub can
       // be perfectly configured for one and not the other. And deliberately not
-      // gated on `ai_enabled`, which is the *adaptation* switch — nobody draws
-      // a portrait by accident, so there is nothing to switch off.
+      // gated on `ai_enabled`, the home's AI switch — it stops what runs by
+      // itself or on somebody's behalf (recognition, both agents, the voice),
+      // and nobody draws a portrait by accident, so there is nothing to
+      // switch off.
       const apiKey = await deps.settings.aiKey('openai');
       if (!apiKey) return reply.code(409).send({ error: 'openai_not_configured' });
 
@@ -2093,19 +2095,22 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
      * version behind reads to draw its picker — so a hub that has grown a
      * second provider does not hand that app a list mixing two vendors it has
      * no control for. `choices` is the whole table for an app that knows about
-     * both, and `choosable` is "there is a decision to make here", exactly as
-     * `mapping.choosable` means it.
+     * both, and `choosable` is "there is a decision to make here" — both
+     * vendors are ones an agent can actually authenticate as, which is
+     * narrower than `mapping.choosable`: a stored Claude subscription token is
+     * a key the hub holds and no conversation can use, so counting it offered
+     * a vendor switch that could only answer `automation_needs_anthropic`.
      *
      * `provider` is derived from the model rather than stored beside it — see
      * `agentProviderOf` — so the two can never disagree, and a picker writes
      * that provider's default model id rather than a second setting.
      */
-    const forAgent = (agent: { model: string; provider: AiProvider | null }) => ({
+    const forAgent = (agent: { model: string; provider: AiProvider | null; choosable: boolean }) => ({
       model: agent.model,
       provider: agent.provider,
       models: agent.provider === null ? [] : AGENT_MODELS[agent.provider].choices,
       choices: { anthropic: AGENT_MODELS.anthropic.choices, openai: AGENT_MODELS.openai.choices },
-      choosable: ai.mappingChoosable,
+      choosable: agent.choosable,
     });
     const forProvider = (provider: AiProvider) => ({
       hasKey: ai[provider].hasKey,
@@ -2138,8 +2143,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       .string()
       .min(1)
       .max(120)
+      // Any id the hub has ever known is *taken* — a retired one is succeeded
+      // when it is read, so an app a version behind is never refused for
+      // naming what it was shown — but the sentence names only what
+      // recognition is offered, because that is what a run will actually use.
       .refine((model) => isSupportedModel(model, provider), {
-        message: `unsupported model — the mapping agent runs on: ${supportedModelIds(provider).join(', ')}`,
+        message: `unsupported model — device recognition runs on: ${offeredModelIds(provider).join(', ')}`,
       })
       .nullable()
       .optional();
@@ -2210,8 +2219,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
           .string()
           .min(1)
           .max(120)
-          .refine(isSupportedModel, {
-            message: `unsupported model — the mapping agent runs on: ${supportedModelIds().join(', ')}`,
+          .refine((model) => isSupportedModel(model), {
+            message: `unsupported model — device recognition runs on: ${offeredModelIds('anthropic').join(', ')}`,
           })
           .nullable()
           .optional(),
@@ -2237,7 +2246,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * Change anything about the hub's AI without re-entering everything else.
    *
    * Every field is optional and absence means "leave this alone", which is what
-   * lets one route carry two credentials, two models, the mapping provider and
+   * lets one route carry two credentials, a model per job, the mapping provider and
    * the switch. `PUT` requires an `apiKey`, so the only way to stop the agent
    * running used to be `DELETE` — which is a different request. "Stop spending
    * my money on this for now" and "forget my credential" have very different

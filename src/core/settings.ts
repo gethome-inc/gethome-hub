@@ -49,10 +49,9 @@ export interface AiProviderSettings {
  * Which model one agent runs on.
  *
  * One shape for both, and a column each — the assistant and the automations
- * agent are offered the same two models (`AGENT_MODELS`) and choose
- * independently, because "answer questions about the house" and "write the
- * rules it runs by itself" are different jobs somebody may want to spend
- * differently on.
+ * agent are offered the same list (`AGENT_MODELS`) and choose independently,
+ * because "answer questions about the house" and "write the rules it runs by
+ * itself" are different jobs somebody may want to spend differently on.
  */
 export interface AiAgentSettings {
   /**
@@ -73,6 +72,19 @@ export interface AiAgentSettings {
    * case and not a setting anybody chose.
    */
   provider: AiProvider | null;
+  /**
+   * Whether the vendor is a decision somebody can make: both vendors are ones
+   * an agent can authenticate as right now.
+   *
+   * **Narrower than `mappingChoosable`, on purpose.** That one counts stored
+   * keys, and a stored Claude *subscription token* is a key — the mapper's
+   * picker has always been offered over one — but it is not a credential any
+   * conversation can use, so an agent's vendor picker counted on it offered a
+   * switch whose only outcome was `automation_needs_anthropic`. Same inputs as
+   * the resolution itself (`UsableProviders`), so the picker and what runs can
+   * never disagree about which vendors are real.
+   */
+  choosable: boolean;
 }
 
 export interface AiSettings {
@@ -98,8 +110,12 @@ export interface AiSettings {
    * my API key" have different costs to undo. Absent means on, so a hub
    * configured before this existed keeps behaving exactly as it did.
    *
-   * It governs device *adaptation* only. Portraits are asked for by hand, one
-   * press at a time, and are not gated on it.
+   * **It is the home's AI switch, not recognition's.** It began as the
+   * adaptation switch, and every AI surface added since checks it too: device
+   * recognition, both agents' conversations and the voice. Rules already
+   * written keep running — `src/automations/` has no idea the agent exists —
+   * and portraits are asked for by hand, one press at a time, so they are not
+   * gated on it.
    */
   enabled: boolean;
   /**
@@ -332,7 +348,7 @@ export class SettingsService {
    * **Its own key, and it did not have one.** This agent read `ai_model` — the
    * *mapper's* column — so "which model recognises a device" and "which model
    * writes a rule" shared an answer. It never showed, because the mapper
-   * offers one model and Sonnet is not on its list, so `effectiveModel` handed
+   * offered one model and Sonnet was not on its list, so `effectiveModel` handed
    * back Opus whatever was stored; the coupling was one added choice away from
    * being a bug somebody had to find. Absent means the default, as everywhere
    * else here.
@@ -418,7 +434,8 @@ export class SettingsService {
  */
 function agentSettings(stored: string | null, usable: UsableProviders): AiAgentSettings {
   const resolved = effectiveAgentModel(stored, usable);
+  const choosable = usable.anthropic && usable.openai;
   return resolved === null
-    ? { model: '', provider: null }
-    : { model: resolved.modelId, provider: resolved.provider };
+    ? { model: '', provider: null, choosable }
+    : { model: resolved.modelId, provider: resolved.provider, choosable };
 }
