@@ -3,8 +3,9 @@
 A local smart-home hub that brings **Matter**, **Zigbee** (via Zigbee2MQTT), and
 **MQTT** devices together behind one clean, typed device schema — and makes the
 home shareable with family members. It runs on a Raspberry Pi or any 64-bit
-Linux machine, entirely on your LAN: no cloud account, no data leaving your
-network.
+Linux machine, entirely on your LAN: no cloud account, and nothing about your
+home leaves your network unless you give the hub an AI key — and then only what
+the AI feature you use needs ([what goes where](https://gethome.me/privacy#ai)).
 
 GetHome Hub is the heart of a *hub home* in the [GetHome iOS app](https://github.com/gethome-inc/gethome-ios):
 devices attach to the hub instead of a phone, so everyone with access to the
@@ -28,14 +29,14 @@ hub can control them.
   researches it on the web (starting from the device's own Zigbee2MQTT
   page), and submits a validated mapping. **Bring your own account** — an
   Anthropic or an OpenAI API key, stored encrypted on the hub and used only for
-  this; with both, you choose which one does the research. No credential →
+  the hub's own AI features; with both, you choose which one does the research. No credential →
   devices still appear, flagged "needs review". It can be switched off without
   deleting the key, every run is recorded (what it searched for, what it read,
   what it cost), and the answers are a **library** you can download from one
   hub, upload to another, or write yourself — a schema the hub can't use comes
   back with the reasons and can be handed to the agent to repair.
-  Only a device's own published description is ever sent; the hub's traffic is
-  structurally incapable of reaching the agent.
+  Only a device's own published description and a few of its recent reports are
+  ever sent; the hub's traffic is structurally incapable of reaching the agent.
   ([docs/ai-adaptation.md](docs/ai-adaptation.md))
 - **Device portraits** — an AI-drawn picture of each device, the floating object
   the GetHome app shows on a device's page. Drawn on the hub with the home's
@@ -391,7 +392,11 @@ There is no cloud account, no relay and no tunnel: the hub opens no inbound
 path through your router, and the only connections it ever makes outward are
 to your AI provider (if you gave it a key), to GitHub when it checks for an
 update, and to two documentation sites while it is working out what a Zigbee
-device is. The same applies to port 8420 as to 1883 — **don't forward it**. It
+device is. (Installing and updating it also download from GitHub, nodejs.org and
+npm, and Zigbee2MQTT may ask GitHub whether your devices have new firmware.)
+What each AI feature sends, and to whom, is in the
+[privacy policy](https://gethome.me/privacy#ai). The same applies to port 8420
+as to 1883 — **don't forward it**. It
 is HTTP on a home network, so the token your phone holds crosses the wire in
 the clear; that is right behind your own router and wrong anywhere else.
 
@@ -563,3 +568,7 @@ evaluation, research. This is source-available, not OSI open source.
 
 **Commercial deployments** (hotels, property management, paid installations)
 require a separate license — see [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md).
+
+The [Terms of Use](https://gethome.me/terms) and the
+[Privacy Policy](https://gethome.me/privacy) on gethome.me cover the hub along
+with the GetHome apps; for the code itself, this license is what governs.

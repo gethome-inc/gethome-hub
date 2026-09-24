@@ -528,11 +528,14 @@ echoes those opaque items on the next turn. That keeps reasoning context across
 a tool call without creating a retrievable Responses conversation; account data
 handling remains subject to the OpenAI API data controls.
 
-No home names, member names, tokens, or any other hub data ever leave the
-machine — and, since the hub gained a traffic inspector, it is worth saying
-explicitly that **none of that traffic is an input either**: see "What can
-reach the agent, and what cannot" above. Without a configured credential, or
-with the switch off, nothing is sent at all.
+A mapping run sends no home names, member names, tokens, or any other hub data
+— and, since the hub gained a traffic inspector, it is worth saying explicitly
+that **none of that traffic is an input either**: see "What can reach the
+agent, and what cannot" above. Without a configured credential, or with the
+switch off, nothing is sent at all. That is recognition's promise, not the
+hub's: the assistant, the automations agent, the voice and portraits send more,
+because they have to, and the [privacy policy](https://gethome.me/privacy#ai)
+lists what each of them sends.
 
 ## What the agent produces: MappingDescriptor
 
