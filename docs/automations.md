@@ -960,8 +960,11 @@ parts, each opening on a bold heading (`**Clarifying the light**`) and none
 saying where it ends — so the transport puts a blank line between parts, or the
 second heading ran onto the last sentence of the first and nothing downstream
 could tell where the join had been. Beyond that it is streamed and stored
-verbatim; an app draws it as plain lines, which is where the asterisks come
-off (the iOS app's `AgentStepRow.plain`).
+verbatim, and an app renders it — the iOS app's `AgentLine` draws a
+heading on a line of its own at one step of weight, code in a mono face, and
+never a raw marker, not even the half of one still arriving. The Markdown stays
+on the wire because what it means is the app's to draw: stripped here, a
+heading could no longer be told from the paragraph it titles.
 
 Both of these are what made `clip()` necessary. `slice` was enough while these
 fields held the hub's own fixed sentences, which never came near either bound;
