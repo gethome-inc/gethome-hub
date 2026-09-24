@@ -594,14 +594,19 @@ describe('starting a conversation', () => {
     expect(body.detail).toMatch(/subscription token/);
   });
 
-  it('says AI is switched off rather than unconfigured', async () => {
+  it('starts one with device recognition switched off', async () => {
+    // It answered `409 ai_disabled` here while `ai_enabled` stopped every AI
+    // surface. That switch is recognition's alone now, and a home that turned
+    // it off to save money can still write a rule.
     await settings.setAiKey('anthropic', 'sk-ant-api03-test');
     await settings.setAiEnabled(false);
+    openedOn = null;
 
     const response = await start();
 
-    expect(response.statusCode).toBe(409);
-    expect(response.json()).toMatchObject({ error: 'ai_disabled' });
+    expect(response.statusCode).toBe(201);
+    expect(openedOn).toBe('anthropic');
+    await chat.idle();
   });
 });
 

@@ -16,6 +16,7 @@ import { PermitJoinService } from '../src/core/permit-join.js';
 import { AiRunLog } from '../src/core/ai-runs.js';
 import { writeRadioStandDown } from '../src/core/radio.js';
 import { MappingLibrary } from '../src/ai/library.js';
+import { settings as settingsTable } from '../src/db/schema.js';
 import type { AdapterBus, ProtocolAdapter } from '../src/adapters/adapter.js';
 import type { HubCommand } from '../src/schema/index.js';
 import {
@@ -957,16 +958,19 @@ describe.skipIf(!handle)('hub API', () => {
     // offering an id this hub would refuse.
     expect(body).toMatchObject({
       providers: {
-        anthropic: { hasKey: true, model: 'claude-opus-5' },
+        anthropic: { hasKey: true, model: 'claude-opus-5-5' },
         openai: { hasKey: false },
       },
-      // One key, so there is nothing to choose between.
-      mapping: { provider: 'anthropic', choosable: false },
+      // One key, so there is nothing to choose between. And recognition's own
+      // switch in recognition's own block: its presence is how an app knows
+      // the switch stops recognition and nothing else.
+      mapping: { provider: 'anthropic', choosable: false, enabled: true },
     });
-    // One model per provider: the picker became a statement, so what an app
-    // draws from this list is "recognition runs on Opus 5", not a question.
-    const providers = body.providers as { anthropic: { models: unknown[] } };
+    // Recognition offers strong models only: one on Anthropic, and on OpenAI
+    // Sol with Astra above it — never a tier cheaper than the default.
+    const providers = body.providers as { anthropic: { models: unknown[] }; openai: { models: unknown[] } };
     expect(providers.anthropic.models).toHaveLength(1);
+    expect(providers.openai.models).toHaveLength(2);
     expect(JSON.stringify(body)).not.toContain('sk-ant');
 
     // A member may read and write this now — see the `hub.ai` note in
@@ -1029,18 +1033,19 @@ describe.skipIf(!handle)('hub API', () => {
       method: 'PATCH',
       url: '/api/v1/settings/ai',
       headers: auth(memberToken),
-      // Terra is still priced, so the write is taken rather than 400-ing an
-      // app that has not shipped an update — the same stance `authType` takes
-      // one field over. What it must not do is come back as the model this
-      // hub runs, because it isn't: it is no longer offered.
+      // Terra is retired and still known, so the write is taken rather than
+      // 400-ing an app that has not shipped an update — the same stance
+      // `authType` takes one field over. What it must not do is come back as
+      // the model this hub runs, because it isn't: it comes back as the model
+      // that replaced it.
       payload: { openaiApiKey: 'sk-proj-1234567890', openaiModel: 'gpt-5.6-terra' },
     });
     expect(saved.statusCode).toBe(200);
     expect(saved.json()).toMatchObject({
       hasKey: true,
       providers: {
-        anthropic: { hasKey: true, model: 'claude-opus-5' },
-        openai: { hasKey: true, model: 'gpt-5.6-sol' },
+        anthropic: { hasKey: true, model: 'claude-opus-5-5' },
+        openai: { hasKey: true, model: 'gpt-6-sol' },
       },
       // Both keys, so which one recognises devices is now somebody's choice.
       mapping: { provider: 'anthropic', choosable: true },
@@ -1124,6 +1129,103 @@ describe.skipIf(!handle)('hub API', () => {
     expect(refused.json()).toMatchObject({ error: 'provider_not_configured', provider: 'openai' });
   });
 
+  /**
+   * The agents' two blocks, end to end — the shape both apps build their model
+   * pickers from, which no route test covered until the lists grew a second
+   * vendor and a successor chain.
+   *
+   * Three things are pinned. **A retired choice reads back as its successor**,
+   * in each agent's block and on the vendor it was chosen on, while the
+   * column keeps what was written (the rollback half, pinned in
+   * `ai-model-choice.test.ts`). **The flat fields stay the raw columns** — an
+   * older app reads them, and they have never been what runs. And
+   * **`choosable` is about what an agent can actually use**: a Claude
+   * subscription token is a stored key, so the mapper's picker still counts
+   * it, but no conversation can run on one, so an agent's vendor is not a
+   * choice beside it.
+   */
+  it('answers each agent’s model as it will run, succeeded, with a choice only between usable vendors', async () => {
+    await app.inject({
+      method: 'PUT',
+      url: '/api/v1/settings/ai',
+      headers: auth(ownerToken),
+      payload: { apiKey: 'sk-ant-api-1234567890' },
+    });
+    const saved = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: {
+        openaiApiKey: 'sk-proj-1234567890',
+        assistantModel: 'gpt-5.6-terra',
+        automationsModel: 'claude-opus-5',
+      },
+    });
+    expect(saved.statusCode).toBe(200);
+    const body = saved.json() as Record<string, unknown>;
+    expect(body).toMatchObject({
+      assistant: { model: 'gpt-6-sol', provider: 'openai', choosable: true },
+      automations: { model: 'claude-opus-5-5', provider: 'anthropic', choosable: true },
+    });
+    const assistant = body.assistant as {
+      models: { id: string }[];
+      choices: Record<string, { id: string; label: string }[]>;
+    };
+    // `models` is the answering vendor's list — what an app a version behind
+    // draws its pills from — and `choices` the whole table.
+    expect(assistant.models.map((model) => model.id)).toEqual(['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna']);
+    expect(assistant.choices.anthropic?.map((model) => model.id)).toEqual(['claude-opus-5-5', 'claude-sonnet-5']);
+    expect(assistant.choices.openai?.map((model) => model.label)).toEqual([
+      'GPT-6 Astra',
+      'GPT-6 Sol',
+      'GPT-6 Luna',
+    ]);
+
+    // One request moves recognition to the other vendor *and* the model on
+    // it — the models are written before the vendor, so neither half is
+    // refused for the other.
+    const moved = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { openaiModel: 'gpt-6-astra', mappingProvider: 'openai' },
+    });
+    expect(moved.json()).toMatchObject({
+      provider: 'openai',
+      mapping: { provider: 'openai', choosable: true },
+      providers: { openai: { model: 'gpt-6-astra' } },
+      // The flat block is the raw column, and has never been what runs.
+      openai: { model: 'gpt-6-astra' },
+    });
+
+    // A subscription token beside the OpenAI key: two stored keys, one usable.
+    await db
+      .insert(settingsTable)
+      .values({ key: 'ai_auth_type', value: 'oauth_token' })
+      .onConflictDoUpdate({ target: settingsTable.key, set: { value: 'oauth_token' } });
+    const token = await app.inject({ method: 'GET', url: '/api/v1/settings/ai', headers: auth(memberToken) });
+    expect(token.json()).toMatchObject({
+      mapping: { choosable: true },
+      assistant: { provider: 'openai', choosable: false },
+      automations: { provider: 'openai', model: 'gpt-6-sol', choosable: false },
+    });
+
+    // Leave the hub as the next test expects to find it: one Anthropic API
+    // key, no OpenAI key, both agents on their defaults.
+    await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { clear: 'openai', assistantModel: null, automationsModel: null },
+    });
+    await app.inject({
+      method: 'PUT',
+      url: '/api/v1/settings/ai',
+      headers: auth(ownerToken),
+      payload: { apiKey: 'sk-ant-api-1234567890' },
+    });
+  });
+
   it('switches adaptation off without asking for the key again', async () => {
     await app.inject({
       method: 'PUT',
@@ -1142,9 +1244,12 @@ describe.skipIf(!handle)('hub API', () => {
     const body = patched.json() as { enabled: boolean; hasKey: boolean };
     // Off, and the credential is still there — those are different requests.
     expect(body).toMatchObject({ enabled: false, hasKey: true });
+    // The same answer in recognition's block, which is the switch's scope:
+    // the agents and the voice do not read it.
+    expect(body).toMatchObject({ mapping: { enabled: false } });
   });
 
-  it('refuses an agent run while adaptation is switched off, and says so', async () => {
+  it('refuses a recognition run while recognition is switched off, and says so', async () => {
     await app.inject({
       method: 'PUT',
       url: '/api/v1/settings/ai',
@@ -1280,7 +1385,12 @@ describe.skipIf(!handle)('hub API', () => {
       payload: { apiKey: 'sk-ant-api03-1234567890', model: 'claude-haiku-4-5' },
     });
     expect(put.statusCode).toBe(400);
-    expect(put.body).toContain('claude-opus-5');
+    // The sentence names what recognition is *offered* — a retired id is
+    // taken and succeeded, so listing it as something recognition "runs on"
+    // would send somebody to a model that never runs.
+    const detail = (put.json() as { detail: string }).detail;
+    expect(detail).toContain('device recognition runs on: claude-opus-5-5');
+    expect(detail).not.toMatch(/claude-opus-5(?!-5)|claude-opus-4|claude-sonnet/);
   });
 
   it('rejects the removed openai provider', async () => {

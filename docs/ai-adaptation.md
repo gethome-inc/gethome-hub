@@ -62,7 +62,12 @@ is enforced rather than merely observed:
 from whether a credential is stored: "stop spending my money on this for now"
 and "forget my API key" have very different costs to undo, and deleting the key
 used to be the only way to ask for the first. It defaults to on, so a hub
-configured before it existed behaves exactly as it did. It is checked in
+configured before it existed behaves exactly as it did. **It is this
+subsystem's switch and nobody else's.** Both agents and the voice checked it for
+a while, which meant a home that switched recognition off to save money could no
+longer talk to itself under a switch both apps labelled as recognition's; they
+do not read it now, and the settings answer repeats it as `mapping.enabled` so
+an app can tell this hub from one that still did. It is checked in
 `src/ai/lazy.ts` beside `hasKey` — so the module is not even imported — and
 again in `resolveProvider()` for a mapper somebody constructed directly. An
 explicitly requested run (`POST /devices/:id/remap`, `POST …/repair`) answers
@@ -257,46 +262,56 @@ The secret is encrypted with the hub's local AES-256-GCM secret, stored in
 the hub's database, never returned by any API, and used only to run the
 mapping agent.
 
-**Model.** Default **`claude-opus-5`** on Anthropic and **`gpt-5.6-sol`** on
-OpenAI — the thorough tier on each, and both pinned as explicit ids rather than
-a floating alias, so neither vendor can re-point what a home runs without
-somebody here deciding to. The choice is an allowlist, not a free string (`src/ai/models.ts`),
-because the research tools have model floors — Anthropic's `_20260209` tools
-only exist on Opus 4.6+ and Sonnet 4.6+, so pointing the hub at Haiku or a
-4.5-era model would not degrade the run, it would 400 it. The allowlist is
-`claude-opus-5`, `claude-opus-4-8`, `claude-opus-4-7`, `claude-opus-4-6`,
-`claude-sonnet-5`, `claude-sonnet-4-6`, `gpt-5.6-sol`, `gpt-5.6-terra`, and
-`gpt-5.6` — the bare OpenAI alias, priced and accepted because it routes to Sol
-and a hub that stored it must not be told its setting is invalid, but never
+**Model.** Default **`claude-opus-5-5`** (Opus 5.5) on Anthropic and
+**`gpt-6-sol`** (GPT-6 Sol) on OpenAI, with **`gpt-6-astra`** offered above
+Sol — every one pinned as an explicit id rather than a floating alias, so no
+vendor can re-point what a home runs without somebody here deciding to. The
+choice is an allowlist, not a free string (`src/ai/models.ts`), because the
+research tools have model floors — Anthropic's `_20260209` tools only exist on
+Opus 4.6+ and Sonnet 4.6+, so pointing the hub at Haiku or a 4.5-era model would
+not degrade the run, it would 400 it. The allowlist is every model this hub has
+ever run: Opus 5.5, 5, 4.8, 4.7 and 4.6, Sonnet 5 and 4.6, GPT-6 Astra, Sol and
+Luna, GPT-5.6 Sol and Terra, and `gpt-5.6` — the bare OpenAI alias, accepted
+because a hub that stored it must not be told its setting is invalid, but never
 offered as a choice.
 
 **The apps do not ship that list.** `GET /settings/ai` carries
 `providers.<name>.models` — id, label, one-line note, one `recommended` — and
-the apps render it, the same rule `GET /permissions` follows.
+the apps render it, the same rule `GET /permissions` follows. A model is added
+or retired on the hub alone.
 
-**It is one model per provider, so the apps state it rather than ask.** It was
-two — the thorough tier and the cheaper one — until the cheaper one was tried
-on a real device. Sonnet 5 repeatedly submitted descriptors the `submit_mapping`
-handler had to bounce, and the run that did finish named `custom` as an outlet's
-primary capability, which is the one value that renders as no control at all: a
-paid run whose result was a dead tile on a working smart plug. A wrong mapping
-is worse than an expensive one in a way that is easy to underestimate, because
-the descriptor is cached per device *model* — it silently shapes every unit of
-that device the home ever meets until somebody notices and remaps. Saving a few
-cents on a job that runs a handful of times in a hub's life is the wrong trade
-for that. OpenAI's cheaper tier is retired on the same reasoning rather than on
-its own evidence.
+**Recognition offers strong models only — never a tier cheaper than its
+default.** It was briefly two tiers per vendor, the thorough one and the cheaper
+one, until the cheaper one was tried on a real device. Sonnet 5 repeatedly
+submitted descriptors the `submit_mapping` handler had to bounce, and the run
+that did finish named `custom` as an outlet's primary capability, which is the
+one value that renders as no control at all: a paid run whose result was a dead
+tile on a working smart plug. A wrong mapping is worse than an expensive one in
+a way that is easy to underestimate, because the descriptor is cached per device
+*model* — it silently shapes every unit of that device the home ever meets until
+somebody notices and remaps. Saving a few cents on a job that runs a handful of
+times in a hub's life is the wrong trade for that. That argument is about
+*cheaper* models and says nothing against a more thorough one, so OpenAI's list
+is GPT-6 Sol with Astra above it, while Sonnet and Luna — both offered to the
+agents — are on neither vendor's recognition list.
 
-**A stored model counts only while it is still offered** (`effectiveModel`).
-Retiring one otherwise leaves the homes that had chosen it as the only homes
-still running it — exactly the homes the retirement is for — and silently, since
-nothing on any screen would have changed. So `GET /settings/ai` answers the
-model that will *run*, never the string in the column, and a hub set to Sonnet
-moves to Opus on its next run with no migration and nothing for its owner to do.
-A write naming a retired model is still accepted rather than 400-ing an app that
-has not shipped an update; it simply is not what runs. The allowlist stays
-broader than `models` for a second reason too: `ai_runs.modelId` rows recorded
-months ago still have to price correctly when a run log is read back.
+**A stored model counts only while it is still offered, and a retired one is
+succeeded** (`effectiveModel`). Retiring a model otherwise leaves the homes
+that had chosen it as the only homes still running it — exactly the homes the
+retirement is for — and silently, since nothing on any screen would have
+changed. So every model the hub has known names the model that replaced it
+(Opus 5 → Opus 5.5; GPT-5.6 Sol, the alias and GPT-5.6 Terra → GPT-6 Sol), a run
+is given the first model along that chain which is still offered, and only
+where there is none the vendor's default. It is resolved on every read and
+**never written back**: updating the hub is all it takes, with no migration and
+nothing for its owner to do, and the previous build — which `install.sh` falls
+back to when a new one fails its health check — still reads the column exactly
+as it was written. `GET /settings/ai` answers the model that will *run*, never
+the string in the column. A write naming a retired model is still accepted
+rather than 400-ing an app that has not shipped an update; it simply resolves to
+its successor. The allowlist stays broader than `models` for a second reason
+too: `ai_runs.modelId` rows recorded months ago still have to price and be named
+correctly when a run log is read back.
 
 **Effort is `high` on both providers and is not exposed.** Adaptation is
 reasoning-heavy and runs a handful of times in a hub's life, so that is the
@@ -306,10 +321,15 @@ the one nobody can judge.
 
 **Cost.** A typical adaptation run costs cents, bounded by the per-run cap.
 Neither API reports what a run cost, so the hub adds up its own token usage
-against list prices (input, output, cache reads at 0.1×, cache writes at 1.25×,
-web searches at $10/1000) and `status.lastRun.costUsd` is an **estimate**. An
-unknown model falls back to the most expensive supported tier, so the cap can
-only ever trip early. OpenAI reports cached input and cache writes *inside* the
+against list prices (input, output, cache reads at 0.1× — 0.05× on Opus 5.5,
+which says so on its own row — cache writes at 1.25×, web searches at $10/1000)
+and `status.lastRun.costUsd` is an **estimate**. An unknown model falls back to
+the most expensive known tier, so the cap can only ever trip early. **The cap is
+in the run's own model's dollars**: $2 was sized against Opus 5's $5/$25, and a
+model priced above that — GPT-6 Astra, at twice it — gets it stretched by the
+same factor (`budgetScale`), so choosing the most thorough model buys a more
+thorough run rather than one cut off at half the work. A cheaper model keeps the
+same $2 ceiling rather than a tighter one. OpenAI reports cached input and cache writes *inside* the
 input count, so both shares are subtracted out before each is billed at its own
 rate — otherwise a cache write would be counted twice.
 

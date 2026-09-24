@@ -148,7 +148,7 @@ than no button.
 | `POST /devices/:id/portraits` | `hub.ai` | draw one. `{photo?: base64, photoType?}` — absent draws from the device's kind alone. Synchronous, and it holds the request for the minutes an image takes. `409 openai_not_configured` (its own code: portraits are OpenAI's job, and a hub can be configured for recognition and not for this), `409 portrait_busy`, `409 no_space`, `502 {error:"provider_failed", kind, detail}` carrying OpenAI's own sentence |
 | `PATCH /devices/:id/portraits` | `device.edit` | `{selected: id\|null}` — which one the home sees. `null` is a *state*: the procedural sphere, chosen over every picture there is |
 | `DELETE /portraits/:portraitId` | `device.edit` | forget one, file and row |
-| `POST /devices/:id/remap` | `hub.ai` | force-regenerate the AI mapping (Zigbee devices) → `{requested}`. **It answers as soon as the run is under way, never when it ends**: a run is minutes and this is an HTTP request, so what the agent then did arrives on the `ai` stream and in `GET /ai/runs`. `requested: false` means the radio has no published schema for that device right now — a device row can outlive its `bridge/devices` entry — which is a different answer from a run that failed. Being explicit, it also drops a `rejected` mapping and **ignores the backoff gate**, because it is how somebody retries after fixing a key or changing the model. The hub also remaps automatically when a device publishes unknown parameters — see [ai-adaptation.md](ai-adaptation.md). `409 ai_not_configured` with no credential, `409 ai_disabled` when the owner has switched adaptation off |
+| `POST /devices/:id/remap` | `hub.ai` | force-regenerate the AI mapping (Zigbee devices) → `{requested}`. **It answers as soon as the run is under way, never when it ends**: a run is minutes and this is an HTTP request, so what the agent then did arrives on the `ai` stream and in `GET /ai/runs`. `requested: false` means the radio has no published schema for that device right now — a device row can outlive its `bridge/devices` entry — which is a different answer from a run that failed. Being explicit, it also drops a `rejected` mapping and **ignores the backoff gate**, because it is how somebody retries after fixing a key or changing the model. The hub also remaps automatically when a device publishes unknown parameters — see [ai-adaptation.md](ai-adaptation.md). `409 ai_not_configured` with no credential, `409 ai_disabled` when the owner has switched device recognition off |
 | `POST /matter/commission` | `device.add` | `{pairingCode, wifi?: {ssid, passphrase}}` → `202 {jobId, deadline}` (async). `wifi` is only for a hub that cannot read its own — see [below](#pairing-a-matter-accessory). `409 already_commissioning` when one is already running, `409 matter_disabled` when this hub has no Matter |
 | `GET /matter/commission/:jobId` | floor | `{status: running\|done\|failed, step?, nodeId?, error?, failure?, startedAt, deadline}` — see [below](#pairing-a-matter-accessory) |
 | `POST /matter/commission/:jobId/cancel` | `device.add` | stop looking → the job as it now stands. `404` for a job the hub has forgotten; a job that has already finished is answered, not refused |
@@ -157,7 +157,7 @@ than no button.
 | `GET /members` · `PATCH /members/me` · `DELETE /members/me` · `DELETE /members/:id` | floor · floor (itself) · floor (itself) · `member.remove` | rows carry `isSelf`, `roleId` and `roleName`; `PATCH` takes `{name}` and renames **the caller**; `DELETE` on either route answers `204` and revokes that member's tokens; the owner cannot be removed, by anyone or by itself. See [below](#which-member-you-are-isself-and-patch-membersme) |
 | `GET /invites` · `POST /invites` | `member.invite` · see notes | `POST {roleId?}` → `201 {code, expiresAt, roleId, roleName, memberId: null, memberName: null}`. Omitting `roleId` mints a **Member** invite, which is what every invite this hub has ever made was. An **owner** invite is allowed and needs the caller to be one (`403 not_owner`). **`POST {memberId}` mints a sign-in code** for somebody already here — `roleId` beside it is `400 invalid_target`, an unknown one is `404 unknown_member`, and the answer carries `memberId`/`memberName` with `roleId: null`. Who may ask is asked of the body: your own (`memberId: "me"` is accepted) is the **floor**, somebody else's is `member.invite`, an **owner's** needs an owner. `GET` lists the live codes, each with `memberId` — null for an invite — and `memberName`. See [below](#signing-in-again-post-invites-with-a-memberid) |
 | `GET /activity?limit=&before=` | floor · `activity.read` | reverse-chronological, cursor = `before` id; rows carry `data` — see [below](#the-activity-log) |
-| `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | `hub.ai` | The home's AI: two credentials, two models, which provider recognises devices, and the switch. **PATCH is the write** — every field optional, absence means "leave this alone": `{enabled?, recordExchanges?, anthropicApiKey?, openaiApiKey?, anthropicModel?, openaiModel?, model?, mappingProvider?, clear?}`. `model` is `anthropicModel` under the name this route has always used; `clear: "anthropic"\|"openai"` forgets one credential and leaves the other; `recordExchanges` starts or stops keeping what each round said, and is off unless asked; `mappingProvider` naming a provider with no key is `400 provider_not_configured`. Keys are told apart by prefix, so one pasted in the other's field is a 400 rather than a 401 an hour later, and a `sk-ant-oat…` subscription token is still refused. **PUT is unchanged** (`{apiKey, model?}`, an Anthropic key, required) for apps that have not moved. See [the answer's shape](#the-ai-settings-answer) |
+| `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | `hub.ai` | The home's AI: two credentials, a model per job (recognition, the assistant, the automations agent), which provider recognises devices, and the switch. **PATCH is the write** — every field optional, absence means "leave this alone": `{enabled?, recordExchanges?, anthropicApiKey?, openaiApiKey?, anthropicModel?, openaiModel?, model?, mappingProvider?, assistantModel?, automationsModel?, clear?}`. `model` is `anthropicModel` under the name this route has always used; a model id this hub has **retired** is still taken, and resolved to its successor when it is read — see [below](#the-ai-settings-answer); `assistantModel` / `automationsModel` name the vendor as well as the model, and `null` puts either back on the default; `clear: "anthropic"\|"openai"` forgets one credential and leaves the other; `recordExchanges` starts or stops keeping what each round said, and is off unless asked; `mappingProvider` naming a provider with no key is `400 provider_not_configured`. Keys are told apart by prefix, so one pasted in the other's field is a 400 rather than a 401 an hour later, and a `sk-ant-oat…` subscription token is still refused. **PUT is unchanged** (`{apiKey, model?}`, an Anthropic key, required) for apps that have not moved. See [the answer's shape](#the-ai-settings-answer) |
 | `GET /ai/runs?limit=` | `hub.ai` | what the mapping agent did, newest first: `{id, at, kind, vendor, model, exposesHash, provider, modelId, effort, via, ok, costUsd, turns, durationMs, errorKind, errorMessage, steps, exchanges}`. A summary, never a transcript — see [ai-adaptation.md](ai-adaptation.md). `exchanges` is how many **rounds** this run kept, `0` unless recording was on when it ran. `effort` (`low`/`medium`/`high`) and `via` (`voice`/`typed`) say what that turn ran at and how it was asked — both **null** on a row written before them and on a run the idea does not apply to: a portrait has no effort, a device recognition nobody asked for has no `via`, and the `voice` meter is a line rather than a generation, so it carries `via` and no effort |
 | `GET /ai/runs/:id/exchanges` | `hub.ai` | what that run actually said, round by round, oldest first: `[{seq, at, durationMs, provider, modelId, status, ok, inputTokens, outputTokens, sent, received}]`. `sent`/`received` are `[{kind, label, text?, bytes?}]` — the round's **main data**, not its bodies; `bytes` is present only on a part that was cut, and is what it weighed whole. A run is a *loop*, so one recognition is several rounds and a failed one is followed by the next in the same list. Empty is the ordinary answer — recording is off unless the owner asked, and rounds age out after a week. See [ai-adaptation.md](ai-adaptation.md) |
 | `GET /automations` | floor | every rule in the home, plus `unreadable` — rules a **newer** build wrote that this one cannot parse. They are kept and not run; listing them is what stops a rule silently vanishing after `install.sh` rolls a build back. Each carries `summary` (a whole sentence — the contract) beside `document` (the structure — the convenience), the `activity.message` rule applied to rules, [`outline`](automations.md#a-rule-as-a-storyboard) — the same rule as a **storyboard** so an app can *draw* it rather than print it — `icon` — the mark somebody chose, or `null` for the one the app derives — and `roomId`, [the one room the rule is about](#which-room-a-rule-is-in) or `null` for a rule about the whole house |
@@ -172,17 +172,17 @@ than no button.
 | `GET /automations/:id/versions` · `POST /automations/:id/revert` | `automation.manage` | what it used to say, and going back to it. `{versionId}` |
 | `POST /automations/dry-run` | `automation.manage` | check a document without saving: `{problems, warnings, shape, summary, outline}` — the same pair every rule carries, so a preview draws exactly what the saved rule would |
 | `POST /automations/templates/:key` | `automation.manage` | install a preset. A template may install **more than one** rule — "light on movement" is genuinely two — so this answers with a list |
-| `POST /automations/chat` | `automation.manage` **+** `hub.ai` | start a conversation: `{message, automationId?}` → `201 {sessionId, messages}`. **An acknowledgement, not an outcome**: `messages` is the person's own row and nothing else, and it answers the moment the hub takes the message — a turn is a provider loop with a three-minute watchdog and no client waits that long. What the agent says arrives on the opt-in `automations` stream, and its `turn` frame is what says the transcript is ready to re-read. Three refusals, all `409 {error, detail}` because they lead to three different screens: `ai_not_configured` (no key), `ai_disabled` (the owner switched AI off), `automation_needs_anthropic` (a key the hub holds and cannot use — a Claude subscription token, with no OpenAI key beside it; the code is kept because both apps branch on it, but it no longer means "only OpenAI's", since either vendor now runs either agent). `detail` is a sentence, so an app that has never met one of these codes still shows something true. The route names `automation.manage` in a refusal; the second key is checked in the handler and refused in the same `{error, permission}` shape |
+| `POST /automations/chat` | `automation.manage` **+** `hub.ai` | start a conversation: `{message, automationId?}` → `201 {sessionId, messages}`. **An acknowledgement, not an outcome**: `messages` is the person's own row and nothing else, and it answers the moment the hub takes the message — a turn is a provider loop with a three-minute watchdog and no client waits that long. What the agent says arrives on the opt-in `automations` stream, and its `turn` frame is what says the transcript is ready to re-read. Two refusals, both `409 {error, detail}` because they lead to two different screens: `ai_not_configured` (no key) and `automation_needs_anthropic` (a key the hub holds and cannot use — a Claude subscription token, with no OpenAI key beside it; the code is kept because both apps branch on it, but it no longer means "only OpenAI's", since either vendor now runs either agent). **Device recognition's switch is not asked** — an older hub answered `ai_disabled` here too, which is why both apps still read that code. `detail` is a sentence, so an app that has never met one of these codes still shows something true. The route names `automation.manage` in a refusal; the second key is checked in the handler and refused in the same `{error, permission}` shape |
 | `POST /automations/chat/:id/messages` | `automation.manage` **+** `hub.ai` | `{message}` → the same acknowledgement shape, and the same rule: it returns when the message is taken, never when the turn ends. Turns are chained per conversation, so a second message sent while one is running is queued rather than run beside it. A typed reply to a question is treated as the *answer* to it, since only the conversation knows whether a tool call is outstanding. **`410 conversation_ended`** only when there is nothing left to read — a session that never existed, or one past the fortnight transcripts are kept for. A hub that has merely *forgotten how to continue* (a restart, or the two-hour idle sweep) rebuilds the model's memory from the stored transcript and carries on under the same session id, because that state is the ordinary one and refusing it made the whole conversations list read-only |
 | `GET /automations/chats` | `automation.manage` **+** `hub.ai` | every conversation this home has had, newest first: `[{sessionId, startedAt, updatedAt, messageCount, title, live, spend?}]`. `title` is the **first thing the person said** — the agent's opening line is about the home rather than about what was asked — and `live` is whether it can still be *continued*, which is a different question from whether it can be read. `spend` is `{usd, provider, modelId, model}`: what it cost and what answered, with `model` the label to draw and `modelId` the id as recorded. It is **absent rather than zero** when the hub cannot say — `ai_runs` keeps sixty runs and a transcript a fortnight, so a readable conversation can outlive its own spend row, and `$0.00` about one that plainly cost something is a claim |
 | `GET /automations/chat/:id` | `automation.manage` **+** `hub.ai` | `{sessionId, live, spend?, messages}` — the transcript, oldest first, with the same `spend` block the list carries so a chat opened from a link says what it cost without the list having been read. `live: false` is history. A message is `{id, at, role, text, data?}` with `role` an **open** vocabulary (`user`/`agent`/`question`/`preview`/`note`); see [`docs/automations.md`](automations.md) for what `data` carries per row. **One turn can write several `preview` rows** — a reply that delivers two rules is one `agent` line followed by a card each, in submission order, so draw a card per row rather than assuming one per turn. The **first** row a round writes also carries `data.steps` — `[{text, kind, detail?}]`, what the agent did to produce it, the same three fields the `step` frame streams — so a conversation read back next week shows the working and not only the answer |
 | `DELETE /automations/chat/:id` | `automation.manage` **+** `hub.ai` | end it and write down what it spent |
-| `POST /assistant/chat` | `hub.ai` | start a conversation with the **assistant** — the agent behind the app's assistant button: `{message}` → `201 {sessionId, messages}`. Same acknowledgement shape and same rule as the automations chat above, and the same three `409` refusals. Guarded by `hub.ai` **alone**: asking what the kitchen is doing and switching a lamp on is the floor, and the key is asked because a conversation spends the home's money. Handing a job to another agent is where `automation.manage` is asked, and it is asked *inside the tool* — so a member whose role cannot do it gets a sentence the model reads out rather than a route that 403s |
+| `POST /assistant/chat` | `hub.ai` | start a conversation with the **assistant** — the agent behind the app's assistant button: `{message}` → `201 {sessionId, messages}`. Same acknowledgement shape and same rule as the automations chat above, and the same two `409` refusals. Guarded by `hub.ai` **alone**: asking what the kitchen is doing and switching a lamp on is the floor, and the key is asked because a conversation spends the home's money. Handing a job to another agent is where `automation.manage` is asked, and it is asked *inside the tool* — so a member whose role cannot do it gets a sentence the model reads out rather than a route that 403s |
 | `POST /assistant/chat/:id/messages` | `hub.ai` | `{message}` → the same acknowledgement. `410 conversation_ended` only when there is nothing left to read |
 | `GET /assistant/chats` | `hub.ai` | the assistant's own conversations, newest first, in the same shape `GET /automations/chats` answers. The two lists are **disjoint**: rows carry a `surface`, and a row written before that column existed is an automations row |
 | `GET /assistant/chat/:id` | `hub.ai` | `{sessionId, live, spend?, messages}`, the same shape as an automations transcript with one more `role`: **`handoff`**, a job handed to another agent. Its `data` is `{agent, title, brief, sessionId, status, automationIds}` — `sessionId` is the *other* agent's conversation, which is where the live trail, its questions and the rules it wrote are read from; `status` is `working`/`asked`/`delivered`/`failed` and is an **open** string; `automationIds` fills as that agent saves rules. Nothing about the other conversation is copied into this one |
 | `DELETE /assistant/chat/:id` | `hub.ai` | end it and write down what it spent |
-| `POST /assistant/voice/session` | `hub.ai` | open a live **voice** session: `{sdp, sessionId?}` → `201 {answerSdp, audioRate, sessionId}`. `sdp` is the client's own **WebRTC offer** and is required, because that is the only transport a phone can hold: Live authenticates a WebSocket with the *project API key* and has no ephemeral client secret anywhere in the family, so the hub does the offer/answer exchange with the home's key and the client is handed **no credential at all** — a stronger containment than the expiring secret this route was first built around. The hub builds the whole session — model, voice, instructions, history, delegation mode — and never sends it to the app, so a prompt change or a configuration key this API grows next month reaches the microphone with no app release. `delegation.type` is **`client`**, which is the architecture in one field: the voice asks *this hub* for help rather than a model OpenAI hosts, so the home keeps its own agent, its own tools, its own transcript and whichever provider it picked. No `audio.format` is sent — WebRTC negotiates its own and refuses the field — and `audioRate` is the rate the app's graph is pointed at. `sessionId` is the assistant conversation to write into — **sent back** when the app already has one, since stopping and restarting the microphone on a page is one conversation rather than two, and minted fresh when it is absent; when it is sent, that conversation's last few exchanges are seeded into `session.input`, so pressing the microphone on a page you have been typing on continues one conversation. It grants nothing new — a home's transcripts are shared by design. When it is sent, that conversation's history is bounded in **characters as well as messages** — `session.input` is capped at 8,192 tokens as well as at 128 messages, and a transcript row holds up to 4,000 characters, so a count alone had a long conversation refused outright on every attempt. A `sessionId` belonging to **somebody else** in the home is `409 not_your_conversation`: reading a home's transcripts is shared by design and writing into one is not. Refuses `409 ai_disabled`, and `409 openai_not_configured` — a fourth code, and a real one: GPT-Live is OpenAI's and there is no substitute, so a home whose assistant answers perfectly well on Anthropic still cannot *speak* without an OpenAI key. `502 voice_unavailable` when OpenAI itself refuses, with their sentence in `detail` — a different screen from a `409`, which is something in this home's settings. **The hub then attaches its own sideband** to the same session (`wss://api.openai.com/v1/live/sessions/{id}/attach`, the home's key again) and that is where the delegation loop lives: client delegation says "I need help" and nothing else, so somebody has to assemble the request from the transcript and answer it — doing that on the phone added two LAN legs to the one thing on this surface measured in how fast a lamp goes off. The sideband owns three facts outright, on the API's own rule that two connections onto one session need one owner per action: **delegations** (the phone answers none), **the transcript** (`askAloud` writes the person's row and the answer, so a spoken exchange leaves exactly what a typed one does) and **what it cost** (`session.usage.updated` / `session.closed`, the seconds OpenAI will bill). Audio is deliberately not one of them: media stays on the phone's WebRTC connection. `POST /assistant/voice/said` and `POST /assistant/voice/ended` are **gone** with it — the phone wrote the transcript and measured the seconds with a stopwatch only because the hub was not in the session at all |
+| `POST /assistant/voice/session` | `hub.ai` | open a live **voice** session: `{sdp, sessionId?}` → `201 {answerSdp, audioRate, sessionId}`. `sdp` is the client's own **WebRTC offer** and is required, because that is the only transport a phone can hold: Live authenticates a WebSocket with the *project API key* and has no ephemeral client secret anywhere in the family, so the hub does the offer/answer exchange with the home's key and the client is handed **no credential at all** — a stronger containment than the expiring secret this route was first built around. The hub builds the whole session — model, voice, instructions, history, delegation mode — and never sends it to the app, so a prompt change or a configuration key this API grows next month reaches the microphone with no app release. `delegation.type` is **`client`**, which is the architecture in one field: the voice asks *this hub* for help rather than a model OpenAI hosts, so the home keeps its own agent, its own tools, its own transcript and whichever provider it picked. No `audio.format` is sent — WebRTC negotiates its own and refuses the field — and `audioRate` is the rate the app's graph is pointed at. `sessionId` is the assistant conversation to write into — **sent back** when the app already has one, since stopping and restarting the microphone on a page is one conversation rather than two, and minted fresh when it is absent; when it is sent, that conversation's last few exchanges are seeded into `session.input`, so pressing the microphone on a page you have been typing on continues one conversation. It grants nothing new — a home's transcripts are shared by design. When it is sent, that conversation's history is bounded in **characters as well as messages** — `session.input` is capped at 8,192 tokens as well as at 128 messages, and a transcript row holds up to 4,000 characters, so a count alone had a long conversation refused outright on every attempt. A `sessionId` belonging to **somebody else** in the home is `409 not_your_conversation`: reading a home's transcripts is shared by design and writing into one is not. Refuses `409 openai_not_configured` — a code of its own, and a real one: GPT-Live is OpenAI's and there is no substitute, so a home whose assistant answers perfectly well on Anthropic still cannot *speak* without an OpenAI key. `502 voice_unavailable` when OpenAI itself refuses, with their sentence in `detail` — a different screen from a `409`, which is something in this home's settings. **The hub then attaches its own sideband** to the same session (`wss://api.openai.com/v1/live/sessions/{id}/attach`, the home's key again) and that is where the delegation loop lives: client delegation says "I need help" and nothing else, so somebody has to assemble the request from the transcript and answer it — doing that on the phone added two LAN legs to the one thing on this surface measured in how fast a lamp goes off. The sideband owns three facts outright, on the API's own rule that two connections onto one session need one owner per action: **delegations** (the phone answers none), **the transcript** (`askAloud` writes the person's row and the answer, so a spoken exchange leaves exactly what a typed one does) and **what it cost** (`session.usage.updated` / `session.closed`, the seconds OpenAI will bill). Audio is deliberately not one of them: media stays on the phone's WebRTC connection. `POST /assistant/voice/said` and `POST /assistant/voice/ended` are **gone** with it — the phone wrote the transcript and measured the seconds with a stopwatch only because the hub was not in the session at all |
 | `GET /settings/timezone` · `PUT /settings/timezone` | floor · `automation.manage` | what "at ten in the evening" means. The system's zone seeds it and the database owns it; `400 unknown_timezone` for one `Intl` cannot use, refused here rather than taking every schedule down on every tick |
 | `GET /device-mappings` | `hub.ai` | the mapping library: one entry per device model, `{adapter, exposesHash, vendor, model, status, source, problems, endpoints, deviceIds, createdAt, updatedAt}` |
 | `GET /device-mappings/:exposesHash` | `hub.ai` | the download — an envelope naming the device, see [below](#the-device-mapping-library) |
@@ -263,7 +263,7 @@ role that did not exist. Being a key rather than either extreme is what lets a
 home that *does* want it kept from the spare room say so.
 
 `hub.ai` is the second exception, and it moved on the same argument. It guards
-the AI keys, the adaptation switch, the mapping library and *drawing a device
+the AI keys, device recognition's switch, the mapping library and *drawing a device
 portrait* — all of which spend the home's money, which is a real reason for care
 and not a reason for owner-only: the person standing in front of the kettle is
 the one who wants a picture of it, and on a hub Studio claimed as the Mac that
@@ -1503,75 +1503,108 @@ the second provider reads exactly what it read before — plus a per-provider ha
 {
   "provider": "anthropic", "model": "claude-opus-5", "hasKey": true,
   "enabled": true, "legacySubscriptionToken": false,
-  "status": { "lastRun": { "at": "…", "ok": true, "costUsd": 0.41, "model": "claude-opus-5" } },
+  "status": { "lastRun": { "at": "…", "ok": true, "costUsd": 0.33, "model": "claude-opus-5-5" } },
 
   "anthropic": { "hasKey": true,  "model": "claude-opus-5" },
   "openai":    { "hasKey": true,  "model": null },
   "mappingChoosable": true,
 
   "providers": {
-    "anthropic": { "hasKey": true, "model": "claude-opus-5",
-                   "models": [ { "id": "claude-opus-5", "label": "Opus 5",
-                                 "note": "The most thorough. Every recognition run uses it.",
+    "anthropic": { "hasKey": true, "model": "claude-opus-5-5",
+                   "models": [ { "id": "claude-opus-5-5", "label": "Opus 5.5",
+                                 "note": "Anthropic’s most thorough model.",
                                  "recommended": true } ] },
-    "openai":    { "hasKey": true, "model": "gpt-5.6-sol", "models": [ … ] }
+    "openai":    { "hasKey": true, "model": "gpt-6-sol",
+                   "models": [ { "id": "gpt-6-astra", "label": "GPT-6 Astra", … },
+                               { "id": "gpt-6-sol", "label": "GPT-6 Sol", …, "recommended": true } ] }
   },
-  "mapping":   { "provider": "anthropic", "choosable": true },
-  "assistant": { "model": "claude-opus-5", "provider": "anthropic", "choosable": true,
-                 "models": [ { "id": "claude-opus-5", "label": "Opus 5",
-                               "note": "The most capable. Best at anything it has to work out.",
-                               "recommended": true },
+  "mapping":   { "provider": "anthropic", "choosable": true, "enabled": true },
+  "assistant": { "model": "claude-opus-5-5", "provider": "anthropic", "choosable": true,
+                 "models": [ { "id": "claude-opus-5-5", "label": "Opus 5.5",
+                               "note": "The most capable Claude. …", "recommended": true },
                              { "id": "claude-sonnet-5", "label": "Sonnet 5",
-                               "note": "Quicker, and less than half the price. …" } ],
-                 "choices": { "anthropic": [ { "id": "claude-opus-5", … },
+                               "note": "Quicker, and half the price of Opus 5.5." } ],
+                 "choices": { "anthropic": [ { "id": "claude-opus-5-5", … },
                                              { "id": "claude-sonnet-5", … } ],
-                              "openai":    [ { "id": "gpt-5.6-sol", "label": "GPT-5.6 Sol", … },
-                                             { "id": "gpt-5.6-terra", "label": "GPT-5.6 Terra", … } ] } },
+                              "openai":    [ { "id": "gpt-6-astra", "label": "GPT-6 Astra", … },
+                                             { "id": "gpt-6-sol", "label": "GPT-6 Sol", … },
+                                             { "id": "gpt-6-luna", "label": "GPT-6 Luna", … } ] } },
+  "automations": { "model": "gpt-6-sol", "provider": "openai", "choosable": true, "models": [ … ], "choices": { … } },
   "portraits": { "model": "gpt-image-2.5-flare", "maxPerDevice": 6, "budgetBytes": 314572800 }
 }
 ```
 
-Four things an app should not work out for itself.
+(That home chose Opus 5 before this build retired it: the flat `model` is the
+column as it was written, while everything under `providers`, `assistant` and
+`automations` is what will run.)
+
+A few things an app should not work out for itself.
 
 **The model list is the hub's.** `providers.<name>.models` carries the id, a
 label a person reads, a one-line note and exactly one `recommended`. This is the
 `GET /permissions` rule applied to models: ids and tiers move, and an app that
 shipped its own list would offer one this hub refuses or miss one it accepts.
-The allowlist behind it is deliberately longer than `models` — a hub already set
-to an older model keeps working rather than being told its setting is invalid,
-and a run recorded months ago still prices correctly when its log is read back.
+The list the hub *accepts* is deliberately longer than any it *offers* — every
+model it has ever run is still taken, so a hub already set to an older model
+keeps working rather than being told its setting is invalid, and a run recorded
+months ago still prices and names correctly when its log is read back. That is
+the whole of what an app needs to add or retire a model without a release: the
+ids, the labels and the notes all come from here.
 
-**`models` is one entry per provider, so draw it as a fact, not a picker.** The
-cheaper tier was retired after it produced descriptors the hub had to reject and
-one that named `custom` as an outlet's primary capability — a paid run whose
-result was a tile with no control on it. An app should show which model
-recognition runs on; keep the picker for the day the list is longer than one,
-and don't hide the row when it isn't, because which model spends the home's
-money is worth stating even when it isn't a question. **`model` is what will
-run, not what is stored**: a setting naming a model no longer offered resolves
-to the one that is, so an app never draws a model this hub will not use. Writing
-a retired id is still accepted — it just isn't what runs.
+**Draw the lists as one picker across both vendors.** Each list's notes are
+written to be read side by side with the other vendor's — "OpenAI’s most
+capable, at five times Sol’s price" rather than "the most capable" twice in one
+menu. Where a vendor is not usable, an app still has its list (to show what a key
+would unlock) but should not offer it as a choice: `mapping.choosable` and each
+agent's `choosable` are the hub saying there are two real vendors to choose
+between. A picker whose lists hold one model in total is a statement, not a
+question — say which model spends the home's money even when there is nothing to
+pick.
+
+**Recognition offers strong models only.** `providers.<name>.models` answers
+"which model reads a device's exposes tree", and it never offers a tier cheaper
+than its default. The cheaper tier was retired from it after it produced
+descriptors the hub had to reject and one that named `custom` as an outlet's
+primary capability — a paid run whose result was a tile with no control on it,
+cached against the device *model* for ever. That argument is about *cheaper*
+models, so OpenAI offers GPT-6 Astra above GPT-6 Sol (the default) and Anthropic
+offers Opus 5.5 alone. Writing it is `anthropicModel` / `openaiModel`, with
+`mappingProvider` beside it when the vendor changes too — one `PATCH` carries
+both, and the hub writes the models before the vendor so neither half is
+refused for the other. Send the vendor only when it actually changes: a
+one-key home that stores one has pinned it, and adding a second key later no
+longer moves recognition to the default vendor.
+
+**`model` is what will run, not what is stored — and a retired model is
+succeeded.** Every model the hub has known carries the model that replaced it
+(Opus 5 → Opus 5.5; GPT-5.6 Sol, the `gpt-5.6` alias and GPT-5.6 Terra → GPT-6
+Sol), and a stored choice counts only while it is still offered: otherwise the
+hub runs the first model along that chain which is, and only where there is none
+the vendor's default. A successor is always the same vendor's — the vendor was a
+choice somebody made, the retired id was not. **This is resolved on every read
+and never written back**, which is what makes an update all it takes and a
+rollback harmless: the previous build, which `install.sh` falls back to when a
+new one fails its health check, reads the column exactly as it always did. The
+flat `model`, `anthropic.model` and `openai.model` are those raw columns and have
+never been what runs; nothing should draw them.
 
 **`assistant` and `automations` are a different question from `providers`, and
-they really are pickers.** `providers.<name>.models` answers "which model reads
-a device's exposes tree"; those two answer "which model answers in the
-assistant" and "which model writes the home's rules", and the lists differ
-because the trades do. A mapping descriptor is cached against a device model and
-shapes every unit of it the home ever meets, so a cheaper tier that is wrong
-once is wrong for ever and the list is one entry long. A conversation is many
-small rounds, read the moment they arrive and answered with another message when
-the reply is poor — so what a round costs is a real choice, and those lists have
-two. Write them with `PATCH /settings/ai {assistantModel}` and
+they are offered a different list.** Those two answer "which model answers in
+the assistant" and "which model writes the home's rules", and the lists differ
+because the trades do. A conversation is many small rounds, read the moment they
+arrive and answered with another message when the reply is poor — so what a
+round costs is a real choice, and those lists add the cheaper tiers (Sonnet 5,
+GPT-6 Luna). Write them with `PATCH /settings/ai {assistantModel}` and
 `{automationsModel}`; `null` clears either back to the default. As above, both
-`model` fields are what will **run**, and a stored id this build no longer
-offers resolves to the default rather than being refused.
+`model` fields are what will **run**, and a retired id resolves to its
+successor rather than being refused.
 
 **The two agents are offered the same list and choose separately**, which is the
 point of them being two blocks: answering questions about the house and writing
 the rules it runs by itself are different jobs, and a home may want to spend
 differently on them. `automations` used to read `providers.anthropic.model`, the
-*mapper's* choice, which never showed because that list offers one model and
-Sonnet is not on it, and was one added choice away from making "which model
+*mapper's* choice, which never showed because that list offered one model and
+Sonnet was not on it, and was one added choice away from making "which model
 recognises a device" silently decide "which model writes a rule".
 
 **And either agent runs on either vendor, so each block carries four fields
@@ -1580,7 +1613,10 @@ list, which is what an app a version behind draws its picker from — so a hub
 that has grown a second provider never hands such an app a list mixing two
 vendors it has no control for; `choices` is the whole table, keyed by provider,
 for an app that knows about both; and `choosable` says there is a decision here
-at all, exactly as `mapping.choosable` does (both keys stored).
+at all. **An agent's `choosable` is narrower than `mapping.choosable`**: both
+vendors have to be ones a conversation can authenticate as, so a stored Claude
+*subscription token* beside an OpenAI key counts for the mapper's picker (it is
+a stored key) and not for an agent's (no conversation can run on one).
 
 **There is no `assistantProvider` to write, and that is deliberate.** Model ids
 do not collide across vendors, so the provider is *derived* from the model and
@@ -1588,7 +1624,7 @@ one column says both things — a provider picker writes that provider's default
 model id. A second stored field would be a second thing to disagree with the
 first. **And the resolution is key-aware**, which is the half a list-only
 version gets wrong: a home that has only ever had an OpenAI key still has
-`claude-opus-5` stored — it is the default and nobody chose it — so a stored
+`claude-opus-5-5` stored — it is the default and nobody chose it — so a stored
 choice counts only while its provider has a usable key, and otherwise falls back
 to the provider that does, at that provider's default. A stored Anthropic
 *subscription token* is not a usable key here, since the loops authenticate with
@@ -1605,9 +1641,25 @@ something it cannot authenticate.
 the question `409 ai_not_configured` answers. Whether *Anthropic* is configured
 is `providers.anthropic.hasKey`.
 
-**`enabled` governs adaptation only.** It exists because the agent runs by
-itself when an unknown device turns up; nobody draws a portrait by accident, so
-portraits are not gated on it.
+**`enabled` is device recognition's switch, and nothing else's.** Off, the
+hub does not ask a model about a device it cannot place — automatically, or by
+`remap` and `repair`, which answer `409 ai_disabled`. It defaults to on, and the
+credential survives it: "stop spending my money on this for now" and "forget my
+key" are different requests. **The assistant, the automations agent and the
+voice do not read it.** They did for a while, answering `409 ai_disabled` too,
+which meant a home that switched recognition off to save money could no longer
+talk to itself — under a switch both apps had always labelled as recognition's.
+Whether a phone may send anything at all is the app's own question, asked
+before a message leaves it. Rules already written never depended on it
+(`src/automations/` has no idea the agent exists), and portraits were never
+gated on it: nobody draws a portrait by accident.
+
+**`mapping.enabled` repeats it, and its presence is the capability.** The flat
+`enabled` is what every app already reads and writes, so it stays; the copy in
+recognition's own block tells an app that this hub asks the switch before
+recognition alone. A hub without it is one that still pauses both agents and
+the voice with the switch, and an app talking to one has to say so rather than
+send a message into a refusal. `PATCH {enabled}` is still how it is written.
 
 Key material is never returned, by any route, in any field.
 

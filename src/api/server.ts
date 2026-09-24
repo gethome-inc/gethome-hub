@@ -35,8 +35,8 @@ import {
   AGENT_MODELS,
   effectiveModel,
   isSupportedModel,
+  offeredModelIds,
   PROVIDER_MODELS,
-  supportedModelIds,
 } from '../ai/models.js';
 // Local operations on stored JSON — zod only, no Anthropic SDK in this graph.
 // `MappingLibrary.repair` loads the agent on demand.
@@ -313,10 +313,11 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   const sessions = new MemberSessions();
 
   /**
-   * Why an explicitly requested agent run must not start, or `null` to go
-   * ahead. Two reasons, and they need different words in the app: a hub with
-   * no credential has never been able to do this, while one whose owner turned
-   * adaptation off is being obeyed.
+   * Why an explicitly requested **recognition** run must not start, or `null`
+   * to go ahead. Two reasons, and they need different words in the app: a hub
+   * with no credential has never been able to do this, while one whose owner
+   * turned recognition off is being obeyed. Only the recognition routes ask
+   * it — `ai_enabled` is that job's switch alone.
    */
   const aiUnavailableReason = async (): Promise<'ai_not_configured' | 'ai_disabled' | null> => {
     const ai = await deps.settings.getAiSettings();
@@ -1236,8 +1237,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       // Its own refusal code, not `ai_not_configured`: portraits are drawn by
       // OpenAI and device recognition may be running on Anthropic, so a hub can
       // be perfectly configured for one and not the other. And deliberately not
-      // gated on `ai_enabled`, which is the *adaptation* switch — nobody draws
-      // a portrait by accident, so there is nothing to switch off.
+      // gated on `ai_enabled`, which is device recognition's switch — nobody
+      // draws a portrait by accident, so there is nothing to switch off.
       const apiKey = await deps.settings.aiKey('openai');
       if (!apiKey) return reply.code(409).send({ error: 'openai_not_configured' });
 
@@ -2093,19 +2094,22 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
      * version behind reads to draw its picker — so a hub that has grown a
      * second provider does not hand that app a list mixing two vendors it has
      * no control for. `choices` is the whole table for an app that knows about
-     * both, and `choosable` is "there is a decision to make here", exactly as
-     * `mapping.choosable` means it.
+     * both, and `choosable` is "there is a decision to make here" — both
+     * vendors are ones an agent can actually authenticate as, which is
+     * narrower than `mapping.choosable`: a stored Claude subscription token is
+     * a key the hub holds and no conversation can use, so counting it offered
+     * a vendor switch that could only answer `automation_needs_anthropic`.
      *
      * `provider` is derived from the model rather than stored beside it — see
      * `agentProviderOf` — so the two can never disagree, and a picker writes
      * that provider's default model id rather than a second setting.
      */
-    const forAgent = (agent: { model: string; provider: AiProvider | null }) => ({
+    const forAgent = (agent: { model: string; provider: AiProvider | null; choosable: boolean }) => ({
       model: agent.model,
       provider: agent.provider,
       models: agent.provider === null ? [] : AGENT_MODELS[agent.provider].choices,
       choices: { anthropic: AGENT_MODELS.anthropic.choices, openai: AGENT_MODELS.openai.choices },
-      choosable: ai.mappingChoosable,
+      choosable: agent.choosable,
     });
     const forProvider = (provider: AiProvider) => ({
       hasKey: ai[provider].hasKey,
@@ -2116,7 +2120,15 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       ...ai,
       status,
       providers: { anthropic: forProvider('anthropic'), openai: forProvider('openai') },
-      mapping: { provider: ai.provider, choosable: ai.mappingChoosable },
+      // Device recognition's own block: who recognises, whether that is a
+      // choice, and **whether it runs at all**. `enabled` repeats the flat
+      // field of the same name on purpose — the flat one is what every app
+      // already reads and writes — and its *presence here* is the capability:
+      // a hub that sends it asks the switch before recognition and nothing
+      // else, while an older one also paused both agents and the voice with
+      // it, and an app has to know which it is talking to before it closes a
+      // composer over a switch somebody flipped to save money on devices.
+      mapping: { provider: ai.provider, choosable: ai.mappingChoosable, enabled: ai.enabled },
       // What answers in the assistant, and what it could answer on. Its own
       // block rather than more fields on `providers`, because it is a
       // different question from "which model reads a device's exposes tree"
@@ -2138,8 +2150,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       .string()
       .min(1)
       .max(120)
+      // Any id the hub has ever known is *taken* — a retired one is succeeded
+      // when it is read, so an app a version behind is never refused for
+      // naming what it was shown — but the sentence names only what
+      // recognition is offered, because that is what a run will actually use.
       .refine((model) => isSupportedModel(model, provider), {
-        message: `unsupported model — the mapping agent runs on: ${supportedModelIds(provider).join(', ')}`,
+        message: `unsupported model — device recognition runs on: ${offeredModelIds(provider).join(', ')}`,
       })
       .nullable()
       .optional();
@@ -2210,8 +2226,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
           .string()
           .min(1)
           .max(120)
-          .refine(isSupportedModel, {
-            message: `unsupported model — the mapping agent runs on: ${supportedModelIds().join(', ')}`,
+          .refine((model) => isSupportedModel(model), {
+            message: `unsupported model — device recognition runs on: ${offeredModelIds('anthropic').join(', ')}`,
           })
           .nullable()
           .optional(),
@@ -2237,7 +2253,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * Change anything about the hub's AI without re-entering everything else.
    *
    * Every field is optional and absence means "leave this alone", which is what
-   * lets one route carry two credentials, two models, the mapping provider and
+   * lets one route carry two credentials, a model per job, the mapping provider and
    * the switch. `PUT` requires an `apiKey`, so the only way to stop the agent
    * running used to be `DELETE` — which is a different request. "Stop spending
    * my money on this for now" and "forget my credential" have very different
@@ -3303,11 +3319,15 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * credential of any kind for, which is a stronger containment than the
    * expiring secret this route was first built around.
    *
-   * **A fourth refusal, and it is a real one.** GPT-Live is OpenAI's and there
-   * is no substitute, so a home running its assistant perfectly well on
+   * **A refusal of its own, and it is a real one.** GPT-Live is OpenAI's and
+   * there is no substitute, so a home running its assistant perfectly well on
    * Anthropic still cannot *speak* without an OpenAI key. That is a thing to
    * say plainly — `openai_not_configured`, with a sentence — rather than a 500
    * or, worse, a microphone button that fails on the first word.
+   *
+   * **`ai_enabled` is not asked**, exactly as the typed assistant does not ask
+   * it: that switch is device recognition's, and talking to the house is not
+   * recognising a device.
    */
   app.post('/api/v1/assistant/voice/session', needs('hub.ai'), async (request, reply) => {
     // **Carrying on rather than forking.** Somebody stops listening and starts
@@ -3329,7 +3349,6 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       .object({ sessionId: z.uuid().optional(), sdp: z.string().min(1).max(64_000) })
       .parse(request.body ?? {});
     const ai = await deps.settings.getAiSettings();
-    if (!ai.enabled) return reply.code(409).send({ error: 'ai_disabled' });
     if (!ai.openai.hasKey) {
       return reply.code(409).send({
         error: 'openai_not_configured',

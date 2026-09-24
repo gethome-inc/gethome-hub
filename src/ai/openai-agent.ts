@@ -22,7 +22,7 @@ import {
   record,
   type ExchangePart,
 } from './agent-core.js';
-import { defaultModelFor, estimateCostUsd, isSupportedModel, supportedModelIds } from './models.js';
+import { budgetScale, defaultModelFor, estimateCostUsd, isSupportedModel, supportedModelIds } from './models.js';
 import { FETCHABLE_HOSTS, fetchDocumentationPage } from './page-fetch.js';
 
 /**
@@ -153,6 +153,8 @@ export function createOpenAiMappingAgent(
 
       const capture: SubmitCapture = { submitted: null };
       const usage = new RunUsage(modelId);
+      // The cap in this run's own dollars — see `budgetScale`.
+      const budgetUsd = AGENT_MAX_BUDGET_USD * budgetScale(modelId);
       const startedAt = Date.now();
       const input: unknown[] = [{ role: 'user', content: userPrompt }];
       // See `AgentExchange`: a turn records what it added, never the whole
@@ -166,7 +168,7 @@ export function createOpenAiMappingAgent(
 
       try {
         for (turns = 1; turns <= AGENT_MAX_TURNS; turns++) {
-          if (usage.costUsd() >= AGENT_MAX_BUDGET_USD) {
+          if (usage.costUsd() >= budgetUsd) {
             ranOutOf = 'budget';
             break;
           }
@@ -279,7 +281,7 @@ export function createOpenAiMappingAgent(
 
       if (ranOutOf === 'budget') {
         throw new Error(
-          `mapping agent hit its $${AGENT_MAX_BUDGET_USD} cost cap after ${stats.numTurns} turn(s) without submitting`,
+          `mapping agent hit its $${budgetUsd} cost cap after ${stats.numTurns} turn(s) without submitting`,
         );
       }
       if (ranOutOf === 'turns') {

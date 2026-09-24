@@ -333,9 +333,11 @@ describe('the mapping agent on OpenAI', () => {
       }),
     );
     let cost = -1;
-    await agent().generate('system', 'user', { onStats: (stats) => (cost = stats.costUsd) });
-    // A million cached input tokens at a tenth of $4, and nothing else.
-    expect(cost).toBeCloseTo(0.4, 5);
+    // Named rather than the default, so the arithmetic below is about the
+    // cache rate and not about whichever model the default happens to be.
+    await agent('gpt-6-sol').generate('system', 'user', { onStats: (stats) => (cost = stats.costUsd) });
+    // A million cached input tokens at a tenth of $2, and nothing else.
+    expect(cost).toBeCloseTo(0.2, 5);
   });
 
   it('counts a cache write at its documented cache-write rate', async () => {
@@ -347,9 +349,9 @@ describe('the mapping agent on OpenAI', () => {
       }),
     );
     let cost = -1;
-    await agent().generate('system', 'user', { onStats: (stats) => (cost = stats.costUsd) });
-    // One million regular input tokens ($4) plus one million cache-write
-    // tokens ($5 = 1.25x the input rate).
-    expect(cost).toBeCloseTo(9, 5);
+    await agent('gpt-6-sol').generate('system', 'user', { onStats: (stats) => (cost = stats.costUsd) });
+    // One million regular input tokens ($2) plus one million cache-write
+    // tokens ($2.50 = 1.25x the input rate).
+    expect(cost).toBeCloseTo(4.5, 5);
   });
 });

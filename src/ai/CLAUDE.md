@@ -55,23 +55,41 @@ domains — update them in the same change.
   settings for one decision is one too many. And **the hub owns the model
   list** — the apps render `providers.<name>.models` rather than shipping ids of
   their own, the `GET /permissions` rule applied to a vocabulary that moves.
-  **That list is one model per provider now, so the apps *state* it rather than
-  ask.** It was two, the thorough tier and the cheaper one, until the cheaper
-  one was tried: Sonnet 5 kept submitting descriptors `submit_mapping` had to
-  bounce, and the run that finished named `custom` as an outlet's primary — the
-  one value that renders as no control at all, so a paid run produced a dead
-  tile on a working plug. The trade is lopsided because a descriptor is cached
-  per device *model* and shapes every unit of it the home ever meets until
-  somebody remaps; a few cents on a job that runs a handful of times in a hub's
-  life does not buy that risk. OpenAI's cheaper tier went on the same reasoning
-  rather than its own evidence. The half that is easy to miss is
+  **Recognition never offers a tier cheaper than its default.** It was two tiers
+  per vendor until the cheaper one was tried: Sonnet 5 kept submitting
+  descriptors `submit_mapping` had to bounce, and the run that finished named
+  `custom` as an outlet's primary — the one value that renders as no control at
+  all, so a paid run produced a dead tile on a working plug. The trade is
+  lopsided because a descriptor is cached per device *model* and shapes every
+  unit of it the home ever meets until somebody remaps; a few cents on a job
+  that runs a handful of times in a hub's life does not buy that risk. That is
+  an argument about *cheaper* models, so OpenAI offers GPT-6 Astra above Sol
+  and Anthropic offers Opus 5.5 alone — and the test pins the invariant, not a
+  count. The half that is easy to miss is
   **`effectiveModel`: a stored model counts only while it is still offered**,
   or retiring one leaves the homes that had chosen it as the only homes still
   running it — silently, since nothing on a screen would change. `GET
-  /settings/ai` answers what will *run*, never the column, so a hub set to
-  Sonnet moves to Opus by itself; a write naming a retired id is still accepted
-  rather than 400-ing an older app, it simply is not what runs, and `PRICING`
-  stays broad so a months-old `ai_runs.modelId` still prices correctly.
+  /settings/ai` answers what will *run*, never the column; a write naming a
+  retired id is still accepted rather than 400-ing an older app, it simply is
+  not what runs, and the model table stays broad so a months-old
+  `ai_runs.modelId` still prices *and names* correctly.
+  **What runs instead is the retired model's successor**, and that is one table
+  rather than three (`MODELS` in `models.ts`: a row per model the hub has ever
+  run, carrying its price, its name and the model that replaced it — Opus 5 →
+  Opus 5.5, GPT-5.6 Sol/Terra → GPT-6 Sol). Three rules. **Resolved on read,
+  never written back**: that is what makes updating the hub the whole
+  migration, and it is the only version that survives `install.sh`'s rollback —
+  the previous build has never heard of the successor, and an agent column
+  holding an id it does not know falls to "the first vendor with a usable key",
+  which would silently move a home that chose OpenAI onto Anthropic. **Same
+  vendor, always** — the vendor was a choice somebody made by pasting its key.
+  **A row names the model that replaced *it***, and the walk follows the chain,
+  so retiring a model edits its own row and nothing older. The one rollback
+  cost that remains is accepted: a successor somebody *deliberately chose* on
+  the new build is an id the previous one does not know. **Never delete a
+  row** — it is what old records are named from and old settings succeeded
+  from. `test/ai-model-choice.test.ts` pins the chain's invariants and that the
+  stored columns are untouched.
   **`resolveProvider()` has to use it too, and that is the half that was
   missed.** Every surface that *reports* which model answered went through
   `effectiveModel` — the settings route, `ai_runs.modelId`,
@@ -79,9 +97,16 @@ domains — update them in the same change.
   call that picks the model to actually run read the column, so a hub set to
   Sonnet went on running Sonnet with every screen and every recorded row
   saying Opus. It passed unnoticed because `isSupportedModel` is deliberately
-  the broad `PRICING` allowlist and let it straight through, and because the
+  the broad allowlist and let it straight through, and because the
   homes it was wrong for are exactly the ones nobody was looking at.
   `test/ai-model-choice.test.ts` pins it.
+  **The spend caps are in the run's own model's dollars.** Every cap here —
+  `AGENT_MAX_BUDGET_USD` per recognition run, `ASSISTANT_MAX_BUDGET_USD` and
+  `AUTOMATION_MAX_BUDGET_USD` per conversation — was sized against Opus 5's
+  $5/$25, and `budgetScale(modelId)` stretches it for a model priced above that
+  (GPT-6 Astra, ×2). Without it the most thorough model a home could pick would
+  be the one stopped at half the work; a cheaper model keeps the same ceiling,
+  never a tighter one. A new cap goes through it too.
   **It used to run on the Claude Agent SDK, and moving off it was a memory
   decision like dropping Docker.** That SDK ships a 276 MB native binary — 74%
   of the hub's whole download — and spawned a ~315 MB subprocess per run, of
@@ -321,7 +346,7 @@ domains — update them in the same change.
 - **The automation agent is authoring, never runtime, and it lives on the
   hub.** `src/ai/automation-*.ts` writes rules in conversation;
   `src/automations/` runs them, with no key, no network and no idea the agent
-  exists. So `ai_enabled: false` stops rules being *written* and touches
+  exists. So removing the key stops rules being *written* and touches
   nothing already running — "stop spending my money on this for now" must not
   put the lights out on a schedule. `docs/automations.md` is canonical.
   On the hub for the same reason the mapper is (the Agent SDK's 276 MB binary
@@ -534,7 +559,12 @@ domains — update them in the same change.
   of the step already on screen; it is hung on that step's `detail` when the next
   step lands, when prose is said, or when the reply starts — the last because a
   round can end without another step. Only into an empty slot: a tool's own
-  `detail` is the better sentence wherever there is one. And **prose from a round
+  `detail` is the better sentence wherever there is one. (On Opus 5.5 the notes a
+  model writes between tool calls arrive as *progress-update* `thinking` blocks
+  rather than `text`, so they reach the trail this way — as reasoning on the
+  step's `detail` — and not as a `said` step; `display: 'summarized'` is what
+  returns their text at all, and `'updates'` would drop the reasoning to get
+  them back. `docs/automations.md` has it.) And **prose from a round
   that then calls a tool is not the answer** — a model narrates ("I'll set that
   up for you.") and then calls something, and only the *last* round's text
   becomes a row — so it is kept as a step of its own, `kind: 'said'`, reported
@@ -683,41 +713,44 @@ domains — update them in the same change.
   paragraph and a release of both apps. `permission` is checked when the tool
   runs, so a member whose role cannot hand a job over gets a sentence the model
   reads out rather than a capability silently absent.
-  **The agents' model list is its own** (`AGENT_MODELS` — Opus 5 and Sonnet 5
-  on Anthropic, GPT-5.6 Sol and Terra on OpenAI), and the mapper's one-model
-  list is untouched: a descriptor is cached against a device model and shapes
+  **The agents' model list is its own** (`AGENT_MODELS` — Opus 5.5 and Sonnet 5
+  on Anthropic, GPT-6 Astra, Sol and Luna on OpenAI), and the mapper's list
+  stays strong-only: a descriptor is cached against a device model and shapes
   every unit of it for ever, while a chat is many small rounds answered with
   another message when the reply is poor. **The provider follows the model id
   and there is no second column** (`agentProviderOf`): ids do not collide across
   vendors — `priceOf` has relied on that since the mapper had two — so one
-  setting says both things and they cannot disagree, and an app's provider
-  picker writes that provider's default model id. **And resolution is
-  key-aware**, which is the half a list-only version gets wrong: a home that has
-  only ever had an OpenAI key still has `claude-opus-5` stored, because it is
-  the default and nobody chose it, so resolving on the offered list alone points
-  every conversation at a vendor the hub cannot authenticate to and answers
+  setting says both things and they cannot disagree, and an app's picker writes
+  a model id whatever vendor it is on. **And resolution is key-aware**, which is
+  the half a list-only version gets wrong: a home that has only ever had an
+  OpenAI key still has `claude-opus-5-5` stored, because it is the default and
+  nobody chose it, so resolving on the offered list alone points every
+  conversation at a vendor the hub cannot authenticate to and answers
   `ai_not_configured` on a home that is configured. A stored choice counts while
-  its provider is *usable*; otherwise the hub falls back to the provider that
-  is. A **retired** id keeps its vendor off `PRICING` rather than `AGENT_MODELS`
-  — the list answers `null` for one, which is the point of it — since the vendor
-  was a real choice somebody made and the retired id was not.
+  its vendor is *usable*; otherwise the hub falls back to the vendor that is. A
+  **retired** id keeps its vendor off `MODELS` rather than `AGENT_MODELS` — the
+  list answers `null` for one, which is the point of it — and runs its
+  successor there, since the vendor was a real choice somebody made and the
+  retired id was not. **An agent's `choosable` is its own, too**: both vendors
+  usable, from the same `UsableProviders` the resolution reads — narrower than
+  `mappingChoosable`, which counts a stored Claude subscription token that no
+  conversation can run on.
   **One list, a column each**: the assistant and the automations agent
   are offered the same lists and choose independently
   (`ai_assistant_model`, `ai_automations_model`), because answering questions
   about the house and writing the rules it runs by itself are different jobs a
   home may want to spend differently on. The automations agent had no column of
   its own and read `ai_model` — the *mapper's* — which never showed, since that
-  list offers one model and Sonnet is not on it, and was one added choice away
+  list offered one model and Sonnet was not on it, and was one added choice away
   from letting "which model recognises a device" decide "which model writes a
   rule". `effectiveAgentModel` is what **runs** as well as what is reported,
-  which is the gap that cost the mapper a release. **And `modelLabel` reads
-  both lists**, which is the same shape of gap from the other end: it names a
-  model that has already run and searched the mapper's alone, so a chat on
-  Sonnet 5 — offered here and nowhere else — reported `claude-sonnet-5` where a
-  chat on Opus reported "Opus 5", and the apps drew a raw id over one
-  conversation and a name over the next. One `ai_runs` table, two surfaces
-  asking one question of it, so the answer is the union. Effort is `medium` here
-  against the mapper's `high`, and is exposed by neither.
+  which is the gap that cost the mapper a release. **And `modelLabel` reads the
+  model's own row**, per provider, which is the same shape of gap from the other
+  end: it names a model that has already run, and searching the offered lists
+  meant a chat on a model offered to one surface only — and, the day it was
+  retired, on *any* model — reported a raw id where the chat beside it had a
+  name. Effort is `medium` here against the mapper's `high`, and is exposed by
+  neither.
   **What the provider line resolves is what runs**, and `openConversation` asks
   the vendor exactly once. The automations agent kept a second
   `provider !== 'anthropic'` refusal for a week after both loops existed — the

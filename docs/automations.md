@@ -27,10 +27,11 @@ rounds.
 | Needs the network | **no** | yes |
 | Deterministic | required | not required |
 
-The consequence is a rule, not a nicety: **`ai_enabled: false`, or a deleted
-API key, stops automations being *written* and does not touch the ones that
-exist.** "Stop spending my money on this for now" must not put the lights out
-on a schedule.
+The consequence is a rule, not a nicety: **a deleted API key stops automations
+being *written* and does not touch the ones that exist.** "Stop spending my
+money on this for now" must not put the lights out on a schedule. (`ai_enabled`
+is device recognition's switch and stops neither — the writing agent does not
+read it.)
 
 ---
 
@@ -452,8 +453,9 @@ says one thing: *this rule is not one room's*.
 
 `src/ai/automation-*.ts`. The agent is **authoring only**: the runtime above
 does not know it exists, runs without a key, and keeps running when the key is
-taken away. `ai_enabled: false` stops rules being written and touches nothing
-that is already running.
+taken away. Removing the key stops rules being written and touches nothing that
+is already running; `ai_enabled`, which is device recognition's switch, stops
+neither.
 
 On the hub, as a plain API loop on whichever vendor answers — Anthropic's
 Messages API or OpenAI's Responses API, behind one `ChatTransport`
@@ -757,14 +759,20 @@ current answer to the same question and covers a revival running on a provider
 the earlier rows never saw.
 
 *And the model is read back, never re-derived.* `effectiveModel` answers "what
-will run" and deliberately moves with the offered list; this answers "what did
-run", which is a fact about a run that already happened and must not move at
-all. So `provider` and `modelId` are the columns verbatim, and only `model` —
-the label an app draws — is looked up: `PROVIDER_MODELS` while the model is
-still offered, the raw id once it is retired. Ugly and true beats a second
-table of names for models nobody offers any more, and it is the hub's answer
-rather than an app's for the reason the model *picker* is. `PRICING` stays
-broad for the same reason, so a months-old row still prices correctly.
+will run" and deliberately moves with the offered list — a retired model is
+succeeded by the one that replaced it; this answers "what did run", which is a
+fact about a run that already happened and must not move at all. So `provider`
+and `modelId` are the columns verbatim, and only `model` — the label an app
+draws — is looked up, from the model's **own** row in `MODELS` (`src/ai/models.ts`),
+which every model the hub has ever run keeps: a chat that ran on Opus 5 still
+says "Opus 5" after Opus 5.5 replaces it, never the successor's name. That used
+to fall back to the raw id once a model was retired, on the argument that the
+alternative was a second table of names nothing kept honest; the answer to that
+is a column on the one table that already had a row per model, beside its price,
+so the two are kept in step by construction. Only an id this build has never
+heard of is drawn raw. It is the hub's answer rather than an app's for the
+reason the model *picker* is, and the table stays broad for the same reason, so
+a months-old row still prices and names correctly.
 
 Guardrails: 12 provider rounds per user message, **$1 per conversation** (on
 the conversation rather than the turn — twenty rounds of clarification are
@@ -920,6 +928,18 @@ would put the reply in the transcript twice.
 **And it is reported from `streamTurn`**, which both agents share, rather than
 from either pump — it is the same fact in both, and the loop is the one place
 that already has `said` and `calls` in hand.
+
+**On Opus 5.5 most of it arrives as reasoning instead, and that is fine.** From
+Opus 5.5 (as on Fable 5.1) the short notes a model writes between tool calls
+come back as *progress-update* `thinking` blocks rather than `text` — at most
+one before each call. The transport asks for `display: 'summarized'`, which
+returns their text mixed in with the summarized reasoning, so the narration
+still streams: over `thinking` rather than `delta`, and it is hung on the
+step's `detail` with the rest of that round's reasoning (next section) rather
+than written as a `said` step. `said` still fires for whatever does arrive as
+`text`. The alternative, `display: 'updates'` (a beta header), returns the notes
+*without* the reasoning — which would give back a `said` step and take away the
+one sentence per round that says *why*, so it is deliberately not used.
 
 ### Why, kept with the step it explains
 

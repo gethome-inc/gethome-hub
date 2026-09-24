@@ -8,6 +8,7 @@ import { buildMappingUserPrompt, zigbee2mqttDevicePage } from '../src/ai/prompts
 import {
   DEFAULT_MODEL,
   PROVIDER_MODELS,
+  budgetScale,
   defaultModelFor,
   effectiveModel,
   estimateCostUsd,
@@ -189,37 +190,47 @@ describe('supported models', () => {
    * deliberately different lengths: a hub already set to an older model has to
    * keep working, while asking somebody to choose between six is asking them to
    * research six.
+   *
+   * **Recognition never offers a tier cheaper than its default**, which is the
+   * invariant that replaced "one model per provider". The cheaper tier was
+   * retired from recognition after Sonnet 5 submitted descriptors the tool
+   * handler kept bouncing and then named `custom` as an outlet's primary, which
+   * renders as no control at all — an argument about *cheaper* models, and one
+   * that says nothing against a more thorough one. So OpenAI offers Astra above
+   * Sol, and Sonnet and Luna stay off this list.
    */
-  it('offers exactly one model per provider, and it is that provider’s default', () => {
+  it('offers recognition nothing cheaper than its default, and recommends the default', () => {
     for (const provider of ['anthropic', 'openai'] as const) {
       const choices = PROVIDER_MODELS[provider].choices;
-      // The model is a fact the apps state, not a decision they ask for: the
-      // cheaper tier was retired after Sonnet 5 submitted descriptors the tool
-      // handler kept bouncing and then named `custom` as an outlet's primary,
-      // which renders as no control at all.
-      expect(choices).toHaveLength(1);
-      expect(choices[0]?.recommended).toBe(true);
-      expect(isSupportedModel(choices[0]!.id, provider)).toBe(true);
-      expect(isSupportedModel(defaultModelFor(provider), provider)).toBe(true);
-      expect(defaultModelFor(provider)).toBe(choices[0]?.id);
+      expect(choices.filter((choice) => choice.recommended).map((choice) => choice.id)).toEqual([
+        defaultModelFor(provider),
+      ]);
+      const floor = estimateCostUsd(defaultModelFor(provider), { output_tokens: 1_000_000 });
+      for (const choice of choices) {
+        expect(isSupportedModel(choice.id, provider)).toBe(true);
+        expect(estimateCostUsd(choice.id, { output_tokens: 1_000_000 })).toBeGreaterThanOrEqual(floor);
+      }
     }
   });
 
   /**
-   * Each is named by an **explicit** id. `gpt-5.6` routes to Sol today and is
-   * OpenAI's to re-point tomorrow, which would move which model a home runs
-   * and what a run costs with nothing in this repository changed to explain
-   * it; the alias stays priced so a hub that stored it keeps working, and
-   * stays out of `choices` so nothing new picks it up.
+   * Each is named by an **explicit** id. `gpt-5.6` routed to Sol and was
+   * OpenAI's to re-point, which would move which model a home runs and what a
+   * run costs with nothing in this repository changed to explain it; the alias
+   * stays known so a hub that stored it keeps working, and stays out of
+   * `choices` so nothing new picks it up.
    */
-  it('pins Opus 5 and Sol by their explicit ids', () => {
-    expect(PROVIDER_MODELS.anthropic.choices.map((choice) => choice.id)).toEqual(['claude-opus-5']);
-    expect(PROVIDER_MODELS.openai.choices.map((choice) => choice.id)).toEqual(['gpt-5.6-sol']);
-    expect(defaultModelFor('openai')).toBe('gpt-5.6-sol');
+  it('pins Opus 5.5, Astra and Sol by their explicit ids', () => {
+    expect(PROVIDER_MODELS.anthropic.choices.map((choice) => choice.id)).toEqual(['claude-opus-5-5']);
+    expect(PROVIDER_MODELS.openai.choices.map((choice) => choice.id)).toEqual(['gpt-6-astra', 'gpt-6-sol']);
+    expect(defaultModelFor('anthropic')).toBe('claude-opus-5-5');
+    expect(defaultModelFor('openai')).toBe('gpt-6-sol');
 
-    // Retired from the picker, still priced: a run recorded months ago names
-    // the model it ran on, and reading that log back has to cost it correctly.
+    // Retired from the picker, still known: a run recorded months ago names
+    // the model it ran on, and a stored setting naming one must still be taken.
+    expect(isSupportedModel('claude-opus-5', 'anthropic')).toBe(true);
     expect(isSupportedModel('claude-sonnet-5', 'anthropic')).toBe(true);
+    expect(isSupportedModel('gpt-5.6-sol', 'openai')).toBe(true);
     expect(isSupportedModel('gpt-5.6-terra', 'openai')).toBe(true);
 
     // Accepted, priced, and never offered.
@@ -229,28 +240,40 @@ describe('supported models', () => {
       estimateCostUsd('gpt-5.6-sol', { input_tokens: 1_000_000 }),
     );
 
-    // Luna is cheap and is not on the list: this job is reasoning-heavy and
-    // runs a handful of times in a hub's life.
+    // Luna is known — the agents offer it — and recognition does not: this job
+    // is reasoning-heavy and runs a handful of times in a hub's life.
+    expect(isSupportedModel('gpt-6-luna', 'openai')).toBe(true);
+    expect(PROVIDER_MODELS.openai.choices.some((choice) => choice.id === 'gpt-6-luna')).toBe(false);
+    // A model this hub has never run is not accepted at all.
     expect(isSupportedModel('gpt-5.6-luna', 'openai')).toBe(false);
   });
 
   /**
    * Retiring a model is only half a decision if the homes that had chosen it
    * carry on running it — those are exactly the homes the retirement is for,
-   * and nothing on any screen would have changed to say so.
+   * and nothing on any screen would have changed to say so. And the other
+   * half is *where* they go: to the model that replaced theirs, which is not
+   * always the default.
    */
-  it('runs a stored model only while it is still offered', () => {
-    expect(effectiveModel('anthropic', 'claude-sonnet-5')).toBe('claude-opus-5');
-    expect(effectiveModel('openai', 'gpt-5.6-terra')).toBe('gpt-5.6-sol');
+  it('runs a stored model only while it is still offered, and succeeds a retired one', () => {
+    expect(effectiveModel('anthropic', 'claude-opus-5')).toBe('claude-opus-5-5');
+    expect(effectiveModel('anthropic', 'claude-opus-4-6')).toBe('claude-opus-5-5');
+    expect(effectiveModel('openai', 'gpt-5.6-sol')).toBe('gpt-6-sol');
+    expect(effectiveModel('openai', 'gpt-5.6-terra')).toBe('gpt-6-sol');
     // The bare alias was never offered, so it was never a preference either.
-    expect(effectiveModel('openai', 'gpt-5.6')).toBe('gpt-5.6-sol');
+    expect(effectiveModel('openai', 'gpt-5.6')).toBe('gpt-6-sol');
+    // Offered to the agents and not here: the default, never the cheap tier.
+    expect(effectiveModel('anthropic', 'claude-sonnet-5')).toBe('claude-opus-5-5');
+    expect(effectiveModel('openai', 'gpt-6-luna')).toBe('gpt-6-sol');
 
     // A model still on the list is still honoured, and so is silence.
-    expect(effectiveModel('anthropic', 'claude-opus-5')).toBe('claude-opus-5');
-    expect(effectiveModel('anthropic', null)).toBe('claude-opus-5');
-    expect(effectiveModel('anthropic', undefined)).toBe('claude-opus-5');
-    // Nothing a stranger could put in the column becomes a model either.
-    expect(effectiveModel('anthropic', 'gpt-5.6-sol')).toBe('claude-opus-5');
+    expect(effectiveModel('anthropic', 'claude-opus-5-5')).toBe('claude-opus-5-5');
+    expect(effectiveModel('openai', 'gpt-6-astra')).toBe('gpt-6-astra');
+    expect(effectiveModel('anthropic', null)).toBe('claude-opus-5-5');
+    expect(effectiveModel('anthropic', undefined)).toBe('claude-opus-5-5');
+    // Nothing a stranger could put in the column becomes a model either — and
+    // a successor never crosses to another vendor's list.
+    expect(effectiveModel('anthropic', 'gpt-5.6-sol')).toBe('claude-opus-5-5');
   });
 
   it('keeps the two allowlists apart, so a model cannot be sent to the wrong API', () => {
@@ -275,11 +298,46 @@ describe('supported models', () => {
     // 1M input + 1M output on Opus-tier list prices.
     const cost = estimateCostUsd('claude-opus-5', { input_tokens: 1_000_000, output_tokens: 1_000_000 });
     expect(cost).toBeCloseTo(30, 5);
+    // Opus 5.5 is $4/$20.
+    expect(
+      estimateCostUsd('claude-opus-5-5', { input_tokens: 1_000_000, output_tokens: 1_000_000 }),
+    ).toBeCloseTo(24, 5);
+    expect(estimateCostUsd('gpt-6-astra', { input_tokens: 1_000_000, output_tokens: 1_000_000 })).toBeCloseTo(60, 5);
+    expect(estimateCostUsd('gpt-6-sol', { input_tokens: 1_000_000, output_tokens: 1_000_000 })).toBeCloseTo(12, 5);
+    expect(estimateCostUsd('gpt-6-luna', { input_tokens: 1_000_000, output_tokens: 1_000_000 })).toBeCloseTo(0.6, 5);
   });
 
   it('bills cache reads at a tenth of the input rate', () => {
     const cached = estimateCostUsd('claude-opus-5', { cache_read_input_tokens: 1_000_000 });
     expect(cached).toBeCloseTo(0.5, 5);
+  });
+
+  /**
+   * A model billed differently says so on its own row. Opus 5.5 reads its
+   * cache at a twentieth of the input rate; at the usual tenth, every long
+   * conversation on it would be reported at nearly twice the cache cost.
+   */
+  it('bills a model’s own cache rates where it has them', () => {
+    expect(estimateCostUsd('claude-opus-5-5', { cache_read_input_tokens: 1_000_000 })).toBeCloseTo(0.2, 5);
+    // Writes are the usual 1.25x of $4.
+    expect(estimateCostUsd('claude-opus-5-5', { cache_creation_input_tokens: 1_000_000 })).toBeCloseTo(5, 5);
+  });
+
+  /**
+   * The caps are dollars sized against Opus 5, so a model priced above it
+   * would stop at a fraction of the work — GPT-6 Astra at half. The scale is
+   * never below one: a cheaper model keeps the same ceiling rather than a
+   * tighter one.
+   */
+  it('stretches the spend caps for a model priced above the one they were set against', () => {
+    expect(budgetScale('gpt-6-astra')).toBeCloseTo(2, 5);
+    expect(budgetScale('claude-opus-5')).toBe(1);
+    expect(budgetScale('claude-opus-5-5')).toBe(1);
+    expect(budgetScale('gpt-6-sol')).toBe(1);
+    expect(budgetScale('gpt-6-luna')).toBe(1);
+    // An unknown model is priced at the most expensive known tier, so its cap
+    // is as wide as any — and its estimate as high as any, so it trips early.
+    expect(budgetScale('something-new')).toBeCloseTo(2, 5);
   });
 
   it('counts web searches, which are billed per request', () => {
@@ -740,7 +798,7 @@ describe('the mapping agent loop', () => {
   });
 
   it('stops when the run has spent its cost cap', async () => {
-    // ~$0.55 of Opus-tier output per turn, so the $2 cap lands well before
+    // ~$0.44 of Opus-tier output per turn, so the $2 cap lands well before
     // the turn cap does.
     queue(
       reply({

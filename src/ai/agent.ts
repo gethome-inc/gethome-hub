@@ -24,7 +24,7 @@ import {
   type MappingProvider,
   type SubmitCapture,
 } from './agent-core.js';
-import { DEFAULT_MODEL, estimateCostUsd, isSupportedModel, supportedModelIds } from './models.js';
+import { budgetScale, DEFAULT_MODEL, estimateCostUsd, isSupportedModel, supportedModelIds } from './models.js';
 
 /**
  * The mapping agent: a tool-use loop on the Anthropic Messages API that
@@ -290,6 +290,10 @@ export function createMappingAgent(
 
       const capture: SubmitCapture = { submitted: null };
       const usage = new RunUsage(modelId);
+      // The cap in this run's own dollars — see `budgetScale`: a model priced
+      // above the one the cap was set against gets as much *work* as any
+      // other, rather than stopping at half of it.
+      const budgetUsd = AGENT_MAX_BUDGET_USD * budgetScale(modelId);
       const startedAt = Date.now();
       const tools = buildTools();
       const messages: Anthropic.MessageParam[] = [{ role: 'user', content: userPrompt }];
@@ -306,7 +310,7 @@ export function createMappingAgent(
 
       try {
         for (turns = 1; turns <= AGENT_MAX_TURNS; turns++) {
-          if (usage.costUsd() >= AGENT_MAX_BUDGET_USD) {
+          if (usage.costUsd() >= budgetUsd) {
             ranOutOf = 'budget';
             break;
           }
@@ -487,7 +491,7 @@ export function createMappingAgent(
 
       if (ranOutOf === 'budget') {
         throw new Error(
-          `mapping agent hit its $${AGENT_MAX_BUDGET_USD} cost cap after ${stats.numTurns} turn(s) without submitting`,
+          `mapping agent hit its $${budgetUsd} cost cap after ${stats.numTurns} turn(s) without submitting`,
         );
       }
       if (ranOutOf === 'turns') {

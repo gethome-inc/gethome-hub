@@ -3,7 +3,7 @@ import type { Logger } from '../logging.js';
 import { automationDocumentSchema } from '../automations/schema.js';
 import { sanityCheckAutomation } from '../automations/sanity.js';
 import { type AgentAuth } from './agent-core.js';
-import { isSupportedModel, supportedModelIds } from './models.js';
+import { budgetScale, isSupportedModel, supportedModelIds } from './models.js';
 import { QuestionGate, type ChatToolResult } from './chat/agent-loop.js';
 import { createChatTransport } from './chat/transport.js';
 import { AGENT_EFFORT } from './chat/chat-runtime.js';
@@ -47,8 +47,8 @@ import { automationShape, describeAutomation } from '../automations/summarize.js
  *  - **it streams**, and the text reaches the socket as it arrives. A mapping
  *    run takes minutes with nobody watching; a chat that shows nothing for
  *    ninety seconds has failed whatever the model is doing;
- *  - **thinking is summarised** rather than omitted. On Opus 5 the default is
- *    `omitted`, which streams empty thinking blocks — correct for a batch job
+ *  - **thinking is summarised** rather than omitted. On Opus 5 and after the
+ *    default is `omitted`, which streams empty thinking blocks — correct for a batch job
  *    and, on a chat, a long pause with nothing to show;
  *  - **it suspends.** `ask_user` and a prose ending both hand control back and
  *    the conversation waits, possibly for minutes, inside an object that
@@ -98,6 +98,9 @@ export async function createAutomationConversation(
     signal: controller.signal,
     log,
   });
+
+  /** The conversation's cap in its own model's dollars — see `budgetScale`. */
+  const budgetUsd = AUTOMATION_MAX_BUDGET_USD * budgetScale(modelId);
 
   /**
    * The question this conversation is waiting on, and the other results from
@@ -166,7 +169,7 @@ export async function createAutomationConversation(
           'thinking',
         );
 
-        if (transport.costUsd() >= AUTOMATION_MAX_BUDGET_USD) {
+        if (transport.costUsd() >= budgetUsd) {
           return {
             kind: 'stopped',
             reason:

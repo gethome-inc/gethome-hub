@@ -11,15 +11,21 @@ answers questions about the home and about the app, works devices and presses
 scenes, says what it can and cannot do — and hands the jobs that belong to
 another agent over to it.
 
-It runs on **either vendor**, on a model the home chooses: **Opus 5** or
-**Sonnet 5** on Anthropic, **GPT-5.6 Sol** or **GPT-5.6 Terra** on OpenAI. That
-list is its own rather than the mapper's, and the difference is the trade: a
-mapping descriptor is cached against a device *model* and shapes every unit of
-it the home ever meets, so a cheaper tier that is wrong once is wrong for ever
-and the mapper offers exactly one model per provider. A conversation is many
-small rounds, read the moment they arrive and answered with another message
-when the reply is poor — so what a round costs is a real choice somebody can
-make, and both halves of it are visible.
+It runs on **either vendor**, on a model the home chooses: **Opus 5.5** or
+**Sonnet 5** on Anthropic, **GPT-6 Astra**, **GPT-6 Sol** or **GPT-6 Luna** on
+OpenAI. That list is its own rather than the mapper's, and the difference is the
+trade: a mapping descriptor is cached against a device *model* and shapes every
+unit of it the home ever meets, so a cheaper tier that is wrong once is wrong
+for ever and the mapper never offers one. A conversation is many small rounds,
+read the moment they arrive and answered with another message when the reply is
+poor — so what a round costs is a real choice somebody can make, and both halves
+of it are visible. **A home that chose a model this build has retired is moved
+to the one that replaced it** — Opus 5 → Opus 5.5, GPT-5.6 Sol and Terra → GPT-6
+Sol — on the vendor it chose, resolved whenever the settings are read and never
+written back (`src/ai/models.ts` says why that is the rollback-safe half).
+**Its $0.50 cap is in the model's own dollars**: it was sized against Opus 5, so
+`budgetScale` stretches it for GPT-6 Astra, at twice that price, and a
+conversation on the most capable model is not cut off at half the rounds.
 
 **It was Anthropic-only, and not as a policy.** `chat/agent-loop.ts` typed every
 signature against `Anthropic.*` and both agents imported the SDK at the top of
@@ -35,24 +41,25 @@ OpenAI key never pulls the Anthropic client into its graph. That is
 **The provider follows the model id**, and there is no second stored column —
 ids do not collide across vendors, so one setting says both things and they can
 never disagree. What is new beside it is that resolution is **key-aware**: a
-home that has only ever had an OpenAI key still has `claude-opus-5` stored (it
+home that has only ever had an OpenAI key still has `claude-opus-5-5` stored (it
 is the default and nobody chose it), so a stored choice counts only while its
 provider has a usable key, and otherwise falls back to the one that does. A
 stored Claude *subscription token* is not a usable key — the loops authenticate
 with an API key — and a home holding only that is the one case
 `automation_needs_anthropic` is still for.
 
-**Two lists per vendor means `modelLabel` has to read all of them**, and it did
-not. It names a model that has already run — the label an app draws over a
-finished conversation — and it searched the mapper's `PROVIDER_MODELS` alone.
-Sonnet 5 is on the agents' list and nowhere else, so a chat that ran on it
-reported `claude-sonnet-5` where a chat on Opus reported "Opus 5", and an app
-drew a raw id at the top of one conversation and a name at the top of the next,
-which reads as the app failing to translate rather than as the hub naming two
-different things. Both surfaces record into one `ai_runs` table and both ask
-this question of it, so the answer covers the union, per provider — leaving the
-agents' list under `anthropic` alone would be the same gap pointed at the other
-vendor.
+**`modelLabel` names a model that has already run, from that model's own
+row.** It is the label an app draws over a finished conversation, and it used
+to search the offered lists — first the mapper's alone, so a chat on Sonnet 5
+(offered to the agents and nowhere else) reported `claude-sonnet-5` where a
+chat on Opus reported "Opus 5", and an app drew a raw id at the top of one
+conversation and a name at the top of the next. Searching the union of both
+lists fixed that and left the same gap one retirement later: the day a model
+leaves every list, every chat that ran on it drops to its raw id. So the name
+lives on the model's row in `MODELS`, beside its price, which every model the
+hub has ever run keeps — looked up **per provider**, because it says who ran
+what — and a chat that ran on Opus 5 still says "Opus 5" after Opus 5.5 has
+replaced it.
 
 ## Two agents, one runtime
 
@@ -747,10 +754,14 @@ its own schedule. Enabling it is a two-line change (`client.beta.messages.stream
 `Beta*` request types) and worth revisiting if refusals ever show up in the run
 log.
 
-The other three refusals are the automations agent's, carrying the same codes
-because both apps already branch on them: `ai_not_configured`, `ai_disabled`,
-`automation_needs_anthropic` — the last narrowed to what is still true of it, a
-credential the hub holds and cannot use. Each carries a sentence, so an app that has never
+The other two refusals are the automations agent's, carrying the same codes
+because both apps already branch on them: `ai_not_configured` and
+`automation_needs_anthropic` — the second narrowed to what is still true of it,
+a credential the hub holds and cannot use. **`ai_disabled` is not one of them
+any more**: `ai_enabled` is device recognition's switch, and it stopped this
+conversation too for a while, which silenced the house under a switch labelled
+as recognition's. Both apps still read the code, because an older hub sends it.
+The voice route asks it no more than the typed conversation does. Each carries a sentence, so an app that has never
 met a code a later build adds still shows something true.
 
 The test seam (`createConversation`) sits **after** every one of them. Above

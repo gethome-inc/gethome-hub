@@ -34,6 +34,10 @@ export const AUTOMATION_MAX_TURNS = 12;
  * On the conversation rather than on a turn, which is the difference from the
  * mapping agent's per-run cap: twenty rounds of clarification are twenty
  * requests, and a ceiling that resets on every message is not a ceiling.
+ *
+ * In Opus 5's dollars, which is what it was sized against — `budgetScale`
+ * stretches it for a model priced above that, so a conversation on GPT-6 Astra
+ * gets as many rounds as one on anything else.
  */
 export const AUTOMATION_MAX_BUDGET_USD = 1;
 
