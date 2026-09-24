@@ -727,4 +727,8 @@ changed (`src/ai/CLAUDE.md`, `src/automations/CLAUDE.md`, `src/core/CLAUDE.md`,
 `src/portraits/CLAUDE.md`, `test/CLAUDE.md`, `deploy/CLAUDE.md`) +
 `docs/architecture.md`; installer markers, autostart or Zigbee detection →
 `docs/zigbee.md` + the marker list in `deploy/install.sh` (and flag the Studio
-repo); anything README restates → `README.md`.
+repo); anything README restates → `README.md`; **what leaves the hub** — a new
+outbound connection, something new sent to an AI provider, a retention period —
+→ the Privacy Policy on gethome.me (the gethome-site repo's
+`frontend/src/legal/privacy.tsx`, which describes this code) and the README's
+"The hub stays on your network".
