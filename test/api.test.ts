@@ -961,8 +961,10 @@ describe.skipIf(!handle)('hub API', () => {
         anthropic: { hasKey: true, model: 'claude-opus-5-5' },
         openai: { hasKey: false },
       },
-      // One key, so there is nothing to choose between.
-      mapping: { provider: 'anthropic', choosable: false },
+      // One key, so there is nothing to choose between. And recognition's own
+      // switch in recognition's own block: its presence is how an app knows
+      // the switch stops recognition and nothing else.
+      mapping: { provider: 'anthropic', choosable: false, enabled: true },
     });
     // Recognition offers strong models only: one on Anthropic, and on OpenAI
     // Sol with Astra above it — never a tier cheaper than the default.
@@ -1242,9 +1244,12 @@ describe.skipIf(!handle)('hub API', () => {
     const body = patched.json() as { enabled: boolean; hasKey: boolean };
     // Off, and the credential is still there — those are different requests.
     expect(body).toMatchObject({ enabled: false, hasKey: true });
+    // The same answer in recognition's block, which is the switch's scope:
+    // the agents and the voice do not read it.
+    expect(body).toMatchObject({ mapping: { enabled: false } });
   });
 
-  it('refuses an agent run while adaptation is switched off, and says so', async () => {
+  it('refuses a recognition run while recognition is switched off, and says so', async () => {
     await app.inject({
       method: 'PUT',
       url: '/api/v1/settings/ai',

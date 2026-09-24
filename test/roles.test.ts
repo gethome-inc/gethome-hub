@@ -600,6 +600,36 @@ describe.skipIf(!handle)('roles and permissions', () => {
     expect(opened.json()).toMatchObject({ error: 'openai_not_configured' });
   });
 
+  it('does not ask device recognition’s switch before opening a voice line', async () => {
+    // `ai_enabled` is recognition's switch alone. It used to be asked first
+    // here, so a home that had switched recognition off heard `ai_disabled`
+    // from the microphone. Keyless, so the answer that proves it is the
+    // configuration refusal that sits *past* where that check stood.
+    await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(ownerToken),
+      payload: { clear: 'openai', enabled: false },
+    });
+
+    const opened = await app.inject({
+      method: 'POST',
+      url: '/api/v1/assistant/voice/session',
+      headers: auth(memberToken),
+      payload: { sdp: 'v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n' },
+    });
+    expect(opened.statusCode).toBe(409);
+    expect(opened.json()).toMatchObject({ error: 'openai_not_configured' });
+
+    // Back as it was, for whatever runs after this in the file.
+    await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(ownerToken),
+      payload: { enabled: true },
+    });
+  });
+
   /**
    * `activity.read` narrows rather than refuses. A guest reading their own
    * actions is a working screen; a guest whose Recent feed 403s is a broken

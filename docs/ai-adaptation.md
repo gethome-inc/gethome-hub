@@ -62,10 +62,12 @@ is enforced rather than merely observed:
 from whether a credential is stored: "stop spending my money on this for now"
 and "forget my API key" have very different costs to undo, and deleting the key
 used to be the only way to ask for the first. It defaults to on, so a hub
-configured before it existed behaves exactly as it did. It began as this
-subsystem's switch and is the whole home's now — both agents and the voice
-check it too — which is why the apps draw it as "AI is on" rather than as
-"recognition is on". It is checked in
+configured before it existed behaves exactly as it did. **It is this
+subsystem's switch and nobody else's.** Both agents and the voice checked it for
+a while, which meant a home that switched recognition off to save money could no
+longer talk to itself under a switch both apps labelled as recognition's; they
+do not read it now, and the settings answer repeats it as `mapping.enabled` so
+an app can tell this hub from one that still did. It is checked in
 `src/ai/lazy.ts` beside `hasKey` — so the module is not even imported — and
 again in `resolveProvider()` for a mapper somebody constructed directly. An
 explicitly requested run (`POST /devices/:id/remap`, `POST …/repair`) answers

@@ -313,10 +313,11 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   const sessions = new MemberSessions();
 
   /**
-   * Why an explicitly requested agent run must not start, or `null` to go
-   * ahead. Two reasons, and they need different words in the app: a hub with
-   * no credential has never been able to do this, while one whose owner turned
-   * adaptation off is being obeyed.
+   * Why an explicitly requested **recognition** run must not start, or `null`
+   * to go ahead. Two reasons, and they need different words in the app: a hub
+   * with no credential has never been able to do this, while one whose owner
+   * turned recognition off is being obeyed. Only the recognition routes ask
+   * it — `ai_enabled` is that job's switch alone.
    */
   const aiUnavailableReason = async (): Promise<'ai_not_configured' | 'ai_disabled' | null> => {
     const ai = await deps.settings.getAiSettings();
@@ -1236,10 +1237,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       // Its own refusal code, not `ai_not_configured`: portraits are drawn by
       // OpenAI and device recognition may be running on Anthropic, so a hub can
       // be perfectly configured for one and not the other. And deliberately not
-      // gated on `ai_enabled`, the home's AI switch — it stops what runs by
-      // itself or on somebody's behalf (recognition, both agents, the voice),
-      // and nobody draws a portrait by accident, so there is nothing to
-      // switch off.
+      // gated on `ai_enabled`, which is device recognition's switch — nobody
+      // draws a portrait by accident, so there is nothing to switch off.
       const apiKey = await deps.settings.aiKey('openai');
       if (!apiKey) return reply.code(409).send({ error: 'openai_not_configured' });
 
@@ -2121,7 +2120,15 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       ...ai,
       status,
       providers: { anthropic: forProvider('anthropic'), openai: forProvider('openai') },
-      mapping: { provider: ai.provider, choosable: ai.mappingChoosable },
+      // Device recognition's own block: who recognises, whether that is a
+      // choice, and **whether it runs at all**. `enabled` repeats the flat
+      // field of the same name on purpose — the flat one is what every app
+      // already reads and writes — and its *presence here* is the capability:
+      // a hub that sends it asks the switch before recognition and nothing
+      // else, while an older one also paused both agents and the voice with
+      // it, and an app has to know which it is talking to before it closes a
+      // composer over a switch somebody flipped to save money on devices.
+      mapping: { provider: ai.provider, choosable: ai.mappingChoosable, enabled: ai.enabled },
       // What answers in the assistant, and what it could answer on. Its own
       // block rather than more fields on `providers`, because it is a
       // different question from "which model reads a device's exposes tree"
@@ -3312,11 +3319,15 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * credential of any kind for, which is a stronger containment than the
    * expiring secret this route was first built around.
    *
-   * **A fourth refusal, and it is a real one.** GPT-Live is OpenAI's and there
-   * is no substitute, so a home running its assistant perfectly well on
+   * **A refusal of its own, and it is a real one.** GPT-Live is OpenAI's and
+   * there is no substitute, so a home running its assistant perfectly well on
    * Anthropic still cannot *speak* without an OpenAI key. That is a thing to
    * say plainly — `openai_not_configured`, with a sentence — rather than a 500
    * or, worse, a microphone button that fails on the first word.
+   *
+   * **`ai_enabled` is not asked**, exactly as the typed assistant does not ask
+   * it: that switch is device recognition's, and talking to the house is not
+   * recognising a device.
    */
   app.post('/api/v1/assistant/voice/session', needs('hub.ai'), async (request, reply) => {
     // **Carrying on rather than forking.** Somebody stops listening and starts
@@ -3338,7 +3349,6 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       .object({ sessionId: z.uuid().optional(), sdp: z.string().min(1).max(64_000) })
       .parse(request.body ?? {});
     const ai = await deps.settings.getAiSettings();
-    if (!ai.enabled) return reply.code(409).send({ error: 'ai_disabled' });
     if (!ai.openai.hasKey) {
       return reply.code(409).send({
         error: 'openai_not_configured',

@@ -520,19 +520,28 @@ describe('the assistant', () => {
   it('refuses before it reaches the seam, with a code an app can branch on', async () => {
     const { assistant } = await assistantFor([]);
 
-    await settings.setAiEnabled(false);
+    await settings.clearAiProvider('anthropic');
     await expect(assistant.start({ memberId, message: 'go' })).rejects.toBeInstanceOf(
       AutomationNotConfiguredError,
     );
     await expect(assistant.start({ memberId, message: 'go' })).rejects.toMatchObject({
-      code: 'ai_disabled',
-    });
-
-    await settings.setAiEnabled(true);
-    await settings.clearAiProvider('anthropic');
-    await expect(assistant.start({ memberId, message: 'go' })).rejects.toMatchObject({
       code: 'ai_not_configured',
     });
+  });
+
+  it('answers with device recognition switched off — that switch is recognition’s alone', async () => {
+    // It used to refuse here with `ai_disabled`, so a home that turned
+    // recognition off to save money could no longer talk to itself, under a
+    // switch both apps have always labelled as recognition's.
+    await settings.setAiEnabled(false);
+    const { assistant } = await assistantFor([{ kind: 'said', text: 'The kitchen light is on.' }]);
+
+    const started = await assistant.start({ memberId, message: 'is the kitchen light on?' });
+    await assistant.idle();
+
+    const rows = await assistant.transcript(started.sessionId);
+    expect(rows.map((row) => row.role)).toEqual(['user', 'agent']);
+    expect(rows[1]?.text).toBe('The kitchen light is on.');
   });
 
   it('runs the model the settings route reports, and moves with the offered list', async () => {

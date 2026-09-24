@@ -27,10 +27,11 @@ rounds.
 | Needs the network | **no** | yes |
 | Deterministic | required | not required |
 
-The consequence is a rule, not a nicety: **`ai_enabled: false`, or a deleted
-API key, stops automations being *written* and does not touch the ones that
-exist.** "Stop spending my money on this for now" must not put the lights out
-on a schedule.
+The consequence is a rule, not a nicety: **a deleted API key stops automations
+being *written* and does not touch the ones that exist.** "Stop spending my
+money on this for now" must not put the lights out on a schedule. (`ai_enabled`
+is device recognition's switch and stops neither — the writing agent does not
+read it.)
 
 ---
 
@@ -452,8 +453,9 @@ says one thing: *this rule is not one room's*.
 
 `src/ai/automation-*.ts`. The agent is **authoring only**: the runtime above
 does not know it exists, runs without a key, and keeps running when the key is
-taken away. `ai_enabled: false` stops rules being written and touches nothing
-that is already running.
+taken away. Removing the key stops rules being written and touches nothing that
+is already running; `ai_enabled`, which is device recognition's switch, stops
+neither.
 
 On the hub, as a plain API loop on whichever vendor answers — Anthropic's
 Messages API or OpenAI's Responses API, behind one `ChatTransport`

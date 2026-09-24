@@ -178,7 +178,12 @@ adapter/registry/API change.
   imported, and again in `resolveProvider()` for a mapper somebody constructed
   directly. An explicit run answers `409 ai_disabled`, which is a *different*
   refusal from `409 ai_not_configured` because an app has to say which of the
-  two a person needs to change.
+  two a person needs to change. **It is recognition's switch and nothing
+  else's**: the assistant, the automations agent and the voice do not read it.
+  They did for a while, which silenced every conversation in a home that had
+  turned recognition off to save money, under a switch both apps labelled as
+  recognition's; `mapping.enabled` in the settings answer is how an app tells
+  this hub from one that still did.
 - **Watching costs nothing when nobody is watching, and that includes the
   socket.** The `MqttObserver` half is in `src/core/CLAUDE.md`; the same rule
   governs `src/api/ws.ts` — the `mqtt`, `zigbee` and `ai` streams are opt-in,

@@ -346,7 +346,7 @@ domains — update them in the same change.
 - **The automation agent is authoring, never runtime, and it lives on the
   hub.** `src/ai/automation-*.ts` writes rules in conversation;
   `src/automations/` runs them, with no key, no network and no idea the agent
-  exists. So `ai_enabled: false` stops rules being *written* and touches
+  exists. So removing the key stops rules being *written* and touches
   nothing already running — "stop spending my money on this for now" must not
   put the lights out on a schedule. `docs/automations.md` is canonical.
   On the hub for the same reason the mapper is (the Agent SDK's 276 MB binary

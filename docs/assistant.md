@@ -754,10 +754,14 @@ its own schedule. Enabling it is a two-line change (`client.beta.messages.stream
 `Beta*` request types) and worth revisiting if refusals ever show up in the run
 log.
 
-The other three refusals are the automations agent's, carrying the same codes
-because both apps already branch on them: `ai_not_configured`, `ai_disabled`,
-`automation_needs_anthropic` — the last narrowed to what is still true of it, a
-credential the hub holds and cannot use. Each carries a sentence, so an app that has never
+The other two refusals are the automations agent's, carrying the same codes
+because both apps already branch on them: `ai_not_configured` and
+`automation_needs_anthropic` — the second narrowed to what is still true of it,
+a credential the hub holds and cannot use. **`ai_disabled` is not one of them
+any more**: `ai_enabled` is device recognition's switch, and it stopped this
+conversation too for a while, which silenced the house under a switch labelled
+as recognition's. Both apps still read the code, because an older hub sends it.
+The voice route asks it no more than the typed conversation does. Each carries a sentence, so an app that has never
 met a code a later build adds still shows something true.
 
 The test seam (`createConversation`) sits **after** every one of them. Above

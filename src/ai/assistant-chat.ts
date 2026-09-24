@@ -385,9 +385,15 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
   /**
    * Build the conversation, refusing before the network is touched.
    *
-   * The same three refusals the automations agent has, and for the same
-   * reasons — a home with no key, the owner's switch, and a key of the wrong
-   * kind. They carry the same codes because both apps already branch on them.
+   * The same two refusals the automations agent has, and for the same
+   * reasons — a home with no key, and a key of the wrong kind. They carry the
+   * same codes because both apps already branch on them.
+   *
+   * **`ai_enabled` is not one of them.** That switch is device recognition's,
+   * and it is what both apps have always labelled it; it used to stop this
+   * conversation too, which silenced the house under a switch that said it
+   * was about recognising devices. Whether this phone may send anything is
+   * the app's own question, asked before a message leaves it.
    */
   protected async openConversation(input: {
     memberId: string;
@@ -395,7 +401,6 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
     sessionId: string;
   }): Promise<AgentConversation<AssistantTurn>> {
     const ai = await this.options.settings.getAiSettings();
-    if (!ai.enabled) throw new AgentNotConfiguredError('ai_disabled');
     if (!ai.hasKey) throw new AgentNotConfiguredError('ai_not_configured');
     /**
      * **Whose key answers, and what runs on it — both from `getAiSettings`.**

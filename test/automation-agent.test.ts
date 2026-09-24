@@ -1566,21 +1566,30 @@ describe('the chat service', () => {
     expect(summary?.spend).toBeUndefined();
   });
 
-  it('refuses when the owner has switched AI off, and says which of the two it is', async () => {
-    await settings.setAiEnabled(false);
+  it('refuses a home with no key, with a code an app can branch on', async () => {
     const { chat } = await chatFor([]);
+    await settings.clearAiProvider('anthropic');
     await expect(chat.start({ memberId: memberId, message: 'go' })).rejects.toBeInstanceOf(
       AutomationNotConfiguredError,
     );
     await expect(chat.start({ memberId: memberId, message: 'go' })).rejects.toMatchObject({
-      code: 'ai_disabled',
-    });
-
-    await settings.setAiEnabled(true);
-    await settings.clearAiProvider('anthropic');
-    await expect(chat.start({ memberId: memberId, message: 'go' })).rejects.toMatchObject({
       code: 'ai_not_configured',
     });
+  });
+
+  it('writes rules with device recognition switched off', async () => {
+    // `ai_enabled` is recognition's switch alone. It used to stop this agent
+    // as well, so turning recognition off to save money also stopped the home
+    // being able to write a rule.
+    await settings.setAiEnabled(false);
+    const { chat } = await chatFor([{ kind: 'said', text: 'Which lights did you mean?' }]);
+
+    const started = await chat.start({ memberId: memberId, message: 'go' });
+    await chat.idle();
+
+    const rows = await chat.transcript(started.sessionId);
+    expect(rows.map((row) => row.role)).toEqual(['user', 'agent']);
+    expect(rows[1]?.text).toBe('Which lights did you mean?');
   });
 
   it('answers nothing for a conversation that has gone', async () => {
@@ -1933,15 +1942,17 @@ describe('AutomationChat provider selection', () => {
     );
   });
 
-  it('says AI is switched off rather than unconfigured when the owner turned it off', async () => {
-    // Two codes because they lead to two different screens, and this one must
-    // not send somebody looking for a key they already have.
+  it('opens a conversation with device recognition switched off', async () => {
+    // It used to answer `ai_disabled` here. That switch is recognition's, and
+    // a home that turned it off still gets the key it saved.
     await settings.setAiKey('anthropic', 'sk-ant-api03-test');
     await settings.setAiEnabled(false);
 
-    const { chat } = await chatFor();
-    const error = await refusal(chat);
+    const { chat, handed } = await chatFor();
+    await chat.start({ memberId, message: 'lights at ten please' });
+    await chat.idle();
 
-    expect((error as InstanceType<typeof AutomationNotConfiguredError>).code).toBe('ai_disabled');
+    expect(handed.provider).toBe('anthropic');
+    expect(handed.secret).toBe('sk-ant-api03-test');
   });
 });

@@ -110,12 +110,14 @@ export interface AiSettings {
    * my API key" have different costs to undo. Absent means on, so a hub
    * configured before this existed keeps behaving exactly as it did.
    *
-   * **It is the home's AI switch, not recognition's.** It began as the
-   * adaptation switch, and every AI surface added since checks it too: device
-   * recognition, both agents' conversations and the voice. Rules already
-   * written keep running — `src/automations/` has no idea the agent exists —
-   * and portraits are asked for by hand, one press at a time, so they are not
-   * gated on it.
+   * **It is device recognition's switch and nothing else's** — the automatic
+   * mapper, `remap` and `repair`. The assistant, the automations agent and the
+   * voice do not read it: they did for a while, which meant a home that turned
+   * recognition off to save money found it could no longer talk to itself,
+   * under a switch both apps had always labelled as recognition's. Portraits
+   * are asked for by hand, one press at a time, and were never gated on it.
+   * The settings answer repeats it as `mapping.enabled`, whose presence is how
+   * an app tells this hub from one that still paused the agents with it.
    */
   enabled: boolean;
   /**

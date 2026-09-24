@@ -316,10 +316,15 @@ export type CommonTurn =
 /**
  * The conversation cannot start, for a reason somebody can fix.
  *
- * Three codes rather than one, because they lead to three different screens:
- * add a key, switch AI back on, add a key *of the other kind*. Each carries a
- * sentence as well, so an app that meets a code a later build added still has
- * something true to show — the `activity.message` rule applied to a refusal.
+ * Two codes rather than one, because they lead to two different screens: add
+ * a key, or add a key *of the other kind*. Each carries a sentence as well, so
+ * an app that meets a code a later build added still has something true to
+ * show — the `activity.message` rule applied to a refusal.
+ *
+ * **There was a third, `ai_disabled`, and it is gone from here on purpose.**
+ * That switch is device recognition's, and a conversation no longer asks it;
+ * the code survives only on the recognition routes (`remap`, `repair`). Both
+ * apps still read it, because a hub older than this one sends it for a chat.
  *
  * **Everything that can refuse a conversation has to end up here**, on either
  * surface. One of these once threw an `AiUnavailableError` instead, which the
@@ -328,7 +333,7 @@ export type CommonTurn =
  */
 export class AgentNotConfiguredError extends Error {
   constructor(
-    readonly code: 'ai_not_configured' | 'ai_disabled' | 'automation_needs_anthropic',
+    readonly code: 'ai_not_configured' | 'automation_needs_anthropic',
     message?: string,
   ) {
     super(message ?? code);

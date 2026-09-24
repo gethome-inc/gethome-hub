@@ -223,10 +223,11 @@ export class AutomationChat extends ChatRuntime<AutomationTurn> {
   /**
    * Build the conversation, loading only the half this home is configured for.
    *
-   * `ai_enabled` is checked here as well as at the route, for the reason
-   * `resolveProvider` checks it: the switch has to be true for a service
-   * somebody constructed directly, not only for the one path that happens to
-   * ask first.
+   * **`ai_enabled` is deliberately not asked.** It is device recognition's
+   * switch — the one both apps have always labelled that way — and it used to
+   * stop this agent as well, so a home that turned recognition off to save
+   * money found it could no longer write a rule either. The assistant makes
+   * the same exception, for the same reason.
    */
   protected async openConversation(input: {
     memberId: string;
@@ -235,7 +236,6 @@ export class AutomationChat extends ChatRuntime<AutomationTurn> {
   }): Promise<AutomationConversation> {
     const automationId = input.topic;
     const ai = await this.options.settings.getAiSettings();
-    if (!ai.enabled) throw new AgentNotConfiguredError('ai_disabled');
     if (!ai.hasKey) throw new AgentNotConfiguredError('ai_not_configured');
 
     /**
