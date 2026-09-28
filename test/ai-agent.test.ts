@@ -263,8 +263,11 @@ describe('supported models', () => {
     // The bare alias was never offered, so it was never a preference either.
     expect(effectiveModel('openai', 'gpt-5.6')).toBe('gpt-6-sol');
     // Offered to the agents and not here: the default, never the cheap tier.
-    expect(effectiveModel('anthropic', 'claude-sonnet-5')).toBe('claude-opus-5-5');
+    expect(effectiveModel('anthropic', 'claude-sonnet-5-5')).toBe('claude-opus-5-5');
     expect(effectiveModel('openai', 'gpt-6-luna')).toBe('gpt-6-sol');
+    // Nor at the end of a chain: Sonnet 5 is succeeded by Sonnet 5.5, which
+    // this list does not offer either.
+    expect(effectiveModel('anthropic', 'claude-sonnet-5')).toBe('claude-opus-5-5');
 
     // A model still on the list is still honoured, and so is silence.
     expect(effectiveModel('anthropic', 'claude-opus-5-5')).toBe('claude-opus-5-5');
@@ -302,6 +305,10 @@ describe('supported models', () => {
     expect(
       estimateCostUsd('claude-opus-5-5', { input_tokens: 1_000_000, output_tokens: 1_000_000 }),
     ).toBeCloseTo(24, 5);
+    // Sonnet 5.5 kept Sonnet 5's $2/$10.
+    expect(
+      estimateCostUsd('claude-sonnet-5-5', { input_tokens: 1_000_000, output_tokens: 1_000_000 }),
+    ).toBeCloseTo(12, 5);
     expect(estimateCostUsd('gpt-6-astra', { input_tokens: 1_000_000, output_tokens: 1_000_000 })).toBeCloseTo(60, 5);
     expect(estimateCostUsd('gpt-6-sol', { input_tokens: 1_000_000, output_tokens: 1_000_000 })).toBeCloseTo(12, 5);
     expect(estimateCostUsd('gpt-6-luna', { input_tokens: 1_000_000, output_tokens: 1_000_000 })).toBeCloseTo(0.6, 5);
@@ -310,6 +317,9 @@ describe('supported models', () => {
   it('bills cache reads at a tenth of the input rate', () => {
     const cached = estimateCostUsd('claude-opus-5', { cache_read_input_tokens: 1_000_000 });
     expect(cached).toBeCloseTo(0.5, 5);
+    // $0.20, like Opus 5.5 — but as a tenth of $2, not a twentieth of $4.
+    expect(estimateCostUsd('claude-sonnet-5-5', { cache_read_input_tokens: 1_000_000 })).toBeCloseTo(0.2, 5);
+    expect(estimateCostUsd('claude-sonnet-5-5', { cache_creation_input_tokens: 1_000_000 })).toBeCloseTo(2.5, 5);
   });
 
   /**
@@ -333,6 +343,7 @@ describe('supported models', () => {
     expect(budgetScale('gpt-6-astra')).toBeCloseTo(2, 5);
     expect(budgetScale('claude-opus-5')).toBe(1);
     expect(budgetScale('claude-opus-5-5')).toBe(1);
+    expect(budgetScale('claude-sonnet-5-5')).toBe(1);
     expect(budgetScale('gpt-6-sol')).toBe(1);
     expect(budgetScale('gpt-6-luna')).toBe(1);
     // An unknown model is priced at the most expensive known tier, so its cap

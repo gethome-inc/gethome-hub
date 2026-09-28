@@ -1174,7 +1174,7 @@ describe.skipIf(!handle)('hub API', () => {
     // `models` is the answering vendor's list — what an app a version behind
     // draws its pills from — and `choices` the whole table.
     expect(assistant.models.map((model) => model.id)).toEqual(['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna']);
-    expect(assistant.choices.anthropic?.map((model) => model.id)).toEqual(['claude-opus-5-5', 'claude-sonnet-5']);
+    expect(assistant.choices.anthropic?.map((model) => model.id)).toEqual(['claude-opus-5-5', 'claude-sonnet-5-5']);
     expect(assistant.choices.openai?.map((model) => model.label)).toEqual([
       'GPT-6 Astra',
       'GPT-6 Sol',

@@ -553,9 +553,9 @@ describe('the assistant', () => {
       provider: 'anthropic',
       modelId: AGENT_MODELS.anthropic.default,
     });
-    expect(effectiveAgentModel('claude-sonnet-5', both)).toEqual({
+    expect(effectiveAgentModel('claude-sonnet-5-5', both)).toEqual({
       provider: 'anthropic',
-      modelId: 'claude-sonnet-5',
+      modelId: 'claude-sonnet-5-5',
     });
     // A model this build no longer offers is stored happily and is simply not
     // what runs — silently keeping a home on a retired one is the failure. The
@@ -566,8 +566,12 @@ describe('the assistant', () => {
       modelId: 'claude-opus-5-5',
     });
 
+    await settings.setAssistantModel('claude-sonnet-5-5');
+    expect((await settings.getAiSettings()).assistant.model).toBe('claude-sonnet-5-5');
+    // And a home that chose Sonnet 5 is on the model that replaced it — the
+    // cheaper tier's successor, not the default.
     await settings.setAssistantModel('claude-sonnet-5');
-    expect((await settings.getAiSettings()).assistant.model).toBe('claude-sonnet-5');
+    expect((await settings.getAiSettings()).assistant.model).toBe('claude-sonnet-5-5');
   });
 
   it('runs on the key the home actually has, whatever model is stored', async () => {
@@ -611,20 +615,20 @@ describe('the assistant', () => {
     // One list, a column each: answering questions about the house and writing
     // the rules it runs by itself are different jobs, and a home may want to
     // spend differently on them.
-    await settings.setAssistantModel('claude-sonnet-5');
+    await settings.setAssistantModel('claude-sonnet-5-5');
     await settings.setAutomationsModel('claude-opus-5-5');
     let ai = await settings.getAiSettings();
     expect([ai.assistant.model, ai.automations.model]).toEqual([
-      'claude-sonnet-5',
+      'claude-sonnet-5-5',
       'claude-opus-5-5',
     ]);
 
-    await settings.setAutomationsModel('claude-sonnet-5');
+    await settings.setAutomationsModel('claude-sonnet-5-5');
     ai = await settings.getAiSettings();
     // Moving one leaves the other exactly where it was — which the automations
     // agent could not have said before, because it read the *mapper's* column.
-    expect(ai.automations.model).toBe('claude-sonnet-5');
-    expect(ai.assistant.model).toBe('claude-sonnet-5');
+    expect(ai.automations.model).toBe('claude-sonnet-5-5');
+    expect(ai.assistant.model).toBe('claude-sonnet-5-5');
 
     // And the mapper's own choice reaches neither, in either direction: a
     // descriptor is cached against a device model for ever, which is why that
@@ -634,7 +638,7 @@ describe('the assistant', () => {
     ai = await settings.getAiSettings();
     expect(ai.anthropic.model).toBe('claude-opus-5-5');
     expect(ai.assistant.model).toBe(AGENT_MODELS.anthropic.default);
-    expect(ai.automations.model).toBe('claude-sonnet-5');
+    expect(ai.automations.model).toBe('claude-sonnet-5-5');
   });
 
   it('says which class of refusal it was, where the category is one a home can trip', async () => {
@@ -645,6 +649,11 @@ describe('the assistant', () => {
     expect(refusalSentence('reasoning_extraction')).toContain('my own reasoning');
     expect(refusalSentence('cyber')).toContain('security work');
     expect(refusalSentence(null)).toBe(
+      'The model declined to answer that. Try asking for it differently.',
+    );
+    // Sonnet 5.5 adds `general_harms`, which benign requests can trip — and
+    // there "ask it differently" is the useful sentence, so it keeps that one.
+    expect(refusalSentence('general_harms')).toBe(
       'The model declined to answer that. Try asking for it differently.',
     );
     // OpenAI reports no category at all, so this is the branch every refusal

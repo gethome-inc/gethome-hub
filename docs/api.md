@@ -1522,10 +1522,10 @@ the second provider reads exactly what it read before — plus a per-provider ha
   "assistant": { "model": "claude-opus-5-5", "provider": "anthropic", "choosable": true,
                  "models": [ { "id": "claude-opus-5-5", "label": "Opus 5.5",
                                "note": "The most capable Claude. …", "recommended": true },
-                             { "id": "claude-sonnet-5", "label": "Sonnet 5",
+                             { "id": "claude-sonnet-5-5", "label": "Sonnet 5.5",
                                "note": "Quicker, and half the price of Opus 5.5." } ],
                  "choices": { "anthropic": [ { "id": "claude-opus-5-5", … },
-                                             { "id": "claude-sonnet-5", … } ],
+                                             { "id": "claude-sonnet-5-5", … } ],
                               "openai":    [ { "id": "gpt-6-astra", "label": "GPT-6 Astra", … },
                                              { "id": "gpt-6-sol", "label": "GPT-6 Sol", … },
                                              { "id": "gpt-6-luna", "label": "GPT-6 Luna", … } ] } },
@@ -1577,23 +1577,24 @@ longer moves recognition to the default vendor.
 
 **`model` is what will run, not what is stored — and a retired model is
 succeeded.** Every model the hub has known carries the model that replaced it
-(Opus 5 → Opus 5.5; GPT-5.6 Sol, the `gpt-5.6` alias and GPT-5.6 Terra → GPT-6
-Sol), and a stored choice counts only while it is still offered: otherwise the
-hub runs the first model along that chain which is, and only where there is none
-the vendor's default. A successor is always the same vendor's — the vendor was a
-choice somebody made, the retired id was not. **This is resolved on every read
-and never written back**, which is what makes an update all it takes and a
-rollback harmless: the previous build, which `install.sh` falls back to when a
-new one fails its health check, reads the column exactly as it always did. The
-flat `model`, `anthropic.model` and `openai.model` are those raw columns and have
-never been what runs; nothing should draw them.
+(Opus 5 → Opus 5.5; Sonnet 5 → Sonnet 5.5; GPT-5.6 Sol, the `gpt-5.6` alias and
+GPT-5.6 Terra → GPT-6 Sol), and a stored choice counts only while it is still
+offered: otherwise the hub runs the first model along that chain which is, and
+only where there is none the vendor's default. A successor is always the same
+vendor's — the vendor was a choice somebody made, the retired id was not. **This
+is resolved on every read and never written back**, which is what makes an
+update all it takes and a rollback harmless: the previous build, which
+`install.sh` falls back to when a new one fails its health check, reads the
+column exactly as it always did. The flat `model`, `anthropic.model` and
+`openai.model` are those raw columns and have never been what runs; nothing
+should draw them.
 
 **`assistant` and `automations` are a different question from `providers`, and
 they are offered a different list.** Those two answer "which model answers in
 the assistant" and "which model writes the home's rules", and the lists differ
 because the trades do. A conversation is many small rounds, read the moment they
 arrive and answered with another message when the reply is poor — so what a
-round costs is a real choice, and those lists add the cheaper tiers (Sonnet 5,
+round costs is a real choice, and those lists add the cheaper tiers (Sonnet 5.5,
 GPT-6 Luna). Write them with `PATCH /settings/ai {assistantModel}` and
 `{automationsModel}`; `null` clears either back to the default. As above, both
 `model` fields are what will **run**, and a retired id resolves to its

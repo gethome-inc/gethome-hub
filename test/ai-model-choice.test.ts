@@ -188,6 +188,10 @@ describe('which model an agent is given once its own is retired', () => {
 
   it('moves each retired model to its successor', () => {
     expect(effectiveAgentModel('claude-opus-5', both)).toEqual({ provider: 'anthropic', modelId: 'claude-opus-5-5' });
+    expect(effectiveAgentModel('claude-sonnet-5', both)).toEqual({
+      provider: 'anthropic',
+      modelId: 'claude-sonnet-5-5',
+    });
     expect(effectiveAgentModel('gpt-5.6-sol', both)).toEqual({ provider: 'openai', modelId: 'gpt-6-sol' });
     expect(effectiveAgentModel('gpt-5.6-terra', both)).toEqual({ provider: 'openai', modelId: 'gpt-6-sol' });
     expect(effectiveAgentModel('gpt-5.6', both)).toEqual({ provider: 'openai', modelId: 'gpt-6-sol' });
@@ -196,10 +200,11 @@ describe('which model an agent is given once its own is retired', () => {
       provider: 'anthropic',
       modelId: 'claude-opus-5-5',
     });
-    // The cheaper tier keeps its tier: Sonnet 4.6 became Sonnet 5, not Opus.
+    // The cheaper tier keeps its tier, down its own chain: Sonnet 4.6 became
+    // Sonnet 5 and then Sonnet 5.5, never Opus.
     expect(effectiveAgentModel('claude-sonnet-4-6', both)).toEqual({
       provider: 'anthropic',
-      modelId: 'claude-sonnet-5',
+      modelId: 'claude-sonnet-5-5',
     });
   });
 
@@ -238,6 +243,7 @@ describe('the model table', () => {
       'claude-opus-4-8',
       'claude-opus-4-7',
       'claude-opus-4-6',
+      'claude-sonnet-5-5',
       'claude-sonnet-5',
       'claude-sonnet-4-6',
     ],
@@ -300,7 +306,7 @@ describe('naming a model that has already run', () => {
    *
    * There are two vocabularies — `PROVIDER_MODELS` for recognising a device,
    * `AGENT_MODELS` for a conversation — and `modelLabel` read only the
-   * first. Sonnet 5 is on the second alone, so every assistant chat that ran
+   * first. Sonnet 5 was on the second alone, so every assistant chat that ran
    * on it reported `claude-sonnet-5` where a chat on Opus reported "Opus 5",
    * and the apps drew a raw id at the top of one conversation and a name at
    * the top of the next.
@@ -310,14 +316,22 @@ describe('naming a model that has already run', () => {
    * exactly the shape of a retired model. The assistant shipping made it an
    * offered one and nothing came back to this file — so the test went on
    * passing about a fact that had changed, which is how the bug reached a
-   * screen. A genuinely retired id is used for that case now.
+   * screen. A genuinely retired id is used for that case now, and the premise
+   * is asserted rather than assumed: Sonnet 5.5 replacing Sonnet 5 set the
+   * same trap again.
    */
   it('names a model the assistant offers, though the mapper does not', () => {
-    expect(modelLabel('anthropic', 'claude-sonnet-5')).toBe('Sonnet 5');
+    const ids = (choices: readonly { id: string }[]) => choices.map((choice) => choice.id);
+    expect(ids(AGENT_MODELS.anthropic.choices)).toContain('claude-sonnet-5-5');
+    expect(ids(PROVIDER_MODELS.anthropic.choices)).not.toContain('claude-sonnet-5-5');
+    expect(ids(AGENT_MODELS.openai.choices)).toContain('gpt-6-luna');
+    expect(ids(PROVIDER_MODELS.openai.choices)).not.toContain('gpt-6-luna');
+
+    expect(modelLabel('anthropic', 'claude-sonnet-5-5')).toBe('Sonnet 5.5');
     expect(modelLabel('openai', 'gpt-6-luna')).toBe('GPT-6 Luna');
     // Still not the mapper's to run: the two lists answer two questions, and
     // this is the one that has to keep saying no.
-    expect(effectiveModel('anthropic', 'claude-sonnet-5')).toBe('claude-opus-5-5');
+    expect(effectiveModel('anthropic', 'claude-sonnet-5-5')).toBe('claude-opus-5-5');
   });
 
   /**
@@ -334,6 +348,12 @@ describe('naming a model that has already run', () => {
     expect(modelLabel('anthropic', 'claude-opus-5')).toBe('Opus 5');
     expect(modelLabel('anthropic', 'claude-opus-4-6')).toBe('Opus 4.6');
     expect(modelLabel('openai', 'gpt-5.6-terra')).toBe('GPT-5.6 Terra');
+    // The same for a chat on the cheaper tier: it ran on Sonnet 5, whatever
+    // runs in its place now.
+    expect(effectiveAgentModel('claude-sonnet-5', { anthropic: true, openai: true })?.modelId).toBe(
+      'claude-sonnet-5-5',
+    );
+    expect(modelLabel('anthropic', 'claude-sonnet-5')).toBe('Sonnet 5');
   });
 
   it('hands back the raw id of a model this build never knew', () => {
