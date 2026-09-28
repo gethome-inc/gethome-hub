@@ -15,7 +15,7 @@ example:
 If you would like to deploy GetHome Hub commercially, please get in touch —
 commercial licenses are available on request:
 
-**Contact:** gera.galanin@gmail.com
+**Contact:** george@gethome.me
 
 Until a commercial license agreement is in place, the PolyForm Noncommercial
 License 1.0.0 is the only license offered for this software.
