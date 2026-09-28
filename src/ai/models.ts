@@ -39,8 +39,9 @@
  *
  * **Succession.** A stored choice counts only while the model it names is still
  * *offered*; otherwise the hub runs the first model along its successor chain
- * that is — Opus 5 → Opus 5.5, GPT-5.6 Sol and Terra → GPT-6 Sol — and only
- * where there is no such model, the vendor's default. Three rules.
+ * that is — Opus 5 → Opus 5.5, Sonnet 5 → Sonnet 5.5, GPT-5.6 Sol and Terra →
+ * GPT-6 Sol — and only where there is no such model, the vendor's default.
+ * Three rules.
  *  - **It is resolved when settings are read, never written back.** Updating a
  *    hub is therefore all it takes to move every home on a retired model, with
  *    no migration and nothing for its owner to do — and it is also the only
@@ -59,9 +60,9 @@
  *    written has to be revisited.
  *
  * Prices are list prices in USD per million tokens, from each vendor's model
- * pages (checked 23 September 2026). They move rarely, and the caps they feed
- * are a safety rail rather than an invoice — `status.lastRun.costUsd` is an
- * estimate and says so.
+ * pages (checked 23 September 2026; Sonnet 5.5 on 28 September). They move
+ * rarely, and the caps they feed are a safety rail rather than an invoice —
+ * `status.lastRun.costUsd` is an estimate and says so.
  */
 
 import type { AiProvider } from '../core/settings.js';
@@ -143,7 +144,14 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
       price: { inputPerMTok: 5, outputPerMTok: 25 },
       successor: 'claude-opus-4-7',
     },
-    'claude-sonnet-5': { label: 'Sonnet 5', price: { inputPerMTok: 2, outputPerMTok: 10 } },
+    // Sonnet 5's price. Its cached read is $0.20 — the same figure as
+    // Opus 5.5's, but here it is the usual tenth, so no multiplier of its own.
+    'claude-sonnet-5-5': { label: 'Sonnet 5.5', price: { inputPerMTok: 2, outputPerMTok: 10 } },
+    'claude-sonnet-5': {
+      label: 'Sonnet 5',
+      price: { inputPerMTok: 2, outputPerMTok: 10 },
+      successor: 'claude-sonnet-5-5',
+    },
     'claude-sonnet-4-6': {
       label: 'Sonnet 4.6',
       price: { inputPerMTok: 3, outputPerMTok: 15 },
@@ -242,8 +250,8 @@ export const PROVIDER_MODELS: Readonly<
  * rounds, it is read the moment it is written, and a reply somebody does not
  * like is answered with another message — so what a model costs per round is a
  * real trade a home can make, and both halves of it are visible. So the cheaper
- * tiers are offered here: Sonnet 5 at half Opus 5.5's price, and GPT-6 Luna at
- * a twentieth of Sol's.
+ * tiers are offered here: Sonnet 5.5 at half Opus 5.5's price, and GPT-6 Luna
+ * at a twentieth of Sol's.
  *
  * **One table for both agents, and two stored columns.** It was
  * `ASSISTANT_MODELS`, and the automations agent read `ai_model` — the
@@ -261,7 +269,7 @@ export const AGENT_MODELS: Readonly<
     default: 'claude-opus-5-5',
     choices: [
       offer('anthropic', 'claude-opus-5-5', 'The most capable Claude. Best when it has to work things out.', true),
-      offer('anthropic', 'claude-sonnet-5', 'Quicker, and half the price of Opus 5.5.'),
+      offer('anthropic', 'claude-sonnet-5-5', 'Quicker, and half the price of Opus 5.5.'),
     ],
   },
   openai: {
@@ -277,8 +285,8 @@ export const AGENT_MODELS: Readonly<
 /**
  * The first model along `stored`'s succession chain that `choices` offers, or
  * `null` when the chain runs out first — an id this vendor never had, or one
- * whose successors are all off this list (Sonnet 4.6 → Sonnet 5, which only
- * the agents offer).
+ * whose successors are all off this list (Sonnet 4.6 → Sonnet 5 → Sonnet 5.5,
+ * which only the agents offer).
  *
  * Bounded, so a row edited into a cycle ends the walk rather than the process.
  */

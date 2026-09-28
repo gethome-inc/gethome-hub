@@ -41,8 +41,9 @@ import {
  * one decision is one too many, which is the rule the mapper already keeps.
  *
  * **No mid-conversation system messages.** They would be the natural way to
- * inject a changing home, and Sonnet 5 rejects them outright — and the model
- * here is switchable, so the one shape has to work on all of them.
+ * inject a changing home, and Sonnet 5 rejected them outright while it was on
+ * the list — and the model here is switchable, so the one shape has to work
+ * on all of them.
  *
  * **A turn can end with work handed to another agent.** `delegate` is an
  * ordinary tool that returns in milliseconds: it starts the other agent's

@@ -929,17 +929,19 @@ would put the reply in the transcript twice.
 from either pump — it is the same fact in both, and the loop is the one place
 that already has `said` and `calls` in hand.
 
-**On Opus 5.5 most of it arrives as reasoning instead, and that is fine.** From
-Opus 5.5 (as on Fable 5.1) the short notes a model writes between tool calls
-come back as *progress-update* `thinking` blocks rather than `text` — at most
-one before each call. The transport asks for `display: 'summarized'`, which
-returns their text mixed in with the summarized reasoning, so the narration
-still streams: over `thinking` rather than `delta`, and it is hung on the
-step's `detail` with the rest of that round's reasoning (next section) rather
-than written as a `said` step. `said` still fires for whatever does arrive as
-`text`. The alternative, `display: 'updates'` (a beta header), returns the notes
-*without* the reasoning — which would give back a `said` step and take away the
-one sentence per round that says *why*, so it is deliberately not used.
+**On Opus 5.5 and Sonnet 5.5 most of it arrives as reasoning instead, and that
+is fine.** From Opus 5.5 (as on Fable 5.1) the short notes a model writes
+between tool calls come back as *progress-update* `thinking` blocks rather than
+`text` — at most one before each call; Sonnet 5.5 does the same with any note
+longer than a sentence or two, and leaves a shorter remark as `text`. The
+transport asks for `display: 'summarized'`, which returns their text mixed in
+with the summarized reasoning, so the narration still streams: over `thinking`
+rather than `delta`, and it is hung on the step's `detail` with the rest of that
+round's reasoning (next section) rather than written as a `said` step. `said`
+still fires for whatever does arrive as `text`. The alternative,
+`display: 'updates'` (a beta header), returns the notes *without* the reasoning
+— which would give back a `said` step and take away the one sentence per round
+that says *why*, so it is deliberately not used.
 
 ### Why, kept with the step it explains
 

@@ -76,20 +76,20 @@ domains — update them in the same change.
   **What runs instead is the retired model's successor**, and that is one table
   rather than three (`MODELS` in `models.ts`: a row per model the hub has ever
   run, carrying its price, its name and the model that replaced it — Opus 5 →
-  Opus 5.5, GPT-5.6 Sol/Terra → GPT-6 Sol). Three rules. **Resolved on read,
-  never written back**: that is what makes updating the hub the whole
-  migration, and it is the only version that survives `install.sh`'s rollback —
-  the previous build has never heard of the successor, and an agent column
-  holding an id it does not know falls to "the first vendor with a usable key",
-  which would silently move a home that chose OpenAI onto Anthropic. **Same
-  vendor, always** — the vendor was a choice somebody made by pasting its key.
-  **A row names the model that replaced *it***, and the walk follows the chain,
-  so retiring a model edits its own row and nothing older. The one rollback
-  cost that remains is accepted: a successor somebody *deliberately chose* on
-  the new build is an id the previous one does not know. **Never delete a
-  row** — it is what old records are named from and old settings succeeded
-  from. `test/ai-model-choice.test.ts` pins the chain's invariants and that the
-  stored columns are untouched.
+  Opus 5.5, Sonnet 5 → Sonnet 5.5, GPT-5.6 Sol/Terra → GPT-6 Sol). Three rules.
+  **Resolved on read, never written back**: that is what makes updating the hub
+  the whole migration, and it is the only version that survives `install.sh`'s
+  rollback — the previous build has never heard of the successor, and an agent
+  column holding an id it does not know falls to "the first vendor with a usable
+  key", which would silently move a home that chose OpenAI onto Anthropic.
+  **Same vendor, always** — the vendor was a choice somebody made by pasting its
+  key. **A row names the model that replaced *it***, and the walk follows the
+  chain, so retiring a model edits its own row and nothing older. The one
+  rollback cost that remains is accepted: a successor somebody *deliberately
+  chose* on the new build is an id the previous one does not know. **Never
+  delete a row** — it is what old records are named from and old settings
+  succeeded from. `test/ai-model-choice.test.ts` pins the chain's invariants and
+  that the stored columns are untouched.
   **`resolveProvider()` has to use it too, and that is the half that was
   missed.** Every surface that *reports* which model answered went through
   `effectiveModel` — the settings route, `ai_runs.modelId`,
@@ -559,21 +559,21 @@ domains — update them in the same change.
   of the step already on screen; it is hung on that step's `detail` when the next
   step lands, when prose is said, or when the reply starts — the last because a
   round can end without another step. Only into an empty slot: a tool's own
-  `detail` is the better sentence wherever there is one. (On Opus 5.5 the notes a
-  model writes between tool calls arrive as *progress-update* `thinking` blocks
-  rather than `text`, so they reach the trail this way — as reasoning on the
-  step's `detail` — and not as a `said` step; `display: 'summarized'` is what
-  returns their text at all, and `'updates'` would drop the reasoning to get
-  them back. `docs/automations.md` has it.) And **prose from a round
-  that then calls a tool is not the answer** — a model narrates ("I'll set that
-  up for you.") and then calls something, and only the *last* round's text
-  becomes a row — so it is kept as a step of its own, `kind: 'said'`, reported
-  from `streamTurn` where both agents share it. That kind is the one the socket
-  **never sends**: the words already reached the app as deltas, and a frame would
-  draw the same sentence twice. Both are why `clip()` exists: `slice` was fine
-  while these fields held the hub's own fixed sentences and cuts model-written
-  prose mid-word, so it cuts at a word, appends an ellipsis, and counts the
-  ellipsis against the bound.
+  `detail` is the better sentence wherever there is one. (On Opus 5.5 and Sonnet
+  5.5 the notes a model writes between tool calls arrive as *progress-update*
+  `thinking` blocks rather than `text`, so they reach the trail this way — as
+  reasoning on the step's `detail` — and not as a `said` step;
+  `display: 'summarized'` is what returns their text at all, and `'updates'`
+  would drop the reasoning to get them back. `docs/automations.md` has it.) And
+  **prose from a round that then calls a tool is not the answer** — a model
+  narrates ("I'll set that up for you.") and then calls something, and only the
+  *last* round's text becomes a row — so it is kept as a step of its own,
+  `kind: 'said'`, reported from `streamTurn` where both agents share it. That
+  kind is the one the socket **never sends**: the words already reached the app
+  as deltas, and a frame would draw the same sentence twice. Both are why
+  `clip()` exists: `slice` was fine while these fields held the hub's own fixed
+  sentences and cuts model-written prose mid-word, so it cuts at a word, appends
+  an ellipsis, and counts the ellipsis against the bound.
   **Nothing is ever sent with a `tool_use` left unanswered, and the repair
   belongs before the next *user* turn.** Every call in an assistant turn needs
   a result in the very next message, and a conversation that breaks that rule
@@ -713,8 +713,8 @@ domains — update them in the same change.
   paragraph and a release of both apps. `permission` is checked when the tool
   runs, so a member whose role cannot hand a job over gets a sentence the model
   reads out rather than a capability silently absent.
-  **The agents' model list is its own** (`AGENT_MODELS` — Opus 5.5 and Sonnet 5
-  on Anthropic, GPT-6 Astra, Sol and Luna on OpenAI), and the mapper's list
+  **The agents' model list is its own** (`AGENT_MODELS` — Opus 5.5 and Sonnet
+  5.5 on Anthropic, GPT-6 Astra, Sol and Luna on OpenAI), and the mapper's list
   stays strong-only: a descriptor is cached against a device model and shapes
   every unit of it for ever, while a chat is many small rounds answered with
   another message when the reply is poor. **The provider follows the model id
