@@ -1,574 +1,178 @@
-# GetHome Hub
+<p align="center">
+  <img src="docs/assets/mark.png" width="76" alt="">
+</p>
 
-A local smart-home hub that brings **Matter**, **Zigbee** (via Zigbee2MQTT), and
-**MQTT** devices together behind one clean, typed device schema — and makes the
-home shareable with family members. It runs on a Raspberry Pi or any 64-bit
-Linux machine, entirely on your LAN: no cloud account, and nothing about your
-home leaves your network unless you give the hub an AI key — and then only what
-the AI feature you use needs ([what goes where](https://gethome.me/privacy#ai)).
+<h1 align="center">gethome hub</h1>
 
-GetHome Hub is the heart of a *hub home* in the [GetHome iOS app](https://github.com/gethome-inc/gethome-ios):
-devices attach to the hub instead of a phone, so everyone with access to the
-hub can control them.
+<p align="center">
+  <strong>The local brain of your home.</strong>
+</p>
+
+<p align="center">
+  Matter, Zigbee and MQTT devices in one app. An assistant you can talk to, and rules you write by describing them. It runs on a small computer at home, on your own Wi-Fi — with your own AI key and no cloud account.
+</p>
+
+<p align="center">
+  <a href="https://github.com/gethome-inc/gethome-hub/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/gethome-inc/gethome-hub/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE.md"><img alt="License: PolyForm Noncommercial 1.0.0" src="https://img.shields.io/badge/license-PolyForm%20Noncommercial-4571CE"></a>
+  <img alt="Node.js 22 or newer" src="https://img.shields.io/badge/node-%E2%89%A5%2022-4571CE">
+  <img alt="Linux arm64 and x64" src="https://img.shields.io/badge/linux-arm64%20%C2%B7%20x64-4571CE">
+</p>
+
+<p align="center">
+  <a href="#get-started">Get started</a> ·
+  <a href="#what-it-does">What it does</a> ·
+  <a href="docs/hardware.md">Hardware</a> ·
+  <a href="#documentation">Docs</a> ·
+  <a href="https://gethome.me">gethome.me</a>
+</p>
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screens/home-dark.webp">
+    <img src="docs/assets/screens/home-light.webp" width="30%" alt="The gethome app's Home pane: a pulse panel, scenes and favorite devices, with one light running.">
+  </picture>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screens/assistant-dark.webp">
+    <img src="docs/assets/screens/assistant-light.webp" width="30%" alt="The gethome app's assistant: a glass orb asking “How can I help?”, with a box to type in and a microphone.">
+  </picture>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screens/device-dark.webp">
+    <img src="docs/assets/screens/device-light.webp" width="30%" alt="The gethome app's page for a lamp: power, brightness and color controls.">
+  </picture>
+</p>
+
+<p align="center">
+  <sub>gethome for iPhone — not on the App Store yet. <a href="https://gethome.me/#waitlist">Join the waitlist</a>.</sub>
+</p>
+
+## What is a hub?
+
+Most smart-home gear belongs to an account: pair a lamp with one phone and it answers to that phone, and to nobody else. A hub turns that around. It is **one small box on your shelf that owns your devices**, so everyone you invite — each with a role of their own — sees the same home, and your rules keep running while every phone is out of the house. One hub is one home.
+
+There is no account to create. Nothing about your home leaves your network unless you give the hub an AI key — and then only what the AI feature you use needs ([what goes where](https://gethome.me/privacy#ai)).
+
+In one line: your devices talk to the hub, and your phone talks to the hub over your own Wi-Fi.
+
+```mermaid
+flowchart TB
+    APPS["gethome apps<br/>iPhone · Mac"] <-->|your own Wi-Fi| HUB["gethome hub<br/>at home"]
+    HUB <--> DEV["Your devices<br/>Matter · Zigbee · MQTT"]
+    HUB -.-> AI["Optional AI<br/>on your own key"]
+```
 
 ## What it does
 
-- **Matter controller** — commissions Matter devices onto the hub's own fabric
-  (matter.js) and controls them over IP.
-- **Zigbee** — pairs any Zigbee device through [Zigbee2MQTT](https://www.zigbee2mqtt.io)
-  and a USB coordinator stick; device definitions ("exposes") are translated
-  into the canonical schema automatically — including buttons/remotes/cubes
-  (as structured button events) and multi-channel relays (as separate
-  endpoints). ([docs/zigbee.md](docs/zigbee.md))
-- **MQTT integrations** — a simple public convention for wiring DIY hardware,
-  wired controllers, and third-party bridges into the hub
-  ([docs/mqtt-integrations.md](docs/mqtt-integrations.md)).
-- **AI device adaptation** — unknown devices, and unknown parameters a
-  device starts publishing later, are mapped into the schema by an
-  autonomous mapping agent: it reads the device's published schema,
-  researches it on the web (starting from the device's own Zigbee2MQTT
-  page), and submits a validated mapping. **Bring your own account** — an
-  Anthropic or an OpenAI API key, stored encrypted on the hub and used only for
-  the hub's own AI features; with both, you choose which one does the research. No credential →
-  devices still appear, flagged "needs review". It can be switched off without
-  deleting the key, every run is recorded (what it searched for, what it read,
-  what it cost), and the answers are a **library** you can download from one
-  hub, upload to another, or write yourself — a schema the hub can't use comes
-  back with the reasons and can be handed to the agent to repair.
-  Only a device's own published description and a few of its recent reports are
-  ever sent; the hub's traffic is structurally incapable of reaching the agent.
-  ([docs/ai-adaptation.md](docs/ai-adaptation.md))
-- **Device portraits** — an AI-drawn picture of each device, the floating object
-  the GetHome app shows on a device's page. Drawn on the hub with the home's
-  OpenAI key and **stored on the hub**, so everybody in the home sees the same
-  kettle rather than one person's phone holding the only copy. Bounded on
-  purpose — a few per device, a few hundred megabytes in total, and it refuses
-  to draw at all when the card is nearly full.
-  ([docs/portraits.md](docs/portraits.md))
-- **One schema for everything** — 27 capabilities (including button/remote
-  events, learn-and-replay IR blasters, and a universal generic-control
-  fallback so *any* device parameter is usable), 16 device kinds, exact unit
-  conventions shared with the GetHome apps ([docs/device-schema.md](docs/device-schema.md)).
-- **Recorded readings** — temperature, humidity, air quality, power and the
-  rest are kept in five-minute buckets for a week, so an app can show what the
-  last hour or the last few days actually looked like. At most one row per
-  bucket rather than one per report, and a bucket nothing reported in writes
-  nothing at all — which is what keeps a week of an ordinary home to a megabyte
-  or two on an SD card. A device that goes quiet leaves a real hole rather than
-  a flat line.
-  ([docs/api.md](docs/api.md#recorded-readings-get-devicesidhistory))
-- **Sharing built in** — pairing-code claim makes you the owner; short-lived
-  invite codes add family members, and a sign-in code brings one of them back on
-  another device as themselves, with their own history rather than as a second
-  person. Only hub homes are shareable in GetHome.
-- **Roles and permissions** — Owner, Member and Guest ship built in, a home can
-  add its own, and what each one may do is a table edited from either app. A
-  Guest works the lights and keeps their own favorites without touching the
-  home's names, its network or anybody else's activity. The defaults reproduce
-  exactly what the hub did before roles existed, so updating changes nothing
-  until somebody edits the matrix. See [docs/api.md](docs/api.md#roles-and-permissions-in-full).
-- **Local REST + WebSocket API** ([docs/api.md](docs/api.md)) and mDNS
-  discovery (`_gethome._tcp`). Apps can watch the hub's own MQTT broker live —
-  every Zigbee signal passes through it — plus the Zigbee pairing timeline and
-  the mapping agent's work. Those streams are opt-in and reference-counted, so
-  a hub nobody is inspecting opens no broker tap, and none of that traffic is
-  ever written to the SD card.
+- **Every device, one app.** Matter devices, Zigbee devices (through [Zigbee2MQTT](https://www.zigbee2mqtt.io) and a USB stick) and your own MQTT hardware all speak one typed schema — 27 capabilities across 16 kinds of device — so each gets controls that fit it. → [Zigbee](docs/zigbee.md) · [Matter](docs/matter.md) · [the schema](docs/device-schema.md)
+- **Ask the house.** An assistant answers questions about your home, works your devices and presses your scenes — typed, or spoken. It runs on your own Anthropic or OpenAI key; the spoken version needs an OpenAI key. → [The assistant](docs/assistant.md)
+- **Rules in plain words.** Describe what you want and an agent writes the rule, shows it back to you as a flow and saves it *switched off* until you turn it on. Scenes are rules you can press. Rules keep running with no AI key at all. → [Automations](docs/automations.md)
+- **Devices it has never seen.** Pair a Zigbee device the hub doesn't know and an agent works out what it is, so it gets real controls instead of a blank tile. It needs your AI key; without one the device still appears, flagged *needs review*. → [AI device recognition](docs/ai-adaptation.md)
+- **A home for everyone in it.** Invite family with a short-lived code. Owner, Member and Guest come built in, you can add roles of your own, and the same person can sign in on a second device as themselves. → [Roles and sharing](docs/api.md#roles-and-permissions-in-full)
+- **What happened, and when.** Temperature, humidity, air quality and power are kept in five-minute steps for a week, and an activity feed shows what was asked of the home, and by whom. → [History](docs/api.md#recorded-readings-get-devicesidhistory)
+- **Build your own.** Anything that can publish JSON over MQTT can be a device, with no hub-side code, and the hub's local REST and WebSocket API is documented. → [The MQTT convention](docs/mqtt-integrations.md) · [The API](docs/api.md)
+- **Private by default.** No cloud account, and your AI key stays on the hub. → [Private by design](#private-by-design)
 
-Remote access (control away from home through a relay) is planned; v1 is
-LAN-only by design.
+Also: AI portraits of your devices, drawn on the hub with your OpenAI key and shared by everyone in the home ([portraits](docs/portraits.md)).
 
-## Required hardware
+## The gethome family
 
-### The computer
+- **gethome hub** *(this repository)* — the brain: talks to your devices, runs your rules and agents, and serves your apps. **Public, and installs today with one command** — see [Get started](#get-started).
+- **gethome for iPhone** — the everyday app: rooms and devices, the assistant, rules, history and widgets. **Not on the App Store yet** — [join the waitlist](https://gethome.me/#waitlist).
+- **gethome studio for Mac** — guided setup: writes the SD card or finds a Pi on your network, installs and claims the hub, and keeps it updated. **Ships alongside the app** — [join the waitlist](https://gethome.me/#waitlist).
+- **[gethome.me](https://gethome.me)** — the website: changelog, privacy policy and terms.
 
-A **64-bit** system is required, and **memory is what decides everything below**
-— not the model name. The installer reads the board's RAM and applies one rule:
+## Get started
 
-> **2 GB or more → both radios together. 1 GB or less → one radio at a time,
-> recommended.** Nothing is refused either way; the smaller board is advised,
-> not restricted, and [you can run both on it](#you-can-run-both-radios-on-a-small-board-and-here-is-what-that-costs).
+You need:
 
-Read the memory column first, because several boards are sold in more than one
-size and the same model lands in different rows:
+- **A small computer with 64-bit Linux** — we test on Raspberry Pi. **2 GB of memory or more** runs Matter and Zigbee together and never has to choose. With 1 GB or less the hub runs one at a time by default; you can switch both on, and it works while your Zigbee network stays small — as that network grows, the hub hands a radio back and says so. → [Choosing hardware](docs/hardware.md)
+- **Raspberry Pi OS Lite (64-bit)** on its card, with SSH switched on. Lite, not the desktop edition: it is one level down in Raspberry Pi Imager.
+- **A USB Zigbee stick**, if you want Zigbee. We develop against the SONOFF ZBDongle-E, which needs a one-minute firmware update when new. Without a stick you get Matter, Wi-Fi and MQTT devices only.
 
-| Memory | Both radios at once? | Boards | Tested here |
-|---|---|---|---|
-| **4 GB and up** | **Yes**, with room to spare | Pi 5 (4/8/16 GB), Pi 4 (4/8 GB), Pi 400, Pi 500, CM4/CM5 (4 GB+) | Pi 5 and Pi 4 are tested |
-| **2 GB** | **Yes** | Pi 5 (2 GB), Pi 4 (2 GB), CM4/CM5 (2 GB) | same rule, same code path as the row above |
-| **1 GB** | One at a time recommended · both allowed | **Pi 4 (1 GB)**, **Pi 3 / 3B+**, CM4 (1 GB) | not routinely tested — see below |
-| **512 MB** | One at a time recommended · both allowed | Pi Zero 2 W, Pi 3 A+ | tested most — the Zero 2 W is the board the hub is developed on |
-| **Under 400 MB** | — | — | Refused by the installer, with the reason |
-| **ARMv6, any size** | — | Pi 1, Pi Zero, Pi Zero W | Cannot work — Node.js has published no ARMv6 build since Node 12 |
-
-Two rows are worth reading twice, because both are easy to buy by accident:
-
-- **A 1 GB Pi 4 is a one-radio board.** So is a Pi 3. "Buy a Pi 4" is not the
-  advice — *2 GB or more* is. The Pi 4 was sold in a 1 GB version and plenty are
-  still in circulation secondhand; it gets exactly the same recommendation as a
-  Zero 2 W, because the installer measures memory rather than reading the model
-  off the board.
-- **1 GB is the tier nobody here has measured.** Everything written below about
-  running both radios was measured on a 512 MB Zero 2 W. A 1 GB board has
-  roughly twice that to work with, so it is very likely more comfortable — but
-  "likely" is the honest word, and it is why 1 GB is grouped with the small
-  boards rather than with the ones that never have the question. It is *sized*
-  for its own memory, though: the installer gives a 1 GB board room to use what
-  it has rather than the ceilings a 512 MB board needs.
-
-Any other 64-bit ARM or x86-64 Linux machine works and follows the same memory
-rule; the installer prints a warning for Raspberry Pis it does not recognise,
-and says nothing for machines that are not Pis at all, where running a home hub
-is already a deliberate choice.
-
-The tested operating system is **Raspberry Pi OS Lite (64-bit)**. Debian and
-Ubuntu on arm64 work too; they are simply not what we test against.
-
-The desktop version of Raspberry Pi OS works as well, and on a 512 MB board it
-is worth knowing what it costs: measured at about 75 MB on a Zero 2 W with
-nothing plugged into its HDMI — more than the hub's whole Matter support, on the
-one board that already has to choose between radios.
-
-**Lite is easy to miss, and missing it is the ordinary mistake.** Raspberry Pi
-Imager opens on an entry called *Raspberry Pi OS (64-bit)*, marks it
-**Recommended**, and keeps Lite one level down under *Raspberry Pi OS (other)*,
-where it is called *Raspberry Pi OS Lite (64-bit)* — the two names are one word
-apart, and only the second one is without a desktop. The installer says so when
-it finds a desktop on a small board, and names the single command that turns it
-off; GetHome Studio says so before the card is written.
-
-**A 32-bit system is refused, even on a 64-bit board.** Writing the 32-bit image
-to a perfectly good Zero 2 W or Pi 4 is an easy mistake and an expensive one —
-the Pi boots, the install runs for minutes, and only then finds there is nothing
-published for it. Both the installer and GetHome Studio stop first and say that
-the *card* needs rewriting, not that the Pi is wrong. Studio checks the card
-before it writes anything at all.
-
-**Wi-Fi is fine, and the install turns its power saving off.** A hub is talked
-to in bursts — a phone opens the app, Studio browses for it, somebody SSHs in —
-and 802.11 power save is at its worst exactly there: a dozing radio listens
-for broadcasts only when the router signals that there are some, and some
-routers get that signalling wrong. The installer turns power saving off on
-whichever interface carries the LAN and makes it stay off across reconnects; a
-hub on Ethernet is left alone. It costs about 20 mA on a board that is plugged
-into the wall.
-
-**The hub also keeps itself known on your network**, and that is the fix for
-the one that is hardest to believe: a hub that is running perfectly and cannot
-be reached, until you wait, or until something else on the network happens to
-talk to it.
-
-Some routers sit on the broadcasts they owe a device on 2.4 GHz — for seconds,
-sometimes minutes — while passing ordinary traffic perfectly. Measured behind a
-TP-Link Archer C6: broadcasts from a Mac reached the hub up to 43 seconds late,
-and at worst three in five not at all, while direct traffic from the same Mac
-arrived 45 of 45 within 30 ms. Two things only ever reach a hub by broadcast.
-One is the router finding a hub that has been quiet for a while, so the hub
-announces itself to the router every twenty seconds (four hours of deliberately
-idle probing afterwards: one lost packet out of 504). The other is your phone:
-after twenty minutes without talking to the hub it forgets the hub's hardware
-address and asks for it again by broadcast, which is the question such a router
-loses — and the app says it cannot find a hub that is sitting there with a full
-signal, running your automations. So the hub does not wait to be asked. It
-keeps every phone and computer that talks to it up to date by addressing each
-one directly, and a phone that comes home is reminded within a couple of
-minutes of rejoining the Wi-Fi.
-
-Give the hub a fixed address while you are in the router — a DHCP reservation
-for its MAC is enough. The apps find it over mDNS and remember the address they
-last saw, so a hub that moves is a hub they have to find again.
-
-### The Zigbee coordinator
-
-A USB Zigbee coordinator is what lets the hub pair Zigbee devices — bulbs,
-sensors, buttons, the great majority of affordable smart-home hardware.
-
-**If you want one recommendation: the SONOFF ZBDongle-E.** It is the coordinator
-this hub is developed against — the stick in the Zero 2 W that the installer,
-the detector and the one-radio switch are exercised on — so it is the hardware
-that has had the most chances to go wrong here and be fixed.
-
-> **A new ZBDongle-E needs its firmware updated once, and that is not our
-> quirk.** It ships running a build older than Zigbee2MQTT supports, so out of
-> the box it is found, identified and opened — and then refuses at the last
-> step. It takes about a minute and no extra hardware: unplug it, put it in a
-> Mac or PC, open SONOFF's flasher at
-> <https://dongle.sonoff.tech/sonoff-dongle-flasher/> in Chrome or Edge (Safari
-> cannot talk to USB devices), and flash the **Zigbee Coordinator** firmware it
-> offers you — it identifies the dongle and picks the current build itself.
-> Plug it back in and the hub picks it up on its own.
->
-> You do not have to know any of this in advance: the hub recognises this exact
-> failure, says so in the install log *and* in `GET /hub`, and GetHome Studio
-> puts the steps and the link on the hub's page. Once updated, it is done for
-> good.
-
-Beyond that, what the hub can tell you is how *certainly* it will recognise a
-stick, and that has three honest levels:
-
-| | Coordinator | Why it's placed here |
-|---|---|---|
-| **Developed against** | **SONOFF ZBDongle-E** (V2, the CH9102 variant, `1a86:55d4`) | The one we own and install with. |
-| **Recognised by a dedicated USB id** | **dresden elektronik ConBee II / III**, **Texas Instruments CC2531 / CC2538** | Their `vendor:product` belongs to a Zigbee coordinator and nothing else, so identifying them never depends on a product string a vendor might reword. |
-| **Recognised by name** | **SONOFF** ZBDongle-P, Dongle Plus MG24, Dongle Lite MG21, Dongle Max, Dongle-PP10 · **Home Assistant** SkyConnect, Connect ZBT-1, Connect ZBT-2 · **SMLIGHT** SLZB-06 / 06p7 / 06p10 / 06m, SLZB-07 / 07p7 / 07mg24 · **ZiGate**, **TubesZB**, **ZigStar**, **Electrolama zzh**, **Nordic Zigbee NCP** | They say what they are in their USB product string, and the hub reads it. |
-
-Any of those: plug it in at any time, before or after installing. The hub
-identifies it, sets it up and starts Zigbee within seconds, with no reboot and
-nothing to re-run ([docs/zigbee.md](docs/zigbee.md#finding-the-coordinator)).
-
-**That table is about recognition, not about what works.** Anything Zigbee2MQTT
-supports works. The difference is that a stick built on a bare USB-serial bridge
-(CP210x, CH340, FTDI) with no name of its own cannot be told apart from a 3D
-printer or a UPS — so the hub offers it to you instead of adopting it, and
-GetHome Studio lets you pick it. Nothing is lost by declining: you can point the
-installer at it later with `--zigbee /dev/serial/by-id/...`.
-
-Both recognised tiers are pinned by `test/deploy-radio.test.ts`, which runs real
-device names from `zigbee-herdsman`'s own table — the library Zigbee2MQTT uses to
-talk to a coordinator — through the actual detector. That is what stops this list
-quietly falling behind as upstream's grows, and it is how the gaps it currently
-closes were found.
-
-**Without a coordinator you get Matter, Wi-Fi and MQTT devices only** — no
-Zigbee. That is a real limitation rather than a temporary one, so it is worth
-deciding before you buy a board:
-
-> **A board with 1 GB or less is set up for one radio at a time** — a Pi Zero
-> 2 W, a Pi 3, and the 1 GB version of the Pi 4. The arithmetic that sets the
-> rule is the smallest board's: 512 MB is not comfortably enough for Matter
-> *and* Zigbee at once in a full house, since measured the hub is ~120 MB,
-> Matter adds ~60 MB, and Zigbee2MQTT another ~150 MB on top of the operating
-> system's ~70 MB. So that board starts with whichever one you are
-> actually using: plug a coordinator in and it runs Zigbee, leave it out and it
-> runs Matter. Nothing to configure either way, and the installer says which one
-> you ended up with. You can switch it in the GetHome app at any time — the
-> coordinator stays configured, and Zigbee devices come back when you switch
-> back (they show as offline meanwhile). A board with 2 GB or more runs both
-> together and never asks.
-
-#### You can run both radios on a small board, and here is what that costs
-
-Those figures are for a *full* home, and most homes are nowhere near one. A
-Zero 2 W with three Zigbee devices and one Matter plug ran both radios for an
-hour with no throttling, no restarts and nothing killed — the hub peaking at
-170 MB against its 200 MB ceiling. So **"Run both radios" is an option in the
-GetHome app on every board**, including this one. What `one` now means is
-*recommended one at a time*, and the app says so where you turn it on.
-
-**The trap this section exists to prevent**, in one paragraph, because it is the
-one way a hub like this goes wrong months after it was set up: you put both
-radios on a small board with four devices, everything works, you go on buying
-Zigbee devices for a year, and somewhere in there the board stops fitting. You
-are not left to discover that in the dark — the hub notices and hands a radio
-back with an explanation — but by then the cheap fix, buying a 2 GB board at the
-start, is behind you. So decide the *size of the home you are building* now, not
-the size it is today.
-
-Before you turn both on, the honest version:
-
-- **What decides it is your Zigbee network, not the board.** Measured over
-  seven hours with both radios on a Zero 2 W — one Matter plug, three Zigbee
-  devices — the hub settled at 160 MB against its 200 MB ceiling, flat for the
-  last six of those hours, and was never once throttled. So a small home is
-  comfortable. What uses up the remaining margin is Zigbee2MQTT, which holds
-  state for every device you pair: the board that copes with a handful may not
-  cope with another twenty.
-- **Nobody here can give you the number of devices**, and you should be
-  suspicious of anyone who does. What has been measured is four devices for
-  seven hours; what has not been measured is twenty, or forty, on this board or
-  on a 1 GB one. The honest boundary is the one above: a handful is known to be
-  fine, a full house is known not to fit, and everything between them is why the
-  hub watches its own memory instead of quoting you a limit.
-- **So treat it as a setting to come back to, not one to set and forget.** This
-  is the part worth knowing *before* you start buying: if you already know you
-  want a large Zigbee network alongside Matter, get a board with **2 GB or
-  more** — a Pi 5, or a Pi 4 in its 2 GB, 4 GB or 8 GB version. It never has the
-  question. Note the memory, not the model: a 1 GB Pi 4 is a one-radio board on
-  exactly the same terms as a Zero 2 W.
-- **The hub watches for it rather than waiting to be told.** With both radios
-  on, it samples the kernel's own memory counters every 30 seconds — how often
-  the hub is being throttled at its limit, whether anything has been killed,
-  and how much memory is actually free. If the board is in trouble across most
-  of a five-minute window, the hub hands a radio back by itself, writes it to
-  the activity log and says so in the app. You are told what happened and can
-  put it back; what you are not left with is the system choosing which half of
-  your house stops working, at night.
-- **It catches trouble before anything dies.** The signal it acts on first is
-  *throttling* — the kernel holding the hub at its ceiling — which happens long
-  before anything is killed. Nothing is lost when it fires, and it warns before
-  it acts: there is about a minute and a half in which you can make the choice
-  yourself rather than have it made.
-- **It gives the radio back.** Turning both on is remembered even while the hub
-  is not doing it, so a stand-down parks your choice rather than cancelling it.
-  The hub tries again by itself — twice — when the Pi has been restarted, or
-  after a week. It cannot *tell* whether both would fit now (the board is no
-  longer running the configuration that failed, so there is nothing to
-  measure), so each try is exactly that: a try, announced like any other radio
-  switch. After the second it stops and says so, and turning it back on
-  yourself hands it two more.
-- **Two things make the margin thinner**: running the desktop version of
-  Raspberry Pi OS (about 75 MB), and a board that has not been restarted since
-  the installer switched the kernel's memory accounting back on — until it has,
-  the hub cannot see the board running short and cannot hand a radio back. The
-  installer says so if either applies to you.
-- **A board with 2 GB or more has none of these questions.** If you know you
-  want both radios and a large network, that is what to buy — a Pi 5, or a
-  Pi 4 in 2 GB or larger. Not "a Pi 4": the 1 GB one is in the same tier as a
-  Zero 2 W and gets this whole section.
-
-## Quick start
+Then, [on the hub](#getting-a-shell-on-the-hub), run one command:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/gethome-inc/gethome-hub/main/deploy/install.sh | bash
-# to pin a specific Zigbee coordinator instead of letting it be detected:
-curl -fsSL https://raw.githubusercontent.com/gethome-inc/gethome-hub/main/deploy/install.sh | bash -s -- --zigbee /dev/serial/by-id/usb-...
 ```
 
-**Zigbee needs no flags.** The installer identifies an attached coordinator by
-itself, and installs a udev rule so one plugged in *later* starts working
-automatically too — see
-[docs/zigbee.md](docs/zigbee.md#finding-the-coordinator).
+It downloads a prebuilt hub for your machine, installs Node.js 22 and Mosquitto, starts everything as services that come back on their own after a power cut, picks up a Zigbee stick by itself and prints a **pairing code**. Whoever claims the hub first becomes its owner, and the owner invites everyone else. → [The full install guide](docs/installation.md)
 
-The installer downloads a prebuilt hub for this machine's processor, installs
-Node.js 22 and Mosquitto, registers everything as systemd units, and prints the
-**pairing code**. Every unit is enabled at boot with `Restart=always`, so the
-hub comes back on its own after a power cut — plug the Pi in and it runs, with
-nothing to start by hand.
-
-The **GetHome Studio** macOS app automates all of this with a guided setup: it
-writes the SD card or finds a Pi already on your network, gets this installer
-running on it, and watches it step by step over SSH.
-
-**Studio claims the hub for you** at the end of that, so the pairing code is for
-your *other* devices — a phone, a second Mac — rather than something you have to
-find. See [docs/api.md](docs/api.md#claiming).
+**Prefer a guided setup?** The Mac app, gethome studio, writes the SD card or finds your Pi and does all of this for you. It is not released yet — [join the waitlist](https://gethome.me/#waitlist).
 
 ### Getting a shell on the hub
 
-Everything in this section runs *on* the hub, so:
+Everything on this page that runs *on* the hub needs a login first:
 
 ```sh
 ssh <user>@<address>
 ```
 
-`<user>` is the account you set in Raspberry Pi Imager (`pi` unless you changed
-it). `<address>` is the Pi's IP or its `<hostname>.local` — the same host the
-apps show for the hub, **without** the `:8420`, which is the API and not SSH.
+`<user>` is the account you set in Raspberry Pi Imager (`pi` unless you changed it). `<address>` is the Pi's IP or its `<hostname>.local` — the same host the apps show for the hub, **without** the `:8420`, which is the API and not SSH.
 
-**If GetHome Studio set the hub up, it never asked you for that password** —
-it authorizes its own key on the Pi instead — so the key is usually the
-shortest way in, and on a card install it may be the only one you still know:
+**If gethome studio set the hub up, it never asked you for that password** — it authorizes its own key on the Pi instead — so the key is usually the shortest way in, and on a card install it may be the only one you still know:
 
 ```sh
 ssh -i "$HOME/Library/Application Support/gethome-studio/id_ed25519_gethome" pi@192.168.0.200
 ```
 
-The quotes are load-bearing: the path contains a space. Use `"$HOME/…"` rather
-than `'~/…'` — a tilde inside quotes is not expanded, and ssh will report a key
-that isn't there.
+The quotes are load-bearing: the path contains a space. Use `"$HOME/…"` rather than `'~/…'` — a tilde inside quotes is not expanded, and ssh will report a key that isn't there.
 
-### One switch
+## Everyday commands
 
 ```sh
 sudo gethome-hubctl status          # every service, and what the API says
 sudo gethome-hubctl logs 100
-sudo gethome-hubctl zigbee          # the coordinator, and re-check what's attached
-sudo gethome-hubctl pairing-code    # for another device
-sudo gethome-hubctl mqtt            # the broker's two accounts (--rotate to change them)
+sudo gethome-hubctl pairing-code    # to add another device
+sudo gethome-hubctl update          # install the latest build (`rollback` goes back)
 ```
 
-The API answers at `http://<hub>:8420/api/v1/hub`, and the MQTT broker at
-`mqtt://<hub>:1883` for devices on the same network. The broker asks for a
-username and password: `sudo gethome-hubctl mqtt` prints the two accounts, and
-the apps show them too. Use the one named for your own devices — it can publish
-under `gethome/` and watch what the home reports, but it cannot control Zigbee
-devices or open the network for pairing, so a devboard built against it cannot
-take the home over. The connection is still unencrypted, which is right for a
-home LAN and wrong for the internet — don't forward 1883 through your router.
-See [mqtt-integrations.md](docs/mqtt-integrations.md).
+The API answers at `http://<hub>:8420/api/v1/hub`. An update keeps the running build until the new one answers its health check, and flips back by itself if it doesn't — from the command line, or from an app (Owners and Members can). → [Installing and running a hub](docs/installation.md)
 
-### The hub stays on your network
+## Private by design
 
-There is no cloud account, no relay and no tunnel: the hub opens no inbound
-path through your router, and the only connections it ever makes outward are
-to your AI provider (if you gave it a key), to GitHub when it checks for an
-update, and to two documentation sites while it is working out what a Zigbee
-device is. (Installing and updating it also download from GitHub, nodejs.org and
-npm, and Zigbee2MQTT may ask GitHub whether your devices have new firmware.)
-What each AI feature sends, and to whom, is in the
-[privacy policy](https://gethome.me/privacy#ai). The same applies to port 8420
-as to 1883 — **don't forward it**. It
-is HTTP on a home network, so the token your phone holds crosses the wire in
-the clear; that is right behind your own router and wrong anywhere else.
+- **No cloud account, relay or tunnel.** The hub opens nothing through your router, and your home lives in one file on its own card. **Don't forward port 8420 (the API) or 1883 (MQTT)** — both are plain connections meant for your home network, and your router is the boundary.
+- **Your AI key stays on the hub**, encrypted, and the API never returns it — not even to your phone. AI is optional, and [what each feature sends](https://gethome.me/privacy#ai) is written down.
+- **Every request but two needs a token**, and the hub refuses any request addressed to a public domain name, which stops a web page from reaching it through your browser.
+- **The installer checks what it downloads** against published checksums, and leaves your running hub alone if anything doesn't match.
 
-Two things guard it from inside the house. Every request but the public
-`GET /hub` and the claim needs a bearer token, and no web page can attach one —
-the hub sends no CORS headers, so a browser refuses to read its answers
-cross-origin. And the hub **refuses any request whose `Host` is a public
-domain**, which is what stops a page on the internet pointing its own name at
-your hub's address to read it through your browser (DNS rebinding). Reaching
-the hub by address, by `localhost` or by its `.local` name is untouched, so
-nothing about how the apps connect changed. If you reach yours by a real domain
-resolved inside your house, name it in `EXTRA_ALLOWED_HOSTS` in
-`/etc/gethome/hub.env`.
+→ [Privacy and network security](docs/security.md), including the short, honest list of what does leave the hub.
 
-What the hub installs is checked, too: the bundle and the Node.js runtime under
-it are each verified against a SHA-256 published beside them, and anything the
-installer cannot verify — a mismatch, a missing checksum, a machine with no
-`sha256sum` — stops the install with your existing hub left running and
-untouched.
+### Good to know
 
-### There is no Docker, and no database server
+- **On your own Wi-Fi only, for now.** Controlling the home from away is not built yet — a relay is planned. Your rules keep running while you're out.
+- **Zigbee needs a USB stick.** Without one: Matter, Wi-Fi and MQTT.
+- **AI features need your own Anthropic or OpenAI key.** Without one the hub works, and devices it can't place are flagged *needs review*.
+- **One radio at a time on 1 GB or less**, by default — [what that costs](docs/hardware.md#one-radio-or-both).
 
-Both were removed, and the reason is one machine: a Raspberry Pi Zero 2 W has
-512 MB of memory. The Docker daemon wanted ~130 MB of it and Postgres at stock
-settings another ~130 MB — before the hub had started — for a workload that is
-one writer, small local reads, and not a single transaction. The board ran out
-of memory, and the hub was being killed somewhere between the install finishing
-and its owner claiming it.
+## Documentation
 
-So: systemd units against a SQLite file at `<data>/hub.db`. systemd also gives
-what compose could not — per-service memory limits, so a runaway Zigbee2MQTT
-costs itself a restart instead of taking the hub down with it. The hub itself is
-*throttled* rather than capped (`MemoryHigh`, no `MemoryMax`): a hard ceiling
-near the real working set turns a busy minute into a kill.
+**Use it**
 
-Those limits need a kernel feature a Raspberry Pi boots **switched off**. The
-firmware puts `cgroup_disable=memory` on the kernel command line, so on a stock
-Pi the units carried the right numbers, `systemctl show` read them straight
-back, and the kernel enforced none of them — found on a Zero 2 W, where the
-unit's cgroup had no `memory.*` file at all. The installer asks for the
-controller by name after it, which is what wins, and takes effect at the next
-restart; it also
-sets `OOMScoreAdjust` on both units, and that is the half that needs no kernel
-feature, no reboot and no cgroup. It is what actually keeps the kernel's choice
-of victim off the hub, from the moment the units start.
+- [Choosing hardware](docs/hardware.md) — what to buy, and why memory decides
+- [Installing and running a hub](docs/installation.md) — install, update, roll back
+- [Privacy and network security](docs/security.md)
+- [Zigbee](docs/zigbee.md) · [Matter](docs/matter.md) · [MQTT for your own hardware](docs/mqtt-integrations.md)
+- [Automations](docs/automations.md) · [The assistant](docs/assistant.md) · [AI device recognition](docs/ai-adaptation.md) · [Device portraits](docs/portraits.md)
 
-**The hub's own memory is also kept out of compressed swap** (`MemorySwapMax=0`),
-and that is the other thing a container could not have been told. A small board
-affords two radios by letting the kernel compress whatever has been idle
-longest — which on a hub is the hub, because nobody talks to it for hours.
-Measured on a Zero 2 W that had been up 38 hours with nothing wrong: 55 MB of
-the hub sitting in compressed swap while 110 MB of RAM was free and the board
-was idle. Waking that costs seconds, and the phone asking is the one that pays
-for it — which is what a hub that is plainly running but "cannot be reached"
-usually turns out to be. Zigbee2MQTT and the page cache keep the swap; they are
-what it is for.
+**Build on it**
 
-### The prebuilt bundle
+- [The API](docs/api.md) · [The device schema](docs/device-schema.md) · [Architecture](docs/architecture.md) · [The gethome family](docs/ecosystem.md)
 
-The Pi downloads the hub; it does not compile it. `.github/workflows/bundle.yml`
-publishes one tarball per architecture (`linux-arm64`, `linux-x64`) — `dist/`
-plus production `node_modules` with native modules already built for that
-platform — and stamps each with a build id. Compiling *on* a Pi means `npm ci`
-pulling a thousand packages onto an SD card and then `tsc`: twenty to forty
-minutes, several hundred megabytes of memory, and on a 512 MB board an
-out-of-memory kill at the end of it regardless.
-
-`install.sh` falls back to building from source when there is no bundle — but
-only on a machine with more than 1 GB of memory. Below that it stops and says
-why, because starting a build that cannot finish is worse than an error.
-
-**Two kinds of release, and only one of them lasts.** Pushing any branch
-publishes a *rolling prerelease* named `bundle-<branch>`; its assets, its tag
-and its description all move on every push, so the release page always names the
-commit that is actually inside it. `bundle-cleanup.yml` deletes the whole thing
-once the branch is gone, so they don't accumulate. Pushing a `v*` tag publishes
-an immutable release under that tag, which nothing re-points and nothing ever
-deletes.
-
-That is what makes a branch testable on real hardware: `install.sh --branch X`
-looks for `bundle-X`, and GetHome Studio passes `StudioFeature.hubBranch`
-through to it. Everything defaults to `main`, so a hub installs `bundle-main`
-unless someone says otherwise.
-
-### Updating
-
-```sh
-sudo gethome-hubctl version          # which build is running
-sudo gethome-hubctl update           # install the latest build of main
-sudo gethome-hubctl rollback         # go back to the previous one
-```
-
-**Or from an app.** The GetHome iOS app updates a hub from its Hub page, and
-GetHome Studio does it over SSH — both run exactly this, so the atomic flip,
-the health check and the automatic rollback are the same on every path. Updating
-from an app is the home owner's; every member can watch it happen. A hub
-installed before that existed has to be updated once from Studio or from here,
-after which it can do it itself.
-
-**Installing a branch.** `update` takes `--branch`, which is how an unmerged
-change gets onto real hardware — and how you go back afterwards:
-
-```sh
-sudo gethome-hubctl update --branch my-feature
-sudo gethome-hubctl update --branch main       # back to the released line
-```
-
-It installs the rolling `bundle-<branch>` release described above, with any `/`
-in the name flattened to `-`: branch `alice/new-thing` installs
-`bundle-alice-new-thing`. If CI has not published that branch for this
-processor yet, the installer says which release it looked for; on a board with
-more than 1 GB of memory it then builds from source instead, which takes a
-while, and on a smaller one it stops and tells you to check the workflow rather
-than starting a build that cannot finish.
-
-On a hub too old to have `gethome-hubctl`, the installer does the same job
-directly. The options go **after** `bash -s --`, or they reach bash instead of
-the script:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/gethome-inc/gethome-hub/my-feature/deploy/install.sh \
-  | bash -s -- --branch my-feature
-```
-
-Either way the hub keeps the build it was running until the new one answers its
-health check, so a branch that doesn't start leaves you where you were.
-
-Each build lives in its own directory under `/opt/gethome/releases/` and
-`current` is a symlink to the one that runs, so an update is an atomic flip —
-**and if the new build doesn't answer, the installer flips it back by itself**
-and tells you why. That is deliberately not a container: on a 512 MB board the
-Docker daemon alone is a third of the machine, and a `docker pull` into the same
-tag has nothing to roll back to.
-
-### Development
+## For developers
 
 ```sh
 cp .env.example .env
 npm install
-npm run dev                               # tsx watch
-npm test                                  # vitest — no services needed
-HUB_TEST_MQTT=1 npm test                  # + end-to-end broker round-trip (needs mosquitto)
+npm run dev                # tsx watch
+npm test                   # vitest — no services needed
 ```
 
-Node.js ≥ 22 required. There is no cloud: everything runs from this repo. The
-hub is *deployed* on Linux only, but it develops and tests fine on macOS — the
-suite needs no radios and keeps its database in a temp file.
-
-## Architecture (short version)
-
-```
-Zigbee2MQTT ─┐                       ┌─ REST /api/v1 ── GetHome apps
-MQTT devices ─┼─ protocol adapters ──┤
-Matter fabric┘        │              └─ WebSocket events
-                DeviceRegistry
-            (canonical schema, SQLite)
-```
-
-Adapters translate protocols into one canonical schema; the registry persists
-devices and fans out events; the API serves them. Full picture in
-[docs/architecture.md](docs/architecture.md), ecosystem context in
-[docs/ecosystem.md](docs/ecosystem.md).
+Node.js ≥ 22. There is no cloud: everything runs from this repo. The hub is *deployed* on Linux only, but it develops and tests fine on macOS — the suite needs no radios and keeps its database in a temp file. `HUB_TEST_MQTT=1 npm test` adds the end-to-end broker round trip (it needs Mosquitto). Read [CLAUDE.md](CLAUDE.md), the engineering guide, before changing code, and [Architecture](docs/architecture.md) for the module map.
 
 ## License
 
-Free for **personal and noncommercial use** under the
-[PolyForm Noncommercial License 1.0.0](LICENSE.md) — homes, hobby projects,
-evaluation, research. This is source-available, not OSI open source.
+- **Source-available.** The code is public under the [PolyForm Noncommercial License 1.0.0](LICENSE.md): read it, change it, share it.
+- **Free for personal and noncommercial use** — your home, hobby projects, evaluation, research.
+- **Commercial deployments** — hotels, property management, paid installations — need a separate license: see [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md).
 
-**Commercial deployments** (hotels, property management, paid installations)
-require a separate license — see [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md).
-
-The [Terms of Use](https://gethome.me/terms) and the
-[Privacy Policy](https://gethome.me/privacy) on gethome.me cover the hub along
-with the GetHome apps; for the code itself, this license is what governs.
+This is a source-available license, not OSI open source: the open-source definition doesn't allow restricting commercial use. The [Terms of Use](https://gethome.me/terms) and the [Privacy Policy](https://gethome.me/privacy) on gethome.me cover the hub along with the gethome apps; for the code itself, this license is what governs.
