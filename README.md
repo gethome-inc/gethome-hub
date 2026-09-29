@@ -122,7 +122,7 @@ The quotes are load-bearing: the path contains a space. Use `"$HOME/…"` rather
 ```sh
 sudo gethome-hubctl status          # every service, and what the API says
 sudo gethome-hubctl logs 100
-sudo gethome-hubctl pairing-code    # to add another device
+sudo gethome-hubctl pairing-code    # the code, until the hub is claimed
 sudo gethome-hubctl update          # install the latest build (`rollback` goes back)
 ```
 

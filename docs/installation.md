@@ -59,14 +59,16 @@ running on it, and watches it step by step over SSH. It is not released yet —
 ## Claim it
 
 An unclaimed hub keeps an 8-digit **pairing code** until somebody uses it. The
-first claim makes that person the **owner**; the owner then invites everybody
-else with short-lived invite codes. The whole flow, including signing a person in
-on a second device as themselves, is in [`api.md`](api.md#claiming).
+first claim makes that person the **owner**, and the code is spent: it is not
+shown again, and `sudo gethome-hubctl pairing-code` on a claimed hub says so.
+Everybody else joins with an **invite code** the owner creates in the app
+(short-lived, single use), and a person coming back on another device signs in
+with a **sign-in code**. The whole flow is in [`api.md`](api.md#claiming).
 
-The Mac app claims the hub for you at the end of its setup, so the pairing code
-is for your *other* devices — a phone, a second Mac — rather than something you
-have to find. On the machine itself, `sudo gethome-hubctl pairing-code` prints it
-again.
+The Mac app claims the hub for you at the end of its setup, so you never see the
+pairing code at all; the phones and other Macs that follow use invite codes.
+`sudo gethome-hubctl pairing-code` is for the other case — installing by hand and
+claiming the hub yourself: it prints the code for as long as nobody has.
 
 ## Day to day
 
@@ -76,7 +78,7 @@ Everything here runs *on* the hub — [get a shell first](../README.md#getting-a
 sudo gethome-hubctl status          # every service, and what the API says
 sudo gethome-hubctl logs 100
 sudo gethome-hubctl zigbee          # the coordinator, and re-check what's attached
-sudo gethome-hubctl pairing-code    # for another device
+sudo gethome-hubctl pairing-code    # the code, until the hub is claimed
 sudo gethome-hubctl mqtt            # the broker's two accounts (--rotate to change them)
 ```
 
