@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-GetHome Hub — a local smart-home hub (TypeScript / Node.js 22, ESM) that hosts
+The gethome hub: a local smart-home hub (TypeScript / Node.js 22, ESM) that hosts
 Matter, Zigbee (via Zigbee2MQTT), and MQTT devices behind one canonical device
-schema and serves them to the GetHome apps over a local REST + WebSocket API.
+schema and serves them to the gethome apps over a local REST + WebSocket API.
 One hub = one home; sharing = granting members access to the hub. This repo is
 **public** (PolyForm Noncommercial + commercial licensing) — never commit
 secrets, keys, or non-public ecosystem details.
@@ -39,7 +39,7 @@ diagnosed nothing. With no `/etc/avahi/services` the mDNS backend fell to
 — the exact conflict `mdns/advertiser.ts` exists to avoid. `PUT /settings/radio`
 answered `applying: true` to a file no watcher read. And there was no
 coordinator detection, no prebuilt bundle, no atomic release or rollback, and a
-marker vocabulary Studio had moved on from. GetHome Studio has since deleted
+marker vocabulary Studio had moved on from. Studio has since deleted
 its own half too — `LocalMacInstaller`, the This-Mac wizard path and the
 service card — so the product is a Raspberry Pi hub, on both sides.
 
@@ -336,7 +336,7 @@ adapter/registry/API change.
   the derived look), and a restyle is deliberately *not* written to the activity
   log, which is read a week later and is not where "the kitchen is blue now"
   belongs.
-- **Units are load-bearing** and mirror the GetHome app's Matter schema
+- **Units are load-bearing** and mirror the gethome app's Matter schema
   byte-for-byte: level 1–254, mireds, centi-°C, humidity centi-%, covering
   percent-100ths with **0 = open**, battery 0–100, milliwatts, lock 0/1/2,
   fan mode 0–5, airQuality 0–6. The wire format (field names included) is a
@@ -356,7 +356,7 @@ adapter/registry/API change.
   the shape of the home, not what somebody calls themselves) and no route
   renames anybody else. Names are trimmed before they are measured, in one
   schema shared with `POST /pair`: a name that is only spaces is a 400, not a
-  member row with nothing to click on. This is what lets GetHome Studio — which
+  member row with nothing to click on. This is what lets gethome studio — which
   has no accounts and no user name of its own — claim as *the Mac* and offer
   the rename afterwards.
 - **A person is a member row and a device is a token row, so coming back is a
@@ -672,7 +672,7 @@ power save and reachability, mDNS, bundles, versioning and rollback — is in
 touching anything there. Five of its rules have a `src/` half and bind code
 outside `deploy/`, so they stay here:
 
-- **`install.sh`'s `@@…@@` markers are a wire protocol.** GetHome Studio
+- **`install.sh`'s `@@…@@` markers are a wire protocol.** The Mac app, gethome studio,
   drives its whole install UI off them, and the step ids are mirrored in
   Studio's `FirstBootMonitor.installSteps` and `PiInstallView.steps()` and in
   the iOS app's `HubUpdateStep`. Adding a marker is safe — unknown ones are
@@ -722,7 +722,7 @@ outside `deploy/`, so they stay here:
 repo point at it: the iOS app's welcome deck opens the repository as **"How the
 hub works"** for somebody who has just installed the app and never heard of a
 hub (`GetHomeWeb.hubRepository`), the apps' store listings send people here to
-learn how a hub is set up, and GetHome Studio's README links
+learn how a hub is set up, and gethome studio's README links
 `#getting-a-shell-on-the-hub`. So it answers, in plain words and in that order,
 *what a hub is, what it runs on, and how one is set up* — and nothing an
 operator needs at 2 a.m. It was 574 lines of measurements and rationale before
@@ -754,8 +754,10 @@ it was rewritten; hold it near 200. Five rules.
   internet" (say *on your own Wi-Fi*), never "local AI" (the hub is local; the AI
   is OpenAI's or Anthropic's, on the home's key), and the **memory, not the
   board**, in every hardware sentence — a family name is fine ("a small computer
-  such as a Raspberry Pi"). The older docs still say "GetHome"; fix a page's
-  casing when you are editing it anyway.
+  such as a Raspberry Pi"). A quotation of a string the hub really once
+  displayed ("GetHome Hub") stays as it was, and the strings inside code —
+  installer output, the Matter fabric label, the prompts — still say "GetHome";
+  they change with their tests, not in a docs pass.
 - **Anything that offers both radios on a one-radio board owes the sentence in
   *The radio budget* bullet above** — it works now, what changes it is your
   Zigbee network growing, the hub hands a radio back and says so, and *2 GB or

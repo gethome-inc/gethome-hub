@@ -8,7 +8,7 @@ here — and keep it portable to BSD userland and **bash 3.2**, because
 has. `docs/zigbee.md` is canonical for detection and markers; the marker list
 in `deploy/install.sh` must stay accurate.
 
-- **`install.sh`'s `@@…@@` markers are a wire protocol.** GetHome Studio drives
+- **`install.sh`'s `@@…@@` markers are a wire protocol.** The Mac app, gethome studio, drives
   its whole install UI off them (`@@STEP@@`, `@@ERROR@@`, `@@WARN@@`,
   `@@BOARD@@`, `@@PAIRING@@`, `@@ZIGBEE_FOUND@@`, `@@ZIGBEE_MAYBE@@`,
   `@@CAPABILITIES@@`, `@@ROLLBACK@@`). Adding a
@@ -828,7 +828,7 @@ in `deploy/install.sh` must stay accurate.
   v230; the old placement earns "Unknown key 'StartLimitIntervalSec' in section
   [Service], ignoring" on every unit load and a rate limit that silently is not
   in force. `test/deploy-config.test.ts` pins the section.
-  **Its tables are duplicated in GetHome Studio** (`Models/ZigbeeModels.swift`),
+  **Its tables are duplicated in gethome studio** (`Models/ZigbeeModels.swift`),
   which classifies devices during its SSH preflight — before this script exists
   on the machine. Change both together; `docs/zigbee.md` documents the contract.
 - **One mDNS responder per host.** `MdnsAdvertiser` publishes `_gethome._tcp`

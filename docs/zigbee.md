@@ -47,7 +47,7 @@ beside the Zero 2 W.
    Zigbee2MQTT is a second full Node.js process — around 150 MB — and on a
    512 MB board, holding that open to wait for hardware nobody has bought is
    memory the hub needs. The detector owns whether it runs.
-3. Open the network from the GetHome app (or
+3. Open the network from the gethome app (or
    `POST /api/v1/zigbee/permit-join {"seconds":120}`) and put the device in
    pairing mode.
 
@@ -122,7 +122,7 @@ It classifies a device three ways, and the middle one is the point:
 | Verdict | Signal | What happens |
 |---|---|---|
 | `certain` | the USB product string names a coordinator (`zigbee`, `zbdongle`, `conbee`, `slzb`, `cc2652`, `efr32`, …), or the `vendor:product` id is a coordinator and nothing else (ConBee, CC2531) | `/etc/gethome/zigbee.env` gets the device path and `gethome-zigbee2mqtt.service` is started |
-| `maybe` | a generic USB-serial bridge (CP210x, CH340/CH9102, FTDI) — what a Sonoff uses, and also a 3D printer, a UPS, a GPS puck, an Arduino | reported as `@@ZIGBEE_MAYBE:<device>@@`, **never** configured automatically; GetHome Studio offers it for the user to pick |
+| `maybe` | a generic USB-serial bridge (CP210x, CH340/CH9102, FTDI) — what a Sonoff uses, and also a 3D printer, a UPS, a GPS puck, an Arduino | reported as `@@ZIGBEE_MAYBE:<device>@@`, **never** configured automatically; gethome studio offers it for the user to pick |
 | `no` | not USB serial, or unknown ids | ignored |
 
 Auto-enabling on `maybe` would hand someone's 3D printer to Zigbee2MQTT, so
@@ -545,7 +545,7 @@ things decide which radio runs:
 | | Who sets it | Where it lives | What it means |
 |---|---|---|---|
 | **Budget** | `install.sh`, from the board's RAM | `GETHOME_RADIO` in `/etc/gethome/hub.env` | `both` (> 1 GB) or `one` (≤ 1 GB). Measured, not a preference — and **advice, not a ceiling**. |
-| **Mode** | any member, from the GetHome app | `<data>/radio-mode` | `auto` (default), `zigbee`, `matter` or `both`. |
+| **Mode** | any member, from the gethome app | `<data>/radio-mode` | `auto` (default), `zigbee`, `matter` or `both`. |
 
 `gethome-zigbee-detect` is where the two meet, because it is the only thing
 that knows whether a coordinator is *actually plugged in* — it runs at boot, on

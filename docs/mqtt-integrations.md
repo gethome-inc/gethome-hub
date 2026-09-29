@@ -1,9 +1,9 @@
-# MQTT integrations — the GetHome convention
+# MQTT integrations — the gethome convention
 
 The hub ships an MQTT broker (Mosquitto on `1883`) and a small, stable topic
-convention for wiring **anything** into a GetHome home: DIY boards (ESPHome,
+convention for wiring **anything** into a gethome home: DIY boards (ESPHome,
 ESP32/Arduino, Raspberry Pi Pico W), wired-bus controllers, relay boards,
-custom bridges. If your thing can publish JSON over MQTT, it can be a GetHome
+custom bridges. If your thing can publish JSON over MQTT, it can be a gethome
 device — with no hub-side code and no per-device mapping, because both
 directions speak the [canonical schema](device-schema.md) directly.
 
@@ -19,7 +19,7 @@ username: gethome
 password: ...
 ```
 
-Get them from **GetHome Studio → your hub → Zigbee & MQTT**, or on the hub
+Get them from **gethome studio → your hub → Zigbee & MQTT**, or on the hub
 itself with `sudo gethome-hubctl mqtt`. They are minted once when the hub is
 installed and kept across updates, so you set them in your device one time.
 
