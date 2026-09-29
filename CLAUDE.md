@@ -754,10 +754,9 @@ it was rewritten; hold it near 200. Five rules.
   internet" (say *on your own Wi-Fi*), never "local AI" (the hub is local; the AI
   is OpenAI's or Anthropic's, on the home's key), and the **memory, not the
   board**, in every hardware sentence — a family name is fine ("a small computer
-  such as a Raspberry Pi"). A quotation of a string the hub really once
-  displayed ("GetHome Hub") stays as it was, and the strings inside code —
-  installer output, the Matter fabric label, the prompts — still say "GetHome";
-  they change with their tests, not in a docs pass.
+  such as a Raspberry Pi"). The strings inside code — installer output, the
+  Matter fabric label, the prompts — still say "GetHome"; they change with their
+  tests, not in a docs pass.
 - **Anything that offers both radios on a one-radio board owes the sentence in
   *The radio budget* bullet above** — it works now, what changes it is your
   Zigbee network growing, the hub hands a radio back and says so, and *2 GB or
