@@ -1,6 +1,6 @@
 # Device portraits
 
-An AI-drawn picture of a device — the floating object the GetHome app shows on
+An AI-drawn picture of a device — the floating object the gethome app shows on
 a device's page, in place of a tinted icon. The hub draws it, stores it, and
 serves it to every member of the home.
 
@@ -26,7 +26,7 @@ sharing the key:
   `kind`, so a caller sends nothing but "draw this device", optionally with a
   photo to restyle. There is no prompt on the wire.
 
-Homes with no hub are unchanged: the GetHome app keeps its Keychain key and its
+Homes with no hub are unchanged: the gethome app keeps its Keychain key and its
 local store for Apple Home exports and demo homes, and says so.
 
 ## The prompts (`src/portraits/prompts.ts`)
@@ -48,7 +48,7 @@ the model likes sneaking a soft ground shadow under the object. Shadows and
 glows are the app's job — each surface draws its own — never baked in.
 
 The palette is the app's, and that is deliberate: a portrait is drawn to sit on
-a GetHome device page, the way `rooms.icon` holds a token only the apps know how
+a gethome device page, the way `rooms.icon` holds a token only the apps know how
 to draw.
 
 **The finish and the light are written for a model that obeys.** The palette used to
@@ -220,7 +220,7 @@ lost but the animation.
 web.** The published figures disagree wildly: OpenAI's own latency guidance says
 30–45 s with a complex prompt "close to two minutes", while blog posts measuring
 reseller proxies and small Azure quotas report three to five, which is mostly
-their queue. What a real GetHome hub does, on this prompt, at `quality: high`
+their queue. What a real gethome hub does, on this prompt, at `quality: high`
 with a transparent background and a photo to restyle, is **two to five minutes**
 — a heavier request than any of those benchmarks runs. The deadline is ten
 minutes, about twice the slowest run observed; a client should size its own from

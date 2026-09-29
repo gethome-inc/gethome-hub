@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-GetHome Hub — a local smart-home hub (TypeScript / Node.js 22, ESM) that hosts
+The gethome hub: a local smart-home hub (TypeScript / Node.js 22, ESM) that hosts
 Matter, Zigbee (via Zigbee2MQTT), and MQTT devices behind one canonical device
-schema and serves them to the GetHome apps over a local REST + WebSocket API.
+schema and serves them to the gethome apps over a local REST + WebSocket API.
 One hub = one home; sharing = granting members access to the hub. This repo is
 **public** (PolyForm Noncommercial + commercial licensing) — never commit
 secrets, keys, or non-public ecosystem details.
@@ -16,7 +16,10 @@ touching that code: `architecture.md` (module boundaries, data flow),
 `device-schema.md` (**the** capability/unit/wire contract), `api.md`,
 `zigbee.md`, `matter.md`, `mqtt-integrations.md` (public integrator
 convention), `ai-adaptation.md`, `automations.md`, `assistant.md`,
-`portraits.md`, `ecosystem.md`.
+`portraits.md`, `ecosystem.md` — and the three a person reads before they have a
+hub: `hardware.md` (what is tested and recommended, in a buyer's terms),
+`installation.md` (install, claim, update, roll back) and `security.md` (what
+stays home, what leaves, what guards the door).
 
 **There is no Docker and no database server anywhere any more.** The hub runs as
 systemd units (`deploy/install.sh`, `deploy/gethome-hubctl`) and the store is a
@@ -36,7 +39,7 @@ diagnosed nothing. With no `/etc/avahi/services` the mDNS backend fell to
 — the exact conflict `mdns/advertiser.ts` exists to avoid. `PUT /settings/radio`
 answered `applying: true` to a file no watcher read. And there was no
 coordinator detection, no prebuilt bundle, no atomic release or rollback, and a
-marker vocabulary Studio had moved on from. GetHome Studio has since deleted
+marker vocabulary Studio had moved on from. Studio has since deleted
 its own half too — `LocalMacInstaller`, the This-Mac wizard path and the
 service card — so the product is a Raspberry Pi hub, on both sides.
 
@@ -333,7 +336,7 @@ adapter/registry/API change.
   the derived look), and a restyle is deliberately *not* written to the activity
   log, which is read a week later and is not where "the kitchen is blue now"
   belongs.
-- **Units are load-bearing** and mirror the GetHome app's Matter schema
+- **Units are load-bearing** and mirror the gethome app's Matter schema
   byte-for-byte: level 1–254, mireds, centi-°C, humidity centi-%, covering
   percent-100ths with **0 = open**, battery 0–100, milliwatts, lock 0/1/2,
   fan mode 0–5, airQuality 0–6. The wire format (field names included) is a
@@ -353,7 +356,7 @@ adapter/registry/API change.
   the shape of the home, not what somebody calls themselves) and no route
   renames anybody else. Names are trimmed before they are measured, in one
   schema shared with `POST /pair`: a name that is only spaces is a 400, not a
-  member row with nothing to click on. This is what lets GetHome Studio — which
+  member row with nothing to click on. This is what lets gethome studio — which
   has no accounts and no user name of its own — claim as *the Mac* and offer
   the rename afterwards.
 - **A person is a member row and a device is a token row, so coming back is a
@@ -669,7 +672,7 @@ power save and reachability, mDNS, bundles, versioning and rollback — is in
 touching anything there. Five of its rules have a `src/` half and bind code
 outside `deploy/`, so they stay here:
 
-- **`install.sh`'s `@@…@@` markers are a wire protocol.** GetHome Studio
+- **`install.sh`'s `@@…@@` markers are a wire protocol.** The Mac app, gethome studio,
   drives its whole install UI off them, and the step ids are mirrored in
   Studio's `FirstBootMonitor.installSteps` and `PiInstallView.steps()` and in
   the iOS app's `HubUpdateStep`. Adding a marker is safe — unknown ones are
@@ -713,6 +716,53 @@ outside `deploy/`, so they stay here:
   that doesn't either. The SQL was well formed, the journal was complete and
   the file was additive, so nothing else here would have said a word.
 
+## The README is a landing page, and other things depend on it
+
+`README.md` is the front page of a public repository, and things outside this
+repo point at it: the iOS app's welcome deck opens the repository as **"How the
+hub works"** for somebody who has just installed the app and never heard of a
+hub (`GetHomeWeb.hubRepository`), the apps' store listings send people here to
+learn how a hub is set up, and gethome studio's README links
+`#getting-a-shell-on-the-hub`. So it answers, in plain words and in that order,
+*what a hub is, what it runs on, and how one is set up* — and nothing an
+operator needs at 2 a.m. It was 574 lines of measurements and rationale before
+it was rewritten; hold it near 200. Five rules.
+
+- **Operator and contributor detail goes to `docs/` or a `CLAUDE.md`, never
+  back into the README.** Buying → `docs/hardware.md`; install, update, roll
+  back → `docs/installation.md`; network and privacy → `docs/security.md`;
+  engineering rationale and measurements → the `CLAUDE.md` of the directory they
+  are about. A new fact that a stranger does not need before their hub is
+  running is a docs fact.
+- **Two things are load-bearing and belong to other repos.** The
+  `### Getting a shell on the hub` heading (Studio deep-links its anchor) and the
+  front page itself. Rename or remove either only after changing the repo that
+  points at it.
+- **Link only what a stranger can open.** The iOS, Studio, site and marketing
+  repositories are private — the README links gethome.me instead, and it once
+  linked a private repository that answered every visitor with a 404. **The two
+  apps are waitlist links** (`https://gethome.me/#waitlist`) **until they ship**;
+  then swap in the store link (Apple's badge only for an app that is live, and
+  only unmodified), and re-check the do-not-claim list in the site repo's
+  `CLAUDE.md` first. The three phone screens are byte-identical copies of what
+  gethome.me already shows (`docs/assets/README.md` says which and when):
+  replace them when the app's interface changes, and never crop, annotate or
+  frame one.
+- **Say what ships, in the brand's voice.** `gethome hub` is lowercase in every
+  string a person reads — a sentence never begins with it, and the H1 is a label
+  and exempt. Never "open source" (it is source-available), never "works without
+  internet" (say *on your own Wi-Fi*), never "local AI" (the hub is local; the AI
+  is OpenAI's or Anthropic's, on the home's key), and the **memory, not the
+  board**, in every hardware sentence — a family name is fine ("a small computer
+  such as a Raspberry Pi"). The strings inside code — installer output, the
+  Matter fabric label, the prompts — still say "GetHome"; they change with their
+  tests, not in a docs pass.
+- **Anything that offers both radios on a one-radio board owes the sentence in
+  *The radio budget* bullet above** — it works now, what changes it is your
+  Zigbee network growing, the hub hands a radio back and says so, and *2 GB or
+  more* never has the question. The README's *Get started* carries it in short
+  and `docs/hardware.md` in full; keep both.
+
 ## Keep the docs in sync
 
 After landing a change, update the docs it invalidates in the same change:
@@ -727,8 +777,14 @@ changed (`src/ai/CLAUDE.md`, `src/automations/CLAUDE.md`, `src/core/CLAUDE.md`,
 `src/portraits/CLAUDE.md`, `test/CLAUDE.md`, `deploy/CLAUDE.md`) +
 `docs/architecture.md`; installer markers, autostart or Zigbee detection →
 `docs/zigbee.md` + the marker list in `deploy/install.sh` (and flag the Studio
-repo); anything README restates → `README.md`; **what leaves the hub** — a new
-outbound connection, something new sent to an AI provider, a retention period —
-→ the Privacy Policy on gethome.me (the gethome-site repo's
-`frontend/src/legal/privacy.tsx`, which describes this code) and the README's
-"The hub stays on your network".
+repo); the boards and Zigbee sticks the hub is tested on or recognises →
+`docs/hardware.md` (its recognised-sticks table mirrors
+`deploy/zigbee-detect.sh`, and Studio's `ZigbeeCatalog` mirrors both — flag the
+Studio repo); how a hub is installed, claimed, updated or rolled back →
+`docs/installation.md`; anything README restates → `README.md`; **what leaves
+the hub** — a new outbound connection, something new sent to an AI provider, a
+retention period → `docs/security.md` (its *What leaves the hub* list is the
+one place that names each connection) and the Privacy Policy on gethome.me (the
+gethome-site repo's `frontend/src/legal/privacy.tsx`, which describes this
+code). The README's *Private by design* only summarises and deliberately names
+no individual connection, so it does not need editing for one.

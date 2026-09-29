@@ -7,7 +7,7 @@
 > system wants ~70 MB. So `install.sh` records that board as affording **one
 > radio** (`GETHOME_RADIO=one`) and `gethome-zigbee-detect` hands it to
 > whichever radio is actually in use: Zigbee when a coordinator is plugged in,
-> Matter when one isn't. The owner can override that from the GetHome app.
+> Matter when one isn't. The owner can override that from the gethome app.
 > See [Zigbee or Matter on a small board](zigbee.md#zigbee-or-matter-on-a-small-board).
 > A board with **2 GB or more** runs both together and never makes the choice —
 > the threshold is `MemTotal` against 1024 MB, so a 1 GB Pi 4 and a Pi 3 are on
@@ -106,7 +106,7 @@ Ethernet. The hub's own band does not matter to Matter otherwise: it reaches an
 accessory on 2.4 GHz through the router like any other client on the LAN.
 
 **What is handed over may be a key rather than the password**, and that is
-allowed. GetHome Studio and Raspberry Pi Imager both write the network's derived
+allowed. Studio and Raspberry Pi Imager both write the network's derived
 64-hex PSK into the profile rather than the passphrase, so the card never
 carries the password itself, and that is what `wifi.env` then holds.
 `AddOrUpdateWiFiNetwork` defines its credentials by length — 8 to 63 bytes are a
@@ -292,11 +292,11 @@ than on the one it was written on:
   vendor's carry-over would be a second one. So the capability is dropped and
   the device is honest about what it does: on/off, which is what it told us.
 - All attributes and events are subscribed; reports run through
-  `src/adapters/matter/reducer.ts` — a 1:1 port of the GetHome app's own
+  `src/adapters/matter/reducer.ts` — a 1:1 port of the gethome app's own
   Matter state reducer (same cluster/attribute IDs, same unit transforms:
   illuminance log-scale, battery half-percents (truncated, like the app),
   thermostat 0x8000 null filtering, 0.1 W power quantization). Hub devices
-  therefore produce exactly the typed state the GetHome app renders.
+  therefore produce exactly the typed state the gethome app renders.
 - On announce, the adapter **seeds initial state** from matter.js's cached
   attribute values (every cluster client's `getLocal()`), so devices show
   real state right after a hub restart instead of an empty card until their
@@ -332,7 +332,7 @@ them up would otherwise have to rediscover. Neither is started.
 belong to several fabrics at once — the Yandex plug this was tested against
 reports `supportedFabrics: 5` — and every other ecosystem offers this
 ("Turn On Pairing Mode" in Apple Home; "add to another app" in a vendor's).
-We don't, so adopting an accessory into a GetHome home currently means giving
+We don't, so adopting an accessory into a gethome home currently means giving
 up the app it came with, and there is no way back short of a factory reset.
 
 That is a bigger deal than a missing feature: it is the fear somebody has

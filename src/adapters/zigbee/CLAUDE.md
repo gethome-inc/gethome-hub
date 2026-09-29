@@ -59,7 +59,7 @@ change.
 - **A device's `friendly_name` is its address until somebody renames it, so it
   is not a name.** Zigbee2MQTT names a newly joined device after its own IEEE —
   `friendly_name: "0x54ef44100047c1bf"` — and passing that through as
-  `suggestedName` put eighteen characters of hex on the tile in the GetHome app,
+  `suggestedName` put eighteen characters of hex on the tile in the gethome app,
   which reads as a hub that failed to recognise the device. It hadn't: the same
   `bridge/devices` record carried a full `exposes` schema, a vendor, a model and
   upstream's own one-line description, all mapped correctly. `suggestedNameFor()`

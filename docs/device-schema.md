@@ -1,6 +1,6 @@
 # The canonical device schema
 
-This document is the contract between the hub and every GetHome client. The
+This document is the contract between the hub and every gethome client. The
 implementation lives in `src/schema/` (dependency-free; zod schemas in
 `src/schema/wire.ts` *are* the normative wire format). The schema deliberately
 mirrors the Matter data model — Matter devices map 1:1, and Zigbee/MQTT

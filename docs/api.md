@@ -56,7 +56,7 @@ the code is a one-time proof of physical access, not a password.
    install into `invalid_code` with nothing the user could do. Rotation bought
    nothing either: the code only ever proves access to the machine, and reading
    the file *is* that access. Moving the file, or the `Pairing code: <digits>`
-   log line, breaks GetHome Studio's fallback path.
+   log line, breaks gethome studio's fallback path.
 2. `POST /pair {"code","memberName","deviceName"?,"claimId"?}` — the first
    successful claim creates the **owner** and returns `{token, member}`. The
    code dies with the claim. `claimId` is the client's own UUID for *this
@@ -79,7 +79,7 @@ the code is a one-time proof of physical access, not a password.
 --name "…" --device "…"` reads the code and claims in one step, printing
 `@@HUBID:…@@` and `@@TOKEN:…@@`. Anyone who can run that already holds root on
 the machine the code exists to prove access to, so requiring them to recite the
-number adds a step that can only fail. GetHome Studio uses it over SSH, which
+number adds a step that can only fail. Studio uses it over SSH, which
 is why the person who installs a hub is never shown a code at all.
 
 ### Roles and permissions
@@ -320,7 +320,7 @@ what edits the matrix and a home can hand it to a role it invented — so if tha
 permission alone could promote, it would quietly come to mean "can make myself
 owner" and every other permission would be a formality. That check is what keeps
 `role.manage` safe to delegate. Refused with **`403 not_owner`**, deliberately
-*not* `owner_only`: both GetHome apps read that word as "this hub predates roles,
+*not* `owner_only`: both gethome apps read that word as "this hub predates roles,
 update it", and would send somebody to fix a hub that is working perfectly.
 
 **A home always keeps at least one owner.** Moving the last one out of the role
@@ -381,7 +381,7 @@ There used to be two. `GET /hub` answered `HUB_NAME` from
 `/etc/gethome/hub.env` — written once by the installer and never edited by
 anyone — while `GET /home` answered a database row the apps could rename. So a
 hub whose owner had called it "Summer House" in the app still advertised
-itself as "GetHome Hub" over mDNS, still said "GetHome Hub" in GetHome Studio,
+itself as "gethome hub" over mDNS, still said "gethome hub" in gethome studio,
 and two hubs on one Mac were two rows with the same name. The second name was
 never a second fact, only a second place for the first one to be wrong.
 
@@ -1034,7 +1034,7 @@ is not offered. Names are trimmed and must be 1–80 characters after trimming;
 activity feed, and a name that is already in force writes nothing.
 
 An app that lets a device claim a hub should say what that name will be and let
-it be changed later: GetHome Studio, which has no accounts and no user name of
+it be changed later: gethome studio, which has no accounts and no user name of
 its own, offers the Mac's own name and renames through this route from the hub
 page.
 
@@ -1165,7 +1165,7 @@ It is deliberately a zone and not a floor. A flat has no floors and a garage
 isn't one, so a *floor* field asks every home that isn't a house either to
 leave it blank or to lie in it, while a zone that happens to be called "Second
 floor" covers the house perfectly. It is also Apple Home's own word (`HMZone`),
-and the GetHome app shows Apple Homes beside hub homes — one vocabulary for
+and the gethome app shows Apple Homes beside hub homes — one vocabulary for
 both.
 
 Rooms and zones are shared, so a change made on one phone has to reach the
@@ -1222,7 +1222,7 @@ Two deliberate silences, and both are the same rule: **an edit is logged when
 it changes what other people see, not when it changes how it looks to them.**
 A room's `icon`/`accent` write nothing, and neither does the order rooms are
 listed in — that one never reaches the hub at all, because it is each phone's
-own preference (see the GetHome app's `CLAUDE.md`).
+own preference (see the gethome app's `CLAUDE.md`).
 
 ### Which room a rule is in
 
@@ -1357,8 +1357,8 @@ must read as "not known" rather than "recognised by nothing".
 
 ### Updating the hub
 
-A hub can update itself when asked. That is what lets a phone do it — GetHome
-Studio drives `gethome-hubctl update` over SSH with a key it planted at install
+A hub can update itself when asked. That is what lets a phone do it — gethome
+studio drives `gethome-hubctl update` over SSH with a key it planted at install
 time, and an iPhone has no such thing.
 
 **The hub records the request; it never applies it.** Updating means writing
@@ -1435,7 +1435,7 @@ it. The request is recorded straight away, with the member's name.
 **Why `hub.update` is a key, and why Member starts with it.** It was owner-only
 first, on the reasoning that an update is not quite "bringing something new in" —
 it replaces the code everybody depends on. What that missed is who the owner
-*is*: GetHome Studio claims a hub as *the Mac*, so the owner is a laptop in a
+*is*: gethome studio claims a hub as *the Mac*, so the owner is a laptop in a
 drawer, every phone joins by invite as a plain member, and [there is no ownership
 transfer](#which-member-you-are-isself-and-patch-membersme) to fix it with. The
 rule therefore did not mean "an update needs care"; it meant the phone in the
@@ -1489,7 +1489,7 @@ that restarts mid-window leaves at most one grant running and nothing renews it.
 
 **The state is on `GET /hub`, not only on the event stream.** An app that has
 just been opened, or has just reconnected, has no other way to learn it — which
-is how GetHome Studio came to draw "Close Network" over a network that had shut
+is how gethome studio came to draw "Close Network" over a network that had shut
 two minutes earlier. `permitJoin` frames repeat every five seconds while the
 window is open, which is the right rate for a network message and the wrong one
 for a countdown; drive the seconds from a local clock and re-sync on each frame.
@@ -1806,7 +1806,7 @@ the house arriving on the next line, with no reconnect and nothing to poll.
 `message` is the whole sentence and is all a client needs — Studio renders
 exactly that. `data` is the same facts structured, so an app can compose its
 own wording ("Brightness set"), pick an icon and a tone, and fold a burst of
-commands into one line; the GetHome iOS app does. Both names are copied into it
+commands into one line; the gethome iOS app does. Both names are copied into it
 because `member_id` and `device_id` are `ON DELETE SET NULL`: a row read next
 week may be all that is left of a device somebody has since removed. `data` is
 **optional everywhere** — rows written before it existed have none, and so do
@@ -2077,7 +2077,7 @@ that is about to be set correctly. That is not a failure, it is the queue
 working, and it is dropped twice — in
 `adapters/zigbee/write-failures.ts` where the log line is classified, and again
 in the registry, because the registry is the seam a second adapter will arrive
-at. Clients that coalesce their own writes (the GetHome app debounces a
+at. Clients that coalesce their own writes (the gethome app debounces a
 stepper) rarely produce one at all.
 
 **Where it comes from.** `bridge/logging` — the third bridge topic the Zigbee
@@ -2159,8 +2159,8 @@ has to see it — but `PUT /settings/radio` writes a file and returns, and the
 hub restarts afterwards *only* when the change actually moves Matter. So a
 client cannot wait for its socket to bounce: switching between two modes that
 resolve the same way changes `mode` and restarts nothing. Polling is not the
-answer either, since not every app polls — the GetHome iOS app doesn't, so a
-switch made in GetHome Studio never reached the phone at all. The frame is
+answer either, since not every app polls — the gethome iOS app doesn't, so a
+switch made in gethome studio never reached the phone at all. The frame is
 sent from the route, and carries a **stale `matter`** for the same reason the
 response does: what is live comes from the adapters, a moment later.
 

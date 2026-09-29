@@ -179,7 +179,7 @@ there, because those reach the routes as well. `docs/api.md` and
   route's old ceiling of 254 was a protocol fact masquerading as a policy; the
   limit is 900 now, and `GET /hub` carries `zigbee.permitJoin` because a client
   that has just connected has no other way to learn the state — which is how
-  GetHome Studio came to draw "Close Network" over a network that had shut two
+  gethome studio came to draw "Close Network" over a network that had shut two
   minutes earlier.
 - **A radio that is off and a radio that is missing need opposite words, and
   both were `connected: false`.** Switching a one-radio board to Matter made the
@@ -344,8 +344,8 @@ there, because those reach the routes as well. `docs/api.md` and
   answered a database row the apps could rename. A home cannot move between
   hubs, so the second name was never a second fact — only a second place for
   the first one to be wrong, and it was: a hub renamed to "Summer House" in
-  the app still advertised itself as "GetHome Hub" over mDNS and still read
-  "GetHome Hub" in GetHome Studio, where two hubs were two rows with the same
+  the app still advertised itself as "gethome hub" over mDNS and still read
+  "gethome hub" in gethome studio, where two hubs were two rows with the same
   name.
   `src/core/home.ts` holds the one name; `GET /hub`, `GET /home` and the
   WebSocket hello all read it from there, and `PATCH /home` is the only writer.
