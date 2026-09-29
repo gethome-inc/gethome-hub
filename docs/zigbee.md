@@ -7,7 +7,9 @@ available.
 
 ## Which coordinator
 
-Known-good sticks, all of which `zigbee-detect.sh` recognises without help:
+The buyer's version, with the full list of what the hub recognises, is
+[hardware.md](hardware.md#the-zigbee-coordinator). Known-good sticks, all of
+which `zigbee-detect.sh` recognises without help:
 
 - **SONOFF ZBDongle-E** (EFR32MG21) or **ZBDongle-P** (CC2652P)
 - **dresden elektronik ConBee II / ConBee III**
@@ -599,7 +601,7 @@ button, reversible, already there.
 informed decision rather than a discovery. Zigbee2MQTT going down publishes
 `bridge/state: offline`, the adapter reports the radio, and the hub sends a
 `hubStatus` WebSocket frame followed by a `deviceUpserted` for every Zigbee
-device it just took offline — see [api.md](api.md#when-a-radio-comes-or-goes-hubstatus).
+device it just took offline — see [api.md](api.md#when-a-radio-comes-or-goes--or-is-switched-hubstatus).
 Plugging the stick back in is the mirror image, except on a one-radio board
 that had switched to Matter in the meantime: there the detector really does
 change `ADAPTER_MATTER` and restart the hub, and the apps re-sync on the

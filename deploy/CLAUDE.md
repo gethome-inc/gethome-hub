@@ -30,8 +30,8 @@ in `deploy/install.sh` must stay accurate.
   and on a 512 MB board an OOM kill at the end regardless. So the fallback is
   **refused below 1 GB of RAM** and says why. Starting a build that cannot
   finish is worse than failing in ten seconds.
-- **Say what is tested, not just what runs.** README's *Required hardware* is
-  the contract: Pi 5 / Pi 4 / Zero 2 W are tested; other 64-bit boards (Pi 3,
+- **Say what is tested, not just what runs.** `docs/hardware.md`'s tested-boards
+  table is the contract (the README only summarises it): Pi 5 / Pi 4 / Zero 2 W are tested; other 64-bit boards (Pi 3,
   400/500, CMs, x86-64) run but aren't routinely tried, and `install.sh` says so
   with a `@@WARN@@` for Raspberry Pis it doesn't recognise — silently for
   anything that isn't a Pi, where running a home hub is already a deliberate

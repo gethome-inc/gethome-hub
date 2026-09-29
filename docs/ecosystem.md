@@ -5,8 +5,8 @@ GetHome Hub is one of three pieces:
 | Repository | What it is |
 |---|---|
 | [`gethome-hub`](https://github.com/gethome-inc/gethome-hub) (this repo, public) | The local hub server: Matter + Zigbee + MQTT devices behind one canonical schema, local REST/WS API, member sharing. Runs on a Raspberry Pi or any 64-bit Linux machine. |
-| `gethome-ios` | The GetHome iOS app — the daily driver for controlling homes. Supports two home types: an Apple Home mirror (Matter accessories come in this way) and **hub homes** served by this project. |
-| `gethome-studio-macos` | GetHome Studio for macOS — the guided way to create a hub: it writes the SD card or finds a Pi already on your network, installs the hub over SSH, walks through claiming, and manages hubs afterwards. |
+| `gethome-ios` (private) | The GetHome iOS app — the daily driver for controlling homes. Supports two home types: an Apple Home mirror (Matter accessories come in this way) and **hub homes** served by this project. |
+| `gethome-studio-macos` (private) | GetHome Studio for macOS — the guided way to create a hub: it writes the SD card or finds a Pi already on your network, installs the hub over SSH, walks through claiming, and manages hubs afterwards. |
 
 ## Why a hub?
 
@@ -36,4 +36,4 @@ integrations, which phones can't do at all.
 
 Everything the Studio app does is scriptable — this repo is self-sufficient:
 `deploy/install.sh` brings up a hub, and the
-pairing code lands in `<data>/pairing-code`. See the [README](../README.md).
+pairing code lands in `<data>/pairing-code`. See [installation.md](installation.md).

@@ -127,14 +127,17 @@ written; a device reporting is not one, or the log would be the write storm
 
 ## Security model (v1, LAN-only)
 
+The owner-facing version — what stays home, what leaves, what never to forward —
+is [security.md](security.md).
+
 - Transport is plain HTTP/WS on the LAN; the API is bound to the local
   network. Remote access will arrive as an authenticated relay through the
   GetHome server (future work) — the hub will never be port-forwarded.
 - AuthN: opaque bearer tokens issued at claim time, sha256-hashed at rest.
-- AuthZ: `owner` (renaming the home, members, invites, commissioning, AI
-  settings, *removing* devices) vs `member` (everything else, including
-  controlling devices, renaming them, and adding or editing rooms and zones —
-  Studio claims a hub as the Mac, so the owner is usually not a person in the
-  house; see `docs/api.md`). Favorites are per member, not per home.
+- AuthZ: roles are rows and permissions are a named vocabulary — Owner, Member
+  and Guest ship built in and a home can add its own; working a device is the
+  floor, and the owner is never evaluated against a table (see
+  [api.md](api.md#roles-and-permissions-in-full)). Favorites are per member, not
+  per home.
 - Secrets: the AI credential (an Anthropic API key) AES-256-GCM-encrypted
   with the hub secret; the key file is 0600 and never leaves the machine.
