@@ -56,9 +56,9 @@ In one line: your devices talk to the hub, and your phone talks to the hub over 
 
 ```mermaid
 flowchart TB
-    APPS["gethome apps<br/>iPhone · Mac"] <-->|your own Wi-Fi| HUB["gethome hub<br/>at home"]
+    APPS["gethome apps<br/>iPhone · Mac"] <--> HUB["gethome hub<br/>at home"]
+    AI["Optional AI<br/>on your own key"] <-.-> HUB
     HUB <--> DEV["Your devices<br/>Matter · Zigbee · MQTT"]
-    HUB -.-> AI["Optional AI<br/>on your own key"]
 ```
 
 ## What it does
