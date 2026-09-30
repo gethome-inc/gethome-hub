@@ -2356,6 +2356,21 @@ Environment=ZIGBEE2MQTT_CONFIG_FRONTEND_ENABLED=false
 # which is where this is actually enforced, because upstream ignores this
 # variable when configuration.yaml doesn't exist yet.
 Environment=ZIGBEE2MQTT_CONFIG_ONBOARDING=false
+# No device's messages on the card. At info, its default, Zigbee2MQTT logs every
+# message it publishes, topic and payload, into its own log file and, through
+# the console, into the journal this installer makes persistent, which is where
+# the traffic the hub's tap deliberately never stores was being written down
+# after all; each is echoed a second time on bridge/logging, too. Only the MQTT
+# namespace is held at warning, so the rest of what it says at info (a device
+# joining, an interview, an update) and every error still arrive, the lines
+# diagnosis.ts and the write-failure relay read among them. The single quotes
+# around the whole assignment are load-bearing: systemd removes double quotes
+# wherever they stand in an Environment= line, and what it would hand over,
+# {z2m:mqtt:warning}, is not JSON, so Zigbee2MQTT would reject its own settings
+# and never start. Upstream copies the value into configuration.yaml each time
+# it starts, as it does every override here, so taking this line out would not
+# undo it.
+Environment='ZIGBEE2MQTT_CONFIG_ADVANCED_LOG_NAMESPACED_LEVELS={"z2m:mqtt":"warning"}'
 # The coordinator's path comes from the detector, as an override rather than an
 # edit: Zigbee2MQTT's own configuration.yaml holds the network key and the
 # paired-device list, and nothing here may ever rewrite that file.
