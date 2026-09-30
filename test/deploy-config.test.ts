@@ -617,6 +617,31 @@ describe('deploy/install.sh', () => {
     expect(installer).toContain('journalctl --flush');
   });
 
+  /**
+   * The hub's traffic tap writes nothing to disk, and Zigbee2MQTT's log wrote
+   * all of it: at `info`, its default, every message it publishes goes into its
+   * log file, topic and payload, and through the console into the journal the
+   * installer keeps across reboots (the test above). Holding the MQTT namespace
+   * at `warning` stops it and leaves the rest of the log alone.
+   *
+   * **The quoting is most of what this pins.** systemd removes double quotes
+   * wherever they stand in an `Environment=` line — checked against v255's own
+   * `extract_first_word` — so the JSON survives only inside quotes around the
+   * whole assignment. Without them Zigbee2MQTT is handed `{z2m:mqtt:warning}`,
+   * rejects its own settings and does not start: Zigbee gone on every hub the
+   * next update reaches.
+   */
+  it('keeps what Zigbee2MQTT publishes out of its log and the journal', () => {
+    const z2mUnit = unitBody('gethome-zigbee2mqtt.service');
+    const line = /^Environment='ZIGBEE2MQTT_CONFIG_ADVANCED_LOG_NAMESPACED_LEVELS=(.*)'$/m.exec(z2mUnit);
+    expect(line, 'the whole assignment has to be single-quoted, or systemd strips the JSON\'s quotes')
+      .not.toBeNull();
+    // Only the MQTT namespace. Everything else Zigbee2MQTT says at `info` — a
+    // device joining, an interview, an update — is what a person reads when
+    // pairing goes wrong, and none of it is the traffic.
+    expect(JSON.parse(line![1]!)).toEqual({ 'z2m:mqtt': 'warning' });
+  });
+
   it('turns the memory cgroup back on without breaking the boot', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'gethome-cmdline-'));
     dirs.push(dir);

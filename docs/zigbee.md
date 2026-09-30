@@ -182,6 +182,27 @@ puts the setting in the file — creating it if absent, or replacing the single
 list have to survive. If that change is made while Z2M is running, `install.sh`
 restarts it, because the detector only restarts on a changed device path.
 
+**And its log keeps none of the traffic.** At `info`, its default, Zigbee2MQTT
+logs every message it publishes — `MQTT publish: topic '…', payload '…'`, a line
+per device report — into `<Z2M data>/log/` and, through the console, into the
+journal the installer makes persistent on the card; it also echoes each one on
+`bridge/logging`, which doubles the Zigbee traffic on the broker. That is where
+the traffic the hub's own tap never stores (`MqttObserver`, below) was being
+written down after all. So the unit holds only the MQTT namespace at
+`warning`, with
+`ZIGBEE2MQTT_CONFIG_ADVANCED_LOG_NAMESPACED_LEVELS={"z2m:mqtt":"warning"}` —
+the example upstream's own settings schema gives. Everything else it says at
+`info` (a device joining, an interview, an update) still reaches the log, and so
+does every error, including the lines `diagnosis.ts` and the write-failure relay
+read; what is left of the MQTT namespace is the broker going wrong, which at
+worst names a message it could not send. The whole assignment is single-quoted
+in the unit because systemd removes double quotes anywhere in an `Environment=`
+line, and `{z2m:mqtt:warning}` would stop Zigbee2MQTT starting at all. Upstream
+copies the value into `configuration.yaml` at every start, as it does each
+override here. Logs written before a hub got this still hold traffic until they
+age out: Zigbee2MQTT keeps its ten newest runs' logs, and the journal is capped
+at 64 MB.
+
 **A started service is not a working radio, so the installer asks.** Presence of
 a device node only proves something is plugged in, and the detector's success
 means "I found a coordinator and started the unit" — neither says Zigbee2MQTT

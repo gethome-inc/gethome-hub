@@ -824,6 +824,21 @@ in `deploy/install.sh` must stay accurate.
   radios nobody here can test, where a bad write bricks the stick or resets NVM3
   and takes the paired network with it. Naming the cause precisely is the whole
   fix; `docs/zigbee.md` is canonical.
+- **That log carries no traffic, and the quotes are what keep it that way.** At
+  `info`, its default, Zigbee2MQTT logs every message it publishes, topic and
+  payload, into that file and — through the console — the persistent journal,
+  and echoes each on `bridge/logging`: the traffic the hub's tap never stores,
+  written to the card anyway. The unit holds only the `z2m:mqtt` namespace at
+  `warning` (`ZIGBEE2MQTT_CONFIG_ADVANCED_LOG_NAMESPACED_LEVELS`), so joins,
+  interviews and updates stay in the log and every error does too, the lines
+  above included. **The single quotes around the whole assignment are
+  load-bearing**: systemd removes double quotes anywhere in an `Environment=`
+  line — checked against v255's own `extract_first_word` — and
+  `{z2m:mqtt:warning}` is not JSON, so Zigbee2MQTT would refuse its settings and
+  every hub the update reached would lose Zigbee. Upstream writes env overrides
+  into `configuration.yaml` at every start, so this one is in that file too, and
+  removing the line would not remove it. `test/deploy-config.test.ts` pins the
+  quoting and the value; `docs/zigbee.md` is canonical.
 - **systemd's restart limits live in `[Unit]`, not `[Service]`.** They moved in
   v230; the old placement earns "Unknown key 'StartLimitIntervalSec' in section
   [Service], ignoring" on every unit load and a rate limit that silently is not
