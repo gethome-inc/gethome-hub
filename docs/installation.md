@@ -6,6 +6,15 @@ are in [`../deploy/CLAUDE.md`](../deploy/CLAUDE.md); what to buy is in
 [`hardware.md`](hardware.md); what stays on your network is in
 [`security.md`](security.md).
 
+**The easiest way to set a hub up is gethome studio, the Mac app, and it is the
+way we recommend.** It prepares the SD card or finds a Pi already on your
+network, runs this same installer on it, watches every step, and claims the
+hub for you — no terminal and no pairing code — and afterwards it shows the
+broker's live traffic, the device-schema library and the AI's run log, which
+the iPhone app doesn't. [Download it from gethome.me](https://gethome.me/studio/)
+(macOS 14 or later). This page is the way by hand, for a terminal and for
+anyone without a Mac, and what to do on the hub once it runs.
+
 - [What you need](#what-you-need)
 - [Install](#install)
 - [Claim it](#claim-it)
@@ -51,22 +60,26 @@ hub comes back on its own after a power cut — plug the Pi in and it runs, with
 nothing to start by hand. There is no Docker and no database server: the store
 is one SQLite file ([`architecture.md`](architecture.md)).
 
-**Prefer a guided setup?** The Mac app, gethome studio, does all of this: it
-writes the SD card or finds a Pi already on your network, gets this installer
-running on it, and watches it step by step over SSH. It is not released yet —
-[join the waitlist](https://gethome.me/#waitlist).
+**Prefer a guided setup?** That is gethome studio, the way we recommend: it
+prepares the SD card or finds a Pi already on your network, gets this installer
+running on it, and watches it step by step over SSH.
+[Download it from gethome.me](https://gethome.me/studio/).
 
 ## Claim it
 
-An unclaimed hub keeps an 8-digit **pairing code** until somebody uses it. The
-first claim makes that person the **owner**, and the code is spent: it is not
-shown again, and `sudo gethome-hubctl pairing-code` on a claimed hub says so.
+An unclaimed hub keeps an 8-digit **pairing code** until somebody uses it —
+from gethome for iPhone and iPad, [free on the App Store](https://apps.apple.com/app/id6792362722),
+or from gethome studio. The first claim makes that person the **owner**, and
+the code is spent: it is not shown again, and `sudo gethome-hubctl pairing-code`
+on a claimed hub says so.
 Everybody else joins with an **invite code** the owner creates in the app
 (short-lived, single use), and a person coming back on another device signs in
 with a **sign-in code**. The whole flow is in [`api.md`](api.md#claiming).
 
 The Mac app claims the hub for you at the end of its setup, so you never see the
-pairing code at all; the phones and other Macs that follow use invite codes.
+pairing code at all; the phones and other Macs that follow use invite codes —
+and your own iPhone a sign-in code, from **Add device** on your row in studio's
+People tab, so it joins as you rather than as somebody new.
 `sudo gethome-hubctl pairing-code` is for the other case — installing by hand and
 claiming the hub yourself: it prints the code for as long as nobody has.
 
