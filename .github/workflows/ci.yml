@@ -93,7 +93,10 @@ jobs:
       #
       # If this ever fails on an advisory with no fix published, don't drop the
       # gate: npm has no per-advisory ignore list, so pin the fix in `overrides`
-      # the way esbuild is pinned there, and say why.
+      # the way esbuild is pinned there, and say why. When there is no fix to
+      # pin and the vulnerable package is one nothing on a hub ever runs, take
+      # it out of the tree instead, the way `patch-package` is stubbed (the
+      # root CLAUDE.md says how, and why that one is safe).
       - run: npm audit --omit=dev --audit-level=moderate
 
   shell:

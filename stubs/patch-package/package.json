@@ -1,0 +1,6 @@
+{
+  "name": "patch-package",
+  "version": "0.0.0-stub",
+  "private": true,
+  "description": "Stands in for patch-package under the Bluetooth stack, which declares it and never runs it on an installing machine. Why, and when it has to go: the dependencies paragraph in CLAUDE.md."
+}

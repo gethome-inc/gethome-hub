@@ -34,7 +34,8 @@
   },
   "optionalDependencies": {
     "@matter/nodejs-ble": "~0.17.9",
-    "@stoprocent/noble": "^2.7.1"
+    "@stoprocent/noble": "^2.7.1",
+    "patch-package": "file:stubs/patch-package"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
@@ -47,6 +48,7 @@
     "vitest": "^5.0.2"
   },
   "overrides": {
-    "esbuild": "^0.28.1"
+    "esbuild": "^0.28.1",
+    "patch-package": "$patch-package"
   }
 }

@@ -98,11 +98,12 @@ the tree moving so those bumps stay small; it deliberately holds matter.js at
 its pinned minor. Fix a finding by updating the lockfile — `npm audit fix` is
 usually enough, because the vulnerable version is normally pinned there while
 the parent's own range already permits the patched one. Reach for `overrides`
-only when a parent range genuinely blocks the fix, or when duplicate copies of
-one package are themselves the problem — which is what the lone existing
-override is now for.
+only when a parent range genuinely blocks the fix, when duplicate copies of
+one package are themselves the problem (the `esbuild` override), or when the
+vulnerable package is one nothing on a hub ever runs and there is no fix to
+pin (the `patch-package` stub).
 
-**That override keeps exactly one `esbuild` in the tree, and the second reason
+**The `esbuild` override keeps exactly one copy in the tree, and the second reason
 is the load-bearing one.** Four things want it at three different ranges
 (`drizzle-kit@^0.25.4` takes the hoisted slot, `tsx@~0.28.0` and `vitest` nest
 their own 0.28.x beside it, `@esbuild-kit/core-utils` pins `~0.18.20`), and
@@ -116,6 +117,38 @@ Removing the override does not simplify this — it restores a *fourth* copy at
 the vulnerable `0.18.20`. The cost is that `drizzle-kit` runs above its declared
 range, which CI does not cover because nothing there runs `db:generate`; if you
 touch these versions, run it by hand and check it still reads the schema.
+
+**The `patch-package` override swaps the real package for an empty one, because
+the Bluetooth stack declares it and never runs it.** `@stoprocent/noble`,
+`@stoprocent/bleno` and `@stoprocent/bluetooth-hci-socket`, all under
+`@matter/nodejs-ble`, list it in `dependencies`, but the only thing that calls
+it is their own `prebuildify-cross` script, which patches their maintainers'
+cross-compiling tools before a release. Their `install` is `node-gyp-build`, and
+no file they ship mentions it. It still put 53 packages on every hub, and one of
+them was `braces`: GHSA-vfj7-8cjw-p6xm (stack exhaustion from deeply nested
+patterns, reviewed 2 October 2026) covers every version with no patched release.
+So the audit failed every pull request, `npm audit fix` had nothing to move, and
+there was no version to pin. `stubs/patch-package/` is a `package.json` and
+nothing else. Three details hold it in place. The root lists it as an optional
+dependency so the override can say `$patch-package`, because a relative `file:`
+written in `overrides` itself is resolved against each dependent's directory and
+points at nothing. `.npmrc`'s `install-links=true` copies it rather than
+symlinking it, because the bundle ships `node_modules` without `stubs/` and a
+link would dangle on every Pi. And moving an existing lockfile onto the stub
+needed the old `node_modules/patch-package` entry deleted first, because npm
+keeps a locked registry copy over a `file:` spec when `install-links` is on;
+from then on the lockfile regenerates stably under npm 10 and 11.
+**The stub is safe only while that premise holds, and breaking it would be
+silent.** These are optional dependencies, and npm drops an optional package
+whose install script fails, so a release that started running `patch-package`
+at install would leave a hub that starts fine, reports
+`bluetoothReason: 'not-installed'` and cannot pair a factory-new Wi-Fi
+accessory. `test/patch-package-stub.test.ts` reads every installed dependent's
+install scripts and shipped JavaScript, fails on a new dependent nobody has
+checked, and fails on a real copy or a symlink in the tree. Delete the stub,
+the root entry, the override and `.npmrc` together once all three packages
+move it to `devDependencies`. If `braces` publishes a fix first, the stub can
+still stay: it costs nothing, and the 53 packages it removes stay off the hub.
 
 `ws` is the one direct dependency added for the voice, and it was already in
 the tree via `@fastify/websocket` — declared rather than used transitively,
