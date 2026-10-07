@@ -54,6 +54,93 @@ starting point. Don't reintroduce half of it either: a second OS that
 implements none of the rules below is the installed-but-unusable trap this file
 names elsewhere.
 
+## Shipped: three products on three clocks
+
+**Everything here is in people's homes now.** gethome for iPhone is on the App
+Store, and gethome hub and gethome studio are open to anyone. A change no longer
+lands on our own setup: it lands on homes we will never see, running versions we
+did not choose, and every change in this repository is checked against this
+section. The iOS and Studio repositories carry the same section from their side
+— when it changes, change all three.
+
+| | It ships when | It reaches somebody | What is still out there |
+|---|---|---|---|
+| **gethome hub** | a pull request merges to `main` — merging *is* releasing, and we choose when | a new install at once (every path runs `main`'s `install.sh` and downloads `bundle-main`); an existing hub only when somebody asks it to (*Update* in an app, where it is offered the next time an app looks, or `gethome-hubctl update`) | every build ever merged — a hub never updates itself |
+| **gethome studio** | we run `scripts/release.sh` and merge the site's pull request — we choose when | Sparkle offers it within a day; installing it is the reader's click, since installing by itself is off by default | every release, and every SD card one of them wrote |
+| **gethome for iPhone** | Apple passes it — App Review takes a day to a week, and can reject | when the phone updates, which for some phones is never | every build that ever passed review |
+
+So the two ends of every connection being out of step is the ordinary case, in
+both directions: a phone from months ago against the hub `main` was an hour
+ago, and today's phone against a hub nobody has updated since spring. Eight
+rules follow from that.
+
+- **The hub lands first, and is whole on its own.** A feature that spans repos
+  merges here before either app uses it, and the hub half must be correct for an
+  app that has never heard of it — the iPhone half is days behind at best, and
+  for some phones it is never coming. Never merge a change that is only right
+  once a matching app release is out. And because `main` *is* the release, it is
+  never somewhere to park something half-done: try it on hardware from its
+  branch (`--branch` and its `bundle-<branch>`), and merge it when it is
+  finished.
+- **The wire only grows.** The wire is everything a shipped client reads or
+  sends: routes; request and response fields; what a value means and its unit;
+  refusal codes (`owner_only`, `not_owner`, `host_not_allowed`, `ai_disabled`…);
+  WebSocket frames, streams and close codes (4001); the `@@…@@` markers and step
+  ids; `install.sh`'s flags; `gethome-hubctl`'s subcommands and what it prints;
+  and the URL of `deploy/install.sh` itself, with this repository's name in it,
+  which is baked into every Studio ever shipped and into the README's one line.
+  Adding is safe. Removing or renaming any of it, changing a unit or a meaning,
+  making an optional request field required, refusing a value an older client
+  sends, or shrinking an answer an older client reads is a decision for the
+  owner, not a refactor — and it has to name the shipped builds that read the
+  thing and what they do without it. The ordinary answer is to keep the old
+  beside the new, which is what `members.role` and `devices.favorite` already
+  are.
+- **A new word in an old field is a change too.** A new device kind, activity
+  kind, refusal code or stream reaches every shipped app the moment it merges.
+  Both apps read those as open strings and fall back rather than fail (the iOS
+  app's `commandFailed.kind` rule), which is why one survives — so make the
+  fallback *true*. An activity row carries its whole sentence in `message`
+  because that is what an older app shows for a `kind` it has never met; a new
+  refusal code is for a new situation and never a rename of an old one, since
+  an older app already has its own words for the old one and only a generic
+  failure for the new.
+- **A capability is advertised, never inferred.** An app learns what a hub can
+  do from presence — `history`, `portraits` and `pairing.signInCodes` on
+  `GET /hub`, `streams` on `hello` — never from a version number, because a hub
+  that was never updated is as ordinary as a phone that never was. And zod
+  strips what it does not know, so an older hub *accepts* a request carrying a
+  field it has never seen and silently does the old thing: a new request field
+  whose being ignored would do harm (`memberId` on a sign-in code is the worked
+  example) needs a capability the app checks first.
+- **`apiVersion` is the breaking lever, and pulling it shows on every phone.**
+  The iOS app compares it with the version it was built for and draws an amber
+  line on the Hub page when the hub is newer — so a bump lights that line on
+  every iPhone that has not updated yet, which on the day it merges is all of
+  them. It is for a change that cannot be made additively, only on the owner's
+  word, and only once an app build that understands the new number has cleared
+  review.
+- **What an older build wrote, a newer one reads.** An update always arrives on
+  a machine an older build configured. The database half is the migration rule
+  under `deploy/` below; the rest is the same rule for every file under
+  `<data>/`, for `hub.env` (written only when absent, so a new key in it never
+  reaches an upgraded hub) and for anything else the installer left on the Pi.
+- **A hub fix ships today; an app fix ships after review.** When a shipped app
+  build trips over something the hub sends, the hub is usually the faster place
+  to make it right — provided the fix is additive and keeps working for every
+  build that never had the problem. Say in the code which build it is there
+  for, because it stays for as long as that build is on somebody's phone.
+- **The repository is public the moment you push, not the moment you merge.**
+  Branches, commits and their messages, pull request titles and descriptions,
+  review threads, CI logs and every branch's `bundle-<branch>` prerelease are
+  readable — and, with `--branch`, installable — by anyone, at once. So the hub
+  half of an iPhone feature is public days before the app is, and that is fine;
+  what must not be anywhere in that list is something that would be wrong to
+  read early or at all: a secret, a private repository's internals, a release
+  date, a claim about what an unreleased app does. Write commit messages and
+  pull requests for a hub owner reading them, because one may be. The license's
+  word is *source-available*, never *open source*.
+
 ## Build, test, run
 
 ```sh
