@@ -557,6 +557,57 @@ describe('deploy/install.sh', () => {
   });
 
   /**
+   * The two units behind "add another Wi-Fi network for my hub" — the update
+   * pair's shape, and the same three things are load-bearing.
+   */
+  describe('the Wi-Fi network units', () => {
+    const wifi = installer.slice(
+      installer.indexOf('manage_wifi_networks() {'),
+      installer.indexOf('WIFI_NETWORKS_UNITS=""'),
+    );
+    const wifiPath = wifi.slice(
+      wifi.indexOf('gethome-wifi.path >/dev/null <<UNIT'),
+      wifi.indexOf('gethome-wifi.service >/dev/null <<UNIT'),
+    );
+    const wifiService = wifi.slice(
+      wifi.indexOf('gethome-wifi.service >/dev/null <<UNIT'),
+      wifi.indexOf('<<DISPATCH'),
+    );
+
+    it('watches the file the hub actually writes', () => {
+      // `src/core/wifi-networks.ts` writes `<data>/wifi/request`; a unit
+      // watching any other path is a setting that queues changes for ever.
+      expect(wifiPath).toMatch(/^PathModified=\$\{DATA_DIR\}\/wifi\/request$/m);
+      expect(wifiPath).toMatch(/^Unit=gethome-wifi\.service$/m);
+    });
+
+    it('never runs the service at boot, and enables the path unit that starts it', () => {
+      expect(wifiService).not.toMatch(/^\[Install\]$/m);
+      expect(installer).not.toMatch(/systemctl enable[^\n]*gethome-wifi\.service/);
+      expect(installer).toMatch(/systemctl enable --now gethome-wifi\.path/);
+    });
+
+    it('runs the script it installs, as the group the hub reads the answer with', () => {
+      expect(wifiService).toMatch(/^ExecStart=\$\{helper\} --quiet$/m);
+      expect(wifiService).toMatch(/^Environment=GETHOME_GROUP=\$\{SERVICE_USER\}$/m);
+      expect(wifi).toContain('"$HUB_DIR/deploy/wifi-networks.sh"');
+    });
+
+    it('rewrites the list on every association, and nothing else from the dispatcher', () => {
+      const dispatch = wifi.slice(wifi.indexOf('<<DISPATCH'), wifi.lastIndexOf('\nDISPATCH'));
+      expect(dispatch).toMatch(/up\|down/);
+      expect(dispatch).toMatch(/--list --quiet/);
+    });
+
+    it('says why on a machine without NetworkManager instead of installing units for it', () => {
+      // `src/core/wifi-networks.ts` reads this word, and an app says "this
+      // hub's system manages Wi-Fi itself" rather than "update your hub".
+      const before = wifi.slice(0, wifi.indexOf('gethome-wifi.path'));
+      expect(before).toMatch(/command -v nmcli[\s\S]*no-networkmanager[\s\S]*return 0/);
+    });
+  });
+
+  /**
    * @@ROLLBACK@@ is what tells "the new build wouldn't start and the hub put
    * itself back" from "the hub is down". Both end in `fail()`, and after either
    * the `current` symlink points where it started, so nothing else can.

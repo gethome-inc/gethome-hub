@@ -139,6 +139,37 @@ in `deploy/install.sh` must stay accurate.
   when an app asks it to, cached six hours: a hub nobody looks at never calls
   out. `docs/api.md` is canonical, including why `available` is *absent* rather
   than false when the hub cannot tell.
+- **A hub can be told about another Wi-Fi network before it is moved, on the
+  update's terms.** It is set up on one network and carried to another, where
+  it joins nothing and no app can reach it; NetworkManager already joins any
+  network it has a profile for, preferring the one it used last, so handing it
+  the profile beforehand is the whole fix. `POST /settings/wifi/networks`
+  writes `<data>/wifi/request`, `gethome-wifi.path` notices, and
+  `deploy/wifi-networks.sh` (installed as `/usr/local/lib/gethome-wifi-networks.sh`,
+  root, `Type=oneshot`) applies it with `nmcli` and writes `networks` and
+  `result` back, `0640 root:gethome`. Six things to keep. **The service is never
+  enabled** and the script **always exits 0**, for the update runner's reasons.
+  **The network the hub is on is never deleted** — checked again here against
+  `nmcli`'s own `ACTIVE`, because the hub's list can be a minute stale and a hub
+  off its only network is the one outcome that costs a trip to the Pi. **One
+  profile per name, sixteen at most, Wi-Fi profiles only**: two profiles for one
+  name are tried in turn and a stale password holds the other up. **Every field
+  is validated before it reaches `nmcli`, and every value is its own argument**
+  — the request is the hub user's file and this is root, the
+  `matter-neighbours` rule. The key in it is the derived 64-hex PSK, never the
+  passphrase, and it sits in `nmcli`'s argv for the moment the profile takes to
+  write, which reaches nobody who could not already read the active network's
+  key. **SSIDs cross as hex**, written with `od`, because a network can be called
+  anything and `nmcli -t` escapes colons. And **the list is rewritten on every
+  association** by a third dispatcher (`53-gethome-wifi-networks`), so
+  "connected" stays true; a profile somebody adds by hand appears at the next
+  reconnect or the next change, which is the one thing this does not watch.
+  NetworkManager or nothing: a machine without `nmcli` gets no units and
+  `<data>/wifi/unsupported` saying `no-networkmanager`, which the hub passes on
+  so an app says why rather than offering a form that can only fail.
+  `gethome-hubctl uninstall` removes the units, the dispatchers and the script
+  and **leaves the profiles** — they are the machine's way onto a network by
+  then, not the hub's.
 - **64-bit only, and the two 32-bit cases are different problems.** Bundles are
   built for `linux-arm64` and `linux-x64` and nothing else. `armv6l` (Pi 1 /
   Zero / Zero W) is unfixable — no Node.js build exists — and the answer is

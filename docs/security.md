@@ -81,6 +81,12 @@ serving it, not a security boundary.
   come built in, a home can add roles, and the owner is never locked out of it —
   [`api.md`](api.md#roles-and-permissions-in-full). Removing a member ends their
   tokens *and* closes the connections they already hold.
+- **A Wi-Fi password given to the hub never comes back out.** Adding a network
+  for the hub to join somewhere else turns the password into that network's
+  key before anything is written, the key goes into the system's own
+  root-only network profile, and no route returns either. The hub refuses an
+  open network outright, because on one every token a phone sends is readable
+  by anyone in range — [`api.md`](api.md#wi-fi-networks-settingswifi).
 - **Rules are data, not code.** A rule written by a person or by a model is
   interpreted by the hub and can never run arbitrary code, and a handful of
   guards hold whatever the document says — [`automations.md`](automations.md).

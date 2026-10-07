@@ -102,6 +102,30 @@ own devices, and why, is in [`mqtt-integrations.md`](mqtt-integrations.md#connec
 Neither port should ever be forwarded through your router
 ([`security.md`](security.md)).
 
+## Moving it to another network
+
+A hub joins the Wi-Fi it was set up on and nothing else, so one carried to a
+new home finds a network it has never heard of and answers no app. **Tell it
+about the new network before you unplug it.** It stays on the network it is on
+now, and joins the new one the first time it powers up in range of it — at home
+the home network still wins, because the hub prefers the one it used last.
+
+An app that shows a *Wi-Fi networks* section on the hub's page does this for
+you ([`api.md`](api.md#wi-fi-networks-settingswifi)): add the network there, and
+remove ones the hub no longer needs — except the one it is on, which the hub
+refuses to forget because nothing could reach it afterwards. On the hub itself
+it is one command:
+
+```sh
+sudo nmcli connection add type wifi ssid "Dacha" wifi-sec.key-mgmt wpa-psk wifi-sec.psk "the password"
+```
+
+This needs NetworkManager, which is what Raspberry Pi OS Bookworm and later
+manage Wi-Fi with. The hub only joins networks that have a password, and a
+WPA3-only network has to be added with that command rather than from an app.
+After the move the hub has a new address on the new network, and announces
+itself there exactly as it did at home.
+
 ## Updating
 
 ```sh

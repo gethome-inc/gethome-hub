@@ -789,7 +789,7 @@ The full contract — the installer's marker vocabulary, the radio budget,
 Zigbee detection, memory limits and cgroups, mosquitto's two accounts, Wi-Fi
 power save and reachability, mDNS, bundles, versioning and rollback — is in
 `deploy/CLAUDE.md`, which loads when you work under `deploy/`. Read it before
-touching anything there. Five of its rules have a `src/` half and bind code
+touching anything there. Six of its rules have a `src/` half and bind code
 outside `deploy/`, so they stay here:
 
 - **`install.sh`'s `@@…@@` markers are a wire protocol.** The Mac app, gethome studio,
@@ -808,6 +808,21 @@ outside `deploy/`, so they stay here:
   oneshot runs it; `<data>/update/enabled` is the capability. What is running
   afterwards is read back from `GET /hub`, never from the log, and a rollback
   is its own outcome that only the `@@ROLLBACK@@` marker can report.
+- **The hub records a Wi-Fi network change the same way, and waits for it.**
+  `POST`/`DELETE /settings/wifi/networks` (`src/core/wifi-networks.ts`) write
+  one request into `<data>/wifi/`, `gethome-wifi.path` notices, and
+  `deploy/wifi-networks.sh` changes NetworkManager as root and writes back
+  `networks` and `result` — and because that is a second rather than a
+  reinstall, the route waits for `result` and answers with the outcome, `202`
+  only if it did not land in time. Three rules cross the boundary. **The
+  request carries the derived 64-hex key, never the passphrase**, and the
+  script refuses anything else in that field. **The network the hub is
+  connected through is never removed**, refused by the hub *and* by the script
+  against NetworkManager itself, because a hub off its only network is one no
+  app can reach to put it back. And the file format is the hub's
+  `requestWifiChange` on one side and the script's `field` on the other, which
+  is why `test/deploy-wifi-networks.test.ts` writes with the first and runs the
+  second rather than testing either alone.
 - **The hub records where its Matter accessories are, and the keep-alive asks
   after them.** `src/adapters/matter/neighbours.ts` writes each accessory's
   link-local address and MAC to `<data>/matter-neighbours`, and the root

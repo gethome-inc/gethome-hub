@@ -120,6 +120,13 @@
       "when": 1789406562996,
       "tag": "0016_military_darwin",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "6",
+      "when": 1791355799875,
+      "tag": "0017_wifi_networks_for_members",
+      "breakpoints": true
     }
   ]
 }

@@ -261,6 +261,10 @@ describe.skipIf(!handle)('roles and permissions', () => {
       'automation.manage',
       'hub.radio',
       'hub.update',
+      // Newer than roles, and a Member default for the `hub.update` reason:
+      // the person carrying the hub to its new home is rarely the Mac that
+      // claimed it. `0017` adds it to hubs that already exist.
+      'hub.wifi',
       // The one key in this row that `authed` never allowed, and it is here on
       // the same argument `hub.update` is: the owner is Studio's Mac, so a
       // member-only house could otherwise never add an AI key to its own hub.
@@ -379,6 +383,23 @@ describe.skipIf(!handle)('roles and permissions', () => {
       ['DELETE', `/api/v1/devices/${deviceId}`, 'device.remove', undefined],
       ['GET', '/api/v1/settings/ai', 'hub.ai', undefined],
       ['GET', '/api/v1/settings/mqtt', 'hub.mqtt', undefined],
+      // Where the hub has been, and where it may go next. Reading the list is
+      // the key too, not the floor: it names other people's homes. The guard
+      // runs before the handler, so a network that does not exist still
+      // proves the refusal.
+      ['GET', '/api/v1/settings/wifi', 'hub.wifi', undefined],
+      [
+        'POST',
+        '/api/v1/settings/wifi/networks',
+        'hub.wifi',
+        { ssid: 'Dacha', passphrase: 'correct horse' } as object,
+      ],
+      [
+        'DELETE',
+        '/api/v1/settings/wifi/networks/66666666-7777-8888-9999-000000000000',
+        'hub.wifi',
+        undefined,
+      ],
       // Drawing a portrait spends the home's money, so it sits with the key it
       // spends; choosing which one everybody sees is an ordinary shared edit.
       [

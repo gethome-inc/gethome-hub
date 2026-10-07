@@ -404,7 +404,7 @@ cmd_uninstall() {
   # units that no longer existed.
   $SUDO systemctl disable --now "$HUB_UNIT" "$Z2M_UNIT" "$DETECT_UNIT" gethome-zram.service \
     gethome-wifi-awake.service gethome-wifi-keepalive.service \
-    gethome-radio.path gethome-update.path >/dev/null 2>&1 || true
+    gethome-radio.path gethome-update.path gethome-wifi.path >/dev/null 2>&1 || true
   $SUDO rm -f /etc/systemd/system/gethome-*.service /etc/systemd/system/gethome-*.path
   $SUDO rm -f /etc/udev/rules.d/99-gethome-zigbee.rules
   $SUDO rm -f /etc/mosquitto/conf.d/gethome.conf
@@ -412,12 +412,18 @@ cmd_uninstall() {
   # refusing anonymous clients on a machine with no hub left to authenticate.
   $SUDO rm -f /etc/mosquitto/gethome.passwd /etc/mosquitto/gethome.acl
   $SUDO rm -f /etc/avahi/services/gethome-hub.service
-  # The one file that is not ours by name: without it NetworkManager goes on
-  # running a script for a hub that is gone, on every association.
-  $SUDO rm -f /etc/NetworkManager/dispatcher.d/50-gethome-wifi-awake
+  # The files that are not ours by name: without them NetworkManager goes on
+  # running scripts for a hub that is gone, on every association.
+  $SUDO rm -f /etc/NetworkManager/dispatcher.d/50-gethome-wifi-awake \
+    /etc/NetworkManager/dispatcher.d/52-gethome-wifi-credentials \
+    /etc/NetworkManager/dispatcher.d/53-gethome-wifi-networks
+  # The Wi-Fi networks added from an app stay. They are the machine's way onto a
+  # network now, not the hub's, and deleting them could leave a Pi nobody can
+  # reach to finish what this started.
   $SUDO rm -f /etc/sysctl.d/60-gethome.conf /etc/sysctl.d/61-gethome-matter.conf
   $SUDO rm -f /usr/local/lib/gethome-zigbee-detect.sh /usr/local/lib/gethome-zram.sh \
-    /usr/local/lib/gethome-wifi-keepalive.sh
+    /usr/local/lib/gethome-wifi-keepalive.sh /usr/local/lib/gethome-wifi-credentials.sh \
+    /usr/local/lib/gethome-wifi-networks.sh /usr/local/lib/gethome-update.sh
   # The keep-alive's memory of who is on the network. It is in /run, so a
   # reboot takes it anyway; an uninstall should not have to wait for one.
   $SUDO rm -f /run/gethome-wifi-neighbours /run/gethome-wifi-neighbours.new
