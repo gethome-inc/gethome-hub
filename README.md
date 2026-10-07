@@ -47,7 +47,7 @@
 </p>
 
 <p align="center">
-  <sub>The app a hub is lived in: gethome for iPhone and iPad, free on the App Store.</sub>
+  <sub>The app a hub is lived in: gethome for iPhone, free on the App Store.</sub>
 </p>
 
 ## What is a hub?
@@ -81,7 +81,7 @@ Also: AI portraits of your devices, drawn on the hub with your OpenAI key and sh
 ## The gethome family
 
 - **gethome hub** *(this repository)* — the brain: talks to your devices, runs your rules and agents, and serves your apps. **Public, and installs today** — see [Get started](#get-started).
-- **gethome for iPhone and iPad** — the everyday app: rooms and devices, the assistant, rules, history and widgets. **Free on the [App Store](https://apps.apple.com/app/id6792362722).**
+- **gethome for iPhone** — the everyday app: rooms and devices, the assistant, rules, history and widgets. **Free on the [App Store](https://apps.apple.com/app/id6792362722).**
 - **gethome studio for Mac** — guided setup: prepares the SD card or finds a Pi on your network, installs and claims the hub, and keeps it updated — then shows the broker's live traffic, the device-schema library and the AI's run log. **The way we recommend setting a hub up** — [download it from gethome.me](https://gethome.me/studio/).
 - **[gethome.me](https://gethome.me)** — the website: changelog, privacy policy and terms.
 
@@ -109,7 +109,7 @@ It downloads a prebuilt hub for your machine, installs Node.js 22 and Mosquitto,
 
 ### Then get the app
 
-Live with your hub in [gethome for iPhone and iPad](https://apps.apple.com/app/id6792362722), free on the App Store: it finds the hub on your Wi-Fi. A hub you installed by hand is claimed there with its pairing code. One that gethome studio set up is already yours — studio claimed it as your Mac — so press **Add device** on your own row in studio's People tab and enter that code in the app instead: your iPhone joins as you.
+Live with your hub in [gethome for iPhone](https://apps.apple.com/app/id6792362722), free on the App Store: it finds the hub on your Wi-Fi. A hub you installed by hand is claimed there with its pairing code. One that gethome studio set up is already yours — studio claimed it as your Mac — so press **Add device** on your own row in studio's People tab and enter that code in the app instead: your iPhone joins as you.
 
 ### Getting a shell on the hub
 

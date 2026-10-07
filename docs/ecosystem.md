@@ -5,7 +5,7 @@ The hub is one of three pieces:
 | Repository | What it is |
 |---|---|
 | [`gethome-hub`](https://github.com/gethome-inc/gethome-hub) (this repo, public) | The local hub server: Matter + Zigbee + MQTT devices behind one canonical schema, local REST/WS API, member sharing. Runs on a Raspberry Pi or any 64-bit Linux machine. |
-| `gethome-ios` (private) | gethome for iPhone and iPad, [free on the App Store](https://apps.apple.com/app/id6792362722) — the daily driver for controlling homes. Supports two home types: an Apple Home mirror (Matter accessories come in this way) and **hub homes** served by this project. |
+| `gethome-ios` (private) | gethome for iPhone, [free on the App Store](https://apps.apple.com/app/id6792362722) — the daily driver for controlling homes. Supports two home types: an Apple Home mirror (Matter accessories come in this way) and **hub homes** served by this project. |
 | `gethome-studio-macos` (private) | The Mac app, gethome studio, [a download from gethome.me](https://gethome.me/studio/) — the guided way to create a hub, and the one we recommend: it prepares the SD card or finds a Pi already on your network, installs the hub over SSH, walks through claiming, and manages hubs afterwards. |
 
 ## Why a hub?

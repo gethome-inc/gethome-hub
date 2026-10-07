@@ -68,8 +68,8 @@ running on it, and watches it step by step over SSH.
 ## Claim it
 
 An unclaimed hub keeps an 8-digit **pairing code** until somebody uses it —
-from gethome for iPhone and iPad, [free on the App Store](https://apps.apple.com/app/id6792362722),
-or from gethome studio. The first claim makes that person the **owner**, and
+from gethome for iPhone, [free on the App Store](https://apps.apple.com/app/id6792362722), or
+from gethome studio. The first claim makes that person the **owner**, and
 the code is spent: it is not shown again, and `sudo gethome-hubctl pairing-code`
 on a claimed hub says so.
 Everybody else joins with an **invite code** the owner creates in the app
