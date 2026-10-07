@@ -10,7 +10,7 @@ they came here.
 | `screens/home-{light,dark}.webp` | the app's Home pane (a demo home) | the website's `public/screens/` | 2026-09-29 |
 | `screens/assistant-{light,dark}.webp` | the assistant as it opens | the website's `public/screens/` | 2026-09-29 |
 | `screens/device-{light,dark}.webp` | a lamp's device page (a demo home) | the website's `public/screens/` | 2026-09-29 |
-| `app-store-badge.svg` | Apple's "Download on the App Store" badge, black, US English | developer.apple.com, as Apple publishes it — the website's `public/app-store/badge.svg` is the same file | 2026-10-06 |
+| `app-store-badge.svg` | Apple's "Download on the App Store" badge, black, US English | developer.apple.com, as Apple publishes it — not the website, which shows Apple's white one on its dark close | 2026-10-06 |
 
 The copies are byte-identical to the originals (sha256 of `mark.png`
 `c7189519…`, of `screens/home-dark.webp` `583bd493…`, of `app-store-badge.svg`
