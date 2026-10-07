@@ -43,7 +43,11 @@
 </p>
 
 <p align="center">
-  <sub>gethome for iPhone — not on the App Store yet. <a href="https://gethome.me/#waitlist">Join the waitlist</a>.</sub>
+  <a href="https://apps.apple.com/app/id6792362722"><img src="docs/assets/app-store-badge.svg" height="40" alt="Download on the App Store"></a>
+</p>
+
+<p align="center">
+  <sub>The app a hub is lived in: gethome for iPhone, free on the App Store.</sub>
 </p>
 
 ## What is a hub?
@@ -76,9 +80,9 @@ Also: AI portraits of your devices, drawn on the hub with your OpenAI key and sh
 
 ## The gethome family
 
-- **gethome hub** *(this repository)* — the brain: talks to your devices, runs your rules and agents, and serves your apps. **Public, and installs today with one command** — see [Get started](#get-started).
-- **gethome for iPhone** — the everyday app: rooms and devices, the assistant, rules, history and widgets. **Not on the App Store yet** — [join the waitlist](https://gethome.me/#waitlist).
-- **gethome studio for Mac** — guided setup: writes the SD card or finds a Pi on your network, installs and claims the hub, and keeps it updated. **Ships alongside the app** — [join the waitlist](https://gethome.me/#waitlist).
+- **gethome hub** *(this repository)* — the brain: talks to your devices, runs your rules and agents, and serves your apps. **Public, and installs today** — see [Get started](#get-started).
+- **gethome for iPhone** — the everyday app: rooms and devices, the assistant, rules, history and widgets. **Free on the [App Store](https://apps.apple.com/app/id6792362722).**
+- **gethome studio for Mac** — guided setup: prepares the SD card or finds a Pi on your network, installs and claims the hub, and keeps it updated — then shows the broker's live traffic, the device-schema library and the AI's run log. **The way we recommend setting a hub up** — [download it from gethome.me](https://gethome.me/studio/).
 - **[gethome.me](https://gethome.me)** — the website: changelog, privacy policy and terms.
 
 ## Get started
@@ -86,10 +90,16 @@ Also: AI portraits of your devices, drawn on the hub with your OpenAI key and sh
 You need:
 
 - **A small computer with 64-bit Linux** — we test on Raspberry Pi. **2 GB of memory or more** runs Matter and Zigbee together and never has to choose. With 1 GB or less the hub runs one at a time by default; you can switch both on, and it works while your Zigbee network stays small — as that network grows, the hub hands a radio back and says so. → [Choosing hardware](docs/hardware.md)
-- **Raspberry Pi OS Lite (64-bit)** on its card, with SSH switched on. Lite, not the desktop edition: it is one level down in Raspberry Pi Imager.
+- **Raspberry Pi OS Lite (64-bit)** on its card. Lite, not the desktop edition: it is one level down in Raspberry Pi Imager.
 - **A USB Zigbee stick**, if you want Zigbee. We develop against the SONOFF ZBDongle-E, which needs a one-minute firmware update when new. Without a stick you get Matter, Wi-Fi and MQTT devices only.
 
-Then, [on the hub](#getting-a-shell-on-the-hub), run one command:
+### The easy way: gethome studio *(recommended)*
+
+On a Mac, [download gethome studio](https://gethome.me/studio/) and let it set the hub up — it is the way we recommend. It prepares the SD card or finds a Pi already on your network, runs the same installer on it, watches every step and names anything that goes wrong, and claims the hub for you: no terminal, and no pairing code to type. Afterwards it looks after every hub you own, with what the iPhone app doesn't show — the broker's live traffic, the device-schema library and every AI run with what it cost. It runs on macOS 14 or later.
+
+### By hand, with one command
+
+No Mac, or rather a terminal? Switch SSH on when you write the card in Raspberry Pi Imager, then, [on the hub](#getting-a-shell-on-the-hub), run:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/gethome-inc/gethome-hub/main/deploy/install.sh | bash
@@ -97,7 +107,9 @@ curl -fsSL https://raw.githubusercontent.com/gethome-inc/gethome-hub/main/deploy
 
 It downloads a prebuilt hub for your machine, installs Node.js 22 and Mosquitto, starts everything as services that come back on their own after a power cut, picks up a Zigbee stick by itself and prints a **pairing code**. Whoever claims the hub first becomes its owner, and the owner invites everyone else. → [The full install guide](docs/installation.md)
 
-**Prefer a guided setup?** The Mac app, gethome studio, writes the SD card or finds your Pi and does all of this for you. It is not released yet — [join the waitlist](https://gethome.me/#waitlist).
+### Then get the app
+
+Live with your hub in [gethome for iPhone](https://apps.apple.com/app/id6792362722), free on the App Store: it finds the hub on your Wi-Fi. A hub you installed by hand is claimed there with its pairing code. One that gethome studio set up is already yours — studio claimed it as your Mac — so press **Add device** on your own row in studio's People tab and enter that code in the app instead: your iPhone joins as you.
 
 ### Getting a shell on the hub
 

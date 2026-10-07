@@ -725,8 +725,13 @@ hub (`GetHomeWeb.hubRepository`), the apps' store listings send people here to
 learn how a hub is set up, and gethome studio's README links
 `#getting-a-shell-on-the-hub`. So it answers, in plain words and in that order,
 *what a hub is, what it runs on, and how one is set up* — and nothing an
-operator needs at 2 a.m. It was 574 lines of measurements and rationale before
-it was rewritten; hold it near 200. Five rules.
+operator needs at 2 a.m. **How one is set up leads with gethome studio**, the
+way we recommend (the owner's call, 2026-10-06): no terminal, no pairing code,
+and afterwards the broker's traffic, the schema library and the AI's run log,
+which the iPhone app doesn't show. The one command follows it, for a terminal
+and for anyone without a Mac — never imply a hub needs a Mac. It was 574 lines
+of measurements and rationale before it was rewritten; hold it near 200. Five
+rules.
 
 - **Operator and contributor detail goes to `docs/` or a `CLAUDE.md`, never
   back into the README.** Buying → `docs/hardware.md`; install, update, roll
@@ -740,11 +745,17 @@ it was rewritten; hold it near 200. Five rules.
   points at it.
 - **Link only what a stranger can open.** The iOS, Studio, site and marketing
   repositories are private — the README links gethome.me instead, and it once
-  linked a private repository that answered every visitor with a 404. **The two
-  apps are waitlist links** (`https://gethome.me/#waitlist`) **until they ship**;
-  then swap in the store link (Apple's badge only for an app that is live, and
-  only unmodified), and re-check the do-not-claim list in the site repo's
-  `CLAUDE.md` first. The three phone screens are byte-identical copies of what
+  linked a private repository that answered every visitor with a 404. **Both
+  apps have shipped, so link where each is got.** The iPhone app's App Store
+  page — `https://apps.apple.com/app/id6792362722`, with no country in the
+  path, so every reader lands in their own store — with Apple's badge once,
+  under the screens, and words everywhere else: the badge is
+  `docs/assets/app-store-badge.svg`, Apple's own artwork used as published
+  (Apple's rules: unmodified, one per layout, black preferred), and it says
+  *gethome for iPhone*, never *for iOS*. Studio's page on gethome.me
+  (`https://gethome.me/studio/`), never its disk image, whose name changes with
+  every release. Re-check the do-not-claim list in the site repo's `CLAUDE.md`
+  before a new claim about either. The three phone screens are byte-identical copies of what
   gethome.me already shows (`docs/assets/README.md` says which and when):
   replace them when the app's interface changes, and never crop, annotate or
   frame one.
