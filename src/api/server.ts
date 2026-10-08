@@ -1379,7 +1379,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         );
         if (changed) {
           await deps.activity.record({
-            kind: 'device.webBlock',
+            kind: 'device.web-block',
             message: `${member.name} installed the panel “${block.title}” on ${device.name}.`,
             memberId: member.id,
             deviceId: id,
@@ -1403,7 +1403,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (!device || !(await webBlocks.remove(id, blockId))) return reply.code(404).send({ error: 'not_found' });
     const member = request.member!;
     await deps.activity.record({
-      kind: 'device.webBlock',
+      kind: 'device.web-block',
       message: `${member.name} removed a panel from ${device.name}.`,
       memberId: member.id,
       deviceId: id,

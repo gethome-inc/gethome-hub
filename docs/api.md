@@ -133,7 +133,7 @@ than no button.
 
 | Method & path | Needs | Notes |
 |---|---|---|
-| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `matter: {bluetooth, bluetoothReason?, wifi, commissioning, settlingUntil?}` is present only while Matter is running and says what pairing this hub can actually do — and, in `settlingUntil`, whether it has finished finding the devices it already owns — see [below](#pairing-a-matter-accessory). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid) |
+| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `matter: {bluetooth, bluetoothReason?, wifi, commissioning, settlingUntil?}` is present only while Matter is running and says what pairing this hub can actually do — and, in `settlingUntil`, whether it has finished finding the devices it already owns — see [below](#pairing-a-matter-accessory). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid). `cameras: {kinds, maxStreams}` and `webBlocks: {maxBytes, maxFiles, perDevice}` are the same answer for [cameras](#cameras) and [web blocks](#web-blocks): what this hub relays and how many at once, and how big a panel may be. A hub without them has never heard of either, so an app offers neither |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
 | `GET /home` · `PATCH /home` | floor · `home.rename` | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name) |
 | `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | floor · `home.structure` | `{id, name, zoneId, icon, accent, sortOrder}`. `POST` takes `{name, zoneId?, icon?, accent?, sortOrder?}` — the name is the only required field anywhere here — and `PATCH` takes the same set with every field optional; `zoneId: null` means "in no zone", and `icon: null` / `accent: null` mean "back to the look the app derives" — each different from leaving the field out. `icon`/`accent` are opaque app tokens (1–40 chars, see [below](#rooms-and-zones)). Names are trimmed before they are measured (1–80), an unknown `zoneId` is `404 unknown_zone`, and a new room goes to the *end* of the order. Deleting a room does not delete its devices — they are simply in no room. Every write broadcasts the [`structure` frame](#rooms-and-zones) |
@@ -148,6 +148,9 @@ than no button.
 | `POST /devices/:id/portraits` | `hub.ai` | draw one. `{photo?: base64, photoType?}` — absent draws from the device's kind alone. Synchronous, and it holds the request for the minutes an image takes. `409 openai_not_configured` (its own code: portraits are OpenAI's job, and a hub can be configured for recognition and not for this), `409 portrait_busy`, `409 no_space`, `502 {error:"provider_failed", kind, detail}` carrying OpenAI's own sentence |
 | `PATCH /devices/:id/portraits` | `device.edit` | `{selected: id\|null}` — which one the home sees. `null` is a *state*: the procedural sphere, chosen over every picture there is |
 | `DELETE /portraits/:portraitId` | `device.edit` | forget one, file and row |
+| `PUT /devices/:id/web-blocks/:blockId` · `DELETE /devices/:id/web-blocks/:blockId` | `device.edit` | install, replace or remove a panel on a device's page — see [below](#web-blocks). `PUT {title, height?, files: [{path, dataBase64}]}` → `{block, changed}`, and `changed: false` is an upload identical to the stored one, which wrote and logged nothing. `400 invalid_block` (with a `message` saying what), `409 too_many_web_blocks`, `409 web_blocks_full`, `507 storage_low`. `DELETE` answers `204`, or `404` for a block that isn't there |
+| `GET /devices/:id/web-blocks/:blockId/*` | floor | one file of a panel, looked up in the manifest stored at install and never on disk; an empty path is `index.html`. A strong `ETag` (`304` on a match), `no-cache`, `nosniff`, and a CSP that allows no network |
+| `GET /cameras/:deviceId/:endpointId/:streamId/snapshot` · `GET /cameras/:deviceId/:endpointId/:streamId/mjpeg` | `camera.view` | a still (`image/jpeg`) or the live picture (`multipart/x-mixed-replace`) of a stream the device announced, fetched by the hub — see [below](#cameras). `404 camera_not_found` for a stream that isn't announced or is the other kind, `409 camera_busy`, and `502` with the reason: `camera_unreachable`, `camera_unverified`, `camera_address_refused`, `camera_bad_response` |
 | `POST /devices/:id/remap` | `hub.ai` | force-regenerate the AI mapping (Zigbee devices) → `{requested}`. **It answers as soon as the run is under way, never when it ends**: a run is minutes and this is an HTTP request, so what the agent then did arrives on the `ai` stream and in `GET /ai/runs`. `requested: false` means the radio has no published schema for that device right now — a device row can outlive its `bridge/devices` entry — which is a different answer from a run that failed. Being explicit, it also drops a `rejected` mapping and **ignores the backoff gate**, because it is how somebody retries after fixing a key or changing the model. The hub also remaps automatically when a device publishes unknown parameters — see [ai-adaptation.md](ai-adaptation.md). `409 ai_not_configured` with no credential, `409 ai_disabled` when the owner has switched device recognition off |
 | `POST /matter/commission` | `device.add` | `{pairingCode, wifi?: {ssid, passphrase}}` → `202 {jobId, deadline}` (async). `wifi` is only for a hub that cannot read its own — see [below](#pairing-a-matter-accessory). `409 already_commissioning` when one is already running, `409 matter_disabled` when this hub has no Matter |
 | `GET /matter/commission/:jobId` | floor | `{status: running\|done\|failed, step?, nodeId?, error?, failure?, startedAt, deadline}` — see [below](#pairing-a-matter-accessory) |
@@ -202,7 +205,7 @@ than no button.
 
 ### Roles and permissions in full
 
-#### The fifteen permissions
+#### The sixteen permissions
 
 `GET /permissions` is the authority and carries a `title` and a `summary` for
 each. **Render those rather than shipping copy of your own** — it is the
@@ -216,6 +219,7 @@ it gates its own screens on.
 | `device.edit` | Devices |
 | `device.add` | Devices |
 | `device.remove` | Devices |
+| `camera.view` | Devices |
 | `home.structure` | Home |
 | `home.rename` | Home |
 | `activity.read` | Home |
@@ -235,6 +239,7 @@ it gates its own screens on.
 |---|:--:|:--:|:--:|
 | `device.edit` | ✓ | ✓ | |
 | `device.add` | ✓ | ✓ | |
+| `camera.view` | ✓ | ✓ | |
 | `home.structure` | ✓ | ✓ | |
 | `activity.read` | ✓ | ✓ | |
 | `automation.manage` | ✓ | ✓ | |
@@ -286,11 +291,21 @@ than a spending decision, which is why the argument that moved `hub.update` and
 the matrix — the safe half, since the account it reveals cannot switch anything
 on — and leaves `hub.mqtt.admin` where it is.
 
+**`camera.view` is newer than every key above it, and Member holds it from the
+start.** Watching the porch is what living in a home with a camera on its porch
+means — the person at the door is looking at a phone, not at a laptop in a
+drawer — so the argument that moved `hub.update` reaches it before it was ever
+anybody's alone. It is a key at all, rather than the floor, because a camera
+shows *people*: a home with somebody staying decides whether they see the
+hallway. Nothing it guards existed before it, so updating takes nothing from
+anybody; it still needs the `member` row to hold it, so it travels with a
+migration (`0017`), the way `hub.ai` did.
+
 **Guest is somebody staying in the house** — and a role with **no keys at all**,
 which is its honest shape rather than an oversight. They work the lights and keep
 their own favorites because both are the *floor*; what they do not get is
-everything above that line — they change no names, open no network, and read only
-their own line in the activity log.
+everything above that line — they change no names, open no network, watch no
+camera, and read only their own line in the activity log.
 
 #### The owner is a special case on purpose
 
@@ -1355,6 +1370,16 @@ is what `needsReview` is about: properties with no representation at all.
 library. Absent on a device adopted before the hub recorded it, which an app
 must read as "not known" rather than "recognised by nothing".
 
+`webBlocks` is present only on a device that has [panels](#web-blocks) —
+`[{id, title, height, sha256, updatedAt}]`, with `updatedAt` in epoch ms like
+`offlineExpected.at` — so every other device's wire is byte-for-byte what it
+was, and an app from before panels never meets the key. `sha256` covers every
+file in the block and changes when any of them does, which makes it the key an
+app caches a panel under.
+
+An endpoint with the `camera` capability carries `state.camera.streams` — ids,
+kinds and sizes, never an address. See [Cameras](#cameras).
+
 ### Updating the hub
 
 A hub can update itself when asked. That is what lets a phone do it — gethome
@@ -1744,6 +1769,137 @@ is copied beside the id for the activity log's own reason: the column carries no
 `invites.member_id` situation), so the id may point at somebody who has since
 been removed, and the row read next week is all that is left of them.
 
+### Web blocks
+
+A web block is a small panel — a gauge, a chart, a few buttons — that somebody
+made for a device of their own, shown on that device's page in the gethome apps.
+Like a portrait it is the **house's**: everybody sees the same panel, so it is
+stored on the hub and installed once, rather than carried by whichever phone
+happened to make it.
+
+`PUT /devices/:id/web-blocks/:blockId` installs one, or replaces the one with
+that id:
+
+```json
+{
+  "title": "Weather",
+  "height": 240,
+  "files": [
+    { "path": "index.html", "dataBase64": "PCFkb2N0eXBlIGh0bWw+…" },
+    { "path": "app.js",     "dataBase64": "Y29uc3Qgc3RhdGUg…" }
+  ]
+}
+```
+
+JSON with base64 files rather than an archive, as a portrait takes its photo: no
+archive library on a 512 MB board, and every byte is checked as it is decoded.
+**A block is code that runs on every phone in the house**, so the hub bounds it
+before it stores anything:
+
+- an id of lowercase letters, digits and dashes, up to 40;
+- a title of 1–60 characters and a height of 60–800 points — what the page
+  reserves for it, 240 when absent;
+- at most 64 files and 512 KB decoded, `index.html` among them;
+- every path at most three folders deep, each part letters, digits, `.`, `_`
+  and `-` with nothing hidden and no `..`, and of a type the hub serves —
+  html, css, js, json, txt, svg, png, jpeg, gif, webp, woff2;
+- strict base64, and no path twice.
+
+Any of those is `400 invalid_block` with a `message` saying which. Past them, a
+device holds four blocks (`409 too_many_web_blocks` — replacing one is not a
+fifth), the hub holds 20 MB of them together (`409 web_blocks_full`), and
+nothing is written with less than 64 MB of disk free (`507 storage_low`): a
+full card stops the home, and a missing panel does not.
+
+**An identical upload writes nothing.** The answer is `{block, changed}`, and
+`changed: false` means the files, title and height were already what the hub
+held — no write to the card, no activity row, no frame — which is what lets a
+tool install on every run and cost nothing. A real change is written beside the
+old one and swapped in by rename, so a phone never loads half of each. It writes
+one `device.web-block` activity row (`data`: `memberName`, `deviceName`,
+`blockId`, and `title` — or `removed: true` from `DELETE`) and sends every socket
+that device's `deviceUpserted` frame, whose `webBlocks` is the new list.
+
+**A panel is served from its manifest.**
+`GET /devices/:id/web-blocks/:blockId/<path>` looks the path up in what was
+stored at install — never on the filesystem — so nothing but the block's own
+files can come out of it, whatever else is on the disk. Every answer carries its
+type with `X-Content-Type-Options: nosniff`, `Cache-Control: no-cache` with a
+strong `ETag` (`304` on `If-None-Match`), and a `Content-Security-Policy` that
+allows no network at all. Reading is the floor: a panel is part of the device's
+page, and a guest whose page could not draw it would be looking at a different
+home. What a panel may *do* once it is on a phone — reach no network, command
+only its own device — is the apps' to enforce, in their web-block host.
+
+A device's blocks go with it: deleting the device deletes its rows and its
+folder.
+
+### Cameras
+
+A camera is a capability **the hub derives**, never one a device declares. An
+MQTT device announces the streams it serves on a retained
+`gethome/device/<id>/camera` topic (see
+[mqtt-integrations.md](mqtt-integrations.md#cameras)), and the hub adds `camera`
+to that endpoint's `capabilities` and writes its state:
+
+```json
+"camera": { "streams": [
+  { "id": "still", "kind": "snapshot", "label": "Still", "width": 640, "height": 480 },
+  { "id": "live",  "kind": "mjpeg",    "label": "Live",  "width": 640, "height": 480 }
+] }
+```
+
+Declaring it would have been simpler and wrong: a hub from before cameras
+refuses a discovery document that names a capability it doesn't know — the whole
+document — so a camera that declared one would not be a device at all on most
+of the hubs it meets. Derived, the same board is a camera on this hub and a
+plain device with a flash LED on an older one.
+
+**There are no addresses in the state.** Where a camera sits on the LAN stays
+on the hub — in memory, rebuilt from the retained topic after a restart — and an
+app fetches through the hub, by the names the state gives it:
+
+- `GET /cameras/:deviceId/:endpointId/:streamId/snapshot` — one `image/jpeg`,
+  `Cache-Control: no-store`;
+- `GET /cameras/:deviceId/:endpointId/:streamId/mjpeg` —
+  `multipart/x-mixed-replace; boundary=gethomeframe`, one JPEG per part, for as
+  long as the request is held open.
+
+Both need `camera.view`. A stream that isn't announced, or is the other kind, is
+`404 camera_not_found`.
+
+**What the hub will fetch is narrow on purpose.** The address came from a
+device, every board in the house shares one broker account, and the hub is the
+machine every phone trusts — so an announcement is untrusted input naming a URL
+the hub will request on somebody's behalf:
+
+- plain `http:` to an IPv4 literal in a private range (10/8, 172.16/12,
+  192.168/16, 169.254/16) — never a name, never loopback, and never one of the
+  hub's own addresses — or `502 camera_address_refused` before any request is
+  made;
+- no credentials in the address, no redirect followed, and the app's token never
+  passed on;
+- and only once the board has **said it is the device**: `GET /gethome/id`, on
+  the stream's own port and then on 80, has to answer `{"id": "<externalId>"}`.
+  An id that is somebody else's is `502 camera_unverified`, so a board can't aim
+  the hub at the router; a proof holds for ten minutes.
+
+What comes back is bounded as well: a still is a JPEG of at most 2 MB within five
+seconds; a live part is at most 1 MB, the connection has three seconds to open
+and the stream ten seconds of silence before it is closed. Anything else is
+`502 camera_bad_response`, and a camera that doesn't answer at all is
+`502 camera_unreachable`.
+
+**One camera, one upstream.** A small camera serves one client at a time, so the
+hub opens one connection per stream and hands every frame to everybody watching,
+re-framed in its own multipart; a viewer that falls behind skips frames rather
+than holding the others back. The upstream closes when the last viewer leaves.
+`maxStreams` cameras stream at once (four); one more is `409 camera_busy`.
+**Nothing is recorded** — frames pass through memory and are gone.
+
+Deleting the device clears its camera topic along with its discovery document,
+so a camera that is removed stays removed.
+
 ### The device-mapping library
 
 `GET /device-mappings/:exposesHash` returns an **envelope**, not a bare
@@ -1814,7 +1970,7 @@ kinds with nothing to add.
 
 The kinds: `device.command`, `device.added`, `device.removed`,
 `device.online`, `device.offline`, `device.renamed`, `device.moved`,
-`device.portrait`,
+`device.portrait`, `device.offline-expected`, `device.web-block`,
 `room.added`, `room.renamed`, `room.removed`, `zone.added`, `zone.renamed`,
 `zone.removed`, `member.joined`, `member.signed-in`, `member.signin-code`,
 `member.left`, `member.removed`,
@@ -2016,7 +2172,7 @@ message. These go to every authorized socket:
 {"type":"hello","hubId","name","apiVersion":1,"streams":["mqtt","zigbee","ai"],"permissions":[…]}
 {"type":"access","role":{id,key,name},"permissions":[…],"roles":[…]}   what *you* may do
 {"type":"state","deviceId","endpointId","state":{…}}    full canonical state after each change
-{"type":"deviceUpserted","device":{…}}                  new device or structure/name change
+{"type":"deviceUpserted","device":{…}}                  new device, structure/name change, or its web blocks
 {"type":"deviceRemoved","deviceId"}
 {"type":"commandFailed","deviceId","property","kind","detail"}   a write never reached the device
 {"type":"structure","rooms":[…],"zones":[…]}            rooms/zones changed — both lists in full
@@ -2309,3 +2465,10 @@ role — a home that has edited its matrix may have granted it to Guest and
 withheld it from Member. `403 owner_only` was the old shape and is gone; a
 client that still recognises it loses nothing by keeping the branch for older
 hubs.
+
+Cameras and web blocks name their own refusals: `404 camera_not_found`,
+`409 camera_busy`, and `502` for a camera the hub could not or would not relay
+(`camera_unreachable`, `camera_unverified`, `camera_address_refused`,
+`camera_bad_response`); `400 invalid_block`, `409 too_many_web_blocks`,
+`409 web_blocks_full` and `507 storage_low`. Read the code as an open string —
+the status alone already says which kind of answer it is.

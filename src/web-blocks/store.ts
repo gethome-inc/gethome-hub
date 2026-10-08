@@ -109,6 +109,14 @@ export class WebBlockService {
    * boot and kept current by every write, as favorites are.
    */
   private readonly index = new Map<string, StoredBlock[]>();
+  /**
+   * Writes run one at a time. Each one checks the limits against the index and
+   * then awaits the disk, so two uploads side by side would both pass the
+   * per-device count and the second to finish would put back an index without
+   * the first. Writes are rare and a few hundred kilobytes, so one queue for
+   * the whole hub costs nothing.
+   */
+  private writes: Promise<unknown> = Promise.resolve();
 
   constructor(
     private readonly db: Db,
@@ -165,7 +173,26 @@ export class WebBlockService {
    * anything changed: an upload identical to what is stored writes nothing,
    * so a tool that installs on every run costs the card nothing.
    */
-  async put(
+  put(
+    deviceId: string,
+    blockId: string,
+    upload: WebBlockUpload,
+    member: { id: string; name: string } | null,
+  ): Promise<{ changed: boolean; block: WebBlockSummary }> {
+    return this.serially(() => this.write(deviceId, blockId, upload, member));
+  }
+
+  remove(deviceId: string, blockId: string): Promise<boolean> {
+    return this.serially(() => this.erase(deviceId, blockId));
+  }
+
+  private serially<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.writes.then(work, work);
+    this.writes = run.catch(() => {});
+    return run;
+  }
+
+  private async write(
     deviceId: string,
     blockId: string,
     upload: WebBlockUpload,
@@ -260,7 +287,7 @@ export class WebBlockService {
     return { changed: true, block: summary(stored) };
   }
 
-  async remove(deviceId: string, blockId: string): Promise<boolean> {
+  private async erase(deviceId: string, blockId: string): Promise<boolean> {
     const existing = this.index.get(deviceId) ?? [];
     if (!existing.some((block) => block.id === blockId)) return false;
     await this.db

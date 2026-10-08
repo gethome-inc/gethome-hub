@@ -102,6 +102,16 @@ describe.skipIf(!handle)('web blocks', () => {
     await expect(store.put(deviceId, 'a', block([file('index.html', 'a2')]), null)).resolves.toMatchObject({ changed: true });
   });
 
+  it('counts uploads that arrive together one at a time', async () => {
+    const results = await Promise.allSettled(
+      ['a', 'b', 'c', 'd', 'e'].map((id) => store.put(deviceId, id, block([file('index.html', id)]), null)),
+    );
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(4);
+    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
+    // None of the four was lost from what GET /devices reads.
+    expect(store.list(deviceId).map((entry) => entry.id).sort()).toEqual(['a', 'b', 'c', 'd']);
+  });
+
   it('removes a block, and every block with its device', async () => {
     await store.put(deviceId, 'one', block([file('index.html', '1')]), null);
     await store.put(deviceId, 'two', block([file('index.html', '2')]), null);
