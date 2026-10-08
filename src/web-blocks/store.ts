@@ -365,6 +365,9 @@ export function pathProblem(filePath: string): string | null {
   if (typeof filePath !== 'string' || filePath.length === 0 || filePath.length > 120) return 'not a usable path';
   const segments = filePath.split('/');
   if (segments.length > 4) return 'nested too deeply';
+  // The apps serve their own theme and fonts at `/_app/` inside every panel,
+  // so a file of the panel's own there would never be the one loaded.
+  if (segments[0] === '_app') return 'the _app folder is the apps\u2019 own';
   for (const segment of segments) {
     if (!/^[A-Za-z0-9._-]+$/.test(segment) || segment === '.' || segment === '..' || segment.startsWith('.')) {
       return 'a path is letters, digits, dots, dashes and underscores, with no hidden files';

@@ -7,7 +7,8 @@ home; update them in the same change.
 - **A block is code that runs on every phone in the house**, so this directory
   is mostly bounds: an id matching `BLOCK_ID_PATTERN`, at most 64 files and
   512 KB decoded, `index.html` required, every path checked by `pathProblem`
-  (letters, digits, `.`, `_`, `-`; no `..`, nothing hidden, four parts at most)
+  (letters, digits, `.`, `_`, `-`; no `..`, nothing hidden, four parts at most,
+  nothing under `_app/`, which the apps serve inside every panel)
   and of a type in `TYPES`, strict base64 (`Buffer.from` silently skips what it
   can't read, which is why `isStrictBase64` exists), four blocks a device, 20 MB
   a hub, and no write below 64 MB free. What a block may *do* on a phone — no

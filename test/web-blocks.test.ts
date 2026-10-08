@@ -91,6 +91,7 @@ describe.skipIf(!handle)('web blocks', () => {
     expect(store.list(deviceId)).toEqual([]);
     expect(pathProblem('css/site.css')).toBeNull();
     expect(pathProblem('a/b/c/d/e.css')).not.toBeNull();
+    expect(pathProblem('_app/theme.css')).not.toBeNull();
   });
 
   it('holds a few blocks per device', async () => {

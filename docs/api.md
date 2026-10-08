@@ -1802,7 +1802,9 @@ before it stores anything:
 - at most 64 files and 512 KB decoded, `index.html` among them;
 - every path at most three folders deep, each part letters, digits, `.`, `_`
   and `-` with nothing hidden and no `..`, and of a type the hub serves —
-  html, css, js, json, txt, svg, png, jpeg, gif, webp, woff2;
+  html, css, js, json, txt, svg, png, jpeg, gif, webp, woff2 — and none under
+  `_app/`, which is where the apps serve their own theme and fonts inside a
+  panel;
 - strict base64, and no path twice.
 
 Any of those is `400 invalid_block` with a `message` saying which. Past them, a
