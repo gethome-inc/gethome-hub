@@ -123,6 +123,9 @@ describe('the roles migration', () => {
       // `ensureBuiltins()` would not reach a row that already exists — which
       // is exactly the case this suite is set up to reproduce.
       'hub.ai',
+      // Newer than all of it — there were no cameras — and reaching a hub
+      // that already exists the same way, by an `UPDATE` in `0017`.
+      'camera.view',
     ] as const) {
       expect(access.can(anna, wasAuthed), wasAuthed).toBe(true);
     }

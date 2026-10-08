@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { CAPABILITY_KINDS } from './capabilities.js';
+import { CAPABILITY_KINDS, DECLARABLE_CAPABILITY_KINDS } from './capabilities.js';
 import { DEVICE_KINDS } from './kinds.js';
 
 /**
@@ -10,6 +10,8 @@ import { DEVICE_KINDS } from './kinds.js';
  */
 
 export const capabilityKindSchema = z.enum(CAPABILITY_KINDS);
+/** What a device may be declared with — every kind but the ones the hub derives (`camera`). */
+export const declarableCapabilityKindSchema = z.enum(DECLARABLE_CAPABILITY_KINDS);
 export const deviceKindSchema = z.enum(DEVICE_KINDS);
 
 const uint8 = z.number().int().min(0).max(255);
@@ -170,6 +172,32 @@ export const endpointStateSchema = z
       .optional(),
     currentMode: uint8.optional(),
     rvcOperationalState: uint8.optional(),
+    /**
+     * What a camera endpoint can show — **the hub's, never the device's.**
+     * Written from the streams an MQTT camera announces on its camera topic,
+     * with the addresses left behind: an app reaches a stream only through the
+     * hub's own camera routes, so nothing in a state ever points a phone at a
+     * machine on the LAN. A device that publishes this key has it stripped.
+     */
+    camera: z
+      .object({
+        streams: z
+          .array(
+            z
+              .object({
+                id: z.string().min(1).max(32),
+                /** `snapshot` (one JPEG) or `mjpeg` (a live stream) today; open, so a newer kind isn't refused. */
+                kind: z.string().min(1).max(24),
+                label: z.string().max(60).optional(),
+                width: z.number().int().min(1).max(10_000).optional(),
+                height: z.number().int().min(1).max(10_000).optional(),
+              })
+              .strict(),
+          )
+          .max(8),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -236,13 +264,17 @@ export const commandSchema = z.discriminatedUnion('type', [
     .strict(),
 ]);
 
-/** Endpoint descriptor as declared by MQTT integrations and served by the API. */
+/**
+ * Endpoint descriptor as declared by MQTT integrations. Declarable kinds only:
+ * `camera` is derived from the camera topic, and a document naming it would be
+ * refused outright by every hub from before cameras.
+ */
 export const endpointDescriptorSchema = z
   .object({
     endpointId: z.number().int().min(0),
     deviceKind: deviceKindSchema,
-    capabilities: z.array(capabilityKindSchema).min(1),
-    primary: capabilityKindSchema,
+    capabilities: z.array(declarableCapabilityKindSchema).min(1),
+    primary: declarableCapabilityKindSchema,
   })
   .strict();
 

@@ -75,6 +75,13 @@ export const PERMISSIONS: readonly PermissionDescriptor[] = [
     summary: 'Take a device out of the home and unpair it. Nothing in the apps undoes this.',
   },
   {
+    key: 'camera.view',
+    group: 'Devices',
+    title: 'Watch the cameras',
+    summary:
+      'See what the home\u2019s cameras see \u2014 a still, or live. The pictures come through the hub and are not recorded.',
+  },
+  {
     key: 'home.structure',
     group: 'Home',
     title: 'Change rooms and zones',
@@ -167,6 +174,7 @@ export type PermissionKey =
   | 'device.edit'
   | 'device.add'
   | 'device.remove'
+  | 'camera.view'
   | 'home.structure'
   | 'home.rename'
   | 'activity.read'
@@ -241,10 +249,19 @@ export const BUILTIN_ROLES = [
      * for a front-door key. A home that wants it otherwise says so in the
      * matrix, and `hub.mqtt` alone is the safe half of the answer: it is the
      * account that cannot switch anything on.
+     *
+     * `camera.view` is here because watching the porch is what living in a
+     * home with a camera on its porch means — the person at the door is
+     * looking at a phone, not at a laptop in a drawer. It is a permission at
+     * all, rather than the floor, because a camera shows *people*: a home
+     * that has somebody staying decides whether they see the hallway, and
+     * Guest starts without it. It reaches homes that already exist through
+     * migration `0017`, the way `hub.ai` travelled in `0006`.
      */
     permissions: [
       'device.edit',
       'device.add',
+      'camera.view',
       'home.structure',
       'activity.read',
       'automation.manage',

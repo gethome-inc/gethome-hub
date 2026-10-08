@@ -846,3 +846,39 @@ export const automationChatMessages = sqliteTable(
     index('automation_chat_surface').on(table.surface, table.at),
   ],
 );
+
+/**
+ * Web blocks — small HTML panels a device's page shows in the apps, uploaded
+ * through `PUT /devices/:id/web-blocks/:blockId` (`src/web-blocks/`).
+ *
+ * **The bytes are files, the record is a row**, `device_portraits`' rule: the
+ * files live under `<data>/web-blocks/<device>/<block>/` and this row carries
+ * the manifest that serving resolves paths against — a request is answered
+ * from the manifest, never by asking the filesystem what is there. One row per
+ * block, so a re-upload replaces it; a device's blocks go with the device
+ * (the row by cascade, the directory by the store).
+ */
+export const deviceWebBlocks = sqliteTable(
+  'device_web_blocks',
+  {
+    deviceId: text('device_id')
+      .notNull()
+      .references(() => devices.id, { onDelete: 'cascade' }),
+    blockId: text('block_id').notNull(),
+    title: text('title').notNull(),
+    /** Over every file's path and digest — an identical re-upload writes nothing. */
+    sha256: text('sha256').notNull(),
+    bytes: integer('bytes').notNull(),
+    /** The height the apps give it on the page, in points. */
+    height: integer('height').notNull(),
+    /** `[{path, bytes, sha256, type}]` — what the block is made of. */
+    manifest: text('manifest', { mode: 'json' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    /** Who put it there, with their name for when the id points at somebody since removed. */
+    memberId: text('member_id'),
+    memberName: text('member_name'),
+  },
+  (table) => [primaryKey({ columns: [table.deviceId, table.blockId] })],
+);
