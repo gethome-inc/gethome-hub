@@ -40,14 +40,14 @@
  * **Succession.** A stored choice counts only while the model it names is still
  * *offered*; otherwise the hub runs the first model along its successor chain
  * that is — Opus 5 → Opus 5.5, Sonnet 5 → Sonnet 5.5, GPT-5.6 Sol and Terra →
- * GPT-6 Sol — and only where there is no such model, the vendor's default.
- * Three rules.
+ * GPT-6 Sol → GPT-6.1 Sol — and only where there is no such model, the
+ * vendor's default. Three rules.
  *  - **It is resolved when settings are read, never written back.** Updating a
  *    hub is therefore all it takes to move every home on a retired model, with
  *    no migration and nothing for its owner to do — and it is also the only
  *    version that is safe to roll back. `install.sh` puts the previous build
  *    back when a new one fails its health check, and that build has never heard
- *    of `gpt-6-sol`: an agent column rewritten at boot would be an unknown id
+ *    of `gpt-6.1-sol`: an agent column rewritten at boot would be an unknown id
  *    there, which falls to "the first vendor with a usable key" and silently
  *    moves a home that had chosen OpenAI onto Anthropic. Left alone, the column
  *    still says what it said and the older build reads it exactly as before.
@@ -60,9 +60,9 @@
  *    written has to be revisited.
  *
  * Prices are list prices in USD per million tokens, from each vendor's model
- * pages (checked 23 September 2026; Sonnet 5.5 on 28 September). They move
- * rarely, and the caps they feed are a safety rail rather than an invoice —
- * `status.lastRun.costUsd` is an estimate and says so.
+ * pages (checked 9 October 2026). They move rarely, and the caps they feed are
+ * a safety rail rather than an invoice — `status.lastRun.costUsd` is an
+ * estimate and says so.
  */
 
 import type { AiProvider } from '../core/settings.js';
@@ -74,13 +74,35 @@ export interface ModelPricing {
   readonly outputPerMTok: number;
   /**
    * What a cached read costs, as a fraction of the input rate, where this model
-   * is billed differently from the usual tenth. Opus 5.5 reads at a twentieth,
-   * and pricing it at a tenth would overstate every long conversation on it.
+   * is billed differently from the usual tenth. Opus 5.5, Sonnet 5.5 and
+   * GPT-6.1 Sol read at a twentieth and Fable 5.1 at a fortieth, and pricing
+   * them at a tenth would overstate every long conversation on them.
    */
   readonly cacheReadMultiplier?: number;
   /** The same for a cache write, where it differs from the usual 1.25×. */
   readonly cacheWriteMultiplier?: number;
+  /**
+   * Dearer rates for a request whose prompt runs past `aboveTokens` — input,
+   * cache reads and cache writes all counted, since that is what the vendors
+   * count. They apply to the **whole request**, not to the tokens past the
+   * line: GPT-6 bills such a request at 2× its input and cache rates and 1.5×
+   * its output, and Haiku 5.5 at 5× all of them.
+   *
+   * That is why `estimateCostUsd` is given one request at a time, never a
+   * conversation's running total: ten rounds of a 20K-token prompt are not a
+   * 200K-token prompt, and pricing them as one would bill a Haiku conversation
+   * at five times what it cost from its fifth round on.
+   */
+  readonly longPrompt?: {
+    readonly aboveTokens: number;
+    /** Applied to the input rate, and so to both cache rates with it. */
+    readonly inputMultiplier: number;
+    readonly outputMultiplier: number;
+  };
 }
+
+/** GPT-6's long-context rates, which every model in that family shares. */
+const GPT_6_LONG_PROMPT = { aboveTokens: 272_000, inputMultiplier: 2, outputMultiplier: 1.5 } as const;
 
 /** One entry in the picker an app draws. The hub owns the wording. */
 export interface ModelChoice {
@@ -118,6 +140,20 @@ interface KnownModel {
  */
 const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>> = {
   anthropic: {
+    // GPT-6 Astra's price, with a cached read at a fortieth ($0.25). It refuses
+    // a forced `tool_choice` — which no loop here sends — and, like Opus 5.5,
+    // `temperature` and a prefilled reply, and it binds each thinking block to
+    // everything ahead of it, so a conversation may only ever be appended to,
+    // which every loop here already does. It can also decline with
+    // `stop_reason: 'refusal'`, which both loops already report.
+    // Anthropic keeps its requests for 30 days with no zero-retention option,
+    // which are the ordinary terms for an API key. Mythos 5.1, the same model
+    // for verified organisations only, is never offered: a home's key would be
+    // refused.
+    'claude-fable-5-1': {
+      label: 'Fable 5.1',
+      price: { inputPerMTok: 10, outputPerMTok: 50, cacheReadMultiplier: 0.025 },
+    },
     'claude-opus-5-5': {
       label: 'Opus 5.5',
       // A twentieth of the input rate for a cached read, where every model
@@ -144,9 +180,12 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
       price: { inputPerMTok: 5, outputPerMTok: 25 },
       successor: 'claude-opus-4-7',
     },
-    // Sonnet 5's price. Its cached read is $0.20 — the same figure as
-    // Opus 5.5's, but here it is the usual tenth, so no multiplier of its own.
-    'claude-sonnet-5-5': { label: 'Sonnet 5.5', price: { inputPerMTok: 2, outputPerMTok: 10 } },
+    // Sonnet 5's price, with Opus 5.5's twentieth for a cached read: $0.10,
+    // where Sonnet 5 reads at the usual tenth ($0.20).
+    'claude-sonnet-5-5': {
+      label: 'Sonnet 5.5',
+      price: { inputPerMTok: 2, outputPerMTok: 10, cacheReadMultiplier: 0.05 },
+    },
     'claude-sonnet-5': {
       label: 'Sonnet 5',
       price: { inputPerMTok: 2, outputPerMTok: 10 },
@@ -157,11 +196,44 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
       price: { inputPerMTok: 3, outputPerMTok: 15 },
       successor: 'claude-sonnet-5',
     },
+    // The one Claude priced by prompt length: $0.10/$0.50 up to 100K tokens of
+    // prompt, and five times that — cache rates included — past it. Offered to
+    // the agents only, and safe to give their tools: it takes adaptive thinking
+    // with `display: 'summarized'` and every effort they send.
+    'claude-haiku-5-5': {
+      label: 'Haiku 5.5',
+      price: {
+        inputPerMTok: 0.1,
+        outputPerMTok: 0.5,
+        longPrompt: { aboveTokens: 100_000, inputMultiplier: 5, outputMultiplier: 5 },
+      },
+    },
   },
   openai: {
-    'gpt-6-astra': { label: 'GPT-6 Astra', price: { inputPerMTok: 10, outputPerMTok: 50 } },
-    'gpt-6-sol': { label: 'GPT-6 Sol', price: { inputPerMTok: 2, outputPerMTok: 10 } },
-    'gpt-6-luna': { label: 'GPT-6 Luna', price: { inputPerMTok: 0.1, outputPerMTok: 0.5 } },
+    'gpt-6-astra': {
+      label: 'GPT-6 Astra',
+      price: { inputPerMTok: 10, outputPerMTok: 50, longPrompt: GPT_6_LONG_PROMPT },
+    },
+    // GPT-6 Sol's price, with a cached read at a twentieth ($0.10) where GPT-6
+    // Sol reads at the usual tenth. It takes the same requests: the Responses
+    // API with hosted web search and function tools, and `reasoning.effort`
+    // low, medium and high — it refuses only `none` and `minimal`, which
+    // nothing here sends.
+    'gpt-6.1-sol': {
+      label: 'GPT-6.1 Sol',
+      price: { inputPerMTok: 2, outputPerMTok: 10, cacheReadMultiplier: 0.05, longPrompt: GPT_6_LONG_PROMPT },
+    },
+    // Still served, and replaced in the picker the way Opus 5 was: GPT-6.1 Sol
+    // is the same price and stronger, so nothing a home chose is lost by moving.
+    'gpt-6-sol': {
+      label: 'GPT-6 Sol',
+      price: { inputPerMTok: 2, outputPerMTok: 10, longPrompt: GPT_6_LONG_PROMPT },
+      successor: 'gpt-6.1-sol',
+    },
+    'gpt-6-luna': {
+      label: 'GPT-6 Luna',
+      price: { inputPerMTok: 0.1, outputPerMTok: 0.5, longPrompt: GPT_6_LONG_PROMPT },
+    },
     // GPT-5.6 was Sol, Terra and Luna; GPT-6 is Astra, Sol and Luna. There is
     // no GPT-6 Terra, and GPT-6 Sol is both cheaper than 5.6 Terra ($2/$12) and
     // stronger than 5.6 Sol — so both of the tiers this hub offered move to it.
@@ -217,8 +289,9 @@ function knownModel(provider: AiProvider, id: string): KnownModel | undefined {
  * this home ever meets, until somebody notices and explicitly remaps. That
  * argument is about *cheaper* models, and it is the invariant the tests keep;
  * a *more* thorough one costs more on a job that runs a handful of times in a
- * hub's life, which is a choice a home can make. So OpenAI offers two — Sol by
- * default, and Astra above it — and Sonnet and Luna are on neither list.
+ * hub's life, which is a choice a home can make. So each vendor offers two —
+ * Opus 5.5 by default with Fable 5.1 above it, GPT-6.1 Sol by default with
+ * Astra above it — and Sonnet, Haiku and Luna are on neither list.
  *
  * Each named by an **explicit** id, never an alias: an alias is the vendor's to
  * re-point tomorrow, which would silently move which model a home runs, what a
@@ -230,14 +303,15 @@ export const PROVIDER_MODELS: Readonly<
   anthropic: {
     default: 'claude-opus-5-5',
     choices: [
-      offer('anthropic', 'claude-opus-5-5', 'Anthropic’s most thorough model.', true),
+      offer('anthropic', 'claude-fable-5-1', 'Anthropic’s most thorough, at two and a half times Opus’s price.'),
+      offer('anthropic', 'claude-opus-5-5', 'Thorough, at two fifths of Fable’s price.', true),
     ],
   },
   openai: {
-    default: 'gpt-6-sol',
+    default: 'gpt-6.1-sol',
     choices: [
       offer('openai', 'gpt-6-astra', 'OpenAI’s most thorough, at five times Sol’s price.'),
-      offer('openai', 'gpt-6-sol', 'Thorough, at a fifth of Astra’s price.', true),
+      offer('openai', 'gpt-6.1-sol', 'Thorough, at a fifth of Astra’s price.', true),
     ],
   },
 };
@@ -250,8 +324,10 @@ export const PROVIDER_MODELS: Readonly<
  * rounds, it is read the moment it is written, and a reply somebody does not
  * like is answered with another message — so what a model costs per round is a
  * real trade a home can make, and both halves of it are visible. So the cheaper
- * tiers are offered here: Sonnet 5.5 at half Opus 5.5's price, and GPT-6 Luna
- * at a twentieth of Sol's.
+ * tiers are offered here: Sonnet 5.5 at half Opus 5.5's price, Haiku 5.5 at a
+ * fortieth of it, and GPT-6 Luna at a twentieth of Sol's — with the dearest of
+ * each vendor's above the default, Fable 5.1 and GPT-6 Astra, as recognition
+ * offers them.
  *
  * **One table for both agents, and two stored columns.** It was
  * `ASSISTANT_MODELS`, and the automations agent read `ai_model` — the
@@ -268,15 +344,17 @@ export const AGENT_MODELS: Readonly<
   anthropic: {
     default: 'claude-opus-5-5',
     choices: [
-      offer('anthropic', 'claude-opus-5-5', 'The most capable Claude. Best when it has to work things out.', true),
+      offer('anthropic', 'claude-fable-5-1', 'Anthropic’s most capable, at two and a half times Opus’s price.'),
+      offer('anthropic', 'claude-opus-5-5', 'Best when it has to work things out, at two fifths of Fable’s price.', true),
       offer('anthropic', 'claude-sonnet-5-5', 'Quicker, and half the price of Opus 5.5.'),
+      offer('anthropic', 'claude-haiku-5-5', 'The quickest and cheapest Claude. Fine for simple requests.'),
     ],
   },
   openai: {
-    default: 'gpt-6-sol',
+    default: 'gpt-6.1-sol',
     choices: [
       offer('openai', 'gpt-6-astra', 'OpenAI’s most capable, at five times Sol’s price.'),
-      offer('openai', 'gpt-6-sol', 'Nearly as capable as Astra, at a fifth of the price.', true),
+      offer('openai', 'gpt-6.1-sol', 'Nearly as capable as Astra, at a fifth of the price.', true),
       offer('openai', 'gpt-6-luna', 'The quickest and cheapest. Fine for simple requests.'),
     ],
   },
@@ -486,9 +564,11 @@ export interface TokenUsage {
 }
 
 /**
- * Estimate what a run has cost so far. Used for the budget caps and for
- * `status.lastRun.costUsd`; an unknown model falls back to the most expensive
- * known tier so a cap can only ever trip early.
+ * Estimate what **one request** cost. A run or a conversation adds these up
+ * request by request (`ModelPricing.longPrompt` is why it cannot add up tokens
+ * instead). Used for the budget caps and for `status.lastRun.costUsd`; an
+ * unknown model falls back to the most expensive known rates so a cap can only
+ * ever trip early.
  */
 export function estimateCostUsd(model: string, usage: TokenUsage): number {
   const price = priceOf(model);
@@ -499,11 +579,15 @@ export function estimateCostUsd(model: string, usage: TokenUsage): number {
   const searches = usage.webSearchRequests ?? 0;
   const readMultiplier = price.cacheReadMultiplier ?? CACHE_READ_MULTIPLIER;
   const writeMultiplier = price.cacheWriteMultiplier ?? CACHE_WRITE_MULTIPLIER;
+  const tier = price.longPrompt;
+  const long = tier !== undefined && input + cacheRead + cacheWrite > tier.aboveTokens;
+  const inputRate = long ? price.inputPerMTok * tier.inputMultiplier : price.inputPerMTok;
+  const outputRate = long ? price.outputPerMTok * tier.outputMultiplier : price.outputPerMTok;
   return (
-    (input * price.inputPerMTok +
-      cacheRead * price.inputPerMTok * readMultiplier +
-      cacheWrite * price.inputPerMTok * writeMultiplier +
-      output * price.outputPerMTok) /
+    (input * inputRate +
+      cacheRead * inputRate * readMultiplier +
+      cacheWrite * inputRate * writeMultiplier +
+      output * outputRate) /
       1_000_000 +
     searches * WEB_SEARCH_USD_PER_REQUEST
   );
@@ -516,10 +600,10 @@ export function estimateCostUsd(model: string, usage: TokenUsage): number {
  * Every cap here — a recognition run's, an assistant conversation's, an
  * automations conversation's — was sized against Opus 5 at $5/$25, as "a run
  * that has spent this much has gone wrong". A model priced above that buys less
- * work for the same money, so on GPT-6 Astra ($10/$50) a fixed cap would stop a
- * perfectly healthy run at half the work it allows everywhere else, and a paid
- * run would end unfinished — somebody would have chosen the most thorough model
- * and got the least done. So the cap scales with the price, by whichever of the
+ * work for the same money, so on GPT-6 Astra or Fable 5.1 ($10/$50) a fixed cap
+ * would stop a perfectly healthy run at half the work it allows everywhere
+ * else, and a paid run would end unfinished — somebody would have chosen the
+ * most thorough model and got the least done. So the cap scales with the price, by whichever of the
  * two rates is further above the reference, and never below 1: a cheaper model
  * gets the same dollar ceiling rather than a tighter one, because a cap is a
  * safety rail on spend and not a quota to be used up.
@@ -548,9 +632,20 @@ function priceOf(model: string): ModelPricing {
   return mostExpensive();
 }
 
+/**
+ * The dearest of every rate the table holds, each taken on its own. Not the
+ * dearest *row*: Fable 5.1 and GPT-6 Astra tie on $10/$50 and differ fourfold
+ * on a cached read, so which one the fallback landed on would have been
+ * decided by the order the table happens to be written in.
+ */
 function mostExpensive(): ModelPricing {
-  return Object.values(MODELS)
+  const prices = Object.values(MODELS)
     .flatMap((provider) => Object.values(provider))
-    .map((known) => known.price)
-    .reduce((worst, price) => (price.outputPerMTok > worst.outputPerMTok ? price : worst));
+    .map((known) => known.price);
+  return {
+    inputPerMTok: Math.max(...prices.map((price) => price.inputPerMTok)),
+    outputPerMTok: Math.max(...prices.map((price) => price.outputPerMTok)),
+    cacheReadMultiplier: Math.max(...prices.map((price) => price.cacheReadMultiplier ?? CACHE_READ_MULTIPLIER)),
+    cacheWriteMultiplier: Math.max(...prices.map((price) => price.cacheWriteMultiplier ?? CACHE_WRITE_MULTIPLIER)),
+  };
 }

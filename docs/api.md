@@ -1511,25 +1511,30 @@ the second provider reads exactly what it read before — plus a per-provider ha
 
   "providers": {
     "anthropic": { "hasKey": true, "model": "claude-opus-5-5",
-                   "models": [ { "id": "claude-opus-5-5", "label": "Opus 5.5",
-                                 "note": "Anthropic’s most thorough model.",
+                   "models": [ { "id": "claude-fable-5-1", "label": "Fable 5.1", … },
+                               { "id": "claude-opus-5-5", "label": "Opus 5.5",
+                                 "note": "Thorough, at two fifths of Fable’s price.",
                                  "recommended": true } ] },
-    "openai":    { "hasKey": true, "model": "gpt-6-sol",
+    "openai":    { "hasKey": true, "model": "gpt-6.1-sol",
                    "models": [ { "id": "gpt-6-astra", "label": "GPT-6 Astra", … },
-                               { "id": "gpt-6-sol", "label": "GPT-6 Sol", …, "recommended": true } ] }
+                               { "id": "gpt-6.1-sol", "label": "GPT-6.1 Sol", …, "recommended": true } ] }
   },
   "mapping":   { "provider": "anthropic", "choosable": true, "enabled": true },
   "assistant": { "model": "claude-opus-5-5", "provider": "anthropic", "choosable": true,
-                 "models": [ { "id": "claude-opus-5-5", "label": "Opus 5.5",
-                               "note": "The most capable Claude. …", "recommended": true },
+                 "models": [ { "id": "claude-fable-5-1", "label": "Fable 5.1", … },
+                             { "id": "claude-opus-5-5", "label": "Opus 5.5",
+                               "note": "Best when it has to work things out, …", "recommended": true },
                              { "id": "claude-sonnet-5-5", "label": "Sonnet 5.5",
-                               "note": "Quicker, and half the price of Opus 5.5." } ],
-                 "choices": { "anthropic": [ { "id": "claude-opus-5-5", … },
-                                             { "id": "claude-sonnet-5-5", … } ],
+                               "note": "Quicker, and half the price of Opus 5.5." },
+                             { "id": "claude-haiku-5-5", "label": "Haiku 5.5", … } ],
+                 "choices": { "anthropic": [ { "id": "claude-fable-5-1", … },
+                                             { "id": "claude-opus-5-5", … },
+                                             { "id": "claude-sonnet-5-5", … },
+                                             { "id": "claude-haiku-5-5", … } ],
                               "openai":    [ { "id": "gpt-6-astra", "label": "GPT-6 Astra", … },
-                                             { "id": "gpt-6-sol", "label": "GPT-6 Sol", … },
+                                             { "id": "gpt-6.1-sol", "label": "GPT-6.1 Sol", … },
                                              { "id": "gpt-6-luna", "label": "GPT-6 Luna", … } ] } },
-  "automations": { "model": "gpt-6-sol", "provider": "openai", "choosable": true, "models": [ … ], "choices": { … } },
+  "automations": { "model": "gpt-6.1-sol", "provider": "openai", "choosable": true, "models": [ … ], "choices": { … } },
   "portraits": { "model": "gpt-image-2.5-flare", "maxPerDevice": 6, "budgetBytes": 314572800 }
 }
 ```
@@ -1567,25 +1572,25 @@ than its default. The cheaper tier was retired from it after it produced
 descriptors the hub had to reject and one that named `custom` as an outlet's
 primary capability — a paid run whose result was a tile with no control on it,
 cached against the device *model* for ever. That argument is about *cheaper*
-models, so OpenAI offers GPT-6 Astra above GPT-6 Sol (the default) and Anthropic
-offers Opus 5.5 alone. Writing it is `anthropicModel` / `openaiModel`, with
-`mappingProvider` beside it when the vendor changes too — one `PATCH` carries
-both, and the hub writes the models before the vendor so neither half is
-refused for the other. Send the vendor only when it actually changes: a
-one-key home that stores one has pinned it, and adding a second key later no
-longer moves recognition to the default vendor.
+models, so OpenAI offers GPT-6 Astra above GPT-6.1 Sol (the default) and
+Anthropic offers Fable 5.1 above Opus 5.5 (the default). Writing it is
+`anthropicModel` / `openaiModel`, with `mappingProvider` beside it when the
+vendor changes too — one `PATCH` carries both, and the hub writes the models
+before the vendor so neither half is refused for the other. Send the vendor only
+when it actually changes: a one-key home that stores one has pinned it, and
+adding a second key later no longer moves recognition to the default vendor.
 
 **`model` is what will run, not what is stored — and a retired model is
 succeeded.** Every model the hub has known carries the model that replaced it
 (Opus 5 → Opus 5.5; Sonnet 5 → Sonnet 5.5; GPT-5.6 Sol, the `gpt-5.6` alias and
-GPT-5.6 Terra → GPT-6 Sol), and a stored choice counts only while it is still
-offered: otherwise the hub runs the first model along that chain which is, and
-only where there is none the vendor's default. A successor is always the same
-vendor's — the vendor was a choice somebody made, the retired id was not. **This
-is resolved on every read and never written back**, which is what makes an
-update all it takes and a rollback harmless: the previous build, which
-`install.sh` falls back to when a new one fails its health check, reads the
-column exactly as it always did. The flat `model`, `anthropic.model` and
+GPT-5.6 Terra → GPT-6 Sol → GPT-6.1 Sol), and a stored choice counts only while
+it is still offered: otherwise the hub runs the first model along that chain
+which is, and only where there is none the vendor's default. A successor is
+always the same vendor's — the vendor was a choice somebody made, the retired id
+was not. **This is resolved on every read and never written back**, which is
+what makes an update all it takes and a rollback harmless: the previous build,
+which `install.sh` falls back to when a new one fails its health check, reads
+the column exactly as it always did. The flat `model`, `anthropic.model` and
 `openai.model` are those raw columns and have never been what runs; nothing
 should draw them.
 

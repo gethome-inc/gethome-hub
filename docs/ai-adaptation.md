@@ -262,18 +262,19 @@ The secret is encrypted with the hub's local AES-256-GCM secret, stored in
 the hub's database, never returned by any API, and used only to run the
 mapping agent.
 
-**Model.** Default **`claude-opus-5-5`** (Opus 5.5) on Anthropic and
-**`gpt-6-sol`** (GPT-6 Sol) on OpenAI, with **`gpt-6-astra`** offered above
-Sol — every one pinned as an explicit id rather than a floating alias, so no
-vendor can re-point what a home runs without somebody here deciding to. The
-choice is an allowlist, not a free string (`src/ai/models.ts`), because the
-research tools have model floors — Anthropic's `_20260209` tools only exist on
-Opus 4.6+ and Sonnet 4.6+, so pointing the hub at Haiku or a 4.5-era model would
-not degrade the run, it would 400 it. The allowlist is every model this hub has
-ever run: Opus 5.5, 5, 4.8, 4.7 and 4.6, Sonnet 5.5, 5 and 4.6, GPT-6 Astra, Sol
-and Luna, GPT-5.6 Sol and Terra, and `gpt-5.6` — the bare OpenAI alias, accepted
-because a hub that stored it must not be told its setting is invalid, but never
-offered as a choice.
+**Model.** Default **`claude-opus-5-5`** (Opus 5.5) on Anthropic, with
+**`claude-fable-5-1`** offered above it, and **`gpt-6.1-sol`** (GPT-6.1 Sol) on
+OpenAI, with **`gpt-6-astra`** offered above Sol — every one pinned as an
+explicit id rather than a floating alias, so no vendor can re-point what a home
+runs without somebody here deciding to. The choice is an allowlist, not a free
+string (`src/ai/models.ts`), because the research tools have model floors —
+Anthropic's `_20260209` tools only exist on Opus 4.6+ and Sonnet 4.6+, so
+pointing the hub at Haiku 4.5 or a 4.5-era model would not degrade the run, it
+would 400 it. The allowlist is every model this hub has ever run: Fable 5.1,
+Opus 5.5, 5, 4.8, 4.7 and 4.6, Sonnet 5.5, 5 and 4.6, Haiku 5.5, GPT-6.1 Sol,
+GPT-6 Astra, Sol and Luna, GPT-5.6 Sol and Terra, and `gpt-5.6` — the bare
+OpenAI alias, accepted because a hub that stored it must not be told its setting
+is invalid, but never offered as a choice.
 
 **The apps do not ship that list.** `GET /settings/ai` carries
 `providers.<name>.models` — id, label, one-line note, one `recommended` — and
@@ -291,9 +292,10 @@ a way that is easy to underestimate, because the descriptor is cached per device
 *model* — it silently shapes every unit of that device the home ever meets until
 somebody notices and remaps. Saving a few cents on a job that runs a handful of
 times in a hub's life is the wrong trade for that. That argument is about
-*cheaper* models and says nothing against a more thorough one, so OpenAI's list
-is GPT-6 Sol with Astra above it, while Sonnet and Luna — both offered to the
-agents — are on neither vendor's recognition list.
+*cheaper* models and says nothing against a more thorough one, so Anthropic's
+list is Opus 5.5 with Fable 5.1 above it and OpenAI's is GPT-6.1 Sol with Astra
+above it, while Sonnet, Haiku and Luna — all offered to the agents — are on
+neither vendor's recognition list.
 
 **A stored model counts only while it is still offered, and a retired one is
 succeeded** (`effectiveModel`). Retiring a model otherwise leaves the homes
@@ -301,17 +303,17 @@ that had chosen it as the only homes still running it — exactly the homes the
 retirement is for — and silently, since nothing on any screen would have
 changed. So every model the hub has known names the model that replaced it
 (Opus 5 → Opus 5.5; Sonnet 5 → Sonnet 5.5; GPT-5.6 Sol, the alias and GPT-5.6
-Terra → GPT-6 Sol), a run is given the first model along that chain which is
-still offered, and only where there is none the vendor's default. It is resolved
-on every read and **never written back**: updating the hub is all it takes, with
-no migration and nothing for its owner to do, and the previous build — which
-`install.sh` falls back to when a new one fails its health check — still reads
-the column exactly as it was written. `GET /settings/ai` answers the model that
-will *run*, never the string in the column. A write naming a retired model is
-still accepted rather than 400-ing an app that has not shipped an update; it
-simply resolves to its successor. The allowlist stays broader than `models` for
-a second reason too: `ai_runs.modelId` rows recorded months ago still have to
-price and be named correctly when a run log is read back.
+Terra → GPT-6 Sol → GPT-6.1 Sol), a run is given the first model along that
+chain which is still offered, and only where there is none the vendor's default.
+It is resolved on every read and **never written back**: updating the hub is all
+it takes, with no migration and nothing for its owner to do, and the previous
+build — which `install.sh` falls back to when a new one fails its health check —
+still reads the column exactly as it was written. `GET /settings/ai` answers the
+model that will *run*, never the string in the column. A write naming a retired
+model is still accepted rather than 400-ing an app that has not shipped an
+update; it simply resolves to its successor. The allowlist stays broader than
+`models` for a second reason too: `ai_runs.modelId` rows recorded months ago
+still have to price and be named correctly when a run log is read back.
 
 **Effort is `high` on both providers and is not exposed.** Adaptation is
 reasoning-heavy and runs a handful of times in a hub's life, so that is the
@@ -320,18 +322,24 @@ model. Two settings for one decision would be one too many, and the second is
 the one nobody can judge.
 
 **Cost.** A typical adaptation run costs cents, bounded by the per-run cap.
-Neither API reports what a run cost, so the hub adds up its own token usage
+Neither API reports what a run cost, so the hub prices its own token usage
 against list prices (input, output, cache reads at 0.1× — 0.05× on Opus 5.5,
-which says so on its own row — cache writes at 1.25×, web searches at $10/1000)
-and `status.lastRun.costUsd` is an **estimate**. An unknown model falls back to
-the most expensive known tier, so the cap can only ever trip early. **The cap is
-in the run's own model's dollars**: $2 was sized against Opus 5's $5/$25, and a
-model priced above that — GPT-6 Astra, at twice it — gets it stretched by the
-same factor (`budgetScale`), so choosing the most thorough model buys a more
-thorough run rather than one cut off at half the work. A cheaper model keeps the
-same $2 ceiling rather than a tighter one. OpenAI reports cached input and cache writes *inside* the
-input count, so both shares are subtracted out before each is billed at its own
-rate — otherwise a cache write would be counted twice.
+Sonnet 5.5 and GPT-6.1 Sol and 0.025× on Fable 5.1, each of which says so on its
+own row — cache writes at 1.25×, web searches at $10/1000) and
+`status.lastRun.costUsd` is an **estimate**. **It is priced one request at a
+time and then added up**, never from a run's token totals: GPT-6 bills a prompt
+past 272K tokens at 2× input and 1.5× output, and Haiku 5.5 one past 100K at 5×
+everything, for that whole request — and a run re-sends its whole conversation
+every turn, so its totals cross either line long before any one prompt does. An
+unknown model falls back to the most expensive known tier, so the cap can only
+ever trip early. **The cap is in the run's own model's dollars**: $2 was sized
+against Opus 5's $5/$25, and a model priced above that — GPT-6 Astra or Fable
+5.1, at twice it — gets it stretched by the same factor (`budgetScale`), so
+choosing the most thorough model buys a more thorough run rather than one cut
+off at half the work. A cheaper model keeps the same $2 ceiling rather than a
+tighter one. OpenAI reports cached input and cache writes *inside* the input
+count, so both shares are subtracted out before each is billed at its own rate —
+otherwise a cache write would be counted twice.
 
 ## When the account fails: taxonomy & backoff
 
@@ -693,7 +701,7 @@ Everything lives in `src/ai/`; the module never imports the API or adapters
 | `agent-core.ts` | Everything about a run that is not one vendor's API: the guardrails (turns, cost cap, watchdog, output ceiling, effort), the `AgentStep` vocabulary, the `submit_mapping` schema and description, `evaluateSubmission`, and the `MappingProvider` seam the mapper (and tests) use. **Imports no SDK** — which is what stops a hub configured with only an OpenAI key loading the Anthropic one to satisfy an import chain. |
 | `agent.ts` | The Anthropic loop, on the Messages API: the tool set (`web_search_20260209` + `web_fetch_20260209` + `submit_mapping`), prompt caching, `pause_turn` resumption, failure classification, run stats. Re-exports `agent-core.ts`, so callers did not move. |
 | `openai-agent.ts` | The same run on OpenAI's Responses API, over plain `fetch` — no second SDK for a Pi to download. Hosted `web_search` and `submit_mapping`; `store: false` with reasoning items echoed back; the same caps and step vocabulary. |
-| `models.ts` | Per provider: the model allowlist (what can drive the hosted research tools), the one-per-provider `choices` list the apps state, and the list prices the per-run cost cap and `costUsd` estimate are computed from. Dependency-free, so the API layer can validate a model without pulling in the AI stack. |
+| `models.ts` | Per provider: the model allowlist (what can drive the hosted research tools), the offered `choices` lists the apps draw, and the list prices (and long-prompt rates) the cost caps and `costUsd` estimate are computed from, one request at a time. Dependency-free, so the API layer can validate a model without pulling in the AI stack. |
 | `errors.ts` | The failure taxonomy: `AiUnavailableError` kinds, HTTP-status classification (`classifyApiError`), error-text fallback, reset-time parsing. |
 | `prompts.ts` | The system prompt (canonical capabilities/paths/units/transforms + worked examples + research rules) — built **per provider**, because the research paragraph names tools and the two loops do not have the same ones; the per-device task prompt carrying the whole research brief; and the zigbee2mqtt.io page URL. |
 | `mapper.ts` | Orchestration: cache lookups, one-run-at-a-time serialization, per-model in-flight dedupe, the credential-keyed backoff gate, validation, storage, and interpretation into an `AppliedAiMapping` for the adapter. |

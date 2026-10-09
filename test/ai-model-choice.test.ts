@@ -115,6 +115,14 @@ describe.skipIf(!handle)('which model a run is given', () => {
     expect(new Set(modelsGiven(createMappingAgent))).toEqual(new Set(['claude-opus-5-5']));
   });
 
+  it('leaves the more thorough of Anthropic’s two alone as well', async () => {
+    await settings.setAiSettings({ model: 'claude-fable-5-1', apiKey: 'sk-ant-api-key-0000' });
+    const mapper = new AiDeviceMapper(db, settings, log);
+    await mapper.requestMapping(lamp, mapExposes(lamp), { force: true });
+
+    expect(new Set(modelsGiven(createMappingAgent))).toEqual(new Set(['claude-fable-5-1']));
+  });
+
   it('leaves the more thorough of OpenAI’s two alone as well', async () => {
     await settings.setAiKey('openai', 'sk-openai-key-0000');
     await settings.setAiModel('gpt-6-astra', 'openai');
@@ -126,8 +134,9 @@ describe.skipIf(!handle)('which model a run is given', () => {
 
   /**
    * **What updating a hub does to a home that chose a model this build
-   * retired**: it runs the model that replaced it — Opus 5 → Opus 5.5, both
-   * GPT-5.6 tiers → GPT-6 Sol — and nobody has to do anything.
+   * retired**: it runs the model that replaced it — Opus 5 → Opus 5.5, GPT-6
+   * Sol → GPT-6.1 Sol, and both GPT-5.6 tiers on down that chain — and nobody
+   * has to do anything.
    */
   it('hands a run the successor of a retired model, on either provider', async () => {
     await settings.setAiSettings({ model: 'claude-opus-5', apiKey: 'sk-ant-api-key-0000' });
@@ -141,13 +150,23 @@ describe.skipIf(!handle)('which model a run is given', () => {
     await settings.setAiModel('gpt-5.6-terra', 'openai');
     const openai = new AiDeviceMapper(db, settings, log);
     await openai.requestMapping(lamp, mapExposes(lamp), { force: true });
-    expect(new Set(modelsGiven(createOpenAiMappingAgent))).toEqual(new Set(['gpt-6-sol']));
+    expect(new Set(modelsGiven(createOpenAiMappingAgent))).toEqual(new Set(['gpt-6.1-sol']));
+
+    await resetDb(db);
+    settings = new SettingsService(db, Buffer.alloc(32).toString('base64'));
+    await settings.setAiKey('openai', 'sk-openai-key-0000');
+    // The default until GPT-6.1 Sol: a home that never chose is on it too.
+    await settings.setAiModel('gpt-6-sol', 'openai');
+    const sol = new AiDeviceMapper(db, settings, log);
+    await sol.requestMapping(lamp, mapExposes(lamp), { force: true });
+    expect(new Set(modelsGiven(createOpenAiMappingAgent))).toEqual(new Set(['gpt-6.1-sol']));
+    expect(modelsGiven(createOpenAiMappingAgent)).not.toContain('gpt-6-sol');
   });
 
   /**
    * **And nothing is written back**, which is the whole of why this is safe to
    * roll back. `install.sh` puts the previous build back when a new one fails
-   * its health check; that build has never heard of `gpt-6-sol`, and an agent
+   * its health check; that build has never heard of `gpt-6.1-sol`, and an agent
    * column it reads with an unknown id falls to "the first vendor with a usable
    * key" — a home that chose OpenAI would silently move to Anthropic. The
    * column still saying what somebody chose is what keeps the older build
@@ -161,8 +180,8 @@ describe.skipIf(!handle)('which model a run is given', () => {
     await settings.setAutomationsModel('claude-opus-5');
 
     const ai = await settings.getAiSettings();
-    expect(effectiveModel('openai', ai.openai.model)).toBe('gpt-6-sol');
-    expect(ai.assistant).toMatchObject({ provider: 'openai', model: 'gpt-6-sol' });
+    expect(effectiveModel('openai', ai.openai.model)).toBe('gpt-6.1-sol');
+    expect(ai.assistant).toMatchObject({ provider: 'openai', model: 'gpt-6.1-sol' });
     expect(ai.automations).toMatchObject({ provider: 'anthropic', model: 'claude-opus-5-5' });
 
     // And straight from the rows: exactly what was written, every one.
@@ -192,9 +211,12 @@ describe('which model an agent is given once its own is retired', () => {
       provider: 'anthropic',
       modelId: 'claude-sonnet-5-5',
     });
-    expect(effectiveAgentModel('gpt-5.6-sol', both)).toEqual({ provider: 'openai', modelId: 'gpt-6-sol' });
-    expect(effectiveAgentModel('gpt-5.6-terra', both)).toEqual({ provider: 'openai', modelId: 'gpt-6-sol' });
-    expect(effectiveAgentModel('gpt-5.6', both)).toEqual({ provider: 'openai', modelId: 'gpt-6-sol' });
+    expect(effectiveAgentModel('gpt-6-sol', both)).toEqual({ provider: 'openai', modelId: 'gpt-6.1-sol' });
+    // Down a chain again: GPT-5.6 was replaced by GPT-6 Sol, which GPT-6.1
+    // Sol has replaced in turn.
+    expect(effectiveAgentModel('gpt-5.6-sol', both)).toEqual({ provider: 'openai', modelId: 'gpt-6.1-sol' });
+    expect(effectiveAgentModel('gpt-5.6-terra', both)).toEqual({ provider: 'openai', modelId: 'gpt-6.1-sol' });
+    expect(effectiveAgentModel('gpt-5.6', both)).toEqual({ provider: 'openai', modelId: 'gpt-6.1-sol' });
     // Down a chain: every Opus before 5 walks to 5.5 rather than stopping.
     expect(effectiveAgentModel('claude-opus-4-6', both)).toEqual({
       provider: 'anthropic',
@@ -238,6 +260,8 @@ describe('the model table', () => {
   /** Every model a hub in the field may have stored, from every build so far. */
   const everShipped = {
     anthropic: [
+      'claude-fable-5-1',
+      'claude-haiku-5-5',
       'claude-opus-5-5',
       'claude-opus-5',
       'claude-opus-4-8',
@@ -247,7 +271,7 @@ describe('the model table', () => {
       'claude-sonnet-5',
       'claude-sonnet-4-6',
     ],
-    openai: ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6', 'gpt-5.6-terra'],
+    openai: ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6', 'gpt-5.6-terra'],
   } as const;
 
   it('still knows, and names, every model a hub may have stored', () => {
@@ -296,7 +320,7 @@ describe('the model table', () => {
 describe('naming a model that has already run', () => {
   it('uses the model’s own name while it is offered', () => {
     expect(modelLabel('anthropic', 'claude-opus-5-5')).toBe('Opus 5.5');
-    expect(modelLabel('openai', 'gpt-6-sol')).toBe('GPT-6 Sol');
+    expect(modelLabel('openai', 'gpt-6.1-sol')).toBe('GPT-6.1 Sol');
     expect(modelLabel('openai', 'gpt-6-astra')).toBe('GPT-6 Astra');
   });
 
@@ -324,14 +348,18 @@ describe('naming a model that has already run', () => {
     const ids = (choices: readonly { id: string }[]) => choices.map((choice) => choice.id);
     expect(ids(AGENT_MODELS.anthropic.choices)).toContain('claude-sonnet-5-5');
     expect(ids(PROVIDER_MODELS.anthropic.choices)).not.toContain('claude-sonnet-5-5');
+    expect(ids(AGENT_MODELS.anthropic.choices)).toContain('claude-haiku-5-5');
+    expect(ids(PROVIDER_MODELS.anthropic.choices)).not.toContain('claude-haiku-5-5');
     expect(ids(AGENT_MODELS.openai.choices)).toContain('gpt-6-luna');
     expect(ids(PROVIDER_MODELS.openai.choices)).not.toContain('gpt-6-luna');
 
     expect(modelLabel('anthropic', 'claude-sonnet-5-5')).toBe('Sonnet 5.5');
+    expect(modelLabel('anthropic', 'claude-haiku-5-5')).toBe('Haiku 5.5');
     expect(modelLabel('openai', 'gpt-6-luna')).toBe('GPT-6 Luna');
     // Still not the mapper's to run: the two lists answer two questions, and
     // this is the one that has to keep saying no.
     expect(effectiveModel('anthropic', 'claude-sonnet-5-5')).toBe('claude-opus-5-5');
+    expect(effectiveModel('anthropic', 'claude-haiku-5-5')).toBe('claude-opus-5-5');
   });
 
   /**
@@ -348,6 +376,8 @@ describe('naming a model that has already run', () => {
     expect(modelLabel('anthropic', 'claude-opus-5')).toBe('Opus 5');
     expect(modelLabel('anthropic', 'claude-opus-4-6')).toBe('Opus 4.6');
     expect(modelLabel('openai', 'gpt-5.6-terra')).toBe('GPT-5.6 Terra');
+    expect(effectiveModel('openai', 'gpt-6-sol')).toBe('gpt-6.1-sol');
+    expect(modelLabel('openai', 'gpt-6-sol')).toBe('GPT-6 Sol');
     // The same for a chat on the cheaper tier: it ran on Sonnet 5, whatever
     // runs in its place now.
     expect(effectiveAgentModel('claude-sonnet-5', { anthropic: true, openai: true })?.modelId).toBe(
@@ -357,8 +387,8 @@ describe('naming a model that has already run', () => {
   });
 
   it('hands back the raw id of a model this build never knew', () => {
-    // Haiku was never on any list — it cannot drive the research tools — so a
-    // row naming it can only have come from somewhere else.
+    // Haiku 4.5 was never on any list — it cannot drive the research tools —
+    // so a row naming it can only have come from somewhere else.
     expect(modelLabel('anthropic', 'claude-haiku-4-5')).toBe('claude-haiku-4-5');
   });
 
