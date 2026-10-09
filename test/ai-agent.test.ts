@@ -222,9 +222,9 @@ describe('supported models', () => {
    */
   it('pins Opus 5.5, Astra and Sol by their explicit ids', () => {
     expect(PROVIDER_MODELS.anthropic.choices.map((choice) => choice.id)).toEqual(['claude-opus-5-5']);
-    expect(PROVIDER_MODELS.openai.choices.map((choice) => choice.id)).toEqual(['gpt-6-astra', 'gpt-6-sol']);
+    expect(PROVIDER_MODELS.openai.choices.map((choice) => choice.id)).toEqual(['gpt-6-astra', 'gpt-6.1-sol']);
     expect(defaultModelFor('anthropic')).toBe('claude-opus-5-5');
-    expect(defaultModelFor('openai')).toBe('gpt-6-sol');
+    expect(defaultModelFor('openai')).toBe('gpt-6.1-sol');
 
     // Retired from the picker, still known: a run recorded months ago names
     // the model it ran on, and a stored setting naming one must still be taken.
@@ -232,6 +232,8 @@ describe('supported models', () => {
     expect(isSupportedModel('claude-sonnet-5', 'anthropic')).toBe(true);
     expect(isSupportedModel('gpt-5.6-sol', 'openai')).toBe(true);
     expect(isSupportedModel('gpt-5.6-terra', 'openai')).toBe(true);
+    expect(isSupportedModel('gpt-6-sol', 'openai')).toBe(true);
+    expect(PROVIDER_MODELS.openai.choices.some((choice) => choice.id === 'gpt-6-sol')).toBe(false);
 
     // Accepted, priced, and never offered.
     expect(isSupportedModel('gpt-5.6', 'openai')).toBe(true);
@@ -258,13 +260,16 @@ describe('supported models', () => {
   it('runs a stored model only while it is still offered, and succeeds a retired one', () => {
     expect(effectiveModel('anthropic', 'claude-opus-5')).toBe('claude-opus-5-5');
     expect(effectiveModel('anthropic', 'claude-opus-4-6')).toBe('claude-opus-5-5');
-    expect(effectiveModel('openai', 'gpt-5.6-sol')).toBe('gpt-6-sol');
-    expect(effectiveModel('openai', 'gpt-5.6-terra')).toBe('gpt-6-sol');
+    // GPT-6 Sol is replaced by GPT-6.1 Sol, and the GPT-5.6 tiers it had
+    // replaced walk on down the same chain.
+    expect(effectiveModel('openai', 'gpt-6-sol')).toBe('gpt-6.1-sol');
+    expect(effectiveModel('openai', 'gpt-5.6-sol')).toBe('gpt-6.1-sol');
+    expect(effectiveModel('openai', 'gpt-5.6-terra')).toBe('gpt-6.1-sol');
     // The bare alias was never offered, so it was never a preference either.
-    expect(effectiveModel('openai', 'gpt-5.6')).toBe('gpt-6-sol');
+    expect(effectiveModel('openai', 'gpt-5.6')).toBe('gpt-6.1-sol');
     // Offered to the agents and not here: the default, never the cheap tier.
     expect(effectiveModel('anthropic', 'claude-sonnet-5-5')).toBe('claude-opus-5-5');
-    expect(effectiveModel('openai', 'gpt-6-luna')).toBe('gpt-6-sol');
+    expect(effectiveModel('openai', 'gpt-6-luna')).toBe('gpt-6.1-sol');
     // Nor at the end of a chain: Sonnet 5 is succeeded by Sonnet 5.5, which
     // this list does not offer either.
     expect(effectiveModel('anthropic', 'claude-sonnet-5')).toBe('claude-opus-5-5');
@@ -311,15 +316,17 @@ describe('supported models', () => {
     ).toBeCloseTo(12, 5);
     expect(estimateCostUsd('gpt-6-astra', { input_tokens: 1_000_000, output_tokens: 1_000_000 })).toBeCloseTo(60, 5);
     expect(estimateCostUsd('gpt-6-sol', { input_tokens: 1_000_000, output_tokens: 1_000_000 })).toBeCloseTo(12, 5);
+    // GPT-6.1 Sol kept GPT-6 Sol's $2/$10.
+    expect(estimateCostUsd('gpt-6.1-sol', { input_tokens: 1_000_000, output_tokens: 1_000_000 })).toBeCloseTo(12, 5);
     expect(estimateCostUsd('gpt-6-luna', { input_tokens: 1_000_000, output_tokens: 1_000_000 })).toBeCloseTo(0.6, 5);
   });
 
   it('bills cache reads at a tenth of the input rate', () => {
     const cached = estimateCostUsd('claude-opus-5', { cache_read_input_tokens: 1_000_000 });
     expect(cached).toBeCloseTo(0.5, 5);
-    // $0.20, like Opus 5.5 — but as a tenth of $2, not a twentieth of $4.
-    expect(estimateCostUsd('claude-sonnet-5-5', { cache_read_input_tokens: 1_000_000 })).toBeCloseTo(0.2, 5);
-    expect(estimateCostUsd('claude-sonnet-5-5', { cache_creation_input_tokens: 1_000_000 })).toBeCloseTo(2.5, 5);
+    // A tenth of $2: Sonnet 5 and GPT-6 Sol have no rate of their own.
+    expect(estimateCostUsd('claude-sonnet-5', { cache_read_input_tokens: 1_000_000 })).toBeCloseTo(0.2, 5);
+    expect(estimateCostUsd('gpt-6-sol', { cache_read_input_tokens: 1_000_000 })).toBeCloseTo(0.2, 5);
   });
 
   /**
@@ -331,6 +338,12 @@ describe('supported models', () => {
     expect(estimateCostUsd('claude-opus-5-5', { cache_read_input_tokens: 1_000_000 })).toBeCloseTo(0.2, 5);
     // Writes are the usual 1.25x of $4.
     expect(estimateCostUsd('claude-opus-5-5', { cache_creation_input_tokens: 1_000_000 })).toBeCloseTo(5, 5);
+    // Sonnet 5.5 and GPT-6.1 Sol read at a twentieth of $2 — half what their
+    // predecessors charged for the same read — and write at the usual 1.25x.
+    expect(estimateCostUsd('claude-sonnet-5-5', { cache_read_input_tokens: 1_000_000 })).toBeCloseTo(0.1, 5);
+    expect(estimateCostUsd('claude-sonnet-5-5', { cache_creation_input_tokens: 1_000_000 })).toBeCloseTo(2.5, 5);
+    expect(estimateCostUsd('gpt-6.1-sol', { cache_read_input_tokens: 1_000_000 })).toBeCloseTo(0.1, 5);
+    expect(estimateCostUsd('gpt-6.1-sol', { cache_creation_input_tokens: 1_000_000 })).toBeCloseTo(2.5, 5);
   });
 
   /**

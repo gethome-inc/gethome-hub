@@ -63,9 +63,9 @@ domains — update them in the same change.
   lopsided because a descriptor is cached per device *model* and shapes every
   unit of it the home ever meets until somebody remaps; a few cents on a job
   that runs a handful of times in a hub's life does not buy that risk. That is
-  an argument about *cheaper* models, so OpenAI offers GPT-6 Astra above Sol
-  and Anthropic offers Opus 5.5 alone — and the test pins the invariant, not a
-  count. The half that is easy to miss is
+  an argument about *cheaper* models, so OpenAI offers GPT-6 Astra above
+  GPT-6.1 Sol and Anthropic offers Opus 5.5 alone — and the test pins the
+  invariant, not a count. The half that is easy to miss is
   **`effectiveModel`: a stored model counts only while it is still offered**,
   or retiring one leaves the homes that had chosen it as the only homes still
   running it — silently, since nothing on a screen would change. `GET
@@ -76,7 +76,8 @@ domains — update them in the same change.
   **What runs instead is the retired model's successor**, and that is one table
   rather than three (`MODELS` in `models.ts`: a row per model the hub has ever
   run, carrying its price, its name and the model that replaced it — Opus 5 →
-  Opus 5.5, Sonnet 5 → Sonnet 5.5, GPT-5.6 Sol/Terra → GPT-6 Sol). Three rules.
+  Opus 5.5, Sonnet 5 → Sonnet 5.5, GPT-5.6 Sol/Terra → GPT-6 Sol → GPT-6.1 Sol).
+  Three rules.
   **Resolved on read, never written back**: that is what makes updating the hub
   the whole migration, and it is the only version that survives `install.sh`'s
   rollback — the previous build has never heard of the successor, and an agent
@@ -714,11 +715,11 @@ domains — update them in the same change.
   runs, so a member whose role cannot hand a job over gets a sentence the model
   reads out rather than a capability silently absent.
   **The agents' model list is its own** (`AGENT_MODELS` — Opus 5.5 and Sonnet
-  5.5 on Anthropic, GPT-6 Astra, Sol and Luna on OpenAI), and the mapper's list
-  stays strong-only: a descriptor is cached against a device model and shapes
-  every unit of it for ever, while a chat is many small rounds answered with
-  another message when the reply is poor. **The provider follows the model id
-  and there is no second column** (`agentProviderOf`): ids do not collide across
+  5.5 on Anthropic, GPT-6 Astra, GPT-6.1 Sol and GPT-6 Luna on OpenAI), and
+  the mapper's list stays strong-only: a descriptor is cached against a device
+  model and shapes every unit of it for ever, while a chat is many small rounds
+  answered with another message when the reply is poor. **The provider follows
+  the model id and there is no second column** (`agentProviderOf`): ids do not collide across
   vendors — `priceOf` has relied on that since the mapper had two — so one
   setting says both things and they cannot disagree, and an app's picker writes
   a model id whatever vendor it is on. **And resolution is key-aware**, which is

@@ -263,17 +263,17 @@ the hub's database, never returned by any API, and used only to run the
 mapping agent.
 
 **Model.** Default **`claude-opus-5-5`** (Opus 5.5) on Anthropic and
-**`gpt-6-sol`** (GPT-6 Sol) on OpenAI, with **`gpt-6-astra`** offered above
+**`gpt-6.1-sol`** (GPT-6.1 Sol) on OpenAI, with **`gpt-6-astra`** offered above
 Sol — every one pinned as an explicit id rather than a floating alias, so no
 vendor can re-point what a home runs without somebody here deciding to. The
 choice is an allowlist, not a free string (`src/ai/models.ts`), because the
 research tools have model floors — Anthropic's `_20260209` tools only exist on
 Opus 4.6+ and Sonnet 4.6+, so pointing the hub at Haiku or a 4.5-era model would
 not degrade the run, it would 400 it. The allowlist is every model this hub has
-ever run: Opus 5.5, 5, 4.8, 4.7 and 4.6, Sonnet 5.5, 5 and 4.6, GPT-6 Astra, Sol
-and Luna, GPT-5.6 Sol and Terra, and `gpt-5.6` — the bare OpenAI alias, accepted
-because a hub that stored it must not be told its setting is invalid, but never
-offered as a choice.
+ever run: Opus 5.5, 5, 4.8, 4.7 and 4.6, Sonnet 5.5, 5 and 4.6, GPT-6.1 Sol,
+GPT-6 Astra, Sol and Luna, GPT-5.6 Sol and Terra, and `gpt-5.6` — the bare
+OpenAI alias, accepted because a hub that stored it must not be told its setting
+is invalid, but never offered as a choice.
 
 **The apps do not ship that list.** `GET /settings/ai` carries
 `providers.<name>.models` — id, label, one-line note, one `recommended` — and
@@ -292,7 +292,7 @@ a way that is easy to underestimate, because the descriptor is cached per device
 somebody notices and remaps. Saving a few cents on a job that runs a handful of
 times in a hub's life is the wrong trade for that. That argument is about
 *cheaper* models and says nothing against a more thorough one, so OpenAI's list
-is GPT-6 Sol with Astra above it, while Sonnet and Luna — both offered to the
+is GPT-6.1 Sol with Astra above it, while Sonnet and Luna — both offered to the
 agents — are on neither vendor's recognition list.
 
 **A stored model counts only while it is still offered, and a retired one is
@@ -301,17 +301,17 @@ that had chosen it as the only homes still running it — exactly the homes the
 retirement is for — and silently, since nothing on any screen would have
 changed. So every model the hub has known names the model that replaced it
 (Opus 5 → Opus 5.5; Sonnet 5 → Sonnet 5.5; GPT-5.6 Sol, the alias and GPT-5.6
-Terra → GPT-6 Sol), a run is given the first model along that chain which is
-still offered, and only where there is none the vendor's default. It is resolved
-on every read and **never written back**: updating the hub is all it takes, with
-no migration and nothing for its owner to do, and the previous build — which
-`install.sh` falls back to when a new one fails its health check — still reads
-the column exactly as it was written. `GET /settings/ai` answers the model that
-will *run*, never the string in the column. A write naming a retired model is
-still accepted rather than 400-ing an app that has not shipped an update; it
-simply resolves to its successor. The allowlist stays broader than `models` for
-a second reason too: `ai_runs.modelId` rows recorded months ago still have to
-price and be named correctly when a run log is read back.
+Terra → GPT-6 Sol → GPT-6.1 Sol), a run is given the first model along that
+chain which is still offered, and only where there is none the vendor's default.
+It is resolved on every read and **never written back**: updating the hub is all
+it takes, with no migration and nothing for its owner to do, and the previous
+build — which `install.sh` falls back to when a new one fails its health check —
+still reads the column exactly as it was written. `GET /settings/ai` answers the
+model that will *run*, never the string in the column. A write naming a retired
+model is still accepted rather than 400-ing an app that has not shipped an
+update; it simply resolves to its successor. The allowlist stays broader than
+`models` for a second reason too: `ai_runs.modelId` rows recorded months ago
+still have to price and be named correctly when a run log is read back.
 
 **Effort is `high` on both providers and is not exposed.** Adaptation is
 reasoning-heavy and runs a handful of times in a hub's life, so that is the

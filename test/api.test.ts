@@ -1045,7 +1045,7 @@ describe.skipIf(!handle)('hub API', () => {
       hasKey: true,
       providers: {
         anthropic: { hasKey: true, model: 'claude-opus-5-5' },
-        openai: { hasKey: true, model: 'gpt-6-sol' },
+        openai: { hasKey: true, model: 'gpt-6.1-sol' },
       },
       // Both keys, so which one recognises devices is now somebody's choice.
       mapping: { provider: 'anthropic', choosable: true },
@@ -1164,7 +1164,7 @@ describe.skipIf(!handle)('hub API', () => {
     expect(saved.statusCode).toBe(200);
     const body = saved.json() as Record<string, unknown>;
     expect(body).toMatchObject({
-      assistant: { model: 'gpt-6-sol', provider: 'openai', choosable: true },
+      assistant: { model: 'gpt-6.1-sol', provider: 'openai', choosable: true },
       automations: { model: 'claude-opus-5-5', provider: 'anthropic', choosable: true },
     });
     const assistant = body.assistant as {
@@ -1173,11 +1173,11 @@ describe.skipIf(!handle)('hub API', () => {
     };
     // `models` is the answering vendor's list — what an app a version behind
     // draws its pills from — and `choices` the whole table.
-    expect(assistant.models.map((model) => model.id)).toEqual(['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna']);
+    expect(assistant.models.map((model) => model.id)).toEqual(['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-luna']);
     expect(assistant.choices.anthropic?.map((model) => model.id)).toEqual(['claude-opus-5-5', 'claude-sonnet-5-5']);
     expect(assistant.choices.openai?.map((model) => model.label)).toEqual([
       'GPT-6 Astra',
-      'GPT-6 Sol',
+      'GPT-6.1 Sol',
       'GPT-6 Luna',
     ]);
 
@@ -1207,7 +1207,7 @@ describe.skipIf(!handle)('hub API', () => {
     expect(token.json()).toMatchObject({
       mapping: { choosable: true },
       assistant: { provider: 'openai', choosable: false },
-      automations: { provider: 'openai', model: 'gpt-6-sol', choosable: false },
+      automations: { provider: 'openai', model: 'gpt-6.1-sol', choosable: false },
     });
 
     // Leave the hub as the next test expects to find it: one Anthropic API

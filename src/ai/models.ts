@@ -40,14 +40,14 @@
  * **Succession.** A stored choice counts only while the model it names is still
  * *offered*; otherwise the hub runs the first model along its successor chain
  * that is — Opus 5 → Opus 5.5, Sonnet 5 → Sonnet 5.5, GPT-5.6 Sol and Terra →
- * GPT-6 Sol — and only where there is no such model, the vendor's default.
- * Three rules.
+ * GPT-6 Sol → GPT-6.1 Sol — and only where there is no such model, the
+ * vendor's default. Three rules.
  *  - **It is resolved when settings are read, never written back.** Updating a
  *    hub is therefore all it takes to move every home on a retired model, with
  *    no migration and nothing for its owner to do — and it is also the only
  *    version that is safe to roll back. `install.sh` puts the previous build
  *    back when a new one fails its health check, and that build has never heard
- *    of `gpt-6-sol`: an agent column rewritten at boot would be an unknown id
+ *    of `gpt-6.1-sol`: an agent column rewritten at boot would be an unknown id
  *    there, which falls to "the first vendor with a usable key" and silently
  *    moves a home that had chosen OpenAI onto Anthropic. Left alone, the column
  *    still says what it said and the older build reads it exactly as before.
@@ -60,9 +60,9 @@
  *    written has to be revisited.
  *
  * Prices are list prices in USD per million tokens, from each vendor's model
- * pages (checked 23 September 2026; Sonnet 5.5 on 28 September). They move
- * rarely, and the caps they feed are a safety rail rather than an invoice —
- * `status.lastRun.costUsd` is an estimate and says so.
+ * pages (checked 9 October 2026). They move rarely, and the caps they feed are
+ * a safety rail rather than an invoice — `status.lastRun.costUsd` is an
+ * estimate and says so.
  */
 
 import type { AiProvider } from '../core/settings.js';
@@ -74,8 +74,9 @@ export interface ModelPricing {
   readonly outputPerMTok: number;
   /**
    * What a cached read costs, as a fraction of the input rate, where this model
-   * is billed differently from the usual tenth. Opus 5.5 reads at a twentieth,
-   * and pricing it at a tenth would overstate every long conversation on it.
+   * is billed differently from the usual tenth. Opus 5.5, Sonnet 5.5 and
+   * GPT-6.1 Sol read at a twentieth, and pricing them at a tenth would
+   * overstate every long conversation on them.
    */
   readonly cacheReadMultiplier?: number;
   /** The same for a cache write, where it differs from the usual 1.25×. */
@@ -144,9 +145,12 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
       price: { inputPerMTok: 5, outputPerMTok: 25 },
       successor: 'claude-opus-4-7',
     },
-    // Sonnet 5's price. Its cached read is $0.20 — the same figure as
-    // Opus 5.5's, but here it is the usual tenth, so no multiplier of its own.
-    'claude-sonnet-5-5': { label: 'Sonnet 5.5', price: { inputPerMTok: 2, outputPerMTok: 10 } },
+    // Sonnet 5's price, with Opus 5.5's twentieth for a cached read: $0.10,
+    // where Sonnet 5 reads at the usual tenth ($0.20).
+    'claude-sonnet-5-5': {
+      label: 'Sonnet 5.5',
+      price: { inputPerMTok: 2, outputPerMTok: 10, cacheReadMultiplier: 0.05 },
+    },
     'claude-sonnet-5': {
       label: 'Sonnet 5',
       price: { inputPerMTok: 2, outputPerMTok: 10 },
@@ -160,7 +164,22 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
   },
   openai: {
     'gpt-6-astra': { label: 'GPT-6 Astra', price: { inputPerMTok: 10, outputPerMTok: 50 } },
-    'gpt-6-sol': { label: 'GPT-6 Sol', price: { inputPerMTok: 2, outputPerMTok: 10 } },
+    // GPT-6 Sol's price, with a cached read at a twentieth ($0.10) where GPT-6
+    // Sol reads at the usual tenth. It takes the same requests: the Responses
+    // API with hosted web search and function tools, and `reasoning.effort`
+    // low, medium and high — it refuses only `none` and `minimal`, which
+    // nothing here sends.
+    'gpt-6.1-sol': {
+      label: 'GPT-6.1 Sol',
+      price: { inputPerMTok: 2, outputPerMTok: 10, cacheReadMultiplier: 0.05 },
+    },
+    // Still served, and replaced in the picker the way Opus 5 was: GPT-6.1 Sol
+    // is the same price and stronger, so nothing a home chose is lost by moving.
+    'gpt-6-sol': {
+      label: 'GPT-6 Sol',
+      price: { inputPerMTok: 2, outputPerMTok: 10 },
+      successor: 'gpt-6.1-sol',
+    },
     'gpt-6-luna': { label: 'GPT-6 Luna', price: { inputPerMTok: 0.1, outputPerMTok: 0.5 } },
     // GPT-5.6 was Sol, Terra and Luna; GPT-6 is Astra, Sol and Luna. There is
     // no GPT-6 Terra, and GPT-6 Sol is both cheaper than 5.6 Terra ($2/$12) and
@@ -234,10 +253,10 @@ export const PROVIDER_MODELS: Readonly<
     ],
   },
   openai: {
-    default: 'gpt-6-sol',
+    default: 'gpt-6.1-sol',
     choices: [
       offer('openai', 'gpt-6-astra', 'OpenAI’s most thorough, at five times Sol’s price.'),
-      offer('openai', 'gpt-6-sol', 'Thorough, at a fifth of Astra’s price.', true),
+      offer('openai', 'gpt-6.1-sol', 'Thorough, at a fifth of Astra’s price.', true),
     ],
   },
 };
@@ -273,10 +292,10 @@ export const AGENT_MODELS: Readonly<
     ],
   },
   openai: {
-    default: 'gpt-6-sol',
+    default: 'gpt-6.1-sol',
     choices: [
       offer('openai', 'gpt-6-astra', 'OpenAI’s most capable, at five times Sol’s price.'),
-      offer('openai', 'gpt-6-sol', 'Nearly as capable as Astra, at a fifth of the price.', true),
+      offer('openai', 'gpt-6.1-sol', 'Nearly as capable as Astra, at a fifth of the price.', true),
       offer('openai', 'gpt-6-luna', 'The quickest and cheapest. Fine for simple requests.'),
     ],
   },

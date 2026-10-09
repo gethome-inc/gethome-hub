@@ -12,21 +12,21 @@ scenes, says what it can and cannot do — and hands the jobs that belong to
 another agent over to it.
 
 It runs on **either vendor**, on a model the home chooses: **Opus 5.5** or
-**Sonnet 5.5** on Anthropic, **GPT-6 Astra**, **GPT-6 Sol** or **GPT-6 Luna** on
-OpenAI. That list is its own rather than the mapper's, and the difference is the
-trade: a mapping descriptor is cached against a device *model* and shapes every
-unit of it the home ever meets, so a cheaper tier that is wrong once is wrong
-for ever and the mapper never offers one. A conversation is many small rounds,
-read the moment they arrive and answered with another message when the reply is
-poor — so what a round costs is a real choice somebody can make, and both halves
-of it are visible. **A home that chose a model this build has retired is moved
-to the one that replaced it** — Opus 5 → Opus 5.5, Sonnet 5 → Sonnet 5.5,
-GPT-5.6 Sol and Terra → GPT-6 Sol — on the vendor it chose, resolved whenever
-the settings are read and never written back (`src/ai/models.ts` says why that
-is the rollback-safe half). **Its $0.50 cap is in the model's own dollars**: it
-was sized against Opus 5, so `budgetScale` stretches it for GPT-6 Astra, at
-twice that price, and a conversation on the most capable model is not cut off at
-half the rounds.
+**Sonnet 5.5** on Anthropic, **GPT-6 Astra**, **GPT-6.1 Sol** or **GPT-6 Luna**
+on OpenAI. That list is its own rather than the mapper's, and the difference is
+the trade: a mapping descriptor is cached against a device *model* and shapes
+every unit of it the home ever meets, so a cheaper tier that is wrong once is
+wrong for ever and the mapper never offers one. A conversation is many small
+rounds, read the moment they arrive and answered with another message when the
+reply is poor — so what a round costs is a real choice somebody can make, and
+both halves of it are visible. **A home that chose a model this build has
+retired is moved to the one that replaced it** — Opus 5 → Opus 5.5, Sonnet 5 →
+Sonnet 5.5, GPT-5.6 Sol and Terra → GPT-6 Sol → GPT-6.1 Sol — on the vendor it
+chose, resolved whenever the settings are read and never written back
+(`src/ai/models.ts` says why that is the rollback-safe half). **Its $0.50 cap is
+in the model's own dollars**: it was sized against Opus 5, so `budgetScale`
+stretches it for GPT-6 Astra, at twice that price, and a conversation on the
+most capable model is not cut off at half the rounds.
 
 **It was Anthropic-only, and not as a policy.** `chat/agent-loop.ts` typed every
 signature against `Anthropic.*` and both agents imported the SDK at the top of
