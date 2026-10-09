@@ -256,6 +256,11 @@ describe.skipIf(!handle)('roles and permissions', () => {
     expect(member.permissions).toEqual([
       'device.edit',
       'device.add',
+      // Not something the hub did before roles — there were no cameras — and
+      // on the household's own reading of who lives here: the person at the
+      // door is looking at a phone. A migration adds it to hubs that already
+      // exist, `hub.ai`'s path; the migration suite proves that half.
+      'camera.view',
       'home.structure',
       'activity.read',
       'automation.manage',
@@ -476,6 +481,19 @@ describe.skipIf(!handle)('roles and permissions', () => {
         'hub.ai',
         undefined,
       ],
+      // A panel on a device's page is what everybody in the house sees there,
+      // so installing or removing one is the rename's permission.
+      [
+        'PUT',
+        `/api/v1/devices/${deviceId}/web-blocks/panel`,
+        'device.edit',
+        { title: 'Panel', files: [{ path: 'index.html', dataBase64: Buffer.from('<p>hi</p>').toString('base64') }] },
+      ],
+      ['DELETE', `/api/v1/devices/${deviceId}/web-blocks/panel`, 'device.edit', undefined],
+      // A camera shows people, and Guest starts without it. The guard runs
+      // before the handler, so a device with no camera still proves it.
+      ['GET', `/api/v1/cameras/${deviceId}/1/live/snapshot`, 'camera.view', undefined],
+      ['GET', `/api/v1/cameras/${deviceId}/1/live/mjpeg`, 'camera.view', undefined],
     ];
     for (const [method, url, permission, payload] of cases) {
       const response = await app.inject({
@@ -492,6 +510,44 @@ describe.skipIf(!handle)('roles and permissions', () => {
       expect(response.statusCode, url).toBe(403);
       expect(response.json(), url).toMatchObject({ error: 'forbidden', permission });
     }
+  });
+
+  /**
+   * The other half of the camera and web-block rows above: a member gets past
+   * both guards, and the panel a member installed is the floor to read — a
+   * guest sees it on the device's page like everybody else.
+   */
+  it('lets a member at the cameras and the panels, and anybody read a panel', async () => {
+    const camera = await app.inject({
+      method: 'GET',
+      url: `/api/v1/cameras/${deviceId}/1/live/snapshot`,
+      headers: auth(memberToken),
+    });
+    // Past the guard: the refusal now is the device's, not the role's.
+    expect(camera.statusCode).toBe(404);
+    expect(camera.json()).toEqual({ error: 'camera_not_found' });
+
+    const html = '<!doctype html><p>Hello</p>';
+    const installed = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/devices/${deviceId}/web-blocks/hello`,
+      headers: auth(memberToken),
+      payload: { title: 'Hello', files: [{ path: 'index.html', dataBase64: Buffer.from(html).toString('base64') }] },
+    });
+    expect(installed.statusCode).toBe(200);
+    const read = await app.inject({
+      method: 'GET',
+      url: `/api/v1/devices/${deviceId}/web-blocks/hello/index.html`,
+      headers: auth(guestToken),
+    });
+    expect(read.statusCode).toBe(200);
+    expect(read.body).toBe(html);
+    const removed = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/devices/${deviceId}/web-blocks/hello`,
+      headers: auth(memberToken),
+    });
+    expect(removed.statusCode).toBe(204);
   });
 
   /**

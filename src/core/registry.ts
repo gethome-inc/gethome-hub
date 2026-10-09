@@ -672,6 +672,25 @@ export class DeviceRegistry implements AdapterBus {
   }
 
   /**
+   * Where a camera stream is on the LAN, for the camera proxy — with the
+   * device's own id, which the board has to answer with before anything is
+   * relayed. Null when the device, the endpoint's camera or the stream is
+   * unknown, including a camera that hasn't re-announced since a restart.
+   */
+  cameraSource(
+    deviceId: string,
+    endpointId: number,
+    streamId: string,
+  ): { externalId: string; kind: string; url: string } | null {
+    const device = this.getDevice(deviceId);
+    if (!device) return null;
+    const endpoint = device.endpoints.find((candidate) => candidate.endpointId === endpointId);
+    if (!endpoint?.capabilities.includes('camera')) return null;
+    const source = this.adapters.get(device.adapter)?.cameraSource?.(device.externalId, endpointId, streamId);
+    return source ? { externalId: device.externalId, ...source } : null;
+  }
+
+  /**
    * Await all pending writes — used by tests and shutdown. Draining the
    * per-device queues is only half of it: endpoint state is deliberately
    * written behind a debounce, so "everything is on disk" also means flushing

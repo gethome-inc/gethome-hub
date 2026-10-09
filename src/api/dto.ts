@@ -1,4 +1,5 @@
 import type { RegistryDevice } from '../core/registry.js';
+import type { WebBlockSummary } from '../web-blocks/store.js';
 
 /**
  * Device shape served by GET /devices and the deviceUpserted WS frame.
@@ -10,7 +11,7 @@ import type { RegistryDevice } from '../core/registry.js';
  * off the device, because one device answers differently to each member, and
  * the WebSocket renders this per socket for exactly that reason.
  */
-export function deviceWire(device: RegistryDevice, favorite: boolean) {
+export function deviceWire(device: RegistryDevice, favorite: boolean, webBlocks?: WebBlockSummary[]) {
   return {
     id: device.id,
     // The device's address on its own protocol — a Zigbee IEEE, an MQTT
@@ -46,6 +47,10 @@ export function deviceWire(device: RegistryDevice, favorite: boolean) {
           },
         }
       : {}),
+    // **Presence is the capability once more**: only a device with panels
+    // carries the key, so the wire of every other device is byte-for-byte what
+    // it was, and an app from before web blocks never meets it at all.
+    ...(webBlocks && webBlocks.length > 0 ? { webBlocks } : {}),
     endpoints: device.endpoints.map((endpoint) => ({
       endpointId: endpoint.endpointId,
       deviceKind: endpoint.deviceKind,
