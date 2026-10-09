@@ -115,6 +115,14 @@ describe.skipIf(!handle)('which model a run is given', () => {
     expect(new Set(modelsGiven(createMappingAgent))).toEqual(new Set(['claude-opus-5-5']));
   });
 
+  it('leaves the more thorough of Anthropic’s two alone as well', async () => {
+    await settings.setAiSettings({ model: 'claude-fable-5-1', apiKey: 'sk-ant-api-key-0000' });
+    const mapper = new AiDeviceMapper(db, settings, log);
+    await mapper.requestMapping(lamp, mapExposes(lamp), { force: true });
+
+    expect(new Set(modelsGiven(createMappingAgent))).toEqual(new Set(['claude-fable-5-1']));
+  });
+
   it('leaves the more thorough of OpenAI’s two alone as well', async () => {
     await settings.setAiKey('openai', 'sk-openai-key-0000');
     await settings.setAiModel('gpt-6-astra', 'openai');
@@ -252,6 +260,8 @@ describe('the model table', () => {
   /** Every model a hub in the field may have stored, from every build so far. */
   const everShipped = {
     anthropic: [
+      'claude-fable-5-1',
+      'claude-haiku-5-5',
       'claude-opus-5-5',
       'claude-opus-5',
       'claude-opus-4-8',
@@ -338,14 +348,18 @@ describe('naming a model that has already run', () => {
     const ids = (choices: readonly { id: string }[]) => choices.map((choice) => choice.id);
     expect(ids(AGENT_MODELS.anthropic.choices)).toContain('claude-sonnet-5-5');
     expect(ids(PROVIDER_MODELS.anthropic.choices)).not.toContain('claude-sonnet-5-5');
+    expect(ids(AGENT_MODELS.anthropic.choices)).toContain('claude-haiku-5-5');
+    expect(ids(PROVIDER_MODELS.anthropic.choices)).not.toContain('claude-haiku-5-5');
     expect(ids(AGENT_MODELS.openai.choices)).toContain('gpt-6-luna');
     expect(ids(PROVIDER_MODELS.openai.choices)).not.toContain('gpt-6-luna');
 
     expect(modelLabel('anthropic', 'claude-sonnet-5-5')).toBe('Sonnet 5.5');
+    expect(modelLabel('anthropic', 'claude-haiku-5-5')).toBe('Haiku 5.5');
     expect(modelLabel('openai', 'gpt-6-luna')).toBe('GPT-6 Luna');
     // Still not the mapper's to run: the two lists answer two questions, and
     // this is the one that has to keep saying no.
     expect(effectiveModel('anthropic', 'claude-sonnet-5-5')).toBe('claude-opus-5-5');
+    expect(effectiveModel('anthropic', 'claude-haiku-5-5')).toBe('claude-opus-5-5');
   });
 
   /**
@@ -373,8 +387,8 @@ describe('naming a model that has already run', () => {
   });
 
   it('hands back the raw id of a model this build never knew', () => {
-    // Haiku was never on any list — it cannot drive the research tools — so a
-    // row naming it can only have come from somewhere else.
+    // Haiku 4.5 was never on any list — it cannot drive the research tools —
+    // so a row naming it can only have come from somewhere else.
     expect(modelLabel('anthropic', 'claude-haiku-4-5')).toBe('claude-haiku-4-5');
   });
 

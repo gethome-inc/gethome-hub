@@ -236,33 +236,29 @@ function buildTools(): Anthropic.Messages.ToolUnion[] {
   ];
 }
 
-/** Running total across every turn of one run. */
+/**
+ * Running total across every turn of one run, priced turn by turn: a long
+ * prompt is billed at dearer rates for the whole of that one request
+ * (`ModelPricing.longPrompt`), and forty turns added up are not one prompt.
+ */
 class RunUsage {
-  private input = 0;
-  private output = 0;
-  private cacheRead = 0;
-  private cacheWrite = 0;
-  private webSearches = 0;
+  private spent = 0;
 
   constructor(private readonly model: string) {}
 
   add(usage: Anthropic.Usage | undefined): void {
     if (!usage) return;
-    this.input += usage.input_tokens ?? 0;
-    this.output += usage.output_tokens ?? 0;
-    this.cacheRead += usage.cache_read_input_tokens ?? 0;
-    this.cacheWrite += usage.cache_creation_input_tokens ?? 0;
-    this.webSearches += usage.server_tool_use?.web_search_requests ?? 0;
+    this.spent += estimateCostUsd(this.model, {
+      input_tokens: usage.input_tokens,
+      output_tokens: usage.output_tokens,
+      cache_read_input_tokens: usage.cache_read_input_tokens,
+      cache_creation_input_tokens: usage.cache_creation_input_tokens,
+      webSearchRequests: usage.server_tool_use?.web_search_requests ?? 0,
+    });
   }
 
   costUsd(): number {
-    return estimateCostUsd(this.model, {
-      input_tokens: this.input,
-      output_tokens: this.output,
-      cache_read_input_tokens: this.cacheRead,
-      cache_creation_input_tokens: this.cacheWrite,
-      webSearchRequests: this.webSearches,
-    });
+    return this.spent;
   }
 }
 

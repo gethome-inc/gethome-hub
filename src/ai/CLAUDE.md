@@ -64,8 +64,8 @@ domains — update them in the same change.
   unit of it the home ever meets until somebody remaps; a few cents on a job
   that runs a handful of times in a hub's life does not buy that risk. That is
   an argument about *cheaper* models, so OpenAI offers GPT-6 Astra above
-  GPT-6.1 Sol and Anthropic offers Opus 5.5 alone — and the test pins the
-  invariant, not a count. The half that is easy to miss is
+  GPT-6.1 Sol and Anthropic offers Fable 5.1 above Opus 5.5 — and the test pins
+  the invariant, not a count. The half that is easy to miss is
   **`effectiveModel`: a stored model counts only while it is still offered**,
   or retiring one leaves the homes that had chosen it as the only homes still
   running it — silently, since nothing on a screen would change. `GET
@@ -105,9 +105,15 @@ domains — update them in the same change.
   `AGENT_MAX_BUDGET_USD` per recognition run, `ASSISTANT_MAX_BUDGET_USD` and
   `AUTOMATION_MAX_BUDGET_USD` per conversation — was sized against Opus 5's
   $5/$25, and `budgetScale(modelId)` stretches it for a model priced above that
-  (GPT-6 Astra, ×2). Without it the most thorough model a home could pick would
-  be the one stopped at half the work; a cheaper model keeps the same ceiling,
-  never a tighter one. A new cap goes through it too.
+  (GPT-6 Astra and Fable 5.1, ×2). Without it the most thorough model a home
+  could pick would be the one stopped at half the work; a cheaper model keeps
+  the same ceiling, never a tighter one. A new cap goes through it too.
+  **And what is measured against them is priced a request at a time**: every
+  `RunUsage` adds up `estimateCostUsd` per round rather than pricing its token
+  totals, because GPT-6 bills a prompt past 272K tokens, and Haiku 5.5 one past
+  100K, at dearer rates for that whole request (`ModelPricing.longPrompt`) — and
+  a loop re-sends its whole conversation every round, so its totals cross
+  either line long before any one prompt does. A new meter keeps that shape.
   **It used to run on the Claude Agent SDK, and moving off it was a memory
   decision like dropping Docker.** That SDK ships a 276 MB native binary — 74%
   of the hub's whole download — and spawned a ~315 MB subprocess per run, of
@@ -714,12 +720,13 @@ domains — update them in the same change.
   paragraph and a release of both apps. `permission` is checked when the tool
   runs, so a member whose role cannot hand a job over gets a sentence the model
   reads out rather than a capability silently absent.
-  **The agents' model list is its own** (`AGENT_MODELS` — Opus 5.5 and Sonnet
-  5.5 on Anthropic, GPT-6 Astra, GPT-6.1 Sol and GPT-6 Luna on OpenAI), and
-  the mapper's list stays strong-only: a descriptor is cached against a device
-  model and shapes every unit of it for ever, while a chat is many small rounds
-  answered with another message when the reply is poor. **The provider follows
-  the model id and there is no second column** (`agentProviderOf`): ids do not collide across
+  **The agents' model list is its own** (`AGENT_MODELS` — Fable 5.1, Opus 5.5,
+  Sonnet 5.5 and Haiku 5.5 on Anthropic, GPT-6 Astra, GPT-6.1 Sol and GPT-6
+  Luna on OpenAI), and the mapper's list stays strong-only: a descriptor is
+  cached against a device model and shapes every unit of it for ever, while a
+  chat is many small rounds answered with another message when the reply is
+  poor. **The provider follows the model id and there is no second column**
+  (`agentProviderOf`): ids do not collide across
   vendors — `priceOf` has relied on that since the mapper had two — so one
   setting says both things and they cannot disagree, and an app's picker writes
   a model id whatever vendor it is on. **And resolution is key-aware**, which is

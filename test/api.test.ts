@@ -966,10 +966,10 @@ describe.skipIf(!handle)('hub API', () => {
       // the switch stops recognition and nothing else.
       mapping: { provider: 'anthropic', choosable: false, enabled: true },
     });
-    // Recognition offers strong models only: one on Anthropic, and on OpenAI
-    // Sol with Astra above it — never a tier cheaper than the default.
+    // Recognition offers strong models only: the default and one dearer model
+    // above it on each vendor — never a tier cheaper than the default.
     const providers = body.providers as { anthropic: { models: unknown[] }; openai: { models: unknown[] } };
-    expect(providers.anthropic.models).toHaveLength(1);
+    expect(providers.anthropic.models).toHaveLength(2);
     expect(providers.openai.models).toHaveLength(2);
     expect(JSON.stringify(body)).not.toContain('sk-ant');
 
@@ -1174,7 +1174,12 @@ describe.skipIf(!handle)('hub API', () => {
     // `models` is the answering vendor's list — what an app a version behind
     // draws its pills from — and `choices` the whole table.
     expect(assistant.models.map((model) => model.id)).toEqual(['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-luna']);
-    expect(assistant.choices.anthropic?.map((model) => model.id)).toEqual(['claude-opus-5-5', 'claude-sonnet-5-5']);
+    expect(assistant.choices.anthropic?.map((model) => model.id)).toEqual([
+      'claude-fable-5-1',
+      'claude-opus-5-5',
+      'claude-sonnet-5-5',
+      'claude-haiku-5-5',
+    ]);
     expect(assistant.choices.openai?.map((model) => model.label)).toEqual([
       'GPT-6 Astra',
       'GPT-6.1 Sol',
@@ -1389,7 +1394,7 @@ describe.skipIf(!handle)('hub API', () => {
     // taken and succeeded, so listing it as something recognition "runs on"
     // would send somebody to a model that never runs.
     const detail = (put.json() as { detail: string }).detail;
-    expect(detail).toContain('device recognition runs on: claude-opus-5-5');
+    expect(detail).toContain('device recognition runs on: claude-fable-5-1, claude-opus-5-5');
     expect(detail).not.toMatch(/claude-opus-5(?!-5)|claude-opus-4|claude-sonnet/);
   });
 
