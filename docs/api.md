@@ -1509,7 +1509,7 @@ with what happened, rather than a receipt to poll.
   ],
   "updatedAt": "2026-10-07T09:12:44Z",  // when the list was last read off the machine
   "maxNetworks": 16,
-  "pending": false,                     // a change is written and not yet picked up
+  "pending": false,                     // a change is in hand and not yet answered
   "lastChange": {                       // what became of the last one, from anybody
     "id": "…", "action": "add", "state": "applied", "ssid": "Dacha",
     "networkId": "8a2d…", "at": "2026-10-07T09:12:44Z"
@@ -1551,7 +1551,9 @@ is still queued; `GET` reports it when it lands). A refusal is the usual
   from here either.
 - **One change at a time.** `409 wifi_change_pending` while a request is written
   and unconsumed (a request nothing picks up within a minute is treated as
-  abandoned). `409 wifi_change_failed` carries NetworkManager's own sentence in
+  abandoned), and after a `202` until that change's own result lands (two
+  minutes at most), so a second change cannot write its result over the first
+  before `GET` has reported it. `pending` is `true` for the whole of that. `409 wifi_change_failed` carries NetworkManager's own sentence in
   `detail` for the refusals that have no better name.
 
 The move itself changes the hub's address, and that is the client's half. The

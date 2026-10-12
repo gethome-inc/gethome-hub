@@ -2726,7 +2726,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       networks: list?.networks ?? [],
       ...(list?.updatedAt !== undefined ? { updatedAt: list.updatedAt } : {}),
       maxNetworks: MAX_WIFI_NETWORKS,
-      pending: wifiChangePending(deps.dataDir),
+      pending: wifiChangePending(deps.dataDir) || wifiChangeUnsettled(last),
       ...(last !== undefined ? { lastChange: last } : {}),
     };
   };
@@ -2759,6 +2759,27 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    */
   let wifiChangeInFlight = false;
 
+  /**
+   * A change answered `202`: the script may have consumed it and still be
+   * applying it, and the route has stopped waiting. Without this the lock went
+   * with the route, so a second change could be written while the first was
+   * still in hand, and its result written over the first before `GET` could
+   * report the first one landing. Held until that change's own result appears,
+   * and for two minutes at most — a script that died says nothing at all.
+   */
+  let wifiChangeAwaited: { id: string; until: number } | undefined;
+  const WIFI_CHANGE_HOLD_MS = 2 * 60 * 1000;
+
+  /** Whether a change answered `202` has still not been answered by the machine. */
+  const wifiChangeUnsettled = (last = readWifiChangeResult(deps.dataDir)): boolean => {
+    if (wifiChangeAwaited === undefined) return false;
+    if (Date.now() >= wifiChangeAwaited.until || last?.id === wifiChangeAwaited.id) {
+      wifiChangeAwaited = undefined;
+      return false;
+    }
+    return true;
+  };
+
   /** The refusals every change makes before it writes anything. */
   const wifiChangeBlocked = (reply: FastifyReply): FastifyReply | undefined => {
     const availability = wifiAvailability(deps.dataDir);
@@ -2768,7 +2789,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // One at a time, and refused rather than queued: a second request written
     // over the first before the script reads it would lose the first without a
     // word, and the script's path unit does not re-fire while it is running.
-    if (wifiChangeInFlight || wifiChangePending(deps.dataDir)) {
+    if (wifiChangeInFlight || wifiChangePending(deps.dataDir) || wifiChangeUnsettled()) {
       return reply.code(409).send({ error: 'wifi_change_pending' });
     }
     return undefined;
@@ -2790,6 +2811,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   ) => {
     const result = await awaitWifiChange(deps.dataDir, id, deps.wifiApplyWaitMs ?? 20_000);
     if (result === undefined) {
+      wifiChangeAwaited = { id, until: Date.now() + WIFI_CHANGE_HOLD_MS };
       await onSettled(undefined);
       return reply.code(202).send({ ...wifiSettings(), change: { id, state: 'pending' } });
     }

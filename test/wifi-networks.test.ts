@@ -373,6 +373,32 @@ describe.skipIf(!handle)('the Wi-Fi network routes', () => {
     expect(feed.find((entry) => entry.kind === 'hub.wifi')?.message).toBe(
       'Georgy asked the hub to add the Wi-Fi network “Slow”.',
     );
+
+    // The script has it now and is still at work: the route stopped waiting,
+    // the lock did not, so a second change cannot write its result over this one.
+    rmSync(path.join(dataDir, 'wifi', 'request'));
+    const second = await app.inject({
+      method: 'POST',
+      url: '/api/v1/settings/wifi/networks',
+      headers: auth(ownerToken),
+      payload: { ssid: 'Second', passphrase: 'password1' },
+    });
+    expect(second.statusCode).toBe(409);
+    expect(second.json()).toEqual({ error: 'wifi_change_pending' });
+    const read = async () =>
+      (await app.inject({ method: 'GET', url: '/api/v1/settings/wifi', headers: auth(ownerToken) })).json() as {
+        pending: boolean;
+        lastChange?: { id: string; state: string };
+      };
+    expect((await read()).pending).toBe(true);
+
+    // And when it lands, GET reports it and the next change is free to go.
+    const id = (quick.json() as { change: { id: string } }).change.id;
+    writeFileSync(
+      path.join(dataDir, 'wifi', 'result'),
+      `id=${id}\naction=add\nstate=applied\nat=2026-10-12T12:00:00Z\n`,
+    );
+    expect(await read()).toMatchObject({ pending: false, lastChange: { id, state: 'applied' } });
   }, 20_000);
 
   it('passes on what the machine refused, when the hub could not have known', async () => {
