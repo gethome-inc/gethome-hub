@@ -1,5 +1,6 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { userInfo } from 'node:os';
 import path from 'node:path';
 
 /**
@@ -107,9 +108,11 @@ function scriptEnv(m: Machine, env: Record<string, string>): NodeJS.ProcessEnv {
   return {
     ...process.env,
     GETHOME_CONF: m.conf,
-    // Not a group the test user belongs to on every machine, which is the
-    // point: a chgrp that fails must not stop the file being written.
-    GETHOME_GROUP: 'gethome-test-nonexistent',
+    // The script reads and writes the data directory as the hub's account. The
+    // staged directory belongs to whoever runs the suite, so that is the
+    // account — which also lets a suite running as root (a container, a CI
+    // image) take the same `setpriv` path a hub does, rather than a shortcut.
+    GETHOME_USER: userInfo().username,
     FAKE_NM_DIR: m.nm,
     // `nmcli` must be the fake or nothing at all, never the real one on a
     // developer's Linux machine.

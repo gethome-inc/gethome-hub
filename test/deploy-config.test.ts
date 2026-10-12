@@ -587,9 +587,14 @@ describe('deploy/install.sh', () => {
       expect(installer).toMatch(/systemctl enable --now gethome-wifi\.path/);
     });
 
-    it('runs the script it installs, as the group the hub reads the answer with', () => {
+    it('runs the script it installs, naming the account it reads and writes the data directory as', () => {
       expect(wifiService).toMatch(/^ExecStart=\$\{helper\} --quiet$/m);
-      expect(wifiService).toMatch(/^Environment=GETHOME_GROUP=\$\{SERVICE_USER\}$/m);
+      // The data directory is the hub's, so the script touches it only as the
+      // hub's account — and has to be told which account that is, from the
+      // unit, the dispatcher and the installer's own first run alike.
+      expect(wifiService).toMatch(/^Environment=GETHOME_USER=\$\{SERVICE_USER\}$/m);
+      expect(wifi).toMatch(/GETHOME_USER=\$\{SERVICE_USER\} GETHOME_GROUP=\$\{SERVICE_USER\} exec \$\{helper\} --list/);
+      expect(wifi).toMatch(/env GETHOME_CONF="\$CONF_DIR" GETHOME_USER="\$SERVICE_USER"/);
       expect(wifi).toContain('"$HUB_DIR/deploy/wifi-networks.sh"');
     });
 
@@ -604,6 +609,9 @@ describe('deploy/install.sh', () => {
       // hub's system manages Wi-Fi itself" rather than "update your hub".
       const before = wifi.slice(0, wifi.indexOf('gethome-wifi.path'));
       expect(before).toMatch(/command -v nmcli[\s\S]*no-networkmanager[\s\S]*return 0/);
+      // Installed is not running: a machine with nmcli and the daemon off is
+      // one where every change would fail, so it is asked whether it answers.
+      expect(before).toMatch(/nmcli -t general status/);
     });
   });
 

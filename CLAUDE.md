@@ -812,7 +812,9 @@ outside `deploy/`, so they stay here:
   `POST`/`DELETE /settings/wifi/networks` (`src/core/wifi-networks.ts`) write
   one request into `<data>/wifi/`, `gethome-wifi.path` notices, and
   `deploy/wifi-networks.sh` changes NetworkManager as root and writes back
-  `networks` and `result` — and because that is a second rather than a
+  `networks` and `result` — as the hub's own account, since the directory is
+  that account's and root following a name in it follows whatever the account
+  put there — and because that is a second rather than a
   reinstall, the route waits for `result` and answers with the outcome, `202`
   only if it did not land in time. Three rules cross the boundary. **The
   request carries the derived 64-hex key, never the passphrase**, and the

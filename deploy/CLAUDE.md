@@ -147,8 +147,17 @@ in `deploy/install.sh` must stay accurate.
   writes `<data>/wifi/request`, `gethome-wifi.path` notices, and
   `deploy/wifi-networks.sh` (installed as `/usr/local/lib/gethome-wifi-networks.sh`,
   root, `Type=oneshot`) applies it with `nmcli` and writes `networks` and
-  `result` back, `0640 root:gethome`. Six things to keep. **The service is never
+  `result` back, 0640. Seven things to keep. **The service is never
   enabled** and the script **always exits 0**, for the update runner's reasons.
+  **Root runs `nmcli` and nothing else; everything in `<data>/wifi/` is read
+  and written as the hub's account** (`as_hub`: `setpriv`, else `runuser`, both
+  util-linux). The directory is that account's, so every name in it is
+  whatever the account made it, and root following one follows its links —
+  measured on this branch: a list written as root through a link the account
+  had planted overwrote a root-only file, and the `chmod`/`chown` after it
+  handed that file to the hub's group. As the account, a planted link reaches
+  only what it could reach already. `test/deploy-wifi-networks.test.ts` pins
+  that no `chmod`, `chown` or `chgrp` comes back.
   **The network the hub is on is never deleted** — checked again here against
   `nmcli`'s own `ACTIVE`, because the hub's list can be a minute stale and a hub
   off its only network is the one outcome that costs a trip to the Pi. **One

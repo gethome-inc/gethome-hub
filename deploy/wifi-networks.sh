@@ -53,11 +53,23 @@
 # that already holds a way to the same key: root, the first user's NOPASSWD
 # sudo, and the hub's own account, which is handed the active network's key in
 # /etc/gethome/wifi.env so it can pair Matter accessories.
+#
+# **And the directory is the hub user's too, so this reads and writes there as
+# that account, never as root** (`as_hub`). Root following a name in a
+# directory somebody else controls follows whatever they put there: a request
+# that is a link to a file only root may read, or a list written through a link
+# into a file only root may write — and `chmod` and `chown`, which follow links,
+# would then hand that file to the hub's group. Done as the hub's account, any
+# such link reaches only what that account could reach already. Only nmcli runs
+# as root, because only nmcli needs to.
 set -uo pipefail
 
 CONF_DIR="${GETHOME_CONF:-/etc/gethome}"
 HUB_ENV="$CONF_DIR/hub.env"
-GROUP="${GETHOME_GROUP:-gethome}"
+# The account the hub runs as and the data directory belongs to. The group was
+# the only name passed before this read and wrote as the account, and the two
+# are the same word on every install, so it still stands in for an older unit.
+HUB_USER="${GETHOME_USER:-${GETHOME_GROUP:-gethome}}"
 MAX_NETWORKS=16
 
 read_env() { sed -n "s/^$1=//p" "$2" 2>/dev/null | tail -n1; }
@@ -88,17 +100,42 @@ now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 # a parser on either side.
 to_hex() { printf '%s' "$1" | od -An -tx1 -v | tr -d ' \n'; }
 
+# Run a command as the hub's account — see "the directory is the hub user's
+# too" above. setpriv first, because it is a plain setresuid with no PAM session
+# to write two journal lines on every association; runuser where it is missing.
+# Both are util-linux, which Debian marks essential. Not running as root — the
+# suite, or anybody running this by hand — there is nothing to drop.
+as_hub() {
+  local uid gid
+  if [[ "$(id -u)" != "0" ]]; then
+    "$@"
+    return
+  fi
+  uid="$(id -u "$HUB_USER" 2>/dev/null)" || return 1
+  gid="$(id -g "$HUB_USER" 2>/dev/null)" || return 1
+  if command -v setpriv >/dev/null 2>&1; then
+    setpriv --reuid="$uid" --regid="$gid" --clear-groups -- "$@"
+  elif command -v runuser >/dev/null 2>&1; then
+    runuser -u "$HUB_USER" -- "$@"
+  else
+    return 1
+  fi
+}
+
 # Written beside its final name and renamed into place, because the hub reads
 # these at any moment and a half-written list is a list with networks missing.
-# Mode before the rename, so the file is never briefly readable by the rest of
-# the machine under its real name — it names the places this hub has been.
+# Created 0640 rather than changed to it afterwards, so the file is never
+# briefly readable by the rest of the machine — it names the places this hub
+# has been — and nothing is ever changed through a path after it is written.
 write_file() {
-  local target="$1" content="$2" tmp
-  tmp="$target.tmp.$$"
-  printf '%s' "$content" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
-  chmod 0640 "$tmp" 2>/dev/null || true
-  chown "root:$GROUP" "$tmp" 2>/dev/null || chgrp "$GROUP" "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$target" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  # shellcheck disable=SC2016 # expanded by the inner shell, as the hub's account
+  printf '%s' "$2" | as_hub sh -c '
+    umask 027
+    tmp="$1.tmp.$$"
+    if cat > "$tmp" && mv -f "$tmp" "$1"; then exit 0; fi
+    rm -f "$tmp"
+    exit 1
+  ' sh "$1" 2>/dev/null
 }
 
 # `uuid active` for every Wi-Fi profile NetworkManager holds, one per line.
@@ -122,7 +159,7 @@ profile_ssid() {
 write_list() {
   local content uuid active ssid count=0
   if ! command -v nmcli >/dev/null 2>&1; then
-    rm -f "$NETWORKS_FILE" 2>/dev/null || true
+    as_hub rm -f "$NETWORKS_FILE" 2>/dev/null || true
     return 0
   fi
   content="# Written by gethome-wifi-networks. Do not edit.
@@ -138,7 +175,7 @@ updated=$(now)
 "
     count=$((count + 1))
   done < <(wifi_profiles)
-  mkdir -p "$WIFI_DIR" 2>/dev/null || true
+  as_hub mkdir -p "$WIFI_DIR" 2>/dev/null || true
   write_file "$NETWORKS_FILE" "$content" || { say "Could not write ${NETWORKS_FILE}."; return 0; }
   say "This hub knows ${count} Wi-Fi network(s)."
 }
@@ -188,7 +225,7 @@ field() { printf '%s\n' "$2" | sed -n "s/^$1=//p" | head -n1; }
 # PathModified is guaranteed to notice. A torn read costs a second look.
 read_request() {
   local raw id
-  raw="$(cat "$REQUEST" 2>/dev/null)" || return 1
+  raw="$(as_hub cat "$REQUEST" 2>/dev/null)" || return 1
   id="$(field id "$raw")"
   [[ "$id" =~ ^[A-Za-z0-9._-]{8,64}$ ]] || return 1
   printf '%s' "$raw"
@@ -295,8 +332,10 @@ apply_one() {
     raw="$(read_request)"
   fi
   # Consumed before any work: this file is what re-arms the path unit, and a
-  # run that dies must not leave one to be picked up again for ever.
-  rm -f "$REQUEST"
+  # run that dies must not leave one to be picked up again for ever. As root
+  # only when the account cannot be switched to: `rm` unlinks a name and
+  # follows nothing, so that fallback cannot be pointed anywhere.
+  as_hub rm -f "$REQUEST" 2>/dev/null || rm -f "$REQUEST"
   [[ -n "$raw" ]] || return 0
 
   RESULT_ID="$(field id "$raw")"

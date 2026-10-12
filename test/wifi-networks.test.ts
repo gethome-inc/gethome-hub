@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -323,6 +323,37 @@ describe.skipIf(!handle)('the Wi-Fi network routes', () => {
     });
     expect(response.statusCode).toBe(409);
     expect(response.json()).toEqual({ error: 'wifi_change_pending' });
+  });
+
+  it('refuses a second change while the first is being applied, after its request is consumed', async () => {
+    // The script removes the request before it starts work, so the file alone
+    // stopped saying a change was in hand halfway through applying it.
+    const request = path.join(dataDir, 'wifi', 'request');
+    const first = app.inject({
+      method: 'POST',
+      url: '/api/v1/settings/wifi/networks',
+      headers: auth(ownerToken),
+      payload: { ssid: 'First', passphrase: 'password1' },
+    });
+    const deadline = Date.now() + 2000;
+    while (!existsSync(request) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+    const firstId = /^id=(.+)$/m.exec(readFileSync(request, 'utf8'))![1]!;
+    rmSync(request);
+
+    const second = await app.inject({
+      method: 'POST',
+      url: '/api/v1/settings/wifi/networks',
+      headers: auth(ownerToken),
+      payload: { ssid: 'Second', passphrase: 'password1' },
+    });
+    expect(second.statusCode).toBe(409);
+    expect(second.json()).toEqual({ error: 'wifi_change_pending' });
+
+    writeFileSync(
+      path.join(dataDir, 'wifi', 'result'),
+      `id=${firstId}\naction=add\nstate=applied\nat=2026-10-12T12:00:00Z\n`,
+    );
+    expect((await first).statusCode).toBe(200);
   });
 
   it('answers 202 when the machine has not got to it yet, and says so in the log', async () => {

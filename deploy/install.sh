@@ -2490,7 +2490,11 @@ manage_wifi_networks() {
   $SUDO mkdir -p "$wifi_dir" 2>/dev/null || true
   $SUDO rm -f "$wifi_dir/enabled" "$wifi_dir/unsupported" 2>/dev/null || true
 
-  if ! command -v nmcli >/dev/null 2>&1; then
+  # Installed is not running: nmcli can be on a machine whose Wi-Fi something
+  # else manages (dhcpcd, on an older Raspberry Pi OS), and there every change
+  # would fail with "NetworkManager is not running" behind a form the app had
+  # offered. `general status` answers only when the daemon does.
+  if ! command -v nmcli >/dev/null 2>&1 || ! $SUDO nmcli -t general status >/dev/null 2>&1; then
     printf 'no-networkmanager\n' | $SUDO tee "$wifi_dir/unsupported" >/dev/null 2>&1 || true
     $SUDO chown -R "$SERVICE_USER:$SERVICE_USER" "$wifi_dir" 2>/dev/null || true
     return 0
@@ -2523,6 +2527,7 @@ Description=Change the GetHome Hub's Wi-Fi networks
 Type=oneshot
 RemainAfterExit=no
 Environment=GETHOME_CONF=${CONF_DIR}
+Environment=GETHOME_USER=${SERVICE_USER}
 Environment=GETHOME_GROUP=${SERVICE_USER}
 ExecStart=${helper} --quiet
 TimeoutStartSec=120
@@ -2537,7 +2542,7 @@ UNIT
 # Installed by GetHome. Writes down which Wi-Fi networks this hub knows and
 # which one it is on, for the hub to show. deploy/wifi-networks.sh says why.
 case "\$2" in up|down) ;; *) exit 0 ;; esac
-GETHOME_CONF=${CONF_DIR} GETHOME_GROUP=${SERVICE_USER} exec ${helper} --list --quiet
+GETHOME_CONF=${CONF_DIR} GETHOME_USER=${SERVICE_USER} GETHOME_GROUP=${SERVICE_USER} exec ${helper} --list --quiet
 DISPATCH
   then
     $SUDO chown root:root "$dispatcher" 2>/dev/null || true
@@ -2548,7 +2553,7 @@ DISPATCH
   $SUDO chown -R "$SERVICE_USER:$SERVICE_USER" "$wifi_dir" 2>/dev/null || true
   $SUDO chmod 0750 "$wifi_dir" 2>/dev/null || true
   # Once now, so the list is there before anybody reconnects.
-  $SUDO env GETHOME_CONF="$CONF_DIR" GETHOME_GROUP="$SERVICE_USER" "$helper" --list --quiet || true
+  $SUDO env GETHOME_CONF="$CONF_DIR" GETHOME_USER="$SERVICE_USER" GETHOME_GROUP="$SERVICE_USER" "$helper" --list --quiet || true
   WIFI_NETWORKS_UNITS=1
 }
 WIFI_NETWORKS_UNITS=""

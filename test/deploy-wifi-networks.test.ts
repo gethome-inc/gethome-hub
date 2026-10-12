@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -9,6 +9,7 @@ import {
   wpaPsk,
 } from '../src/core/wifi-networks.js';
 import {
+  WIFI_NETWORKS_SCRIPT,
   callsOf,
   machine as stagedMachine,
   profilesOf,
@@ -240,5 +241,24 @@ describe('a machine that cannot', () => {
     expect(run(m)).toBe(0);
     expect(existsSync(path.join(m.data, 'wifi', 'request'))).toBe(false);
     expect(readWifiChangeResult(m.data)).toBeUndefined();
+  });
+});
+
+describe('root, in a directory the hub owns', () => {
+  it('reads and writes there only as the hub\'s account, and changes nothing through a path', () => {
+    // The data directory belongs to the hub's account, so a name in it is
+    // whatever that account made it. Root writing a list through a link it had
+    // planted there — and `chmod`/`chown`, which follow links — overwrote a
+    // root-only file and handed it to the hub's group; measured, then fixed.
+    // Done as the account, a planted link reaches only what it could already.
+    const code = readFileSync(WIFI_NETWORKS_SCRIPT, 'utf8')
+      .split('\n')
+      .filter((line) => !line.trimStart().startsWith('#'))
+      .join('\n');
+    expect(code).not.toMatch(/\bch(mod|own|grp)\b/);
+    expect(code).toMatch(/\| as_hub sh -c/);
+    expect(code).toMatch(/as_hub cat "\$REQUEST"/);
+    expect(code).toMatch(/as_hub mkdir -p "\$WIFI_DIR"/);
+    expect(code).toMatch(/setpriv --reuid=/);
   });
 });

@@ -2747,6 +2747,18 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     nmcli: [409, 'wifi_change_failed'],
   };
 
+  /**
+   * A change is being applied and its route has not answered yet.
+   *
+   * The request file stops saying so the moment the script starts work — it is
+   * consumed first — so on its own it let a second change through while the
+   * first was still being applied: a second request, a second result written
+   * over the first before the first route had read it, and that route answering
+   * "still adding" about a network that had been added. In memory, because
+   * nothing awaits between the check and the write that sets it.
+   */
+  let wifiChangeInFlight = false;
+
   /** The refusals every change makes before it writes anything. */
   const wifiChangeBlocked = (reply: FastifyReply): FastifyReply | undefined => {
     const availability = wifiAvailability(deps.dataDir);
@@ -2756,7 +2768,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // One at a time, and refused rather than queued: a second request written
     // over the first before the script reads it would lose the first without a
     // word, and the script's path unit does not re-fire while it is running.
-    if (wifiChangePending(deps.dataDir)) {
+    if (wifiChangeInFlight || wifiChangePending(deps.dataDir)) {
       return reply.code(409).send({ error: 'wifi_change_pending' });
     }
     return undefined;
@@ -2833,30 +2845,35 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       return reply.code(409).send({ error: 'wifi_network_limit' });
     }
 
-    const id = requestWifiChange(deps.dataDir, {
-      action: 'add',
-      ssid: body.ssid,
-      psk: wpaPsk(body.ssid, body.passphrase),
-      hidden: body.hidden === true,
-    });
-    deps.log.info({ id, member: request.member!.id }, 'Wi-Fi network addition requested');
-    return settleWifiChange(reply, id, async (result) => {
-      const name = request.member!.name;
-      await deps.activity.record({
-        kind: 'hub.wifi',
-        message:
-          result !== undefined
-            ? `${name} added the Wi-Fi network “${body.ssid}” to the hub.`
-            : `${name} asked the hub to add the Wi-Fi network “${body.ssid}”.`,
-        memberId: request.member!.id,
-        data: {
-          memberName: name,
-          action: 'add',
-          ssid: body.ssid,
-          outcome: result !== undefined ? 'applied' : 'pending',
-        },
+    wifiChangeInFlight = true;
+    try {
+      const id = requestWifiChange(deps.dataDir, {
+        action: 'add',
+        ssid: body.ssid,
+        psk: wpaPsk(body.ssid, body.passphrase),
+        hidden: body.hidden === true,
       });
-    });
+      deps.log.info({ id, member: request.member!.id }, 'Wi-Fi network addition requested');
+      return await settleWifiChange(reply, id, async (result) => {
+        const name = request.member!.name;
+        await deps.activity.record({
+          kind: 'hub.wifi',
+          message:
+            result !== undefined
+              ? `${name} added the Wi-Fi network “${body.ssid}” to the hub.`
+              : `${name} asked the hub to add the Wi-Fi network “${body.ssid}”.`,
+          memberId: request.member!.id,
+          data: {
+            memberName: name,
+            action: 'add',
+            ssid: body.ssid,
+            outcome: result !== undefined ? 'applied' : 'pending',
+          },
+        });
+      });
+    } finally {
+      wifiChangeInFlight = false;
+    }
   });
 
   /**
@@ -2880,27 +2897,32 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (list !== undefined && known === undefined) return reply.code(404).send({ error: 'not_found' });
     if (known?.connected === true) return reply.code(409).send({ error: 'wifi_network_connected' });
 
-    const id = requestWifiChange(deps.dataDir, { action: 'remove', networkId: networkId.toLowerCase() });
-    deps.log.info({ id, member: request.member!.id }, 'Wi-Fi network removal requested');
-    return settleWifiChange(reply, id, async (result) => {
-      const name = request.member!.name;
-      const ssid = result?.ssid ?? known?.ssid;
-      const network = ssid !== undefined ? `the Wi-Fi network “${ssid}”` : 'a Wi-Fi network';
-      await deps.activity.record({
-        kind: 'hub.wifi',
-        message:
-          result !== undefined
-            ? `${name} removed ${network} from the hub.`
-            : `${name} asked the hub to forget ${network}.`,
-        memberId: request.member!.id,
-        data: {
-          memberName: name,
-          action: 'remove',
-          ...(ssid !== undefined ? { ssid } : {}),
-          outcome: result !== undefined ? 'applied' : 'pending',
-        },
+    wifiChangeInFlight = true;
+    try {
+      const id = requestWifiChange(deps.dataDir, { action: 'remove', networkId: networkId.toLowerCase() });
+      deps.log.info({ id, member: request.member!.id }, 'Wi-Fi network removal requested');
+      return await settleWifiChange(reply, id, async (result) => {
+        const name = request.member!.name;
+        const ssid = result?.ssid ?? known?.ssid;
+        const network = ssid !== undefined ? `the Wi-Fi network “${ssid}”` : 'a Wi-Fi network';
+        await deps.activity.record({
+          kind: 'hub.wifi',
+          message:
+            result !== undefined
+              ? `${name} removed ${network} from the hub.`
+              : `${name} asked the hub to forget ${network}.`,
+          memberId: request.member!.id,
+          data: {
+            memberName: name,
+            action: 'remove',
+            ...(ssid !== undefined ? { ssid } : {}),
+            outcome: result !== undefined ? 'applied' : 'pending',
+          },
+        });
       });
-    });
+    } finally {
+      wifiChangeInFlight = false;
+    }
   });
 
   // ── Automations ──────────────────────────────────────────────────────────
