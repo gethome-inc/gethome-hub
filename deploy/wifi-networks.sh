@@ -312,6 +312,14 @@ apply_remove() {
     return
   fi
   RESULT_SSID="$(profile_ssid "$target")"
+  # Asked a second way before the one step that cannot be taken back: the
+  # profiles NetworkManager has up right now, which reads no yes or no column.
+  # A hub off its only network is the outcome that costs a trip to the Pi, so it
+  # takes two answers rather than one parse of one table to allow it.
+  if [[ -z "$was_active" ]] \
+    && nmcli -t -f UUID connection show --active 2>/dev/null | grep -qixF -- "$target"; then
+    was_active=1
+  fi
   if [[ -n "$was_active" ]]; then
     finish failed connected "The hub is connected through this network right now."
     return

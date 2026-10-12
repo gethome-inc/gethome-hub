@@ -35,6 +35,14 @@ case "$*" in
     while IFS="$tab" read -r uuid type active name ssid; do
       [ -n "$uuid" ] && printf '%s:%s:%s\\n' "$uuid" "$type" "$active"
     done < "$state" ;;
+  "-t -f UUID connection show --active")
+    # FAKE_ACTIVE stands in for NetworkManager disagreeing with its own
+    # ACTIVE column, which is the case the second question exists for.
+    if [ -n "$FAKE_ACTIVE" ]; then printf '%s\\n' $FAKE_ACTIVE; else
+      while IFS="$tab" read -r uuid type active name ssid; do
+        [ "$active" = yes ] && printf '%s\\n' "$uuid"
+      done < "$state"
+    fi ;;
   "-t -f UUID,NAME connection show")
     while IFS="$tab" read -r uuid type active name ssid; do
       [ -n "$uuid" ] && printf '%s:%s\\n' "$uuid" "$name"

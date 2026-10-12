@@ -160,7 +160,10 @@ in `deploy/install.sh` must stay accurate.
   that no `chmod`, `chown` or `chgrp` comes back.
   **The network the hub is on is never deleted** — checked again here against
   `nmcli`'s own `ACTIVE`, because the hub's list can be a minute stale and a hub
-  off its only network is the one outcome that costs a trip to the Pi. **One
+  off its only network is the one outcome that costs a trip to the Pi, and then
+  a second way, against `connection show --active`, which reads no yes-or-no
+  column: the hub's list and the first check come from the same parse, so one
+  misread table must not be enough to allow the step that cannot be undone. **One
   profile per name, sixteen at most, Wi-Fi profiles only**: two profiles for one
   name are tried in turn and a stale password holds the other up. **Every field
   is validated before it reaches `nmcli`, and every value is its own argument**

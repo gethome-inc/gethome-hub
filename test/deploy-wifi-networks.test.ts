@@ -216,6 +216,17 @@ describe('removing a network', () => {
     expect(callsOf(m).some((call) => call[1] === 'delete')).toBe(false);
   });
 
+  it('asks a second way before deleting, so one misread column cannot take the hub off its network', () => {
+    // NetworkManager's ACTIVE column says no; its list of active profiles says
+    // otherwise. Either answer is enough to refuse.
+    const m = machine([{ ...HOME, active: false }, SPARE]);
+    requestWifiChange(m.data, { action: 'remove', networkId: HOME_ID });
+    run(m, [], { FAKE_ACTIVE: HOME_ID });
+    expect(readWifiChangeResult(m.data)).toMatchObject({ state: 'failed', error: 'connected' });
+    expect(profilesOf(m)).toHaveLength(2);
+    expect(callsOf(m).some((call) => call[1] === 'delete')).toBe(false);
+  });
+
   it('touches nothing that is not a Wi-Fi profile', () => {
     const m = machine([HOME, { ...WIRED, active: false }]);
     requestWifiChange(m.data, { action: 'remove', networkId: WIRED_ID });
