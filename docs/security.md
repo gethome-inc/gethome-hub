@@ -63,9 +63,17 @@ serving it, not a security boundary.
 
 ## Who can talk to the hub
 
-- **Every request but two needs a token.** Only the public `GET /hub` and the
-  claim need none. A token comes from the claim flow and is never handed to a
-  page — see [`api.md`](api.md#claiming).
+- **Every request but three needs a token.** Only the public `GET /hub`, the
+  claim, and `POST /hub/proof` — the hub proving it is itself to an app that
+  already holds one of its tokens — need none. A token comes from the claim
+  flow and is never handed to a page — see [`api.md`](api.md#claiming).
+- **An app follows a hub to a new address only once it has proved itself
+  there.** A hub moved to another network, or given a new lease, is found
+  again by its id — which is public, so anything on the LAN can announce it.
+  Before an app sends its token to a new address it asks for an HMAC keyed by
+  that token's hash, over a fresh nonce and the address it dialled, and the
+  hub signs only for an address it holds; an impostor can neither compute it
+  nor relay it — [`api.md`](api.md#following-a-hub-to-a-new-address-post-hubproof).
 - **No web page can use it.** The hub sends no CORS headers, so a browser
   refuses to read its answers cross-origin, and a page cannot attach an
   `Authorization` header without a preflight the hub answers with a `404`.

@@ -81,6 +81,7 @@ import {
   type WifiChangeError,
   type WifiChangeResult,
 } from '../core/wifi-networks.js';
+import { ownIPv4Addresses, proofAddressHost, proveIdentity } from '../core/hub-proof.js';
 import type { MqttObserver } from '../core/mqtt-observer.js';
 import { hostFromRequest, mqttAccess, type MqttBrokerConfig } from '../core/mqtt-access.js';
 import { isHistoryKind, type HistoryKind, type HistoryService } from '../core/history.js';
@@ -158,6 +159,12 @@ export interface ApiDeps {
    * and every `buildServer` call site does not have to grow it.
    */
   wifiApplyWaitMs?: number;
+  /**
+   * The IPv4 addresses this machine holds, for `POST /hub/proof`, which signs
+   * only for one of them. Optional so a suite can name the address it dials;
+   * the hub reads the interfaces afresh on every request.
+   */
+  ownAddresses?: () => readonly string[];
   /**
    * Where the coordinator detector records what it found — read only to tell
    * "no Zigbee stick" apart from "the stick is here and Matter has the board".
@@ -392,7 +399,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    *
    * `onRequest` rather than a per-route `preHandler`, and that placement is
    * the point: it lands before the body is read, before every route including
-   * the two unauthenticated ones, and before the WebSocket upgrade — and
+   * the three unauthenticated ones, and before the WebSocket upgrade — and
    * `GET /hub` is exactly what a rebinding page is after, so exempting the
    * public route would be exempting the target.
    *
@@ -509,6 +516,39 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // depending on which arrived first.
     ...hubStatus.snapshot(),
   }));
+
+  /**
+   * Prove this hub is itself, at this address, to an app holding one of its
+   * tokens — before that app sends the token here. `core/hub-proof.ts` has the
+   * argument; this is what an app asks a hub it has followed to a new address.
+   *
+   * Public, like `GET /hub`, because the whole point is that no credential has
+   * been sent yet. One refusal for an unknown token and for an address that is
+   * not this hub's, so the route answers neither question on its own. And no
+   * capability on `GET /hub` for it, deliberately: the address being checked is
+   * the one that cannot be trusted to say so, and a hub without this route
+   * answers 404, which an app treats as "not proven" and does not follow.
+   */
+  const ownAddresses = deps.ownAddresses ?? ownIPv4Addresses;
+  app.post('/api/v1/hub/proof', async (request, reply) => {
+    const body = z
+      .object({
+        nonce: z.string().regex(/^[0-9a-f]{32,128}$/),
+        address: z.string().max(64),
+        tokenId: z.string().regex(/^[0-9a-f]{64}$/),
+      })
+      .parse(request.body);
+    const host = proofAddressHost(body.address);
+    const tokenHash =
+      host !== undefined && ownAddresses().includes(host)
+        ? await deps.pairing.tokenHashForProof(body.tokenId)
+        : undefined;
+    if (tokenHash === undefined) return reply.code(403).send({ error: 'proof_refused' });
+    return {
+      hubId: deps.hubId,
+      proof: proveIdentity(tokenHash, deps.hubId, body.nonce, body.address),
+    };
+  });
 
   /**
    * One member, as every route that answers with one renders them.

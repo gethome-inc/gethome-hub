@@ -5,6 +5,7 @@ import type { Db } from '../db/client.js';
 import { invites, members, tokens } from '../db/schema.js';
 import { generateNumericCode, generateToken, sha256Hex } from './crypto.js';
 import type { AccessService } from './access.js';
+import { proofTokenId } from './hub-proof.js';
 import type { Logger } from '../logging.js';
 
 /**
@@ -309,6 +310,17 @@ export class PairingService {
       role: member.role === 'owner' ? 'owner' : 'member',
       roleId: member.roleId,
     };
+  }
+
+  /**
+   * The stored hash of the token an app names by `proofTokenId` — for
+   * `POST /hub/proof`, which proves this hub to an app without the token
+   * travelling. A scan rather than an index: a home holds a few dozen tokens,
+   * and the id is a hash of the stored hash, which no column carries.
+   */
+  async tokenHashForProof(id: string): Promise<string | undefined> {
+    const rows = await this.db.select({ tokenHash: tokens.tokenHash }).from(tokens);
+    return rows.find((row) => proofTokenId(row.tokenHash) === id)?.tokenHash;
   }
 
   private async issueToken(

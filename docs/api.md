@@ -135,6 +135,7 @@ than no button.
 |---|---|---|
 | `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `matter: {bluetooth, bluetoothReason?, wifi, commissioning, settlingUntil?}` is present only while Matter is running and says what pairing this hub can actually do — and, in `settlingUntil`, whether it has finished finding the devices it already owns — see [below](#pairing-a-matter-accessory). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid). `wifiNetworks: {available, reason?}` is present on a hub that can be told about another Wi-Fi network before it is moved — `available: false` with `reason` `"no-networkmanager"` or `"not-installed"` when this machine cannot — see [below](#wi-fi-networks-settingswifi) |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
+| `POST /hub/proof` | — | `{nonce, address, tokenId}` → `{hubId, proof}`: this hub proving it is itself **at the address the app dialled**, to an app holding one of its tokens, without the token being sent. `403 proof_refused` for an address that is not this hub's or a token it does not hold — one answer for both. For an app following a saved hub to a new address — see [below](#following-a-hub-to-a-new-address-post-hubproof) |
 | `GET /home` · `PATCH /home` | floor · `home.rename` | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name) |
 | `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | floor · `home.structure` | `{id, name, zoneId, icon, accent, sortOrder}`. `POST` takes `{name, zoneId?, icon?, accent?, sortOrder?}` — the name is the only required field anywhere here — and `PATCH` takes the same set with every field optional; `zoneId: null` means "in no zone", and `icon: null` / `accent: null` mean "back to the look the app derives" — each different from leaving the field out. `icon`/`accent` are opaque app tokens (1–40 chars, see [below](#rooms-and-zones)). Names are trimmed before they are measured (1–80), an unknown `zoneId` is `404 unknown_zone`, and a new room goes to the *end* of the order. Deleting a room does not delete its devices — they are simply in no room. Every write broadcasts the [`structure` frame](#rooms-and-zones) |
 | `GET /zones` · `POST /zones` · `PATCH /zones/:id` · `DELETE /zones/:id` | floor · `home.structure` | `{id, name, sortOrder}` — the optional layer above rooms, see [below](#rooms-and-zones). `POST {name, sortOrder?}`, `PATCH {name?, sortOrder?}`; a zone carries no look of its own, since nothing draws a zone as a thing. Deleting a zone keeps its rooms and leaves them in none |
@@ -1561,6 +1562,39 @@ hub advertises `_gethome._tcp` with its `id` TXT record on whatever network it
 joins, and its address there is a new DHCP lease — so an app has to find a hub
 it has saved **by that id** and take the new address, rather than trust the one
 it saved at the claim.
+
+#### Following a hub to a new address (`POST /hub/proof`)
+
+The `id` in an mDNS record and in `GET /hub` is public, and anything on the LAN
+can announce it — so before an app writes a new address down, and before it
+sends a token there, it asks that address to prove it is the hub:
+
+```jsonc
+// POST /hub/proof — no Authorization header
+{ "nonce": "<64 hex, random per attempt>",
+  "address": "192.168.1.60:8420",        // exactly the host:port the app dialled
+  "tokenId": "<64 hex>" }                // sha256 of the raw sha256 of the token
+// 200
+{ "hubId": "…", "proof": "<64 hex>" }
+```
+
+`proof` is HMAC-SHA256, keyed by the **raw 32 bytes of sha256(token)** — which
+is all the hub stores of a token — over the UTF-8 bytes of
+`gethome-hub-proof\n<hubId>\n<nonce>\n<address>`. The app computes the same
+and compares, in constant time. Three rules.
+
+- **The hub signs only for an IPv4 address it holds right now.** That is what
+  stops an impostor relaying the challenge to the real hub: the relayed
+  `address` is the impostor's, which the real hub refuses, and rewriting it to
+  the real hub's makes the proof cover an address the app never dialled.
+- **No answer but a valid proof moves an app.** `403 proof_refused`, a `404`
+  from a hub older than this route, a timeout and a proof that does not match
+  all mean "not proven", and the app keeps the address it has. There is no
+  capability on `GET /hub` for this on purpose: the address in question is the
+  one that cannot be trusted to say so.
+- **Nothing secret travels.** `tokenId` is a one-way function of the stored
+  hash, and the nonce and address are the app's own. The token goes to the new
+  address only after the proof has matched.
 
 ### The Zigbee join window
 

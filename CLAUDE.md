@@ -529,9 +529,10 @@ adapter/registry/API change.
   expire is fifteen minutes in which somebody just removed could let themselves
   back in.
 - **The hub is a LAN service, and the one attack that reaches past a bearer
-  token is rebinding.** Every route but `GET /hub` and `POST /pair` is behind a
-  token, and no browser can attach one cross-origin: there are no cookies here,
-  so a hostile page has no ambient authority to borrow, and asking for an
+  token is rebinding.** Every route but `GET /hub`, `POST /pair` and
+  `POST /hub/proof` is behind a token, and no browser can attach one
+  cross-origin: there are no cookies here, so a hostile page has no ambient
+  authority to borrow, and asking for an
   `Authorization` header triggers a preflight this API answers with a 404.
   **That is why no CORS plugin is registered — the absence is the policy**, and
   adding one would be handing back exactly what it withholds. DNS rebinding
@@ -555,7 +556,7 @@ adapter/registry/API change.
   because whoever meets it is almost always somebody who reached their own hub
   by a name nobody anticipated. It hangs off `onRequest` rather than a
   per-route `preHandler`, which is the placement doing the work: before the
-  body, before the two unauthenticated routes — `GET /hub` is exactly what a
+  body, before the three unauthenticated routes — `GET /hub` is exactly what a
   rebound page reads, so exempting the public route would be exempting the
   target — and before the WebSocket upgrade, where a socket authorizes once and
   then streams the home. `EXTRA_ALLOWED_HOSTS` **adds** rather than replaces,
