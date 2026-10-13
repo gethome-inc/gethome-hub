@@ -548,6 +548,92 @@ in `deploy/install.sh` must stay accurate.
   code while it was written: bash 3.2 keeps the quotes of a quoted replacement
   in `${var//pattern/"$x"}`, so escaping the name in the shell produced
   `My"\:"Net` on macOS and `My\:Net` on the Pi.)
+- **A hub that loses its Wi-Fi profile is a hub nobody can reach to fix it, so
+  it keeps its own copy and puts it back.** On 2026-10-12 the owner's Zero 2 W
+  (Trixie, NetworkManager 1.52.1 storing profiles through netplan, Wi-Fi from
+  Raspberry Pi Imager via cloud-init) was unplugged 15–45 s after power-on.
+  NetworkManager had been re-writing `/etc/netplan/90-NM-<uuid>.yaml` for the
+  hub's Wi-Fi and one other profile, and both were left at **0 bytes**. Every
+  boot after that was healthy and off the network: hubd on 8420, Zigbee2MQTT
+  with its devices, and wlan0 "disconnected" for ever, because **an empty YAML
+  is not an error to netplan — it defines nothing**, so the profile was simply
+  gone and nothing said so. It came back only by taking the card to a Mac.
+  **Why a cut can do that, from the source** (Ubuntu's NetworkManager netplan
+  patch and netplan 1.1.2, which is what NetworkManager links): a profile is
+  persisted with `netplan_netdef_write_yaml`, which is `fopen(path, "wb")` —
+  truncate, then write, no temporary file, no rename, no fsync — and *deleting*
+  any netplan-backed profile runs `netplan_delete_connection`, which rewrites
+  every file in `/etc/netplan` (temporary file and rename, still no fsync), so
+  one profile's deletion puts all the others in the window too. NetworkManager's
+  own keyfile writer, the other storage and Bookworm's, does fsync and rename.
+  The other shape the same cut can leave is a file of zeros rather than an
+  empty one, and that is worse: measured with netplan 1.1.2, one file with a
+  NUL in it makes `netplan generate` refuse **the whole directory**, so every
+  profile there goes at once.
+  **How wide the window is, measured on that hub after the repair** (12:27:08
+  boot, 2026-10-13): NetworkManager loaded the hand-written
+  `system-connections/Keti.nmconnection`, connected 29.4 s after boot, and did
+  **not** migrate or re-write it — `/etc/netplan` stayed empty and the keyfile
+  kept the mtime it was written with. So re-persisting is not an every-boot
+  event; NetworkManager does run `netplan generate` on every start (~25 s in),
+  which writes only `/run`. What made it re-persist in the boot that was cut is
+  **unknown** — that boot's journal stops at 14 s — so treat the window as
+  "whenever something on the machine changes or deletes a profile", which is
+  rare and not ours to close.
+  `deploy/wifi-profile.sh` is the fix, installed as
+  `/usr/local/lib/gethome-wifi-profile.sh` with two callers. **The dispatcher
+  (`53-gethome-wifi-profile`, on `up`) keeps the copy** in
+  `/etc/gethome/wifi-profile.nmconnection`, root 0600. **`gethome-wifi-
+  restore.service` puts it back**: a oneshot `After=NetworkManager.service`
+  (never `Wants=` — a machine with NetworkManager turned off has its reasons),
+  `ConditionPathExists=` the copy, enabled and never started by the installer.
+  Seven rules hold it up.
+  **The copy is asked of NetworkManager, never read from a path**: the active
+  wireless connection (`CONNECTION_UUID` from the dispatcher) and the file
+  NetworkManager says it loaded it from (`nmcli -t -f TYPE,UUID,FILENAME
+  connection show --active`, `\:` decoded). That hub has had the same profile
+  as netplan YAML rendered to `/run/NetworkManager/system-connections/netplan-*`
+  and as a native keyfile, and the file is a keyfile either way — so the copy
+  is the whole profile, open networks, 5 GHz, hidden SSIDs and static addresses
+  included, which is why it is not `wifi.env` (that file means "what to hand an
+  accessory" and holds nothing for an open or a 5 GHz-only network).
+  **A copy gets the UUID NetworkManager reports** when the file has none:
+  netplan's rendering of a cloud-init profile carries no `uuid=` and
+  NetworkManager derives one from the file's path, so the same profile put back
+  under another name would come back as another connection.
+  **Atomic, fsynced, and only when it changed** — a dot-named temporary file
+  (NetworkManager never loads one), fsync, rename, fsync of the directory — so
+  the copy is never the thing a cut empties, and a dispatcher that runs on every
+  association writes nothing on almost all of them. A profile that is empty,
+  not Wi-Fi, a hotspot the machine runs (`mode=ap`), some other UUID, or has no
+  file never replaces a good copy.
+  **"Missing" means NetworkManager lists no wireless profile at all** —
+  `nmcli -t -f TYPE connection show` — never the absence of a file, because the
+  failure was a file that *existed* and defined nothing. A healthy boot answers
+  that at once and does nothing else; only a boot with none waits for
+  `nm-online -s` (startup complete) and asks again, so a slow start is not
+  mistaken for a stranded hub, and an `nmcli` that fails is never read as "no
+  profiles".
+  **It leaves alone** any Wi-Fi profile that exists, the copy or not — a network
+  or password the owner changed stands, and becomes the copy the next time it
+  connects — a hub with a default route or an Ethernet device connecting or
+  connected (somebody who moved it to a cable and deleted its Wi-Fi meant
+  both), and a machine with no Wi-Fi device.
+  **It puts the profile back as a keyfile** —
+  `system-connections/gethome-restored-wifi.nmconnection`, written the same
+  atomic way, then `nmcli connection load` and NetworkManager's own autoconnect
+  — because NetworkManager reads a keyfile with or without netplan, including
+  when a damaged YAML makes `netplan generate` refuse everything. That is also
+  exactly what the hand repair did.
+  **`/etc/netplan` is the distribution's and is never touched**: an empty or
+  zero-filled file there is *named* in the journal line and left in place. And
+  uninstall leaves a restored profile where it is, since by then it is the
+  machine's Wi-Fi. Everything it did is one line under
+  `journalctl -u gethome-wifi-restore`. The paths are overridable
+  (`GETHOME_NM_CONNECTIONS`, `GETHOME_NETPLAN_DIR`, and the installer's three
+  `GETHOME_WIFI_PROFILE_*`/`GETHOME_WIFI_RESTORE_UNIT`) so
+  `test/deploy-wifi-profile.test.ts` runs the real script and the real
+  `keep_wifi_profile` against a fake `nmcli` and files it owns.
 - **A Thread accessory is reached through a route the border router
   announces, and Linux ignores it by default.** An Apple TV, HomePod or Google
   hub tells the LAN how to reach its Thread network with a Route Information
