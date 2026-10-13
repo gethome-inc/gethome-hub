@@ -352,6 +352,20 @@ in `deploy/install.sh` must stay accurate.
   every other bound here (`STATE_FLUSH_MS`, the activity log's two, the history
   buckets) exists to *stop* writing, and this one exists because the alternative
   is a support question with no evidence behind it.
+  **And a bound in megabytes is only as long as what fills it**, which the
+  first outage diagnosed from this journal measured: about an hour. matter.js
+  ran at its own default, debug, and on that hub — a Zero 2 W with one Matter
+  plug and three Zigbee devices, ten minutes after boot — `gethome-hubd` wrote
+  **3,517 journal lines in ten minutes, 3,468 of them (98.6%) matter.js
+  debug** (`MessageExchange` 2,231, `MessageChannel` 751, `PairedNode` 465):
+  about 1.06 MB of message text per ten minutes, roughly 150 MB a day before
+  journald's own per-entry overhead, with `journalctl --disk-usage` at 56M
+  against the cap. matter.js follows the hub's `LOG_LEVEL` now
+  (`src/adapters/matter/log-level.ts`). The rule it leaves is to read the
+  cap as time rather than as space: anything that writes per report rather
+  than per event shortens the history the cap buys, so measure the rate
+  (`journalctl -u gethome-hubd --since -10min | wc -l`) before and after a
+  change that adds logging.
 - **The hub's Wi-Fi must not doze — though not for the reason this was first
   written for.** 802.11 power save is on by default on the Pi's brcmfmac
   (`brcmf_cfg80211_set_power_mgmt: power save enabled`, in every Pi's kernel
