@@ -60,6 +60,9 @@ function lines(file: string): string[] {
 
 const UUID = 'cf593bc2-43d4-31e2-9ea5-937546cda026';
 const PSK = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const LOOPBACK = '5bed983f-04fe-40d6-ac35-d4e2d7ea1c75';
+/** The network an app told the hub about before a move: a Wi-Fi profile that is not the copy's. */
+const DACHA = '0b9c0d4e-0000-4000-8000-0000000000da';
 
 /** The keyfile written by hand on 2026-10-13 to bring the hub back. */
 const KETI_KEYFILE = `[connection]
@@ -170,11 +173,11 @@ interface Hub {
   profile(dir: string, name: string, body: string): string;
   /** What `nmcli -t -f TYPE,UUID,FILENAME connection show --active` answers. */
   active(rows: string[]): void;
-  /** What `nmcli -t -f TYPE connection show` answers, one type per profile. */
-  profiles(types: string[]): void;
+  /** What `nmcli -t -f UUID,TYPE connection show` answers: `uuid:type`, one per profile. */
+  profiles(rows: string[]): void;
   /** What `nmcli -t -f TYPE,STATE device` answers. */
   devices(rows: string[]): void;
-  run(mode: 'backup' | 'restore', env?: Record<string, string>): string;
+  run(mode: 'backup' | 'restore' | 'forget', env?: Record<string, string>, args?: string[]): string;
   /** Every `nmcli`, `nm-online` and `sync` invocation, in order. */
   nmcli(): string[];
   nmOnline(): string[];
@@ -216,13 +219,14 @@ function hub(): Hub {
      [ "$FAKE_NM_DOWN" = "yes" ] && { echo "Error: NetworkManager is not running." >&2; exit 8; }
      case "$*" in
        "-t -f TYPE,UUID,FILENAME connection show --active") cat "${state}/active" ;;
-       "-t -f TYPE connection show")
+       "-t -f UUID,TYPE connection show")
          if [ "$FAKE_LATE" = "yes" ] && [ ! -f "${state}/asked" ]; then : > "${state}/asked"; exit 0; fi
          cat "${state}/profiles" ;;
        "-t -f TYPE,STATE device") cat "${state}/devices" ;;
        "connection load "*)
          [ "$FAKE_LOAD_FAILS" = "yes" ] && { echo "Error: failed to load connection: invalid key" >&2; exit 1; }
-         echo 802-11-wireless >> "${state}/profiles" ;;
+         loaded=$(sed -n 's/^uuid=//p' "$3" | head -n 1)
+         echo "\${loaded}:802-11-wireless" >> "${state}/profiles" ;;
        *) echo "unexpected nmcli $*" >&2; exit 2 ;;
      esac
      exit 0`,
@@ -265,14 +269,14 @@ function hub(): Hub {
     active(rows) {
       writeFileSync(path.join(state, 'active'), rows.map((row) => `${row}\n`).join(''));
     },
-    profiles(types) {
-      writeFileSync(path.join(state, 'profiles'), types.map((type) => `${type}\n`).join(''));
+    profiles(rows) {
+      writeFileSync(path.join(state, 'profiles'), rows.map((row) => `${row}\n`).join(''));
     },
     devices(rows) {
       writeFileSync(path.join(state, 'devices'), rows.map((row) => `${row}\n`).join(''));
     },
-    run(mode, extra = {}) {
-      return execFileSync('bash', [SCRIPT, mode, '--conf', conf], {
+    run(mode, extra = {}, args = []) {
+      return execFileSync('bash', [SCRIPT, mode, ...args, '--conf', conf], {
         encoding: 'utf8',
         env: { ...process.env, ...env, ...extra },
       });
@@ -291,7 +295,7 @@ function onKeti(): Hub {
   const h = hub();
   const file = h.profile(h.nmDir, 'Keti.nmconnection', KETI_KEYFILE);
   h.active([`802-11-wireless:${UUID}:${file}`]);
-  h.profiles(['802-11-wireless', 'loopback']);
+  h.profiles([`${UUID}:802-11-wireless`, `${LOOPBACK}:loopback`]);
   h.devices(['wifi:connected', 'loopback:connected (externally)']);
   return h;
 }
@@ -301,7 +305,7 @@ function stranded(h: Hub = onKeti()): Hub {
   h.run('backup');
   expect(h.backup()).not.toBe('');
   h.active([]);
-  h.profiles(['loopback']);
+  h.profiles([`${LOOPBACK}:loopback`]);
   h.devices(['wifi:disconnected', 'loopback:connected (externally)']);
   writeFileSync(path.join(h.netplanDir, `90-NM-${UUID}.yaml`), '');
   return h;
@@ -491,7 +495,7 @@ describe('putting the profile back at boot', () => {
     const h = hub();
     const file = h.profile(h.runDir, 'netplan-wlan0-Keti.nmconnection', KETI_NETPLAN_RENDER);
     h.active([`802-11-wireless:${UUID}:${file}`]);
-    h.profiles(['802-11-wireless']);
+    h.profiles([`${UUID}:802-11-wireless`]);
     stranded(h);
     h.run('restore');
     expect(h.restored()).toContain(`[connection]\nuuid=${UUID}\nid=netplan-wlan0-Keti\n`);
@@ -536,7 +540,7 @@ describe('putting the profile back at boot', () => {
     const h = stranded();
     h.run('restore');
     h.active([`802-11-wireless:${UUID}:${h.restoredFile}`]);
-    h.profiles(['802-11-wireless']);
+    h.profiles([`${UUID}:802-11-wireless`]);
     h.run('backup');
     expect(h.backup()).toBe(h.restored());
     stranded(h);
@@ -552,6 +556,21 @@ describe('putting the profile back at boot', () => {
     expect(h.restored()).toContain(KETI_KEYFILE);
   });
 
+  /**
+   * A hub can know more than one network — an app adds the one it is about to
+   * be moved to — and a cut that empties the profile for the network it stands
+   * on strands it just the same while the other survives. Out of range, that
+   * other one cannot put the hub on a network; in range, it already would have.
+   */
+  it('puts the copy back when another Wi-Fi profile survived but the one it last joined did not', () => {
+    const h = stranded();
+    h.profiles([`${DACHA}:802-11-wireless`, `${LOOPBACK}:loopback`]);
+    const output = h.run('restore');
+    expect(h.restored()).toContain(KETI_KEYFILE);
+    expect(h.nmcli()).toContain(`connection load ${h.restoredFile}`);
+    expect(output).toContain('put back the one it last connected with (Keti)');
+  });
+
   it('says so when NetworkManager will not load it', () => {
     const h = stranded();
     const output = h.run('restore', { FAKE_LOAD_FAILS: 'yes' });
@@ -564,17 +583,34 @@ describe('putting the profile back at boot', () => {
       const h = onKeti();
       h.run('backup');
       const output = h.run('restore');
-      expect(output).toContain('has a Wi-Fi profile');
+      expect(output).toContain('still has the Wi-Fi profile the hub last connected with (Keti)');
       expect(h.restored()).toBe('');
       expect(h.nmcli().filter((call) => call.startsWith('connection load'))).toEqual([]);
       // The ordinary boot answers at once and does not wait for NetworkManager.
       expect(h.nmOnline()).toEqual([]);
     });
 
-    it('any Wi-Fi profile, even one that is not the copy — the owner’s change stands', () => {
+    it('the network it last joined, among others it knows', () => {
       const h = stranded();
-      h.profiles(['802-11-wireless', 'loopback']);
+      h.profiles([`${DACHA}:802-11-wireless`, `${UUID}:802-11-wireless`, `${LOOPBACK}:loopback`]);
+      expect(h.run('restore')).toContain('nothing to put back');
+      expect(h.restored()).toBe('');
+    });
+
+    it('a profile for that network the owner has changed — same connection, still there', () => {
+      // A new password or an edited setting keeps the UUID, and it is theirs:
+      // it becomes the copy the next time it connects.
+      const h = stranded();
+      h.profiles([`${UUID.toUpperCase()}:802-11-wireless`]);
       h.run('restore');
+      expect(h.restored()).toBe('');
+    });
+
+    it('a hub another network it knows has already put on the network', () => {
+      const h = stranded();
+      h.profiles([`${DACHA}:802-11-wireless`]);
+      const output = h.run('restore', { FAKE_ROUTE: 'default via 10.0.0.1 dev wlan0 proto dhcp metric 600\n' });
+      expect(output).toContain('on the network another way');
       expect(h.restored()).toBe('');
     });
 
@@ -582,10 +618,10 @@ describe('putting the profile back at boot', () => {
       // Only a boot with no Wi-Fi profile waits for NetworkManager to finish
       // starting, and then asks again before deciding anything.
       const h = stranded();
-      h.profiles(['802-11-wireless']);
+      h.profiles([`${UUID}:802-11-wireless`]);
       const output = h.run('restore', { FAKE_LATE: 'yes' });
       expect(h.nmOnline()).toEqual(['-s -q -t 1']);
-      expect(output).toContain('has a Wi-Fi profile');
+      expect(output).toContain('still has the Wi-Fi profile the hub last connected with');
       expect(h.restored()).toBe('');
     });
 
@@ -630,6 +666,61 @@ describe('putting the profile back at boot', () => {
       expect(h.restored()).toBe('');
       expect(h.nmcli()).toEqual([]);
     });
+  });
+});
+
+/**
+ * A network removed through the hub (`deploy/wifi-networks.sh`) must not come
+ * back from the copy. The hub never removes the network it is on, so the copy
+ * can be of a removed network only on a board reached another way — Ethernet —
+ * and there it would put that network back the first boot the cable was out.
+ */
+describe('forgetting a network removed through the hub', () => {
+  it('drops the copy when it is of the network removed', () => {
+    const h = onKeti();
+    h.run('backup');
+    const syncs = h.syncs().length;
+    const output = h.run('forget', {}, [UUID]);
+    expect(h.backup()).toBe('');
+    expect(output).toContain('no longer keeps a copy of Keti');
+    // The removal is on the card before it is reported.
+    expect(h.syncs().slice(syncs)).toEqual([h.conf]);
+  });
+
+  it('matches the UUID whatever its case', () => {
+    const h = onKeti();
+    h.run('backup');
+    h.run('forget', {}, [UUID.toUpperCase()]);
+    expect(h.backup()).toBe('');
+  });
+
+  it('keeps the copy when another network was removed', () => {
+    const h = onKeti();
+    h.run('backup');
+    expect(h.run('forget', {}, [DACHA])).toContain('of another network');
+    expect(h.backup()).toBe(KETI_KEYFILE);
+  });
+
+  it('touches nothing for a word that is not a UUID', () => {
+    const h = onKeti();
+    h.run('backup');
+    expect(h.run('forget', {}, ['../../etc/passwd'])).toContain('not a connection UUID');
+    expect(h.run('forget')).toContain('not a connection UUID');
+    expect(h.backup()).toBe(KETI_KEYFILE);
+  });
+
+  it('says nothing and changes nothing when there is no copy', () => {
+    const h = hub();
+    expect(h.run('forget', {}, [UUID])).toBe('');
+    expect(h.nmcli()).toEqual([]);
+  });
+
+  it('never asks NetworkManager anything', () => {
+    const h = onKeti();
+    h.run('backup');
+    const before = h.nmcli().length;
+    h.run('forget', {}, [UUID]);
+    expect(h.nmcli()).toHaveLength(before);
   });
 });
 

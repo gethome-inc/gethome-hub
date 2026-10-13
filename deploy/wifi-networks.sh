@@ -71,6 +71,9 @@ HUB_ENV="$CONF_DIR/hub.env"
 # are the same word on every install, so it still stands in for an older unit.
 HUB_USER="${GETHOME_USER:-${GETHOME_GROUP:-gethome}}"
 MAX_NETWORKS=16
+# The copy of the profile the hub last connected with (deploy/wifi-profile.sh),
+# which a network removed here must not come back from.
+PROFILE_HELPER="${GETHOME_WIFI_PROFILE_BIN:-/usr/local/lib/gethome-wifi-profile.sh}"
 
 read_env() { sed -n "s/^$1=//p" "$2" 2>/dev/null | tail -n1; }
 
@@ -235,6 +238,14 @@ wifi_device() {
   nmcli -t -f DEVICE,TYPE device 2>/dev/null | awk -F: '$2 == "wifi" { print $1; exit }'
 }
 
+# Push a change NetworkManager has just made onto the card before saying it is
+# made. On Raspberry Pi OS Trixie it keeps profiles as netplan YAML and writes
+# them in place, with no temporary file and no fsync, so for half a minute
+# afterwards a power cut can leave the file empty — which is how a hub lost its
+# only network on 2026-10-12 (deploy/wifi-profile.sh). A hub unplugged the
+# moment an app says "added" is the ordinary case for a feature about moving.
+settle() { sync 2>/dev/null || true; }
+
 apply_add() {
   local ssid="$1" psk="$2" hidden="$3" bytes uuid active count=0 out name device existing
   RESULT_SSID="$ssid"
@@ -289,6 +300,7 @@ apply_add() {
     finish failed nmcli "$out"
     return
   fi
+  settle
   RESULT_UUID="$(nmcli -t -f UUID,NAME connection show 2>/dev/null \
     | awk -F: -v name="$name" '$2 == name { print $1; exit }')"
   finish applied
@@ -328,6 +340,13 @@ apply_remove() {
   if ! out="$(nmcli connection delete uuid "$target" 2>&1)"; then
     finish failed nmcli "$out"
     return
+  fi
+  settle
+  # And out of the copy the hub keeps of the network it last connected with,
+  # when this was that network — possible on a board reached over Ethernet — or
+  # a power cut would bring back a network somebody removed on purpose.
+  if [[ -x "$PROFILE_HELPER" ]]; then
+    "$PROFILE_HELPER" forget "$target" --conf "$CONF_DIR" --quiet >/dev/null 2>&1 || true
   fi
   finish applied
 }

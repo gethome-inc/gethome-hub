@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -233,6 +233,103 @@ describe('removing a network', () => {
     run(m);
     expect(readWifiChangeResult(m.data)).toMatchObject({ state: 'failed', error: 'not_found' });
     expect(profilesOf(m)).toHaveLength(2);
+  });
+});
+
+/**
+ * NetworkManager on Raspberry Pi OS Trixie persists a profile as netplan YAML
+ * through `fopen(path, "wb")` with no fsync, the writer that left a hub with
+ * two empty profiles on 2026-10-12. So a change is pushed to the card before
+ * the result says it is made: a hub unplugged the moment an app says "added"
+ * is the ordinary case for a feature about moving.
+ */
+describe('a change survives the plug being pulled', () => {
+  function withSync(m: Machine): void {
+    writeFileSync(
+      path.join(m.bin, 'sync'),
+      `#!/bin/sh\n{ printf '%s\\n' '---'; printf '%s\\n' sync "$@"; } >> "$FAKE_NM_DIR/calls"\n`,
+    );
+    chmodSync(path.join(m.bin, 'sync'), 0o755);
+  }
+  const verbs = (m: Machine): string[] => callsOf(m).map((call) => (call[0] === 'sync' ? 'sync' : `${call[0]} ${call[1]}`));
+
+  it('syncs after adding, before the result is written', () => {
+    const m = machine([HOME]);
+    withSync(m);
+    requestWifiChange(m.data, { action: 'add', ssid: 'Dacha', psk: wpaPsk('Dacha', 'correct horse battery'), hidden: false });
+    run(m);
+    const order = verbs(m);
+    expect(order.indexOf('sync')).toBeGreaterThan(order.indexOf('connection add'));
+    expect(readWifiChangeResult(m.data)).toMatchObject({ state: 'applied' });
+  });
+
+  it('syncs after removing', () => {
+    const m = machine([HOME, SPARE]);
+    withSync(m);
+    requestWifiChange(m.data, { action: 'remove', networkId: SPARE_ID });
+    run(m);
+    const order = verbs(m);
+    expect(order.indexOf('sync')).toBeGreaterThan(order.indexOf('connection delete'));
+  });
+
+  it('does not bother when nothing changed', () => {
+    const m = machine([HOME, SPARE]);
+    withSync(m);
+    requestWifiChange(m.data, { action: 'remove', networkId: HOME_ID });
+    run(m);
+    expect(verbs(m)).not.toContain('sync');
+  });
+});
+
+/**
+ * The hub keeps a copy of the profile it last connected with, and puts it back
+ * at boot if NetworkManager loses it (`deploy/wifi-profile.sh`). A network
+ * removed here must leave that copy too, or a power cut would bring back a
+ * network somebody removed on purpose. The hub never removes the network it is
+ * on, so this is the board reached over Ethernet, whose copy is of a Wi-Fi it
+ * is not using.
+ */
+describe('the profile copy', () => {
+  function withCopyOf(m: Machine, uuid: string): string {
+    const helper = path.join(m.bin, 'gethome-wifi-profile.sh');
+    copyFileSync(path.resolve(import.meta.dirname, '../deploy/wifi-profile.sh'), helper);
+    chmodSync(helper, 0o755);
+    const copy = path.join(m.conf, 'wifi-profile.nmconnection');
+    writeFileSync(copy, `[connection]\nid=Dacha\nuuid=${uuid}\ntype=wifi\n\n[wifi]\nssid=Dacha\n`);
+    return copy;
+  }
+
+  it('is dropped when the network removed is the one it is of', () => {
+    const m = machine([{ ...HOME, active: false }, SPARE, WIRED]);
+    const copy = withCopyOf(m, SPARE_ID);
+    requestWifiChange(m.data, { action: 'remove', networkId: SPARE_ID });
+    run(m);
+    expect(readWifiChangeResult(m.data)).toMatchObject({ state: 'applied' });
+    expect(existsSync(copy)).toBe(false);
+  });
+
+  it('is kept when another network is removed', () => {
+    const m = machine([HOME, SPARE]);
+    const copy = withCopyOf(m, HOME_ID);
+    requestWifiChange(m.data, { action: 'remove', networkId: SPARE_ID });
+    run(m);
+    expect(existsSync(copy)).toBe(true);
+  });
+
+  it('is kept when the removal is refused', () => {
+    const m = machine([HOME, SPARE]);
+    const copy = withCopyOf(m, HOME_ID);
+    requestWifiChange(m.data, { action: 'remove', networkId: HOME_ID });
+    run(m);
+    expect(readWifiChangeResult(m.data)).toMatchObject({ state: 'failed', error: 'connected' });
+    expect(existsSync(copy)).toBe(true);
+  });
+
+  it('does not stop a removal on a hub installed without the helper', () => {
+    const m = machine([HOME, SPARE]);
+    requestWifiChange(m.data, { action: 'remove', networkId: SPARE_ID });
+    run(m);
+    expect(readWifiChangeResult(m.data)).toMatchObject({ state: 'applied' });
   });
 });
 

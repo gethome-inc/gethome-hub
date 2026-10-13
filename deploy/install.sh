@@ -1752,9 +1752,11 @@ DISPATCH
 # So the hub keeps its own copy of the profile it last connected with, taken by
 # a dispatcher whenever a connection comes up (atomically, fsynced, root-only,
 # and only when it changed), and a oneshot puts it back at boot when
-# NetworkManager has no Wi-Fi profile at all and the hub is not on the network
-# another way. It never edits a profile that exists, so whatever the owner has
-# changed stands, and becomes the copy the next time it connects.
+# NetworkManager no longer holds that profile and the hub is not on the network
+# another way — whether or not it holds others, since the hub can be told about
+# more than one network (manage_wifi_networks, below). It never edits a profile
+# that exists, so whatever the owner has changed stands, and becomes the copy
+# the next time it connects.
 #
 # Installed wherever NetworkManager is, a wired hub included: the dispatcher
 # keeps nothing until a Wi-Fi connection comes up, the oneshot does not run
@@ -2564,9 +2566,13 @@ $SUDO chown -R "$SERVICE_USER:$SERVICE_USER" "${DATA_DIR}/update" 2>/dev/null ||
 # for the reason `update/enabled` is: `hub.env` never reaches an upgraded hub.
 manage_wifi_networks() {
   local helper="${GETHOME_WIFI_NETWORKS_BIN:-/usr/local/lib/gethome-wifi-networks.sh}"
-  local dispatcher="${GETHOME_WIFI_NETWORKS_DISPATCHER:-/etc/NetworkManager/dispatcher.d/53-gethome-wifi-networks}"
+  local dispatcher="${GETHOME_WIFI_NETWORKS_DISPATCHER:-/etc/NetworkManager/dispatcher.d/54-gethome-wifi-networks}"
   local wifi_dir="${DATA_DIR}/wifi"
 
+  # 54, because the profile copy (keep_wifi_profile) has 53. This dispatcher
+  # was 53 on its branch before that landed, so a hub that tried the branch has
+  # it under the old name too, and would run it twice on every association.
+  $SUDO rm -f "$(dirname "$dispatcher")/53-gethome-wifi-networks" 2>/dev/null || true
   $SUDO mkdir -p "$wifi_dir" 2>/dev/null || true
   $SUDO rm -f "$wifi_dir/enabled" "$wifi_dir/unsupported" 2>/dev/null || true
 

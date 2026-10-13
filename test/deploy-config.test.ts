@@ -919,6 +919,21 @@ describe('deploy/install.sh', () => {
  * being checked. So every script in `deploy/` must be on it — a shebang is
  * what makes a file a script here, since `gethome-hubctl` has no extension.
  */
+/**
+ * The profile copy and the networks list each arrived with a dispatcher
+ * numbered 53, on two branches at once. NetworkManager runs dispatchers in name
+ * order, so a shared number still works — and is one more thing the next one
+ * collides with, so each has a number of its own.
+ */
+describe('NetworkManager dispatchers', () => {
+  it('each have a number of their own', () => {
+    const installer = readFileSync(path.join(repoRoot, 'deploy', 'install.sh'), 'utf8');
+    const numbers = [...installer.matchAll(/dispatcher\.d\/(\d+)-gethome-[a-z-]+\}/g)].map((match) => match[1]);
+    expect(numbers).toEqual(expect.arrayContaining(['50', '52', '53', '54']));
+    expect(new Set(numbers).size).toBe(numbers.length);
+  });
+});
+
 describe('CI', () => {
   it('shellchecks every script in deploy/', () => {
     const ci = readFileSync(path.join(repoRoot, '.github', 'workflows', 'ci.yml'), 'utf8');

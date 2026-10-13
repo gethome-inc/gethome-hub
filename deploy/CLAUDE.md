@@ -147,7 +147,7 @@ in `deploy/install.sh` must stay accurate.
   writes `<data>/wifi/request`, `gethome-wifi.path` notices, and
   `deploy/wifi-networks.sh` (installed as `/usr/local/lib/gethome-wifi-networks.sh`,
   root, `Type=oneshot`) applies it with `nmcli` and writes `networks` and
-  `result` back, 0640. Seven things to keep. **The service is never
+  `result` back, 0640. Eight things to keep. **The service is never
   enabled** and the script **always exits 0**, for the update runner's reasons.
   **Root runs `nmcli` and nothing else; everything in `<data>/wifi/` is read
   and written as the hub's account** (`as_hub`: `setpriv`, else `runuser`, both
@@ -173,9 +173,20 @@ in `deploy/install.sh` must stay accurate.
   write, which reaches nobody who could not already read the active network's
   key. **SSIDs cross as hex**, written with `od`, because a network can be called
   anything and `nmcli -t` escapes colons. And **the list is rewritten on every
-  association** by a third dispatcher (`53-gethome-wifi-networks`), so
-  "connected" stays true; a profile somebody adds by hand appears at the next
-  reconnect or the next change, which is the one thing this does not watch.
+  association** by its own dispatcher (`54-gethome-wifi-networks`; 53 is the
+  profile copy's, below), so "connected" stays true; a profile somebody adds by
+  hand appears at the next reconnect or the next change, which is the one thing
+  this does not watch. **A change is on the card before it is reported, and a
+  removed network leaves the profile copy too.** On Raspberry Pi OS Trixie
+  `nmcli connection add` persists the profile as `/etc/netplan/90-NM-<uuid>.yaml`
+  through netplan's `netplan_netdef_write_yaml`, which is `fopen(path, "wb")`
+  and nothing more — no temporary file, no fsync — the writer that left a hub
+  with two empty profiles on 2026-10-12 (the profile-copy bullet below). So
+  every successful add and delete is followed by `sync` before the result is
+  written: a hub unplugged the moment an app says "added" is the ordinary case
+  for a feature about moving. And a delete runs `gethome-wifi-profile.sh forget
+  <uuid>`, which drops the copy only when it is of that very connection, so a
+  power cut can never bring back a network somebody removed on purpose.
   NetworkManager or nothing: a machine without `nmcli` gets no units and
   `<data>/wifi/unsupported` saying `no-networkmanager`, which the hub passes on
   so an app says why rather than offering a form that can only fail.
@@ -644,7 +655,7 @@ in `deploy/install.sh` must stay accurate.
   restore.service` puts it back**: a oneshot `After=NetworkManager.service`
   (never `Wants=` — a machine with NetworkManager turned off has its reasons),
   `ConditionPathExists=` the copy, enabled and never started by the installer.
-  Seven rules hold it up.
+  Eight rules hold it up.
   **The copy is asked of NetworkManager, never read from a path**: the active
   wireless connection (`CONNECTION_UUID` from the dispatcher) and the file
   NetworkManager says it loaded it from (`nmcli -t -f TYPE,UUID,FILENAME
@@ -664,18 +675,31 @@ in `deploy/install.sh` must stay accurate.
   association writes nothing on almost all of them. A profile that is empty,
   not Wi-Fi, a hotspot the machine runs (`mode=ap`), some other UUID, or has no
   file never replaces a good copy.
-  **"Missing" means NetworkManager lists no wireless profile at all** —
-  `nmcli -t -f TYPE connection show` — never the absence of a file, because the
-  failure was a file that *existed* and defined nothing. A healthy boot answers
-  that at once and does nothing else; only a boot with none waits for
-  `nm-online -s` (startup complete) and asks again, so a slow start is not
-  mistaken for a stranded hub, and an `nmcli` that fails is never read as "no
-  profiles".
-  **It leaves alone** any Wi-Fi profile that exists, the copy or not — a network
-  or password the owner changed stands, and becomes the copy the next time it
-  connects — a hub with a default route or an Ethernet device connecting or
-  connected (somebody who moved it to a cable and deleted its Wi-Fi meant
+  **"Missing" means NetworkManager no longer holds the profile the copy is
+  of** — the wireless profile with the copy's UUID, from `nmcli -t -f UUID,TYPE
+  connection show` — never the absence of a file, because the failure was a
+  file that *existed* and defined nothing, and never "no Wi-Fi profile at all".
+  It was that for the first day, and that was right only while a hub knew one
+  network: once an app can add the one it is about to be moved to (the
+  networks bullet above), a cut that empties the profile for the network the
+  hub stands on strands it just the same while the other survives, and the
+  other — out of range, or it would already have put the hub on a network — is
+  no reason to stay off this one. A healthy boot answers at once and does
+  nothing else; only a boot without it waits for `nm-online -s` (startup
+  complete) and asks again, so a slow start is not mistaken for a stranded hub,
+  and an `nmcli` that fails is never read as "no profiles".
+  **It leaves alone** every profile that exists, the copy's or another — it
+  never edits one, and a network or password the owner changed stands and
+  becomes the copy the next time it connects — a hub with a default route or an
+  Ethernet device connecting or connected (through a cable or through another
+  network it knows; somebody who moved it to a cable and deleted its Wi-Fi meant
   both), and a machine with no Wi-Fi device.
+  **A network removed through the hub leaves the copy too**: `wifi-networks.sh`
+  runs `forget <uuid>` after NetworkManager has deleted it, and the copy goes
+  only if it is of that connection. The hub never deletes the network it is on,
+  so this matters on a board reached another way — Ethernet — where the copy
+  can be of a Wi-Fi the hub is not using, and would otherwise put back a
+  network somebody removed on purpose the first boot the cable was out.
   **It puts the profile back as a keyfile** —
   `system-connections/gethome-restored-wifi.nmconnection`, written the same
   atomic way, then `nmcli connection load` and NetworkManager's own autoconnect

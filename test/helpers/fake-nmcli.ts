@@ -125,6 +125,9 @@ function scriptEnv(m: Machine, env: Record<string, string>): NodeJS.ProcessEnv {
     // `nmcli` must be the fake or nothing at all, never the real one on a
     // developer's Linux machine.
     PATH: `${m.bin}:/usr/bin:/bin`,
+    // The same for the profile copy's helper, which a delete runs: nothing
+    // unless a test puts one here, never one a hub installed on this machine.
+    GETHOME_WIFI_PROFILE_BIN: path.join(m.bin, 'gethome-wifi-profile.sh'),
     ...env,
   };
 }
