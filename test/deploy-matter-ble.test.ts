@@ -239,23 +239,36 @@ function credentials(options: {
     );
   }
 
-  const output = execFileSync('bash', [CREDENTIALS, '--conf', conf], {
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      PATH: `${bin}:${process.env.PATH ?? ''}`,
-      FAKE_SSID: options.ssid ?? 'Flat 3',
-      FAKE_PSK: options.psk ?? 'hunter2hunter2',
-      FAKE_ACTIVE: options.active === false ? 'no' : 'yes',
-      FAKE_FREQ: options.freq === undefined ? '' : String(options.freq),
-      FAKE_SCAN: (options.scan ?? []).map((row) => `${row}\n`).join(''),
-      FAKE_SCAN_FAILS: options.scanFails === true ? 'yes' : 'no',
-      GETHOME_GROUP: 'staff',
-      // A dispatcher sets this; without it the script asks nmcli which
-      // connection carries the wireless link.
-      CONNECTION_UUID: '',
+  // No NetworkManager is a PATH holding only the fakes, without `nmcli` — and
+  // without the host's own, which any machine with NetworkManager installed
+  // has beside every other tool in /usr/bin. Leaving the fake out is not
+  // enough there: `command -v nmcli` finds the real one, and asks it.
+  // Nothing the script runs before deciding there is none comes from the
+  // PATH, so only `bash` itself is found on the host's, and it hands the
+  // script the narrow one.
+  const runPath = options.nmcli === false ? bin : `${bin}:${process.env.PATH ?? ''}`;
+  const output = execFileSync(
+    'bash',
+    ['-c', 'PATH="$RUN_PATH"; exec "$BASH" "$@"', 'bash', CREDENTIALS, '--conf', conf],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH ?? ''}`,
+        RUN_PATH: runPath,
+        FAKE_SSID: options.ssid ?? 'Flat 3',
+        FAKE_PSK: options.psk ?? 'hunter2hunter2',
+        FAKE_ACTIVE: options.active === false ? 'no' : 'yes',
+        FAKE_FREQ: options.freq === undefined ? '' : String(options.freq),
+        FAKE_SCAN: (options.scan ?? []).map((row) => `${row}\n`).join(''),
+        FAKE_SCAN_FAILS: options.scanFails === true ? 'yes' : 'no',
+        GETHOME_GROUP: 'staff',
+        // A dispatcher sets this; without it the script asks nmcli which
+        // connection carries the wireless link.
+        CONNECTION_UUID: '',
+      },
     },
-  });
+  );
 
   const file = path.join(conf, 'wifi.env');
   return {
