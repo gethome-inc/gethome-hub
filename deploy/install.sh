@@ -1747,8 +1747,9 @@ DISPATCH
 # NetworkManager was saving its profiles, and both were left at 0 bytes: every
 # boot after that came up healthy and off the network, with no Wi-Fi profile at
 # all, until the card was taken to another computer. Raspberry Pi OS Trixie's
-# NetworkManager keeps profiles as netplan YAML and writes them in place, with
-# no temporary file and no fsync — deploy/wifi-profile.sh says what that costs.
+# NetworkManager keeps the profile Imager set up as netplan YAML and writes it
+# back in place, with no temporary file and no fsync — deploy/wifi-profile.sh
+# says what that costs.
 # So the hub keeps its own copy of the profile it last connected with, taken by
 # a dispatcher whenever a connection comes up (atomically, fsynced, root-only,
 # and only when it changed), and a oneshot puts it back at boot when

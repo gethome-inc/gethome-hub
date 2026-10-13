@@ -237,11 +237,13 @@ describe('removing a network', () => {
 });
 
 /**
- * NetworkManager on Raspberry Pi OS Trixie persists a profile as netplan YAML
- * through `fopen(path, "wb")` with no fsync, the writer that left a hub with
- * two empty profiles on 2026-10-12. So a change is pushed to the card before
- * the result says it is made: a hub unplugged the moment an app says "added"
- * is the ordinary case for a feature about moving.
+ * NetworkManager on Raspberry Pi OS Trixie writes a profile that came from
+ * netplan back through `fopen(path, "wb")` with no fsync, the writer that left
+ * a hub with two empty profiles on 2026-10-12; one `nmcli` adds is a keyfile,
+ * written safely, but which writer it uses is NetworkManager's choice. So a
+ * change is pushed to the card before the result says it is made: a hub
+ * unplugged the moment an app says "added" is the ordinary case for a feature
+ * about moving.
  */
 describe('a change survives the plug being pulled', () => {
   function withSync(m: Machine): void {

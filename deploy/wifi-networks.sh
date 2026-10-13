@@ -239,11 +239,15 @@ wifi_device() {
 }
 
 # Push a change NetworkManager has just made onto the card before saying it is
-# made. On Raspberry Pi OS Trixie it keeps profiles as netplan YAML and writes
-# them in place, with no temporary file and no fsync, so for half a minute
-# afterwards a power cut can leave the file empty — which is how a hub lost its
-# only network on 2026-10-12 (deploy/wifi-profile.sh). A hub unplugged the
-# moment an app says "added" is the ordinary case for a feature about moving.
+# made. Measured on a Raspberry Pi OS Trixie hub, a profile this adds lands as a
+# keyfile, which NetworkManager writes safely; but a profile that came from
+# netplan — the one Raspberry Pi Imager sets up — is written back through
+# netplan's `fopen(path, "wb")`, with no temporary file and no fsync, which is
+# how a hub lost its only network on 2026-10-12 (deploy/wifi-profile.sh). Which
+# writer NetworkManager uses is its own business and can change in an update,
+# so one flush covers both, and the directory entry a delete removes. A hub
+# unplugged the moment an app says "added" is the ordinary case for a feature
+# about moving.
 settle() { sync 2>/dev/null || true; }
 
 apply_add() {

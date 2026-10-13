@@ -177,14 +177,20 @@ in `deploy/install.sh` must stay accurate.
   profile copy's, below), so "connected" stays true; a profile somebody adds by
   hand appears at the next reconnect or the next change, which is the one thing
   this does not watch. **A change is on the card before it is reported, and a
-  removed network leaves the profile copy too.** On Raspberry Pi OS Trixie
-  `nmcli connection add` persists the profile as `/etc/netplan/90-NM-<uuid>.yaml`
+  removed network leaves the profile copy too.** Measured on the hub this was
+  tried on (Raspberry Pi OS Trixie, NetworkManager 1.52.1-1+rpt4, netplan
+  1.1.2): a profile `nmcli connection add` creates lands as a keyfile in
+  `/etc/NetworkManager/system-connections`, which NetworkManager writes safely,
+  while a profile that came from netplan — the one Raspberry Pi Imager sets up
+  through cloud-init — is written back to `/etc/netplan/90-NM-<uuid>.yaml`
   through netplan's `netplan_netdef_write_yaml`, which is `fopen(path, "wb")`
-  and nothing more — no temporary file, no fsync — the writer that left a hub
-  with two empty profiles on 2026-10-12 (the profile-copy bullet below). So
-  every successful add and delete is followed by `sync` before the result is
-  written: a hub unplugged the moment an app says "added" is the ordinary case
-  for a feature about moving. And a delete runs `gethome-wifi-profile.sh forget
+  and nothing more: the writer that left a hub with two empty profiles on
+  2026-10-12 (the profile-copy bullet below). Which writer NetworkManager picks
+  is its own and can change in an update, so every successful add and delete is
+  followed by `sync` before the result is written — one flush covers either
+  writer and the directory entry a delete removes, and a hub unplugged the
+  moment an app says "added" is the ordinary case for a feature about moving.
+  And a delete runs `gethome-wifi-profile.sh forget
   <uuid>`, which drops the copy only when it is of that very connection, so a
   power cut can never bring back a network somebody removed on purpose.
   NetworkManager or nothing: a machine without `nmcli` gets no units and

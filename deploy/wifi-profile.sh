@@ -22,7 +22,10 @@
 # no keyboard, so the only way back was taking the SD card to another computer.
 #
 # The file was a netplan YAML, because Raspberry Pi OS Trixie's NetworkManager
-# keeps its profiles in /etc/netplan. That writer opens the file with
+# keeps a profile that came from netplan — the one Raspberry Pi Imager sets up
+# through cloud-init — in /etc/netplan (one it creates itself, with
+# `nmcli connection add`, is a keyfile: measured on that hub). That writer opens
+# the file with
 # `fopen(…, "wb")` — truncate, then write — with no temporary file, no rename
 # and no fsync, so a power cut between the two leaves a profile with nothing in
 # it. An empty YAML is not an error to netplan: it simply defines nothing, so
