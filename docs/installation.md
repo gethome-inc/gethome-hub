@@ -60,6 +60,15 @@ hub comes back on its own after a power cut — plug the Pi in and it runs, with
 nothing to start by hand. There is no Docker and no database server: the store
 is one SQLite file ([`architecture.md`](architecture.md)).
 
+**That includes its Wi-Fi.** A power cut while the system is saving its Wi-Fi
+settings can leave the hub with none, and a hub off the network is one you
+cannot reach to fix. So the hub keeps its own copy of the Wi-Fi it last
+connected with, and if it ever starts up with no Wi-Fi settings at all — and is
+not on your network some other way, such as a cable — it puts that copy back
+and joins your network as before. It never changes Wi-Fi settings you have
+made yourself. `journalctl -u gethome-wifi-restore` on the hub says whether it
+ever had to.
+
 **Prefer a guided setup?** That is gethome studio, the way we recommend: it
 prepares the SD card or finds a Pi already on your network, gets this installer
 running on it, and watches it step by step over SSH.

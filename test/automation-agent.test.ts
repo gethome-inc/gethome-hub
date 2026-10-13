@@ -1867,8 +1867,9 @@ describe('AutomationChat provider selection', () => {
   /**
    * **What an update does to a conversation's model, on the path that runs
    * one.** A home that chose GPT-5.6 Terra before this build retired it is
-   * handed GPT-6 Sol — the model that replaced it, on the vendor they chose —
-   * rather than the retired id, and rather than Anthropic's default.
+   * handed GPT-6.1 Sol — the end of the chain of models that replaced it, on
+   * the vendor they chose — rather than the retired id, and rather than
+   * Anthropic's default.
    */
   it('hands a conversation the successor of a retired model, on the vendor it chose', async () => {
     await settings.setAiKey('anthropic', 'sk-ant-api03-not-this-one');
@@ -1881,7 +1882,7 @@ describe('AutomationChat provider selection', () => {
 
     expect(handed.provider).toBe('openai');
     expect(handed.secret).toBe('sk-proj-this-one');
-    expect(handed.modelId).toBe('gpt-6-sol');
+    expect(handed.modelId).toBe('gpt-6.1-sol');
   });
 
   /** A Claude subscription token, stored the way an upgraded hub carries it. */

@@ -12,6 +12,7 @@ import { reduceReports, type AttributeReport } from './reducer.js';
 import { executeMatterCommand } from './commands.js';
 import { installBle, type BleStatus } from './ble.js';
 import { settlingUntil } from './settling.js';
+import { applyMatterLogLevel } from './log-level.js';
 import {
   classifyCommissionError,
   CommissionError,
@@ -321,6 +322,11 @@ export class MatterAdapter implements ProtocolAdapter {
     try {
       const environment = Environment.default;
       this.environment = environment;
+      // First, because matter.js starts at debug and everything below logs:
+      // left alone it wrote ~350 journal lines a minute about one plug. The
+      // level is this adapter's own logger's, which is the hub's `LOG_LEVEL`,
+      // so the two cannot disagree — see `log-level.ts`.
+      applyMatterLogLevel(environment, this.options.log.level);
       environment.vars.set('storage.path', path.join(this.options.dataDir, 'matter'));
 
       // Before the controller is built: the BLE backend registers itself as a

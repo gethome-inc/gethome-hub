@@ -103,6 +103,20 @@ function run(options: {
   script_(path.join(bin, 'systemctl'), 'exit 0');
   if (options.networkManager !== false) script_(path.join(bin, 'nmcli'), 'exit 0');
 
+  // No NetworkManager is a PATH holding only the fakes, without `nmcli` — and
+  // without the host's own, which any machine with NetworkManager installed
+  // has beside every other tool in /usr/bin. Leaving the fake out is not
+  // enough there: `command -v nmcli` finds the real one, and the function
+  // installs a dispatcher. The PATH narrows after the lift, which needs `sed`,
+  // keeping by name whichever of the host tools the function runs on either
+  // branch the host has, and `cat` for the fake `iw` — so a branch taken
+  // wrongly fails on what it wrote rather than on a missing command. One left
+  // off the list fails the test rather than passing it, since each is on the
+  // way to something it asserts.
+  const host = path.join(dir, 'host');
+  mkdirSync(host);
+  const runPath = options.networkManager === false ? `${bin}:${host}` : `${bin}:${process.env.PATH ?? ''}`;
+
   const output = execFileSync(
     'bash',
     [
@@ -120,6 +134,10 @@ function run(options: {
          prog="/^$fn() {/,/^}/p"
          eval "$(sed -n "$prog" "$1")"
        done
+       for tool in awk tee grep dirname mkdir chown chmod cat; do
+         if found="$(command -v "$tool")"; then ln -s "$found" "$HOST_TOOLS/$tool"; fi
+       done
+       PATH="$RUN_PATH"
        keep_wifi_awake`,
       'bash',
       INSTALLER,
@@ -129,6 +147,8 @@ function run(options: {
       env: {
         ...process.env,
         PATH: `${bin}:${process.env.PATH ?? ''}`,
+        RUN_PATH: runPath,
+        HOST_TOOLS: host,
         FAKE_ROUTE: options.route,
         FAKE_RADIO_OBEYS: options.radioObeys === false ? 'no' : 'yes',
         GETHOME_NET_DIR: net,

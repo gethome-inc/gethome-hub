@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -910,5 +910,25 @@ describe('deploy/install.sh', () => {
     expect(avahi).toContain('avahi_set server deny-interfaces docker0');
     expect(avahi, 'the hub is IPv4-only; AAAA over IPv4 is the answer clients take first')
       .toContain('avahi_set publish publish-aaaa-on-ipv4 no');
+  });
+});
+
+/**
+ * CI's shellcheck step names its scripts one by one, and a list like that
+ * forgets: `wifi-credentials.sh` shipped root-run on every hub without ever
+ * being checked. So every script in `deploy/` must be on it — a shebang is
+ * what makes a file a script here, since `gethome-hubctl` has no extension.
+ */
+describe('CI', () => {
+  it('shellchecks every script in deploy/', () => {
+    const ci = readFileSync(path.join(repoRoot, '.github', 'workflows', 'ci.yml'), 'utf8');
+    const step = ci.split('\n').find((line) => line.includes('run: shellcheck'));
+    expect(step, 'no shellcheck step in ci.yml').toBeDefined();
+    const deployDir = path.join(repoRoot, 'deploy');
+    const scripts = readdirSync(deployDir)
+      .filter((name) => readFileSync(path.join(deployDir, name), 'utf8').startsWith('#!'))
+      .sort();
+    expect(scripts).toContain('wifi-profile.sh');
+    for (const script of scripts) expect(step, `deploy/${script} is not shellchecked`).toContain(`deploy/${script}`);
   });
 });

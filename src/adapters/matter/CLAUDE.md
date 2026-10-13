@@ -127,5 +127,33 @@ update it in the same change.
   waits on it. And **the file object is made in `start()`**, not the
   constructor, because the API reads this adapter before it has started and
   a test constructs one with no data directory at all.
+- **matter.js logs at the hub's level, never at its own default, which is
+  debug.** Nothing set it, so a hub at `LOG_LEVEL=info` wrote every matter.js
+  debug line to the journal. With one plug reporting its power, that was
+  3,468 of the 3,517 lines `gethome-hubd` wrote in ten minutes, and it left the
+  64 MB journal holding about an hour (`deploy/CLAUDE.md` has the
+  measurement). `log-level.ts` maps the hub's level onto matter.js's: debug
+  only at `debug` or `trace`, the same name otherwise, and `info` for anything
+  it does not recognise. `start()` applies it **first**, before Bluetooth or the
+  controller. Importing `@matter/main` logs nothing (measured on 0.17.9), and
+  every other path into matter.js goes through the controller that `start()`
+  builds, so the constructor stays free of side effects as the bullet above
+  requires. Three choices to keep. **The level is read from the adapter's own
+  logger** (`options.log.level`, a child of the hub's), not plumbed from config
+  as a second option, so matter.js and the adapter's own lines cannot
+  disagree. **It is set through matter.js's `log.level` variable, not by
+  assigning `Logger.level`**: the Node.js environment registers a configurator
+  that rewrites `Logger.level` from that variable whenever any `log.*`
+  variable changes. An assignment holds only until the next such run, which
+  would bring back a `MATTER_LOG_LEVEL` or `config.json` level. **So the hub's
+  `LOG_LEVEL` is the one setting**, and `MATTER_LOG_LEVEL` is deliberately
+  overridden; turning matter.js debug on means `LOG_LEVEL=debug` for the whole
+  hub, for as long as it is needed. `test/matter-log-level.test.ts` covers the
+  mapping, typed against the config's own enum. Against real matter.js it
+  checks that debug lines are dropped while warnings and errors still get
+  through, that the variable holds when the configurator runs again, and that
+  the adapter applies it before it builds a controller. On a matter.js upgrade,
+  re-check the two facts this rests on: importing still logs nothing, and the
+  configurator still reads `log.level`.
 - The Matter reducer (`src/adapters/matter/reducer.ts`) is a 1:1 port of the
   iOS `MatterStateReducer` — keep them in lockstep if either changes.

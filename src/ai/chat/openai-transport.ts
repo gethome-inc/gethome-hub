@@ -69,12 +69,13 @@ interface ResponseBody {
   usage?: ResponsesUsage;
 }
 
-/** Running total across every round of one conversation. */
+/**
+ * Running total across every round of one conversation, priced round by round
+ * because a prompt past 272K tokens is billed at dearer rates for the whole of
+ * that one request (`ModelPricing.longPrompt`).
+ */
 class RunUsage {
-  private input = 0;
-  private output = 0;
-  private cacheRead = 0;
-  private cacheWrite = 0;
+  private spent = 0;
 
   constructor(private readonly model: string) {}
 
@@ -86,19 +87,16 @@ class RunUsage {
     // documented 1.25x cache-write rate.
     const cached = usage.input_tokens_details?.cached_tokens ?? 0;
     const cacheWrite = usage.input_tokens_details?.cache_write_tokens ?? 0;
-    this.input += Math.max((usage.input_tokens ?? 0) - cached - cacheWrite, 0);
-    this.cacheRead += cached;
-    this.cacheWrite += cacheWrite;
-    this.output += usage.output_tokens ?? 0;
+    this.spent += estimateCostUsd(this.model, {
+      input_tokens: Math.max((usage.input_tokens ?? 0) - cached - cacheWrite, 0),
+      output_tokens: usage.output_tokens ?? 0,
+      cache_read_input_tokens: cached,
+      cache_creation_input_tokens: cacheWrite,
+    });
   }
 
   costUsd(): number {
-    return estimateCostUsd(this.model, {
-      input_tokens: this.input,
-      output_tokens: this.output,
-      cache_read_input_tokens: this.cacheRead,
-      cache_creation_input_tokens: this.cacheWrite,
-    });
+    return this.spent;
   }
 }
 

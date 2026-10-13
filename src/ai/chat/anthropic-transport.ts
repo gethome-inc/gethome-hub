@@ -40,30 +40,29 @@ import {
  * agent may run, and adaptive thinking is the only correct form.
  */
 
-/** What one round of a conversation costs, added up as it goes. */
+/**
+ * What a conversation costs, added up as it goes — round by round, because a
+ * long prompt is billed at dearer rates for the whole of that one request
+ * (`ModelPricing.longPrompt`), and the sum of ten rounds is not a prompt
+ * anybody sent.
+ */
 class RunUsage {
-  private input = 0;
-  private output = 0;
-  private cacheRead = 0;
-  private cacheWrite = 0;
+  private spent = 0;
 
   constructor(private readonly model: string) {}
 
   add(usage: Anthropic.Usage | undefined): void {
     if (!usage) return;
-    this.input += usage.input_tokens ?? 0;
-    this.output += usage.output_tokens ?? 0;
-    this.cacheRead += usage.cache_read_input_tokens ?? 0;
-    this.cacheWrite += usage.cache_creation_input_tokens ?? 0;
+    this.spent += estimateCostUsd(this.model, {
+      input_tokens: usage.input_tokens,
+      output_tokens: usage.output_tokens,
+      cache_read_input_tokens: usage.cache_read_input_tokens,
+      cache_creation_input_tokens: usage.cache_creation_input_tokens,
+    });
   }
 
   costUsd(): number {
-    return estimateCostUsd(this.model, {
-      input_tokens: this.input,
-      output_tokens: this.output,
-      cache_read_input_tokens: this.cacheRead,
-      cache_creation_input_tokens: this.cacheWrite,
-    });
+    return this.spent;
   }
 }
 

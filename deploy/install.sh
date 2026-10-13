@@ -1741,6 +1741,85 @@ DISPATCH
   $SUDO env GETHOME_GROUP="$SERVICE_USER" "$helper" --conf "$CONF_DIR" || true
 }
 
+# ── The hub's own Wi-Fi profile, kept where a power cut cannot empty it ────
+# **A hub that loses its Wi-Fi profile is a hub nobody can reach to fix it.**
+# On 2026-10-12 one was unplugged seconds after it was switched on, while
+# NetworkManager was saving its profiles, and both were left at 0 bytes: every
+# boot after that came up healthy and off the network, with no Wi-Fi profile at
+# all, until the card was taken to another computer. Raspberry Pi OS Trixie's
+# NetworkManager keeps profiles as netplan YAML and writes them in place, with
+# no temporary file and no fsync — deploy/wifi-profile.sh says what that costs.
+# So the hub keeps its own copy of the profile it last connected with, taken by
+# a dispatcher whenever a connection comes up (atomically, fsynced, root-only,
+# and only when it changed), and a oneshot puts it back at boot when
+# NetworkManager has no Wi-Fi profile at all and the hub is not on the network
+# another way. It never edits a profile that exists, so whatever the owner has
+# changed stands, and becomes the copy the next time it connects.
+#
+# Installed wherever NetworkManager is, a wired hub included: the dispatcher
+# keeps nothing until a Wi-Fi connection comes up, the oneshot does not run
+# without a copy (`ConditionPathExists`), and a hub moved to Wi-Fi later is
+# covered from its first connection rather than from its next update.
+keep_wifi_profile() {
+  local helper="${GETHOME_WIFI_PROFILE_BIN:-/usr/local/lib/gethome-wifi-profile.sh}"
+  local dispatcher="${GETHOME_WIFI_PROFILE_DISPATCHER:-/etc/NetworkManager/dispatcher.d/53-gethome-wifi-profile}"
+  local unit="${GETHOME_WIFI_RESTORE_UNIT:-/etc/systemd/system/gethome-wifi-restore.service}"
+
+  # A machine without NetworkManager keeps its Wi-Fi elsewhere, written by
+  # something else: nothing to do and nothing to say.
+  command -v nmcli >/dev/null 2>&1 || return 0
+
+  if ! $SUDO install -m 0755 "$HUB_DIR/deploy/wifi-profile.sh" "$helper" 2>/dev/null; then
+    warn "Could not install the Wi-Fi profile helper, so a power cut at the wrong moment could still leave this hub off the network until its SD card is repaired on another computer."
+    return 0
+  fi
+
+  $SUDO mkdir -p "$(dirname "$dispatcher")" 2>/dev/null || true
+  # NM ignores a dispatcher script anybody but root can write, so the
+  # ownership and the mode are part of the fix, as for the two above.
+  if $SUDO tee "$dispatcher" >/dev/null <<DISPATCH
+#!/bin/sh
+# Installed by GetHome. Keeps a copy of the Wi-Fi profile this hub connects
+# with, so a power cut that empties NetworkManager's own cannot leave the hub
+# off the network. deploy/wifi-profile.sh says why.
+[ "\$2" = "up" ] || exit 0
+exec ${helper} backup --conf ${CONF_DIR} --quiet
+DISPATCH
+  then
+    $SUDO chown root:root "$dispatcher" 2>/dev/null || true
+    $SUDO chmod 0755 "$dispatcher" 2>/dev/null || true
+  fi
+
+  # After NetworkManager, and not `Wants=` it: a machine where somebody has
+  # turned NetworkManager off has its reasons, and this must not start it.
+  # Not ordered before anything either — the hub does not wait for a network,
+  # and the restored profile comes up on NetworkManager's own autoconnect.
+  if $SUDO tee "$unit" >/dev/null <<UNIT
+[Unit]
+Description=Put back this hub's Wi-Fi profile if NetworkManager has lost it
+After=NetworkManager.service
+ConditionPathExists=${CONF_DIR}/wifi-profile.nmconnection
+
+[Service]
+Type=oneshot
+ExecStart=${helper} restore --conf ${CONF_DIR}
+SyslogIdentifier=gethome-wifi-restore
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  then
+    $SUDO systemctl daemon-reload >/dev/null 2>&1 || true
+    # Enabled and not started: it is for the next boot, and there is nothing
+    # to put back on a machine that is running this installer over a network.
+    $SUDO systemctl enable gethome-wifi-restore >/dev/null 2>&1 || true
+  fi
+
+  # And once now, so a hub nobody reconnects is covered from tonight.
+  $SUDO "$helper" backup --conf "$CONF_DIR" || true
+}
+
 # ── IPv6, which is the network Matter actually runs on ─────────────────────
 # **Matter is IPv6, and on one Wi-Fi the link-local address is all it needs** —
 # no IPv6 from the internet provider, no DHCPv6. What more it needs is for one
@@ -1810,6 +1889,7 @@ matter_ipv6() {
 
 matter_bluetooth
 share_wifi_for_matter
+keep_wifi_profile
 matter_ipv6
 
 

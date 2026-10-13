@@ -94,39 +94,38 @@ interface ResponseBody {
   usage?: ResponsesUsage;
 }
 
-/** Running total across every turn of one run. */
+/**
+ * Running total across every turn of one run, priced turn by turn because a
+ * prompt past 272K tokens is billed at dearer rates for the whole of that one
+ * request (`ModelPricing.longPrompt`).
+ */
 class RunUsage {
-  private input = 0;
-  private output = 0;
-  private cacheRead = 0;
-  private cacheWrite = 0;
-  private webSearches = 0;
+  private spent = 0;
 
   constructor(private readonly model: string) {}
 
   add(usage: ResponsesUsage | undefined, searches: number): void {
-    this.webSearches += searches;
-    if (!usage) return;
+    if (!usage) {
+      this.spent += estimateCostUsd(this.model, { webSearchRequests: searches });
+      return;
+    }
     // OpenAI reports cached input and cache writes inside the input count, so
     // each share is subtracted before it is billed at its own rate. Otherwise a
     // prompt cache write would be charged once as normal input and again at its
     // documented 1.25x cache-write rate.
     const cached = usage.input_tokens_details?.cached_tokens ?? 0;
     const cacheWrite = usage.input_tokens_details?.cache_write_tokens ?? 0;
-    this.input += Math.max((usage.input_tokens ?? 0) - cached - cacheWrite, 0);
-    this.cacheRead += cached;
-    this.cacheWrite += cacheWrite;
-    this.output += usage.output_tokens ?? 0;
+    this.spent += estimateCostUsd(this.model, {
+      input_tokens: Math.max((usage.input_tokens ?? 0) - cached - cacheWrite, 0),
+      output_tokens: usage.output_tokens ?? 0,
+      cache_read_input_tokens: cached,
+      cache_creation_input_tokens: cacheWrite,
+      webSearchRequests: searches,
+    });
   }
 
   costUsd(): number {
-    return estimateCostUsd(this.model, {
-      input_tokens: this.input,
-      output_tokens: this.output,
-      cache_read_input_tokens: this.cacheRead,
-      cache_creation_input_tokens: this.cacheWrite,
-      webSearchRequests: this.webSearches,
-    });
+    return this.spent;
   }
 }
 
