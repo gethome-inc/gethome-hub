@@ -173,6 +173,16 @@ to shorten, are in
   is off on the machine or on the LAN interface.
 - Fabric storage lives in `<data>/matter/`; keep the `/data` volume to keep
   your fabric.
+- **Logging follows the hub's `LOG_LEVEL`** (`/etc/gethome/hub.env`, `info`
+  unless changed). matter.js's own default is debug, which logs every message
+  exchange and every attribute report. On a hub with one Matter plug that was
+  98.6% of everything the hub wrote to the journal, and it left the 64 MB
+  journal holding about an hour. At `info` those lines are gone, while
+  matter.js's info, notice, warning and error lines still reach the journal.
+  To read the debug lines while chasing a pairing problem, set
+  `LOG_LEVEL=debug`, run `sudo gethome-hubctl restart`, and set it back
+  afterwards. `MATTER_LOG_LEVEL` and matter.js's own `config.json` are
+  overridden: the hub's level is the one setting.
 
 ## The network Matter needs, and what the hub does about each part
 
