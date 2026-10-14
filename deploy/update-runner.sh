@@ -35,6 +35,11 @@ set -uo pipefail
 CONF_DIR="${GETHOME_CONF:-/etc/gethome}"
 HUB_ENV="$CONF_DIR/hub.env"
 INSTALL_DIR="${GETHOME_DIR:-/opt/gethome}"
+# The account the hub runs as and owns its data directory. The unit passes it;
+# it is the same word on every install, so an older unit that passed only the
+# group still names it. Everything this script reads or writes inside that
+# directory is done as this account — see `as_hub`.
+HUB_USER="${GETHOME_USER:-${GETHOME_GROUP:-gethome}}"
 
 read_env() { sed -n "s/^$1=//p" "$2" 2>/dev/null | tail -n1; }
 
@@ -62,6 +67,43 @@ SETTLE_TRIES="${GETHOME_UPDATE_SETTLE_TRIES:-30}"
 SETTLE_SLEEP="${GETHOME_UPDATE_SETTLE_SLEEP:-2}"
 
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# Run a command as the hub's account, for anything that touches the hub's own
+# data directory — the request, the status file, the log. Root runs only what
+# needs root: `gethome-hubctl update` below. The account owns that directory, so
+# every name in it is whatever the account made it, and root following one
+# follows whatever was planted there — a link from `last.log` or the request to
+# a file only root may write or read. Done as the account, a planted link
+# reaches only what that account could reach already: the rule
+# `deploy/wifi-networks.sh` follows, with the same-named helper. setpriv first
+# (a plain setresuid, no PAM session), then runuser, both util-linux. Not
+# running as root — the test suite, or anyone running this by hand — there is
+# nothing to drop, so the command runs directly.
+as_hub() {
+  local uid gid
+  if [[ "$(id -u)" != "0" ]]; then
+    "$@"
+    return
+  fi
+  uid="$(id -u "$HUB_USER" 2>/dev/null)" || return 1
+  gid="$(id -g "$HUB_USER" 2>/dev/null)" || return 1
+  if command -v setpriv >/dev/null 2>&1; then
+    setpriv --reuid="$uid" --regid="$gid" --clear-groups -- "$@"
+  elif command -v runuser >/dev/null 2>&1; then
+    runuser -u "$HUB_USER" -- "$@"
+  else
+    return 1
+  fi
+}
+
+# Append one line to the log as the hub's account. The hub serves this file live
+# at GET /system/update/log, so each line lands as it arrives rather than
+# buffered, and the `>>` is opened by the account — a `last.log` it planted as a
+# link reaches only what it could already write. One short helper per installer
+# line is nothing beside apt and a bundle download.
+log_line() {
+  printf '%s\n' "$1" | as_hub sh -c 'cat >> "$1"' sh "$LOG_FILE" 2>/dev/null || true
+}
 
 # Names and error text come from people and from the installer, so they carry
 # quotes, backslashes and non-ASCII. Same helper as gethome-hubctl.
@@ -114,10 +156,19 @@ write_status() {
   [[ -n "$ERROR_TEXT" ]] && json+=",\"error\":$(json_string "$ERROR_TEXT")"
   json+="}"
 
-  if printf '%s\n' "$json" > "$STATUS_FILE.tmp" 2>/dev/null; then
-    chmod 0644 "$STATUS_FILE.tmp" 2>/dev/null || true
-    mv -f "$STATUS_FILE.tmp" "$STATUS_FILE" 2>/dev/null || rm -f "$STATUS_FILE.tmp"
-  fi
+  # Written whole and renamed into place as the hub's account. The account doing
+  # the open is what keeps a link it planted in its own directory from being
+  # followed by root, and the rename past a planted `status.json` replaces that
+  # name rather than writing through it. The temp carries the writer's pid, so
+  # it is the account's to create rather than a fixed name waiting to be
+  # hijacked — and there is no chmod through a path (umask sets the mode).
+  printf '%s\n' "$json" | as_hub sh -c '
+    umask 022
+    tmp="$1.tmp.$$"
+    if cat > "$tmp" && mv -f "$tmp" "$1"; then exit 0; fi
+    rm -f "$tmp"
+    exit 1
+  ' sh "$STATUS_FILE" 2>/dev/null || true
   LAST_WRITE=$(date +%s)
 }
 
@@ -131,7 +182,7 @@ CODE=1
 LAST_LINE=""
 handle_line() {
   local line="$1"
-  printf '%s\n' "$line" >> "$LOG_FILE"
+  log_line "$line"
   case "$line" in
     *"@@EXIT:"*"@@"*)     CODE="$(marker_value "$line" EXIT)" ;;
     *"@@STEP:"*"@@"*)     STEP="$(marker_value "$line" STEP)"; write_status; return ;;
@@ -155,7 +206,9 @@ handle_line() {
 # concluding there is nothing here.
 read_request() {
   local raw
-  raw="$(tr -d '[:space:]' < "$REQUEST" 2>/dev/null)"
+  # Read as the hub's account: the request is a name in the hub's own directory,
+  # so a link it planted there is followed as that account, never by root.
+  raw="$(as_hub cat "$REQUEST" 2>/dev/null | tr -d '[:space:]')"
   [[ "$raw" =~ ^[A-Za-z0-9._-]{8,64}$ ]] && printf '%s' "$raw"
 }
 
@@ -165,17 +218,22 @@ if [[ -z "$RUN_ID" ]]; then
   RUN_ID="$(read_request)"
 fi
 if [[ -z "$RUN_ID" ]]; then
-  rm -f "$REQUEST"
+  as_hub rm -f "$REQUEST" 2>/dev/null || rm -f "$REQUEST"
   exit 0
 fi
 
 # Consumed before any work: this file is what re-arms the path unit for the
 # *next* update, and a run that dies must not leave one to be picked up again.
-rm -f "$REQUEST"
+# As the hub's account; `rm` unlinks a name and follows nothing, so the root
+# fallback for a machine that cannot switch user cannot be pointed anywhere.
+as_hub rm -f "$REQUEST" 2>/dev/null || rm -f "$REQUEST"
 
-mkdir -p "$UPDATE_DIR"
-: > "$LOG_FILE"
-chmod 0644 "$LOG_FILE" 2>/dev/null || true
+as_hub mkdir -p "$UPDATE_DIR" 2>/dev/null || true
+# Truncate (create) the log as the hub's account, 0644 via umask, with no chmod
+# through a path: the account owns this directory, so a `last.log` it planted as
+# a link is one root must not follow — as a plain `: > "$LOG_FILE"` would. From
+# here the log is only ever appended to as that account (log_line).
+as_hub sh -c 'umask 022; : > "$1"' sh "$LOG_FILE" 2>/dev/null || true
 FROM_BUILD="$(current_build)"
 write_status
 
@@ -184,7 +242,7 @@ if ! command -v gethome-hubctl >/dev/null 2>&1; then
   STEP="starting"
   FINISHED_AT="$(now)"
   ERROR_TEXT="This machine has no gethome-hubctl, so the hub can't update itself. Reinstalling it from GetHome Studio brings it forward — nothing paired is lost."
-  printf '%s\n' "$ERROR_TEXT" >> "$LOG_FILE"
+  log_line "$ERROR_TEXT"
   write_status
   # Zero, like every other outcome — see the note at the foot of this file. This
   # is the branch somebody presses again, and a handful of non-zero exits inside

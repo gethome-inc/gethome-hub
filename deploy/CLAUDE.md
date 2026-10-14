@@ -117,7 +117,7 @@ in `deploy/install.sh` must stay accurate.
   `gethome-hubctl update`. That is what lets a phone update a hub at all —
   Studio does it over SSH with a key it planted, and an iPhone has none.
   Any member may ask; see the owner-only bullet above for why that moved.
-  Six things to keep. **The unit is never enabled and never ordered after the
+  Seven things to keep. **The unit is never enabled and never ordered after the
   hub**: an enabled update service updates on every boot, and a unit ordered
   after `gethome-hubd` is one systemd may take down with the hub *this very run
   is restarting*. **`TimeoutStartSec=infinity`**, because a `Type=oneshot`
@@ -131,7 +131,23 @@ in `deploy/install.sh` must stay accurate.
   or not, and `current` points at the same build either way, so `@@ROLLBACK@@`
   was added to the marker vocabulary rather than matching its prose. **What is
   running afterwards is read back from `GET /hub`**, never from the log, the same
-  rule the radio card follows. And **`<data>/update/enabled` is the capability**:
+  rule the radio card follows. **Root runs only `gethome-hubctl update`;
+  everything in `<data>/update` is read and written as the hub's account**
+  (`as_hub`: `setpriv`, else `runuser`, both util-linux — the Wi-Fi bullet's
+  rule, in the runner). That directory is the account's, so a name in it is
+  whatever the account made it, and root following one follows its links — a
+  `request` or a `last.log` planted as a link to a file only root may read or
+  write, and the log is where the installer's output (part of it the account's
+  own) lands. So the request and the pairing code are read as the account, the
+  status file is written whole and renamed past any planted name, the log is
+  appended to as the account, and there is no `chmod` through a path (umask sets
+  the mode). `install.sh` keeps the same rule for its own `<data>` writes:
+  `as_service_user` makes the hub's data directories and reads `pairing-code`,
+  and only a `chown -R` stays root's, because without `-H`/`-L` it changes a
+  link itself and never descends through one. `test/deploy-update.test.ts` and
+  `test/deploy-config.test.ts` pin that no root write or chmod inside `<data>`
+  comes back, and plant a link to show its target untouched. And
+  **`<data>/update/enabled` is the capability**:
   `install.sh` touches it in the same breath as it writes the units, because
   `hub.env` is written *only when absent* and so would never reach an upgraded
   hub — the trap that makes a `GETHOME_UPDATE=1` variable there the wrong answer.
