@@ -2774,6 +2774,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       ...availability,
       networks: list?.networks ?? [],
       ...(list?.updatedAt !== undefined ? { updatedAt: list.updatedAt } : {}),
+      // What the hub's radio can join, absent when the list does not say (a
+      // build older than the field wrote it, or the machine has no Wi-Fi
+      // device). An app warns before a network the hub cannot hear is added.
+      ...(list?.bands !== undefined ? { bands: list.bands } : {}),
       maxNetworks: MAX_WIFI_NETWORKS,
       pending: wifiChangePending(deps.dataDir) || wifiChangeUnsettled(last),
       ...(last !== undefined ? { lastChange: last } : {}),

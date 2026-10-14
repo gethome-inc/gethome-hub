@@ -192,7 +192,7 @@ than no button.
 | `POST /device-mappings/:exposesHash/repair` | `hub.ai` | hand a rejected descriptor to the agent with the complaints. `409 ai_not_configured` / `409 ai_disabled` / `409 nothing_to_repair`, `422 no_device` |
 | `PUT /settings/radio` | `hub.radio` | `{mode: "auto"\|"zigbee"\|"matter"\|"both"}` → `{budget, mode, matter, canRunBoth, modes, applying: true}`. Records a *request*; see below. It also hands back the hub's two automatic retries when `mode` is `"both"`. `both` is accepted on **any** board — `budget` is advice, not a ceiling — and is refused with 400 by a hub too old for it, which is why `radio.modes` exists |
 | `GET /settings/mqtt` | `hub.mqtt` | the broker's credentials: `{requiresPassword, host, port, baseTopic, accounts[]}`. Each account is `{id, username, password, recommended, title, summary, publish[], subscribe[]}`. `hub.mqtt.admin` **adds** the hub's own full-access account; without it only the limited one is returned. See [below](#the-mqtt-broker-asks-for-a-password) |
-| `GET /settings/wifi` | `hub.wifi` | the Wi-Fi networks this hub knows: `{available, reason?, networks: [{id, ssid, connected}], updatedAt?, maxNetworks, pending, lastChange?}`. **No password ever comes back** — the hub never has one to return. See [below](#wi-fi-networks-settingswifi) |
+| `GET /settings/wifi` | `hub.wifi` | the Wi-Fi networks this hub knows: `{available, reason?, networks: [{id, ssid, connected}], updatedAt?, bands?, maxNetworks, pending, lastChange?}`. `bands` is what the hub's radio can join (`"2.4"`, `"5"`, `"6"`). **No password ever comes back** — the hub never has one to return. See [below](#wi-fi-networks-settingswifi) |
 | `POST /settings/wifi/networks` | `hub.wifi` | `{ssid, passphrase, hidden?}` — tell the hub about a network to join when it is somewhere that network reaches. Nothing changes now. Answers with the outcome: `200 {…settings, change}` once the machine has applied it, `202` with `change.state: "pending"` if it has not got to it yet. `400` with a sentence in `detail` for a name or password Wi-Fi does not allow — including **no password**, which is refused. `409 wifi_network_exists`, `409 wifi_network_limit` (16), `409 wifi_change_pending`, `409 wifi_unsupported {reason}`, `409 wifi_change_failed {detail}` |
 | `DELETE /settings/wifi/networks/:id` | `hub.wifi` | forget a network. **`409 wifi_network_connected` for the one the hub is on now** — never offered behind a confirmation, because it would take the hub off its only network. `404 not_found`, and the same `409`s as above |
 | `GET /me` | floor | `{id, name, role: {id, key, name}, permissions, isOwner}` — who this token belongs to and what it may do. See [below](#roles-and-permissions-in-full) |
@@ -1561,6 +1561,7 @@ with what happened, rather than a receipt to poll.
     { "id": "8a2d…", "ssid": "Dacha", "connected": false }
   ],
   "updatedAt": "2026-10-07T09:12:44Z",  // when the list was last read off the machine
+  "bands": ["2.4"],                     // what the radio can join — a Pi Zero 2 W
   "maxNetworks": 16,
   "pending": false,                     // a change is in hand and not yet answered
   "lastChange": {                       // what became of the last one, from anybody
@@ -1574,7 +1575,7 @@ with what happened, rather than a receipt to poll.
 with the same object plus `change` — `200` and `change.state: "applied"`, or
 `202` and `"pending"` on a board too busy to finish inside the wait (the change
 is still queued; `GET` reports it when it lands). A refusal is the usual
-`{error}`. Seven things a client has to know.
+`{error}`. Eight things a client has to know.
 
 - **`available` is the machine, not the build.** `false` with
   `reason: "no-networkmanager"` is a system that manages Wi-Fi some other way —
@@ -1590,6 +1591,17 @@ is still queued; `GET` reports it when it lands). A refusal is the usual
   *be* that 64-hex key, which is what a card carries. The cost is a **WPA3-only**
   network, whose handshake needs the passphrase; WPA2 and mixed-mode networks —
   every home router's default — join with the key.
+- **`bands` is what the hub's radio can join, and an app says so before a
+  network is added.** A Pi Zero 2 W and a Pi 3B answer `["2.4"]`, and a hub
+  given a 5 GHz network stores it, answers `applied`, and never joins it — the
+  hub cannot see the network it is being told about, so this is advice in the
+  form rather than a refusal. The case that found it: an iPhone 12 or later
+  runs its Personal Hotspot on 5 GHz unless *Maximize Compatibility* is on, and
+  a hub carried onto its owner's hotspot stayed off the network until it was.
+  Read from NetworkManager's own report of the radio on every association,
+  never from a board name; **absent** means the hub cannot say (a
+  build older than the field, an `nmcli` that does not report bands, no Wi-Fi
+  device), and an app then says nothing.
 - **An open network is refused** (`400`, with the reason in `detail`). This API is
   plain HTTP with bearer tokens, and on a network with no password every token
   a phone sends is readable by anybody in range.

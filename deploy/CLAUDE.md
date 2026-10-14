@@ -147,7 +147,10 @@ in `deploy/install.sh` must stay accurate.
   writes `<data>/wifi/request`, `gethome-wifi.path` notices, and
   `deploy/wifi-networks.sh` (installed as `/usr/local/lib/gethome-wifi-networks.sh`,
   root, `Type=oneshot`) applies it with `nmcli` and writes `networks` and
-  `result` back, 0640. Eight things to keep. **The service is never
+  `result` back, 0640. `networks` also carries one `bands=` line: what the
+  radio can join, from `nmcli -t -f WIFI-PROPERTIES device show`, because a
+  2.4 GHz-only board given a 5 GHz network (an iPhone hotspot without
+  *Maximize Compatibility*) stores it, says nothing, and never joins it. Eight things to keep. **The service is never
   enabled** and the script **always exits 0**, for the update runner's reasons.
   **Root runs `nmcli` and nothing else; everything in `<data>/wifi/` is read
   and written as the hub's account** (`as_hub`: `setpriv`, else `runuser`, both

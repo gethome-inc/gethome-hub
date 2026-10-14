@@ -129,6 +129,12 @@ it is one command:
 sudo nmcli connection add type wifi ssid "Dacha" wifi-sec.key-mgmt wpa-psk wifi-sec.psk "the password"
 ```
 
+**Check the new network is on 2.4 GHz if the hub's radio is.** A Pi Zero 2 W
+and a Pi 3B join 2.4 GHz networks only, and a hub told about a 5 GHz one keeps
+it and never joins it. The app says so on the form when your hub is one of
+them. An iPhone's Personal Hotspot is 5 GHz on an iPhone 12 or later unless
+*Maximize Compatibility* is on in Settings › Personal Hotspot.
+
 This needs NetworkManager, which is what Raspberry Pi OS Bookworm and later
 manage Wi-Fi with. The hub only joins networks that have a password, and a
 WPA3-only network has to be added with that command rather than from an app.

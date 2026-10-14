@@ -42,6 +42,16 @@ export type WifiAvailability =
   | { available: true }
   | { available: false; reason: WifiUnavailableReason };
 
+/**
+ * A band the hub's Wi-Fi radio can join, as NetworkManager reports it. A Pi
+ * Zero 2 W and a Pi 3B join `2.4` alone, which is the fact an app needs before
+ * somebody adds a 5 GHz network — an iPhone's Personal Hotspot, on any iPhone
+ * from the 12 on, unless Maximize Compatibility is on.
+ */
+export type WifiBand = '2.4' | '5' | '6';
+
+const WIFI_BANDS: readonly WifiBand[] = ['2.4', '5', '6'];
+
 /** One network NetworkManager holds a profile for. */
 export interface SavedWifiNetwork {
   /** NetworkManager's UUID for the profile — what `DELETE` names. */
@@ -144,7 +154,7 @@ const PROFILE_ID = /^[0-9a-f-]{36}$/i;
  */
 export function readSavedNetworks(
   dataDir: string,
-): { networks: SavedWifiNetwork[]; updatedAt?: string } | undefined {
+): { networks: SavedWifiNetwork[]; updatedAt?: string; bands?: WifiBand[] } | undefined {
   let raw: string;
   try {
     raw = readFileSync(path.join(wifiDir(dataDir), 'networks'), 'utf8');
@@ -153,9 +163,18 @@ export function readSavedNetworks(
   }
   const networks: SavedWifiNetwork[] = [];
   let updatedAt: string | undefined;
+  let bands: WifiBand[] | undefined;
   for (const line of raw.split('\n')) {
     if (line.startsWith('updated=')) {
       updatedAt = line.slice('updated='.length).trim() || undefined;
+      continue;
+    }
+    if (line.startsWith('bands=')) {
+      // Only the words this knows, in their own order, so an unexpected one
+      // from a newer script is dropped rather than passed on as a claim.
+      const said = new Set(line.slice('bands='.length).trim().split(','));
+      const known = WIFI_BANDS.filter((band) => said.has(band));
+      bands = known.length > 0 ? known : undefined;
       continue;
     }
     if (!line.startsWith('network=')) continue;
@@ -168,7 +187,11 @@ export function readSavedNetworks(
   networks.sort((a, b) =>
     a.connected !== b.connected ? (a.connected ? -1 : 1) : a.ssid.localeCompare(b.ssid),
   );
-  return { networks, ...(updatedAt !== undefined ? { updatedAt } : {}) };
+  return {
+    networks,
+    ...(updatedAt !== undefined ? { updatedAt } : {}),
+    ...(bands !== undefined ? { bands } : {}),
+  };
 }
 
 const CHANGE_ERRORS = new Set<string>([

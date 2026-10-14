@@ -55,6 +55,18 @@ case "$*" in
   "-t -f DEVICE,TYPE device")
     [ "$FAKE_NO_WIFI_DEVICE" = 1 ] || printf 'wlan0:wifi\\n'
     printf 'eth0:ethernet\\n' ;;
+  "-t -f WIFI-PROPERTIES device show wlan0")
+    # A Pi Zero 2 W unless a test says otherwise: FAKE_BANDS lists the bands
+    # the radio can join, and an empty one stands in for an nmcli too old to
+    # report any of them.
+    bands="\${FAKE_BANDS-2.4}"
+    printf 'WIFI-PROPERTIES.WPA2:yes\\n'
+    if [ -n "$bands" ]; then
+      for band in 2.4 5 6; do
+        case " $bands " in *" $band "*) yes=yes ;; *) yes=no ;; esac
+        printf 'WIFI-PROPERTIES.%sGHZ:%s\\n' "\${band%.4}" "$yes"
+      done
+    fi ;;
   "connection add "*)
     if [ "$FAKE_ADD_FAILS" = 1 ]; then
       echo "Error: Failed to add 'x' connection: 802-11-wireless-security.psk: property is invalid" >&2

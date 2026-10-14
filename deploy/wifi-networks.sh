@@ -155,12 +155,38 @@ profile_ssid() {
   nmcli -e no -g 802-11-wireless.ssid connection show uuid "$1" 2>/dev/null | head -n1
 }
 
+wifi_device() {
+  nmcli -t -f DEVICE,TYPE device 2>/dev/null | awk -F: '$2 == "wifi" { print $1; exit }'
+}
+
+# The bands this machine's Wi-Fi radio can join, as NetworkManager reports them
+# — `2.4`, `5` and `6`, comma-separated, or nothing when it cannot say. A Pi
+# Zero 2 W and a Pi 3B answer `2.4` alone, and an iPhone 12 or later runs its
+# Personal Hotspot on 5 GHz unless Maximize Compatibility is on: a hub given
+# that hotspot before a move stored it, said nothing, and never joined it.
+# Asked of the device rather than the board name, for the reason the radio
+# budget reads memory — a board name is never a capability. An nmcli too old
+# for a band's field simply leaves that band out.
+wifi_bands() {
+  local dev
+  dev="$(wifi_device)"
+  [[ -n "$dev" ]] || return 0
+  nmcli -t -f WIFI-PROPERTIES device show "$dev" 2>/dev/null | awk -F: '
+    $2 == "yes" && $1 ~ /^WIFI-PROPERTIES\.(2|5|6)GHZ$/ {
+      band = substr($1, 17, 1)
+      if (band == "2") band = "2.4"
+      list = list (list == "" ? "" : ",") band
+    }
+    END { if (list != "") print list }'
+}
+
 # ── The list ───────────────────────────────────────────────────────────────
 # One `network=` line per Wi-Fi profile: its UUID, whether the hub is connected
-# through it now, and the name as hex. The hub reads nothing else of
-# NetworkManager's, and never the passwords.
+# through it now, and the name as hex — and one `bands=` line for what the
+# radio can join. The hub reads nothing else of NetworkManager's, and never the
+# passwords.
 write_list() {
-  local content uuid active ssid count=0
+  local content uuid active ssid bands count=0
   if ! command -v nmcli >/dev/null 2>&1; then
     as_hub rm -f "$NETWORKS_FILE" 2>/dev/null || true
     return 0
@@ -169,6 +195,11 @@ write_list() {
 # The Wi-Fi networks this hub knows. See deploy/wifi-networks.sh.
 updated=$(now)
 "
+  bands="$(wifi_bands)"
+  if [[ -n "$bands" ]]; then
+    content+="bands=${bands}
+"
+  fi
   while read -r uuid active; do
     [[ -n "$uuid" ]] || continue
     ssid="$(profile_ssid "$uuid")"
@@ -232,10 +263,6 @@ read_request() {
   id="$(field id "$raw")"
   [[ "$id" =~ ^[A-Za-z0-9._-]{8,64}$ ]] || return 1
   printf '%s' "$raw"
-}
-
-wifi_device() {
-  nmcli -t -f DEVICE,TYPE device 2>/dev/null | awk -F: '$2 == "wifi" { print $1; exit }'
 }
 
 # Push a change NetworkManager has just made onto the card before saying it is

@@ -67,6 +67,44 @@ describe('the list of networks the hub reads', () => {
     expect(list?.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
+  /**
+   * The bands the radio can join, so an app can say so before somebody adds
+   * a network the hub will never hear. Found on a Pi Zero 2 W given its
+   * owner's iPhone hotspot, which an iPhone 12 or later runs on 5 GHz: the
+   * hub stored it, said "added", and stayed off the network.
+   */
+  it('writes down which bands the radio can join, as NetworkManager says', () => {
+    const zero = machine([HOME]);
+    run(zero, ['--list']);
+    expect(readSavedNetworks(zero.data)?.bands).toEqual(['2.4']);
+
+    const pi5 = machine([HOME]);
+    run(pi5, ['--list'], { FAKE_BANDS: '2.4 5' });
+    expect(readSavedNetworks(pi5.data)?.bands).toEqual(['2.4', '5']);
+
+    // An nmcli too old to report any band, and a machine with no Wi-Fi
+    // device: no claim either way, and the networks are listed regardless.
+    for (const env of [{ FAKE_BANDS: '' }, { FAKE_NO_WIFI_DEVICE: '1' }]) {
+      const quiet = machine([HOME]);
+      run(quiet, ['--list'], env);
+      const list = readSavedNetworks(quiet.data);
+      expect(list?.bands, JSON.stringify(env)).toBeUndefined();
+      expect(list?.networks, JSON.stringify(env)).toHaveLength(1);
+    }
+  });
+
+  it('reads only the band words it knows', () => {
+    const m = machine([HOME]);
+    run(m, ['--list']);
+    const file = path.join(m.data, 'wifi', 'networks');
+    writeFileSync(file, readFileSync(file, 'utf8').replace(/^bands=.*$/m, 'bands=60,5,2.4,banana'));
+    // In its own order, and a word from a newer script is dropped rather than
+    // passed on as a claim.
+    expect(readSavedNetworks(m.data)?.bands).toEqual(['2.4', '5']);
+    writeFileSync(file, readFileSync(file, 'utf8').replace(/^bands=.*$/m, 'bands=banana'));
+    expect(readSavedNetworks(m.data)?.bands).toBeUndefined();
+  });
+
   it('is readable by the hub and nobody else, because it says where the hub has been', () => {
     const m = machine([HOME]);
     run(m, ['--list']);

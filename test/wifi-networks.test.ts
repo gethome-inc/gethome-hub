@@ -213,6 +213,8 @@ describe.skipIf(!handle)('the Wi-Fi network routes', () => {
         { id: HOME_ID, ssid: 'Flat 3', connected: true },
         { id: SPARE_ID, ssid: 'Old flat', connected: false },
       ],
+      // The staged machine's radio is a Pi Zero 2 W's: 2.4 GHz alone.
+      bands: ['2.4'],
     });
   });
 
