@@ -287,7 +287,8 @@ still wins. **Destroys nothing that cannot be typed in again** — the one remov
 that would cost a trip to the Pi, the network it is connected through, is
 refused outright. **Named** — both changes write a `hub.wifi` row. Reading the
 list needs the key too rather than the floor, because the list is where the hub
-has been. `0017` grants it to hubs that already exist, as `0006` did for
+has been — and so does reading a device's network in `offlineElsewhere`, which
+narrows to `{}` without it rather than refusing. `0017` grants it to hubs that already exist, as `0006` did for
 `hub.ai`.
 
 **The two MQTT keys are neither exception, and they are the one place the
@@ -985,6 +986,50 @@ reading a week later. The automatic clear writes nothing of its own: the device
 coming back already writes `device.online`, and two lines for one event is the
 burst the feed's whole shape exists to avoid.
 
+#### A device on another Wi-Fi (`offlineElsewhere`)
+
+A hub can be told about another Wi-Fi network before it is carried there, and
+when it arrives it joins that one. Its Wi-Fi accessories cannot follow: a
+Matter accessory is moved to another network by its administrator *while it is
+reachable*, and once the hub has gone it never is. So every one of them goes
+offline the moment the hub moves, and both apps drew a plain "Offline" under
+*Needs attention* over a plug that was exactly where it had been left. Found on
+a hub carried onto its owner's iPhone hotspot.
+
+A device in that state comes back carrying `offlineElsewhere`, and **presence
+is the answer**, as for `offlineExpected`. An app draws it as offline, says
+why, and **does not count it as something needing attention** — nothing in the
+house is broken, and it comes back by itself when the hub and the device are on
+the same network again. The hub claims it only when every one of these holds,
+because a device it covers is one the apps stop raising an alarm about:
+
+- the device is **offline** — one that answers is on a network the hub
+  reaches, whatever it is called;
+- it **said which Wi-Fi it is on** — a Matter accessory's own
+  `NetworkCommissioning` list, read from matter.js's cache, so it is known for
+  an accessory out of reach right now. Nothing else reports one yet;
+- the hub is on **Wi-Fi and only Wi-Fi** — a hub on a cable reaches a Wi-Fi
+  accessory through the router, whatever its radio is joined to;
+- the device's network is **one the hub holds a profile for, and not the one
+  it is on**. That is what makes it the hub having moved: an accessory paired
+  by this hub was given the network the hub was on at the time. And it keeps a
+  router with a name per band out of it — a hub on the 5 GHz name holds no
+  profile for the 2.4 GHz one its accessories use, so an accessory there that
+  goes offline is reported as offline.
+
+`offlineElsewhere.network` names the device's network **only to a member with
+`hub.wifi`** — the key that already guards the hub's own list of them, which is
+where it has been. Everybody else gets `offlineElsewhere: {}`: told that the
+device is on another network, not which. Narrowed rather than refused, like
+`activity.read`, because the field is what keeps every dashboard calm and the
+name is only a convenience. The WebSocket's `deviceUpserted` renders it the same
+way, per socket, asking at send time.
+
+Nothing is stored: the hub compares what the device last said with its own
+network list on every render, so it is right the moment the hub moves and gone
+the moment the device answers. An older app reads past the field and draws a
+plain "Offline", which is what it drew before.
+
 #### A radio switch in flight (`radio.applying`)
 
 Applying a radio **restarts the hub** — around seventy seconds of a closed port
@@ -1343,6 +1388,13 @@ what Zigbee2MQTT and every MQTT integration already call the device.
 
 `needsReview: true` marks devices whose automatic mapping was incomplete
 (see [ai-adaptation.md](ai-adaptation.md)).
+
+Two optional fields explain an offline device and are absent for nearly every
+one: `offlineExpected` (somebody said it is meant to be —
+[A device that is meant to be offline](#a-device-that-is-meant-to-be-offline))
+and `offlineElsewhere` (it is on a Wi-Fi network the hub is not on —
+[A device on another Wi-Fi](#a-device-on-another-wi-fi-offlineelsewhere)).
+Neither is counted as needing attention.
 
 `online` is **whether the hub can reach the device**, and it answers for the
 radio as well as for the device. A radio that is switched off, failed to start,

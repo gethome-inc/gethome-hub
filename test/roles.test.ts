@@ -15,6 +15,7 @@ import { PermitJoinService } from '../src/core/permit-join.js';
 import { AiRunLog } from '../src/core/ai-runs.js';
 import { MappingLibrary } from '../src/ai/library.js';
 import { BUILTIN_ROLES, PERMISSION_KEYS, type RoleWire } from '../src/core/access.js';
+import type { HubWifiView } from '../src/core/device-network.js';
 import type { AdapterBus, ProtocolAdapter } from '../src/adapters/adapter.js';
 import type { HubCommand } from '../src/schema/index.js';
 import {
@@ -71,6 +72,8 @@ describe.skipIf(!handle)('roles and permissions', () => {
   let guestId: string;
   let deviceId: string;
   let roomId: string;
+  /** What the hub knows of its own Wi-Fi — nothing, until a test says. */
+  let hubWifi: HubWifiView | undefined;
 
   const auth = (token: string) => ({ authorization: `Bearer ${token}` });
   const roleId = async (key: string): Promise<string> => {
@@ -153,6 +156,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
       permitJoin: new PermitJoinService(undefined, log, () => {}),
       aiRuns: new AiRunLog(db, events),
       mappings: new MappingLibrary({ db, settings, registry, log }),
+      hubWifi: () => hubWifi,
     });
     // A real socket is needed for the `access` frame test, and `inject` gives
     // no port. Everything else uses `inject`.
@@ -1976,6 +1980,97 @@ describe.skipIf(!handle)('roles and permissions', () => {
       roleName: 'Groundskeeper',
       memberName: 'Georgy',
     });
+  });
+
+  // ── Network names ─────────────────────────────────────────────────────────
+
+  /**
+   * A device offline because the hub has moved to another Wi-Fi is told to
+   * **everybody** — it is what keeps every dashboard from raising an alarm over
+   * a plug that is exactly where it was left — but the network's *name* only to
+   * those who may read the hub's own list of them, which is `hub.wifi`. Both
+   * halves, on the route and on the socket, because a field narrowed in one
+   * place and not the other is a name leaked through the second.
+   */
+  it('says a device is on another Wi-Fi to every member, and names it only with hub.wifi', async () => {
+    const plug = {
+      adapter: 'mqtt' as const,
+      externalId: 'plug-elsewhere',
+      suggestedName: 'Kettle plug',
+      wifiNetwork: 'Keti',
+      endpoints: [{ endpointId: 1, deviceKind: 'outlet' as const, capabilities: ['onOff' as const], primary: 'onOff' as const }],
+    };
+    adapter.bus!.deviceUpserted(plug);
+    adapter.bus!.reachabilityChanged('mqtt', 'plug-elsewhere', false);
+    await registry.flush();
+    const plugId = registry.listDevices().find((device) => device.externalId === 'plug-elsewhere')!.id;
+    const elsewhere = async (token: string): Promise<unknown> => {
+      const devices = (
+        await app.inject({ method: 'GET', url: '/api/v1/devices', headers: auth(token) })
+      ).json() as Array<{ id: string; offlineElsewhere?: unknown }>;
+      return devices.find((device) => device.id === plugId)?.offlineElsewhere;
+    };
+
+    try {
+      // The hub cannot say: nothing at all, for anybody.
+      expect(await elsewhere(ownerToken)).toBeUndefined();
+
+      // Carried onto the owner's hotspot, with the home network still saved.
+      hubWifi = { current: 'iPhone (George)', known: new Set(['Keti', 'iPhone (George)']) };
+      expect(await elsewhere(ownerToken)).toEqual({ network: 'Keti' });
+      expect(await elsewhere(memberToken)).toEqual({ network: 'Keti' });
+      expect(await elsewhere(guestToken)).toEqual({});
+
+      // The socket narrows the same way, per reader.
+      const frames = async (token: string) => {
+        const socket = new WebSocket(`ws://127.0.0.1:${port}/api/v1/ws?token=${token}`);
+        const seen: unknown[] = [];
+        socket.on('message', (data) => {
+          const frame = JSON.parse(data.toString()) as {
+            type: string;
+            device?: { id: string; offlineElsewhere?: unknown };
+          };
+          if (frame.type === 'deviceUpserted' && frame.device?.id === plugId) {
+            seen.push(frame.device.offlineElsewhere);
+          }
+        });
+        await new Promise<void>((resolve, reject) => {
+          socket.on('open', () => resolve());
+          socket.on('error', reject);
+        });
+        return { socket, seen };
+      };
+      const member = await frames(memberToken);
+      const guest = await frames(guestToken);
+      await new Promise<void>((resolve) => setTimeout(resolve, 120));
+      adapter.bus!.deviceUpserted(plug);
+      await registry.flush();
+      await new Promise<void>((resolve) => setTimeout(resolve, 120));
+      expect(member.seen).toEqual([{ network: 'Keti' }]);
+      expect(guest.seen).toEqual([{}]);
+      member.socket.close();
+      guest.socket.close();
+
+      // Not a network the hub knows: an accessory somewhere it has never been,
+      // which says nothing about the hub having moved.
+      hubWifi = { current: 'iPhone (George)', known: new Set(['iPhone (George)']) };
+      expect(await elsewhere(ownerToken)).toBeUndefined();
+
+      // Back on the home network, and it is just offline again.
+      hubWifi = { current: 'Keti', known: new Set(['Keti', 'iPhone (George)']) };
+      expect(await elsewhere(ownerToken)).toBeUndefined();
+
+      // And a device that answers is on a network the hub reaches, whatever
+      // either is called.
+      hubWifi = { current: 'iPhone (George)', known: new Set(['Keti', 'iPhone (George)']) };
+      adapter.bus!.reachabilityChanged('mqtt', 'plug-elsewhere', true);
+      await registry.flush();
+      expect(await elsewhere(ownerToken)).toBeUndefined();
+    } finally {
+      hubWifi = undefined;
+      adapter.bus!.deviceRemoved('mqtt', 'plug-elsewhere');
+      await registry.flush();
+    }
   });
 
   // ── The rest of the guest table ───────────────────────────────────────────

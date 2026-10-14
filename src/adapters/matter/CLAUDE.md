@@ -127,6 +127,15 @@ update it in the same change.
   waits on it. And **the file object is made in `start()`**, not the
   constructor, because the API reads this adapter before it has started and
   a test constructs one with no data directory at all.
+- **The hub reads which Wi-Fi each accessory is on, from the same cache.**
+  `wifi-network.ts` takes the accessory's own `NetworkCommissioning` list. It
+  uses the connected entry, or the only one, and drops a name that is not
+  UTF-8. It covers Wi-Fi accessories only. `announceNode` puts the result in
+  the descriptor as `wifiNetwork`, which is how `offlineElsewhere` can name the
+  network of a plug left behind when the hub moved (`src/core/CLAUDE.md`).
+  Never allowed to throw, like the neighbour read. On the hub this came from,
+  the cache held `[{ networkId: "Keti", connected: true }]` for a plug out of
+  reach since the hub had restarted on its owner's hotspot.
 - **matter.js logs at the hub's level, never at its own default, which is
   debug.** Nothing set it, so a hub at `LOG_LEVEL=info` wrote every matter.js
   debug line to the journal. With one plug reporting its power, that was

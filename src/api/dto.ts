@@ -1,4 +1,32 @@
+import type { AccessService } from '../core/access.js';
+import { hubWifiView, offlineElsewhere, type HubWifiView } from '../core/device-network.js';
 import type { RegistryDevice } from '../core/registry.js';
+
+/**
+ * What a device's rendering depends on besides the device: the reader, and
+ * the hub's own Wi-Fi at this moment.
+ */
+export interface DeviceWireView {
+  /** See `core/device-network.ts`. Absent means the hub cannot say. */
+  hubWifi?: HubWifiView | undefined;
+  /**
+   * Whether the reader may see Wi-Fi network names — `hub.wifi`, the
+   * permission that already guards the hub's own list of them. Everybody else
+   * is told a device is on another network and not which one.
+   */
+  namesNetworks?: boolean;
+}
+
+/** The view for one reader, asked once per render rather than per device. */
+export function deviceWireView(
+  deps: { dataDir: string; hubWifi?: () => HubWifiView | undefined; access: AccessService },
+  memberId: string | null,
+): DeviceWireView {
+  return {
+    hubWifi: (deps.hubWifi ?? (() => hubWifiView(deps.dataDir)))(),
+    namesNetworks: memberId !== null && deps.access.can(memberId, 'hub.wifi'),
+  };
+}
 
 /**
  * Device shape served by GET /devices and the deviceUpserted WS frame.
@@ -10,7 +38,8 @@ import type { RegistryDevice } from '../core/registry.js';
  * off the device, because one device answers differently to each member, and
  * the WebSocket renders this per socket for exactly that reason.
  */
-export function deviceWire(device: RegistryDevice, favorite: boolean) {
+export function deviceWire(device: RegistryDevice, favorite: boolean, view: DeviceWireView = {}) {
+  const elsewhere = offlineElsewhere(device, view.hubWifi);
   return {
     id: device.id,
     // The device's address on its own protocol — a Zigbee IEEE, an MQTT
@@ -45,6 +74,14 @@ export function deviceWire(device: RegistryDevice, favorite: boolean) {
               : {}),
           },
         }
+      : {}),
+    // Presence is the answer here too: the device is offline because it is on
+    // a Wi-Fi network the hub is not on, and every rule in
+    // `core/device-network.ts` held. Rendered per reader, like `favorite`,
+    // because the name is `hub.wifi`'s to show — the field is not, since
+    // "this one is fine where it is" is what every member's dashboard needs.
+    ...(elsewhere !== undefined
+      ? { offlineElsewhere: view.namesNetworks === true ? { network: elsewhere.network } : {} }
       : {}),
     endpoints: device.endpoints.map((endpoint) => ({
       endpointId: endpoint.endpointId,

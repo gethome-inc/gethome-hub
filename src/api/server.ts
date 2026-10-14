@@ -82,6 +82,7 @@ import {
   type WifiChangeResult,
 } from '../core/wifi-networks.js';
 import { ownIPv4Addresses, proofAddressHost, proveIdentity } from '../core/hub-proof.js';
+import type { HubWifiView } from '../core/device-network.js';
 import type { MqttObserver } from '../core/mqtt-observer.js';
 import { hostFromRequest, mqttAccess, type MqttBrokerConfig } from '../core/mqtt-access.js';
 import { isHistoryKind, type HistoryKind, type HistoryService } from '../core/history.js';
@@ -90,7 +91,7 @@ import { PortraitBusyError, PortraitSpaceError, type PortraitService } from '../
 import { PortraitDrawError } from '../portraits/openai-images.js';
 import { MAX_WINDOW_SECONDS, type PermitJoinService } from '../core/permit-join.js';
 import { createHubStatusReader } from '../core/hub-status.js';
-import { deviceWire } from './dto.js';
+import { deviceWire, deviceWireView } from './dto.js';
 import { extractToken, requireMember, requirePermission } from './auth.js';
 import { createHostCheck, createRefusalLogGate, hostnameFromHeader } from './host-guard.js';
 import {
@@ -165,6 +166,13 @@ export interface ApiDeps {
    * the hub reads the interfaces afresh on every request.
    */
   ownAddresses?: () => readonly string[];
+  /**
+   * What the hub knows about its own Wi-Fi, for saying a device is offline
+   * because the hub is on another network (`core/device-network.ts`).
+   * Optional so a suite can name the networks; the hub reads its list afresh
+   * on every render, because a hub that has just moved is the one asked about.
+   */
+  hubWifi?: () => HubWifiView | undefined;
   /**
    * Where the coordinator detector records what it found — read only to tell
    * "no Zigbee stick" apart from "the stick is here and Matter has the board".
@@ -973,9 +981,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
 
   app.get('/api/v1/devices', authed, async (request) => {
     const memberId = request.member!.id;
+    const view = deviceWireView(deps, memberId);
     return deps.registry
       .listDevices()
-      .map((device) => deviceWire(device, deps.favorites.isFavorite(memberId, device.id)));
+      .map((device) => deviceWire(device, deps.favorites.isFavorite(memberId, device.id), view));
   });
 
   /**
@@ -1108,7 +1117,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         },
       });
     }
-    return deviceWire(device, deps.favorites.isFavorite(memberId, id));
+    return deviceWire(device, deps.favorites.isFavorite(memberId, id), deviceWireView(deps, memberId));
   });
 
   const roomExists = async (id: string): Promise<boolean> =>

@@ -135,6 +135,14 @@ WPA3-only network has to be added with that command rather than from an app.
 After the move the hub has a new address on the new network, and announces
 itself there exactly as it did at home.
 
+**Your Wi-Fi Matter accessories stay on the old network.** A hub can move an
+accessory to another network only while it can reach it, so a plug left at home
+keeps waiting on the home Wi-Fi. The apps show it as offline and say which
+network it is on, without calling it a problem: it answers again as soon as the
+hub is back on that network. One that moves for good — or one taken along to
+the new place — has to be reset and paired again there. Zigbee devices travel
+with the hub's stick and are unaffected.
+
 ## Updating
 
 ```sh
