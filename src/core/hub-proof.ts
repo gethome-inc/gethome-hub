@@ -20,11 +20,15 @@ import { networkInterfaces } from 'node:os';
  * reveals neither), and the hub answers with an HMAC over all three and its own
  * id. Two rules make that a proof rather than a ceremony:
  *
- * - **The hub signs only for an address it has.** Without that, an impostor
- *   relays the app's challenge to the real hub and hands the answer back. With
- *   it, the relayed challenge names the impostor's address, which the real hub
- *   refuses; and if the impostor rewrites it to the real hub's address, the
- *   HMAC covers an address the app never dialled, which the app refuses.
+ * - **The hub signs only for an address it has, on the port the challenge
+ *   arrived on.** Without that, an impostor relays the app's challenge to the
+ *   real hub and hands the answer back. With it, the relayed challenge names
+ *   the impostor's address, which the real hub refuses; and if the impostor
+ *   rewrites it to the real hub's address, the HMAC covers an address the app
+ *   never dialled, which the app refuses. The port is the half that closes it
+ *   on the hub's own machine: an address check alone signed for
+ *   `<hub>:9999`, so anything able to listen on another port there could
+ *   relay a challenge under its own address and be followed.
  * - **Nothing secret goes out.** The token id is a one-way function of a
  *   one-way function of 32 random bytes, and the HMAC is over values the
  *   caller chose. A wrong token id, or an address that is not this hub's,
@@ -59,16 +63,17 @@ export function proveIdentity(tokenHashHex: string, hubId: string, nonce: string
 const IPV4 = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
 
 /**
- * The host of an `address:port` an app says it dialled, when it is an IPv4
+ * The `address:port` an app says it dialled, when the address is an IPv4
  * literal — the only thing an app follows a hub to, and the only family the
  * API answers on.
  */
-export function proofAddressHost(address: string): string | undefined {
+export function proofAddress(address: string): { host: string; port: number } | undefined {
   const match = /^([0-9.]+):(\d{1,5})$/.exec(address);
   if (!match) return undefined;
-  const [, host, port] = match;
-  if (!IPV4.test(host!) || Number(port) < 1 || Number(port) > 65535) return undefined;
-  return host;
+  const [, host, digits] = match;
+  const port = Number(digits);
+  if (!IPV4.test(host!) || port < 1 || port > 65535) return undefined;
+  return { host: host!, port };
 }
 
 /** Every IPv4 address this machine holds right now. Asked per request: a lease moves. */

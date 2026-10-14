@@ -511,7 +511,7 @@ describe('deploy/install.sh', () => {
   describe('the update units', () => {
     const updateService = installer.slice(
       installer.indexOf('gethome-update.service >/dev/null <<UNIT'),
-      installer.indexOf('$SUDO touch "${DATA_DIR}/update/enabled"'),
+      installer.indexOf('as_service_user() {'),
     );
     const updatePath = installer.slice(
       installer.indexOf('gethome-update.path >/dev/null <<UNIT'),
@@ -585,6 +585,33 @@ describe('deploy/install.sh', () => {
       expect(wifiService).not.toMatch(/^\[Install\]$/m);
       expect(installer).not.toMatch(/systemctl enable[^\n]*gethome-wifi\.service/);
       expect(installer).toMatch(/systemctl enable --now gethome-wifi\.path/);
+    });
+
+    /**
+     * The data directory is the hub's account's, so a name in it is whatever
+     * that account made it — and root following one follows whatever was
+     * planted: `touch` and `tee` through a link write where it points, and
+     * `chmod` on a directory that has become a link changes the mode of the
+     * directory it names. The installer's own writes there go through
+     * `as_service_user`; only `chown -R` stays root's, because without -H or
+     * -L it changes a link itself and never descends through one.
+     */
+    it('writes inside the hub’s directories only as the hub’s account', () => {
+      const block = installer.slice(
+        installer.indexOf('as_service_user() {'),
+        installer.indexOf('WIFI_NETWORKS_UNITS=""'),
+      );
+      const helper = block.slice(0, block.indexOf('\n}\n'));
+      expect(helper).toContain('setpriv --reuid="$uid" --regid="$gid" --clear-groups --');
+      expect(helper).toContain('runuser -u "$SERVICE_USER" --');
+      for (const line of block.split('\n')) {
+        if (!/\$SUDO\b/.test(line) || !/(wifi_dir|DATA_DIR)/.test(line)) continue;
+        expect(line.trim(), line).toMatch(/^\$SUDO chown -R "\$SERVICE_USER:\$SERVICE_USER" /);
+      }
+      expect(block).toMatch(/as_service_user touch "\$\{DATA_DIR\}\/update\/enabled"/);
+      expect(block).toMatch(/as_service_user touch "\$wifi_dir\/enabled"/);
+      expect(block).toMatch(/as_service_user tee "\$wifi_dir\/unsupported"/);
+      expect(block).toMatch(/as_service_user chmod 0750 "\$wifi_dir"/);
     });
 
     it('runs the script it installs, naming the account it reads and writes the data directory as', () => {

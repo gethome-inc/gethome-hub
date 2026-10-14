@@ -81,7 +81,7 @@ import {
   type WifiChangeError,
   type WifiChangeResult,
 } from '../core/wifi-networks.js';
-import { ownIPv4Addresses, proofAddressHost, proveIdentity } from '../core/hub-proof.js';
+import { ownIPv4Addresses, proofAddress, proveIdentity } from '../core/hub-proof.js';
 import type { HubWifiView } from '../core/device-network.js';
 import type { MqttObserver } from '../core/mqtt-observer.js';
 import { hostFromRequest, mqttAccess, type MqttBrokerConfig } from '../core/mqtt-access.js';
@@ -546,9 +546,19 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         tokenId: z.string().regex(/^[0-9a-f]{64}$/),
       })
       .parse(request.body);
-    const host = proofAddressHost(body.address);
+    const target = proofAddress(body.address);
+    // The port too, not only the host: an address check alone signed for any
+    // port on the hub's own addresses, so anything able to listen on another
+    // port on this machine could relay an app's challenge here under its own
+    // address and get a proof back for it. The port the challenge arrived on
+    // is the one the app dialled whenever nothing stood in between. It is
+    // unknown only for a request with no socket at all — a suite's `inject` —
+    // and every real connection has one.
+    const arrivedOn = request.socket.localPort;
     const tokenHash =
-      host !== undefined && ownAddresses().includes(host)
+      target !== undefined &&
+      ownAddresses().includes(target.host) &&
+      (arrivedOn === undefined || target.port === arrivedOn)
         ? await deps.pairing.tokenHashForProof(body.tokenId)
         : undefined;
     if (tokenHash === undefined) return reply.code(403).send({ error: 'proof_refused' });

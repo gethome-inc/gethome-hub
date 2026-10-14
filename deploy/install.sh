@@ -2546,12 +2546,35 @@ ExecStart=/usr/local/lib/gethome-update.sh
 TimeoutStartSec=infinity
 UNIT
 
+# Run a command as the hub's account, for anything inside the hub's own data
+# directory. That account owns it, so every name in it is whatever the account
+# made it, and root following one follows whatever was planted there: a link
+# from `wifi/enabled` to a file only root may touch, or `wifi` itself pointed
+# at a directory whose mode the `chmod` after it would then change. Done as the
+# account, a planted link reaches only what that account could reach already —
+# `as_hub` in deploy/wifi-networks.sh, for the same reason. setpriv first, then
+# runuser, both util-linux; with neither the write is skipped, which leaves a
+# capability unannounced rather than written by root. (`chown -R` stays root's:
+# without -H or -L it changes a link itself and never descends through one.)
+as_service_user() {
+  local uid gid
+  uid="$(id -u "$SERVICE_USER" 2>/dev/null)" || return 1
+  gid="$(id -g "$SERVICE_USER" 2>/dev/null)" || return 1
+  if command -v setpriv >/dev/null 2>&1; then
+    $SUDO setpriv --reuid="$uid" --regid="$gid" --clear-groups -- "$@"
+  elif command -v runuser >/dev/null 2>&1; then
+    $SUDO runuser -u "$SERVICE_USER" -- "$@"
+  else
+    return 1
+  fi
+}
+
 # What the hub reads to know this machine can apply an update at all. A file in
 # the hub's own directory rather than a systemd path it would have to know
 # about: the hub stays portable, and this is written in the same breath as the
 # units, so it cannot promise plumbing that was never installed.
-$SUDO touch "${DATA_DIR}/update/enabled" 2>/dev/null || true
 $SUDO chown -R "$SERVICE_USER:$SERVICE_USER" "${DATA_DIR}/update" 2>/dev/null || true
+as_service_user touch "${DATA_DIR}/update/enabled" 2>/dev/null || true
 
 # ── The Wi-Fi networks the hub knows, changed from an app ──────────────────
 # So a hub set up on one network can be told about another before it is carried
@@ -2574,16 +2597,16 @@ manage_wifi_networks() {
   # was 53 on its branch before that landed, so a hub that tried the branch has
   # it under the old name too, and would run it twice on every association.
   $SUDO rm -f "$(dirname "$dispatcher")/53-gethome-wifi-networks" 2>/dev/null || true
-  $SUDO mkdir -p "$wifi_dir" 2>/dev/null || true
-  $SUDO rm -f "$wifi_dir/enabled" "$wifi_dir/unsupported" 2>/dev/null || true
+  # Everything inside the directory as the hub's account (`as_service_user`).
+  as_service_user mkdir -p "$wifi_dir" 2>/dev/null || true
+  as_service_user rm -f "$wifi_dir/enabled" "$wifi_dir/unsupported" 2>/dev/null || true
 
   # Installed is not running: nmcli can be on a machine whose Wi-Fi something
   # else manages (dhcpcd, on an older Raspberry Pi OS), and there every change
   # would fail with "NetworkManager is not running" behind a form the app had
   # offered. `general status` answers only when the daemon does.
   if ! command -v nmcli >/dev/null 2>&1 || ! $SUDO nmcli -t general status >/dev/null 2>&1; then
-    printf 'no-networkmanager\n' | $SUDO tee "$wifi_dir/unsupported" >/dev/null 2>&1 || true
-    $SUDO chown -R "$SERVICE_USER:$SERVICE_USER" "$wifi_dir" 2>/dev/null || true
+    printf 'no-networkmanager\n' | as_service_user tee "$wifi_dir/unsupported" >/dev/null 2>&1 || true
     return 0
   fi
 
@@ -2636,9 +2659,11 @@ DISPATCH
     $SUDO chmod 0755 "$dispatcher" 2>/dev/null || true
   fi
 
-  $SUDO touch "$wifi_dir/enabled" 2>/dev/null || true
+  # A hub installed by an earlier build may hold files root made here; `chown -R`
+  # hands them back without following anything (see `as_service_user`).
   $SUDO chown -R "$SERVICE_USER:$SERVICE_USER" "$wifi_dir" 2>/dev/null || true
-  $SUDO chmod 0750 "$wifi_dir" 2>/dev/null || true
+  as_service_user touch "$wifi_dir/enabled" 2>/dev/null || true
+  as_service_user chmod 0750 "$wifi_dir" 2>/dev/null || true
   # Once now, so the list is there before anybody reconnects.
   $SUDO env GETHOME_CONF="$CONF_DIR" GETHOME_USER="$SERVICE_USER" GETHOME_GROUP="$SERVICE_USER" "$helper" --list --quiet || true
   WIFI_NETWORKS_UNITS=1

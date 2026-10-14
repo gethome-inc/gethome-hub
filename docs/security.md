@@ -72,7 +72,8 @@ serving it, not a security boundary.
   again by its id — which is public, so anything on the LAN can announce it.
   Before an app sends its token to a new address it asks for an HMAC keyed by
   that token's hash, over a fresh nonce and the address it dialled, and the
-  hub signs only for an address it holds; an impostor can neither compute it
+  hub signs only for an address it holds, on the port the request reached it
+  on; an impostor can neither compute it
   nor relay it — [`api.md`](api.md#following-a-hub-to-a-new-address-post-hubproof).
 - **No web page can use it.** The hub sends no CORS headers, so a browser
   refuses to read its answers cross-origin, and a page cannot attach an

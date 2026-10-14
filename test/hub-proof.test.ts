@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { pino } from 'pino';
@@ -14,7 +15,7 @@ import { DeviceRegistry } from '../src/core/registry.js';
 import { PermitJoinService } from '../src/core/permit-join.js';
 import { AiRunLog } from '../src/core/ai-runs.js';
 import { MappingLibrary } from '../src/ai/library.js';
-import { proofAddressHost, proofMessage, proofTokenId, proveIdentity } from '../src/core/hub-proof.js';
+import { proofAddress, proofMessage, proofTokenId, proveIdentity } from '../src/core/hub-proof.js';
 import {
   startedAutomations,
   bootedHome,
@@ -63,13 +64,13 @@ describe('the proof itself', () => {
   });
 
   it('takes only an IPv4 address and a port', () => {
-    expect(proofAddressHost('192.168.1.60:8420')).toBe('192.168.1.60');
-    expect(proofAddressHost('192.168.1.60')).toBeUndefined();
-    expect(proofAddressHost('pi.local:8420')).toBeUndefined();
-    expect(proofAddressHost('[fe80::1]:8420')).toBeUndefined();
-    expect(proofAddressHost('192.168.1.256:8420')).toBeUndefined();
-    expect(proofAddressHost('192.168.1.60:0')).toBeUndefined();
-    expect(proofAddressHost('192.168.1.60:70000')).toBeUndefined();
+    expect(proofAddress('192.168.1.60:8420')).toEqual({ host: '192.168.1.60', port: 8420 });
+    expect(proofAddress('192.168.1.60')).toBeUndefined();
+    expect(proofAddress('pi.local:8420')).toBeUndefined();
+    expect(proofAddress('[fe80::1]:8420')).toBeUndefined();
+    expect(proofAddress('192.168.1.256:8420')).toBeUndefined();
+    expect(proofAddress('192.168.1.60:0')).toBeUndefined();
+    expect(proofAddress('192.168.1.60:70000')).toBeUndefined();
   });
 });
 
@@ -187,5 +188,34 @@ describe.skipIf(!handle)('POST /hub/proof', () => {
     expect((await ask({ nonce, address: '192.168.1.60', tokenId })).statusCode).toBe(403);
     expect((await ask({ nonce: 'short', address: here, tokenId })).statusCode).toBe(400);
     expect((await ask({ nonce, address: here, tokenId: 'nope' })).statusCode).toBe(400);
+  });
+
+  /**
+   * Over a real connection, because the port is read off the socket the
+   * challenge arrived on and `inject` has none. Something else on the hub's
+   * own machine, listening on another port, could otherwise relay an app's
+   * challenge here under its own address — the host is the hub's, so an
+   * address check alone signed for it — and be followed with the token.
+   */
+  it('signs only for the port the challenge arrived on', async () => {
+    await app.listen({ port: 0, host: '127.0.0.1' });
+    const port = (app.server.address() as AddressInfo).port;
+    const post = (address: string, nonce: string, tokenId: string) =>
+      fetch(`http://127.0.0.1:${port}/api/v1/hub/proof`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ nonce, address, tokenId }),
+      });
+
+    const nonce = randomBytes(32).toString('hex');
+    const dialled = asAnApp(token, hubId, nonce, `127.0.0.1:${port}`);
+    const direct = await post(`127.0.0.1:${port}`, nonce, dialled.tokenId);
+    expect(direct.status).toBe(200);
+    expect(((await direct.json()) as { proof: string }).proof).toBe(dialled.expected);
+
+    const elsewhere = `127.0.0.1:${port === 9999 ? 9998 : 9999}`;
+    const relayed = await post(elsewhere, nonce, asAnApp(token, hubId, nonce, elsewhere).tokenId);
+    expect(relayed.status).toBe(403);
+    expect(await relayed.json()).toEqual({ error: 'proof_refused' });
   });
 });

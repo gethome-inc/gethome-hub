@@ -1659,10 +1659,14 @@ is all the hub stores of a token — over the UTF-8 bytes of
 `gethome-hub-proof\n<hubId>\n<nonce>\n<address>`. The app computes the same
 and compares, in constant time. Three rules.
 
-- **The hub signs only for an IPv4 address it holds right now.** That is what
-  stops an impostor relaying the challenge to the real hub: the relayed
-  `address` is the impostor's, which the real hub refuses, and rewriting it to
-  the real hub's makes the proof cover an address the app never dialled.
+- **The hub signs only for an IPv4 address it holds right now, on the port
+  the challenge arrived on.** That is what stops an impostor relaying the
+  challenge to the real hub: the relayed `address` is the impostor's, which
+  the real hub refuses, and rewriting it to the real hub's makes the proof
+  cover an address the app never dialled. The port is checked as well because
+  the host alone was not enough. Anything able to listen on another port of
+  the hub's own machine could otherwise relay a challenge naming `<hub>:9999`
+  and be signed for.
 - **No answer but a valid proof moves an app.** `403 proof_refused`, a `404`
   from a hub older than this route, a timeout and a proof that does not match
   all mean "not proven", and the app keeps the address it has. There is no

@@ -160,7 +160,12 @@ in `deploy/install.sh` must stay accurate.
   had planted overwrote a root-only file, and the `chmod`/`chown` after it
   handed that file to the hub's group. As the account, a planted link reaches
   only what it could reach already. `test/deploy-wifi-networks.test.ts` pins
-  that no `chmod`, `chown` or `chgrp` comes back.
+  that no `chmod`, `chown` or `chgrp` comes back. **The installer keeps the
+  same rule for its own writes there**: `install.sh`'s `as_service_user`
+  creates `wifi/enabled` and `wifi/unsupported`, sets `wifi`'s mode and
+  touches `update/enabled` as that account. Only a `chown -R` stays root's,
+  because without `-H`/`-L` it changes a link itself and never descends
+  through one. `test/deploy-config.test.ts` pins both.
   **The network the hub is on is never deleted** — checked again here against
   `nmcli`'s own `ACTIVE`, because the hub's list can be a minute stale and a hub
   off its only network is the one outcome that costs a trip to the Pi, and then
