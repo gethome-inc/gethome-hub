@@ -163,6 +163,19 @@ kills the CASE session outright. Both halves, and why the interval is not ours
 to shorten, are in
 [`api.md`](api.md#and-how-long-it-takes-to-notice-one-has-gone).
 
+### Or that the hub has gone from it
+
+A Wi-Fi accessory stays on the network it was given at commissioning, and a
+controller can move it to another only while it can reach it. So a hub carried
+to another network — which it can be told about in advance — leaves its Wi-Fi
+accessories behind, offline for as long as the two are apart. The hub reads
+which network each accessory is on from its own `NetworkCommissioning` list,
+out of matter.js's cache, so the answer exists for an accessory that is out of
+reach right now; a device in that state carries `offlineElsewhere`
+([`api.md`](api.md#a-device-on-another-wi-fi-offlineelsewhere)), and the apps
+stop counting it as a fault. Wi-Fi only: a Thread accessory's network id is an
+extended PAN ID, not a name anybody knows.
+
 ## Runtime requirements
 
 - **Host networking.** Matter uses site-local UDP (port 5540) and mDNS

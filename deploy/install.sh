@@ -1747,14 +1747,17 @@ DISPATCH
 # NetworkManager was saving its profiles, and both were left at 0 bytes: every
 # boot after that came up healthy and off the network, with no Wi-Fi profile at
 # all, until the card was taken to another computer. Raspberry Pi OS Trixie's
-# NetworkManager keeps profiles as netplan YAML and writes them in place, with
-# no temporary file and no fsync — deploy/wifi-profile.sh says what that costs.
+# NetworkManager keeps the profile Imager set up as netplan YAML and writes it
+# back in place, with no temporary file and no fsync — deploy/wifi-profile.sh
+# says what that costs.
 # So the hub keeps its own copy of the profile it last connected with, taken by
 # a dispatcher whenever a connection comes up (atomically, fsynced, root-only,
 # and only when it changed), and a oneshot puts it back at boot when
-# NetworkManager has no Wi-Fi profile at all and the hub is not on the network
-# another way. It never edits a profile that exists, so whatever the owner has
-# changed stands, and becomes the copy the next time it connects.
+# NetworkManager no longer holds that profile and the hub is not on the network
+# another way — whether or not it holds others, since the hub can be told about
+# more than one network (manage_wifi_networks, below). It never edits a profile
+# that exists, so whatever the owner has changed stands, and becomes the copy
+# the next time it connects.
 #
 # Installed wherever NetworkManager is, a wired hub included: the dispatcher
 # keeps nothing until a Wi-Fi connection comes up, the oneshot does not run
@@ -2543,18 +2546,139 @@ ExecStart=/usr/local/lib/gethome-update.sh
 TimeoutStartSec=infinity
 UNIT
 
+# Run a command as the hub's account, for anything inside the hub's own data
+# directory. That account owns it, so every name in it is whatever the account
+# made it, and root following one follows whatever was planted there: a link
+# from `wifi/enabled` to a file only root may touch, or `wifi` itself pointed
+# at a directory whose mode the `chmod` after it would then change. Done as the
+# account, a planted link reaches only what that account could reach already —
+# `as_hub` in deploy/wifi-networks.sh, for the same reason. setpriv first, then
+# runuser, both util-linux; with neither the write is skipped, which leaves a
+# capability unannounced rather than written by root. (`chown -R` stays root's:
+# without -H or -L it changes a link itself and never descends through one.)
+as_service_user() {
+  local uid gid
+  uid="$(id -u "$SERVICE_USER" 2>/dev/null)" || return 1
+  gid="$(id -g "$SERVICE_USER" 2>/dev/null)" || return 1
+  if command -v setpriv >/dev/null 2>&1; then
+    $SUDO setpriv --reuid="$uid" --regid="$gid" --clear-groups -- "$@"
+  elif command -v runuser >/dev/null 2>&1; then
+    $SUDO runuser -u "$SERVICE_USER" -- "$@"
+  else
+    return 1
+  fi
+}
+
 # What the hub reads to know this machine can apply an update at all. A file in
 # the hub's own directory rather than a systemd path it would have to know
 # about: the hub stays portable, and this is written in the same breath as the
 # units, so it cannot promise plumbing that was never installed.
-$SUDO touch "${DATA_DIR}/update/enabled" 2>/dev/null || true
 $SUDO chown -R "$SERVICE_USER:$SERVICE_USER" "${DATA_DIR}/update" 2>/dev/null || true
+as_service_user touch "${DATA_DIR}/update/enabled" 2>/dev/null || true
+
+# ── The Wi-Fi networks the hub knows, changed from an app ──────────────────
+# So a hub set up on one network can be told about another before it is carried
+# there. Same shape as the update: the hub writes a request into its own data
+# directory, the path unit notices, and the root script applies it with nmcli.
+# deploy/wifi-networks.sh says what it refuses and why.
+#
+# NetworkManager or nothing: it is what every current Raspberry Pi OS manages
+# Wi-Fi with, and a machine without it (Bullseye's wpa_supplicant, Ubuntu's
+# netplan, a wired box) gets no units and a one-word reason the hub passes on,
+# so an app says why rather than offering a form that can only fail. The
+# reason file and the capability are written in the same breath as the units,
+# for the reason `update/enabled` is: `hub.env` never reaches an upgraded hub.
+manage_wifi_networks() {
+  local helper="${GETHOME_WIFI_NETWORKS_BIN:-/usr/local/lib/gethome-wifi-networks.sh}"
+  local dispatcher="${GETHOME_WIFI_NETWORKS_DISPATCHER:-/etc/NetworkManager/dispatcher.d/54-gethome-wifi-networks}"
+  local wifi_dir="${DATA_DIR}/wifi"
+
+  # 54, because the profile copy (keep_wifi_profile) has 53. This dispatcher
+  # was 53 on its branch before that landed, so a hub that tried the branch has
+  # it under the old name too, and would run it twice on every association.
+  $SUDO rm -f "$(dirname "$dispatcher")/53-gethome-wifi-networks" 2>/dev/null || true
+  # Everything inside the directory as the hub's account (`as_service_user`).
+  as_service_user mkdir -p "$wifi_dir" 2>/dev/null || true
+  as_service_user rm -f "$wifi_dir/enabled" "$wifi_dir/unsupported" 2>/dev/null || true
+
+  # Installed is not running: nmcli can be on a machine whose Wi-Fi something
+  # else manages (dhcpcd, on an older Raspberry Pi OS), and there every change
+  # would fail with "NetworkManager is not running" behind a form the app had
+  # offered. `general status` answers only when the daemon does.
+  if ! command -v nmcli >/dev/null 2>&1 || ! $SUDO nmcli -t general status >/dev/null 2>&1; then
+    printf 'no-networkmanager\n' | as_service_user tee "$wifi_dir/unsupported" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  if ! $SUDO install -m 0755 "$HUB_DIR/deploy/wifi-networks.sh" "$helper" 2>/dev/null; then
+    warn "Could not install the Wi-Fi helper, so this hub's Wi-Fi networks can't be changed from an app."
+    return 0
+  fi
+
+  $SUDO tee /etc/systemd/system/gethome-wifi.path >/dev/null <<UNIT
+[Unit]
+Description=Notice that a change to the GetHome Hub's Wi-Fi networks was asked for
+
+[Path]
+PathModified=${DATA_DIR}/wifi/request
+Unit=gethome-wifi.service
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+  # Started by the path unit and nothing else, like the update service: no
+  # [Install], never enabled, so it never runs at boot with nothing to do.
+  $SUDO tee /etc/systemd/system/gethome-wifi.service >/dev/null <<UNIT
+[Unit]
+Description=Change the GetHome Hub's Wi-Fi networks
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+Environment=GETHOME_CONF=${CONF_DIR}
+Environment=GETHOME_USER=${SERVICE_USER}
+Environment=GETHOME_GROUP=${SERVICE_USER}
+ExecStart=${helper} --quiet
+TimeoutStartSec=120
+UNIT
+
+  # Which network is the live one changes on every association, so the list is
+  # written again then. NM ignores a dispatcher script anybody but root can
+  # write, so the ownership and the mode are part of it.
+  $SUDO mkdir -p "$(dirname "$dispatcher")" 2>/dev/null || true
+  if $SUDO tee "$dispatcher" >/dev/null <<DISPATCH
+#!/bin/sh
+# Installed by GetHome. Writes down which Wi-Fi networks this hub knows and
+# which one it is on, for the hub to show. deploy/wifi-networks.sh says why.
+case "\$2" in up|down) ;; *) exit 0 ;; esac
+GETHOME_CONF=${CONF_DIR} GETHOME_USER=${SERVICE_USER} GETHOME_GROUP=${SERVICE_USER} exec ${helper} --list --quiet
+DISPATCH
+  then
+    $SUDO chown root:root "$dispatcher" 2>/dev/null || true
+    $SUDO chmod 0755 "$dispatcher" 2>/dev/null || true
+  fi
+
+  # A hub installed by an earlier build may hold files root made here; `chown -R`
+  # hands them back without following anything (see `as_service_user`).
+  $SUDO chown -R "$SERVICE_USER:$SERVICE_USER" "$wifi_dir" 2>/dev/null || true
+  as_service_user touch "$wifi_dir/enabled" 2>/dev/null || true
+  as_service_user chmod 0750 "$wifi_dir" 2>/dev/null || true
+  # Once now, so the list is there before anybody reconnects.
+  $SUDO env GETHOME_CONF="$CONF_DIR" GETHOME_USER="$SERVICE_USER" GETHOME_GROUP="$SERVICE_USER" "$helper" --list --quiet || true
+  WIFI_NETWORKS_UNITS=1
+}
+WIFI_NETWORKS_UNITS=""
+manage_wifi_networks
 
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable gethome-hubd.service >/dev/null 2>&1
 $SUDO systemctl enable gethome-zigbee-detect.service >/dev/null 2>&1 || true
 $SUDO systemctl enable --now gethome-radio.path >/dev/null 2>&1 || true
 $SUDO systemctl enable --now gethome-update.path >/dev/null 2>&1 || true
+if [[ -n "$WIFI_NETWORKS_UNITS" ]]; then
+  $SUDO systemctl enable --now gethome-wifi.path >/dev/null 2>&1 || true
+fi
 # Zigbee2MQTT, when it is already running, is holding a broker connection that
 # was opened before any of this and may have been anonymous. Its unit has just
 # gained the credentials, so it needs restarting to pick them up — but only if

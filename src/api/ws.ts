@@ -9,7 +9,7 @@ import type {
 } from '../core/bus.js';
 import type { AiRunEvent } from '../core/ai-runs.js';
 import type { AutomationChatEvent, AutomationRunEvent, CommissioningUpdate } from '../core/bus.js';
-import { deviceWire } from './dto.js';
+import { deviceWire, deviceWireView } from './dto.js';
 import type { HubStatusReader } from '../core/hub-status.js';
 
 /** Controls a subscribed-but-not-yet-authorized WebSocket. */
@@ -179,7 +179,9 @@ export function attachWebSocket(
     const device = deps.registry.getDevice(deviceId);
     if (!device) return;
     const favorite = memberId !== null && deps.favorites.isFavorite(memberId, deviceId);
-    send({ type: 'deviceUpserted', device: deviceWire(device, favorite) });
+    // And the network name is `hub.wifi`'s, asked at send time like
+    // `activity.read`, so a grant reaches an open socket with no reconnect.
+    send({ type: 'deviceUpserted', device: deviceWire(device, favorite, deviceWireView(deps, memberId)) });
   };
   const onRemoved = (deviceId: string) => send({ type: 'deviceRemoved', deviceId });
   /**

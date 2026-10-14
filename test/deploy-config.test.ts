@@ -511,7 +511,7 @@ describe('deploy/install.sh', () => {
   describe('the update units', () => {
     const updateService = installer.slice(
       installer.indexOf('gethome-update.service >/dev/null <<UNIT'),
-      installer.indexOf('$SUDO touch "${DATA_DIR}/update/enabled"'),
+      installer.indexOf('as_service_user() {'),
     );
     const updatePath = installer.slice(
       installer.indexOf('gethome-update.path >/dev/null <<UNIT'),
@@ -553,6 +553,92 @@ describe('deploy/install.sh', () => {
       // The hub is unprivileged; `mkdir -p` here plus the `chown -R` on the
       // next line is what makes POST /system/update able to write at all.
       expect(installer).toMatch(/mkdir -p "\$INSTALL_DIR" "\$DATA_DIR" "\$DATA_DIR\/update"/);
+    });
+  });
+
+  /**
+   * The two units behind "add another Wi-Fi network for my hub" — the update
+   * pair's shape, and the same three things are load-bearing.
+   */
+  describe('the Wi-Fi network units', () => {
+    const wifi = installer.slice(
+      installer.indexOf('manage_wifi_networks() {'),
+      installer.indexOf('WIFI_NETWORKS_UNITS=""'),
+    );
+    const wifiPath = wifi.slice(
+      wifi.indexOf('gethome-wifi.path >/dev/null <<UNIT'),
+      wifi.indexOf('gethome-wifi.service >/dev/null <<UNIT'),
+    );
+    const wifiService = wifi.slice(
+      wifi.indexOf('gethome-wifi.service >/dev/null <<UNIT'),
+      wifi.indexOf('<<DISPATCH'),
+    );
+
+    it('watches the file the hub actually writes', () => {
+      // `src/core/wifi-networks.ts` writes `<data>/wifi/request`; a unit
+      // watching any other path is a setting that queues changes for ever.
+      expect(wifiPath).toMatch(/^PathModified=\$\{DATA_DIR\}\/wifi\/request$/m);
+      expect(wifiPath).toMatch(/^Unit=gethome-wifi\.service$/m);
+    });
+
+    it('never runs the service at boot, and enables the path unit that starts it', () => {
+      expect(wifiService).not.toMatch(/^\[Install\]$/m);
+      expect(installer).not.toMatch(/systemctl enable[^\n]*gethome-wifi\.service/);
+      expect(installer).toMatch(/systemctl enable --now gethome-wifi\.path/);
+    });
+
+    /**
+     * The data directory is the hub's account's, so a name in it is whatever
+     * that account made it — and root following one follows whatever was
+     * planted: `touch` and `tee` through a link write where it points, and
+     * `chmod` on a directory that has become a link changes the mode of the
+     * directory it names. The installer's own writes there go through
+     * `as_service_user`; only `chown -R` stays root's, because without -H or
+     * -L it changes a link itself and never descends through one.
+     */
+    it('writes inside the hub’s directories only as the hub’s account', () => {
+      const block = installer.slice(
+        installer.indexOf('as_service_user() {'),
+        installer.indexOf('WIFI_NETWORKS_UNITS=""'),
+      );
+      const helper = block.slice(0, block.indexOf('\n}\n'));
+      expect(helper).toContain('setpriv --reuid="$uid" --regid="$gid" --clear-groups --');
+      expect(helper).toContain('runuser -u "$SERVICE_USER" --');
+      for (const line of block.split('\n')) {
+        if (!/\$SUDO\b/.test(line) || !/(wifi_dir|DATA_DIR)/.test(line)) continue;
+        expect(line.trim(), line).toMatch(/^\$SUDO chown -R "\$SERVICE_USER:\$SERVICE_USER" /);
+      }
+      expect(block).toMatch(/as_service_user touch "\$\{DATA_DIR\}\/update\/enabled"/);
+      expect(block).toMatch(/as_service_user touch "\$wifi_dir\/enabled"/);
+      expect(block).toMatch(/as_service_user tee "\$wifi_dir\/unsupported"/);
+      expect(block).toMatch(/as_service_user chmod 0750 "\$wifi_dir"/);
+    });
+
+    it('runs the script it installs, naming the account it reads and writes the data directory as', () => {
+      expect(wifiService).toMatch(/^ExecStart=\$\{helper\} --quiet$/m);
+      // The data directory is the hub's, so the script touches it only as the
+      // hub's account — and has to be told which account that is, from the
+      // unit, the dispatcher and the installer's own first run alike.
+      expect(wifiService).toMatch(/^Environment=GETHOME_USER=\$\{SERVICE_USER\}$/m);
+      expect(wifi).toMatch(/GETHOME_USER=\$\{SERVICE_USER\} GETHOME_GROUP=\$\{SERVICE_USER\} exec \$\{helper\} --list/);
+      expect(wifi).toMatch(/env GETHOME_CONF="\$CONF_DIR" GETHOME_USER="\$SERVICE_USER"/);
+      expect(wifi).toContain('"$HUB_DIR/deploy/wifi-networks.sh"');
+    });
+
+    it('rewrites the list on every association, and nothing else from the dispatcher', () => {
+      const dispatch = wifi.slice(wifi.indexOf('<<DISPATCH'), wifi.lastIndexOf('\nDISPATCH'));
+      expect(dispatch).toMatch(/up\|down/);
+      expect(dispatch).toMatch(/--list --quiet/);
+    });
+
+    it('says why on a machine without NetworkManager instead of installing units for it', () => {
+      // `src/core/wifi-networks.ts` reads this word, and an app says "this
+      // hub's system manages Wi-Fi itself" rather than "update your hub".
+      const before = wifi.slice(0, wifi.indexOf('gethome-wifi.path'));
+      expect(before).toMatch(/command -v nmcli[\s\S]*no-networkmanager[\s\S]*return 0/);
+      // Installed is not running: a machine with nmcli and the daemon off is
+      // one where every change would fail, so it is asked whether it answers.
+      expect(before).toMatch(/nmcli -t general status/);
     });
   });
 
@@ -860,6 +946,21 @@ describe('deploy/install.sh', () => {
  * being checked. So every script in `deploy/` must be on it — a shebang is
  * what makes a file a script here, since `gethome-hubctl` has no extension.
  */
+/**
+ * The profile copy and the networks list each arrived with a dispatcher
+ * numbered 53, on two branches at once. NetworkManager runs dispatchers in name
+ * order, so a shared number still works — and is one more thing the next one
+ * collides with, so each has a number of its own.
+ */
+describe('NetworkManager dispatchers', () => {
+  it('each have a number of their own', () => {
+    const installer = readFileSync(path.join(repoRoot, 'deploy', 'install.sh'), 'utf8');
+    const numbers = [...installer.matchAll(/dispatcher\.d\/(\d+)-gethome-[a-z-]+\}/g)].map((match) => match[1]);
+    expect(numbers).toEqual(expect.arrayContaining(['50', '52', '53', '54']));
+    expect(new Set(numbers).size).toBe(numbers.length);
+  });
+});
+
 describe('CI', () => {
   it('shellchecks every script in deploy/', () => {
     const ci = readFileSync(path.join(repoRoot, '.github', 'workflows', 'ci.yml'), 'utf8');

@@ -2,7 +2,7 @@ import path from 'node:path';
 import { CommissioningController } from '@project-chip/matter.js';
 import { NodeStates, type Endpoint, type PairedNode } from '@project-chip/matter.js/device';
 import { Environment, Millis, ServerAddress } from '@matter/main';
-import { GeneralDiagnostics } from '@matter/main/clusters';
+import { GeneralDiagnostics, NetworkCommissioning } from '@matter/main/clusters';
 import { ActiveDiscoveries } from '@matter/main/node';
 import { ClusterId, NodeId } from '@matter/main/types';
 import type { AdapterBus, ProtocolAdapter } from '../adapter.js';
@@ -28,6 +28,7 @@ import {
 import type { WifiCredentials } from '../../core/wifi.js';
 import { commissioningFor } from './commissioning-options.js';
 import { MATTER_NEIGHBOURS_FILE, MatterNeighbourFile, neighboursOf } from './neighbours.js';
+import { wifiNetworkOf } from './wifi-network.js';
 import type { Logger } from '../../logging.js';
 
 const SWITCH_CLUSTER = 0x003b;
@@ -721,6 +722,23 @@ export class MatterAdapter implements ProtocolAdapter {
   }
 
   /**
+   * The Wi-Fi network this accessory is joined to, by its own
+   * `NetworkCommissioning` list — see `wifi-network.ts`. From matter.js's
+   * cache, so an accessory out of reach right now still says where it is,
+   * which is the one time anybody needs to know. Never allowed to throw, for
+   * the reason `recordNeighbours` gives.
+   */
+  private readWifiNetwork(externalId: string, node: PairedNode): string | undefined {
+    try {
+      const client = node.getRootClusterClient(NetworkCommissioning.Complete);
+      return wifiNetworkOf(client?.attributes.featureMap?.getLocal(), client?.attributes.networks?.getLocal());
+    } catch (error) {
+      this.options.log.debug({ err: error }, `Could not read which Wi-Fi Matter node ${externalId} is on.`);
+      return undefined;
+    }
+  }
+
+  /**
    * Start writing the neighbour file once every commissioned node has been
    * asked where it is, or after `NEIGHBOURS_OPEN_MS` if one never answers
    * that. The file is the one this `start()` made: a hub stopped and started
@@ -769,6 +787,7 @@ export class MatterAdapter implements ProtocolAdapter {
     if (endpoints.length === 0) return;
 
     const info = node.basicInformation;
+    const wifiNetwork = this.readWifiNetwork(externalId, node);
     this.bus?.deviceUpserted({
       adapter: 'matter',
       externalId,
@@ -779,6 +798,7 @@ export class MatterAdapter implements ProtocolAdapter {
         : typeof info?.productName === 'string'
           ? { suggestedName: info.productName }
           : {}),
+      ...(wifiNetwork !== undefined ? { wifiNetwork } : {}),
       endpoints,
     });
 

@@ -4,10 +4,12 @@
 #
 #   wifi-profile.sh backup  [--conf /etc/gethome] [--quiet]
 #   wifi-profile.sh restore [--conf /etc/gethome]
+#   wifi-profile.sh forget UUID [--conf /etc/gethome] [--quiet]
 #
 # `backup` runs at install time and from a NetworkManager dispatcher every time
 # a connection comes up. `restore` runs once at boot, as a root oneshot ordered
-# after NetworkManager (gethome-wifi-restore.service).
+# after NetworkManager (gethome-wifi-restore.service). `forget` is run by
+# deploy/wifi-networks.sh when a network is removed through the hub.
 #
 # ── Why ─────────────────────────────────────────────────────────────────────
 #
@@ -20,7 +22,10 @@
 # no keyboard, so the only way back was taking the SD card to another computer.
 #
 # The file was a netplan YAML, because Raspberry Pi OS Trixie's NetworkManager
-# keeps its profiles in /etc/netplan. That writer opens the file with
+# keeps a profile that came from netplan — the one Raspberry Pi Imager sets up
+# through cloud-init — in /etc/netplan (one it creates itself, with
+# `nmcli connection add`, is a keyfile: measured on that hub). That writer opens
+# the file with
 # `fopen(…, "wb")` — truncate, then write — with no temporary file, no rename
 # and no fsync, so a power cut between the two leaves a profile with nothing in
 # it. An empty YAML is not an error to netplan: it simply defines nothing, so
@@ -31,11 +36,24 @@
 # So the hub keeps the last profile it actually connected with, root-only,
 # under /etc/gethome — written atomically and fsynced, and only when it changed,
 # so the copy is never the thing a power cut empties — and at boot it checks
-# whether NetworkManager still has any Wi-Fi profile. Only when it has none at
-# all, and the hub is not on the network some other way, does it put the copy
-# back. It never edits or replaces a profile that exists, so a network or a
-# password the owner has changed is theirs; the next time that profile connects
-# it becomes the copy.
+# whether NetworkManager still holds that profile, by its UUID. Only when it
+# does not, the machine has a Wi-Fi radio, and the hub is not on the network
+# some other way, does it put the copy back.
+#
+# **The question is "is the network the hub last joined still there", never "is
+# there any Wi-Fi profile".** A hub can know several networks — an app can add
+# the one it is about to be moved to (deploy/wifi-networks.sh) — and a power cut
+# that empties the profile for the network the hub actually stands on strands it
+# just the same while another profile survives. That second profile is no reason
+# to stay off the network: if it could put the hub on one, the hub would be on
+# it by the time this asks, and the route check says so.
+#
+# It never edits or replaces a profile that exists, so a network or a password
+# the owner has changed is theirs; the next time that profile connects it
+# becomes the copy. And a network removed through the hub is dropped from the
+# copy as well (`forget`), so a copy never brings back a network somebody
+# removed on purpose — which matters on a board with Ethernet, where the hub can
+# be reached, and a Wi-Fi removed, without that Wi-Fi being the one it is on.
 #
 # ── What it copies ──────────────────────────────────────────────────────────
 #
@@ -66,6 +84,11 @@ set -uo pipefail
 
 MODE="${1:-}"
 [[ $# -gt 0 ]] && shift
+TARGET=""
+if [[ "$MODE" == "forget" && $# -gt 0 && "$1" != --* ]]; then
+  TARGET="$1"
+  shift
+fi
 CONF_DIR="${GETHOME_CONF:-/etc/gethome}"
 QUIET=""
 
@@ -236,11 +259,33 @@ backup() {
 
 # ── restore ─────────────────────────────────────────────────────────────────
 
-# The type of every profile NetworkManager has, one per line. Fails when
+# `uuid:type` for every profile NetworkManager has, one per line. Fails when
 # NetworkManager does not answer — which must never read as "no profiles".
-profile_types() { nmcli -t -f TYPE connection show 2>/dev/null; }
+# Neither field can contain a colon, so `-t` needs no unescaping here.
+profile_rows() { nmcli -t -f UUID,TYPE connection show 2>/dev/null; }
 
-has_wifi_profile() { printf '%s\n' "$1" | grep -qx "$WIRELESS"; }
+# The UUID a keyfile is the connection of, lower-cased; empty when it has none.
+# Every copy `backup` writes has one, because it adds the one NetworkManager
+# reports to a netplan rendering that carried none.
+profile_uuid() {
+  awk '
+    function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t\r]+$/, "", s); return s }
+    /^[ \t]*[#;]/ { next }
+    /^[ \t]*\[/ { section = trim($0); next }
+    section == "[connection]" {
+      i = index($0, "=")
+      if (i > 0 && trim(substr($0, 1, i - 1)) == "uuid") { print tolower(trim(substr($0, i + 1))); exit }
+    }' "$1" 2>/dev/null
+}
+
+# Whether NetworkManager still holds the network the copy is of: the Wi-Fi
+# profile with the copy's UUID. A copy without one — none `backup` writes —
+# falls back to whether there is any Wi-Fi profile at all.
+holds_copy() {
+  printf '%s\n' "$1" | WANT="$2" TYPE="$WIRELESS" awk -F: '
+    $2 == ENVIRON["TYPE"] && (ENVIRON["WANT"] == "" || tolower($1) == ENVIRON["WANT"]) { found = 1 }
+    END { exit !found }'
+}
 
 # Files in /etc/netplan that a power cut has emptied or filled with zeros. An
 # empty one defines nothing; one with a NUL in it makes `netplan generate`
@@ -261,7 +306,7 @@ damaged_netplan() {
 }
 
 restore() {
-  local verdict id types devices route damaged result
+  local verdict id uuid rows devices route damaged result
 
   if [[ ! -s "$BACKUP" ]]; then
     say "There is no copy of a Wi-Fi profile on this hub, so there is nothing to put back."
@@ -277,25 +322,27 @@ restore() {
     *) say "The copy of the Wi-Fi profile in ${BACKUP} is not one the hub could reconnect with (${verdict:-unreadable}), so nothing was put back."; return 0 ;;
   esac
   IFS=$'\t' read -r _ _ id <<< "$verdict"
+  uuid="$(profile_uuid "$BACKUP")"
 
-  # The ordinary boot answers at once: there is a Wi-Fi profile and nothing to
-  # do. Only when there is none is it worth waiting for NetworkManager to
-  # finish starting — every profile loaded, every device that is going to come
-  # up having come up — before deciding the hub is stranded, so a slow start or
-  # an Ethernet link still getting its address is not mistaken for one.
-  if types="$(profile_types)" && has_wifi_profile "$types"; then
-    say "NetworkManager has a Wi-Fi profile, so there is nothing to put back."
+  # The ordinary boot answers at once: NetworkManager still holds the network
+  # the hub last joined, and there is nothing to do. Only when it does not is it
+  # worth waiting for NetworkManager to finish starting — every profile loaded,
+  # every device that is going to come up having come up — before deciding the
+  # hub is stranded, so a slow start, an Ethernet link still getting its address
+  # or another known network still associating is not mistaken for one.
+  if rows="$(profile_rows)" && holds_copy "$rows" "$uuid"; then
+    say "NetworkManager still has the Wi-Fi profile the hub last connected with (${id}), so there is nothing to put back."
     return 0
   fi
   if command -v nm-online >/dev/null 2>&1; then
     nm-online -s -q -t "$NM_WAIT" >/dev/null 2>&1 || true
   fi
-  if ! types="$(profile_types)"; then
+  if ! rows="$(profile_rows)"; then
     say "NetworkManager did not answer, so the copy of the Wi-Fi profile (${id}) was not put back."
     return 0
   fi
-  if has_wifi_profile "$types"; then
-    say "NetworkManager has a Wi-Fi profile, so there is nothing to put back."
+  if holds_copy "$rows" "$uuid"; then
+    say "NetworkManager still has the Wi-Fi profile the hub last connected with (${id}), so there is nothing to put back."
     return 0
   fi
 
@@ -303,52 +350,80 @@ restore() {
   # board) has nothing to put a profile on.
   devices="$(nmcli -t -f TYPE,STATE device 2>/dev/null || true)"
   if ! printf '%s\n' "$devices" | grep -q '^wifi:'; then
-    say "NetworkManager has no Wi-Fi profile, but this machine has no Wi-Fi radio for one either, so the copy (${id}) was not put back."
+    say "NetworkManager has lost the Wi-Fi profile the hub last connected with (${id}), but this machine has no Wi-Fi radio for one either, so the copy was not put back."
     return 0
   fi
-  # And a hub that is on the network some other way is not stranded: somebody
-  # who moved it to Ethernet and deleted its Wi-Fi meant both.
+  # And a hub that is on the network some other way is not stranded: through
+  # Ethernet, or through another network it knows. Somebody who moved it to
+  # Ethernet and deleted its Wi-Fi meant both.
   route="$(ip -4 route show default 2>/dev/null || true)"
   if [[ -n "$route" ]] || printf '%s\n' "$devices" | grep -Eq '^ethernet:connect(ed|ing)'; then
-    say "NetworkManager has no Wi-Fi profile, but this hub is on the network another way, so the copy (${id}) was not put back."
+    say "NetworkManager has lost the Wi-Fi profile the hub last connected with (${id}), but this hub is on the network another way, so the copy was not put back."
     return 0
   fi
 
   damaged="$(damaged_netplan)"
 
   # The name is ours, so whatever is there already is ours too — an earlier
-  # restore that something has since emptied, since NetworkManager has no Wi-Fi
-  # profile loaded from it. The note goes on once: after a restore the next copy
-  # is taken from this very file, note and all.
+  # restore that something has since emptied, since NetworkManager does not hold
+  # the profile loaded from it. The note goes on once: after a restore the next
+  # copy is taken from this very file, note and all.
   if ! {
     if ! head -n 1 "$BACKUP" | grep -q '^# Put back by GetHome'; then
-      printf '# Put back by GetHome at boot: NetworkManager had no Wi-Fi profile left, and\n'
-      printf '# this is the one the hub last connected with. deploy/wifi-profile.sh says why.\n'
+      printf '# Put back by GetHome at boot: NetworkManager had lost this profile, and it\n'
+      printf '# is the one the hub last connected with. deploy/wifi-profile.sh says why.\n'
     fi
     cat "$BACKUP"
   } | write_atomically "$RESTORED"; then
-    say "NetworkManager has no Wi-Fi profile, and the copy (${id}) could not be written to ${RESTORED}."
+    say "NetworkManager has lost the Wi-Fi profile the hub last connected with (${id}), and the copy could not be written to ${RESTORED}."
     return 0
   fi
   if ! result="$(nmcli connection load "$RESTORED" 2>&1)"; then
-    say "NetworkManager has no Wi-Fi profile, and would not load the copy put back at ${RESTORED}: ${result:-no reason given}"
+    say "NetworkManager has lost the Wi-Fi profile the hub last connected with (${id}), and would not load the copy put back at ${RESTORED}: ${result:-no reason given}"
     return 0
   fi
-  if ! types="$(profile_types)" || ! has_wifi_profile "$types"; then
-    say "NetworkManager has no Wi-Fi profile. The copy (${id}) was put back at ${RESTORED}, but NetworkManager still lists none."
+  if ! rows="$(profile_rows)" || ! holds_copy "$rows" "$uuid"; then
+    say "The copy of the Wi-Fi profile (${id}) was put back at ${RESTORED}, but NetworkManager still does not list it."
     return 0
   fi
-  say "NetworkManager had no Wi-Fi profile, so the hub put back the one it last connected with (${id}) at ${RESTORED}."
+  say "NetworkManager had lost the Wi-Fi profile, so the hub put back the one it last connected with (${id}) at ${RESTORED}."
   if [[ -n "$damaged" ]]; then
     say "Left as they are in ${NETPLAN_DIR}: ${damaged}. A power cut while NetworkManager was saving is the usual cause."
   fi
 }
 
+# ── forget ──────────────────────────────────────────────────────────────────
+# A network removed through the hub must not come back from the copy. Run by
+# deploy/wifi-networks.sh after NetworkManager has deleted the profile; drops
+# the copy only when it is of that very connection.
+forget() {
+  local target copy id
+  target="$(printf '%s' "$TARGET" | tr '[:upper:]' '[:lower:]')"
+  if ! [[ "$target" =~ ^[0-9a-f-]{36}$ ]]; then
+    say "That is not a connection UUID, so the copy of the Wi-Fi profile was left as it was."
+    return 0
+  fi
+  [[ -s "$BACKUP" ]] || return 0
+  copy="$(profile_uuid "$BACKUP")"
+  if [[ "$copy" != "$target" ]]; then
+    say "The copy of the Wi-Fi profile is of another network, so it was left as it was."
+    return 0
+  fi
+  id="$(describe_profile "$BACKUP" | cut -s -f3)"
+  if ! rm -f "$BACKUP" 2>/dev/null; then
+    say "Could not remove ${BACKUP}; a power cut could still bring back ${id:-the network} that was removed."
+    return 0
+  fi
+  flush "$CONF_DIR"
+  say "The hub no longer keeps a copy of ${id:-that network}, which was removed from it, so a power cut will not bring it back."
+}
+
 case "$MODE" in
   backup) backup ;;
   restore) restore ;;
+  forget) forget ;;
   *)
-    echo "usage: $(basename "$0") backup|restore [--conf DIR] [--quiet]" >&2
+    echo "usage: $(basename "$0") backup|restore|forget UUID [--conf DIR] [--quiet]" >&2
     exit 2
     ;;
 esac

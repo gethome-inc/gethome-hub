@@ -144,7 +144,7 @@ The API answers at `http://<hub>:8420/api/v1/hub`. An update keeps the running b
 
 - **No cloud account, relay or tunnel.** The hub opens nothing through your router, and your home lives in one file on its own card. **Don't forward port 8420 (the API) or 1883 (MQTT)** — both are plain connections meant for your home network, and your router is the boundary.
 - **Your AI key stays on the hub**, encrypted, and the API never returns it — not even to your phone. AI is optional, and [what each feature sends](https://gethome.me/privacy#ai) is written down.
-- **Every request but two needs a token**, and the hub refuses any request addressed to a public domain name, which stops a web page from reaching it through your browser.
+- **Every request but three needs a token** (the hub's public description, the claim, and the hub proving it is itself to an app that already has one), and the hub refuses any request addressed to a public domain name, which stops a web page from reaching it through your browser.
 - **The installer checks what it downloads** against published checksums, and leaves your running hub alone if anything doesn't match.
 
 → [Privacy and network security](docs/security.md), including the short, honest list of what does leave the hub.

@@ -83,6 +83,14 @@ card before it writes anything at all.
 
 ## Network
 
+**Some boards' Wi-Fi is 2.4 GHz only.** A Pi Zero 2 W and a Pi 3B cannot see a
+5 GHz network at all; a Pi 3A+, 3B+, 4 and 5 join either band. That decides which
+networks the hub can be put on — a router with a separate name for each band,
+or a phone's hotspot, which is 5 GHz on an iPhone 12 or later unless
+*Maximize Compatibility* is on — and the apps say so when you add a network for
+the hub to move to. Matter accessories are 2.4 GHz almost without exception,
+whatever the board.
+
 **Wi-Fi is fine, and the install turns its power saving off.** A hub is talked
 to in bursts — a phone opens the app, the Mac app browses for it, somebody SSHs in —
 and 802.11 power save is at its worst exactly there: a dozing radio listens

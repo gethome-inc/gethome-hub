@@ -67,6 +67,22 @@ import {
   readUpdateRun,
   requestUpdate,
 } from '../core/update.js';
+import {
+  awaitWifiChange,
+  MAX_WIFI_NETWORKS,
+  passwordProblem,
+  readSavedNetworks,
+  readWifiChangeResult,
+  requestWifiChange,
+  ssidProblem,
+  wifiAvailability,
+  wifiChangePending,
+  wpaPsk,
+  type WifiChangeError,
+  type WifiChangeResult,
+} from '../core/wifi-networks.js';
+import { ownIPv4Addresses, proofAddress, proveIdentity } from '../core/hub-proof.js';
+import type { HubWifiView } from '../core/device-network.js';
 import type { MqttObserver } from '../core/mqtt-observer.js';
 import { hostFromRequest, mqttAccess, type MqttBrokerConfig } from '../core/mqtt-access.js';
 import { isHistoryKind, type HistoryKind, type HistoryService } from '../core/history.js';
@@ -75,7 +91,7 @@ import { PortraitBusyError, PortraitSpaceError, type PortraitService } from '../
 import { PortraitDrawError } from '../portraits/openai-images.js';
 import { MAX_WINDOW_SECONDS, type PermitJoinService } from '../core/permit-join.js';
 import { createHubStatusReader } from '../core/hub-status.js';
-import { deviceWire } from './dto.js';
+import { deviceWire, deviceWireView } from './dto.js';
 import { extractToken, requireMember, requirePermission } from './auth.js';
 import { createHostCheck, createRefusalLogGate, hostnameFromHeader } from './host-guard.js';
 import {
@@ -138,6 +154,25 @@ export interface ApiDeps {
    * half, which only exists in the process doing the watching.
    */
   radioPressure?: { pressure(): MemoryPressure | undefined };
+  /**
+   * How long a Wi-Fi network change waits for the root script before it
+   * answers `202` instead of the outcome. Optional so a suite can make it short
+   * and every `buildServer` call site does not have to grow it.
+   */
+  wifiApplyWaitMs?: number;
+  /**
+   * The IPv4 addresses this machine holds, for `POST /hub/proof`, which signs
+   * only for one of them. Optional so a suite can name the address it dials;
+   * the hub reads the interfaces afresh on every request.
+   */
+  ownAddresses?: () => readonly string[];
+  /**
+   * What the hub knows about its own Wi-Fi, for saying a device is offline
+   * because the hub is on another network (`core/device-network.ts`).
+   * Optional so a suite can name the networks; the hub reads its list afresh
+   * on every render, because a hub that has just moved is the one asked about.
+   */
+  hubWifi?: () => HubWifiView | undefined;
   /**
    * Where the coordinator detector records what it found — read only to tell
    * "no Zigbee stick" apart from "the stick is here and Matter has the board".
@@ -372,7 +407,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    *
    * `onRequest` rather than a per-route `preHandler`, and that placement is
    * the point: it lands before the body is read, before every route including
-   * the two unauthenticated ones, and before the WebSocket upgrade — and
+   * the three unauthenticated ones, and before the WebSocket upgrade — and
    * `GET /hub` is exactly what a rebinding page is after, so exempting the
    * public route would be exempting the target.
    *
@@ -433,6 +468,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * one second to the next.
    */
   const hubStatus = createHubStatusReader(deps);
+  const wifiNetworksCapability = wifiAvailability(deps.dataDir);
 
   app.get('/api/v1/hub', async () => ({
     hubId: deps.hubId,
@@ -471,6 +507,14 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // add exactly the duplicate person this exists to prevent, which is the
     // one refusal that must not be discovered afterwards.
     pairing: { signInCodes: true },
+    // Additive, and presence is the capability: a hub carrying this block has
+    // `GET/POST/DELETE /settings/wifi…`, so an app may offer to add the Wi-Fi
+    // network a hub is about to be carried to. `available: false` says this
+    // machine cannot — no NetworkManager, or an installer older than this —
+    // with the reason, so an app can say which. Read once, at start: the
+    // installer writes it and then restarts the hub, so it cannot change
+    // underneath a running one, and this route must not touch the disk.
+    wifiNetworks: wifiNetworksCapability,
     // Additive: an app that doesn't know about this field ignores it, and one
     // that does can say "plug a coordinator in" instead of showing an empty
     // Zigbee section with no explanation.
@@ -480,6 +524,49 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // depending on which arrived first.
     ...hubStatus.snapshot(),
   }));
+
+  /**
+   * Prove this hub is itself, at this address, to an app holding one of its
+   * tokens — before that app sends the token here. `core/hub-proof.ts` has the
+   * argument; this is what an app asks a hub it has followed to a new address.
+   *
+   * Public, like `GET /hub`, because the whole point is that no credential has
+   * been sent yet. One refusal for an unknown token and for an address that is
+   * not this hub's, so the route answers neither question on its own. And no
+   * capability on `GET /hub` for it, deliberately: the address being checked is
+   * the one that cannot be trusted to say so, and a hub without this route
+   * answers 404, which an app treats as "not proven" and does not follow.
+   */
+  const ownAddresses = deps.ownAddresses ?? ownIPv4Addresses;
+  app.post('/api/v1/hub/proof', async (request, reply) => {
+    const body = z
+      .object({
+        nonce: z.string().regex(/^[0-9a-f]{32,128}$/),
+        address: z.string().max(64),
+        tokenId: z.string().regex(/^[0-9a-f]{64}$/),
+      })
+      .parse(request.body);
+    const target = proofAddress(body.address);
+    // The port too, not only the host: an address check alone signed for any
+    // port on the hub's own addresses, so anything able to listen on another
+    // port on this machine could relay an app's challenge here under its own
+    // address and get a proof back for it. The port the challenge arrived on
+    // is the one the app dialled whenever nothing stood in between. It is
+    // unknown only for a request with no socket at all — a suite's `inject` —
+    // and every real connection has one.
+    const arrivedOn = request.socket.localPort;
+    const tokenHash =
+      target !== undefined &&
+      ownAddresses().includes(target.host) &&
+      (arrivedOn === undefined || target.port === arrivedOn)
+        ? await deps.pairing.tokenHashForProof(body.tokenId)
+        : undefined;
+    if (tokenHash === undefined) return reply.code(403).send({ error: 'proof_refused' });
+    return {
+      hubId: deps.hubId,
+      proof: proveIdentity(tokenHash, deps.hubId, body.nonce, body.address),
+    };
+  });
 
   /**
    * One member, as every route that answers with one renders them.
@@ -904,9 +991,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
 
   app.get('/api/v1/devices', authed, async (request) => {
     const memberId = request.member!.id;
+    const view = deviceWireView(deps, memberId);
     return deps.registry
       .listDevices()
-      .map((device) => deviceWire(device, deps.favorites.isFavorite(memberId, device.id)));
+      .map((device) => deviceWire(device, deps.favorites.isFavorite(memberId, device.id), view));
   });
 
   /**
@@ -1039,7 +1127,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         },
       });
     }
-    return deviceWire(device, deps.favorites.isFavorite(memberId, id));
+    return deviceWire(device, deps.favorites.isFavorite(memberId, id), deviceWireView(deps, memberId));
   });
 
   const roomExists = async (id: string): Promise<boolean> =>
@@ -2673,6 +2761,253 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // The total goes back too, so an app can say what it is *not* showing
     // rather than letting a cut log read as the whole story.
     return readUpdateLog(deps.dataDir, tail ?? 200);
+  });
+
+  // ── Wi-Fi networks ───────────────────────────────────────────────────────
+
+  /**
+   * The networks this hub knows, which one it is on, and what became of the
+   * last change — the answer every route below also ends with, so a screen is
+   * redrawn from one shape whichever of them it called.
+   *
+   * Read fresh from the root script's files every time; nothing here is held
+   * in memory, because the list changes on an association this process never
+   * hears about. **Passwords never come back**: the hub does not have them —
+   * the script reads names and nothing else — and an app that wants to show
+   * one has nothing to show.
+   */
+  const wifiSettings = () => {
+    const availability = wifiAvailability(deps.dataDir);
+    const list = readSavedNetworks(deps.dataDir);
+    const last = readWifiChangeResult(deps.dataDir);
+    return {
+      ...availability,
+      networks: list?.networks ?? [],
+      ...(list?.updatedAt !== undefined ? { updatedAt: list.updatedAt } : {}),
+      // What the hub's radio can join, absent when the list does not say (a
+      // build older than the field wrote it, or the machine has no Wi-Fi
+      // device). An app warns before a network the hub cannot hear is added.
+      ...(list?.bands !== undefined ? { bands: list.bands } : {}),
+      maxNetworks: MAX_WIFI_NETWORKS,
+      pending: wifiChangePending(deps.dataDir) || wifiChangeUnsettled(last),
+      ...(last !== undefined ? { lastChange: last } : {}),
+    };
+  };
+
+  /**
+   * The script's own words for a refusal, as this API says them. Each is a new
+   * situation and so a new code — never one an older app already reads as
+   * something else — and `detail` carries NetworkManager's own sentence for
+   * the one that has no better name.
+   */
+  const WIFI_REFUSALS: Record<WifiChangeError, readonly [number, string]> = {
+    exists: [409, 'wifi_network_exists'],
+    limit: [409, 'wifi_network_limit'],
+    connected: [409, 'wifi_network_connected'],
+    not_found: [404, 'not_found'],
+    unsupported: [409, 'wifi_unsupported'],
+    invalid: [409, 'wifi_change_failed'],
+    nmcli: [409, 'wifi_change_failed'],
+  };
+
+  /**
+   * A change is being applied and its route has not answered yet.
+   *
+   * The request file stops saying so the moment the script starts work — it is
+   * consumed first — so on its own it let a second change through while the
+   * first was still being applied: a second request, a second result written
+   * over the first before the first route had read it, and that route answering
+   * "still adding" about a network that had been added. In memory, because
+   * nothing awaits between the check and the write that sets it.
+   */
+  let wifiChangeInFlight = false;
+
+  /**
+   * A change answered `202`: the script may have consumed it and still be
+   * applying it, and the route has stopped waiting. Without this the lock went
+   * with the route, so a second change could be written while the first was
+   * still in hand, and its result written over the first before `GET` could
+   * report the first one landing. Held until that change's own result appears,
+   * and for two minutes at most — a script that died says nothing at all.
+   */
+  let wifiChangeAwaited: { id: string; until: number } | undefined;
+  const WIFI_CHANGE_HOLD_MS = 2 * 60 * 1000;
+
+  /** Whether a change answered `202` has still not been answered by the machine. */
+  const wifiChangeUnsettled = (last = readWifiChangeResult(deps.dataDir)): boolean => {
+    if (wifiChangeAwaited === undefined) return false;
+    if (Date.now() >= wifiChangeAwaited.until || last?.id === wifiChangeAwaited.id) {
+      wifiChangeAwaited = undefined;
+      return false;
+    }
+    return true;
+  };
+
+  /** The refusals every change makes before it writes anything. */
+  const wifiChangeBlocked = (reply: FastifyReply): FastifyReply | undefined => {
+    const availability = wifiAvailability(deps.dataDir);
+    if (!availability.available) {
+      return reply.code(409).send({ error: 'wifi_unsupported', reason: availability.reason });
+    }
+    // One at a time, and refused rather than queued: a second request written
+    // over the first before the script reads it would lose the first without a
+    // word, and the script's path unit does not re-fire while it is running.
+    if (wifiChangeInFlight || wifiChangePending(deps.dataDir) || wifiChangeUnsettled()) {
+      return reply.code(409).send({ error: 'wifi_change_pending' });
+    }
+    return undefined;
+  };
+
+  /**
+   * Wait for the root script, then answer with what happened.
+   *
+   * It is quick — a path unit, one `nmcli` call and a list — so the route
+   * answers with the outcome instead of a receipt to poll, which is what lets
+   * an app say "added" or say why not on the same screen. A board too busy to
+   * finish inside the wait gets `202` and `change.state: 'pending'`; the change
+   * is still queued, and `GET /settings/wifi` reports it when it lands.
+   */
+  const settleWifiChange = async (
+    reply: FastifyReply,
+    id: string,
+    onSettled: (result: WifiChangeResult | undefined) => Promise<void>,
+  ) => {
+    const result = await awaitWifiChange(deps.dataDir, id, deps.wifiApplyWaitMs ?? 20_000);
+    if (result === undefined) {
+      wifiChangeAwaited = { id, until: Date.now() + WIFI_CHANGE_HOLD_MS };
+      await onSettled(undefined);
+      return reply.code(202).send({ ...wifiSettings(), change: { id, state: 'pending' } });
+    }
+    if (result.state === 'applied') {
+      await onSettled(result);
+      return reply.code(200).send({ ...wifiSettings(), change: result });
+    }
+    const [status, error] = WIFI_REFUSALS[result.error ?? 'nmcli'];
+    return reply.code(status).send({ error, ...(result.detail !== undefined ? { detail: result.detail } : {}) });
+  };
+
+  /**
+   * Reading is `hub.wifi` too, not the floor. The list is where the hub has
+   * been — a holiday house, a parent's flat — and that is not "reading the
+   * home" in the sense every member is owed; a guest sees nothing here.
+   */
+  app.get('/api/v1/settings/wifi', needs('hub.wifi'), async () => wifiSettings());
+
+  /**
+   * Tell the hub about another Wi-Fi network, for it to join when it is
+   * somewhere that network reaches.
+   *
+   * Nothing changes now: NetworkManager does not leave a network it is on for
+   * one it has just been told about, and when both are in range it prefers the
+   * one it used last. So this is safe to do from the sofa the evening before
+   * the move, which is exactly when somebody does it.
+   *
+   * The password is turned into the network's key before anything is written
+   * (`core/wifi-networks.ts`), and is never logged, stored or returned.
+   */
+  app.post('/api/v1/settings/wifi/networks', needs('hub.wifi'), async (request, reply) => {
+    const body = z
+      .object({
+        ssid: z.string().superRefine((ssid, ctx) => {
+          const problem = ssidProblem(ssid);
+          if (problem !== undefined) ctx.addIssue({ code: 'custom', message: problem });
+        }),
+        passphrase: z.string().superRefine((passphrase, ctx) => {
+          const problem = passwordProblem(passphrase);
+          if (problem !== undefined) ctx.addIssue({ code: 'custom', message: problem });
+        }),
+        hidden: z.boolean().optional(),
+      })
+      .parse(request.body);
+
+    const blocked = wifiChangeBlocked(reply);
+    if (blocked !== undefined) return blocked;
+    const list = readSavedNetworks(deps.dataDir);
+    if (list?.networks.some((network) => network.ssid === body.ssid)) {
+      return reply.code(409).send({ error: 'wifi_network_exists' });
+    }
+    if (list !== undefined && list.networks.length >= MAX_WIFI_NETWORKS) {
+      return reply.code(409).send({ error: 'wifi_network_limit' });
+    }
+
+    wifiChangeInFlight = true;
+    try {
+      const id = requestWifiChange(deps.dataDir, {
+        action: 'add',
+        ssid: body.ssid,
+        psk: wpaPsk(body.ssid, body.passphrase),
+        hidden: body.hidden === true,
+      });
+      deps.log.info({ id, member: request.member!.id }, 'Wi-Fi network addition requested');
+      return await settleWifiChange(reply, id, async (result) => {
+        const name = request.member!.name;
+        await deps.activity.record({
+          kind: 'hub.wifi',
+          message:
+            result !== undefined
+              ? `${name} added the Wi-Fi network “${body.ssid}” to the hub.`
+              : `${name} asked the hub to add the Wi-Fi network “${body.ssid}”.`,
+          memberId: request.member!.id,
+          data: {
+            memberName: name,
+            action: 'add',
+            ssid: body.ssid,
+            outcome: result !== undefined ? 'applied' : 'pending',
+          },
+        });
+      });
+    } finally {
+      wifiChangeInFlight = false;
+    }
+  });
+
+  /**
+   * Make the hub forget a network.
+   *
+   * **Never the one it is connected through**, which is refused here and again
+   * by the root script against NetworkManager itself: deleting the active
+   * profile takes the connection down with it, and a hub off its only network
+   * is one no app can reach to put it back. That is the single change here
+   * whose cost is a trip to the Pi, so it is not offered behind a confirmation
+   * — it is not offered at all.
+   */
+  app.delete('/api/v1/settings/wifi/networks/:id', needs('hub.wifi'), async (request, reply) => {
+    const { id: networkId } = request.params as { id: string };
+    if (!/^[0-9a-f-]{36}$/i.test(networkId)) return reply.code(404).send({ error: 'not_found' });
+
+    const blocked = wifiChangeBlocked(reply);
+    if (blocked !== undefined) return blocked;
+    const list = readSavedNetworks(deps.dataDir);
+    const known = list?.networks.find((network) => network.id === networkId.toLowerCase());
+    if (list !== undefined && known === undefined) return reply.code(404).send({ error: 'not_found' });
+    if (known?.connected === true) return reply.code(409).send({ error: 'wifi_network_connected' });
+
+    wifiChangeInFlight = true;
+    try {
+      const id = requestWifiChange(deps.dataDir, { action: 'remove', networkId: networkId.toLowerCase() });
+      deps.log.info({ id, member: request.member!.id }, 'Wi-Fi network removal requested');
+      return await settleWifiChange(reply, id, async (result) => {
+        const name = request.member!.name;
+        const ssid = result?.ssid ?? known?.ssid;
+        const network = ssid !== undefined ? `the Wi-Fi network “${ssid}”` : 'a Wi-Fi network';
+        await deps.activity.record({
+          kind: 'hub.wifi',
+          message:
+            result !== undefined
+              ? `${name} removed ${network} from the hub.`
+              : `${name} asked the hub to forget ${network}.`,
+          memberId: request.member!.id,
+          data: {
+            memberName: name,
+            action: 'remove',
+            ...(ssid !== undefined ? { ssid } : {}),
+            outcome: result !== undefined ? 'applied' : 'pending',
+          },
+        });
+      });
+    } finally {
+      wifiChangeInFlight = false;
+    }
   });
 
   // ── Automations ──────────────────────────────────────────────────────────

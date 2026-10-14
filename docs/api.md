@@ -133,8 +133,9 @@ than no button.
 
 | Method & path | Needs | Notes |
 |---|---|---|
-| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `matter: {bluetooth, bluetoothReason?, wifi, commissioning, settlingUntil?}` is present only while Matter is running and says what pairing this hub can actually do — and, in `settlingUntil`, whether it has finished finding the devices it already owns — see [below](#pairing-a-matter-accessory). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid) |
+| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `matter: {bluetooth, bluetoothReason?, wifi, commissioning, settlingUntil?}` is present only while Matter is running and says what pairing this hub can actually do — and, in `settlingUntil`, whether it has finished finding the devices it already owns — see [below](#pairing-a-matter-accessory). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid). `wifiNetworks: {available, reason?}` is present on a hub that can be told about another Wi-Fi network before it is moved — `available: false` with `reason` `"no-networkmanager"` or `"not-installed"` when this machine cannot — see [below](#wi-fi-networks-settingswifi) |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
+| `POST /hub/proof` | — | `{nonce, address, tokenId}` → `{hubId, proof}`: this hub proving it is itself **at the address the app dialled**, to an app holding one of its tokens, without the token being sent. `403 proof_refused` for an address that is not this hub's or a token it does not hold — one answer for both. For an app following a saved hub to a new address — see [below](#following-a-hub-to-a-new-address-post-hubproof) |
 | `GET /home` · `PATCH /home` | floor · `home.rename` | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name) |
 | `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | floor · `home.structure` | `{id, name, zoneId, icon, accent, sortOrder}`. `POST` takes `{name, zoneId?, icon?, accent?, sortOrder?}` — the name is the only required field anywhere here — and `PATCH` takes the same set with every field optional; `zoneId: null` means "in no zone", and `icon: null` / `accent: null` mean "back to the look the app derives" — each different from leaving the field out. `icon`/`accent` are opaque app tokens (1–40 chars, see [below](#rooms-and-zones)). Names are trimmed before they are measured (1–80), an unknown `zoneId` is `404 unknown_zone`, and a new room goes to the *end* of the order. Deleting a room does not delete its devices — they are simply in no room. Every write broadcasts the [`structure` frame](#rooms-and-zones) |
 | `GET /zones` · `POST /zones` · `PATCH /zones/:id` · `DELETE /zones/:id` | floor · `home.structure` | `{id, name, sortOrder}` — the optional layer above rooms, see [below](#rooms-and-zones). `POST {name, sortOrder?}`, `PATCH {name?, sortOrder?}`; a zone carries no look of its own, since nothing draws a zone as a thing. Deleting a zone keeps its rooms and leaves them in none |
@@ -191,6 +192,9 @@ than no button.
 | `POST /device-mappings/:exposesHash/repair` | `hub.ai` | hand a rejected descriptor to the agent with the complaints. `409 ai_not_configured` / `409 ai_disabled` / `409 nothing_to_repair`, `422 no_device` |
 | `PUT /settings/radio` | `hub.radio` | `{mode: "auto"\|"zigbee"\|"matter"\|"both"}` → `{budget, mode, matter, canRunBoth, modes, applying: true}`. Records a *request*; see below. It also hands back the hub's two automatic retries when `mode` is `"both"`. `both` is accepted on **any** board — `budget` is advice, not a ceiling — and is refused with 400 by a hub too old for it, which is why `radio.modes` exists |
 | `GET /settings/mqtt` | `hub.mqtt` | the broker's credentials: `{requiresPassword, host, port, baseTopic, accounts[]}`. Each account is `{id, username, password, recommended, title, summary, publish[], subscribe[]}`. `hub.mqtt.admin` **adds** the hub's own full-access account; without it only the limited one is returned. See [below](#the-mqtt-broker-asks-for-a-password) |
+| `GET /settings/wifi` | `hub.wifi` | the Wi-Fi networks this hub knows: `{available, reason?, networks: [{id, ssid, connected}], updatedAt?, bands?, maxNetworks, pending, lastChange?}`. `bands` is what the hub's radio can join (`"2.4"`, `"5"`, `"6"`). **No password ever comes back** — the hub never has one to return. See [below](#wi-fi-networks-settingswifi) |
+| `POST /settings/wifi/networks` | `hub.wifi` | `{ssid, passphrase, hidden?}` — tell the hub about a network to join when it is somewhere that network reaches. Nothing changes now. Answers with the outcome: `200 {…settings, change}` once the machine has applied it, `202` with `change.state: "pending"` if it has not got to it yet. `400` with a sentence in `detail` for a name or password Wi-Fi does not allow — including **no password**, which is refused. `409 wifi_network_exists`, `409 wifi_network_limit` (16), `409 wifi_change_pending`, `409 wifi_unsupported {reason}`, `409 wifi_change_failed {detail}` |
+| `DELETE /settings/wifi/networks/:id` | `hub.wifi` | forget a network. **`409 wifi_network_connected` for the one the hub is on now** — never offered behind a confirmation, because it would take the hub off its only network. `404 not_found`, and the same `409`s as above |
 | `GET /me` | floor | `{id, name, role: {id, key, name}, permissions, isOwner}` — who this token belongs to and what it may do. See [below](#roles-and-permissions-in-full) |
 | `GET /permissions` | floor | the catalog: `{key, group, title, summary}` per permission. The hub owns the wording |
 | `GET /roles` | floor | `[{id, key, name, builtin, permissions, memberCount, sortOrder}]` |
@@ -202,7 +206,7 @@ than no button.
 
 ### Roles and permissions in full
 
-#### The fifteen permissions
+#### The sixteen permissions
 
 `GET /permissions` is the authority and carries a `title` and a `summary` for
 each. **Render those rather than shipping copy of your own** — it is the
@@ -225,6 +229,7 @@ it gates its own screens on.
 | `role.manage` | People |
 | `hub.radio` | Hub |
 | `hub.update` | Hub |
+| `hub.wifi` | Hub |
 | `hub.ai` | Hub |
 | `hub.mqtt` | Hub |
 | `hub.mqtt.admin` | Hub |
@@ -240,11 +245,12 @@ it gates its own screens on.
 | `automation.manage` | ✓ | ✓ | |
 | `hub.radio` | ✓ | ✓ | |
 | `hub.update` | ✓ | ✓ | |
+| `hub.wifi` | ✓ | ✓ | |
 | `hub.ai` | ✓ | ✓ | |
 | `home.rename` · `device.remove` · `member.invite` · `member.remove` · `role.manage` | ✓ | | |
 | `hub.mqtt` · `hub.mqtt.admin` | ✓ | | |
 
-**Member is the old behaviour written down, with two deliberate exceptions.**
+**Member is the old behaviour written down, with three deliberate exceptions.**
 Those keys are, key for key, the routes that used to be open to any member; the
 five on the row below them are the ones that used to be owner-only. A hub that
 updates into this changes nothing about what anybody can do — the migration
@@ -272,6 +278,18 @@ this is a genuine change to what a member may do, so it travels with a migration
 that grants it to hubs that already exist — `ensureBuiltins()` inserts with
 `ON CONFLICT DO NOTHING` and would never reach a `member` row that is already
 there.
+
+`hub.wifi` is the third, on the `hub.update` argument again: the person carrying
+the hub to its new home is rarely the Mac that claimed it. It passes the three
+tests a default has to. **Bounded** — adding a network changes nothing until the
+hub is somewhere its current network has gone, and at home the home network
+still wins. **Destroys nothing that cannot be typed in again** — the one removal
+that would cost a trip to the Pi, the network it is connected through, is
+refused outright. **Named** — both changes write a `hub.wifi` row. Reading the
+list needs the key too rather than the floor, because the list is where the hub
+has been — and so does reading a device's network in `offlineElsewhere`, which
+narrows to `{}` without it rather than refusing. `0017` grants it to hubs that already exist, as `0006` did for
+`hub.ai`.
 
 **The two MQTT keys are neither exception, and they are the one place the
 "bounded cost" test comes out the other way.** They are newer than the rest of
@@ -968,6 +986,50 @@ reading a week later. The automatic clear writes nothing of its own: the device
 coming back already writes `device.online`, and two lines for one event is the
 burst the feed's whole shape exists to avoid.
 
+#### A device on another Wi-Fi (`offlineElsewhere`)
+
+A hub can be told about another Wi-Fi network before it is carried there, and
+when it arrives it joins that one. Its Wi-Fi accessories cannot follow: a
+Matter accessory is moved to another network by its administrator *while it is
+reachable*, and once the hub has gone it never is. So every one of them goes
+offline the moment the hub moves, and both apps drew a plain "Offline" under
+*Needs attention* over a plug that was exactly where it had been left. Found on
+a hub carried onto its owner's iPhone hotspot.
+
+A device in that state comes back carrying `offlineElsewhere`, and **presence
+is the answer**, as for `offlineExpected`. An app draws it as offline, says
+why, and **does not count it as something needing attention** — nothing in the
+house is broken, and it comes back by itself when the hub and the device are on
+the same network again. The hub claims it only when every one of these holds,
+because a device it covers is one the apps stop raising an alarm about:
+
+- the device is **offline** — one that answers is on a network the hub
+  reaches, whatever it is called;
+- it **said which Wi-Fi it is on** — a Matter accessory's own
+  `NetworkCommissioning` list, read from matter.js's cache, so it is known for
+  an accessory out of reach right now. Nothing else reports one yet;
+- the hub is on **Wi-Fi and only Wi-Fi** — a hub on a cable reaches a Wi-Fi
+  accessory through the router, whatever its radio is joined to;
+- the device's network is **one the hub holds a profile for, and not the one
+  it is on**. That is what makes it the hub having moved: an accessory paired
+  by this hub was given the network the hub was on at the time. And it keeps a
+  router with a name per band out of it — a hub on the 5 GHz name holds no
+  profile for the 2.4 GHz one its accessories use, so an accessory there that
+  goes offline is reported as offline.
+
+`offlineElsewhere.network` names the device's network **only to a member with
+`hub.wifi`** — the key that already guards the hub's own list of them, which is
+where it has been. Everybody else gets `offlineElsewhere: {}`: told that the
+device is on another network, not which. Narrowed rather than refused, like
+`activity.read`, because the field is what keeps every dashboard calm and the
+name is only a convenience. The WebSocket's `deviceUpserted` renders it the same
+way, per socket, asking at send time.
+
+Nothing is stored: the hub compares what the device last said with its own
+network list on every render, so it is right the moment the hub moves and gone
+the moment the device answers. An older app reads past the field and draws a
+plain "Offline", which is what it drew before.
+
 #### A radio switch in flight (`radio.applying`)
 
 Applying a radio **restarts the hub** — around seventy seconds of a closed port
@@ -1327,6 +1389,13 @@ what Zigbee2MQTT and every MQTT integration already call the device.
 `needsReview: true` marks devices whose automatic mapping was incomplete
 (see [ai-adaptation.md](ai-adaptation.md)).
 
+Two optional fields explain an offline device and are absent for nearly every
+one: `offlineExpected` (somebody said it is meant to be —
+[A device that is meant to be offline](#a-device-that-is-meant-to-be-offline))
+and `offlineElsewhere` (it is on a Wi-Fi network the hub is not on —
+[A device on another Wi-Fi](#a-device-on-another-wi-fi-offlineelsewhere)).
+Neither is counted as needing attention.
+
 `online` is **whether the hub can reach the device**, and it answers for the
 radio as well as for the device. A radio that is switched off, failed to start,
 or lost its Zigbee2MQTT bridge takes every device behind it `offline` — with a
@@ -1464,6 +1533,148 @@ two minutes.
 
 Taking something *away* is still guarded harder — a device, a member, the
 credential that spends their money. That line has not moved.
+
+### Wi-Fi networks (`/settings/wifi`)
+
+A hub is set up on one Wi-Fi and then carried somewhere else — a new flat, a
+house in the country — where it finds a network it has never heard of, joins
+nothing, and answers no app. These routes are how it is told about the other
+network **before** the move. NetworkManager already joins any network it holds a
+profile for, preferring the one it used most recently, so that is the whole of
+the fix: the hub stays on the network it is on today, and joins the new one the
+first time it powers up in range of it.
+
+**The hub records the request; it never applies it** — the shape of
+`PUT /settings/radio` and `POST /system/update`. The profiles are root's, so the
+hub writes one file into its own data directory, `gethome-wifi.path` notices,
+and `deploy/wifi-networks.sh` changes NetworkManager as root and writes back
+the list and the outcome. Unlike an update this is quick — a path unit and one
+`nmcli` call — so **the route waits for it** (up to twenty seconds) and answers
+with what happened, rather than a receipt to poll.
+
+```jsonc
+// GET /settings/wifi
+{
+  "available": true,
+  "networks": [
+    { "id": "1f0c…", "ssid": "Flat 3", "connected": true },   // the one it is on: first
+    { "id": "8a2d…", "ssid": "Dacha", "connected": false }
+  ],
+  "updatedAt": "2026-10-07T09:12:44Z",  // when the list was last read off the machine
+  "bands": ["2.4"],                     // what the radio can join — a Pi Zero 2 W
+  "maxNetworks": 16,
+  "pending": false,                     // a change is in hand and not yet answered
+  "lastChange": {                       // what became of the last one, from anybody
+    "id": "…", "action": "add", "state": "applied", "ssid": "Dacha",
+    "networkId": "8a2d…", "at": "2026-10-07T09:12:44Z"
+  }
+}
+```
+
+`POST /settings/wifi/networks` and `DELETE /settings/wifi/networks/:id` answer
+with the same object plus `change` — `200` and `change.state: "applied"`, or
+`202` and `"pending"` on a board too busy to finish inside the wait (the change
+is still queued; `GET` reports it when it lands). A refusal is the usual
+`{error}`. Eight things a client has to know.
+
+- **`available` is the machine, not the build.** `false` with
+  `reason: "no-networkmanager"` is a system that manages Wi-Fi some other way —
+  Bullseye's `wpa_supplicant`, Ubuntu's netplan — and changing that is not an
+  app's business; `"not-installed"` is a hub whose installer predates this, and
+  updating it is the fix. `GET /hub` carries the same `wifiNetworks` block, read
+  once at start, so an app can decide whether to draw the section without a
+  second request. A hub without either is older still.
+- **The password never comes back, and is never stored as typed.** The hub turns
+  it into the network's 64-hex WPA key before anything is written — the
+  derivation Raspberry Pi Imager and gethome studio use for a card, so the
+  passphrase somebody uses everywhere is not on the Pi. `passphrase` may also
+  *be* that 64-hex key, which is what a card carries. The cost is a **WPA3-only**
+  network, whose handshake needs the passphrase; WPA2 and mixed-mode networks —
+  every home router's default — join with the key.
+- **`bands` is what the hub's radio can join, and an app says so before a
+  network is added.** A Pi Zero 2 W and a Pi 3B answer `["2.4"]`, and a hub
+  given a 5 GHz network stores it, answers `applied`, and never joins it — the
+  hub cannot see the network it is being told about, so this is advice in the
+  form rather than a refusal. The case that found it: an iPhone 12 or later
+  runs its Personal Hotspot on 5 GHz unless *Maximize Compatibility* is on, and
+  a hub carried onto its owner's hotspot stayed off the network until it was.
+  Read from NetworkManager's own report of the radio on every association,
+  never from a board name; **absent** means the hub cannot say (a
+  build older than the field, an `nmcli` that does not report bands, no Wi-Fi
+  device), and an app then says nothing.
+- **An open network is refused** (`400`, with the reason in `detail`). This API is
+  plain HTTP with bearer tokens, and on a network with no password every token
+  a phone sends is readable by anybody in range.
+- **The network the hub is connected through cannot be removed** —
+  `409 wifi_network_connected`, from the hub and again from the root script
+  against NetworkManager itself. Deleting an active profile takes the
+  connection down with it, and a hub off its only network is one no app can
+  reach to put it back. An app should not offer the button on that row at all.
+- **One profile per name.** Adding a name the hub already knows is
+  `409 wifi_network_exists`; changing a saved network's password is remove,
+  then add — which is why the connected network's password cannot be changed
+  from here either.
+- **`hidden` is opt-in, and should stay that way.** It is for a network whose
+  router does not announce its name, and it costs something: to find one, the
+  hub calls the name out when it scans, wherever it is — NetworkManager's own
+  reference calls those probes "distinctly recognizable on the air" — and a
+  device heard asking for a network by name invites somebody to stand one up
+  under that name and collect a handshake to attack the password offline.
+  Marking every network hidden would join just as well, since a router that
+  announces its name answers a probe for it too, and would pay that cost for
+  every network to spare the rare hidden one a switch. An app should ask it as
+  something a person can check from anywhere — *did you have to type its name
+  to join it?* — because the network being added is usually one they are not
+  in range of.
+- **One change at a time.** `409 wifi_change_pending` while a request is written
+  and unconsumed (a request nothing picks up within a minute is treated as
+  abandoned), and after a `202` until that change's own result lands (two
+  minutes at most), so a second change cannot write its result over the first
+  before `GET` has reported it. `pending` is `true` for the whole of that. `409 wifi_change_failed` carries NetworkManager's own sentence in
+  `detail` for the refusals that have no better name.
+
+The move itself changes the hub's address, and that is the client's half. The
+hub advertises `_gethome._tcp` with its `id` TXT record on whatever network it
+joins, and its address there is a new DHCP lease — so an app has to find a hub
+it has saved **by that id** and take the new address, rather than trust the one
+it saved at the claim.
+
+#### Following a hub to a new address (`POST /hub/proof`)
+
+The `id` in an mDNS record and in `GET /hub` is public, and anything on the LAN
+can announce it — so before an app writes a new address down, and before it
+sends a token there, it asks that address to prove it is the hub:
+
+```jsonc
+// POST /hub/proof — no Authorization header
+{ "nonce": "<64 hex, random per attempt>",
+  "address": "192.168.1.60:8420",        // exactly the host:port the app dialled
+  "tokenId": "<64 hex>" }                // sha256 of the raw sha256 of the token
+// 200
+{ "hubId": "…", "proof": "<64 hex>" }
+```
+
+`proof` is HMAC-SHA256, keyed by the **raw 32 bytes of sha256(token)** — which
+is all the hub stores of a token — over the UTF-8 bytes of
+`gethome-hub-proof\n<hubId>\n<nonce>\n<address>`. The app computes the same
+and compares, in constant time. Three rules.
+
+- **The hub signs only for an IPv4 address it holds right now, on the port
+  the challenge arrived on.** That is what stops an impostor relaying the
+  challenge to the real hub: the relayed `address` is the impostor's, which
+  the real hub refuses, and rewriting it to the real hub's makes the proof
+  cover an address the app never dialled. The port is checked as well because
+  the host alone was not enough. Anything able to listen on another port of
+  the hub's own machine could otherwise relay a challenge naming `<hub>:9999`
+  and be signed for.
+- **No answer but a valid proof moves an app.** `403 proof_refused`, a `404`
+  from a hub older than this route, a timeout and a proof that does not match
+  all mean "not proven", and the app keeps the address it has. There is no
+  capability on `GET /hub` for this on purpose: the address in question is the
+  one that cannot be trusted to say so.
+- **Nothing secret travels.** `tokenId` is a one-way function of the stored
+  hash, and the nonce and address are the app's own. The token goes to the new
+  address only after the proof has matched.
 
 ### The Zigbee join window
 
@@ -1825,7 +2036,8 @@ The kinds: `device.command`, `device.added`, `device.removed`,
 `member.left`, `member.removed`,
 `member.renamed`, `member.role-changed`, `role.added`, `role.renamed`,
 `role.changed`, `role.removed`, `home.renamed`, `hub.radio`,
-`hub.radio-stood-down`, `hub.radio-restored`, `hub.mqtt`, `adapter.error`,
+`hub.radio-stood-down`, `hub.radio-restored`, `hub.mqtt`, `hub.update`,
+`hub.wifi`, `adapter.error`,
 `zigbee.interview-failed`, `zigbee.left`, `zigbee.permit-join`,
 `zigbee.permit-join-closed`, `matter.commission`. Treat the list as open — a
 client must render an unknown kind from `message` rather than drop it.

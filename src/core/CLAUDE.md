@@ -315,6 +315,26 @@ there, because those reach the routes as well. `docs/api.md` and
   is the only thing it decides. And **one activity row per decision, none for
   the clear** — the device coming back already writes `device.online`.
   `docs/api.md` is canonical.
+- **A device can be offline because the hub left, and the hub says so only
+  when it can tell.** A hub carried to another Wi-Fi leaves its Wi-Fi
+  accessories behind, and both apps drew them as faults.
+  `core/device-network.ts` decides `offlineElsewhere` on every render. All of
+  these must hold:
+  the device is offline, it said which Wi-Fi it is on (`wifiNetwork`, from the
+  Matter adapter), the hub is on Wi-Fi alone, and the device's network is one
+  the hub **holds a profile for** and is not on. The last rule is the
+  load-bearing one: an accessory paired here was given the hub's network at
+  the time, and a router with a name per band leaves a 5 GHz hub with no
+  profile for the 2.4 GHz name, so an unplugged accessory there is still
+  reported as offline. A scan of visible networks was the other candidate. It
+  was measured and dropped: a connected hub's scan cache held one network, its
+  own. Three rules. **`wifiNetwork` is memory only**: the adapter re-announces
+  it from matter.js's cache at every start, so a column would be a second copy
+  of something the device keeps. **Nothing is stored about the decision**, so
+  it is right the moment the hub moves and gone the moment the device answers.
+  And **the network's name is `hub.wifi`'s**: `deviceWire` renders `{}` without
+  it (per reader, on the route and the socket), the `activity.read`
+  narrowing shape. `docs/api.md` is canonical.
 - **`<data>/pairing-code` is a contract, and it now *survives* restarts.** It
   used to be re-minted on every boot, and that was the bug: any code that had
   been read — `install.sh`'s `@@PAIRING@@` marker, or a value Studio fetched a

@@ -123,6 +123,8 @@ describe('the roles migration', () => {
       // `ensureBuiltins()` would not reach a row that already exists — which
       // is exactly the case this suite is set up to reproduce.
       'hub.ai',
+      // And `hub.wifi` is newer than either, granted the same way by `0017`.
+      'hub.wifi',
     ] as const) {
       expect(access.can(anna, wasAuthed), wasAuthed).toBe(true);
     }

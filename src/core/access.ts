@@ -138,6 +138,14 @@ export const PERMISSIONS: readonly PermissionDescriptor[] = [
       'Install a newer build when one exists. The home is offline for a few minutes while it happens.',
   },
   {
+    key: 'hub.wifi',
+    group: 'Hub',
+    title: 'Wi-Fi networks',
+    summary:
+      'Add a Wi-Fi network for the hub to join somewhere else, and remove ones it no longer ' +
+      'needs. The network it is on now can never be removed from an app.',
+  },
+  {
     key: 'hub.ai',
     group: 'Hub',
     title: 'AI keys and portraits',
@@ -176,6 +184,7 @@ export type PermissionKey =
   | 'role.manage'
   | 'hub.radio'
   | 'hub.update'
+  | 'hub.wifi'
   | 'hub.ai'
   | 'hub.mqtt'
   | 'hub.mqtt.admin';
@@ -241,6 +250,17 @@ export const BUILTIN_ROLES = [
      * for a front-door key. A home that wants it otherwise says so in the
      * matrix, and `hub.mqtt` alone is the safe half of the answer: it is the
      * account that cannot switch anything on.
+     *
+     * `hub.wifi` is here on the `hub.update` reading again — the person
+     * carrying the hub to its new home is rarely the laptop that claimed it —
+     * and it passes the same three tests. **Bounded**: adding a network
+     * changes nothing until the hub is somewhere the network it is on has gone,
+     * and NetworkManager prefers the one it used last, so the home network
+     * still wins at home. **Destroys nothing that cannot be typed again**: the
+     * one removal that would cost a trip to the Pi — the network it is
+     * connected through — is refused outright, by the hub and again by the
+     * root script. **Named**: both changes write a row. Guest is where the line
+     * falls, as it does for every key in this list. It travels with `0017`.
      */
     permissions: [
       'device.edit',
@@ -250,6 +270,7 @@ export const BUILTIN_ROLES = [
       'automation.manage',
       'hub.radio',
       'hub.update',
+      'hub.wifi',
       'hub.ai',
     ] as PermissionKey[],
   },
