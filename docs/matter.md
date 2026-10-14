@@ -231,6 +231,20 @@ than on the one it was written on:
   warns when IPv6 forwarding is on, which undoes this. A NetworkManager profile
   with `ipv6.method=auto` learns these routes itself (1.42 or later, which
   Bookworm and Trixie both ship).
+- **A link-local address on the hub's own interface**, which NetworkManager
+  can take away. The Wi-Fi profile Raspberry Pi Imager writes says
+  `ipv6.method=ignore`, so IPv6 is the kernel's. NetworkManager 1.52 switches
+  it off when such a connection comes up, and sometimes cannot switch it back
+  on: when the network has gone away and come back, it has forgotten the value
+  it was going to restore. The interface is then left with no IPv6 at all
+  until a reboot. An accessory that also answers on IPv4 is still reached that
+  way, but one that is only on IPv6, which every Thread accessory is, is not.
+  So a
+  NetworkManager dispatcher (`deploy/matter-ipv6.sh`) turns the kernel's IPv6
+  back on each time a connection comes up. It acts only for an `ignore`
+  connection on a physical interface, and never where the profile or this
+  machine's own sysctl settings turn IPv6 off. The installer does the same
+  once, for a hub that is already in that state.
 - **Multicast has to cross the router**, because discovery (mDNS) and IPv6
   neighbour discovery are multicast. Three router features break it, and none
   can be fixed from the hub: a guest network or client isolation (nothing can

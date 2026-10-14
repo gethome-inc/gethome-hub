@@ -766,6 +766,46 @@ in `deploy/install.sh` must stay accurate.
   advertisements and stop probing a border router that has gone). Unverifiable
   end to end on the hub it was written on, which has no border router — measured
   there: 0 router advertisements in three days.
+- **NetworkManager switches a hub's IPv6 off by itself and leaves it off, so a
+  dispatcher turns it back on.** That same `ipv6.method=ignore` means "IPv6 is
+  the kernel's", and activating such a connection NetworkManager sets
+  `disable_ipv6=1` to restart the kernel's link-local address, then puts back
+  the value it saved when it first took the device over. It forgets the saved
+  value whenever the access point under an active connection changes
+  (`nm_device_update_dynamic_ip_setup`, "roamed to a different AP" — logged
+  only as `ip:dhcp4: restarting`), and on the owner's hub that happened every
+  time the network it was on went away, so the next activation set `1` and had
+  nothing to put back. wlan0 then has no IPv6 and no link-local address until
+  NetworkManager restarts, which in practice means a reboot; a router that
+  disappears for longer than the 15-second link timeout is enough. **What that
+  costs is everything Matter reaches over IPv6**, and it is worth being exact:
+  the owner's Wi-Fi plug went on answering at its IPv4 address for the five
+  hours it lasted, while an accessory that is only on IPv6 — every Thread one —
+  cannot be reached at all, and the keep-alive's link-local seeding has nothing
+  to work with. Read in NetworkManager 1.52.1 (Trixie), unchanged on its main
+  branch on 2026-10-15, and reproduced on that Zero 2 W: `busctl call
+  fi.w1.wpa_supplicant1 /fi/w1/wpa_supplicant1/Interfaces/0
+  fi.w1.wpa_supplicant1.Interface Disconnect`, then `… Reconnect` (the
+  connection stays activated and the journal says `ip:dhcp4: restarting`), then
+  `nmcli connection up <profile>` leaves `disable_ipv6=1` and no link-local
+  address, where the same reactivation without the drop leaves it at `0`.
+  `iw dev wlan0 disconnect` is refused while NetworkManager holds the link, and
+  `Reassociate` on a live link changes nothing, so neither reproduces it.
+  `deploy/matter-ipv6.sh` (`/usr/local/lib/gethome-matter-ipv6.sh`) is run by
+  `51-gethome-matter-ipv6` on every `up`, and once by `matter_ipv6()` for a hub
+  it has already happened to, and writes `0` back — which is all `ignore`
+  asked for: no address of its own, no listener, no change to the profile.
+  Four limits keep it from overriding anybody. **Only `ignore`**, asked of
+  NetworkManager (the dispatcher's own `CONNECTION_UUID`, else the device's
+  connection): `disabled` is somebody's choice, and every other method has
+  NetworkManager running IPv6 itself. **Only a physical interface.** **Never
+  against this machine's own setting**: `all` or `default` already `1`, or a
+  sysctl file turning it off for that interface, `all`, `default` or `*`.
+  **Nothing without NetworkManager's word** — no `nmcli`, or one that cannot
+  say, changes nothing and the installer's warning stands. Numbered 51 so it
+  runs before the slower Wi-Fi dispatchers. A change is one line under
+  `journalctl -t gethome-matter-ipv6`, and `test/deploy-matter-ble.test.ts`
+  runs the script and the dispatcher against a fake `nmcli` and `/proc`.
 - **The detector exits 1 for an ordinary state, so the unit says
   `SuccessExitStatus=1`.** "Zigbee is not the radio here" — no coordinator, or
   one plugged into a board the owner has set to Matter — is correct and

@@ -417,6 +417,7 @@ cmd_uninstall() {
   # networks dispatcher is 54; it was 53 on its branch before the profile copy
   # took that number, and a hub that tried the branch has it under that name.
   $SUDO rm -f /etc/NetworkManager/dispatcher.d/50-gethome-wifi-awake \
+    /etc/NetworkManager/dispatcher.d/51-gethome-matter-ipv6 \
     /etc/NetworkManager/dispatcher.d/52-gethome-wifi-credentials \
     /etc/NetworkManager/dispatcher.d/53-gethome-wifi-profile \
     /etc/NetworkManager/dispatcher.d/54-gethome-wifi-networks \
@@ -429,7 +430,7 @@ cmd_uninstall() {
   $SUDO rm -f /usr/local/lib/gethome-zigbee-detect.sh /usr/local/lib/gethome-zram.sh \
     /usr/local/lib/gethome-wifi-keepalive.sh /usr/local/lib/gethome-wifi-credentials.sh \
     /usr/local/lib/gethome-wifi-profile.sh /usr/local/lib/gethome-wifi-networks.sh \
-    /usr/local/lib/gethome-update.sh
+    /usr/local/lib/gethome-update.sh /usr/local/lib/gethome-matter-ipv6.sh
   # The keep-alive's memory of who is on the network. It is in /run, so a
   # reboot takes it anyway; an uninstall should not have to wait for one.
   $SUDO rm -f /run/gethome-wifi-neighbours /run/gethome-wifi-neighbours.new

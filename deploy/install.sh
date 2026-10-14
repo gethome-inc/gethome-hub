@@ -1880,6 +1880,8 @@ matter_ipv6() {
   local conf="${GETHOME_SYSCTL_MATTER:-/etc/sysctl.d/61-gethome-matter.conf}"
   local proc="${GETHOME_PROC_IPV6:-/proc/sys/net/ipv6/conf}"
   local net_dir="${GETHOME_NET_DIR:-/sys/class/net}"
+  local helper="${GETHOME_MATTER_IPV6_BIN:-/usr/local/lib/gethome-matter-ipv6.sh}"
+  local dispatcher="${GETHOME_MATTER_IPV6_DISPATCHER:-/etc/NetworkManager/dispatcher.d/51-gethome-matter-ipv6}"
   local body entry iface lan
 
   # No IPv6 at all is the one thing Matter cannot work around.
@@ -1913,12 +1915,49 @@ matter_ipv6() {
   if [[ "$(cat "$proc/all/forwarding" 2>/dev/null || echo 0)" == "1" ]]; then
     warn "IPv6 forwarding is on here, which stops this machine learning routes to Thread accessories and noticing when a border router goes away, so Matter over Thread may be unreliable until it is off (net.ipv6.conf.all.forwarding=0)."
   fi
-  # And a LAN interface with IPv6 disabled has no link-local address, which
-  # Matter will not start without.
+  # **NetworkManager switches IPv6 off by itself, and leaves it off.** A
+  # connection that says `ipv6.method=ignore`, which is what Raspberry Pi
+  # Imager's Wi-Fi profile says, can come back up with IPv6 disabled on its
+  # interface after the network has gone away and returned, and stays that way
+  # until NetworkManager restarts; deploy/matter-ipv6.sh says exactly when. So a
+  # dispatcher puts the kernel's IPv6 back every time a connection comes up.
+  # Installed wherever NetworkManager is, a wired hub included, because it acts
+  # only on a connection that leaves IPv6 to the kernel. NetworkManager ignores
+  # a dispatcher script anybody but root can write, so the ownership and the
+  # mode are part of it, as for the Wi-Fi ones.
+  if $SUDO install -m 0755 "$HUB_DIR/deploy/matter-ipv6.sh" "$helper" 2>/dev/null \
+    && command -v nmcli >/dev/null 2>&1; then
+    $SUDO mkdir -p "$(dirname "$dispatcher")" 2>/dev/null || true
+    if $SUDO tee "$dispatcher" >/dev/null <<DISPATCH
+#!/bin/sh
+# Installed by GetHome. NetworkManager can leave IPv6 off on an interface whose
+# connection leaves IPv6 to the kernel, and Matter reaches everything that is
+# only on IPv6 through it; this turns it back on when a connection comes up.
+# deploy/matter-ipv6.sh says why.
+[ "\$2" = "up" ] || exit 0
+exec ${helper} "\$1" --quiet
+DISPATCH
+    then
+      $SUDO chown root:root "$dispatcher" 2>/dev/null || true
+      $SUDO chmod 0755 "$dispatcher" 2>/dev/null || true
+    fi
+  fi
+
+  # And a LAN interface with IPv6 disabled has no link-local address, which is
+  # what Matter is built on: an accessory that also answers on IPv4 is still
+  # reached that way, but one that is only on IPv6, which every Thread accessory
+  # is, is not. Turned back on now when it is NetworkManager's doing, so a hub
+  # this already happened to is not left waiting for its next reconnect; said
+  # when it is not ours to change.
   lan="$(ip -o route show default 2>/dev/null \
     | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }' || true)"
   if [[ -n "$lan" && "$(cat "$proc/$lan/disable_ipv6" 2>/dev/null || echo 0)" == "1" ]]; then
-    warn "IPv6 is disabled on ${lan}, and Matter needs at least its link-local address there, so the hub cannot reach Matter accessories until it is turned back on."
+    if [[ -x "$helper" ]]; then $SUDO "$helper" "$lan" --quiet >/dev/null 2>&1 || true; fi
+    if [[ "$(cat "$proc/$lan/disable_ipv6" 2>/dev/null || echo 0)" == "1" ]]; then
+      warn "IPv6 is disabled on ${lan}, so the hub has no IPv6 link-local address there and cannot reach a Matter accessory that is only on IPv6, which every Thread accessory is, until it is turned back on."
+    else
+      say "IPv6 was off on ${lan}, which NetworkManager leaves that way after some reconnects, and is back on, so Matter accessories can be reached over IPv6 again."
+    fi
   fi
 }
 

@@ -581,9 +581,10 @@ adapter/registry/API change.
   `0.0.0.0` is an IPv4 socket and the dual-stack `::` is refused deliberately:
   a home's IPv4 is behind NAT and a global IPv6 address is not, so binding both
   would put a plain-HTTP, bearer-token API on a routable address behind a
-  firewall default this hub cannot see. The board keeps its IPv6 — Matter needs
-  the link-local one and will not start without it — the API just does not
-  answer there. What that obliges is the other half: **never publish an address
+  firewall default this hub cannot see. The board keeps its IPv6 — Matter
+  reaches everything that is only on IPv6 over the link-local one, every Thread
+  accessory included — the API just does not answer there. What that obliges is
+  the other half: **never publish an address
   the caller cannot reach.** It is the rule `install.sh` already applied to
   `docker0`'s `172.17.0.1`, and an AAAA record is the same fault one level up,
   because a client takes whichever answer arrives *first* and on a Pi that is
