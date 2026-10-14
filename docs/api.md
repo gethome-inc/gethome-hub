@@ -1522,7 +1522,7 @@ with what happened, rather than a receipt to poll.
 with the same object plus `change` — `200` and `change.state: "applied"`, or
 `202` and `"pending"` on a board too busy to finish inside the wait (the change
 is still queued; `GET` reports it when it lands). A refusal is the usual
-`{error}`. Six things a client has to know.
+`{error}`. Seven things a client has to know.
 
 - **`available` is the machine, not the build.** `false` with
   `reason: "no-networkmanager"` is a system that manages Wi-Fi some other way —
@@ -1550,6 +1550,18 @@ is still queued; `GET` reports it when it lands). A refusal is the usual
   `409 wifi_network_exists`; changing a saved network's password is remove,
   then add — which is why the connected network's password cannot be changed
   from here either.
+- **`hidden` is opt-in, and should stay that way.** It is for a network whose
+  router does not announce its name, and it costs something: to find one, the
+  hub calls the name out when it scans, wherever it is — NetworkManager's own
+  reference calls those probes "distinctly recognizable on the air" — and a
+  device heard asking for a network by name invites somebody to stand one up
+  under that name and collect a handshake to attack the password offline.
+  Marking every network hidden would join just as well, since a router that
+  announces its name answers a probe for it too, and would pay that cost for
+  every network to spare the rare hidden one a switch. An app should ask it as
+  something a person can check from anywhere — *did you have to type its name
+  to join it?* — because the network being added is usually one they are not
+  in range of.
 - **One change at a time.** `409 wifi_change_pending` while a request is written
   and unconsumed (a request nothing picks up within a minute is treated as
   abandoned), and after a `202` until that change's own result lands (two
