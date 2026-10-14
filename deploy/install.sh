@@ -147,6 +147,31 @@ fi
 command -v systemctl >/dev/null 2>&1 \
   || fail "This installer needs systemd, which every current Raspberry Pi OS, Debian and Ubuntu has. Install the hub by hand on a system without it — see deploy/ in the repository."
 
+# Run a command as the hub's account, for anything that touches the hub's own
+# data directory — making those directories, reading the pairing code, writing
+# the files that tell the hub what plumbing it has. Root runs only what needs
+# root. The account owns that directory, so every name in it is whatever the
+# account made it, and root following one follows whatever was planted there: a
+# link from a file to one only root may touch, or a directory pointed elsewhere
+# so the `chmod` after it changes the target's mode. Done as the account, a
+# planted link reaches only what that account could reach already — `as_hub` in
+# deploy/wifi-networks.sh and deploy/update-runner.sh, for the same reason.
+# setpriv first (a plain setresuid, no PAM session), then runuser, both
+# util-linux. (`chown -R` stays root's: without -H or -L it changes a link
+# itself and never descends through one.)
+as_service_user() {
+  local uid gid
+  uid="$(id -u "$SERVICE_USER" 2>/dev/null)" || return 1
+  gid="$(id -g "$SERVICE_USER" 2>/dev/null)" || return 1
+  if command -v setpriv >/dev/null 2>&1; then
+    $SUDO setpriv --reuid="$uid" --regid="$gid" --clear-groups -- "$@"
+  elif command -v runuser >/dev/null 2>&1; then
+    $SUDO runuser -u "$SERVICE_USER" -- "$@"
+  else
+    return 1
+  fi
+}
+
 # ── System ─────────────────────────────────────────────────────────────────
 step system "Checking this machine…"
 
@@ -605,9 +630,16 @@ if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
 fi
 # Serial access for a Zigbee coordinator, without running anything as root.
 $SUDO usermod -aG dialout "$SERVICE_USER" >/dev/null 2>&1 || true
-$SUDO mkdir -p "$INSTALL_DIR" "$DATA_DIR" "$DATA_DIR/update" "$Z2M_DATA_DIR" "$CONF_DIR"
+# INSTALL_DIR and CONF_DIR are root's own. The hub's tree under /var/lib/gethome
+# is the hub account's, so root makes only the top of it and hands it over, and
+# the account makes the rest: a name under it the account replaced with a link
+# is then one root never follows — as `mkdir -p` and `chmod` both do. `chown -R`
+# stays root's; without -H/-L it changes a link itself and never descends one.
+$SUDO mkdir -p "$INSTALL_DIR" "$CONF_DIR" /var/lib/gethome
+$SUDO chown "$SERVICE_USER:$SERVICE_USER" /var/lib/gethome
+as_service_user mkdir -p "$DATA_DIR" "$DATA_DIR/update" "$Z2M_DATA_DIR"
 $SUDO chown -R "$SERVICE_USER:$SERVICE_USER" /var/lib/gethome
-$SUDO chmod 0750 /var/lib/gethome "$DATA_DIR"
+as_service_user chmod 0750 /var/lib/gethome "$DATA_DIR"
 
 # ── Downloads are checked against a digest ─────────────────────────────────
 # Both things this script fetches and then *executes* — the hub bundle and the
@@ -2534,6 +2566,11 @@ Type=oneshot
 RemainAfterExit=no
 Environment=GETHOME_CONF=${CONF_DIR}
 Environment=GETHOME_DIR=${INSTALL_DIR}
+# The account that owns <data>/update. The runner is root and does its file I/O
+# in that directory as this account, so a link the account planted there is one
+# root never follows — see as_hub in update-runner.sh.
+Environment=GETHOME_USER=${SERVICE_USER}
+Environment=GETHOME_GROUP=${SERVICE_USER}
 ExecStart=/usr/local/lib/gethome-update.sh
 # Not a number, and not the 90-second default a Type=oneshot otherwise gets.
 # A real run is apt, a bundle over a domestic line, migrations onto an SD card,
@@ -2545,29 +2582,6 @@ ExecStart=/usr/local/lib/gethome-update.sh
 # rolled it back, killing the only thing that could undo it.
 TimeoutStartSec=infinity
 UNIT
-
-# Run a command as the hub's account, for anything inside the hub's own data
-# directory. That account owns it, so every name in it is whatever the account
-# made it, and root following one follows whatever was planted there: a link
-# from `wifi/enabled` to a file only root may touch, or `wifi` itself pointed
-# at a directory whose mode the `chmod` after it would then change. Done as the
-# account, a planted link reaches only what that account could reach already —
-# `as_hub` in deploy/wifi-networks.sh, for the same reason. setpriv first, then
-# runuser, both util-linux; with neither the write is skipped, which leaves a
-# capability unannounced rather than written by root. (`chown -R` stays root's:
-# without -H or -L it changes a link itself and never descends through one.)
-as_service_user() {
-  local uid gid
-  uid="$(id -u "$SERVICE_USER" 2>/dev/null)" || return 1
-  gid="$(id -g "$SERVICE_USER" 2>/dev/null)" || return 1
-  if command -v setpriv >/dev/null 2>&1; then
-    $SUDO setpriv --reuid="$uid" --regid="$gid" --clear-groups -- "$@"
-  elif command -v runuser >/dev/null 2>&1; then
-    $SUDO runuser -u "$SERVICE_USER" -- "$@"
-  else
-    return 1
-  fi
-}
 
 # What the hub reads to know this machine can apply an update at all. A file in
 # the hub's own directory rather than a systemd path it would have to know
@@ -2751,7 +2765,11 @@ fi
 
 INFO=$(curl -fsS http://localhost:8420/api/v1/hub)
 if echo "$INFO" | grep -q '"claimed":false'; then
-  CODE=$($SUDO cat "$DATA_DIR/pairing-code" 2>/dev/null | tr -d '[:space:]' || true)
+  # Read as the hub's account, not by root through a path: pairing-code is a
+  # name in the hub's own directory, so a link the account planted there (this
+  # output lands in the hub-readable update log) is followed as that account
+  # rather than turned into a read of any root-only file.
+  CODE=$(as_service_user cat "$DATA_DIR/pairing-code" 2>/dev/null | tr -d '[:space:]' || true)
   if [[ -n "$CODE" ]]; then
     printf '@@PAIRING:%s@@\n' "$CODE"
     say "Pairing code: ${CODE}"

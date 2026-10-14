@@ -509,14 +509,12 @@ describe('deploy/install.sh', () => {
    * reading the unit, so they are pinned here.
    */
   describe('the update units', () => {
-    const updateService = installer.slice(
-      installer.indexOf('gethome-update.service >/dev/null <<UNIT'),
-      installer.indexOf('as_service_user() {'),
-    );
-    const updatePath = installer.slice(
-      installer.indexOf('gethome-update.path >/dev/null <<UNIT'),
-      installer.indexOf('gethome-update.service >/dev/null <<UNIT'),
-    );
+    // From each heredoc marker to its own terminator — never to the next
+    // mention of a helper, which a hoist of that helper's definition (it is
+    // now near the top) would move above these and silently empty the slice,
+    // passing every assertion on ''. The `unitBody` helper slices to `\nUNIT\n`.
+    const updateService = unitBody('gethome-update.service');
+    const updatePath = unitBody('gethome-update.path');
 
     it('watches the file the hub actually writes', () => {
       expect(updatePath).toMatch(/^PathModified=\$\{DATA_DIR\}\/update\/request$/m);
@@ -549,10 +547,24 @@ describe('deploy/install.sh', () => {
       expect(updateService).toMatch(/^TimeoutStartSec=infinity$/m);
     });
 
-    it('leaves the hub a directory it can write the request into', () => {
-      // The hub is unprivileged; `mkdir -p` here plus the `chown -R` on the
-      // next line is what makes POST /system/update able to write at all.
-      expect(installer).toMatch(/mkdir -p "\$INSTALL_DIR" "\$DATA_DIR" "\$DATA_DIR\/update"/);
+    it('passes the hub account to the runner, so its data-directory I/O can drop to it', () => {
+      // update-runner.sh is root and does its <data>/update reads and writes as
+      // this account (as_hub). Without the account named in the unit it would
+      // fall back to the `gethome` default — right today, but the unit is where
+      // the name belongs, beside the Wi-Fi unit that already carries it.
+      expect(updateService).toMatch(/^Environment=GETHOME_USER=\$\{SERVICE_USER\}$/m);
+    });
+
+    it('makes the hub’s data directories as the hub’s account, not root through a path', () => {
+      // /var/lib/gethome is the hub account's. Root makes only the top of the
+      // tree and hands it over; the account makes <data> and <data>/update, so
+      // a name under it the account replaced with a link is one root never
+      // follows — as `mkdir -p` and `chmod` both do. `chown -R` stays root's.
+      expect(installer).toMatch(/as_service_user mkdir -p "\$DATA_DIR" "\$DATA_DIR\/update"/);
+      expect(installer).toMatch(/as_service_user chmod 0750 \/var\/lib\/gethome "\$DATA_DIR"/);
+      // The old root mkdir/chmod of the hub's own directories must not return.
+      expect(installer).not.toMatch(/\$SUDO mkdir -p "\$INSTALL_DIR" "\$DATA_DIR"/);
+      expect(installer).not.toMatch(/\$SUDO chmod 0750 \/var\/lib\/gethome/);
     });
   });
 
@@ -597,13 +609,19 @@ describe('deploy/install.sh', () => {
      * -L it changes a link itself and never descends through one.
      */
     it('writes inside the hub’s directories only as the hub’s account', () => {
-      const block = installer.slice(
-        installer.indexOf('as_service_user() {'),
-        installer.indexOf('WIFI_NETWORKS_UNITS=""'),
-      );
-      const helper = block.slice(0, block.indexOf('\n}\n'));
+      // The helper is defined once, near the top, and slicing to its own `\n}\n`
+      // keeps this to the definition even though it now sits far from here.
+      const helperStart = installer.indexOf('as_service_user() {');
+      const helper = installer.slice(helperStart, installer.indexOf('\n}\n', helperStart));
       expect(helper).toContain('setpriv --reuid="$uid" --regid="$gid" --clear-groups --');
       expect(helper).toContain('runuser -u "$SERVICE_USER" --');
+      // The write sites: the update capability and all of the Wi-Fi directory.
+      // Bounded to that region — not to the hoisted definition above — so a line
+      // elsewhere cannot quietly pass or fail this.
+      const block = installer.slice(
+        installer.indexOf('# What the hub reads to know this machine'),
+        installer.indexOf('WIFI_NETWORKS_UNITS=""'),
+      );
       for (const line of block.split('\n')) {
         if (!/\$SUDO\b/.test(line) || !/(wifi_dir|DATA_DIR)/.test(line)) continue;
         expect(line.trim(), line).toMatch(/^\$SUDO chown -R "\$SERVICE_USER:\$SERVICE_USER" /);
@@ -640,6 +658,18 @@ describe('deploy/install.sh', () => {
       // one where every change would fail, so it is asked whether it answers.
       expect(before).toMatch(/nmcli -t general status/);
     });
+  });
+
+  /**
+   * The pairing code lives in `<data>/pairing-code`, a name in the hub account's
+   * own directory, and the installer prints it into output that lands in the
+   * hub-readable update log. Read by root through that path, a link the account
+   * planted there would be a read of any root-only file; read as the account, it
+   * is not. The same `as_service_user` the directory writes above go through.
+   */
+  it('reads the pairing code as the hub’s account, not root through a path', () => {
+    expect(installer).toMatch(/as_service_user cat "\$DATA_DIR\/pairing-code"/);
+    expect(installer).not.toMatch(/\$SUDO cat "\$DATA_DIR\/pairing-code"/);
   });
 
   /**
