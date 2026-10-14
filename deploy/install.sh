@@ -172,6 +172,19 @@ as_service_user() {
   fi
 }
 
+# A file in the hub's own directories, read as the hub's account: its contents
+# when it is a regular file, and a failure with nothing printed otherwise —
+# missing, unreadable, or something else at that name (a FIFO would hold the
+# installer for ever). As the account for the reason above, and for a second
+# one that is easy to miss: run by a login user with sudo — `curl … | bash`, or
+# `gethome-hubctl update` without sudo — the installer cannot see into
+# /var/lib/gethome at all once "Accounts and directories" has made it 0750, so a
+# check it made in its own name would find nothing there and say so.
+read_hub_file() {
+  as_service_user test -f "$1" 2>/dev/null || return 1
+  as_service_user cat "$1" 2>/dev/null
+}
+
 # ── System ─────────────────────────────────────────────────────────────────
 step system "Checking this machine…"
 
@@ -2100,15 +2113,18 @@ $SUDO chown -R "$SERVICE_USER:$SERVICE_USER" "$Z2M_DATA_DIR"
 # else in the system ever will: Zigbee is connected, the devices report, and
 # what suffers is the other radio. Said as a standing handicap, never as a
 # diagnosis — see the sizing above.
+#
+# Both files are read as the hub's account, for the reasons the config section
+# below gives.
 zigbee_network_channel() {
-  local backup="$Z2M_DATA_DIR/coordinator_backup.json" channel=""
-  if [[ -f "$backup" ]]; then
-    channel="$($SUDO grep -o '"logical_channel"[[:space:]]*:[[:space:]]*[0-9]*' "$backup" 2>/dev/null \
-      | head -n1 | grep -o '[0-9]*$' || true)"
-  fi
-  if [[ -z "$channel" && -f "$Z2M_CONFIG" ]]; then
-    channel="$($SUDO sed -n 's/^[[:space:]]*channel:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
-      "$Z2M_CONFIG" 2>/dev/null | head -n1 || true)"
+  local channel=""
+  channel="$(read_hub_file "$Z2M_DATA_DIR/coordinator_backup.json" \
+    | grep -o '"logical_channel"[[:space:]]*:[[:space:]]*[0-9]*' \
+    | head -n1 | grep -o '[0-9]*$' || true)"
+  if [[ -z "$channel" ]]; then
+    channel="$(read_hub_file "$Z2M_CONFIG" \
+      | sed -n 's/^[[:space:]]*channel:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+      | head -n1 || true)"
   fi
   printf '%s' "$channel"
 }
@@ -2191,28 +2207,77 @@ zigbee_channel_clear_of_wifi() {
   printf '%s' "$best"
 }
 
+# ── configuration.yaml is touched only as the hub's account ────────────────
+# **Doing it as root was two bugs, and the second could cost a network.** The
+# directory is the hub account's, so every name in it is whatever the account
+# made it, and root writing `configuration.yaml` followed a link planted there:
+# `tee` wrote where it pointed and the `chown` after it handed the target to the
+# account — a file of its choosing anywhere on the machine, made its own.
+#
+# And the checks that decide *whether* to write ran as whoever ran the
+# installer, which for `curl … | bash` and for `gethome-hubctl update` without
+# sudo is the login user. By this point "Accounts and directories" has made
+# /var/lib/gethome 0750 — systemd's `StateDirectory=` puts it back to 0755 only
+# when the hub restarts, further down — so that user saw no configuration.yaml
+# and no coordinator backup, took the hub for one that had never formed a
+# network, and wrote a fresh three-line file over a working one — its network
+# key, its PAN IDs and its channel, gone. Measured on a Zero 2 W: with
+# /var/lib/gethome at 0750, `pi` sees neither file.
+#
+# As the account, the checks see what is there and a planted link reaches only
+# what the account could reach already. Creating is create-only (`set -C`), so
+# no check that is wrong can ever replace a file that exists. And an edit is the
+# whole file written beside the old one with the old one's mode (`cp -p`),
+# flushed, and renamed over it — read in full first, so a read that fails part
+# way is never what gets written back — so a power cut leaves the old file or
+# the new one, never half of the file the key is in.
 Z2M_CONFIG="$Z2M_DATA_DIR/configuration.yaml"
 Z2M_ONBOARDING_CHANGED=""
-if [[ ! -f "$Z2M_CONFIG" ]]; then
-  # A backup means a network exists even with the config gone, and its channel
-  # is not ours to move.
-  if [[ -f "$Z2M_DATA_DIR/coordinator_backup.json" ]]; then
-    Z2M_NEW_CONFIG=$'onboarding: false\n'
-  else
-    ZIGBEE_CHANNEL="$(zigbee_channel_clear_of_wifi "$(wifi_frequency_mhz)")"
-    Z2M_NEW_CONFIG=$'onboarding: false\nadvanced:\n  channel: '"${ZIGBEE_CHANNEL}"$'\n'
-    say "Zigbee will form its network on channel ${ZIGBEE_CHANNEL}, clear of this hub's Wi-Fi."
+
+z2m_onboarding_off() {
+  local current updated channel=""
+  if ! as_service_user test -e "$Z2M_CONFIG" 2>/dev/null; then
+    # A backup means a network exists even with the config gone, and its channel
+    # is not ours to move.
+    if as_service_user test -f "$Z2M_DATA_DIR/coordinator_backup.json" 2>/dev/null; then
+      updated=$'onboarding: false\n'
+    else
+      channel="$(zigbee_channel_clear_of_wifi "$(wifi_frequency_mhz)")"
+      updated=$'onboarding: false\nadvanced:\n  channel: '"${channel}"$'\n'
+    fi
+    printf '%s' "$updated" \
+      | as_service_user sh -c 'set -C; cat > "$1"' sh "$Z2M_CONFIG" 2>/dev/null || return 0
+    [[ -z "$channel" ]] || say "Zigbee will form its network on channel ${channel}, clear of this hub's Wi-Fi."
+    Z2M_ONBOARDING_CHANGED=1
+    return 0
   fi
-  printf '%s' "$Z2M_NEW_CONFIG" | $SUDO tee "$Z2M_CONFIG" >/dev/null \
-    && $SUDO chown "$SERVICE_USER:$SERVICE_USER" "$Z2M_CONFIG" \
-    && Z2M_ONBOARDING_CHANGED=1
-elif grep -qE '^onboarding:[[:space:]]*true' "$Z2M_CONFIG" 2>/dev/null; then
-  $SUDO sed -i 's/^onboarding:[[:space:]]*true.*/onboarding: false/' "$Z2M_CONFIG" \
-    && Z2M_ONBOARDING_CHANGED=1
-elif ! grep -qE '^onboarding:' "$Z2M_CONFIG" 2>/dev/null; then
-  printf 'onboarding: false\n' | $SUDO tee -a "$Z2M_CONFIG" >/dev/null \
-    && Z2M_ONBOARDING_CHANGED=1
-fi
+  current="$(read_hub_file "$Z2M_CONFIG")" || return 0
+  if grep -qE '^onboarding:[[:space:]]*true' <<<"$current"; then
+    updated="$(sed 's/^onboarding:[[:space:]]*true.*/onboarding: false/' <<<"$current")"
+  elif ! grep -qE '^onboarding:' <<<"$current"; then
+    updated="$current"
+    [[ -z "$updated" ]] || updated+=$'\n'
+    updated+='onboarding: false'
+  else
+    return 0
+  fi
+  replace_z2m_config "$updated" && Z2M_ONBOARDING_CHANGED=1
+  return 0
+}
+
+replace_z2m_config() {
+  local tmp="${Z2M_CONFIG}.gethome-$$"
+  if as_service_user cp -p "$Z2M_CONFIG" "$tmp" 2>/dev/null \
+    && printf '%s\n' "$1" | as_service_user tee "$tmp" >/dev/null 2>&1 \
+    && { as_service_user sync "$tmp" 2>/dev/null || sync; } \
+    && as_service_user mv -f "$tmp" "$Z2M_CONFIG" 2>/dev/null; then
+    return 0
+  fi
+  as_service_user rm -f "$tmp" 2>/dev/null || true
+  return 1
+}
+
+z2m_onboarding_off
 # A running Z2M read the old file at startup, and the detector below only
 # restarts it when the *device path* changed — so without this an existing hub
 # would keep waiting for its browser until the next reboot.
@@ -2948,10 +3013,12 @@ fi
 printf '@@CAPABILITIES:%s@@\n' "$CAPS"
 say "This hub can talk to: ${CAPS}."
 
-RADIO_MODE=auto
-if [[ -r "$DATA_DIR/radio-mode" ]]; then
-  RADIO_MODE=$(tr -d '[:space:]' < "$DATA_DIR/radio-mode" 2>/dev/null || echo auto)
-fi
+# Read as the hub's account, like everything else in its directory — which is
+# also what lets an install run by the login user read it at all (<data> is
+# 0750), rather than settle on `auto` and tell somebody who chose both radios
+# that their coordinator has the board.
+RADIO_MODE="$(read_hub_file "$DATA_DIR/radio-mode" | tr -d '[:space:]' || true)"
+[[ -n "$RADIO_MODE" ]] || RADIO_MODE=auto
 
 if [[ "$RADIO_BUDGET" == "one" && "$RADIO_MODE" == "both" ]]; then
   # The owner has already overridden the measurement, on this board, before

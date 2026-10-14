@@ -142,11 +142,21 @@ in `deploy/install.sh` must stay accurate.
   status file is written whole and renamed past any planted name, the log is
   appended to as the account, and there is no `chmod` through a path (umask sets
   the mode). `install.sh` keeps the same rule for its own `<data>` writes:
-  `as_service_user` makes the hub's data directories and reads `pairing-code`,
-  and only a `chown -R` stays root's, because without `-H`/`-L` it changes a
-  link itself and never descends through one. `test/deploy-update.test.ts` and
-  `test/deploy-config.test.ts` pin that no root write or chmod inside `<data>`
-  comes back, and plant a link to show its target untouched. And
+  `as_service_user` makes the hub's data directories, `read_hub_file` reads
+  `pairing-code` and `radio-mode`, everything in Zigbee2MQTT's directory goes
+  through the account too (the `onboarding` bullet below), and only a
+  `chown -R` stays root's, because without `-H`/`-L` it changes a link itself
+  and never descends through one. `gethome-hubctl` reads `pairing-code` the
+  same way — `claim` sends it to the hub's own port, so root reading it through
+  a planted link would hand a root-only file to whatever answers there.
+  **Reading as the account is also what makes the read work at all** when the
+  installer runs as a login user with sudo (`curl … | bash`, or
+  `gethome-hubctl update` without sudo): from "Accounts and directories" until
+  the hub restarts, `/var/lib/gethome` is 0750 (the hub unit's
+  `StateDirectory=` sets it back to 0755 on every start), and that user cannot
+  see into it. `test/deploy-update.test.ts`, `test/deploy-config.test.ts` and
+  `test/deploy-hub-account.test.ts` pin that no root write or chmod inside
+  `<data>` comes back, and plant a link to show its target untouched. And
   **`<data>/update/enabled` is the capability**:
   `install.sh` touches it in the same breath as it writes the units, because
   `hub.env` is written *only when absent* and so would never reach an upgraded
@@ -1024,6 +1034,21 @@ in `deploy/install.sh` must stay accurate.
   a rewrite, because the key and the device list must survive. It restarts Z2M
   itself when it changes that, since the detector only restarts on a changed
   *device path*.
+  **All of it is done as the hub's account (`z2m_onboarding_off`), and doing it
+  as root could cost a network.** The checks ran as whoever ran the installer,
+  and a login user with sudo cannot see into `/var/lib/gethome` while it is
+  0750 (the `<data>` bullet above) — measured on a Zero 2 W: `pi` sees neither
+  `configuration.yaml` nor `coordinator_backup.json` — so the file looked
+  absent and a fresh one went over a working network's key, PAN IDs and
+  channel. And root writing there followed a link the account could plant, with
+  a `chown` after it that handed the target over. Three things keep it safe
+  now. Every test, read and write is the account's. **Creating is create-only**
+  (`set -C`), so a check that is wrong can never replace a file that exists.
+  And an edit reads the whole file first, writes the new one beside it with the
+  old one's mode (`cp -p`), flushes it and renames it over — so a read that
+  fails part way is never written back, and a power cut leaves one file or the
+  other. `test/deploy-hub-account.test.ts` runs the real functions with a fake
+  `sudo` that records every root command and requires each to be `setpriv`.
   **Writing that override is load-bearing and used to fail silently.** The
   write was `{ … [[ -n "$PINNED" ]] && echo … } > tmp && mv tmp real`; a
   group's exit status is its last command's, so with nothing pinned — every

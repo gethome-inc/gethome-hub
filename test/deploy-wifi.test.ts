@@ -802,8 +802,11 @@ function collisionWarning(options: {
        Z2M_CONFIG="$2/configuration.yaml"
        say()  { printf 'SAY %s\n' "$*"; }
        warn() { printf 'WARN %s\n' "$*"; }
+       # Zigbee2MQTT's files are read as the hub's account; a test cannot switch
+       # users, and deploy-hub-account.test.ts pins that it is the account.
+       as_service_user() { "$@"; }
        CONF_DIR="$2"
-       for fn in find_iw lan_wifi_iface wifi_frequency_mhz zigbee_channel_clear_of_wifi \
+       for fn in read_hub_file find_iw lan_wifi_iface wifi_frequency_mhz zigbee_channel_clear_of_wifi \
                  zigbee_network_channel zigbee_notice_file warn_if_zigbee_jams_wifi; do
          prog="/^$fn() {/,/^}/p"
          eval "$(sed -n "$prog" "$1")"
@@ -974,10 +977,14 @@ describe('choosing a Zigbee channel', () => {
    * device needing to be paired again.
    */
   it('leaves an existing network on the channel it formed on', () => {
+    // The branch that creates a missing configuration.yaml asks for the backup
+    // before it picks a channel. deploy-hub-account.test.ts runs both cases.
     const installer = readFileSync(INSTALLER, 'utf8');
-    expect(installer).toContain('coordinator_backup.json');
-    const guarded = installer.slice(installer.indexOf('if [[ ! -f "$Z2M_CONFIG" ]]; then'));
-    expect(guarded.slice(0, guarded.indexOf('elif'))).toContain('coordinator_backup.json');
+    const start = installer.indexOf('if ! as_service_user test -e "$Z2M_CONFIG"');
+    expect(start).toBeGreaterThan(0);
+    const absent = installer.slice(start, installer.indexOf('current="$(read_hub_file "$Z2M_CONFIG")"', start));
+    expect(absent.indexOf('coordinator_backup.json')).toBeGreaterThan(0);
+    expect(absent.indexOf('coordinator_backup.json')).toBeLessThan(absent.indexOf('zigbee_channel_clear_of_wifi'));
   });
 });
 
