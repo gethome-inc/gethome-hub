@@ -172,6 +172,19 @@ as_service_user() {
   fi
 }
 
+# A file in the hub's own directories, read as the hub's account: its contents
+# when it is a regular file, and a failure with nothing printed otherwise —
+# missing, unreadable, or something else at that name (a FIFO would hold the
+# installer for ever). As the account for the reason above, and for a second
+# one that is easy to miss: run by a login user with sudo — `curl … | bash`, or
+# `gethome-hubctl update` without sudo — the installer cannot see into
+# /var/lib/gethome at all once "Accounts and directories" has made it 0750, so a
+# check it made in its own name would find nothing there and say so.
+read_hub_file() {
+  as_service_user test -f "$1" 2>/dev/null || return 1
+  as_service_user cat "$1" 2>/dev/null
+}
+
 # ── System ─────────────────────────────────────────────────────────────────
 step system "Checking this machine…"
 
@@ -1880,6 +1893,8 @@ matter_ipv6() {
   local conf="${GETHOME_SYSCTL_MATTER:-/etc/sysctl.d/61-gethome-matter.conf}"
   local proc="${GETHOME_PROC_IPV6:-/proc/sys/net/ipv6/conf}"
   local net_dir="${GETHOME_NET_DIR:-/sys/class/net}"
+  local helper="${GETHOME_MATTER_IPV6_BIN:-/usr/local/lib/gethome-matter-ipv6.sh}"
+  local dispatcher="${GETHOME_MATTER_IPV6_DISPATCHER:-/etc/NetworkManager/dispatcher.d/51-gethome-matter-ipv6}"
   local body entry iface lan
 
   # No IPv6 at all is the one thing Matter cannot work around.
@@ -1913,12 +1928,49 @@ matter_ipv6() {
   if [[ "$(cat "$proc/all/forwarding" 2>/dev/null || echo 0)" == "1" ]]; then
     warn "IPv6 forwarding is on here, which stops this machine learning routes to Thread accessories and noticing when a border router goes away, so Matter over Thread may be unreliable until it is off (net.ipv6.conf.all.forwarding=0)."
   fi
-  # And a LAN interface with IPv6 disabled has no link-local address, which
-  # Matter will not start without.
+  # **NetworkManager switches IPv6 off by itself, and leaves it off.** A
+  # connection that says `ipv6.method=ignore`, which is what Raspberry Pi
+  # Imager's Wi-Fi profile says, can come back up with IPv6 disabled on its
+  # interface after the network has gone away and returned, and stays that way
+  # until NetworkManager restarts; deploy/matter-ipv6.sh says exactly when. So a
+  # dispatcher puts the kernel's IPv6 back every time a connection comes up.
+  # Installed wherever NetworkManager is, a wired hub included, because it acts
+  # only on a connection that leaves IPv6 to the kernel. NetworkManager ignores
+  # a dispatcher script anybody but root can write, so the ownership and the
+  # mode are part of it, as for the Wi-Fi ones.
+  if $SUDO install -m 0755 "$HUB_DIR/deploy/matter-ipv6.sh" "$helper" 2>/dev/null \
+    && command -v nmcli >/dev/null 2>&1; then
+    $SUDO mkdir -p "$(dirname "$dispatcher")" 2>/dev/null || true
+    if $SUDO tee "$dispatcher" >/dev/null <<DISPATCH
+#!/bin/sh
+# Installed by GetHome. NetworkManager can leave IPv6 off on an interface whose
+# connection leaves IPv6 to the kernel, and Matter reaches everything that is
+# only on IPv6 through it; this turns it back on when a connection comes up.
+# deploy/matter-ipv6.sh says why.
+[ "\$2" = "up" ] || exit 0
+exec ${helper} "\$1" --quiet
+DISPATCH
+    then
+      $SUDO chown root:root "$dispatcher" 2>/dev/null || true
+      $SUDO chmod 0755 "$dispatcher" 2>/dev/null || true
+    fi
+  fi
+
+  # And a LAN interface with IPv6 disabled has no link-local address, which is
+  # what Matter is built on: an accessory that also answers on IPv4 is still
+  # reached that way, but one that is only on IPv6, which every Thread accessory
+  # is, is not. Turned back on now when it is NetworkManager's doing, so a hub
+  # this already happened to is not left waiting for its next reconnect; said
+  # when it is not ours to change.
   lan="$(ip -o route show default 2>/dev/null \
     | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }' || true)"
   if [[ -n "$lan" && "$(cat "$proc/$lan/disable_ipv6" 2>/dev/null || echo 0)" == "1" ]]; then
-    warn "IPv6 is disabled on ${lan}, and Matter needs at least its link-local address there, so the hub cannot reach Matter accessories until it is turned back on."
+    if [[ -x "$helper" ]]; then $SUDO "$helper" "$lan" --quiet >/dev/null 2>&1 || true; fi
+    if [[ "$(cat "$proc/$lan/disable_ipv6" 2>/dev/null || echo 0)" == "1" ]]; then
+      warn "IPv6 is disabled on ${lan}, so the hub has no IPv6 link-local address there and cannot reach a Matter accessory that is only on IPv6, which every Thread accessory is, until it is turned back on."
+    else
+      say "IPv6 was off on ${lan}, which NetworkManager leaves that way after some reconnects, and is back on, so Matter accessories can be reached over IPv6 again."
+    fi
   fi
 }
 
@@ -2061,15 +2113,18 @@ $SUDO chown -R "$SERVICE_USER:$SERVICE_USER" "$Z2M_DATA_DIR"
 # else in the system ever will: Zigbee is connected, the devices report, and
 # what suffers is the other radio. Said as a standing handicap, never as a
 # diagnosis — see the sizing above.
+#
+# Both files are read as the hub's account, for the reasons the config section
+# below gives.
 zigbee_network_channel() {
-  local backup="$Z2M_DATA_DIR/coordinator_backup.json" channel=""
-  if [[ -f "$backup" ]]; then
-    channel="$($SUDO grep -o '"logical_channel"[[:space:]]*:[[:space:]]*[0-9]*' "$backup" 2>/dev/null \
-      | head -n1 | grep -o '[0-9]*$' || true)"
-  fi
-  if [[ -z "$channel" && -f "$Z2M_CONFIG" ]]; then
-    channel="$($SUDO sed -n 's/^[[:space:]]*channel:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
-      "$Z2M_CONFIG" 2>/dev/null | head -n1 || true)"
+  local channel=""
+  channel="$(read_hub_file "$Z2M_DATA_DIR/coordinator_backup.json" \
+    | grep -o '"logical_channel"[[:space:]]*:[[:space:]]*[0-9]*' \
+    | head -n1 | grep -o '[0-9]*$' || true)"
+  if [[ -z "$channel" ]]; then
+    channel="$(read_hub_file "$Z2M_CONFIG" \
+      | sed -n 's/^[[:space:]]*channel:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+      | head -n1 || true)"
   fi
   printf '%s' "$channel"
 }
@@ -2152,28 +2207,77 @@ zigbee_channel_clear_of_wifi() {
   printf '%s' "$best"
 }
 
+# ── configuration.yaml is touched only as the hub's account ────────────────
+# **Doing it as root was two bugs, and the second could cost a network.** The
+# directory is the hub account's, so every name in it is whatever the account
+# made it, and root writing `configuration.yaml` followed a link planted there:
+# `tee` wrote where it pointed and the `chown` after it handed the target to the
+# account — a file of its choosing anywhere on the machine, made its own.
+#
+# And the checks that decide *whether* to write ran as whoever ran the
+# installer, which for `curl … | bash` and for `gethome-hubctl update` without
+# sudo is the login user. By this point "Accounts and directories" has made
+# /var/lib/gethome 0750 — systemd's `StateDirectory=` puts it back to 0755 only
+# when the hub restarts, further down — so that user saw no configuration.yaml
+# and no coordinator backup, took the hub for one that had never formed a
+# network, and wrote a fresh three-line file over a working one — its network
+# key, its PAN IDs and its channel, gone. Measured on a Zero 2 W: with
+# /var/lib/gethome at 0750, `pi` sees neither file.
+#
+# As the account, the checks see what is there and a planted link reaches only
+# what the account could reach already. Creating is create-only (`set -C`), so
+# no check that is wrong can ever replace a file that exists. And an edit is the
+# whole file written beside the old one with the old one's mode (`cp -p`),
+# flushed, and renamed over it — read in full first, so a read that fails part
+# way is never what gets written back — so a power cut leaves the old file or
+# the new one, never half of the file the key is in.
 Z2M_CONFIG="$Z2M_DATA_DIR/configuration.yaml"
 Z2M_ONBOARDING_CHANGED=""
-if [[ ! -f "$Z2M_CONFIG" ]]; then
-  # A backup means a network exists even with the config gone, and its channel
-  # is not ours to move.
-  if [[ -f "$Z2M_DATA_DIR/coordinator_backup.json" ]]; then
-    Z2M_NEW_CONFIG=$'onboarding: false\n'
-  else
-    ZIGBEE_CHANNEL="$(zigbee_channel_clear_of_wifi "$(wifi_frequency_mhz)")"
-    Z2M_NEW_CONFIG=$'onboarding: false\nadvanced:\n  channel: '"${ZIGBEE_CHANNEL}"$'\n'
-    say "Zigbee will form its network on channel ${ZIGBEE_CHANNEL}, clear of this hub's Wi-Fi."
+
+z2m_onboarding_off() {
+  local current updated channel=""
+  if ! as_service_user test -e "$Z2M_CONFIG" 2>/dev/null; then
+    # A backup means a network exists even with the config gone, and its channel
+    # is not ours to move.
+    if as_service_user test -f "$Z2M_DATA_DIR/coordinator_backup.json" 2>/dev/null; then
+      updated=$'onboarding: false\n'
+    else
+      channel="$(zigbee_channel_clear_of_wifi "$(wifi_frequency_mhz)")"
+      updated=$'onboarding: false\nadvanced:\n  channel: '"${channel}"$'\n'
+    fi
+    printf '%s' "$updated" \
+      | as_service_user sh -c 'set -C; cat > "$1"' sh "$Z2M_CONFIG" 2>/dev/null || return 0
+    [[ -z "$channel" ]] || say "Zigbee will form its network on channel ${channel}, clear of this hub's Wi-Fi."
+    Z2M_ONBOARDING_CHANGED=1
+    return 0
   fi
-  printf '%s' "$Z2M_NEW_CONFIG" | $SUDO tee "$Z2M_CONFIG" >/dev/null \
-    && $SUDO chown "$SERVICE_USER:$SERVICE_USER" "$Z2M_CONFIG" \
-    && Z2M_ONBOARDING_CHANGED=1
-elif grep -qE '^onboarding:[[:space:]]*true' "$Z2M_CONFIG" 2>/dev/null; then
-  $SUDO sed -i 's/^onboarding:[[:space:]]*true.*/onboarding: false/' "$Z2M_CONFIG" \
-    && Z2M_ONBOARDING_CHANGED=1
-elif ! grep -qE '^onboarding:' "$Z2M_CONFIG" 2>/dev/null; then
-  printf 'onboarding: false\n' | $SUDO tee -a "$Z2M_CONFIG" >/dev/null \
-    && Z2M_ONBOARDING_CHANGED=1
-fi
+  current="$(read_hub_file "$Z2M_CONFIG")" || return 0
+  if grep -qE '^onboarding:[[:space:]]*true' <<<"$current"; then
+    updated="$(sed 's/^onboarding:[[:space:]]*true.*/onboarding: false/' <<<"$current")"
+  elif ! grep -qE '^onboarding:' <<<"$current"; then
+    updated="$current"
+    [[ -z "$updated" ]] || updated+=$'\n'
+    updated+='onboarding: false'
+  else
+    return 0
+  fi
+  replace_z2m_config "$updated" && Z2M_ONBOARDING_CHANGED=1
+  return 0
+}
+
+replace_z2m_config() {
+  local tmp="${Z2M_CONFIG}.gethome-$$"
+  if as_service_user cp -p "$Z2M_CONFIG" "$tmp" 2>/dev/null \
+    && printf '%s\n' "$1" | as_service_user tee "$tmp" >/dev/null 2>&1 \
+    && { as_service_user sync "$tmp" 2>/dev/null || sync; } \
+    && as_service_user mv -f "$tmp" "$Z2M_CONFIG" 2>/dev/null; then
+    return 0
+  fi
+  as_service_user rm -f "$tmp" 2>/dev/null || true
+  return 1
+}
+
+z2m_onboarding_off
 # A running Z2M read the old file at startup, and the detector below only
 # restarts it when the *device path* changed — so without this an existing hub
 # would keep waiting for its browser until the next reboot.
@@ -2909,10 +3013,12 @@ fi
 printf '@@CAPABILITIES:%s@@\n' "$CAPS"
 say "This hub can talk to: ${CAPS}."
 
-RADIO_MODE=auto
-if [[ -r "$DATA_DIR/radio-mode" ]]; then
-  RADIO_MODE=$(tr -d '[:space:]' < "$DATA_DIR/radio-mode" 2>/dev/null || echo auto)
-fi
+# Read as the hub's account, like everything else in its directory — which is
+# also what lets an install run by the login user read it at all (<data> is
+# 0750), rather than settle on `auto` and tell somebody who chose both radios
+# that their coordinator has the board.
+RADIO_MODE="$(read_hub_file "$DATA_DIR/radio-mode" | tr -d '[:space:]' || true)"
+[[ -n "$RADIO_MODE" ]] || RADIO_MODE=auto
 
 if [[ "$RADIO_BUDGET" == "one" && "$RADIO_MODE" == "both" ]]; then
   # The owner has already overridden the measurement, on this board, before

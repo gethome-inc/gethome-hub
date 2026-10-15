@@ -38,7 +38,37 @@ API="http://127.0.0.1:${PORT}/api/v1"
 SUDO=""
 if [[ $(id -u) -ne 0 ]]; then SUDO="sudo"; fi
 
+# The hub's account, which owns DATA_DIR. install.sh has only ever named it this.
+HUB_USER="${GETHOME_USER:-gethome}"
+
 die() { echo "gethome-hubctl: $*" >&2; exit 1; }
+
+# Run a command as the hub's account: setpriv first, then runuser, both
+# util-linux — install.sh's `as_service_user` and update-runner.sh's `as_hub`.
+as_hub() {
+  local uid gid
+  uid="$(id -u "$HUB_USER" 2>/dev/null)" || return 1
+  gid="$(id -g "$HUB_USER" 2>/dev/null)" || return 1
+  if command -v setpriv >/dev/null 2>&1; then
+    $SUDO setpriv --reuid="$uid" --regid="$gid" --clear-groups -- "$@"
+  elif command -v runuser >/dev/null 2>&1; then
+    $SUDO runuser -u "$HUB_USER" -- "$@"
+  else
+    return 1
+  fi
+}
+
+# A file in the hub's data directory, read as the hub's account rather than by
+# root through a path. The directory is that account's, so any name in it can be
+# a link the account planted — and `claim` sends what it reads to the hub's own
+# port, so root reading `pairing-code` through a link to a root-only file would
+# hand that file to whatever answers there. Read as the account, a link reaches
+# only what it could read already. Only a regular file: anything else at that
+# name (a FIFO would hold this for ever) reads as missing.
+read_hub_file() {
+  as_hub test -f "$1" 2>/dev/null || return 1
+  as_hub cat "$1"
+}
 
 hub_info() { curl -fsS --max-time 5 "${API}/hub" 2>/dev/null; }
 
@@ -215,7 +245,7 @@ cmd_zigbee() {
 
 cmd_pairing_code() {
   local code
-  code="$($SUDO cat "$DATA_DIR/pairing-code" 2>/dev/null | tr -d '[:space:]')"
+  code="$(read_hub_file "$DATA_DIR/pairing-code" 2>/dev/null | tr -d '[:space:]')"
   if [[ -n "$code" ]]; then
     printf '@@PAIRING:%s@@\n' "$code"
     echo "$code"
@@ -265,7 +295,7 @@ cmd_claim() {
   fi
 
   local code
-  code="$($SUDO cat "$DATA_DIR/pairing-code" 2>/dev/null | tr -d '[:space:]')"
+  code="$(read_hub_file "$DATA_DIR/pairing-code" 2>/dev/null | tr -d '[:space:]')"
   [[ -n "$code" ]] || die "the hub is unclaimed but its pairing code is missing from ${DATA_DIR}."
 
   # A stable id for this attempt, so a reply lost to a slow network can be
@@ -417,6 +447,7 @@ cmd_uninstall() {
   # networks dispatcher is 54; it was 53 on its branch before the profile copy
   # took that number, and a hub that tried the branch has it under that name.
   $SUDO rm -f /etc/NetworkManager/dispatcher.d/50-gethome-wifi-awake \
+    /etc/NetworkManager/dispatcher.d/51-gethome-matter-ipv6 \
     /etc/NetworkManager/dispatcher.d/52-gethome-wifi-credentials \
     /etc/NetworkManager/dispatcher.d/53-gethome-wifi-profile \
     /etc/NetworkManager/dispatcher.d/54-gethome-wifi-networks \
@@ -429,7 +460,7 @@ cmd_uninstall() {
   $SUDO rm -f /usr/local/lib/gethome-zigbee-detect.sh /usr/local/lib/gethome-zram.sh \
     /usr/local/lib/gethome-wifi-keepalive.sh /usr/local/lib/gethome-wifi-credentials.sh \
     /usr/local/lib/gethome-wifi-profile.sh /usr/local/lib/gethome-wifi-networks.sh \
-    /usr/local/lib/gethome-update.sh
+    /usr/local/lib/gethome-update.sh /usr/local/lib/gethome-matter-ipv6.sh
   # The keep-alive's memory of who is on the network. It is in /run, so a
   # reboot takes it anyway; an uninstall should not have to wait for one.
   $SUDO rm -f /run/gethome-wifi-neighbours /run/gethome-wifi-neighbours.new
