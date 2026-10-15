@@ -127,6 +127,19 @@ update it in the same change.
   waits on it. And **the file object is made in `start()`**, not the
   constructor, because the API reads this adapter before it has started and
   a test constructs one with no data directory at all.
+- **matter.js joins its mDNS groups once, when it starts, so an interface
+  replaced underneath it leaves it deaf.** `UdpMulticastServer` adds the
+  memberships when it creates its sockets, on the interfaces there are then,
+  and never again; only its *sending* channel is rebuilt after an error, which
+  is why a single `send ENODEV` is all the journal shows. Measured on a
+  Zero 2 W: reloading brcmfmac replaced wlan0 (ifindex 2, then 3), and
+  afterwards only avahi was in 224.0.0.251 and ff02::fb on it — sessions went
+  on by unicast, but no accessory could be heard announcing itself — until the
+  hub restarted. `deploy/wifi-watchdog.sh` is the one thing that replaces the
+  interface on purpose, and it restarts the hub when the network answers again
+  (`deploy/CLAUDE.md`); anything else that recreates an interface under a
+  running hub owes the same restart, or a change here that joins the groups
+  again.
 - **The hub reads which Wi-Fi each accessory is on, from the same cache.**
   `wifi-network.ts` takes the accessory's own `NetworkCommissioning` list. It
   uses the connected entry, or the only one, and drops a name that is not

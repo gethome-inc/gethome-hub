@@ -111,6 +111,14 @@ own devices, and why, is in [`mqtt-integrations.md`](mqtt-integrations.md#connec
 Neither port should ever be forwarded through your router
 ([`security.md`](security.md)).
 
+A hub on Wi-Fi keeps an eye on its own connection. If it stays connected while
+nothing on the network answers it for five minutes — seen once, on a Zero 2 W,
+until somebody switched it off and on — it restarts its Wi-Fi radio, and if
+five more minutes bring nothing, it restarts itself, never more than once an
+hour. A router that is switched off or restarting does not set this off,
+because the hub sees its Wi-Fi go. What it saw and did is in
+`journalctl -t gethome-wifi-watchdog`.
+
 ## Moving it to another network
 
 A hub joins the Wi-Fi it was set up on and nothing else, so one carried to a

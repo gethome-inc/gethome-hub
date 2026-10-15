@@ -429,10 +429,12 @@ cmd_uninstall() {
   $SUDO rm -f /usr/local/lib/gethome-zigbee-detect.sh /usr/local/lib/gethome-zram.sh \
     /usr/local/lib/gethome-wifi-keepalive.sh /usr/local/lib/gethome-wifi-credentials.sh \
     /usr/local/lib/gethome-wifi-profile.sh /usr/local/lib/gethome-wifi-networks.sh \
-    /usr/local/lib/gethome-update.sh
-  # The keep-alive's memory of who is on the network. It is in /run, so a
-  # reboot takes it anyway; an uninstall should not have to wait for one.
-  $SUDO rm -f /run/gethome-wifi-neighbours /run/gethome-wifi-neighbours.new
+    /usr/local/lib/gethome-wifi-watchdog.sh /usr/local/lib/gethome-update.sh
+  # The keep-alive's memory of who is on the network, and its watchdog's of
+  # when somebody last answered. They are in /run, so a reboot takes them
+  # anyway; an uninstall should not have to wait for one.
+  $SUDO rm -f /run/gethome-wifi-neighbours /run/gethome-wifi-neighbours.new \
+    /run/gethome-wifi-watchdog /run/gethome-wifi-watchdog.new
   $SUDO rm -rf "$INSTALL_DIR" /var/lib/gethome "$CONF_DIR"
   $SUDO systemctl daemon-reload
   $SUDO systemctl restart mosquitto avahi-daemon >/dev/null 2>&1 || true

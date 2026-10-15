@@ -592,6 +592,80 @@ in `deploy/install.sh` must stay accurate.
   reaches it; and the hub exchanging traffic with the gateway throughout rules
   out its own radio, its power save and anything the *hub* buffers. Those two
   fixes are real and stand on their own measurements. Neither was this.
+- **A hub whose Wi-Fi stays connected while nothing gets through restarts its
+  radio, then itself.** A third shape, and the one the two above are not: on
+  2026-10-15 the owner's Zero 2 W passed no traffic at all for fifty minutes —
+  from a Mac no ping, no SSH, nothing on 8420, no mDNS, one ping reply in all
+  that time — while cron and logrotate ran, NetworkManager's last line was an
+  ordinary DHCP renewal, and neither it, wpa_supplicant nor the kernel logged
+  anything. The Mac's ARP entry for the hub went on being refreshed, which is
+  the firmware's `arpoe` answering: the radio was associated and alive while
+  nothing crossed between it and Linux. A power cycle ended it and took every
+  counter that could have said which side stopped, so **the cause is not
+  known**. `deploy/wifi-watchdog.sh` (installed as `/usr/local/lib/gethome-wifi-
+  watchdog.sh`) is called at the end of every keep-alive round, and five rules
+  hold it up.
+  **REACHABLE is the answer, and the firmware cannot fake it.** The kernel
+  marks a neighbour REACHABLE only for an answer to its own unicast question or
+  a connection making progress, and the loop above asks every stale neighbour
+  every round. Measured on that hub, almost three hours of a night sampled every
+  5 s: never more than 10 s without a REACHABLE neighbour, never more than 30 s
+  without the gateway; and a probe at a link address nobody has went from
+  PROBE to FAILED in three seconds, IPv4 and IPv6 alike — `arp_ol=0x9` answers
+  ARP *for* the hub, never the hub's own questions. Five minutes is the trigger.
+  **Only after an answer since boot** (the state is in `/run`, so a network that
+  never answers can never start a loop), **only while NetworkManager says
+  `100 (connected)`** (asked in the C locale; `connected (externally)` is
+  somebody else's), so a router that is off or restarting — the link times out
+  in 15 s — never sets it off, **and only after asking again**: every neighbour
+  the keep-alive remembers, by unicast at its old link address, three seconds
+  for answers, so a round starved of CPU is not read as the network's silence.
+  **The driver first, then the machine.** brcmfmac only, the one driver this was
+  tried on: `modprobe -r` the vendor half and brcmfmac, `modprobe brcmfmac`,
+  once more if the radio is not back, and an immediate restart if it still is
+  not. Measured on that Zero 2 W: wlan0 gone for under a second, NetworkManager
+  connected 3.5 s after the reload began, 2.8 s of a Mac's 0.2-second pings
+  lost, Bluetooth up throughout, IPv6 on, power save off again through its
+  dispatcher. Five minutes later, if nothing has answered — whatever
+  NetworkManager says by then, and from rounds with no default route too, which
+  is why the keep-alive calls it with no interface there — it restarts the
+  machine, but never one that has been up for less than an hour, so at most
+  once an hour. Any other driver goes straight to the restart. **Not a
+  re-join**, though it is cheaper (measured: 2.5 s, 2.2 s of pings lost): an
+  activation runs the 4-way handshake in wpa_supplicant — this firmware lists
+  no FWSUP — and then DHCP, both across the path that stopped, so in this
+  failure it cannot finish and leaves NetworkManager not connected, where the
+  rule above would stop every later step. That part is reasoned, not measured.
+  And on NetworkManager 1.52.1 an activation of an `ipv6.method=ignore` profile
+  can leave `disable_ipv6=1` once the device has roamed — measured during the
+  re-join test, put right 0.2 s later by `51-gethome-matter-ipv6` where it is
+  installed — while the reload hands NetworkManager a new device and kept IPv6
+  on.
+  **A reload is followed by a restart of the hub, when the network answers
+  again.** matter.js joins its mDNS groups once, when it starts: after the
+  reload only avahi was in 224.0.0.251 and ff02::fb on the new wlan0
+  (`/proc/net/igmp` and `igmp6`, one user where there had been two), so Matter
+  kept its sessions and could not hear an accessory announce itself, until a
+  restart of `gethome-hubd` put it back — 35 s of the API on that board.
+  `src/adapters/matter/CLAUDE.md` carries the Matter half.
+  **It writes down what each side counted**: Linux's statistics and
+  `disable_ipv6`, the firmware's station counters through `iw`, brcmfmac's SDIO
+  bus counters (`/sys/kernel/debug/ieee80211/phy0/counters` — `intrcount`,
+  `f2rxdata`, `f2txdata`, `fc_xoff`/`fc_xon`), the transmit queue and the
+  neighbour table by state, at two minutes, before each step and when an answer
+  comes back, and that last line names the step taken before it. **That line is
+  the measurement this still lacks**: whether the reload cures the fault that
+  was seen is unknown — it has happened once — and the run that would have
+  checked the whole ladder on hardware, the hub dropping its own traffic until
+  the watchdog restarted it, was not done, because it takes the owner's hub off
+  the network for a quarter of an hour. Each step was run on its own there; the
+  ladder has only run against the suite's fakes. One case it cannot tell
+  apart: an access point that stays up with nothing behind it and nobody else
+  on it to answer. Nobody can reach the hub either way. The clock is
+  `/proc/uptime`, never the wall clock; everything it does is under
+  `journalctl -t gethome-wifi-watchdog`; and `test/deploy-wifi.test.ts` runs
+  the real script against a fake sysfs, `ip`, `nmcli`, `modprobe`, `iw`, `tc`,
+  `logger` and `systemctl` and a clock it moves.
 - **A Matter accessory out of its box needs Bluetooth, and a Raspberry Pi ships
   with it off.** A factory-new — or factory-reset — Wi-Fi Matter accessory
   advertises over BLE and nowhere else: it has no network to be found on yet.

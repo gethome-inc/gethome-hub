@@ -129,4 +129,4 @@ jobs:
             -exec mv -t /etc/apt/sources.list.d.off {} +
           sudo apt-get update -qq "${apt_opts[@]}"
           sudo apt-get install -y -qq "${apt_opts[@]}" shellcheck
-      - run: shellcheck -S warning deploy/install.sh deploy/zigbee-detect.sh deploy/update-runner.sh deploy/gethome-hubctl deploy/wifi-credentials.sh deploy/wifi-profile.sh deploy/wifi-networks.sh
+      - run: shellcheck -S warning deploy/install.sh deploy/zigbee-detect.sh deploy/update-runner.sh deploy/gethome-hubctl deploy/wifi-credentials.sh deploy/wifi-profile.sh deploy/wifi-networks.sh deploy/wifi-watchdog.sh
