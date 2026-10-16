@@ -275,6 +275,11 @@ describe.skipIf(!handle)('roles and permissions', () => {
       // A migration adds it to hubs that already exist; the suite below proves
       // that half.
       'hub.ai',
+      // Newer than everything above, and on the same reading: the person who
+      // wants their own software on the hub is the one standing in the house.
+      // A key never holds more than its member, so this hands out nothing a
+      // member does not already have. `0018` adds it to hubs that exist.
+      'hub.apikeys',
     ]);
     // What the old `ownerOnly` guarded, minus the one key deliberately moved.
     for (const ownerOnly of [
@@ -429,6 +434,17 @@ describe.skipIf(!handle)('roles and permissions', () => {
       ],
       ['POST', '/api/v1/invites', 'member.invite', {}],
       ['GET', '/api/v1/roles', '', undefined],
+      // A key for your own software is `hub.apikeys`, which Guest does not
+      // hold — making one and changing one alike. Seeing your own keys (none,
+      // here) is the floor, so somebody paused can still find and revoke theirs.
+      ['POST', '/api/v1/api-keys', 'hub.apikeys', { name: 'Mine' } as object],
+      [
+        'PATCH',
+        '/api/v1/api-keys/55555555-5555-4555-a555-555555555555',
+        'hub.apikeys',
+        { name: 'Renamed' } as object,
+      ],
+      ['GET', '/api/v1/api-keys', '', undefined],
       // Writing the rules the home runs by itself. **Pressing** one is
       // deliberately absent from this table: working the home is the floor, so
       // `POST /automations/:id/run` and `PUT …/active` take any token — see
@@ -2127,6 +2143,79 @@ describe.skipIf(!handle)('roles and permissions', () => {
       url: `/api/v1/zones/${zone.id}`,
       headers: auth(ownerToken),
     });
+  });
+
+  /**
+   * The allowed half of `hub.apikeys`, and the two rules for somebody else's
+   * key: revoking it is `member.remove`, and an owner's needs an owner.
+   * `test/api-keys.test.ts` is the whole of what a key may then do.
+   */
+  it('lets a member make and revoke their own keys, and member.remove revoke anybody’s', async () => {
+    const made = await app.inject({
+      method: 'POST',
+      url: '/api/v1/api-keys',
+      headers: auth(memberToken),
+      payload: { name: 'Anna’s script', control: true, permissions: ['device.edit'] },
+    });
+    expect(made.statusCode).toBe(201);
+    const annas = (made.json() as { key: { id: string } }).key.id;
+    const owners = (
+      (
+        await app.inject({
+          method: 'POST',
+          url: '/api/v1/api-keys',
+          headers: auth(ownerToken),
+          payload: { name: 'Georgy’s script' },
+        })
+      ).json() as { key: { id: string } }
+    ).key.id;
+
+    // Not somebody else's, without `member.remove`.
+    const refused = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/api-keys/${owners}`,
+      headers: auth(memberToken),
+    });
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json()).toEqual({ error: 'forbidden', permission: 'member.remove' });
+
+    // With it, anybody's but an owner's.
+    const remover = (
+      await app.inject({
+        method: 'POST',
+        url: '/api/v1/roles',
+        headers: auth(ownerToken),
+        payload: { name: 'Key keeper', permissions: ['member.remove'] },
+      })
+    ).json() as { id: string };
+    const keeper = await join('Sasha', 'member');
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/members/${keeper.id}`,
+      headers: auth(ownerToken),
+      payload: { roleId: remover.id },
+    });
+    const notOwner = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/api-keys/${owners}`,
+      headers: auth(keeper.token),
+    });
+    expect(notOwner.statusCode).toBe(403);
+    expect(notOwner.json()).toEqual({ error: 'not_owner' });
+    const revoked = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/api-keys/${annas}`,
+      headers: auth(keeper.token),
+    });
+    expect(revoked.statusCode).toBe(204);
+
+    // And your own is the floor, whatever your role says now.
+    const own = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/api-keys/${owners}`,
+      headers: auth(ownerToken),
+    });
+    expect(own.statusCode).toBe(204);
   });
 
   /**

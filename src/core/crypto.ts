@@ -38,6 +38,48 @@ export function generateToken(): string {
   return randomBytes(32).toString('base64url');
 }
 
+/** What every API key starts with — see `generateApiKeySecret`. */
+export const API_KEY_PREFIX = 'gethome_';
+
+const BASE62 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+
+/** 256 bits need 43 base-62 digits; every key is padded to exactly that. */
+const API_KEY_DIGITS = 43;
+
+/**
+ * A new API key: `gethome_` and 32 random bytes in base 62.
+ *
+ * **Base 62 because a key is something a person copies.** A member token never
+ * leaves an app, so base64url is fine there; a key is pasted into a terminal,
+ * a `.env` file, a Node-RED field — and `-` and `_` end a double-click
+ * selection in most of those, so a base64url key gets copied in pieces. Letters
+ * and digits select whole.
+ *
+ * **The prefix is what makes a leaked key recognisable** — to the hub, which
+ * tells a key from a member token without a second lookup; to a secret scanner;
+ * and to a person who finds one in a file and wonders what it opens. It is
+ * fixed-length (51 characters) for the same reason: a string of exactly this
+ * shape is a gethome key and nothing else.
+ */
+export function generateApiKeySecret(): string {
+  let value = BigInt(`0x${randomBytes(32).toString('hex')}`);
+  let digits = '';
+  while (value > 0n) {
+    digits = BASE62[Number(value % 62n)] + digits;
+    value /= 62n;
+  }
+  return API_KEY_PREFIX + digits.padStart(API_KEY_DIGITS, '0');
+}
+
+/** Whether a presented credential has the shape of an API key at all. */
+export function looksLikeApiKey(credential: string): boolean {
+  return (
+    credential.length === API_KEY_PREFIX.length + API_KEY_DIGITS &&
+    credential.startsWith(API_KEY_PREFIX) &&
+    /^[0-9A-Za-z]+$/.test(credential.slice(API_KEY_PREFIX.length))
+  );
+}
+
 export function sha256Hex(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }

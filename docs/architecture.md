@@ -33,6 +33,7 @@ plus a stock Postgres wanted half of it before the hub had started.
 | `src/adapters/` | Protocol drivers. Each implements `ProtocolAdapter` and talks to the rest of the hub only through the narrow `AdapterBus` (announce devices, report state, execute commands). Adapters never touch the database or the API. |
 | `src/core/registry.ts` | `DeviceRegistry` — implements the `AdapterBus`: persists devices/endpoints, merges state patches (per-device write queue + write-through cache), fans events out, routes commands back to the owning adapter. An adapter that fails to start is isolated; the hub keeps running — and its devices are marked offline, because a radio that isn't there cannot report them. |
 | `src/core/pairing.ts` | Claim flow: boot pairing code → first claim = owner; owner-minted invite codes (15 min TTL) → members. Opaque bearer tokens, sha256-hashed at rest. |
+| `src/core/api-keys.ts` | A member's **API keys** for their own software — a table of their own (`api_keys`), sha256-hashed at rest, read on every request. A key acts as its member, narrowed to what it was given (`AccessService.canThrough`), and only while its member's role holds `hub.apikeys`. Holds in memory only what is deliberately not a row: the exact last use (written through hourly), the last refusal, and a per-key rate bucket. See [api.md](api.md#api-keys). |
 | `src/core/crypto.ts` | Hub identity + AES-256-GCM key in `<data>/hub-secret.json` (survives database resets), token generation/hashing, secret encryption. |
 | `src/core/radio.ts` | The owner's Matter-or-Zigbee choice on a board that affords one radio, as a word in `<data>/radio-mode`, plus the moment it was asked for in `<data>/radio-requested`. Records only — applying it is root work, so a `.path` unit hands it to `gethome-zigbee-detect`. The moment is on disk because applying a radio **restarts the process that recorded it**, and an app polling across that gap used to draw "can't reach your hub" over a deliberate change. See [zigbee.md](zigbee.md#zigbee-or-matter-on-a-small-board) and [api.md](api.md#a-radio-switch-in-flight-radioapplying). |
 | `src/core/wifi.ts` | The Wi-Fi the hub hands a Matter accessory it is taking on over Bluetooth. Read from a file root writes for it (`/etc/gethome/wifi.env`), never from the system's own network configuration — the PSK is in a root-owned profile and the point of the service account is that it cannot read one. |
@@ -136,7 +137,15 @@ is [security.md](security.md).
 - Transport is plain HTTP/WS on the LAN; the API is bound to the local
   network. Remote access will arrive as an authenticated relay through the
   gethome server (future work) — the hub will never be port-forwarded.
-- AuthN: opaque bearer tokens issued at claim time, sha256-hashed at rest.
+- AuthN: opaque bearer tokens issued at claim time, sha256-hashed at rest —
+  and a member's **API keys**, the same kind of secret with a leash: they act as
+  their member and do only what they were given. `api/auth.ts` resolves either
+  to the member row, so everything that writes a member id keeps working, and
+  keeps the key beside it on the request.
+- Every route declares what an API key may do there — `read`, `control`, a
+  named permission, `deny` — and a route that declares nothing is closed to keys
+  if it changes anything. `api/server.ts` records the table and
+  `test/api-keys.test.ts` pins it, route by route.
 - AuthZ: roles are rows and permissions are a named vocabulary — Owner, Member
   and Guest ship built in and a home can add its own; working a device is the
   floor, and the owner is never evaluated against a table (see

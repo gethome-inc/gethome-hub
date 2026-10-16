@@ -5,6 +5,7 @@ import path from 'node:path';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { pino } from 'pino';
 import { PairingService } from '../src/core/pairing.js';
+import { ApiKeyService } from '../src/core/api-keys.js';
 import { sha256Hex, generateToken, encryptSecret, decryptSecret } from '../src/core/crypto.js';
 import { invites, members, tokens } from '../src/db/schema.js';
 import { HubEventBus } from '../src/core/bus.js';
@@ -209,6 +210,27 @@ describe.skipIf(!handle)('PairingService', () => {
     await db.delete(members).where(eq(members.id, anna!.member.id));
     expect(await pairing.claim(signIn!.code, 'Mallory')).toBeNull();
     expect(await db.select().from(members)).toHaveLength(1);
+  });
+
+  /**
+   * The rollback `api_keys` is a table of its own for: a build from before
+   * keys reads only `tokens`, exactly as this method does — so a key there is
+   * a 401, and never a full member token with none of its narrowing.
+   */
+  it('does not take an API key for a member token', async () => {
+    const code = readFileSync(path.join(dataDir, 'pairing-code'), 'utf8').trim();
+    const owner = await pairing.claim(code, 'Georgy');
+    const { secret } = await new ApiKeyService(db).create({
+      memberId: owner!.member.id,
+      name: 'Script',
+      control: true,
+      permissions: [],
+      expiresAt: null,
+    });
+    expect(await pairing.verifyToken(secret)).toBeNull();
+    // What a key resolves to instead: its member, read afresh.
+    expect(await pairing.member(owner!.member.id)).toMatchObject({ name: 'Georgy', role: 'owner' });
+    expect(await pairing.member('11111111-1111-4111-a111-111111111111')).toBeNull();
   });
 
   it('keeps the same pairing code across restarts while unclaimed', async () => {

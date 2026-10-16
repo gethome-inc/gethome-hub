@@ -719,8 +719,11 @@ adapter/registry/API change.
   nothing" rather than asserting it. `test/pairing.test.ts` owns the invite →
   role path, which is the only place a role is chosen for somebody who has no
   member row yet. A new permission key needs a line in the defaults assertion,
-  a guard test both ways, and a row in `docs/api.md`'s two tables; a new guarded
-  route needs its row in the refusal table and an allowed case somewhere.
+  a guard test both ways, and a row in `docs/api.md`'s two tables — and a
+  decision about whether an API key may hold it, which is *no* until somebody
+  adds it to `KEY_GRANTABLE` and to the exact list `test/access.test.ts` pins;
+  a new guarded route needs its row in the refusal table, an allowed case
+  somewhere, and its line in `test/api-keys.test.ts`'s route table.
   **`npm run typecheck` covers `test/` as well as `src/`, and that is what
   `tsconfig.test.json` is for.** It did not, for a while, and this is the rule
   that paid for it: `tsconfig.json` is the *build*, so it is `src`-only with
@@ -771,14 +774,64 @@ adapter/registry/API change.
   And **registration is scoped to the socket's life** — `authorize` adds,
   the close handler removes — so the map holds one entry per open connection
   and none per closed one. `test/api.test.ts` opens a real socket, removes its
-  member, and asserts both the close code and the silence. **Revoking is the
-  only thing this registry does**, and it briefly carried a `notifyAccess`
-  channel beside it on the reasoning that a role edit and a removal are one
-  question asked with different force. They are not: a removal is about one
-  member, and an access change is about the home — see the `announce` note in
-  the access bullet above. Nothing ever called it, and a per-member access
-  channel sitting there unused is an invitation to wire the narrow rule back
-  in, so it is gone.
+  member, and asserts both the close code and the silence. **Revoking is what
+  this registry is for** — a member's sockets, or one API key's — plus the two
+  things a key's sockets need from it: how many it holds (`countKey`, the
+  five-stream limit) and the grant they render with (`rekey`, after a key is
+  edited; the frame itself still goes out on the `accessChanged` broadcast). It
+  briefly carried a `notifyAccess` channel beside it on the reasoning that a
+  role edit and a removal are one question asked with different force. They
+  are not: a removal is about one member, and an access change is about the
+  home — see the `announce` note in the access bullet above. Nothing ever
+  called it, and a per-member access channel sitting there unused is an
+  invitation to wire the narrow rule back in, so it is gone.
+- **An API key is a member's token with a leash, and five rules hold the
+  leash on.** `docs/api.md#api-keys` is canonical; `src/core/api-keys.ts`,
+  `AccessService.canThrough` and `src/api/auth.ts` are the model.
+  **A table of its own, never rows in `tokens`** — because `install.sh` rolls
+  back after a migration has run, and an older build that found keys in
+  `tokens` would take each for a full member token with none of the narrowing.
+  In their own table they are a `401` there, which is failing closed.
+  **What a key may be given is an allowlist** (`KEY_GRANTABLE`), the opposite
+  of the owner rule and for the opposite reason: a permission a later build
+  adds is not grantable until somebody decides it is. `member.*`,
+  `role.manage`, `hub.apikeys`, `hub.ai`, `hub.mqtt*` and `hub.wifi` are out,
+  each for a stated reason, and the owner rule never reaches a key — an owner's
+  key holds what it was given. `automation.manage` needs `control`, because a
+  rule switches devices on its own. What a key holds is asked **live** against
+  its member's role, so a demotion narrows every key at once, and a key works
+  only while that role holds `hub.apikeys` (one switch pauses a role's keys).
+  **Every route declares a key policy, and an undeclared write is closed.** The
+  helpers say it — `authed` (read), `controls` (the floor's writes),
+  `keyAware` (the handler asks, `PATCH /devices/:id` and `/ws`), `memberOnly`,
+  `needs(p)` — and the `onRoute` hook in `server.ts` defaults a `GET` to
+  `read` and anything else to `deny`, and **refuses to build** a write declared
+  `read`: that is `authed` copied onto a `POST`, the one mistake worth stopping
+  loudly. `test/api-keys.test.ts` holds the whole table route by route — a new
+  route needs its line there, which is the point. Never through a key: minting
+  a credential (`POST /invites`, `/api-keys`), changing or ending a membership
+  (`/members/me`), and every conversation, reading included.
+  **A handler asks as the caller, never as the bare member** — `can(access,
+  request, p)` from `api/auth.ts`, `canAs`/`permissionsAs` on the socket.
+  `access.can(request.member.id, …)` compiles, passes every member test and
+  widens every key to its member's whole role, so the suite scans `src/api`
+  for it. And **what a key does is written as its member, through it**: every
+  activity row goes through `actor(request)`, which keeps `memberId` and
+  `data.memberName` the member's and adds `via: "api"`, the key's id and name,
+  and the key in the sentence. An explicit helper, deliberately not
+  AsyncLocalStorage, which would follow a key into the timers the automation
+  engine sets up during its request.
+  Three smaller things that bite. **The socket authenticates inside its
+  handler**, keys included, because a preHandler refusing an upgrade reaches the
+  client as 1006 rather than the 4001 contract; 1008 is a sixth stream for one
+  key and 1013 its rate. **Keys go in the header**: `?token=` with a key is
+  `401 key_in_query` on REST and taken only on `/ws`, and the API's logger
+  strips every query string (`req` serializer, `url`/`path` redaction, and a
+  404 handler that does not log the URL) — `test/api-keys.test.ts` proves it at
+  `trace` against a listening server. And **the `/api-keys` bodies are
+  `.strict()`**: zod strips what it does not know, so a narrowing field a later
+  build adds would be dropped by an older hub and the key made broader than
+  asked — a 400 is the only safe answer.
 - matter.js is pinned to a minor (`~0.17.x`) because its API churns; keep all
   matter.js-specific code inside `src/adapters/matter/`.
 - `tsconfig` uses `exactOptionalPropertyTypes` — build optional-field objects

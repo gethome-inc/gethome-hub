@@ -1,6 +1,13 @@
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import { AccessService, BUILTIN_ROLES, PERMISSION_KEYS } from '../src/core/access.js';
+import {
+  AccessService,
+  BUILTIN_ROLES,
+  isKeyGrantable,
+  KEY_GRANTABLE,
+  PERMISSION_KEYS,
+  type PermissionKey,
+} from '../src/core/access.js';
 import { HubEventBus } from '../src/core/bus.js';
 import { members, roles } from '../src/db/schema.js';
 import { openTestDb, resetDb } from './helpers/db.js';
@@ -40,6 +47,20 @@ describe.skipIf(!handle)('access service', () => {
     const access = new AccessService(db, events);
     await access.load();
     return access;
+  };
+
+  /**
+   * Put the built-in rows back to their defaults. `resetDb` keeps built-in
+   * roles — they are part of the schema a hub boots with — so a test above
+   * that edited Member leaves it edited for every test after it.
+   */
+  const restoreBuiltins = async (): Promise<void> => {
+    for (const builtin of BUILTIN_ROLES) {
+      await db
+        .update(roles)
+        .set({ permissions: [...builtin.permissions] })
+        .where(eq(roles.key, builtin.key));
+    }
   };
 
   beforeEach(async () => {
@@ -310,6 +331,104 @@ describe.skipIf(!handle)('access service', () => {
     // back to reads that column on every authenticated request.
     const row = await db.query.members.findFirst({ where: eq(members.id, anna) });
     expect(row?.role).toBe('member');
+  });
+
+  // ── API keys ──────────────────────────────────────────────────────────────
+
+  /**
+   * `hub.apikeys` is an ordinary key in the catalog, and what a key may be
+   * *given* is a separate, shorter list — an allowlist, so a permission a
+   * later build adds is not grantable until somebody decides it is.
+   */
+  it('lists hub.apikeys, and exactly the grantable keys', () => {
+    expect(PERMISSION_KEYS).toContain('hub.apikeys');
+    expect(KEY_GRANTABLE).toEqual([
+      'device.edit',
+      'device.add',
+      'device.remove',
+      'home.structure',
+      'home.rename',
+      'activity.read',
+      'automation.manage',
+      'hub.radio',
+      'hub.update',
+    ]);
+    // Catalog order, and every one of them a real key.
+    expect(KEY_GRANTABLE).toEqual(PERMISSION_KEYS.filter((key) => KEY_GRANTABLE.includes(key)));
+    for (const never of ['hub.apikeys', 'hub.ai', 'hub.mqtt', 'hub.mqtt.admin', 'hub.wifi', 'role.manage', 'member.invite', 'member.remove']) {
+      expect(isKeyGrantable(never), never).toBe(false);
+    }
+  });
+
+  /**
+   * **A key is its member, narrowed — never widened.** Four answers decide it
+   * and each is asked here on its own: the member is still in the home, the
+   * permission is grantable, the key was given it, and the member holds it
+   * right now.
+   */
+  it('answers for a key only what its member holds and it was given', async () => {
+    await restoreBuiltins();
+    const access = await loaded();
+    const anna = await addMember('Anna', { role: 'member', roleId: access.builtinRoleId('member') });
+    access.noteMember(anna, access.builtinRoleId('member'));
+    const grant = { control: true, permissions: ['device.edit', 'home.rename', 'automation.manage'] as PermissionKey[] };
+
+    // Given and held.
+    expect(access.canThrough(anna, 'device.edit', grant)).toBe(true);
+    expect(access.canThrough(anna, 'automation.manage', grant)).toBe(true);
+    // Given, but Member does not hold it.
+    expect(access.canThrough(anna, 'home.rename', grant)).toBe(false);
+    // Held, but not given.
+    expect(access.canThrough(anna, 'home.structure', grant)).toBe(false);
+    // Held and "given", but no key may ever hold it.
+    expect(access.canThrough(anna, 'hub.ai', { control: true, permissions: ['hub.ai'] })).toBe(false);
+    // `automation.manage` needs `control` even when a row somehow holds it.
+    expect(access.canThrough(anna, 'automation.manage', { control: false, permissions: ['automation.manage'] })).toBe(false);
+    expect(access.permissionsThrough(anna, grant)).toEqual(['device.edit', 'automation.manage']);
+
+    // A member moved to a smaller role narrows every key at once.
+    await access.assignRole(anna, access.builtinRoleId('guest')!);
+    expect(access.canThrough(anna, 'device.edit', grant)).toBe(false);
+    expect(access.permissionsThrough(anna, grant)).toEqual([]);
+  });
+
+  /**
+   * The owner rule — never evaluated — is about a person who can always put
+   * the matrix back. A script cannot, so an owner's key holds what it was
+   * given and nothing more, and an empty grant is nothing at all.
+   */
+  it('never widens an owner’s key to the owner', async () => {
+    await restoreBuiltins();
+    const access = await loaded();
+    const ownerRole = access.builtinRoleId('owner')!;
+    const georgy = await addMember('Georgy', { role: 'owner', roleId: ownerRole });
+    access.noteMember(georgy, ownerRole);
+    for (const key of PERMISSION_KEYS) {
+      expect(access.canThrough(georgy, key, { control: true, permissions: [] }), key).toBe(false);
+    }
+    expect(access.canThrough(georgy, 'home.rename', { control: false, permissions: ['home.rename'] })).toBe(true);
+    // And the plain `canAs` with no grant is the owner themselves.
+    expect(access.canAs(georgy, 'hub.ai', null)).toBe(true);
+  });
+
+  /**
+   * `roleFor` answers the default role for an id it has never seen, so
+   * `can()` alone would hand a stranger Member's permissions. A key whose
+   * member is gone must be worth nothing, so `canThrough` asks first.
+   */
+  it('gives a key whose member is gone nothing', async () => {
+    await restoreBuiltins();
+    const access = await loaded();
+    const grant = { control: true, permissions: ['device.edit'] as PermissionKey[] };
+    expect(access.can('nobody-at-all', 'device.edit')).toBe(true);
+    expect(access.canThrough('nobody-at-all', 'device.edit', grant)).toBe(false);
+
+    const kolya = await addMember('Kolya', { role: 'member', roleId: access.builtinRoleId('member') });
+    access.noteMember(kolya, access.builtinRoleId('member'));
+    expect(access.canThrough(kolya, 'device.edit', grant)).toBe(true);
+    await db.delete(members).where(eq(members.id, kolya));
+    access.forgetMember(kolya);
+    expect(access.canThrough(kolya, 'device.edit', grant)).toBe(false);
   });
 
   /**

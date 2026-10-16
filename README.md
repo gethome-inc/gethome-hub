@@ -73,7 +73,7 @@ flowchart TB
 - **Devices it has never seen.** Pair a Zigbee device the hub doesn't know and an agent works out what it is, so it gets real controls instead of a blank tile. It needs your AI key; without one the device still appears, flagged *needs review*. → [AI device recognition](docs/ai-adaptation.md)
 - **A home for everyone in it.** Invite family with a short-lived code. Owner, Member and Guest come built in, you can add roles of your own, and the same person can sign in on a second device as themselves. → [Roles and sharing](docs/api.md#roles-and-permissions-in-full)
 - **What happened, and when.** Temperature, humidity, air quality and power are kept in five-minute steps for a week, and an activity feed shows what was asked of the home, and by whom. → [History](docs/api.md#recorded-readings-get-devicesidhistory)
-- **Build your own.** Anything that can publish JSON over MQTT can be a device, with no hub-side code, and the hub's local REST and WebSocket API is documented. → [The MQTT convention](docs/mqtt-integrations.md) · [The API](docs/api.md)
+- **Build your own.** Anything that can publish JSON over MQTT can be a device, with no hub-side code. Your own scripts, dashboards and AI agents use the hub's local REST and WebSocket API with an API key — narrowed to what you give it, and taken back with one tap. → [Building on a hub](docs/integrations.md) · [The MQTT convention](docs/mqtt-integrations.md) · [The API](docs/api.md)
 - **Private by default.** No cloud account, and your AI key stays on the hub. → [Private by design](#private-by-design)
 
 Also: AI portraits of your devices, drawn on the hub with your OpenAI key and shared by everyone in the home ([portraits](docs/portraits.md)).
@@ -144,7 +144,7 @@ The API answers at `http://<hub>:8420/api/v1/hub`. An update keeps the running b
 
 - **No cloud account, relay or tunnel.** The hub opens nothing through your router, and your home lives in one file on its own card. **Don't forward port 8420 (the API) or 1883 (MQTT)** — both are plain connections meant for your home network, and your router is the boundary.
 - **Your AI key stays on the hub**, encrypted, and the API never returns it — not even to your phone. AI is optional, and [what each feature sends](https://gethome.me/privacy#ai) is written down.
-- **Every request but three needs a token** (the hub's public description, the claim, and the hub proving it is itself to an app that already has one), and the hub refuses any request addressed to a public domain name, which stops a web page from reaching it through your browser.
+- **Every request but three needs a token or an API key** (the hub's public description, the claim, and the hub proving it is itself to an app that already has one), and the hub refuses any request addressed to a public domain name, which stops a web page from reaching it through your browser.
 - **The installer checks what it downloads** against published checksums, and leaves your running hub alone if anything doesn't match.
 
 → [Privacy and network security](docs/security.md), including the short, honest list of what does leave the hub.
@@ -168,6 +168,7 @@ The API answers at `http://<hub>:8420/api/v1/hub`. An update keeps the running b
 
 **Build on it**
 
+- [Building on a hub](docs/integrations.md) — API keys, your own software, and agent skills for Claude Code, Codex and others
 - [The API](docs/api.md) · [The device schema](docs/device-schema.md) · [Architecture](docs/architecture.md) · [The gethome family](docs/ecosystem.md)
 
 ## For developers

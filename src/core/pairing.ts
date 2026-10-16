@@ -41,6 +41,15 @@ export interface ClaimResult {
   signedIn: boolean;
 }
 
+function toMember(row: { id: string; name: string; role: string; roleId: string | null }): Member {
+  return {
+    id: row.id,
+    name: row.name,
+    role: row.role === 'owner' ? 'owner' : 'member',
+    roleId: row.roleId,
+  };
+}
+
 const INVITE_TTL_MS = 15 * 60 * 1000;
 const CLAIM_REPLAY_TTL_MS = 5 * 60 * 1000;
 const LAST_USED_RESOLUTION_MS = 60 * 60 * 1000;
@@ -304,12 +313,19 @@ export class PairingService {
         // Never fail a request because a timestamp didn't stick.
       }
     }
-    return {
-      id: member.id,
-      name: member.name,
-      role: member.role === 'owner' ? 'owner' : 'member',
-      roleId: member.roleId,
-    };
+    return toMember(member);
+  }
+
+  /**
+   * A member by id — what an API key resolves to.
+   *
+   * Read from the table on every request, the way `verifyToken` reads it, so a
+   * key whose member has just been removed is worth nothing and the name on
+   * what it does is the member's name as it stands now.
+   */
+  async member(memberId: string): Promise<Member | null> {
+    const member = await this.db.query.members.findFirst({ where: eq(members.id, memberId) });
+    return member ? toMember(member) : null;
   }
 
   /**

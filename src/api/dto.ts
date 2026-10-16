@@ -1,4 +1,4 @@
-import type { AccessService } from '../core/access.js';
+import type { AccessService, KeyGrant } from '../core/access.js';
 import { hubWifiView, offlineElsewhere, type HubWifiView } from '../core/device-network.js';
 import type { RegistryDevice } from '../core/registry.js';
 
@@ -17,14 +17,21 @@ export interface DeviceWireView {
   namesNetworks?: boolean;
 }
 
-/** The view for one reader, asked once per render rather than per device. */
+/**
+ * The view for one reader, asked once per render rather than per device.
+ *
+ * `grant` is the key the reader came through, if they came through one — a
+ * key reads as its member narrowed, and `hub.wifi` is not something a key is
+ * ever given, so a key is told a device is on another network and not which.
+ */
 export function deviceWireView(
   deps: { dataDir: string; hubWifi?: () => HubWifiView | undefined; access: AccessService },
   memberId: string | null,
+  grant?: KeyGrant | null,
 ): DeviceWireView {
   return {
     hubWifi: (deps.hubWifi ?? (() => hubWifiView(deps.dataDir)))(),
-    namesNetworks: memberId !== null && deps.access.can(memberId, 'hub.wifi'),
+    namesNetworks: memberId !== null && deps.access.canAs(memberId, 'hub.wifi', grant),
   };
 }
 

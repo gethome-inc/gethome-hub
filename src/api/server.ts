@@ -92,16 +92,43 @@ import { PortraitDrawError } from '../portraits/openai-images.js';
 import { MAX_WINDOW_SECONDS, type PermitJoinService } from '../core/permit-join.js';
 import { createHubStatusReader } from '../core/hub-status.js';
 import { deviceWire, deviceWireView } from './dto.js';
-import { extractToken, requireMember, requirePermission } from './auth.js';
+import {
+  authenticate,
+  can,
+  extractCredential,
+  isPrincipalHandler,
+  mayControl,
+  pathOf,
+  requirePermission,
+  requirePrincipal,
+  type ApiKeyPolicy,
+  type RoutePolicy,
+} from './auth.js';
 import { createHostCheck, createRefusalLogGate, hostnameFromHeader } from './host-guard.js';
 import {
+  isKeyGrantable,
+  KEY_GRANTABLE,
   OWNER_ROLE_KEY,
   PERMISSIONS,
   PERMISSION_KEYS,
   type AccessService,
   type PermissionKey,
 } from '../core/access.js';
-import { attachWebSocket, MemberSessions, UNAUTHORIZED_CLOSE_CODE } from './ws.js';
+import {
+  apiKeyState,
+  ApiKeyService,
+  MAX_KEY_LIFETIME_DAYS,
+  MAX_KEYS_PER_MEMBER,
+  MAX_SOCKETS_PER_KEY,
+  type ApiKeyRecord,
+} from '../core/api-keys.js';
+import {
+  attachWebSocket,
+  KEY_LIMIT_CLOSE_CODE,
+  KEY_RATE_CLOSE_CODE,
+  MemberSessions,
+  UNAUTHORIZED_CLOSE_CODE,
+} from './ws.js';
 
 export interface ApiDeps {
   db: Db;
@@ -301,10 +328,86 @@ const memberNameSchema = z.string().trim().min(1).max(80);
 /** A device model's identity in the mapping library: a sha256 hex digest. */
 const hashParam = z.object({ exposesHash: z.string().regex(/^[0-9a-f]{64}$/) });
 
+/** A string with any query string cut off; anything else as it was. */
+function withoutQuery(value: unknown): unknown {
+  return typeof value === 'string' ? pathOf(value) : value;
+}
+
+/**
+ * The request as the log writes it — Fastify's own fields, with the path and
+ * never the query, which is where a credential travels when it travels badly.
+ */
+function requestForLog(request: FastifyRequest) {
+  return {
+    method: request.method,
+    url: pathOf(request.url),
+    host: request.host,
+    remoteAddress: request.ip,
+    remotePort: request.socket?.remotePort,
+  };
+}
+
+/**
+ * An API key as an app draws it — `GET /api-keys`, and the answer to every
+ * route that makes or changes one.
+ *
+ * **What it was given beside what it can do now**: `permissions` is the
+ * grant, and `effective` is that grant narrowed by what its member may do
+ * today, so an app can say "can rename devices — but Alex's role no longer
+ * allows that" rather than leaving somebody to work out why a key stopped. And
+ * `state` says whether it works at all, separately, because a paused key still
+ * has a grant worth showing.
+ */
+function apiKeyWire(
+  key: ApiKeyRecord,
+  context: {
+    access: AccessService;
+    memberName: string | null;
+    callerId: string;
+    connections: number;
+    lastRefusal: ReturnType<ApiKeyService['lastRefusal']>;
+  },
+) {
+  return {
+    id: key.id,
+    name: key.name,
+    hint: key.hint,
+    memberId: key.memberId,
+    memberName: context.memberName,
+    isMine: key.memberId === context.callerId,
+    state: apiKeyState(key, context.access),
+    control: key.control,
+    permissions: key.permissions,
+    effective: context.access.permissionsThrough(key.memberId, key),
+    createdAt: key.createdAt.toISOString(),
+    expiresAt: key.expiresAt?.toISOString() ?? null,
+    lastUsedAt: key.lastUsedAt?.toISOString() ?? null,
+    lastUsedFrom: key.lastUsedFrom,
+    /** Event streams open on it right now. */
+    connections: context.connections,
+    ...(context.lastRefusal !== undefined
+      ? {
+          lastRefusal: {
+            at: context.lastRefusal.at.toISOString(),
+            status: context.lastRefusal.status,
+            error: context.lastRefusal.error,
+            ...(context.lastRefusal.permission !== undefined
+              ? { permission: context.lastRefusal.permission }
+              : {}),
+            ...(context.lastRefusal.reason !== undefined ? { reason: context.lastRefusal.reason } : {}),
+            method: context.lastRefusal.method,
+            path: context.lastRefusal.path,
+          },
+        }
+      : {}),
+  };
+}
+
 /**
  * The hub's local API: REST under /api/v1 plus a WebSocket event stream.
- * Auth is a bearer token issued by the pairing claim flow; `GET /api/v1/hub`
- * is the only unauthenticated route (discovery/health).
+ * Auth is a bearer token — a member's, issued by the pairing claim flow, or one
+ * of a member's API keys (`core/api-keys.ts`). `GET /hub`, `POST /pair` and
+ * `POST /hub/proof` are the only unauthenticated routes.
  */
 export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   // pino v10 instance vs fastify's bundled pino types — structurally identical.
@@ -319,10 +422,72 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   const app = Fastify({
     loggerInstance: deps.log.child(
       { module: 'api' },
-      verbose ? {} : { level: 'warn' },
+      {
+        ...(verbose ? {} : { level: 'warn' }),
+        // **No query string reaches the journal.** A credential may be in one
+        // — the apps' sockets have sent `?token=`, and an API key sent that way
+        // is refused but has still arrived — and an operator who turns the log
+        // up to `debug` to find a fault must not end up with a log file that
+        // opens their home. Fastify's own request line is the `req` serializer;
+        // `url` and `path` cover the lines that name a request directly (the
+        // host guard's, and the WebSocket plugin's).
+        serializers: { req: requestForLog },
+        redact: { paths: ['url', 'path'], censor: (value: unknown) => withoutQuery(value) },
+      },
     ) as unknown as FastifyBaseLogger,
   });
   await app.register(websocket);
+
+  app.decorateRequest('member', null);
+  app.decorateRequest('apiKey', null);
+
+  /**
+   * What an API key may do on every route, decided when the route is
+   * registered — and **closed unless a route says otherwise**.
+   *
+   * A route that declares nothing is `read` if it is a `GET` and `deny` if it
+   * changes anything, so a write added tomorrow by somebody who never thought
+   * about keys is not something a key can call. And a write that *declares*
+   * `read` does not build at all: that would be every key's to call, and the
+   * reason it would happen is the floor's `authed` copied onto a `POST` —
+   * which is exactly the mistake worth refusing loudly rather than shipping.
+   *
+   * Recorded whole on `app.apiKeyPolicies`, which `test/api-keys.test.ts`
+   * holds against the routes one by one.
+   */
+  const policies: RoutePolicy[] = [];
+  app.addHook('onRoute', (route) => {
+    const methods = (Array.isArray(route.method) ? route.method : [route.method]).map((m) =>
+      String(m).toUpperCase(),
+    );
+    const reads = methods.every((method) => method === 'GET' || method === 'HEAD');
+    const declared = route.config?.apiKey;
+    const policy: ApiKeyPolicy = declared ?? (reads ? 'read' : 'deny');
+    const label = `${methods.join(',')} ${route.url}`;
+    if (policy === 'read' && !reads) {
+      throw new Error(
+        `${label}: a route that changes something cannot be open to every API key — ` +
+          'declare it controls, keyAware, memberOnly or needs(…) instead of authed',
+      );
+    }
+    if (policy === 'permission' && route.config?.permission === undefined) {
+      throw new Error(`${label}: a permission policy has to name its permission`);
+    }
+    route.config = { ...route.config, apiKey: policy };
+    const preHandlers = [route.preHandler].flat().filter((handler) => handler !== undefined);
+    policies.push({
+      method: methods.join(','),
+      url: route.url,
+      policy,
+      ...(route.config.permission !== undefined ? { permission: route.config.permission } : {}),
+      authenticated: preHandlers.some((handler) => isPrincipalHandler(handler)),
+    });
+  });
+  app.decorate('apiKeyPolicies', policies);
+
+  /** A member's keys for their own software — `core/api-keys.ts`. */
+  const apiKeys = new ApiKeyService(deps.db);
+  const principal = requirePrincipal({ pairing: deps.pairing, apiKeys, access: deps.access });
 
   /**
    * The floor: any member of this home, whatever their role.
@@ -332,12 +497,105 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * and none appears in the matrix. A role that could take them away would
    * leave somebody holding a token that can only 401, behind an app with
    * nothing to draw.
+   *
+   * **Reading only, as far as a key is concerned.** Every key reads what its
+   * member reads; the floor's *writes* are split out below, because a key
+   * that may read has not thereby been given the house.
    */
-  const authed = { preHandler: [requireMember(deps.pairing)] };
+  const authed = { preHandler: [principal], config: { apiKey: 'read' as const } };
+  /** The floor's writes — working a device, pressing a scene. A key needs `control`. */
+  const controls = { preHandler: [principal], config: { apiKey: 'control' as const } };
+  /** The handler asks for itself, because the body decides which question. */
+  const keyAware = { preHandler: [principal], config: { apiKey: 'handler' as const } };
+  /** The member and never one of their keys. */
+  const memberOnly = { preHandler: [principal], config: { apiKey: 'deny' as const } };
   /** Everything else names the permission it needs. */
   const needs = (permission: PermissionKey) => ({
-    preHandler: [requireMember(deps.pairing), requirePermission(deps.access, permission)],
+    preHandler: [principal, requirePermission(deps.access, permission)],
+    config: { apiKey: 'permission' as const, permission },
   });
+  /** A permission's route that no key may call even with the permission. */
+  const memberOnlyNeeds = (permission: PermissionKey) => ({
+    ...needs(permission),
+    config: { apiKey: 'deny' as const, permission },
+  });
+
+  /**
+   * Who did it, as the activity log writes it down.
+   *
+   * **A key acts as its member, and says so.** `memberId` and
+   * `data.memberName` stay the member's, so every row is still somebody's —
+   * the apps' "who" and the narrowing of the feed for a member without
+   * `activity.read` both keep working — and the key rides beside it as
+   * `data.via: "api"` with its id and name. The *sentence* names the key,
+   * because `message` is what an app that has never heard of keys shows: a
+   * light that went on at three in the morning reads "Alex’s “Node-RED” ·
+   * Desk lamp: power" rather than blaming Alex's phone.
+   *
+   * An explicit helper at every site rather than something ambient, because
+   * the obvious ambient answer — AsyncLocalStorage — would follow a key into
+   * every timer the automation engine sets up while one of its requests is
+   * running, and attribute a rule's next firing to it.
+   */
+  const actor = (request: FastifyRequest) => {
+    const member = request.member!;
+    const key = request.apiKey;
+    if (!key) {
+      return { name: member.name, memberId: member.id, data: { memberName: member.name } };
+    }
+    return {
+      name: `${member.name}’s “${key.name}”`,
+      memberId: member.id,
+      data: { memberName: member.name, via: 'api', apiKeyId: key.id, apiKeyName: key.name },
+    };
+  };
+
+  /**
+   * What a key met, written down where its owner can find it.
+   *
+   * Every refusal after a key has been recognised passes through here — the
+   * route guards', the handlers' and the error handler's alike — which is the
+   * one place that sees them all without each route remembering to. The body
+   * is a few bytes of JSON on an error path, and this runs only for a request
+   * made with a key.
+   */
+  app.addHook('onSend', async (request, reply, payload) => {
+    const key = request.apiKey;
+    if (key === null || reply.statusCode < 400) return payload;
+    let body: Record<string, unknown> = {};
+    if (typeof payload === 'string') {
+      try {
+        const parsed: unknown = JSON.parse(payload);
+        if (parsed !== null && typeof parsed === 'object') body = parsed as Record<string, unknown>;
+      } catch {
+        // Not JSON — the status is still worth having.
+      }
+    }
+    apiKeys.noteRefusal(key.id, {
+      at: new Date(),
+      status: reply.statusCode,
+      error: typeof body.error === 'string' ? body.error : String(reply.statusCode),
+      ...(typeof body.permission === 'string' ? { permission: body.permission } : {}),
+      ...(typeof body.reason === 'string' ? { reason: body.reason } : {}),
+      method: request.method,
+      path: pathOf(request.url),
+    });
+    return payload;
+  });
+
+  /**
+   * Fastify's own 404, without the line its default handler logs: that one
+   * writes the whole URL — query string, and any credential in it — at `info`.
+   * The body is the one it has always answered with, less the query it echoed.
+   */
+  app.setNotFoundHandler((request, reply) =>
+    reply.code(404).send({
+      message: `Route ${request.method}:${pathOf(request.url)} not found`,
+      error: 'Not Found',
+      statusCode: 404,
+    }),
+  );
+
   const commissionJobs = new Map<string, CommissionJob>();
   /**
    * Who is holding a live event stream, so removing them can hang it up.
@@ -424,7 +682,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const hostname = hostnameFromHeader(request.headers.host);
     if (shouldLogRefusal(hostname)) {
       deps.log.warn(
-        { host: hostname, url: request.url },
+        // The path and never the query: `deps.log` is not the API's redacting
+        // logger, and a query string is where a credential travels badly.
+        { host: hostname, url: pathOf(request.url) },
         'Refused a request addressed to a name this hub does not answer to. If this is how you ' +
           'reach your own hub, add it to EXTRA_ALLOWED_HOSTS in /etc/gethome/hub.env.',
       );
@@ -470,7 +730,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   const hubStatus = createHubStatusReader(deps);
   const wifiNetworksCapability = wifiAvailability(deps.dataDir);
 
-  app.get('/api/v1/hub', async () => ({
+  /** No credential at all — the health check, the claim, and the proof. */
+  const open = { config: { apiKey: 'public' as const } };
+
+  app.get('/api/v1/hub', open, async () => ({
     hubId: deps.hubId,
     // The home's name. One hub hosts one home, so a hub with a name of its own
     // was only ever a second place for the same fact to go stale — this route
@@ -515,6 +778,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // installer writes it and then restarts the hub, so it cannot change
     // underneath a running one, and this route must not touch the disk.
     wifiNetworks: wifiNetworksCapability,
+    // Additive, and presence is the capability: a hub carrying this block has
+    // `/api-keys`, so an app may offer to make a key and an agent may tell the
+    // person it is helping that this hub can be given one. `grantable` is what
+    // a key may be handed beyond reading and `control`, so an app draws the
+    // choices this hub will accept rather than a list from its own build.
+    // Static, and therefore cannot throw — this route is the health check.
+    apiKeys: { grantable: KEY_GRANTABLE },
     // Additive: an app that doesn't know about this field ignores it, and one
     // that does can say "plug a coordinator in" instead of showing an empty
     // Zigbee section with no explanation.
@@ -538,7 +808,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * answers 404, which an app treats as "not proven" and does not follow.
    */
   const ownAddresses = deps.ownAddresses ?? ownIPv4Addresses;
-  app.post('/api/v1/hub/proof', async (request, reply) => {
+  app.post('/api/v1/hub/proof', open, async (request, reply) => {
     const body = z
       .object({
         nonce: z.string().regex(/^[0-9a-f]{32,128}$/),
@@ -600,7 +870,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     };
   };
 
-  app.post('/api/v1/pair', async (request, reply) => {
+  app.post('/api/v1/pair', open, async (request, reply) => {
     const body = z
       .object({
         code: z.string().min(4).max(16),
@@ -659,7 +929,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       token: result.token,
       member: {
         ...memberWire({ id: result.member.id, name: result.member.name, role: result.member.role }),
-        permissions: deps.access.permissionsFor(result.member.id),
+        permissions: deps.access.permissionsAs(result.member.id, null),
       },
     };
   });
@@ -684,11 +954,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   app.patch('/api/v1/home', needs('home.rename'), async (request) => {
     const body = z.object({ name: z.string().trim().min(1).max(80) }).parse(request.body);
     const result = await deps.home.rename(body.name);
+    const who = actor(request);
     await deps.activity.record({
       kind: 'home.renamed',
-      message: `${request.member!.name} renamed the home to “${body.name}”.`,
-      memberId: request.member!.id,
-      data: { homeName: body.name, memberName: request.member!.name },
+      message: `${who.name} renamed the home to “${body.name}”.`,
+      memberId: who.memberId,
+      data: { homeName: body.name, ...who.data },
     });
     return result;
   });
@@ -795,11 +1066,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         sortOrder: body.sortOrder ?? (await nextSortOrder(rooms)),
       })
       .returning();
+    const who = actor(request);
     await deps.activity.record({
       kind: 'room.added',
-      message: `${request.member!.name} added the room “${body.name}”.`,
-      memberId: request.member!.id,
-      data: { roomName: body.name, memberName: request.member!.name },
+      message: `${who.name} added the room “${body.name}”.`,
+      memberId: who.memberId,
+      data: { roomName: body.name, ...who.data },
     });
     await announceStructure();
     return reply.code(201).send(roomWire(row!));
@@ -836,14 +1108,15 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       .returning();
     if (!row) return reply.code(404).send({ error: 'not_found' });
     if (body.name !== undefined && body.name !== before.name) {
+      const who = actor(request);
       await deps.activity.record({
         kind: 'room.renamed',
-        message: `${request.member!.name} renamed “${before.name}” to “${body.name}”.`,
-        memberId: request.member!.id,
+        message: `${who.name} renamed “${before.name}” to “${body.name}”.`,
+        memberId: who.memberId,
         data: {
           roomName: body.name,
           previousName: before.name,
-          memberName: request.member!.name,
+          ...who.data,
         },
       });
     }
@@ -869,11 +1142,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (!room) return reply.code(404).send({ error: 'not_found' });
     await deps.db.delete(rooms).where(eq(rooms.id, id));
     deps.registry.clearRoom(id);
+    const who = actor(request);
     await deps.activity.record({
       kind: 'room.removed',
-      message: `${request.member!.name} removed the room “${room.name}”.`,
-      memberId: request.member!.id,
-      data: { roomName: room.name, memberName: request.member!.name },
+      message: `${who.name} removed the room “${room.name}”.`,
+      memberId: who.memberId,
+      data: { roomName: room.name, ...who.data },
     });
     await announceStructure();
     return reply.code(204).send();
@@ -899,11 +1173,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       .insert(zones)
       .values({ name: body.name, sortOrder: body.sortOrder ?? (await nextSortOrder(zones)) })
       .returning();
+    const who = actor(request);
     await deps.activity.record({
       kind: 'zone.added',
-      message: `${request.member!.name} added the zone “${body.name}”.`,
-      memberId: request.member!.id,
-      data: { zoneName: body.name, memberName: request.member!.name },
+      message: `${who.name} added the zone “${body.name}”.`,
+      memberId: who.memberId,
+      data: { zoneName: body.name, ...who.data },
     });
     await announceStructure();
     return reply.code(201).send({ id: row!.id, name: row!.name, sortOrder: row!.sortOrder });
@@ -930,14 +1205,15 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // people see. Adding, renaming and removing a place are the three things
     // in this file that change the home's shape and all three say so.
     if (body.name !== undefined && body.name !== before.name) {
+      const who = actor(request);
       await deps.activity.record({
         kind: 'zone.renamed',
-        message: `${request.member!.name} renamed the zone “${before.name}” to “${body.name}”.`,
-        memberId: request.member!.id,
+        message: `${who.name} renamed the zone “${before.name}” to “${body.name}”.`,
+        memberId: who.memberId,
         data: {
           zoneName: body.name,
           previousName: before.name,
-          memberName: request.member!.name,
+          ...who.data,
         },
       });
     }
@@ -962,11 +1238,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (!zone) return reply.code(404).send({ error: 'not_found' });
     await deps.db.update(rooms).set({ zoneId: null }).where(eq(rooms.zoneId, id));
     await deps.db.delete(zones).where(eq(zones.id, id));
+    const who = actor(request);
     await deps.activity.record({
       kind: 'zone.removed',
-      message: `${request.member!.name} removed the zone “${zone.name}”.`,
-      memberId: request.member!.id,
-      data: { zoneName: zone.name, memberName: request.member!.name },
+      message: `${who.name} removed the zone “${zone.name}”.`,
+      memberId: who.memberId,
+      data: { zoneName: zone.name, ...who.data },
     });
     await announceStructure();
     return reply.code(204).send();
@@ -991,7 +1268,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
 
   app.get('/api/v1/devices', authed, async (request) => {
     const memberId = request.member!.id;
-    const view = deviceWireView(deps, memberId);
+    const view = deviceWireView(deps, memberId, request.apiKey);
     return deps.registry
       .listDevices()
       .map((device) => deviceWire(device, deps.favorites.isFavorite(memberId, device.id), view));
@@ -1018,8 +1295,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * lights must be able to put the kettle on their own dashboard. Checking the
    * whole route would have taken that away; not checking it at all would let a
    * guest rename everybody's devices. So the guard reads the body.
+   *
+   * **And it is why a key is asked here too**: a pin is the floor's write, so
+   * a key needs `control` for it, while the house's half is `device.edit`
+   * through the key like anywhere else.
    */
-  app.patch('/api/v1/devices/:id', authed, async (request, reply) => {
+  app.patch('/api/v1/devices/:id', keyAware, async (request, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     const body = z
       .object({
@@ -1041,9 +1322,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const memberId = request.member!.id;
     const touchesTheHouse =
       body.name !== undefined || body.roomId !== undefined || body.offlineExpected !== undefined;
-    if (touchesTheHouse && !deps.access.can(memberId, 'device.edit')) {
+    if (touchesTheHouse && !can(deps.access, request, 'device.edit')) {
       return reply.code(403).send({ error: 'forbidden', permission: 'device.edit' });
     }
+    if (body.favorite !== undefined && !mayControl(request)) {
+      return reply.code(403).send({ error: 'key_read_only' });
+    }
+    const who = actor(request);
     const before = deps.registry.getDevice(id);
     if (!before) return reply.code(404).send({ error: 'not_found' });
     if (body.roomId && !(await roomExists(body.roomId))) {
@@ -1073,13 +1358,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       await deps.activity.record({
         kind: 'device.offline-expected',
         message: body.offlineExpected
-          ? `${request.member!.name} said ${before.name} being offline is expected.`
-          : `${request.member!.name} said ${before.name} being offline is not expected after all.`,
+          ? `${who.name} said ${before.name} being offline is expected.`
+          : `${who.name} said ${before.name} being offline is not expected after all.`,
         deviceId: id,
         memberId,
         data: {
           deviceName: before.name,
-          memberName: request.member!.name,
+          ...who.data,
           expected: body.offlineExpected,
         },
       });
@@ -1097,13 +1382,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (body.name !== undefined && body.name !== previousName) {
       await deps.activity.record({
         kind: 'device.renamed',
-        message: `${request.member!.name} renamed “${previousName}” to “${body.name}”.`,
+        message: `${who.name} renamed “${previousName}” to “${body.name}”.`,
         deviceId: device.id,
         memberId,
         data: {
           deviceName: body.name,
           previousName,
-          memberName: request.member!.name,
+          ...who.data,
         },
       });
     }
@@ -1114,8 +1399,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       await deps.activity.record({
         kind: 'device.moved',
         message: room
-          ? `${request.member!.name} moved ${device.name} to ${room.name}.`
-          : `${request.member!.name} took ${device.name} out of its room.`,
+          ? `${who.name} moved ${device.name} to ${room.name}.`
+          : `${who.name} took ${device.name} out of its room.`,
         deviceId: device.id,
         memberId,
         data: {
@@ -1123,11 +1408,15 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
           // Absent is "out of every room", which is a real answer and the
           // reason the sentence above has two forms.
           ...(room ? { roomName: room.name } : {}),
-          memberName: request.member!.name,
+          ...who.data,
         },
       });
     }
-    return deviceWire(device, deps.favorites.isFavorite(memberId, id), deviceWireView(deps, memberId));
+    return deviceWire(
+      device,
+      deps.favorites.isFavorite(memberId, id),
+      deviceWireView(deps, memberId, request.apiKey),
+    );
   });
 
   const roomExists = async (id: string): Promise<boolean> =>
@@ -1154,8 +1443,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * in the catalog switched on for everybody: a permission every role must hold
    * is a row in the matrix that can only be wrong, and somebody would
    * eventually turn it off and find out what it means.
+   *
+   * A key needs `control` — the floor is the member's, and a key that may
+   * read has not thereby been given the house. Locks included: a key with
+   * `control` can unlock the door its member can.
    */
-  app.post('/api/v1/devices/:id/endpoints/:endpointId/commands', authed, async (request, reply) => {
+  app.post('/api/v1/devices/:id/endpoints/:endpointId/commands', controls, async (request, reply) => {
     const params = z
       .object({ id: z.uuid(), endpointId: z.coerce.number().int().min(0) })
       .parse(request.params);
@@ -1168,17 +1461,18 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     } catch (error) {
       return reply.code(409).send({ error: (error as Error).message });
     }
+    const who = actor(request);
     await deps.activity.record({
       kind: 'device.command',
-      message: `${request.member!.name} · ${device.name}: ${command.type}`,
+      message: `${who.name} · ${device.name}: ${command.type}`,
       deviceId: device.id,
-      memberId: request.member!.id,
+      memberId: who.memberId,
       // The whole command, not a summary of it: it is schema-bounded (the
       // largest is a 400-character custom field) and it is what lets an app
       // write "Turned on" instead of "power". The two names ride along
       // because both ids are `ON DELETE SET NULL` — a week later this row may
       // be all that is left of the device.
-      data: { command, deviceName: device.name, memberName: request.member!.name },
+      data: { command, deviceName: device.name, ...who.data },
     });
     return reply.code(202).send({ accepted: true });
   });
@@ -1350,12 +1644,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         // different picture. Only the drawing: choosing between portraits and
         // deleting one are restyles, and a restyle is not what somebody reads
         // the log for a week later — the same line `rooms.icon` holds.
+        const who = actor(request);
         await deps.activity.record({
           kind: 'device.portrait',
-          message: `${request.member!.name} had a new portrait drawn for ${device.name}.`,
-          memberId: request.member!.id,
+          message: `${who.name} had a new portrait drawn for ${device.name}.`,
+          memberId: who.memberId,
           deviceId: id,
-          data: { memberName: request.member!.name, deviceName: device.name },
+          data: { ...who.data, deviceName: device.name },
         });
         announcePortraits(id);
         return portrait;
@@ -1430,11 +1725,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // asked for, and the accessory's own arrival is the registry's
     // `device.added` a moment later. The pairing code never goes in — it is a
     // credential for the accessory, and this log is read by every member.
+    const who = actor(request);
     await deps.activity.record({
       kind: 'matter.commission',
-      message: `${request.member!.name} started pairing a Matter accessory.`,
-      memberId: request.member!.id,
-      data: { memberName: request.member!.name },
+      message: `${who.name} started pairing a Matter accessory.`,
+      memberId: who.memberId,
+      data: { ...who.data },
     });
     const startedAt = Date.now();
     const job: CommissionJob = {
@@ -1609,19 +1905,20 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // recorded with the name of whoever did it, the way a command is. The
     // *live* window is what gets logged, not the request: Zigbee2MQTT may
     // already have had one open and is the authority on this.
+    const who = actor(request);
     await deps.activity.record(
       state.active
         ? {
             kind: 'zigbee.permit-join',
-            message: `${request.member!.name} opened the Zigbee network for ${Math.round(state.remainingSeconds / 60)} min.`,
-            memberId: request.member!.id,
-            data: { memberName: request.member!.name, seconds: state.remainingSeconds },
+            message: `${who.name} opened the Zigbee network for ${Math.round(state.remainingSeconds / 60)} min.`,
+            memberId: who.memberId,
+            data: { ...who.data, seconds: state.remainingSeconds },
           }
         : {
             kind: 'zigbee.permit-join-closed',
-            message: `${request.member!.name} closed the Zigbee network.`,
-            memberId: request.member!.id,
-            data: { memberName: request.member!.name },
+            message: `${who.name} closed the Zigbee network.`,
+            memberId: who.memberId,
+            data: { ...who.data },
           },
     );
     return { permitJoin: state.active, seconds: state.remainingSeconds };
@@ -1651,12 +1948,31 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   app.get('/api/v1/me', authed, async (request) => {
     const me = request.member!;
     const role = deps.access.roleFor(me.id);
+    const key = request.apiKey;
     return {
       id: me.id,
       name: me.name,
       role: role ? { id: role.id, key: role.key, name: role.name } : null,
-      permissions: deps.access.permissionsFor(me.id),
+      // Through a key, what *this key* may do — its grant, narrowed by what
+      // its member may do now — because that is the question its software is
+      // asking. `role` and `isOwner` stay facts about the member.
+      permissions: deps.access.permissionsAs(me.id, key),
       isOwner: deps.access.isOwner(me.id),
+      // Present only through a key, which is how software tells that it is
+      // holding one and what it was given — `control` above all, since
+      // working the home is not a permission and so is never in the list.
+      ...(key
+        ? {
+            apiKey: {
+              id: key.id,
+              name: key.name,
+              control: key.control,
+              permissions: key.permissions,
+              state: apiKeyState(key, deps.access),
+              expiresAt: key.expiresAt?.toISOString() ?? null,
+            },
+          }
+        : {}),
     };
   });
 
@@ -1699,11 +2015,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       .object({ name: roleNameSchema, permissions: permissionListSchema.default([]) })
       .parse(request.body);
     const role = await deps.access.createRole(body.name, body.permissions);
+    const who = actor(request);
     await deps.activity.record({
       kind: 'role.added',
-      message: `${request.member!.name} added the role ${role.name}.`,
-      memberId: request.member!.id,
-      data: { roleName: role.name, memberName: request.member!.name },
+      message: `${who.name} added the role ${role.name}.`,
+      memberId: who.memberId,
+      data: { roleName: role.name, ...who.data },
     });
     return reply.code(201).send({ ...role, memberCount: 0 });
   });
@@ -1733,23 +2050,24 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // later, where "Georgy changed what Guest can do" is the whole of what
     // anybody is looking for. The `structure`-style live frame is what tells
     // an app that is open right now.
+    const who = actor(request);
     if (body.permissions !== undefined) {
       await deps.activity.record({
         kind: 'role.changed',
-        message: `${request.member!.name} changed what ${result.name} can do.`,
-        memberId: request.member!.id,
-        data: { roleName: result.name, memberName: request.member!.name },
+        message: `${who.name} changed what ${result.name} can do.`,
+        memberId: who.memberId,
+        data: { roleName: result.name, ...who.data },
       });
     }
     if (body.name !== undefined && before && before.name !== result.name) {
       await deps.activity.record({
         kind: 'role.renamed',
-        message: `${request.member!.name} renamed the role ${before.name} to ${result.name}.`,
-        memberId: request.member!.id,
+        message: `${who.name} renamed the role ${before.name} to ${result.name}.`,
+        memberId: who.memberId,
         data: {
           roleName: result.name,
           previousName: before.name,
-          memberName: request.member!.name,
+          ...who.data,
         },
       });
     }
@@ -1772,11 +2090,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const name = deps.access.role(id)?.name;
     const refusal = await deps.access.deleteRole(id);
     if (refusal) return roleRefusal(reply, refusal);
+    const who = actor(request);
     await deps.activity.record({
       kind: 'role.removed',
-      message: `${request.member!.name} removed the role ${name ?? 'that was there'}.`,
-      memberId: request.member!.id,
-      data: { ...(name ? { roleName: name } : {}), memberName: request.member!.name },
+      message: `${who.name} removed the role ${name ?? 'that was there'}.`,
+      memberId: who.memberId,
+      data: { ...(name ? { roleName: name } : {}), ...who.data },
     });
     return reply.code(204).send();
   });
@@ -1824,12 +2143,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (before?.id === wanted.id) return memberWire(target, request.member!.id);
 
     await deps.access.assignRole(target.id, wanted.id);
+    const who = actor(request);
     await deps.activity.record({
       kind: 'member.role-changed',
-      message: `${request.member!.name} made ${target.name} ${wanted.name}.`,
-      memberId: request.member!.id,
+      message: `${who.name} made ${target.name} ${wanted.name}.`,
+      memberId: who.memberId,
       data: {
-        memberName: request.member!.name,
+        ...who.data,
         subjectName: target.name,
         roleName: wanted.name,
         ...(before ? { previousName: before.name } : {}),
@@ -1850,8 +2170,11 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * is none of that. Renaming *another* member is not offered at all: it is
    * the one member operation nobody has needed, and an owner who wants a
    * member gone already has `DELETE`.
+   *
+   * **The member's and never a key's**: what somebody is called is theirs to
+   * say, and a script renaming its own person would put words in their mouth.
    */
-  app.patch('/api/v1/members/me', authed, async (request) => {
+  app.patch('/api/v1/members/me', memberOnly, async (request) => {
     const body = z.object({ name: memberNameSchema }).parse(request.body);
     const before = request.member!;
     if (body.name !== before.name) {
@@ -1865,7 +2188,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     }
     return {
       ...memberWire({ id: before.id, name: body.name, role: before.role }, before.id),
-      permissions: deps.access.permissionsFor(before.id),
+      permissions: deps.access.permissionsAs(before.id, request.apiKey),
     };
   });
 
@@ -1881,8 +2204,11 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * with nobody in it would have no way back. An owner who is finished with a
    * hub and is the only one left is finished with the hub, and that is
    * `gethome-hubctl` on the machine, not a route.
+   *
+   * Never through a key: a key acts as its member, and leaving is the one
+   * decision that has to be the member's own.
    */
-  app.delete('/api/v1/members/me', authed, async (request, reply) => {
+  app.delete('/api/v1/members/me', memberOnly, async (request, reply) => {
     const member = request.member!;
     if (deps.access.isLastOwner(member.id)) {
       return reply.code(409).send({ error: 'cannot_remove_owner' });
@@ -1907,7 +2233,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     await deleteMemberRow(id);
     await endMembership(
       target.id,
-      `${request.member!.name} removed ${target.name} from the home.`,
+      `${actor(request).name} removed ${target.name} from the home.`,
       'member.removed',
     );
     return reply.code(204).send();
@@ -1967,6 +2293,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // a member who has left for the life of the process.
     deps.favorites.forgetMember(memberId);
     deps.access.forgetMember(memberId);
+    // Their keys went with the row too (`api_keys.member_id` cascades), and
+    // their sockets with `sessions.revoke` above; this drops what was held
+    // about the keys in memory — last use, last refusal, the rate bucket.
+    apiKeys.forgetMember(memberId);
     await deps.activity.record({ kind, message });
   }
 
@@ -2052,7 +2382,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * guard `POST /invites {roleId: owner}` and `PATCH /members/:id` carry, and
    * the same code, which both apps already read as "ask an owner".
    */
-  app.post('/api/v1/invites', authed, async (request, reply) => {
+  app.post('/api/v1/invites', memberOnly, async (request, reply) => {
     const body = z
       .object({
         roleId: z.uuid().optional(),
@@ -2070,7 +2400,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       const target = await deps.db.query.members.findFirst({ where: eq(members.id, targetId) });
       if (!target) return reply.code(404).send({ error: 'unknown_member' });
       const forSelf = target.id === caller.id;
-      if (!forSelf && !deps.access.can(caller.id, 'member.invite')) {
+      if (!forSelf && !can(deps.access, request, 'member.invite')) {
         return reply.code(403).send({ error: 'forbidden', permission: 'member.invite' });
       }
       if (!forSelf && deps.access.isOwner(target.id) && !deps.access.isOwner(caller.id)) {
@@ -2104,7 +2434,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       });
     }
 
-    if (!deps.access.can(caller.id, 'member.invite')) {
+    if (!can(deps.access, request, 'member.invite')) {
       return reply.code(403).send({ error: 'forbidden', permission: 'member.invite' });
     }
     if (body.roleId) {
@@ -2143,9 +2473,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const query = z
       .object({ limit: z.coerce.number().int().min(1).max(200).default(50), before: z.coerce.number().int().optional() })
       .parse(request.query);
-    const mine = deps.access.can(request.member!.id, 'activity.read')
-      ? undefined
-      : request.member!.id;
+    // Through a key, the key's own grant decides — a key without
+    // `activity.read` reads its member's rows, as its member would without it.
+    const mine = can(deps.access, request, 'activity.read') ? undefined : request.member!.id;
     const rows = await deps.activity.list(query.limit, query.before, mine);
     return rows.map((row) => ({
       id: row.id,
@@ -2158,6 +2488,246 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       // reads the backlog and then follows the stream renders both alike.
       data: row.data ?? null,
     }));
+  });
+
+  // ── API keys ─────────────────────────────────────────────────────────────
+
+  /**
+   * Keys for a person's own software — a script, a bridge, an AI agent.
+   *
+   * **Every route here is the member's and never a key's**: a key does not
+   * make, change, read or revoke keys, so a leaked one cannot mint a
+   * replacement that outlives the revoke. `core/api-keys.ts` and
+   * `AccessService.canThrough` are the model; these are the four doors.
+   */
+  const keyFields = {
+    name: z.string().trim().min(1).max(80),
+    control: z.boolean(),
+    permissions: z.array(z.string().min(1).max(64)).max(32),
+    expiresInDays: z.number().int().min(1).max(MAX_KEY_LIFETIME_DAYS).nullable(),
+  };
+  /**
+   * **Strict**, unlike nearly every other body here, and that is the point:
+   * zod strips what it does not know, so a field a later build adds to narrow
+   * a key — rooms, devices — would be silently dropped by this one, which
+   * would then make a key *broader* than the person asked for. A 400 instead
+   * is the only safe answer an older hub can give.
+   */
+  const createKeySchema = z
+    .object({
+      name: keyFields.name,
+      control: keyFields.control.optional(),
+      permissions: keyFields.permissions.optional(),
+      expiresInDays: keyFields.expiresInDays.optional(),
+    })
+    .strict();
+  const changeKeySchema = z
+    .object({
+      name: keyFields.name.optional(),
+      control: keyFields.control.optional(),
+      permissions: keyFields.permissions.optional(),
+      expiresInDays: keyFields.expiresInDays.optional(),
+    })
+    .strict();
+
+  const expiryFrom = (days: number | null | undefined): Date | null =>
+    days === null || days === undefined ? null : new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+
+  /**
+   * Why a grant cannot be given, or undefined if it can.
+   *
+   * Three refusals, in the order a person would fix them. A permission no key
+   * may ever hold is `400 not_grantable` — it is the request that is wrong.
+   * `automation.manage` without `control` is `400 needs_control`, because a
+   * rule switches devices on its own and a key that may write one but not
+   * work the home would work it a minute later. And a permission the person
+   * does not hold themselves is `403 forbidden`, the refusal they would meet
+   * using it: **nobody can give a key more than they have.** Only what is
+   * being *added* is asked of the role, so renaming a key whose member has
+   * since lost something is not refused for it — that part of the grant is
+   * already inert, and `effective` says so.
+   */
+  const grantRefusal = (
+    request: FastifyRequest,
+    control: boolean,
+    permissions: readonly string[],
+    already: readonly PermissionKey[] = [],
+  ): { status: number; body: Record<string, unknown> } | undefined => {
+    for (const permission of permissions) {
+      if (!isKeyGrantable(permission)) {
+        return { status: 400, body: { error: 'not_grantable', permission } };
+      }
+    }
+    if (permissions.includes('automation.manage') && !control) {
+      return { status: 400, body: { error: 'needs_control', permission: 'automation.manage' } };
+    }
+    for (const permission of permissions as readonly PermissionKey[]) {
+      if (!already.includes(permission) && !can(deps.access, request, permission)) {
+        return { status: 403, body: { error: 'forbidden', permission } };
+      }
+    }
+    return undefined;
+  };
+
+  const renderKey = async (key: ApiKeyRecord, callerId: string, names?: Map<string, string>) =>
+    apiKeyWire(key, {
+      access: deps.access,
+      memberName:
+        names?.get(key.memberId) ?? (await deps.pairing.member(key.memberId))?.name ?? null,
+      callerId,
+      connections: sessions.countKey(key.id),
+      lastRefusal: apiKeys.lastRefusal(key.id),
+    });
+
+  /**
+   * The caller's keys — or, with `member.remove`, everybody's.
+   *
+   * Your own are the floor: somebody whose role no longer lets them make keys
+   * can still see the ones they made, paused, and revoke them. Everybody's
+   * goes with `member.remove` because ending somebody's access is that
+   * permission's own sentence, and a key is access.
+   */
+  app.get('/api/v1/api-keys', memberOnly, async (request) => {
+    const me = request.member!;
+    const everybody = can(deps.access, request, 'member.remove');
+    const keys = await apiKeys.list(everybody ? undefined : me.id);
+    const names = new Map((await deps.db.query.members.findMany()).map((row) => [row.id, row.name]));
+    return Promise.all(keys.map((key) => renderKey(key, me.id, names)));
+  });
+
+  /**
+   * Make a key. The secret is in this answer and nowhere else, ever: the hub
+   * keeps its hash, and an app that loses it makes another.
+   */
+  app.post('/api/v1/api-keys', memberOnlyNeeds('hub.apikeys'), async (request, reply) => {
+    const body = createKeySchema.parse(request.body ?? {});
+    const control = body.control ?? false;
+    const permissions = [...new Set(body.permissions ?? [])];
+    const refused = grantRefusal(request, control, permissions);
+    if (refused) return reply.code(refused.status).send(refused.body);
+    const me = request.member!;
+    if ((await apiKeys.countFor(me.id)) >= MAX_KEYS_PER_MEMBER) {
+      return reply.code(409).send({ error: 'too_many_keys', limit: MAX_KEYS_PER_MEMBER });
+    }
+    const { record, secret } = await apiKeys.create({
+      memberId: me.id,
+      name: body.name,
+      control,
+      permissions: permissions as PermissionKey[],
+      expiresAt: expiryFrom(body.expiresInDays),
+    });
+    const who = actor(request);
+    await deps.activity.record({
+      kind: 'apikey.added',
+      message: `${who.name} created the API key “${record.name}”.`,
+      memberId: who.memberId,
+      data: { ...who.data, apiKeyId: record.id, apiKeyName: record.name },
+    });
+    return reply.code(201).send({ key: await renderKey(record, me.id), secret });
+  });
+
+  /**
+   * Rename a key, change what it may do, or when it expires — **your own
+   * only**. A key is its member's authority, and nobody else's edit should be
+   * able to reshape it; the people who may end somebody's access revoke
+   * instead.
+   */
+  app.patch('/api/v1/api-keys/:id', memberOnlyNeeds('hub.apikeys'), async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const body = changeKeySchema.parse(request.body ?? {});
+    const key = await apiKeys.get(id);
+    if (!key) return reply.code(404).send({ error: 'not_found' });
+    const me = request.member!;
+    if (key.memberId !== me.id) return reply.code(403).send({ error: 'not_your_key' });
+
+    const control = body.control ?? key.control;
+    const permissions =
+      body.permissions !== undefined ? [...new Set(body.permissions)] : [...key.permissions];
+    const refused = grantRefusal(request, control, permissions, key.permissions);
+    if (refused) return reply.code(refused.status).send(refused.body);
+
+    const updated = await apiKeys.update(id, {
+      ...(body.name !== undefined ? { name: body.name } : {}),
+      ...(body.control !== undefined ? { control: body.control } : {}),
+      ...(body.permissions !== undefined ? { permissions: permissions as PermissionKey[] } : {}),
+      ...(body.expiresInDays !== undefined ? { expiresAt: expiryFrom(body.expiresInDays) } : {}),
+    });
+    if (!updated) return reply.code(404).send({ error: 'not_found' });
+
+    // Its open streams render with the new grant from the next frame, and
+    // the `access` frame every socket re-sends is how they hear it now.
+    sessions.rekey(updated);
+    deps.events.emit('accessChanged');
+
+    const accessMoved =
+      updated.control !== key.control ||
+      updated.permissions.join() !== key.permissions.join();
+    const expiryMoved = (updated.expiresAt?.getTime() ?? null) !== (key.expiresAt?.getTime() ?? null);
+    const who = actor(request);
+    const message = accessMoved
+      ? `${who.name} changed what the API key “${updated.name}” can do.`
+      : expiryMoved
+        ? `${who.name} changed when the API key “${updated.name}” expires.`
+        : updated.name !== key.name
+          ? `${who.name} renamed the API key “${key.name}” to “${updated.name}”.`
+          : undefined;
+    if (message !== undefined) {
+      await deps.activity.record({
+        kind: 'apikey.changed',
+        message,
+        memberId: who.memberId,
+        data: {
+          ...who.data,
+          apiKeyId: updated.id,
+          apiKeyName: updated.name,
+          ...(updated.name !== key.name ? { previousName: key.name } : {}),
+        },
+      });
+    }
+    return renderKey(updated, me.id);
+  });
+
+  /**
+   * Revoke a key. Your own is the floor — a person must always be able to
+   * stop their own software, whatever their role now says. Somebody else's is
+   * `member.remove`, and an owner's needs an owner, for the reason
+   * `DELETE /members/:id` gives: ending an owner's access is the owner's call.
+   *
+   * Its streams are hung up **before** the row goes and the line is written,
+   * with the same 4001 a removed member's get.
+   */
+  app.delete('/api/v1/api-keys/:id', memberOnly, async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const key = await apiKeys.get(id);
+    if (!key) return reply.code(404).send({ error: 'not_found' });
+    const me = request.member!;
+    const mine = key.memberId === me.id;
+    if (!mine && !can(deps.access, request, 'member.remove')) {
+      return reply.code(403).send({ error: 'forbidden', permission: 'member.remove' });
+    }
+    if (!mine && deps.access.isOwner(key.memberId) && !deps.access.isOwner(me.id)) {
+      return reply.code(403).send({ error: 'not_owner' });
+    }
+    const owner = mine ? me.name : ((await deps.pairing.member(key.memberId))?.name ?? null);
+    const closed = sessions.revokeKey(id);
+    if (closed > 0) deps.log.info({ apiKeyId: id, closed }, 'Closed event streams for a revoked API key');
+    await apiKeys.remove(id);
+    const who = actor(request);
+    await deps.activity.record({
+      kind: 'apikey.removed',
+      message:
+        mine || owner === null
+          ? `${who.name} revoked the API key “${key.name}”.`
+          : `${who.name} revoked ${owner}’s API key “${key.name}”.`,
+      memberId: who.memberId,
+      data: {
+        ...who.data,
+        apiKeyId: key.id,
+        apiKeyName: key.name,
+        ...(!mine && owner !== null ? { subjectName: owner } : {}),
+      },
+    });
+    return reply.code(204).send();
   });
 
   // ── AI settings ──────────────────────────────────────────────────────────
@@ -2548,20 +3118,21 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * home can see afterwards who was given one.
    */
   app.get('/api/v1/settings/mqtt', needs('hub.mqtt'), async (request) => {
-    const admin = deps.access.can(request.member!.id, 'hub.mqtt.admin');
+    const admin = can(deps.access, request, 'hub.mqtt.admin');
     const answer = mqttAccess({
       config: deps.mqtt,
       requestHost: hostFromRequest(request.headers.host),
       canUseIntegrations: true,
       canUseFullAccess: admin,
     });
+    const who = actor(request);
     await deps.activity.record({
       kind: 'hub.mqtt',
       message: admin
-        ? `${request.member!.name} looked up the MQTT broker credentials, including full access.`
-        : `${request.member!.name} looked up the MQTT credentials for connecting a device.`,
-      memberId: request.member!.id,
-      data: { memberName: request.member!.name, full: admin },
+        ? `${who.name} looked up the MQTT broker credentials, including full access.`
+        : `${who.name} looked up the MQTT credentials for connecting a device.`,
+      memberId: who.memberId,
+      data: { ...who.data, full: admin },
     });
     return answer;
   });
@@ -2603,6 +3174,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // The frame carries a stale `matter` for the same reason the response
     // does; what is *live* still comes from the adapters.
     deps.events.emit('hubStatusChanged');
+    const who = actor(request);
     await deps.activity.record({
       kind: 'hub.radio',
       // `both` is not a radio, so it cannot be set *to* one: on a board
@@ -2610,10 +3182,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       // they are working out why the hub started handing radios back.
       message:
         body.mode === 'both'
-          ? `${request.member!.name} set the hub to run both radios at once.`
-          : `${request.member!.name} set the radio to ${body.mode}.`,
-      memberId: request.member!.id,
-      data: { memberName: request.member!.name, mode: body.mode },
+          ? `${who.name} set the hub to run both radios at once.`
+          : `${who.name} set the radio to ${body.mode}.`,
+      memberId: who.memberId,
+      data: { ...who.data, mode: body.mode },
     });
     // The whole `radio` block `GET /hub` answers with, from the same snapshot
     // — because two shapes for one fact drift, and this response and that one
@@ -2736,12 +3308,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     deps.log.info({ id, member: request.member!.id }, 'Hub update requested');
     // Written here, while this process is still alive to write it: the outcome
     // is recorded at the next boot, by which time there is no member to name.
+    const who = actor(request);
     await deps.activity.record({
       kind: 'hub.update',
-      message: `${request.member!.name} started a hub update.`,
-      memberId: request.member!.id,
+      message: `${who.name} started a hub update.`,
+      memberId: who.memberId,
       data: {
-        memberName: request.member!.name,
+        ...who.data,
         outcome: 'started',
         ...(deps.build !== undefined ? { fromBuild: deps.build } : {}),
       },
@@ -2940,16 +3513,17 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       });
       deps.log.info({ id, member: request.member!.id }, 'Wi-Fi network addition requested');
       return await settleWifiChange(reply, id, async (result) => {
-        const name = request.member!.name;
+        const who = actor(request);
+        const name = who.name;
         await deps.activity.record({
           kind: 'hub.wifi',
           message:
             result !== undefined
               ? `${name} added the Wi-Fi network “${body.ssid}” to the hub.`
               : `${name} asked the hub to add the Wi-Fi network “${body.ssid}”.`,
-          memberId: request.member!.id,
+          memberId: who.memberId,
           data: {
-            memberName: name,
+            ...who.data,
             action: 'add',
             ssid: body.ssid,
             outcome: result !== undefined ? 'applied' : 'pending',
@@ -2987,7 +3561,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       const id = requestWifiChange(deps.dataDir, { action: 'remove', networkId: networkId.toLowerCase() });
       deps.log.info({ id, member: request.member!.id }, 'Wi-Fi network removal requested');
       return await settleWifiChange(reply, id, async (result) => {
-        const name = request.member!.name;
+        const who = actor(request);
+        const name = who.name;
         const ssid = result?.ssid ?? known?.ssid;
         const network = ssid !== undefined ? `the Wi-Fi network “${ssid}”` : 'a Wi-Fi network';
         await deps.activity.record({
@@ -2996,9 +3571,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
             result !== undefined
               ? `${name} removed ${network} from the hub.`
               : `${name} asked the hub to forget ${network}.`,
-          memberId: request.member!.id,
+          memberId: who.memberId,
           data: {
-            memberName: name,
+            ...who.data,
             action: 'remove',
             ...(ssid !== undefined ? { ssid } : {}),
             outcome: result !== undefined ? 'applied' : 'pending',
@@ -3141,8 +3716,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * argument that killed `device.control`. A role that may work every light
    * individually and not the button that works them together would be a rule
    * nobody asked for.
+   *
+   * A key needs `control`, which is what working the home is for a key.
    */
-  app.post('/api/v1/automations/:id/run', authed, async (request, reply) => {
+  app.post('/api/v1/automations/:id/run', controls, async (request, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     const record = deps.automations.get(id);
     if (!record) return reply.code(404).send({ error: 'not_found' });
@@ -3150,7 +3727,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (automationShape(record.document) === 'watching') {
       return reply.code(409).send({ error: 'not_pressable' });
     }
-    await deps.automations.runManually(id, request.member!.name);
+    // The sentence the run writes names who pressed it — a key by name, so a
+    // scene a script pressed at three in the morning says which script.
+    await deps.automations.runManually(id, actor(request).name);
     return reply.code(202).send({ accepted: true });
   });
 
@@ -3161,8 +3740,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * mode on is working the home; enabling a rule is editing it. Two words, two
    * permissions, and keeping them apart is what lets a guest arm the house
    * without being able to rewrite what arming it does.
+   *
+   * A key needs `control` here too: switching a mode on is working the home.
    */
-  app.put('/api/v1/automations/:id/active', authed, async (request, reply) => {
+  app.put('/api/v1/automations/:id/active', controls, async (request, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     const { active } = z.object({ active: z.boolean() }).parse(request.body);
     const record = deps.automations.get(id);
@@ -3171,7 +3752,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (automationShape(record.document) !== 'toggle') {
       return reply.code(409).send({ error: 'not_a_toggle' });
     }
-    await deps.automations.setActive(id, active, request.member!.name);
+    await deps.automations.setActive(id, active, actor(request).name);
     return { active };
   });
 
@@ -3229,11 +3810,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const record = await deps.automationStore.create(parsed.data, request.member!.id);
     await deps.automations.reload();
     deps.events.emit('automationChanged', record.id);
+    const who = actor(request);
     await deps.activity.record({
       kind: 'automation.added',
-      message: `${request.member!.name} added the automation “${record.name}”`,
-      memberId: request.member!.id,
-      data: { automationId: record.id, automationName: record.name },
+      message: `${who.name} added the automation “${record.name}”`,
+      memberId: who.memberId,
+      data: { automationId: record.id, automationName: record.name, ...who.data },
     });
     const saved = deps.automations.get(record.id);
     return reply
@@ -3311,16 +3893,17 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // log is read a week later, and "somebody changed that rule's icon" is not
     // what anybody is looking for in it — while "who renamed this" is exactly
     // the sort of thing a shared home asks.
+    const who = actor(request);
     if (body.name !== undefined && body.name !== record.name) {
       await deps.activity.record({
         kind: 'automation.renamed',
-        message: `${request.member!.name} renamed the automation “${record.name}” to “${body.name}”`,
-        memberId: request.member!.id,
+        message: `${who.name} renamed the automation “${record.name}” to “${body.name}”`,
+        memberId: who.memberId,
         data: {
           automationId: id,
           automationName: body.name,
           previousName: record.name,
-          memberName: request.member!.name,
+          ...who.data,
         },
       });
     }
@@ -3331,11 +3914,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       const name = body.name ?? record.name;
       await deps.activity.record({
         kind: body.enabled ? 'automation.enabled' : 'automation.disabled',
-        message: `${request.member!.name} switched the automation “${name}” ${
-          body.enabled ? 'on' : 'off'
-        }`,
-        memberId: request.member!.id,
-        data: { automationId: id, automationName: name },
+        message: `${who.name} switched the automation “${name}” ${body.enabled ? 'on' : 'off'}`,
+        memberId: who.memberId,
+        data: { automationId: id, automationName: name, ...who.data },
       });
     }
     const saved = deps.automations.get(id);
@@ -3349,11 +3930,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     await deps.automationStore.remove(id);
     await deps.automations.reload();
     deps.events.emit('automationChanged', id);
+    const who = actor(request);
     await deps.activity.record({
       kind: 'automation.removed',
-      message: `${request.member!.name} removed the automation “${record.name}”`,
-      memberId: request.member!.id,
-      data: { automationId: id, automationName: record.name },
+      message: `${who.name} removed the automation “${record.name}”`,
+      memberId: who.memberId,
+      data: { automationId: id, automationName: record.name, ...who.data },
     });
     return reply.code(204).send();
   });
@@ -3422,11 +4004,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     }
     await deps.automations.reload();
     for (const id of created) deps.events.emit('automationChanged', id);
+    const who = actor(request);
     await deps.activity.record({
       kind: 'automation.added',
-      message: `${request.member!.name} added “${template.title}”`,
-      memberId: request.member!.id,
-      data: { template: key, count: created.length },
+      message: `${who.name} added “${template.title}”`,
+      memberId: who.memberId,
+      data: { template: key, count: created.length, ...who.data },
     });
     // Read after the reload above, and once for the whole answer rather than
     // per rule — a template can install several.
@@ -3462,6 +4045,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
 
   // ── Writing a rule in conversation ───────────────────────────────────────
 
+  // **No conversation route takes an API key — reading one included.** A
+  // transcript is what a person in the home said, and a conversation spends
+  // the home's AI money on somebody's behalf: a key that could read them would
+  // read other people's words, and one that could write would put words in its
+  // member's mouth. Software that wants a rule writes the document itself
+  // (`POST /automations`), where `dry-run` says what it will do first.
+
   /**
    * Two permissions, and the route asks for both.
    *
@@ -3472,7 +4062,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * `{error, permission}` into a sentence and has no way to read a bare 403.
    */
   const chatGuard = async (request: FastifyRequest, reply: FastifyReply) => {
-    if (!deps.access.can(request.member!.id, 'hub.ai')) {
+    if (!can(deps.access, request, 'hub.ai')) {
       await reply.code(403).send({ error: 'forbidden', permission: 'hub.ai' });
       return reply;
     }
@@ -3496,7 +4086,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     throw error;
   };
 
-  app.post('/api/v1/automations/chat', needs('automation.manage'), async (request, reply) => {
+  app.post('/api/v1/automations/chat', memberOnlyNeeds('automation.manage'), async (request, reply) => {
     const refused = await chatGuard(request, reply);
     if (refused) return refused;
     const body = z
@@ -3519,7 +4109,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
 
   app.post(
     '/api/v1/automations/chat/:id/messages',
-    needs('automation.manage'),
+    memberOnlyNeeds('automation.manage'),
     async (request, reply) => {
       const refused = await chatGuard(request, reply);
       if (refused) return refused;
@@ -3548,13 +4138,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * surface: a transcript names the home's devices and what somebody asked
    * for, which is the same shape of thing the rules themselves are.
    */
-  app.get('/api/v1/automations/chats', needs('automation.manage'), async (request, reply) => {
+  app.get('/api/v1/automations/chats', memberOnlyNeeds('automation.manage'), async (request, reply) => {
     const refused = await chatGuard(request, reply);
     if (refused) return refused;
     return deps.automationChat.list();
   });
 
-  app.get('/api/v1/automations/chat/:id', needs('automation.manage'), async (request, reply) => {
+  app.get('/api/v1/automations/chat/:id', memberOnlyNeeds('automation.manage'), async (request, reply) => {
     const refused = await chatGuard(request, reply);
     if (refused) return refused;
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
@@ -3569,7 +4159,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     };
   });
 
-  app.delete('/api/v1/automations/chat/:id', needs('automation.manage'), async (request, reply) => {
+  app.delete('/api/v1/automations/chat/:id', memberOnlyNeeds('automation.manage'), async (request, reply) => {
     const refused = await chatGuard(request, reply);
     if (refused) return refused;
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
@@ -3595,7 +4185,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * guest gets a sentence the model can read out rather than a feature that is
    * silently absent.
    */
-  app.post('/api/v1/assistant/chat', needs('hub.ai'), async (request, reply) => {
+  app.post('/api/v1/assistant/chat', memberOnlyNeeds('hub.ai'), async (request, reply) => {
     const body = z.object({ message: z.string().trim().min(1).max(2_000) }).parse(request.body);
     try {
       const started = await deps.assistantChat.start({
@@ -3608,7 +4198,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     }
   });
 
-  app.post('/api/v1/assistant/chat/:id/messages', needs('hub.ai'), async (request, reply) => {
+  app.post('/api/v1/assistant/chat/:id/messages', memberOnlyNeeds('hub.ai'), async (request, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     const { message } = z
       .object({ message: z.string().trim().min(1).max(2_000) })
@@ -3621,9 +4211,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   });
 
   /** Listed before the `:id` route below, or Fastify parses `chats` as a uuid. */
-  app.get('/api/v1/assistant/chats', needs('hub.ai'), async () => deps.assistantChat.list());
+  app.get('/api/v1/assistant/chats', memberOnlyNeeds('hub.ai'), async () => deps.assistantChat.list());
 
-  app.get('/api/v1/assistant/chat/:id', needs('hub.ai'), async (request) => {
+  app.get('/api/v1/assistant/chat/:id', memberOnlyNeeds('hub.ai'), async (request) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     const spend = await deps.assistantChat.spend(id);
     return {
@@ -3664,7 +4254,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * it: that switch is device recognition's, and talking to the house is not
    * recognising a device.
    */
-  app.post('/api/v1/assistant/voice/session', needs('hub.ai'), async (request, reply) => {
+  app.post('/api/v1/assistant/voice/session', memberOnlyNeeds('hub.ai'), async (request, reply) => {
     // **Carrying on rather than forking.** Somebody stops listening and starts
     // again on the same page, and that is one conversation — so the app hands
     // back the id it already has and the transcript keeps going. Absent is the
@@ -3859,7 +4449,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * action. See `src/ai/voice/sideband.ts`.
    */
 
-  app.delete('/api/v1/assistant/chat/:id', needs('hub.ai'), async (request, reply) => {
+  app.delete('/api/v1/assistant/chat/:id', memberOnlyNeeds('hub.ai'), async (request, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     await deps.assistantChat.close(id);
     return reply.code(204).send();
@@ -3876,23 +4466,57 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * off was ever registered: an unauthenticated `HEAD` from anywhere on the LAN
    * left thirteen listeners behind for the life of the process. Without the
    * twin a `HEAD` here is the ordinary 404.
+   *
+   * **It authenticates inside the handler, keys included**, and that is not a
+   * shortcut: a preHandler that refuses an upgrade reaches the client as a
+   * failed handshake — a 1006 with no reason — and never as the 4001 every
+   * client already stops reconnecting on. So a key that is expired, paused or
+   * revoked closes 4001 like a member token that is no good; one opened faster
+   * than its rate allows closes 1013, "try again later"; and one holding
+   * `MAX_SOCKETS_PER_KEY` streams already closes 1008. A key may arrive as
+   * `?token=` here and nowhere else, because some socket clients cannot set a
+   * header — and the query string never reaches the log (see the logger above).
    */
-  app.get('/api/v1/ws', { websocket: true, exposeHeadRoute: false }, (socket, request) => {
-    // Subscribe synchronously, before the async token check, so an event
-    // fired the moment the socket opens is buffered instead of lost in the
-    // gap between "connected" and "authorized".
-    const handle = attachWebSocket(socket, deps, sessions, hubStatus);
-    void (async () => {
-      const token = extractToken(request);
-      const member = token ? await deps.pairing.verifyToken(token) : null;
-      if (!member) {
-        handle.close();
-        socket.close(UNAUTHORIZED_CLOSE_CODE, 'unauthorized');
-        return;
-      }
-      handle.authorize(member.id);
-    })();
-  });
+  app.get(
+    '/api/v1/ws',
+    { websocket: true, exposeHeadRoute: false, config: { apiKey: 'handler' } },
+    (socket, request) => {
+      // Subscribe synchronously, before the async token check, so an event
+      // fired the moment the socket opens is buffered instead of lost in the
+      // gap between "connected" and "authorized".
+      const handle = attachWebSocket(socket, deps, sessions, hubStatus);
+      void (async () => {
+        const credential = extractCredential(request);
+        const result = credential
+          ? await authenticate({ pairing: deps.pairing, apiKeys, access: deps.access }, credential, {
+              method: request.method,
+              path: pathOf(request.url),
+              ip: request.ip,
+              allowKeyInQuery: true,
+            })
+          : undefined;
+        if (!result?.ok) {
+          handle.close();
+          if (result?.status === 429) socket.close(KEY_RATE_CLOSE_CODE, 'rate limited');
+          else socket.close(UNAUTHORIZED_CLOSE_CODE, 'unauthorized');
+          return;
+        }
+        if (result.key && sessions.countKey(result.key.id) >= MAX_SOCKETS_PER_KEY) {
+          apiKeys.noteRefusal(result.key.id, {
+            at: new Date(),
+            status: 429,
+            error: 'too_many_connections',
+            method: request.method,
+            path: pathOf(request.url),
+          });
+          handle.close();
+          socket.close(KEY_LIMIT_CLOSE_CODE, 'too many connections for this key');
+          return;
+        }
+        handle.authorize(result.member.id, result.key);
+      })();
+    },
+  );
 
   return app;
 }

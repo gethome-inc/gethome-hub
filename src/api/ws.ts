@@ -11,6 +11,7 @@ import type { AiRunEvent } from '../core/ai-runs.js';
 import type { AutomationChatEvent, AutomationRunEvent, CommissioningUpdate } from '../core/bus.js';
 import { deviceWire, deviceWireView } from './dto.js';
 import type { HubStatusReader } from '../core/hub-status.js';
+import { apiKeyState, type ApiKeyRecord } from '../core/api-keys.js';
 
 /** Controls a subscribed-but-not-yet-authorized WebSocket. */
 export interface WebSocketHandle {
@@ -19,9 +20,10 @@ export interface WebSocketHandle {
    *
    * Takes the member because the socket has to be findable again: a member who
    * is removed has to lose the connection they are already holding, not just
-   * the next one they open.
+   * the next one they open. And the key, when the socket came through one —
+   * so revoking it can find the socket, and every frame is the key's view.
    */
-  authorize(memberId: string): void;
+  authorize(memberId: string, key?: ApiKeyRecord | null): void;
   /** Drop all listeners without ever sending a frame (auth failed). */
   close(): void;
 }
@@ -39,6 +41,19 @@ export interface WebSocketHandle {
 export const UNAUTHORIZED_CLOSE_CODE = 4001;
 
 /**
+ * A key already holds as many streams as one key may (`MAX_SOCKETS_PER_KEY`).
+ * The standard's own "policy violation", because nothing about the key is
+ * wrong — closing one of the others makes room.
+ */
+export const KEY_LIMIT_CLOSE_CODE = 1008;
+
+/**
+ * A key has opened streams faster than its rate allows. The standard's "try
+ * again later", which is exactly the advice.
+ */
+export const KEY_RATE_CLOSE_CODE = 1013;
+
+/**
  * The live authorized sockets, by member.
  *
  * Authorization happens once, when a socket opens, so without this a member
@@ -54,24 +69,49 @@ export const UNAUTHORIZED_CLOSE_CODE = 4001;
  * isn't.
  */
 export interface MemberSession {
-  /** Hang up on this socket — its member is gone. */
+  /** Hang up on this socket — its member is gone, or its key. */
   revoke: () => void;
+  /** The key behind this socket was changed; later frames are its new view. */
+  rekey: (key: ApiKeyRecord) => void;
 }
 
+/**
+ * The same registry for keys, beside it: a socket opened with a key is filed
+ * under its member *and* its key, so removing the member hangs it up as before
+ * and revoking the key hangs up only that key's.
+ */
 export class MemberSessions {
   private readonly byMember = new Map<string, Set<MemberSession>>();
+  private readonly byKey = new Map<string, Set<MemberSession>>();
 
-  register(memberId: string, session: MemberSession): void {
-    const existing = this.byMember.get(memberId);
-    if (existing) existing.add(session);
-    else this.byMember.set(memberId, new Set([session]));
+  register(memberId: string, session: MemberSession, keyId?: string): void {
+    add(this.byMember, memberId, session);
+    if (keyId !== undefined) add(this.byKey, keyId, session);
   }
 
-  forget(memberId: string, session: MemberSession): void {
-    const existing = this.byMember.get(memberId);
-    if (!existing) return;
-    existing.delete(session);
-    if (existing.size === 0) this.byMember.delete(memberId);
+  forget(memberId: string, session: MemberSession, keyId?: string): void {
+    remove(this.byMember, memberId, session);
+    if (keyId !== undefined) remove(this.byKey, keyId, session);
+  }
+
+  /** How many streams this key holds open right now. */
+  countKey(keyId: string): number {
+    return this.byKey.get(keyId)?.size ?? 0;
+  }
+
+  /** Close every socket this key holds — it was revoked. Returns how many. */
+  revokeKey(keyId: string): number {
+    const sockets = this.byKey.get(keyId);
+    if (!sockets) return 0;
+    const closing = [...sockets];
+    for (const session of closing) session.revoke();
+    this.byKey.delete(keyId);
+    return closing.length;
+  }
+
+  /** A key was changed: every socket it holds renders with the new grant. */
+  rekey(key: ApiKeyRecord): void {
+    for (const session of this.byKey.get(key.id) ?? []) session.rekey(key);
   }
 
   /**
@@ -89,6 +129,19 @@ export class MemberSessions {
     this.byMember.delete(memberId);
     return closing.length;
   }
+}
+
+function add(map: Map<string, Set<MemberSession>>, id: string, session: MemberSession): void {
+  const existing = map.get(id);
+  if (existing) existing.add(session);
+  else map.set(id, new Set([session]));
+}
+
+function remove(map: Map<string, Set<MemberSession>>, id: string, session: MemberSession): void {
+  const existing = map.get(id);
+  if (!existing) return;
+  existing.delete(session);
+  if (existing.size === 0) map.delete(id);
 }
 
 /** Streams a client can ask for beyond the always-on events. */
@@ -109,7 +162,7 @@ const MAX_CLIENT_MESSAGE_BYTES = 4096;
 /**
  * WebSocket event stream. Frames (JSON, one per message):
  *
- *   {"type":"hello","hubId","name","apiVersion":1,"streams":[…],"permissions":[…]}
+ *   {"type":"hello","hubId","name","apiVersion":1,"streams":[…],"permissions":[…],"apiKey"?:{…}}
  *   {"type":"access","role":{…},"permissions":[…],"roles":[…]}   what *you* may do
  *   {"type":"state","deviceId","endpointId","state":{…full canonical state…}}
  *   {"type":"deviceUpserted","device":{…GET /devices item…}}
@@ -158,14 +211,31 @@ export function attachWebSocket(
   let closed = false;
   /** Whose socket this is, once it is authorized — the registry key. */
   let memberId: string | null = null;
+  /**
+   * The key this socket came through, or null for the member themselves.
+   * Replaced in place when the key is changed (`MemberSessions.rekey`), so a
+   * frame is always rendered with what the key holds *now*.
+   */
+  let key: ApiKeyRecord | null = null;
   const backlog: string[] = [];
   const send = (frame: Record<string, unknown>) => {
-    const data = JSON.stringify(frame);
     if (!authorized) {
-      backlog.push(data);
+      backlog.push(JSON.stringify(frame));
       return;
     }
-    if (socket.readyState === socket.OPEN) socket.send(data);
+    // **A key is asked again before every frame, and nothing waits on a
+    // timer for it.** Revoking one hangs its sockets up at once; expiring or
+    // being paused by a role edit is noticed here, on the next thing the hub
+    // would have said — which for a paused role is the `access` frame that
+    // edit sends to everybody. A socket that hears nothing holds nothing.
+    if (key !== null && memberId !== null) {
+      const state = apiKeyState(key, deps.access);
+      if (state !== 'active') {
+        revoke(`key ${state}`);
+        return;
+      }
+    }
+    if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(frame));
   };
 
   const onState = (deviceId: string, endpointId: number, state: unknown) =>
@@ -181,7 +251,10 @@ export function attachWebSocket(
     const favorite = memberId !== null && deps.favorites.isFavorite(memberId, deviceId);
     // And the network name is `hub.wifi`'s, asked at send time like
     // `activity.read`, so a grant reaches an open socket with no reconnect.
-    send({ type: 'deviceUpserted', device: deviceWire(device, favorite, deviceWireView(deps, memberId)) });
+    send({
+      type: 'deviceUpserted',
+      device: deviceWire(device, favorite, deviceWireView(deps, memberId, key)),
+    });
   };
   const onRemoved = (deviceId: string) => send({ type: 'deviceRemoved', deviceId });
   /**
@@ -219,7 +292,7 @@ export function attachWebSocket(
    * are correctly withheld.
    */
   const onActivity = (entry: ActivityEvent) => {
-    if (memberId !== null && !deps.access.can(memberId, 'activity.read')) {
+    if (memberId !== null && !deps.access.canAs(memberId, 'activity.read', key)) {
       if (entry.memberId !== memberId) return;
     }
     send({ type: 'activity', entry });
@@ -244,7 +317,8 @@ export function attachWebSocket(
     return {
       type: 'access',
       role: role ? { id: role.id, key: role.key, name: role.name } : null,
-      permissions: deps.access.permissionsFor(memberId),
+      // Through a key, what the key may do — `GET /me`'s answer, on the socket.
+      permissions: deps.access.permissionsAs(memberId, key),
       roles: deps.access.list(),
     };
   };
@@ -389,8 +463,19 @@ export function attachWebSocket(
    */
   const onAssistantChat = (event: AutomationChatEvent) => send({ type: 'assistantChat', chat: event });
 
-  const available = (stream: OptionalStream): boolean =>
-    stream === 'mqtt' ? deps.mqttObserver !== undefined : true;
+  /**
+   * What this socket may subscribe to.
+   *
+   * **A key gets neither the broker nor the AI**: `mqtt` is every message on
+   * the broker — the traffic `hub.mqtt` guards — and `ai` is what the mapping
+   * agent read and spent, which is `hub.ai`'s. Neither is something a key is
+   * ever given, so the socket says they are unavailable rather than letting a
+   * subscription succeed into a stream the key could not have read by REST.
+   */
+  const available = (stream: OptionalStream): boolean => {
+    if (key !== null && (stream === 'mqtt' || stream === 'ai')) return false;
+    return stream === 'mqtt' ? deps.mqttObserver !== undefined : true;
+  };
 
   const subscribe = (streams: OptionalStream[]): void => {
     const unavailable: string[] = [];
@@ -412,8 +497,14 @@ export function attachWebSocket(
       if (stream === 'ai') deps.events.on('aiRun', onAiRun);
       if (stream === 'automations') {
         deps.events.on('automationRun', onAutomationRun);
-        deps.events.on('automationChat', onAutomationChat);
-        deps.events.on('assistantChat', onAssistantChat);
+        // A key's stream is the rules firing and nothing else: the two
+        // conversations are what people in the home said, which no key reads
+        // by REST either — so the listeners are never attached, rather than
+        // attached and filtered.
+        if (key === null) {
+          deps.events.on('automationChat', onAutomationChat);
+          deps.events.on('assistantChat', onAssistantChat);
+        }
       }
     }
     send({
@@ -479,17 +570,25 @@ export function attachWebSocket(
   });
 
   /**
-   * Hang up on this socket because its member is gone.
+   * Hang up on this socket because its member is gone — or its key is.
    *
    * Listeners come off first: closing a WebSocket is not instant, and a frame
    * fired in the meantime must not reach somebody who has just been removed.
+   * The same 4001 for a key as for a member, because it means the same thing
+   * and every client already stops reconnecting on it: this credential will
+   * not work again until a person does something.
    */
-  const session: MemberSession = { revoke: () => revoke() };
+  const session: MemberSession = {
+    revoke: () => revoke(key !== null ? 'key revoked' : 'membership ended'),
+    rekey: (next) => {
+      key = next;
+    },
+  };
 
-  const revoke = () => {
+  const revoke = (reason: string) => {
     detach();
     if (socket.readyState === socket.OPEN) {
-      socket.close(UNAUTHORIZED_CLOSE_CODE, 'membership ended');
+      socket.close(UNAUTHORIZED_CLOSE_CODE, reason);
     }
   };
 
@@ -497,7 +596,7 @@ export function attachWebSocket(
     if (closed) return;
     closed = true;
     if (memberId !== null) {
-      sessions.forget(memberId, session);
+      sessions.forget(memberId, session, key?.id);
       memberId = null;
     }
     deps.events.off('stateChanged', onState);
@@ -531,13 +630,14 @@ export function attachWebSocket(
   socket.on('close', detach);
 
   return {
-    authorize(id: string) {
+    authorize(id: string, through?: ApiKeyRecord | null) {
       // A socket that has already gone must not register: `detach` has run, so
       // nothing would ever take the entry back out again.
       if (authorized || closed) return;
       authorized = true;
       memberId = id;
-      sessions.register(id, session);
+      key = through ?? null;
+      sessions.register(id, session, key?.id);
       if (socket.readyState !== socket.OPEN) return;
       // Read at send time, not captured at attach: the name can change under a
       // socket that is already open, and the next client to connect must be
@@ -553,7 +653,11 @@ export function attachWebSocket(
           // wait for a REST answer would draw one paint of every control it is
           // about to lose — and a client that has never heard of the field
           // reads none, which is exactly how it behaved before.
-          permissions: deps.access.permissionsFor(id),
+          permissions: deps.access.permissionsAs(id, key),
+          // Present only on a socket opened with a key, which is how software
+          // learns it is holding one — `control` included, since working the
+          // home is not a permission and so is never in the list above.
+          ...(key !== null ? { apiKey: { id: key.id, name: key.name, control: key.control } } : {}),
         }),
       );
       // Behind `hello` rather than inside it: the roles list is the *home's*
