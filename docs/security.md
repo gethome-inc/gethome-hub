@@ -66,7 +66,8 @@ serving it, not a security boundary.
 - **Every request but three needs a token.** Only the public `GET /hub`, the
   claim, and `POST /hub/proof` — the hub proving it is itself to an app that
   already holds one of its tokens — need none. A token comes from the claim
-  flow and is never handed to a page — see [`api.md`](api.md#claiming).
+  flow, or is an API key a member made for their own software, and is never
+  handed to a page — see [`api.md`](api.md#claiming).
 - **An app follows a hub to a new address only once it has proved itself
   there.** A hub moved to another network, or given a new lease, is found
   again by its id — which is public, so anything on the LAN can announce it.
@@ -90,6 +91,21 @@ serving it, not a security boundary.
   come built in, a home can add roles, and the owner is never locked out of it —
   [`api.md`](api.md#roles-and-permissions-in-full). Removing a member ends their
   tokens *and* closes the connections they already hold.
+- **An API key is a bearer secret, so keep it like one.** Anything on your
+  network that holds it can use it, and it crosses your Wi-Fi in the clear like
+  every token here. So the hub shows it once and keeps only its hash; it does
+  only what you gave it — never more than you can do yourself, and nothing that
+  changes who is in the home, reads a conversation or touches the AI or broker
+  keys; it stops working the moment it is revoked, and its open connections are
+  hung up — unlike a broker password, nothing has to be changed on every board
+  that had it; and it is refused in a URL. Keep it out of web pages (the hub
+  will not answer one anyway), out of URLs, and out of anything you publish — a
+  repository, a forum post, a conversation with an AI. When and from which
+  address each key was last used stays on the hub, for the home to see —
+  [`api.md`](api.md#api-keys).
+- **No query string reaches the hub's log.** A credential sent in a URL is
+  where it is most often leaked, so even at `debug` the hub writes the path of a
+  request and never what follows the `?`.
 - **A Wi-Fi password given to the hub never comes back out.** Adding a network
   for the hub to join somewhere else turns the password into that network's
   key before anything is written, the key goes into the system's own

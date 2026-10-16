@@ -160,6 +160,62 @@ describe('the roles migration', () => {
   });
 
   /**
+   * `0018` hands Member `hub.apikeys`, and that is all it may do.
+   *
+   * The default in `access.ts` reaches no hub that already exists —
+   * `ensureBuiltins()` inserts with `ON CONFLICT DO NOTHING` — so an `UPDATE`
+   * carries it, exactly as `0006` did for `hub.ai`. What has to be proved is
+   * the half the default cannot get wrong and an `UPDATE` can: a home that has
+   * edited its own matrix keeps every edit, Guest and Owner are untouched, and
+   * running it twice adds nothing twice.
+   */
+  it('grants hub.apikeys to Member alone, keeping the home’s own edits', async () => {
+    dir = mkdtempSync(path.join(tmpdir(), 'gethome-migration-'));
+    const sqlite = new Database(path.join(dir, 'hub.db'));
+    sqlite.pragma('foreign_keys = ON');
+    const keysMigration = migrationFiles.findIndex((name) => name.startsWith('0018_'));
+    expect(keysMigration).toBeGreaterThan(0);
+
+    apply(sqlite, 0, keysMigration);
+    // A home that took `hub.ai` away from Member and let Guest read the feed.
+    const edited = BUILTIN_ROLES[1].permissions.filter((key) => key !== 'hub.ai' && key !== 'hub.apikeys');
+    sqlite.prepare("UPDATE roles SET permissions = ? WHERE key = 'member'").run(JSON.stringify(edited));
+    sqlite.prepare("UPDATE roles SET permissions = ? WHERE key = 'guest'").run(JSON.stringify(['activity.read']));
+    const ownerBefore = sqlite.prepare("SELECT permissions FROM roles WHERE key = 'owner'").get() as {
+      permissions: string;
+    };
+
+    apply(sqlite, keysMigration, keysMigration + 1);
+    const read = (key: string) =>
+      JSON.parse(
+        (sqlite.prepare('SELECT permissions FROM roles WHERE key = ?').get(key) as { permissions: string })
+          .permissions,
+      ) as string[];
+    expect(read('member')).toEqual([...edited, 'hub.apikeys']);
+    expect(read('member')).not.toContain('hub.ai');
+    expect(read('guest')).toEqual(['activity.read']);
+    expect(
+      (sqlite.prepare("SELECT permissions FROM roles WHERE key = 'owner'").get() as { permissions: string })
+        .permissions,
+    ).toBe(ownerBefore.permissions);
+
+    // The grant again, as a hub that met it twice would: nothing doubles.
+    const grant = readFileSync(path.join(migrationsDir, migrationFiles[keysMigration]!), 'utf8')
+      .split('--> statement-breakpoint')
+      .find((statement) => statement.includes('UPDATE `roles`'))!;
+    sqlite.exec(grant);
+    expect(read('member').filter((key) => key === 'hub.apikeys')).toHaveLength(1);
+
+    // And the service reads it as the new permission it is.
+    const db = drizzle(sqlite, { schema });
+    const access = new AccessService(db, new HubEventBus());
+    await access.load();
+    expect(access.roleByKeyName('member')?.permissions).toContain('hub.apikeys');
+    expect(access.roleByKeyName('guest')?.permissions).not.toContain('hub.apikeys');
+    sqlite.close();
+  });
+
+  /**
    * `install.sh` flips back to the previous release when a new build fails its
    * health check — by which time this migration has already run — and that
    * build reads `members.role` on every authenticated request. So the column

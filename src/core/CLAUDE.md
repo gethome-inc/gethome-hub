@@ -380,3 +380,21 @@ there, because those reach the routes as well. `docs/api.md` and
   one is the same split this change removed. Renaming deliberately needs no
   root and no restart — the same reason the radio mode lives in the data
   directory rather than in `hub.env`.
+- **An API key is read from its table on every request, and memory holds only
+  what is deliberately not a row** (`src/core/api-keys.ts`). A key is looked up
+  by the hash of the secret — one indexed read, what a member token already
+  pays — so nothing in memory can disagree with the row about whether a key
+  exists or what it was given, and its member is re-read with it so a removed
+  member's key is worth nothing even before the cascade. Three things live in
+  memory instead, each for a reason. **The exact last use**, ahead of a row
+  written at most hourly or when the address moves — the
+  `tokens.last_used_at` rule, because a script polling once a second would be a
+  row write a second on an SD card. **The last refusal**, which answers "why
+  has my integration stopped" and is worth nothing after a restart. And **a
+  token bucket per key** (burst 50, 10/s), so one loop with no sleep in it
+  cannot take a Zero 2 W's attention from the house; member tokens are never
+  limited. `forgetMember` is the in-memory half of the cascade, called from
+  `endMembership` like the favorites and access maps beside it. The secret is
+  `gethome_` and 43 base-62 characters (`crypto.ts`) — letters and digits so it
+  copies whole from a terminal, and fixed-length so a string of that shape is a
+  gethome key and nothing else — and only its sha256 is ever stored.

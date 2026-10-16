@@ -115,7 +115,12 @@ export class MqttAdapter implements ProtocolAdapter {
         if (!this.known.has(parsed.deviceId)) return;
         const result = statePatchSchema.safeParse(JSON.parse(payload));
         if (!result.success) {
-          this.options.log.warn({ deviceId: parsed.deviceId }, 'Rejected invalid MQTT state payload');
+          // The reasons go in the line, as the discovery refusal's do: a refused
+          // state report is explained nowhere else.
+          this.options.log.warn(
+            { deviceId: parsed.deviceId, endpointId: parsed.endpointId, issues: result.error.issues },
+            'Rejected invalid MQTT state payload',
+          );
           return;
         }
         // An event without a timestamp gets one on arrival, like the Zigbee
