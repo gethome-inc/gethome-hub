@@ -1482,9 +1482,22 @@ UNIT
 # disproved, and kept afterwards "because it costs nothing" — but the gateway
 # is a neighbour like any other now and is re-checked with the rest. A wired
 # hub gets none of this, for the reason it gets no dispatcher.
+#
+# **And every round ends by asking whether anything answered at all.** A hub
+# whose Wi-Fi stays connected while nothing gets through — seen once, for fifty
+# minutes, with NetworkManager and the kernel saying nothing — is one no amount
+# of asking can help, because none of the questions is answered. So the round
+# calls `deploy/wifi-watchdog.sh` (installed as `/usr/local/lib/gethome-wifi-
+# watchdog.sh`), which after five minutes with no answer from anything while
+# NetworkManager says the hub is connected reloads the radio's driver, and five
+# minutes after that restarts the machine. It is called with no interface on a
+# round with no default route, because that is what a reload that did not help
+# looks like. That file says why, and what keeps it from acting on a hub that
+# is fine.
 keep_wifi_reachable() {
   local iface self arping_bin gateway gateway_mac unit="${GETHOME_KEEPALIVE_UNIT:-/etc/systemd/system/gethome-wifi-keepalive.service}"
   local script="${GETHOME_KEEPALIVE_SCRIPT:-/usr/local/lib/gethome-wifi-keepalive.sh}"
+  local watchdog="${GETHOME_WIFI_WATCHDOG_BIN:-/usr/local/lib/gethome-wifi-watchdog.sh}"
 
   iface="$(lan_wifi_iface)"
   [[ -n "$iface" ]] || return 0
@@ -1521,21 +1534,31 @@ keep_wifi_reachable() {
     warn "This hub could not ask the kernel to re-check a neighbour, so a phone that has not talked to the hub for 20 minutes may not find it for a while, on a router that is slow to pass broadcasts on."
   fi
 
-  # The body is quoted, so it is written exactly as it reads. Two values are
+  # The watchdog every round ends with, from the build being installed. A hub
+  # it cannot be installed on still gets the rest of the round, and is told
+  # what it goes without.
+  if ! { $SUDO mkdir -p "$(dirname "$watchdog")" \
+    && $SUDO install -m 0755 "$HUB_DIR/deploy/wifi-watchdog.sh" "$watchdog"; } >/dev/null 2>&1; then
+    warn "Could not install the Wi-Fi watchdog. The hub works, but if its Wi-Fi ever stops passing traffic while it stays connected, it stays off the network until it is switched off and on again."
+    watchdog=""
+  fi
+
+  # The body is quoted, so it is written exactly as it reads. Three values are
   # baked in at install time: the `arping` resolved above, by path — see
-  # `find_arping` for why it is never looked up at run time — and where the
-  # hub keeps its list of Matter accessories (`src/adapters/matter/
+  # `find_arping` for why it is never looked up at run time — where the hub
+  # keeps its list of Matter accessories (`src/adapters/matter/
   # neighbours.ts`, `MATTER_NEIGHBOURS_FILE`; the suite holds the two names
-  # together). **No line in it may begin with `}`**: the suites lift this
-  # function out of the file with `sed '/^keep_wifi_reachable() {/,/^}/p'`,
-  # which would end it there — which is why the loop below has no functions
-  # of its own.
+  # together), and the watchdog just installed. **No line in it may begin
+  # with `}`**: the suites lift this function out of the file with
+  # `sed '/^keep_wifi_reachable() {/,/^}/p'`, which would end it there — which
+  # is why the loop below has no functions of its own.
   $SUDO mkdir -p "$(dirname "$script")"
   if ! {
     printf '#!/bin/sh\n'
     printf '# Installed by GetHome. deploy/install.sh says why in full.\n'
     printf 'arping_bin="%s"\n' "${arping_bin:-/nonexistent}"
     printf 'matter_neighbours="%s"\n' "${DATA_DIR}/matter-neighbours"
+    printf 'wifi_watchdog="%s"\n' "${watchdog:-/nonexistent}"
     cat <<'KEEPALIVE'
 #
 # The short version: a router can sit on the broadcasts it owes this hub's
@@ -1549,7 +1572,11 @@ keep_wifi_reachable() {
 #    does by asking that one machine, by unicast. That is what refreshes the
 #    neighbour's own record of this hub: macOS and iOS take nothing from a
 #    gratuitous ARP, and once their record expires they can only ask by
-#    broadcast, which is the question that goes missing.
+#    broadcast, which is the question that goes missing;
+#  - and last, whether anything answered at all. After five minutes in which
+#    nothing has while NetworkManager says this hub is connected, the
+#    watchdog reloads the radio's driver, then restarts the machine; its own
+#    file says why, and what keeps it from acting on a hub that is fine.
 # Neighbours the kernel has given up on are remembered for a day and asked
 # about the same way every two minutes, at the address they had, so a phone
 # that comes home is known again before anybody opens the app. Nothing is ever
@@ -1579,6 +1606,7 @@ keep_wifi_reachable() {
 state="${GETHOME_NEIGH_STATE:-/run/gethome-wifi-neighbours}"
 # $matter holds one "link-local-address link-address" per accessory.
 matter="${GETHOME_MATTER_NEIGHBOURS:-$matter_neighbours}"
+watchdog="${GETHOME_WIFI_WATCHDOG:-$wifi_watchdog}"
 round=0
 while :; do
   iface=$(ip route show default 2>/dev/null |
@@ -1645,6 +1673,13 @@ while :; do
         ip neigh replace "$addr" lladdr "$mac" nud probe dev "$iface" 2>/dev/null
       done
     fi
+    # Last, after every question this round has asked: did anything answer?
+    [ -x "$watchdog" ] && "$watchdog" "$iface"
+  else
+    # No default route, which is also what a reload looks like when the
+    # network it joins afresh still passes nothing: the watchdog has to see
+    # that round too, to take its last step.
+    [ -x "$watchdog" ] && "$watchdog"
   fi
   # One round and out, for the suite that runs this file.
   [ -z "${GETHOME_KEEPALIVE_ONCE:-}" ] || exit 0
@@ -1684,6 +1719,8 @@ UNIT
     # while the old one kept running. `restart` starts a stopped unit too.
     if $SUDO systemctl restart gethome-wifi-keepalive >/dev/null 2>&1; then
       say "The hub will keep itself known on the network — to the router every 20 seconds, and to every phone and computer that talks to it — so it stays reachable after a quiet spell."
+      [[ -z "$watchdog" ]] \
+        || say "If its Wi-Fi ever stays connected while nothing gets through, it restarts the radio after five minutes, and the whole hub if that is not enough."
       return 0
     fi
   fi
