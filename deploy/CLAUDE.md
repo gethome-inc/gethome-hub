@@ -635,7 +635,11 @@ in `deploy/install.sh` must stay accurate.
   activation runs the 4-way handshake in wpa_supplicant — this firmware lists
   no FWSUP — and then DHCP, both across the path that stopped, so in this
   failure it cannot finish and leaves NetworkManager not connected, where the
-  rule above would stop every later step. That part is reasoned, not measured.
+  rule above would stop every later step — measured on that hub with every
+  IPv4, IPv6 and ARP frame dropped at wlan0 (EAPOL let through): after the
+  reload NetworkManager associated, finished the handshake, timed out in DHCP
+  after 45 s and cycled between connecting and disconnected for five minutes,
+  never connected and never with a default route.
   And on NetworkManager 1.52.1 an activation of an `ipv6.method=ignore` profile
   can leave `disable_ipv6=1` once the device has roamed — measured during the
   re-join test, put right 0.2 s later by `51-gethome-matter-ipv6` where it is
@@ -653,13 +657,19 @@ in `deploy/install.sh` must stay accurate.
   bus counters (`/sys/kernel/debug/ieee80211/phy0/counters` — `intrcount`,
   `f2rxdata`, `f2txdata`, `fc_xoff`/`fc_xon`), the transmit queue and the
   neighbour table by state, at two minutes, before each step and when an answer
-  comes back, and that last line names the step taken before it. **That line is
-  the measurement this still lacks**: whether the reload cures the fault that
-  was seen is unknown — it has happened once — and the run that would have
-  checked the whole ladder on hardware, the hub dropping its own traffic until
-  the watchdog restarted it, was not done, because it takes the owner's hub off
-  the network for a quarter of an hour. Each step was run on its own there; the
-  ladder has only run against the suite's fakes. One case it cannot tell
+  comes back, and that last line names the step taken before it. **The whole
+  ladder ran on that hub** with its own traffic dropped as above, a runtime
+  udev rule dropping it again on the interface a reload created, and the
+  restart written down instead of done: the two-minute line at 121 s, the
+  reload at 302 s (radio back in 1.9 s), the restart asked for at 608 s from a
+  round with no default route; then, with the drop lifted, the answer at the
+  next round and `gethome-hubd` restarted, matter.js back in both groups. The
+  counters told the sides apart — `tx_packets` and `f2txdata` stood still,
+  `f2rxdata` and the radio's counts went on — and a Mac saw what it saw in the
+  real outage: no ping, its ARP entry still refreshed by the firmware. **What
+  is still unmeasured is the cure**: whether a reload ends the fault that was
+  seen — it has happened once — and the "answers again" line is what will say.
+  One case it cannot tell
   apart: an access point that stays up with nothing behind it and nobody else
   on it to answer. Nobody can reach the hub either way. The clock is
   `/proc/uptime`, never the wall clock; everything it does is under

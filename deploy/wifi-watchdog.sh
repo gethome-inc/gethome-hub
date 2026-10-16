@@ -77,10 +77,22 @@
 # among its features) and DHCP after it, and both are frames between Linux and
 # the radio. So in the failure this is for, an activation cannot finish and
 # leaves NetworkManager not connected — where the rule above would stop every
-# later step. That much is reasoned, not measured: the fault has not been seen
-# again. So after the reload the restart does not wait for NetworkManager's
-# word, and is reached from the keep-alive's rounds with no default route as
-# well, which is why it can be called with no interface.
+# later step. Measured on that hub with every IPv4, IPv6 and ARP frame dropped
+# at wlan0 and EAPOL let through: after the reload NetworkManager associated
+# and finished the handshake, timed out in DHCP after 45 s, and spent the next
+# five minutes between connecting and disconnected — never connected, never a
+# default route. (In the real fault the handshake may fail as well.) So after
+# the reload the restart does not wait for NetworkManager's word, and is
+# reached from the keep-alive's rounds with no default route as well, which is
+# why it can be called with no interface.
+#
+# **The whole ladder, run on that hub the same way** (the restart written down
+# instead of done): the two-minute line at 121 s, the reload at 302 s with the
+# radio back 1.9 s later, the restart asked for at 608 s from a round with no
+# default route; and once the drop was lifted, the answer at the next round
+# and `gethome-hubd` restarted, matter.js back in both mDNS groups. The
+# counters said which side had stopped: Linux's `tx_packets` and the bus's
+# `f2txdata` stood still while `f2rxdata` and the radio's own counts went on.
 #
 # **What the reload costs, measured on that Zero 2 W.** wlan0 was gone for
 # under a second and NetworkManager connected 3.5 s after the reload began; a

@@ -1107,10 +1107,11 @@ describe('a hub whose Wi-Fi stays connected while nothing gets through', () => {
 
   /**
    * **After the reload, NetworkManager's word no longer decides.** An
-   * activation over the path that stopped cannot finish — its handshake and
-   * its DHCP both cross that path — so NetworkManager may well not be
-   * connected by then and the hub have no default route; the keep-alive calls
-   * with no interface, and the restart comes all the same.
+   * activation over the path that stopped cannot finish — measured on the hub
+   * with its own traffic dropped: NetworkManager associated, timed out in DHCP
+   * and cycled between connecting and disconnected — so the hub has no default
+   * route; the keep-alive calls with no interface, and the restart comes all
+   * the same.
    */
   it('restarts the machine five minutes after the reload, whatever NetworkManager says by then', () => {
     const hub = watchdogHub();
