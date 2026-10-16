@@ -142,11 +142,21 @@ in `deploy/install.sh` must stay accurate.
   status file is written whole and renamed past any planted name, the log is
   appended to as the account, and there is no `chmod` through a path (umask sets
   the mode). `install.sh` keeps the same rule for its own `<data>` writes:
-  `as_service_user` makes the hub's data directories and reads `pairing-code`,
-  and only a `chown -R` stays root's, because without `-H`/`-L` it changes a
-  link itself and never descends through one. `test/deploy-update.test.ts` and
-  `test/deploy-config.test.ts` pin that no root write or chmod inside `<data>`
-  comes back, and plant a link to show its target untouched. And
+  `as_service_user` makes the hub's data directories, `read_hub_file` reads
+  `pairing-code` and `radio-mode`, everything in Zigbee2MQTT's directory goes
+  through the account too (the `onboarding` bullet below), and only a
+  `chown -R` stays root's, because without `-H`/`-L` it changes a link itself
+  and never descends through one. `gethome-hubctl` reads `pairing-code` the
+  same way — `claim` sends it to the hub's own port, so root reading it through
+  a planted link would hand a root-only file to whatever answers there.
+  **Reading as the account is also what makes the read work at all** when the
+  installer runs as a login user with sudo (`curl … | bash`, or
+  `gethome-hubctl update` without sudo): from "Accounts and directories" until
+  the hub restarts, `/var/lib/gethome` is 0750 (the hub unit's
+  `StateDirectory=` sets it back to 0755 on every start), and that user cannot
+  see into it. `test/deploy-update.test.ts`, `test/deploy-config.test.ts` and
+  `test/deploy-hub-account.test.ts` pin that no root write or chmod inside
+  `<data>` comes back, and plant a link to show its target untouched. And
   **`<data>/update/enabled` is the capability**:
   `install.sh` touches it in the same breath as it writes the units, because
   `hub.env` is written *only when absent* and so would never reach an upgraded
@@ -850,6 +860,46 @@ in `deploy/install.sh` must stay accurate.
   advertisements and stop probing a border router that has gone). Unverifiable
   end to end on the hub it was written on, which has no border router — measured
   there: 0 router advertisements in three days.
+- **NetworkManager switches a hub's IPv6 off by itself and leaves it off, so a
+  dispatcher turns it back on.** That same `ipv6.method=ignore` means "IPv6 is
+  the kernel's", and activating such a connection NetworkManager sets
+  `disable_ipv6=1` to restart the kernel's link-local address, then puts back
+  the value it saved when it first took the device over. It forgets the saved
+  value whenever the access point under an active connection changes
+  (`nm_device_update_dynamic_ip_setup`, "roamed to a different AP" — logged
+  only as `ip:dhcp4: restarting`), and on the owner's hub that happened every
+  time the network it was on went away, so the next activation set `1` and had
+  nothing to put back. wlan0 then has no IPv6 and no link-local address until
+  NetworkManager restarts, which in practice means a reboot; a router that
+  disappears for longer than the 15-second link timeout is enough. **What that
+  costs is everything Matter reaches over IPv6**, and it is worth being exact:
+  the owner's Wi-Fi plug went on answering at its IPv4 address for the five
+  hours it lasted, while an accessory that is only on IPv6 — every Thread one —
+  cannot be reached at all, and the keep-alive's link-local seeding has nothing
+  to work with. Read in NetworkManager 1.52.1 (Trixie), unchanged on its main
+  branch on 2026-10-15, and reproduced on that Zero 2 W: `busctl call
+  fi.w1.wpa_supplicant1 /fi/w1/wpa_supplicant1/Interfaces/0
+  fi.w1.wpa_supplicant1.Interface Disconnect`, then `… Reconnect` (the
+  connection stays activated and the journal says `ip:dhcp4: restarting`), then
+  `nmcli connection up <profile>` leaves `disable_ipv6=1` and no link-local
+  address, where the same reactivation without the drop leaves it at `0`.
+  `iw dev wlan0 disconnect` is refused while NetworkManager holds the link, and
+  `Reassociate` on a live link changes nothing, so neither reproduces it.
+  `deploy/matter-ipv6.sh` (`/usr/local/lib/gethome-matter-ipv6.sh`) is run by
+  `51-gethome-matter-ipv6` on every `up`, and once by `matter_ipv6()` for a hub
+  it has already happened to, and writes `0` back — which is all `ignore`
+  asked for: no address of its own, no listener, no change to the profile.
+  Four limits keep it from overriding anybody. **Only `ignore`**, asked of
+  NetworkManager (the dispatcher's own `CONNECTION_UUID`, else the device's
+  connection): `disabled` is somebody's choice, and every other method has
+  NetworkManager running IPv6 itself. **Only a physical interface.** **Never
+  against this machine's own setting**: `all` or `default` already `1`, or a
+  sysctl file turning it off for that interface, `all`, `default` or `*`.
+  **Nothing without NetworkManager's word** — no `nmcli`, or one that cannot
+  say, changes nothing and the installer's warning stands. Numbered 51 so it
+  runs before the slower Wi-Fi dispatchers. A change is one line under
+  `journalctl -t gethome-matter-ipv6`, and `test/deploy-matter-ble.test.ts`
+  runs the script and the dispatcher against a fake `nmcli` and `/proc`.
 - **The detector exits 1 for an ordinary state, so the unit says
   `SuccessExitStatus=1`.** "Zigbee is not the radio here" — no coordinator, or
   one plugged into a board the owner has set to Matter — is correct and
@@ -1068,6 +1118,21 @@ in `deploy/install.sh` must stay accurate.
   a rewrite, because the key and the device list must survive. It restarts Z2M
   itself when it changes that, since the detector only restarts on a changed
   *device path*.
+  **All of it is done as the hub's account (`z2m_onboarding_off`), and doing it
+  as root could cost a network.** The checks ran as whoever ran the installer,
+  and a login user with sudo cannot see into `/var/lib/gethome` while it is
+  0750 (the `<data>` bullet above) — measured on a Zero 2 W: `pi` sees neither
+  `configuration.yaml` nor `coordinator_backup.json` — so the file looked
+  absent and a fresh one went over a working network's key, PAN IDs and
+  channel. And root writing there followed a link the account could plant, with
+  a `chown` after it that handed the target over. Three things keep it safe
+  now. Every test, read and write is the account's. **Creating is create-only**
+  (`set -C`), so a check that is wrong can never replace a file that exists.
+  And an edit reads the whole file first, writes the new one beside it with the
+  old one's mode (`cp -p`), flushes it and renames it over — so a read that
+  fails part way is never written back, and a power cut leaves one file or the
+  other. `test/deploy-hub-account.test.ts` runs the real functions with a fake
+  `sudo` that records every root command and requires each to be `setpriv`.
   **Writing that override is load-bearing and used to fail silently.** The
   write was `{ … [[ -n "$PINNED" ]] && echo … } > tmp && mv tmp real`; a
   group's exit status is its last command's, so with nothing pinned — every
