@@ -101,7 +101,7 @@ saturation % → 0–254   sat = round(percent × 254 / 100)
 ## Sensors
 
 - Report on a meaningful change — 0.1 °C, 1 % RH, a door opening — and at
-  least every few minutes even when nothing moves: the hub's history records
+  least every minute or two even when nothing moves: the hub's history records
   the reports it gets, and a long silence is drawn as a gap rather than as a
   flat line.
 - `occupied` and `contactClosed` are booleans that change; a motion sensor

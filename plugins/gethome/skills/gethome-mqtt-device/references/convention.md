@@ -148,7 +148,8 @@ The rules that catch people out:
    `covering.currentPositionLiftPercent100ths`, `fan.mode`,
    `battery.percent`), and fields with a default that you leave out are set to
    that default — overwriting what the hub held. So send each of these objects
-   with every field you know, every time.
+   with every field you know, every time. `sensors` has neither required fields
+   nor defaults, which is why a partial `sensors` merges cleanly.
 3. **Objects merge; arrays and values replace.** `{"sensors":{"humidityCenti":4800}}`
    keeps the stored temperature. `event.buttons` and `custom.fields` are
    replaced whole when sent. `custom.values` merges key by key.
@@ -185,6 +186,11 @@ may be added; ignore any `type` you do not know.
 There is no reply topic. The hub learns the outcome from the state you report:
 report the new state after a command that worked, and nothing after one that
 did not.
+
+The hub never publishes a command retained. A retained `set` message was
+published by hand, and the broker hands it to the device again at every
+reconnect — ignore it if your MQTT library says a message was retained, and
+clear it with an empty retained message on that topic.
 
 An endpoint with the `irRemote` capability is the exception: its library of
 learned codes is kept by the hub, and the device receives `irLearn` and

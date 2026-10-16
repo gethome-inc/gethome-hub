@@ -31,8 +31,8 @@ mirrors the Matter data model. The hub's `docs/device-schema.md` is canonical.
   address on its protocol.
 - A device has one or more **endpoints** (a two-gang switch has two). Send a
   command to the endpoint whose `capabilities` include what it needs.
-- `online` says whether the hub can reach it; each endpoint also carries
-  `state.reachable`. Read one, don't combine them.
+- `online` says whether the hub can reach it — read that for "is it online?".
+  Each endpoint's `state.reachable` carries the same fact per endpoint.
 - `offlineExpected` (present only when somebody said a device being offline is
   fine) and `offlineElsewhere` (it is on a Wi-Fi network the hub has left) mean
   an offline device is **not** a fault. Don't alarm about either.
@@ -117,6 +117,11 @@ these as the body. The key needs `control`.
 ```
 
 - `transitionDs` is in **deciseconds** and optional.
+- **`setLevel` is brightness, not power.** Whether it switches an off light on
+  depends on the device: many do, while one built to the hub's MQTT convention
+  keeps the level for the next time it is switched on. To turn a light on at a
+  brightness, send `setLevel` and then `{"type":"power","on":true}` — in that
+  order, so it doesn't flash at its old level.
 - `{"type":"lock","engage":false}` **unlocks a door**; ask the person first.
 - `setCustomField` writes one of the device's `custom.fields` — only where that
   field's `settable` is true; `value` is a boolean for a toggle, a number for a

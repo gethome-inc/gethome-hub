@@ -31,7 +31,8 @@ mosquitto_pub -h "$GETHOME_HUB" -u gethome -P "$GETHOME_MQTT_PASSWORD" \
 
 The device should apply it and publish its new state within a second. Then do
 the same from a gethome app: the device's card, its page and a scene should
-all work it.
+all work it. Never add `-r` to a command: the broker would hand it to the
+device again every time it reconnects.
 
 ## Play the device's part
 
@@ -63,8 +64,15 @@ curl -s -H "Authorization: Bearer $GETHOME_API_KEY" "http://$GETHOME_HUB:8420/ap
 ```
 
 A refused document shows in the activity as *Rejected invalid MQTT discovery
-config for "<deviceId>".* A refused state message is only in the hub's own
-log: on the hub, `gethome-hubctl logs 300 | grep -i mqtt`.
+config for "<deviceId>".* That entry was made by no member, so a key sees it
+only if it holds `activity.read` — without it, the key reads its own member's
+entries alone. A gethome app shows it to anybody whose role reads the whole
+activity, the owner included.
+
+A refused state message is only in the hub's own log: on the hub,
+`gethome-hubctl logs 300 | grep -i mqtt`. A current hub puts the reasons in
+the line, under `issues` — the unknown key, or the field that is not an
+integer.
 
 ## When something is wrong
 

@@ -27,6 +27,9 @@ The first frame is `hello`, then `access`, then everything as it happens:
 
 - `state` carries the **whole** endpoint state, not a diff: replace what you
   hold for that endpoint.
+- To see a command land, **open the socket first**: the `state` frame can
+  arrive milliseconds after the command's `202`, before a socket opened
+  afterwards is listening.
 - `commandFailed.kind` is an open string (`unreachable`, `refused`, …); show
   `detail`, which is the protocol's own words.
 - `activity` through a key without `activity.read` carries only the key's
@@ -55,7 +58,7 @@ A stream that is not available comes back in `unavailable` on the
 | Close code | Means | Do |
 |---|---|---|
 | `4001` | the key is no good: revoked, expired, its member removed, or its member's role no longer allows keys | **stop**; do not reconnect; tell the person |
-| `1008` | this key already holds five streams | close one of the others |
+| `1008` | this key already holds five streams | close one of the others; don't reconnect until you have |
 | `1013` | opened faster than the key's rate allows | wait a few seconds, then retry |
 | anything else | network, restart, update | reconnect with exponential backoff (1 s, 2 s, 4 s … capped near a minute) |
 

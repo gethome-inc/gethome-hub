@@ -6,22 +6,31 @@ keep those two properties.
 
 ## curl
 
+`hub` hands curl the header through a pipe: `printf` is built into bash and
+zsh, so the key never appears on a command line, where anyone else on the
+machine could read it in the process list.
+
 ```sh
-auth=(-H "Authorization: Bearer $GETHOME_API_KEY")
+hub() { curl -sS -H @<(printf 'Authorization: Bearer %s\n' "$GETHOME_API_KEY") "$@"; }
+api=$GETHOME_HUB_URL/api/v1
 
 # Does this hub take keys, and what may this one do?
-curl -s "$GETHOME_HUB_URL/api/v1/hub" | jq '.apiKeys'
-curl -s "${auth[@]}" "$GETHOME_HUB_URL/api/v1/me" | jq '{permissions, apiKey}'
+curl -sS "$api/hub" | jq '.apiKeys'
+hub "$api/me" | jq '{permissions, apiKey}'
 
 # Every light and whether it is on.
-curl -s "${auth[@]}" "$GETHOME_HUB_URL/api/v1/devices" |
+hub "$api/devices" |
   jq -r '.[] | select(.endpoints[0].deviceKind == "light")
          | "\(.name)\t\(.endpoints[0].state.onOff)"'
 
-# Dim one to about 30 % (level is 1–254, not percent).
-curl -s -X POST "${auth[@]}" -H 'content-type: application/json' \
-  -d '{"type":"setLevel","level":77}' \
-  "$GETHOME_HUB_URL/api/v1/devices/$DEVICE_ID/endpoints/1/commands"
+# Every rule: the answer is an object, not a list.
+hub "$api/automations" | jq -r '.automations[] | "\(.name): \(.summary)"'
+
+# On at about 30 % (level is 1–254, not percent): brightness first, then power.
+for body in '{"type":"setLevel","level":77}' '{"type":"power","on":true}'; do
+  hub -X POST -H 'content-type: application/json' -d "$body" \
+    "$api/devices/$DEVICE_ID/endpoints/1/commands"
+done
 ```
 
 ## Python (standard library)
@@ -111,6 +120,10 @@ function connect() {
   socket.on('close', async (code) => {
     if (code === 4001) {
       console.error('The hub no longer accepts this key (revoked, expired or paused). Stopping.');
+      return;
+    }
+    if (code === 1008) {
+      console.error('This key already holds five event streams. Close one, then start again.');
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, delay));

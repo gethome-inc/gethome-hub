@@ -42,7 +42,7 @@ API keys, and every conversation with the hub's assistant or automations agent.
 | `GET /api/v1/members` | who is in the home |
 | `GET /api/v1/roles` · `GET /api/v1/permissions` | the role table and the permission catalog, with the hub's own wording |
 | `GET /api/v1/activity?limit=&before=` | newest first; only the member's own rows unless the key has `activity.read` |
-| `GET /api/v1/automations` | every rule, each with `summary` (a sentence), `outline`, `shape` (`button`/`toggle`/`watching`), `enabled`, `active`, `roomId` |
+| `GET /api/v1/automations` | `{automations, unreadable}` — an object, not a list. `automations` is every rule, each with `summary` (a sentence), `outline`, `shape` (`button`/`toggle`/`watching`), `enabled`, `active`, `roomId`; `unreadable` is rules a newer build wrote that this hub cannot run, kept rather than lost |
 | `GET /api/v1/automations/{automationId}` · `GET /api/v1/automations/{automationId}/runs` | one rule, and why it fired |
 | `GET /api/v1/automations/capabilities` | the rule vocabulary, generated from the hub's own schema |
 | `GET /api/v1/automations/templates` | the shipped presets |

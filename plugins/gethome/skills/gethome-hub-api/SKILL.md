@@ -36,10 +36,12 @@ This skill is for writing code that **uses** a home. To make a board or bridge
    yourself.** Use `GETHOME_HUB_URL` (for example `http://192.168.1.50:8420`)
    and `GETHOME_API_KEY` (`gethome_` + 43 letters and digits). If either is
    missing, ask the person to create a key and set the variable themselves —
-   **never ask them to paste the key into the conversation**, and never print
-   it, log it, write it into code, a URL, a commit, a test fixture or a file you
-   create. Reference it by name (`$GETHOME_API_KEY`, `os.environ[...]`,
-   `process.env...`).
+   *Get a key* in the hub's
+   [`docs/integrations.md`](https://github.com/gethome-inc/gethome-hub/blob/main/docs/integrations.md#get-a-key)
+   says how. **Never ask them to paste the key into the conversation**, and
+   never print it, log it, write it into code, a URL, a commit, a test fixture
+   or a file you create. Reference it by name (`$GETHOME_API_KEY`,
+   `os.environ[...]`, `process.env...`).
 
 3. **Learn what this key may do** — `GET /api/v1/me`. Plan within it:
 
@@ -51,10 +53,11 @@ This skill is for writing code that **uses** a home. To make a board or bridge
 
    - No `control` → the key reads only. Commands, pressing scenes, switching
      modes and pinning favorites answer `403 key_read_only`.
-   - `permissions` lists what else it may do *now* (it narrows by itself if the
-     member's role does). Anything a task needs beyond it is the **person's**
-     decision: say which permission, and let them change the key. Do not look
-     for another way in.
+   - The top-level `permissions` is what else the key may do **now**:
+     `apiKey.permissions` is what it was given, narrowed by its member's role
+     today. Plan with the top-level one. Anything a task needs beyond it is the
+     **person's** decision: say which permission, and let them change the key.
+     Do not look for another way in.
 
 4. **Suggest the smallest key that does the job.** A dashboard or exporter
    needs a read-only key. A script that switches lights needs `control` and
@@ -69,13 +72,20 @@ This skill is for writing code that **uses** a home. To make a board or bridge
   everywhere but the WebSocket.
 - JSON everywhere. Timestamps are ISO-8601 with milliseconds.
 - **The home in one read**: `GET /api/v1/devices` (each device's endpoints,
-  capabilities and typed state), `GET /api/v1/rooms`, `GET /api/v1/zones`,
-  `GET /api/v1/automations`. Device and room ids are UUIDs the hub minted;
-  match by id, show by name.
+  capabilities and typed state), `GET /api/v1/rooms`, `GET /api/v1/zones` —
+  each a list — and `GET /api/v1/automations`, which is an object:
+  `{automations: [...], unreadable: [...]}`. Device and room ids are UUIDs the
+  hub minted; match by id, show by name. When a person names a device, match
+  their words against the names (and rooms), and ask when more than one fits.
 - **Work a device**:
   `POST /api/v1/devices/{deviceId}/endpoints/{endpointId}/commands` with a
   canonical command such as `{"type":"power","on":true}`. Pick the endpoint
   whose `capabilities` include what the command needs.
+- **Brightness is not power.** Whether `setLevel` switches an off light on
+  depends on the device — many do, while one built to the hub's MQTT
+  convention keeps the level for later. To turn a light on at a brightness,
+  send `setLevel`, then `{"type":"power","on":true}`; to change only the
+  brightness of a light that is on, check `onOff` first.
 - **Units are the schema's, never the ones on the box**: brightness is a level
   1–254, colour temperature is mireds, temperatures are hundredths of a degree
   Celsius (`2150` = 21.5 °C), humidity is hundredths of a percent, power is
@@ -86,20 +96,23 @@ This skill is for writing code that **uses** a home. To make a board or bridge
 - **`202` means routed, not done.** The device's new state arrives as a `state`
   frame on the WebSocket (or on the next `GET /api/v1/devices`); a write that
   never lands arrives as a `commandFailed` frame. Do not report success to a
-  person until the state says so.
+  person until the state says so. **Open the socket before sending** — the
+  frame can arrive within milliseconds of the `202` — and if neither frame has
+  come after about fifteen seconds, read the device again and say what it
+  shows. A battery device may act on a write much later; don't resend.
 
 ## Live updates: use the WebSocket, not polling
 
 `GET /api/v1/ws` upgrades to a WebSocket; send the same `Authorization`
 header. The first frame is `hello` (with `apiKey` and `permissions`), then
-`state`, `deviceUpserted`, `deviceRemoved`, `structure`, `activity`,
-`commandFailed` and more as they happen. Frames and reconnection rules:
-[references/websocket.md](references/websocket.md).
+`access`, then `state`, `deviceUpserted`, `deviceRemoved`, `structure`,
+`activity`, `commandFailed` and more as they happen. Frames and reconnection
+rules: [references/websocket.md](references/websocket.md).
 
 - **Close code `4001` means stop**: the key was revoked, expired, or its
   member's role no longer allows keys. Do not reconnect; tell the person.
 - `1013`: opened too fast — wait and retry. `1008`: this key already holds five
-  streams.
+  streams — close one of the others rather than reconnecting.
 - Any other close: reconnect with exponential backoff, then re-read
   `GET /api/v1/devices`, because frames may have been missed.
 
@@ -113,8 +126,8 @@ Hubs update only when their owner asks, so the one you meet may be months old
 or newer than these docs.
 
 - **What a hub can do is read from what it carries**, never inferred from
-  `version` or `apiVersion`: `apiKeys`, `history`, `portraits`, `wifiNetworks`
-  and `pairing` on `GET /api/v1/hub`, `streams` on `hello`.
+  `version` or `apiVersion`: `apiKeys`, `history` and `portraits` on
+  `GET /api/v1/hub`, `streams` on `hello`.
 - **A `404` from a route documented here means an older hub**, not a mistake.
   Say so and degrade; don't retry.
 - **Vocabularies are open**: device kinds, capabilities, activity kinds,

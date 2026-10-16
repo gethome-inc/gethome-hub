@@ -9,7 +9,8 @@ it rather than guessing a field.
 
 ## Pressing what already exists (`control`)
 
-`GET /api/v1/automations` lists every rule with a `shape`:
+`GET /api/v1/automations` answers `{automations: [...], unreadable: [...]}`;
+each rule in `automations` has a `shape`:
 
 - `button` — press it: `POST /api/v1/automations/{automationId}/run`
 - `toggle` — a mode such as "Night": `PUT /api/v1/automations/{automationId}/active` with `{"active": true}`
@@ -75,8 +76,13 @@ out, so the hub picks the endpoint that can do the command.
 ```
 
 - Times are `HH:MM` in the home's timezone (`GET /api/v1/settings/timezone`);
-  days are 0 = Sunday … 6 = Saturday. A schedule missed while the hub was down
-  does not fire late. `everyMs` is at least 60 000.
+  days are 0 = Sunday … 6 = Saturday, and leaving `days` out means every day.
+  A schedule missed while the hub was down does not fire late. `everyMs` is at
+  least 60 000.
+- **A schedule has no date, so it repeats** on its days until it is switched
+  off. "Tomorrow at ten" is a rule that fires every week unless the person
+  switches it off afterwards — say so before saving one, or suggest they do
+  the thing themselves at the time.
 - `deviceState` fires on the **crossing**, not on every report while it holds.
 - **A threshold on a reading that moves by itself** — temperature, humidity,
   illuminance, pressure, power, energy, flow, PM2.5, CO₂ — **must** carry `for`

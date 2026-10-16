@@ -105,7 +105,7 @@ def run():
         client.check_msg()                              # delivers commands to on_message
         now = time.ticks_ms()
         value = chip_temperature_centi()
-        if last_value is None or abs(value - last_value) >= 50 or time.ticks_diff(now, last_sent) > 300000:
+        if last_value is None or abs(value - last_value) >= 50 or time.ticks_diff(now, last_sent) > 120000:
             publish("/state/2", {"sensors": {"temperatureCenti": value}})
             last_sent, last_value = now, value
         if time.ticks_diff(now, last_ping) > 30000:     # umqtt.simple never pings by itself
@@ -130,7 +130,7 @@ while True:
 - **The last will is set before `connect()`**, retained, so the hub sees
   `offline` when the board loses power.
 - **Document, availability, state, then subscribe** on every connection.
-- **A change of half a degree, or five minutes**, whichever comes first: the
+- **A change of half a degree, or two minutes**, whichever comes first: the
   history stays continuous without a report every 200 ms.
 - **Resetting on a network error** is the simplest dependable recovery on a
   microcontroller: the board boots into a known state and announces itself

@@ -67,7 +67,7 @@ publish    discovery document                  retained
 publish    availability "online"               retained
 publish    the full current state              retained   (each endpoint)
 subscribe  .../set   and .../set/<endpointId> for every other endpoint
-then       on a change  → publish a patch of what changed
+then       on a change  → publish the endpoint's state again
            on a command → apply it, then publish the resulting state
 ```
 
@@ -113,7 +113,7 @@ hub recover the device after its own restart without waiting for you.
 
 ## Reporting state
 
-A state message is a **patch** in the hub's canonical schema:
+A state message is a JSON object in the hub's canonical schema:
 
 ```json
 {"onOff": true, "power": {"activeMilliwatts": 740000}}
@@ -131,17 +131,23 @@ A state message is a **patch** in the hub's canonical schema:
 - **Strict here too.** One unknown key (`rssi`, `uptime`, `firmware`) and the
   hub drops the **whole** message, saying so only in its own log. Something
   worth showing that has no capability goes in a `custom` field.
-- **Send only what changed, but each nested object whole.** Objects merge into
-  what the hub holds and arrays replace, but a nested object is checked as a
-  unit and its left-out fields with defaults take the **default**, not their
-  last value: `{"thermostat":{"localTemperatureCenti":2100}}` also sets
-  `systemMode` to 0 (off), `{"fan":{"mode":3}}` sets `percentCurrent` to 0,
-  and a `covering` without `isMoving` says it has stopped. Send every field of
-  `thermostat`, `fan`, `covering`, `level` and `colorTemperature` you know.
-- **Report on change**, and no more often than about once a second. A sensor
-  that drifts reports when it moves by a meaningful step (0.1 °C, 1 % RH) or
-  every minute or two — the hub may be a 512 MB board running the whole house,
-  and it records readings in five-minute buckets anyway.
+- **Send the endpoint's whole state each time.** It is small, and the broker
+  keeps only the *latest* retained message on a topic, so the whole state is
+  what a restarting hub reads back. A message carrying only what changed is
+  accepted too, and merges into what the hub holds — but **a nested object is
+  checked as a unit**, and its left-out fields that have defaults take the
+  *default*, not their last value: `{"thermostat":{"localTemperatureCenti":2100}}`
+  also sets `systemMode` to 0 (off), `{"fan":{"mode":3}}` sets
+  `percentCurrent` to 0, and a `covering` without `isMoving` says it has
+  stopped. So always send every field you know of `thermostat`, `fan`,
+  `covering`, `level`, `colorTemperature` and `colorHS`; `sensors` and
+  `custom.values` are the exceptions, whose fields merge one by one.
+- **Report on change, and at least every minute or two even when nothing
+  moves**, and no more often than about once a second. A sensor that drifts
+  reports when it moves by a meaningful step (0.1 °C, 1 % RH); the steady
+  heartbeat is what keeps the hub's history from drawing a quiet sensor as a
+  gap. The hub may be a 512 MB board running the whole house, and it records
+  readings in five-minute buckets anyway.
 - A patch for an endpoint the document did not declare is dropped.
 
 ## Handling commands
@@ -161,6 +167,12 @@ gethome/device/greenhouse/set  ←  {"type":"toggle"}
   [references/capabilities.md](references/capabilities.md).
 - **Ignore any `type` you do not handle** — including ones a newer hub adds —
   rather than failing. Values arrive already inside the schema's ranges.
+- **The hub never retains a command**, so a `set` message that arrives
+  retained was published by hand — and the broker replays it at every
+  reconnect, which for an unlock means every time the lock comes back. Ignore
+  it where your MQTT library says a message was retained (paho's
+  `message.retain`); never publish a command with the retain flag yourself,
+  and clear a stray one with an empty retained message on that topic.
 - **Fail safe.** Decide what a relay does when Wi-Fi or the broker goes away,
   start every output in a known safe state at boot rather than replaying the
   last command, and keep any local interlock (a limit switch, a door sensor) in
@@ -169,7 +181,9 @@ gethome/device/greenhouse/set  ←  {"type":"toggle"}
 ## Buttons and everything else
 
 - **Buttons and remotes** declare `event` (kind `remote` for pure senders),
-  publish their button inventory once, then one small patch per press:
+  publish their button inventory once, retained, then one small patch per
+  press, **not** retained — a retained press is pressed again at every hub
+  restart:
   `{"event":{"action":"double","button":"main","gesture":"double"}}`. The hub
   stamps the time, so identical presses each arrive.
 - **Any other knob or reading** — a schedule mode, a sensitivity, a soil
