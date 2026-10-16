@@ -1348,23 +1348,35 @@ describe.skipIf(!handle)('API keys', () => {
   describe('the rate limit', () => {
     it('lets a key burst, then answers 429 with when to come back', async () => {
       const { secret } = await mint(memberToken, { name: 'Busy loop' });
-      const statuses: number[] = [];
-      let refused: Awaited<ReturnType<typeof app.inject>> | undefined;
-      for (let i = 0; i < 120; i += 1) {
-        const response = await app.inject({ method: 'GET', url: '/api/v1/home', headers: auth(secret) });
-        statuses.push(response.statusCode);
-        if (response.statusCode === 429 && refused === undefined) refused = response;
-      }
-      expect(statuses.slice(0, 50).every((status) => status === 200)).toBe(true);
-      expect(refused).toBeDefined();
-      const body = refused!.json() as { error: string; retryAfterMs: number };
-      expect(body.error).toBe('rate_limited');
-      expect(body.retryAfterMs).toBeGreaterThan(0);
-      expect(Number(refused!.headers['retry-after'])).toBeGreaterThanOrEqual(1);
+      // The bucket refills by the clock, ten tokens a second, and keeps the
+      // fraction a refused request leaves in it — so whether it was still
+      // empty when the stream below opened depended on how long the handshake
+      // took. On a loaded runner it sometimes had a whole token again: the
+      // stream was let in, nothing ever closed it, and the test waited out its
+      // timeout. Held still, the clock leaves the bucket exactly as the
+      // requests left it. Only `Date` is faked; timers and sockets are real.
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        const statuses: number[] = [];
+        let refused: Awaited<ReturnType<typeof app.inject>> | undefined;
+        for (let i = 0; i < 120; i += 1) {
+          const response = await app.inject({ method: 'GET', url: '/api/v1/home', headers: auth(secret) });
+          statuses.push(response.statusCode);
+          if (response.statusCode === 429 && refused === undefined) refused = response;
+        }
+        expect(statuses.slice(0, 50).every((status) => status === 200)).toBe(true);
+        expect(statuses.slice(50).every((status) => status === 429)).toBe(true);
+        const body = refused!.json() as { error: string; retryAfterMs: number };
+        expect(body.error).toBe('rate_limited');
+        expect(body.retryAfterMs).toBeGreaterThan(0);
+        expect(Number(refused!.headers['retry-after'])).toBeGreaterThanOrEqual(1);
 
-      // And a stream opened from the empty bucket is told to try again later.
-      const stream = connect({ secret });
-      expect(await stream.closed).toBe(1013);
+        // And a stream opened from the empty bucket is told to try again later.
+        const stream = connect({ secret });
+        expect(await stream.closed).toBe(1013);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('counts a request it turned away as a refusal, never as a use', async () => {
