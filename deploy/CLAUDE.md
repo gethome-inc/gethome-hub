@@ -633,7 +633,13 @@ in `deploy/install.sh` must stay accurate.
   **The driver first, then the machine.** brcmfmac only, the one driver this was
   tried on: `modprobe -r` the vendor half and brcmfmac, `modprobe brcmfmac`,
   once more if the radio is not back, and an immediate restart if it still is
-  not. Measured on that Zero 2 W: wlan0 gone for under a second, NetworkManager
+  not. "Back" means an interface brcmfmac drives, under any name — a second
+  adapter in the machine is not it — and the watchdog's memory follows that
+  radio rather than the name: wlan0 came back as wlan0 three times out of
+  three on that hub, but the kernel takes the next free name and udev may
+  rename it, and a memory kept under the old one would follow up on an
+  interface that is gone, or forget the silence when a default route returned
+  on the new one. Measured on that Zero 2 W: wlan0 gone for under a second, NetworkManager
   connected 3.5 s after the reload began, 2.8 s of a Mac's 0.2-second pings
   lost, Bluetooth up throughout, IPv6 on, power save off again through its
   dispatcher. Five minutes later, if nothing has answered — whatever

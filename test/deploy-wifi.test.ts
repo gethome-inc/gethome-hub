@@ -1,5 +1,15 @@
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -790,7 +800,15 @@ const MEMORY = ['192.168.0.1 02:00:00:00:00:01 1792009718', 'fe80::81b:2cff:fe3d
  * answer, whether re-joining or reloading cures it, and whether a reloaded
  * driver brings the radio back at all.
  */
-function watchdogHub(options: { driver?: string; nmcli?: boolean; memory?: string } = {}) {
+function watchdogHub(
+  options: {
+    driver?: string;
+    nmcli?: boolean;
+    memory?: string;
+    /** A second Wi-Fi adapter beside the hub's own, driven by something else. */
+    otherRadio?: boolean;
+  } = {},
+) {
   const dir = mkdtempSync(path.join(tmpdir(), 'gethome-watchdog-'));
   dirs.push(dir);
   const bin = path.join(dir, 'bin');
@@ -811,14 +829,21 @@ function watchdogHub(options: { driver?: string; nmcli?: boolean; memory?: strin
     'intrcount:    24124\nf2rxdata:     28794\nf2txdata:     14390\nfcqueued:     20035\nfc_xoff:      1\nfc_xon:       1\n',
   );
   // The radio as sysfs shows it, made by a shell snippet so the fake
-  // `modprobe` can take it away and put it back the way a reload does.
+  // `modprobe` can take it away and put it back the way a reload does — under
+  // `$name`, which a reload may change (the `radio-name` flag's contents).
   const radio = [
-    `mkdir -p "${net}/wlan0/wireless" "${net}/wlan0/statistics" "${net}/wlan0/device/driver"`,
-    `ln -s "${dir}/ieee80211/phy0" "${net}/wlan0/phy80211"`,
-    `ln -s "${dir}/module/${driver}" "${net}/wlan0/device/driver/module"`,
-    `for c in rx_packets:36063 tx_packets:20050 rx_dropped:38 tx_dropped:0 tx_errors:0; do echo "\${c#*:}" > "${net}/wlan0/statistics/\${c%%:*}"; done`,
+    `mkdir -p "${net}/$name/wireless" "${net}/$name/statistics" "${net}/$name/device/driver"`,
+    `ln -s "${dir}/ieee80211/phy0" "${net}/$name/phy80211"`,
+    `ln -s "${dir}/module/${driver}" "${net}/$name/device/driver/module"`,
+    `for c in rx_packets:36063 tx_packets:20050 rx_dropped:38 tx_dropped:0 tx_errors:0; do echo "\${c#*:}" > "${net}/$name/statistics/\${c%%:*}"; done`,
   ].join('\n');
-  execFileSync('/bin/sh', ['-c', radio]);
+  execFileSync('/bin/sh', ['-c', `name=wlan0\n${radio}`]);
+  if (options.otherRadio) {
+    mkdirSync(path.join(dir, 'module', 'iwlwifi'), { recursive: true });
+    mkdirSync(path.join(net, 'wlan9', 'wireless'), { recursive: true });
+    mkdirSync(path.join(net, 'wlan9', 'device', 'driver'), { recursive: true });
+    execFileSync('/bin/ln', ['-s', path.join(dir, 'module', 'iwlwifi'), path.join(net, 'wlan9', 'device', 'driver', 'module')]);
+  }
   // And an Ethernet interface beside it, which is never the watchdog's.
   mkdirSync(path.join(net, 'eth0', 'statistics'), { recursive: true });
   writeFileSync(path.join(dir, 'nm-state'), '100 (connected)\n');
@@ -827,7 +852,7 @@ function watchdogHub(options: { driver?: string; nmcli?: boolean; memory?: strin
   script_(
     path.join(bin, 'ip'),
     `case "$*" in
-       "neigh show dev wlan0 nud reachable"|"neigh show dev eth0 nud reachable") [ -f "${reach}" ] && cat "${reach}"; exit 0 ;;
+       "neigh show dev "*" nud reachable") [ -f "${reach}" ] && cat "${reach}"; exit 0 ;;
        "neigh show dev "*) printf '192.168.0.1  FAILED\\nfe80::1  FAILED\\n192.168.0.218 lladdr 0a:1b:2c:3d:4e:5f STALE\\n' ;;
        "neigh replace "*) echo "ip $*" >> "${calls}"; [ -f "${dir}/answers-when-asked" ] && echo "${ANSWER}" > "${reach}"; exit 0 ;;
        *) echo "unexpected ip $*" >> "${calls}" ;;
@@ -849,7 +874,11 @@ function watchdogHub(options: { driver?: string; nmcli?: boolean; memory?: strin
   script_(
     path.join(bin, 'modprobe'),
     `echo "modprobe $*" >> "${calls}"
-     if [ "$1" = -r ]; then rm -rf "${net}/wlan0"; exit 0; fi
+     if [ "$1" = -r ]; then
+       for d in "${net}"/*; do case "$(readlink "$d/device/driver/module" 2>/dev/null)" in */brcmfmac) rm -rf "$d" ;; esac; done
+       exit 0
+     fi
+     name=$(cat "${dir}/radio-name" 2>/dev/null || echo wlan0)
      n=$(cat "${dir}/loads" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "${dir}/loads"
      [ -f "${dir}/radio-never-returns" ] && exit 1
      if [ -f "${dir}/radio-returns-second-time" ] && [ "$n" -lt 2 ]; then exit 0; fi
@@ -865,7 +894,7 @@ function watchdogHub(options: { driver?: string; nmcli?: boolean; memory?: strin
   );
   script_(
     path.join(bin, 'iw'),
-    `[ "$*" = "dev wlan0 station dump" ] || exit 1
+    `case "$*" in "dev "*" station dump") ;; *) exit 1 ;; esac
      printf 'Station 02:00:00:00:00:01 (on wlan0)\\n\\tinactive time:\\t48020 ms\\n\\trx bytes:\\t932185\\n\\trx packets:\\t4662\\n\\ttx bytes:\\t979691\\n\\ttx packets:\\t2785\\n\\ttx retries:\\t12\\n\\ttx failed:\\t0\\n\\tsignal:  \\t-59 dBm\\n\\tconnected time:\\t878 seconds\\n'`,
   );
   script_(
@@ -935,6 +964,14 @@ function watchdogHub(options: { driver?: string; nmcli?: boolean; memory?: strin
     log: (): string[] => read(log),
     state: (): string => (existsSync(path.join(dir, 'state')) ? readFileSync(path.join(dir, 'state'), 'utf8') : ''),
     wlan0: (): boolean => existsSync(path.join(net, 'wlan0')),
+    /** The name the next reload brings the radio back under. */
+    reloadsAs(name: string): void {
+      writeFileSync(path.join(dir, 'radio-name'), name);
+    },
+    /** An interface renamed after it appeared, the way a udev rule renames one. */
+    rename(from: string, to: string): void {
+      renameSync(path.join(net, from), path.join(net, to));
+    },
   };
 }
 
@@ -1284,6 +1321,70 @@ describe('a hub whose Wi-Fi stays connected while nothing gets through', () => {
     hub.run(5300);
     expect(actions(hub.calls())).toEqual([...RELOAD, 'modprobe brcmfmac']);
     expect(hub.log()).toContain('The Wi-Fi radio is back after loading its driver a second time.');
+  });
+
+  /**
+   * **The silence follows the radio, not its name.** On the hub this was
+   * written on a reload brought wlan0 back as wlan0 three times out of three,
+   * but the kernel takes the next free name and udev may rename it — and a
+   * memory kept under the old name would follow up on an interface that no
+   * longer exists, or forget the silence when a default route comes back on
+   * the new one.
+   */
+  it('follows the radio when the reload brings it back under another name', () => {
+    const hub = watchdogHub();
+    hub.reloadsAs('wlan1');
+    hub.answering(true);
+    hub.run(5000);
+    hub.answering(false);
+    hub.run(5300);
+    expect(hub.log()).toContain(
+      'The Wi-Fi radio is back after reloading its driver, as wlan1 rather than wlan0; following it there.',
+    );
+    expect(hub.state()).toMatch(/ wlan1\n$/);
+    hub.rounds(5320, 5600, 20, null);
+    expect(actions(hub.calls())).toEqual([...RELOAD, RESTART]);
+    expect(hub.calls().filter((call) => call.startsWith('ip neigh replace')).at(-1)).toMatch(/ dev wlan1$/);
+  });
+
+  it('and restarts the hub when the network answers again on the new name', () => {
+    const hub = watchdogHub();
+    hub.reloadsAs('wlan1');
+    hub.answering(true);
+    hub.run(5000);
+    hub.answering(false);
+    hub.run(5300);
+    hub.answering(true);
+    hub.run(5320, 'wlan1');
+    expect(actions(hub.calls())).toEqual([...RELOAD, HUB_RESTART]);
+    expect(hub.log()).toContain(
+      'The network answers this hub over wlan1 again, 320 s after it last did. Last step taken: reloading the Wi-Fi driver, 20 s before.',
+    );
+  });
+
+  /** Renamed after the reload had already found it: the memory still follows. */
+  it('follows a radio renamed after the reload, with or without a default route', () => {
+    for (const route of [null, 'wlan1'] as const) {
+      const hub = watchdogHub();
+      hub.answering(true);
+      hub.run(5000);
+      hub.answering(false);
+      hub.run(5300);
+      hub.rename('wlan0', 'wlan1');
+      hub.rounds(5320, 5600, 20, route);
+      expect(actions(hub.calls()), String(route)).toEqual([...RELOAD, RESTART]);
+    }
+  });
+
+  /** A second Wi-Fi adapter is not the radio coming back: only one brcmfmac drives counts. */
+  it('does not take another radio in the machine for the one it reloaded', () => {
+    const hub = watchdogHub({ otherRadio: true });
+    hub.answering(true);
+    hub.run(1000);
+    hub.answering(false);
+    hub.flag('radio-never-returns');
+    hub.run(1300);
+    expect(actions(hub.calls())).toEqual([...RELOAD, 'modprobe brcmfmac', RESTART]);
   });
 
   /** A hub moved to a cable keeps its keep-alive, and has no radio for this to restart. */

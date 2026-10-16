@@ -225,13 +225,33 @@ driver() {
   printf '%s' "${module##*/}"
 }
 
-# A wireless interface again, under whatever name the kernel gave it.
+# The radio a reload is about, back again: a wireless interface brcmfmac
+# drives, under whatever name it has now — the kernel's next free one, or
+# what udev renamed it to. Sets $radio to that name. Any other radio in the
+# machine is not it, or a second adapter would read as this one back.
 radio_back() {
-  local dir
+  local dir module
+  radio=""
   for dir in "$NET_DIR"/*; do
-    [[ -d "$dir/wireless" || -e "$dir/phy80211" ]] && return 0
+    [[ -d "$dir/wireless" || -e "$dir/phy80211" ]] || continue
+    module="$(readlink "$dir/device/driver/module" 2>/dev/null)"
+    [[ "${module##*/}" == brcmfmac ]] || continue
+    radio="${dir##*/}"
+    return 0
   done
   return 1
+}
+
+# Say the radio is back, and follow it if it came back under another name, so
+# the next steps — and the memory this saves — are about the interface that
+# exists rather than the one that went.
+radio_returned() {
+  if [[ "$radio" == "$IFACE" ]]; then
+    note "The Wi-Fi radio is back after $1."
+  else
+    note "The Wi-Fi radio is back after $1, as $radio rather than $IFACE; following it there."
+    IFACE="$radio"
+  fi
 }
 
 wait_for_radio() {
@@ -260,12 +280,12 @@ reload_driver() {
   modprobe -r ${holders[@]+"${holders[@]}"} brcmfmac 2>/dev/null || note "The driver would not unload; loading it anyway."
   modprobe brcmfmac 2>/dev/null
   if wait_for_radio; then
-    note "The Wi-Fi radio is back after reloading its driver."
+    radio_returned "reloading its driver"
     return 0
   fi
   modprobe brcmfmac 2>/dev/null
   if wait_for_radio; then
-    note "The Wi-Fi radio is back after loading its driver a second time."
+    radio_returned "loading its driver a second time"
     return 0
   fi
   # Not held back by the hour below: this step took the radio away, and a hub
@@ -331,6 +351,15 @@ for value in "${alive_at:-x}" "${rung:-x}" "${rung_at:-x}" "${noted:-x}" "${relo
 done
 if [[ -n "$alive_at" ]] && (( alive_at > now )); then
   alive_at="" rung=0 rung_at=0 noted=0 reloaded=0 about=""
+fi
+# A silence this took a reload over follows the radio, not the name: when the
+# interface it remembers is gone and the radio is back under another one —
+# renamed after the reload, say — the memory is that one's. Without this, a
+# round with no default route would follow up on a name that no longer
+# exists and stop there, and a default route on the new name would read as a
+# different interface and forget the silence, the restarts with it.
+if (( reloaded > 0 )) && [[ -n "$about" && ! -e "$NET_DIR/$about" ]] && radio_back; then
+  about="$radio"
 fi
 
 # No default route. Only a silence this has already taken a step over is still
