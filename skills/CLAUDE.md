@@ -6,7 +6,10 @@ home through an API key) and `gethome-mqtt-device` (hardware that joins it over
 MQTT). The root `CLAUDE.md` says **when** they have to change — with the API,
 the MQTT convention or the schema, in the same pull request — and this file says
 how they are written. `README.md` beside this file is for people browsing
-GitHub and is how they install them.
+GitHub and is how they install them. The install command is written twice
+more, in the root README's *Build with an AI agent* and in
+`docs/integrations.md`, so a change to how they are installed changes all
+three.
 
 **They are plain folders, installed with `npx skills add gethome-inc/gethome-hub`**,
 which clones the repository shallowly into a temporary directory, copies each

@@ -961,7 +961,11 @@ rules.
   back → `docs/installation.md`; network and privacy → `docs/security.md`;
   engineering rationale and measurements → the `CLAUDE.md` of the directory they
   are about. A new fact that a stranger does not need before their hub is
-  running is a docs fact.
+  running is a docs fact. **The one exception is *Build with an AI agent***
+  (the owner's call, 2026-10-16): the skills are installed by this
+  repository's name, so this page is where people come for them. It says what
+  the two are and gives the one command, and everything else about them stays
+  in `skills/README.md`.
 - **Two things are load-bearing and belong to other repos.** The
   `### Getting a shell on the hub` heading (Studio deep-links its anchor) and the
   front page itself. Rename or remove either only after changing the repo that
