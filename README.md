@@ -30,15 +30,15 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screens/home-dark.webp">
-    <img src="docs/assets/screens/home-light.webp" width="30%" alt="The gethome app's Home pane: a pulse panel, scenes and favorite devices, with one light running.">
+    <img src="docs/assets/screens/home-light.webp" width="31%" alt="The gethome app's Home pane for a demo home, City Apartment: all calm, 22.4° inside, one light on, everything secured, with scenes and favorite devices under it.">
   </picture>
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screens/assistant-dark.webp">
-    <img src="docs/assets/screens/assistant-light.webp" width="30%" alt="The gethome app's assistant: a glass orb asking “How can I help?”, with a box to type in and a microphone.">
+    <img src="docs/assets/screens/assistant-light.webp" width="31%" alt="The gethome app's assistant: a glass orb asking “How can I help?”, with a box to type in and a microphone.">
   </picture>
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screens/device-dark.webp">
-    <img src="docs/assets/screens/device-light.webp" width="30%" alt="The gethome app's page for a lamp: power, brightness and color controls.">
+    <img src="docs/assets/screens/device-light.webp" width="31%" alt="The gethome app's page for a lamp: power, brightness and color controls.">
   </picture>
 </p>
 
