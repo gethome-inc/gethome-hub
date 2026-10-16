@@ -2,9 +2,6 @@
 name: gethome-hub-api
 description: Write software that uses a gethome smart-home hub through its local REST and WebSocket API with an API key — scripts, dashboards, bridges, exporters and agents that read or control a home.
 license: PolyForm-Noncommercial-1.0.0
-metadata:
-  homepage: https://github.com/gethome-inc/gethome-hub
-  api-docs: https://github.com/gethome-inc/gethome-hub/blob/main/docs/api.md
 ---
 
 # Building on a gethome hub

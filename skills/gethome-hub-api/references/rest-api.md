@@ -38,7 +38,7 @@ API keys, and every conversation with the hub's assistant or automations agent.
 | `GET /api/v1/zones` | `[{id, name, sortOrder}]` |
 | `GET /api/v1/devices` | every device — see [devices-and-commands.md](devices-and-commands.md) |
 | `GET /api/v1/devices/{deviceId}/history?from=&to=&points=&series=` | recorded readings in five-minute buckets for about a week; `from`/`to` epoch ms |
-| `GET /api/v1/devices/{deviceId}/portraits` | the pictures drawn of a device |
+| `GET /api/v1/devices/{deviceId}/portraits` · `GET /api/v1/portraits/{portraitId}` | the pictures drawn of a device, and one picture itself as `image/png` (it never changes; a new one gets a new id) |
 | `GET /api/v1/members` | who is in the home |
 | `GET /api/v1/roles` · `GET /api/v1/permissions` | the role table and the permission catalog, with the hub's own wording |
 | `GET /api/v1/activity?limit=&before=` | newest first; only the member's own rows unless the key has `activity.read` |

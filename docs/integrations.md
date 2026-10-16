@@ -193,22 +193,25 @@ through a key.
 
 ## With an AI coding agent
 
-This repository publishes two [agent skills](../plugins/gethome/README.md), so
-a coding agent knows the API, the device schema and the MQTT convention without
-being walked through them — and the rules that come with them: keep the key out
-of the conversation, ask before unlocking a door or switching on a rule it
-wrote, and read what a hub can do from what it advertises rather than from its
+This repository publishes two [agent skills](../skills/README.md), so a coding
+agent knows the API, the device schema and the MQTT convention without being
+walked through them — and the rules that come with them: keep the key out of
+the conversation, ask before unlocking a door or switching on a rule it wrote,
+and read what a hub can do from what it advertises rather than from its
 version.
 
 - **`gethome-hub-api`** — software that uses a home, through an API key.
 - **`gethome-mqtt-device`** — firmware that makes a board a device: ESPHome,
   Arduino, MicroPython or Python.
 
-| Agent | Install |
-|---|---|
-| Claude Code | `/plugin marketplace add gethome-inc/gethome-hub`, then `/plugin install gethome@gethome` |
-| Codex | `codex plugin marketplace add gethome-inc/gethome-hub`, then `codex plugin add gethome@gethome` — or `/plugins` inside Codex |
-| Cursor, OpenCode and other agents that read [Agent Skills](https://agentskills.io) | `npx skills add gethome-inc/gethome-hub` |
+```sh
+npx skills add gethome-inc/gethome-hub
+```
+
+installs them for Claude Code, Codex, Cursor and the other agents that read
+[Agent Skills](https://agentskills.io), copying the two skill folders and
+nothing else; `npx skills update` brings them up to date. Neither needs this
+repository or a hub's source beside it.
 
 Then give the agent the hub without giving it the secret: set `GETHOME_HUB_URL`
 and `GETHOME_API_KEY` in the shell you start it from, with a key made for the

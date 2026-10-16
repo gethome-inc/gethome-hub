@@ -724,7 +724,9 @@ adapter/registry/API change.
   decision about whether an API key may hold it, which is *no* until somebody
   adds it to `KEY_GRANTABLE` and to the exact list `test/access.test.ts` pins;
   a new guarded route needs its row in the refusal table, an allowed case
-  somewhere, and its line in `test/api-keys.test.ts`'s route table.
+  somewhere, its line in `test/api-keys.test.ts`'s route table and — when a
+  key can reach it — its row in the API skill, which `test/skills.test.ts`
+  refuses to go without.
   **`npm run typecheck` covers `test/` as well as `src/`, and that is what
   `tsconfig.test.json` is for.** It did not, for a while, and this is the rule
   that paid for it: `tsconfig.json` is the *build*, so it is `src`-only with
@@ -833,17 +835,34 @@ adapter/registry/API change.
   `.strict()`**: zod strips what it does not know, so a narrowing field a later
   build adds would be dropped by an older hub and the key made broader than
   asked — a 400 is the only safe answer.
-- **The agent skills in `plugins/gethome/` are instructions other people's
-  agents follow, and they are held to this server.** `test/skills.test.ts`
-  builds the API and fails when a skill names a route that does not exist,
-  sends a key somewhere no key may go, or claims a key policy or a grantable
-  permission the server disagrees with — so a route, a refusal or a policy
-  change that would make a skill lie fails here, and the fix is the skill,
-  in the same change, with the plugin's version raised in both `plugin.json`
-  files (CI's *Plugin version* job checks the second half). The skills'
-  own rules — the frontmatter subset, the 200-character description, the
-  four manifests and what each client reads — are in `plugins/CLAUDE.md`,
-  which loads when you work under `plugins/`.
+- **A change to the API, the MQTT convention or the device schema updates
+  the agent skills in `skills/`, in the same pull request.** They are this
+  hub's contract condensed for other people's agents: installed on strangers'
+  machines with `npx skills add gethome-inc/gethome-hub`, followed literally,
+  by agents holding a key to somebody's house — and an installed copy keeps
+  whatever `main` said when it was fetched, so a skill that lies goes on lying
+  until its owner updates it. Which change touches which:
+  - a route, a request or response field, a refusal code, a WebSocket frame,
+    stream or close code, a rate limit, or what an API key may be given (a
+    route's key policy, `KEY_GRANTABLE`) → `skills/gethome-hub-api/`;
+  - the MQTT topics, the discovery document, what a state report or a command
+    may carry, availability and retained messages, or the broker's accounts
+    (`src/adapters/mqtt/`, mosquitto's ACL in `deploy/`) →
+    `skills/gethome-mqtt-device/`;
+  - a device kind, a capability, a unit or a command (`src/schema/`) → both.
+
+  `test/skills.test.ts` catches the mechanical half and fails the build: a
+  route a skill names that the server does not serve, a route a key can use
+  that the API skill does not name, a key sent where no key may go, a policy
+  table or grantable list the server disagrees with, a device kind or
+  capability the schema lacks or a skill leaves out, an MQTT topic the adapter
+  would not read, and **any JSON example the schema would refuse**. **It cannot
+  catch what something means** — that `setLevel` does not switch every light
+  on, that a command is never retained, the order a device announces itself
+  in, a refusal's wording, a default's value — so re-read the part of the skill
+  the change is about, and write it in the same pull request rather than in a
+  follow-up. The rules for writing a skill are in `skills/CLAUDE.md`, which
+  loads when you work under `skills/`.
 - matter.js is pinned to a minor (`~0.17.x`) because its API churns; keep all
   matter.js-specific code inside `src/adapters/matter/`.
 - `tsconfig` uses `exactOptionalPropertyTypes` — build optional-field objects
@@ -984,8 +1003,8 @@ After landing a change, update the docs it invalidates in the same change:
 schema/units/wire → `docs/device-schema.md` (+ the iOS repo needs a matching
 change — flag it); routes/auth → `docs/api.md`; adapter behavior/topics →
 `docs/zigbee.md` / `docs/matter.md` / `docs/mqtt-integrations.md`; a route,
-a unit, the MQTT convention or what an API key may do → the agent skills under
-`plugins/gethome/` as well, with the plugin's version raised; AI
+a unit, the MQTT convention, the device schema or what an API key may do → the
+agent skills under `skills/` as well (see the bullet on them above); AI
 trigger/DSL → `docs/ai-adaptation.md`; the assistant, the chat runtime or the
 delegate registry → `docs/assistant.md`; portraits → `docs/portraits.md`;
 module boundaries → this file and the subsystem file for the directory you

@@ -2,9 +2,6 @@
 name: gethome-mqtt-device
 description: Make a DIY board, sensor, relay or bridge appear as a device in a gethome home over the hub's MQTT broker — ESPHome, Arduino, MicroPython or Python code using the gethome topic convention.
 license: PolyForm-Noncommercial-1.0.0
-metadata:
-  homepage: https://github.com/gethome-inc/gethome-hub
-  convention: https://github.com/gethome-inc/gethome-hub/blob/main/docs/mqtt-integrations.md
 ---
 
 # Making a device for a gethome home

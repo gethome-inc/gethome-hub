@@ -1,4 +1,0 @@
-interface:
-  display_name: "gethome hub API"
-  short_description: "Build scripts, dashboards and bridges on a gethome hub with an API key"
-  default_prompt: "Check that my gethome hub takes API keys, then help me write a script that uses it — reading the hub address and key from GETHOME_HUB_URL and GETHOME_API_KEY."

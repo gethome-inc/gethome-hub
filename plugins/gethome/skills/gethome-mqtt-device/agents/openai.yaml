@@ -1,4 +1,0 @@
-interface:
-  display_name: "gethome MQTT device"
-  short_description: "Make a DIY board or bridge appear as a gethome device over MQTT"
-  default_prompt: "Help me write firmware that makes my board appear as a device in my gethome home, using the gethome MQTT convention and keeping the broker password out of the source."

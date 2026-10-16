@@ -15,6 +15,17 @@ import { AiRunLog } from '../src/core/ai-runs.js';
 import { MappingLibrary } from '../src/ai/library.js';
 import { KEY_GRANTABLE } from '../src/core/access.js';
 import type { AutomationEngine } from '../src/automations/engine.js';
+import type { ZodType } from 'zod';
+import {
+  CAPABILITY_KINDS,
+  DEVICE_KINDS,
+  commandSchema,
+  endpointDescriptorSchema,
+  isCapabilityKind,
+  mqttDiscoverySchema,
+  statePatchSchema,
+} from '../src/schema/index.js';
+import { commandTopic, parseTopic } from '../src/adapters/mqtt/convention.js';
 import {
   bootedHome,
   loadedAccess,
@@ -28,20 +39,18 @@ import {
 } from './helpers/db.js';
 
 /**
- * The agent skills in `plugins/gethome/`, held to the open standard and to the
- * server.
+ * The agent skills in `skills/`, held to the open standard, to the server and
+ * to the schema.
  *
  * A skill is followed literally, by an agent on somebody else's machine, so a
- * route it names that does not exist — or one it says a key can use when no
- * key can — is a bug that ships to every installed copy. Nothing else checks:
- * Claude Code's validator reads the manifests and not the skills' frontmatter,
- * and no loader knows what this hub serves. `plugins/CLAUDE.md` is the prose
- * behind each rule here.
+ * route it names that does not exist, one it says a key can use when no key
+ * can, a capability the hub has renamed or an example the hub would refuse is a
+ * bug in every installed copy. Nothing else checks: no loader knows what this
+ * hub serves. `skills/CLAUDE.md` is the prose behind each rule here.
  */
 
 const repoRoot = path.join(import.meta.dirname, '..');
-const pluginRoot = path.join(repoRoot, 'plugins', 'gethome');
-const skillsRoot = path.join(pluginRoot, 'skills');
+const skillsRoot = path.join(repoRoot, 'skills');
 
 const readJson = (file: string): Record<string, unknown> =>
   JSON.parse(readFileSync(path.join(repoRoot, file), 'utf8')) as Record<string, unknown>;
@@ -78,7 +87,7 @@ function scalar(raw: string, where: string): string {
 }
 
 /**
- * The small YAML subset `plugins/CLAUDE.md` allows: `key: value` on one line,
+ * The small YAML subset `skills/CLAUDE.md` allows: `key: value` on one line,
  * and a `key:` opening one level of two-space-indented `key: value` pairs.
  * Anything else is refused by name rather than guessed at, because loaders
  * read frontmatter with everything from a YAML library to a regex.
@@ -128,7 +137,7 @@ const skills = readdirSync(skillsRoot)
   .sort();
 
 describe('the agent skills', () => {
-  it('are the two this plugin publishes', () => {
+  it('are the two this repository publishes', () => {
     // Pinned, so this file cannot pass by finding nothing — and so a skill
     // added or renamed is a decision someone writes down, since agents and
     // people refer to a skill by its name.
@@ -174,8 +183,8 @@ describe('the agent skills', () => {
       }
     });
 
-    it('is licensed as the plugin is', () => {
-      expect(fields.license).toBe(readJson('plugins/gethome/.claude-plugin/plugin.json').license);
+    it('is licensed as the repository is', () => {
+      expect(fields.license).toBe(readJson('package.json').license);
     });
 
     it('keeps SKILL.md under 500 lines', () => {
@@ -201,61 +210,197 @@ describe('the agent skills', () => {
       }
     });
 
-    it('keeps its Codex metadata within what Codex reads', () => {
-      const yaml = readFileSync(path.join(dir, 'agents', 'openai.yaml'), 'utf8');
-      const parsed = parseSubset(yaml, `${skill}/agents/openai.yaml`);
-      expect(Object.keys(parsed)).toEqual(['interface']);
-      const ui = parsed.interface as Record<string, string>;
-      expect(ui.display_name!.length).toBeLessThanOrEqual(64);
-      expect(ui.short_description!.length).toBeLessThanOrEqual(1024);
-      expect(ui.default_prompt!.length).toBeLessThanOrEqual(1024);
-    });
   });
 });
 
-// ── The manifests ────────────────────────────────────────────────────────────
+// ── Held to the schema ───────────────────────────────────────────────────────
 
-describe('the plugin and its two catalogs', () => {
-  const claude = readJson('plugins/gethome/.claude-plugin/plugin.json');
-  const portable = readJson('plugins/gethome/plugin.json');
+const read = (skill: string, file: string) => readFileSync(path.join(skillsRoot, skill, file), 'utf8');
 
-  it('give the plugin one identity in both manifests', () => {
-    // Claude Code and Codex cache an installed plugin by its version, so the
-    // version is raised with every change (CI's *Plugin version* job) — and
-    // in both files, or the two clients would disagree about what is installed.
-    for (const key of ['name', 'version', 'description', 'author', 'homepage', 'repository', 'license', 'keywords']) {
-      expect(portable[key], key).toEqual(claude[key]);
+/** Every command the hub sends a device, read from the schema itself. */
+const COMMAND_TYPES: readonly string[] = commandSchema.options.map((option) => [...option.shape.type.values][0]!);
+const isCommandType = (value: unknown) => typeof value === 'string' && COMMAND_TYPES.includes(value);
+
+/**
+ * Learning, saving, renaming and deleting an IR code is a person at the blaster
+ * with a remote in hand, so the API skill leaves those four out on purpose.
+ * Anything else the hub learns to do, the skill learns too.
+ */
+const LEFT_TO_PEOPLE = ['irLearn', 'irSaveLearned', 'irRenameCommand', 'irDeleteCommand'];
+
+/** The backticked words in the sentence that follows `marker`, split on commas. */
+function listAfter(text: string, marker: string): string[] {
+  const start = text.indexOf(marker);
+  if (start < 0) throw new Error(`no "${marker}"`);
+  const sentence = text.slice(start + marker.length).split(/\.(?:\s|$)/)[0]!;
+  return [...sentence.matchAll(/`([^`]+)`/g)].flatMap(([, words]) =>
+    words!.split(',').map((word) => word.trim()).filter(Boolean),
+  );
+}
+
+/** A table's first column, where its rows start with a backticked word. */
+const tableNames = (text: string) => [...text.matchAll(/^\| `([A-Za-z0-9]+)` \|/gm)].map(([, name]) => name!);
+
+/** The third column of the same rows — in `capabilities.md`, the commands that arrive. */
+const commandsColumn = (text: string) =>
+  [...text.matchAll(/^\| `[A-Za-z0-9]+` \|[^|\n]*\|([^|\n]*)\|/gm)].flatMap(([, cell]) =>
+    [...cell!.matchAll(/`([A-Za-z]+)/g)].map(([, name]) => name!),
+  );
+
+/** The topics in a table whose rows start with one. */
+const topicRows = (text: string) => [...text.matchAll(/^\| `(gethome\/[^`]+)` \|/gm)].map(([, topic]) => topic!);
+
+const tryJson = (text: string): unknown => {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * Every JSON value a skill shows: a `json` block whole or a line at a time, an
+ * object on a line of any other block — a command after `←`, a dictionary in
+ * Python — and a code span in the prose. A placeholder (`…`) is not JSON and
+ * is passed over, which is the one way to show a shape without a value.
+ */
+function jsonExamples(text: string): unknown[] {
+  const found: unknown[] = [];
+  for (const [, lang, body] of text.matchAll(/```(\w*)\n([\s\S]*?)```/g)) {
+    const whole = lang === 'json' ? tryJson(body!) : undefined;
+    if (whole !== undefined) {
+      found.push(whole);
+      continue;
     }
-    expect(claude.name).toBe('gethome');
-    expect(claude.version).toMatch(/^\d+\.\d+\.\d+$/);
+    for (const line of body!.split('\n')) {
+      const asLine = lang === 'json' ? tryJson(line.trim()) : undefined;
+      if (asLine !== undefined) {
+        found.push(asLine);
+        continue;
+      }
+      for (const [candidate] of line.matchAll(/\{"[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g)) {
+        const value = tryJson(candidate);
+        if (value !== undefined) found.push(value);
+      }
+    }
+  }
+  const prose = text.replace(/```[\s\S]*?```/g, '');
+  for (const [, span] of prose.matchAll(/`(\{"[^`]*\})`/g)) {
+    const value = tryJson(span!);
+    if (value !== undefined) found.push(value);
+  }
+  return found;
+}
+
+/** Every command inside a value: one with a command's `type`, or under a `command` key. */
+function* commandsWithin(value: unknown): Generator<unknown> {
+  if (Array.isArray(value)) {
+    for (const item of value) yield* commandsWithin(item);
+    return;
+  }
+  if (typeof value !== 'object' || value === null) return;
+  if (isCommandType((value as { type?: unknown }).type)) yield value;
+  for (const [key, inner] of Object.entries(value)) {
+    if (key === 'command') yield inner;
+    else yield* commandsWithin(inner);
+  }
+}
+
+describe('the skills, against the schema', () => {
+  it('name every device kind, and no other', () => {
+    for (const [skill, file, marker] of [
+      ['gethome-mqtt-device', 'SKILL.md', '`deviceKind` is one of'],
+      ['gethome-mqtt-device', 'references/convention.md', '**Device kinds**:'],
+      ['gethome-hub-api', 'references/devices-and-commands.md', '## Device kinds'],
+    ] as const) {
+      expect(listAfter(read(skill, file), marker).sort(), `${skill}/${file}`).toEqual([...DEVICE_KINDS].sort());
+    }
   });
 
-  it('keep the portable manifest to the Agent Plugins schema, which Codex reads only with its $schema', () => {
-    expect(portable.$schema).toBe('https://agent-plugins.org/schemas/1.0.0/plugin.schema.json');
-    const allowed = ['$schema', 'name', 'version', 'description', 'author', 'homepage', 'repository', 'license', 'keywords', 'extensions'];
-    expect(Object.keys(portable).filter((key) => !allowed.includes(key))).toEqual([]);
-    expect(Object.keys(portable.author as object).filter((key) => !['name', 'email', 'url'].includes(key))).toEqual([]);
-    expect(portable.name).toMatch(/^(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/);
+  it('name every capability, and no other', () => {
+    expect(listAfter(read('gethome-mqtt-device', 'references/convention.md'), '**Capabilities**:').sort()).toEqual(
+      [...CAPABILITY_KINDS].sort(),
+    );
+    for (const [skill, file] of [
+      ['gethome-mqtt-device', 'references/capabilities.md'],
+      ['gethome-hub-api', 'references/devices-and-commands.md'],
+    ] as const) {
+      const text = read(skill, file);
+      const rows = tableNames(text);
+      expect(rows.length, file).toBeGreaterThan(20);
+      expect(rows.filter((name) => !isCapabilityKind(name)), file).toEqual([]);
+      // One the table leaves out is still named, with the reason — the device
+      // skill says why `irRemote` is not its business.
+      expect(CAPABILITY_KINDS.filter((kind) => !text.includes(`\`${kind}\``)), file).toEqual([]);
+    }
   });
 
-  it('list it under the same name, from the same directory, in both catalogs', () => {
-    const forClaude = readJson('.claude-plugin/marketplace.json');
-    const forCodex = readJson('.agents/plugins/marketplace.json');
-    expect(forClaude.name).toBe('gethome');
-    expect(forCodex.name).toBe('gethome');
-    const [claudeEntry, ...moreClaude] = forClaude.plugins as Array<Record<string, unknown>>;
-    const [codexEntry, ...moreCodex] = forCodex.plugins as Array<Record<string, unknown>>;
-    expect(moreClaude).toEqual([]);
-    expect(moreCodex).toEqual([]);
-    // Codex refuses a plugin whose manifest name differs from its entry.
-    expect(claudeEntry!.name).toBe(claude.name);
-    expect(codexEntry!.name).toBe(claude.name);
-    // A string, starting `./`: the form Claude Code, Codex and the `skills`
-    // installer all read.
-    expect(claudeEntry!.source).toBe('./plugins/gethome');
-    expect(codexEntry!.source).toEqual({ source: 'local', path: './plugins/gethome' });
-    // A version in the entry would only be overruled by plugin.json.
-    expect(claudeEntry!.version).toBeUndefined();
+  it('name only commands the hub sends, and every one a key may send', () => {
+    const named = commandsColumn(read('gethome-mqtt-device', 'references/capabilities.md'));
+    expect(named.length).toBeGreaterThan(15);
+    expect(named.filter((type) => !isCommandType(type))).toEqual([]);
+
+    const listed = new Set(
+      jsonExamples(read('gethome-hub-api', 'references/devices-and-commands.md'))
+        .flatMap((example) => [...commandsWithin(example)])
+        .map((command) => (command as { type?: unknown }).type),
+    );
+    expect(COMMAND_TYPES.filter((type) => !listed.has(type) && !LEFT_TO_PEOPLE.includes(type))).toEqual([]);
+  });
+
+  it('use the MQTT topics the hub reads and writes', () => {
+    for (const file of ['SKILL.md', 'references/convention.md']) {
+      const topics = topicRows(read('gethome-mqtt-device', file));
+      expect(topics.length, file).toBeGreaterThanOrEqual(6);
+      for (const topic of topics) {
+        const concrete = topic.replace('<deviceId>', 'porch-light').replace('<endpointId>', '2');
+        if (/\/set(?:\/|$)/.test(concrete)) {
+          expect([commandTopic('porch-light', 1), commandTopic('porch-light', 2)], `${file}: ${topic}`).toContain(
+            concrete,
+          );
+        } else {
+          expect(parseTopic(concrete), `${file}: ${topic}`).not.toBeNull();
+        }
+      }
+    }
+  });
+
+  it('show only examples the hub accepts', () => {
+    // An agent copies an example before it reads the paragraph around it.
+    const counted: Record<string, number> = {};
+    const refused: string[] = [];
+    const check = (kind: string, schema: ZodType, value: unknown, where: string) => {
+      counted[kind] = (counted[kind] ?? 0) + 1;
+      const result = schema.safeParse(value);
+      if (!result.success) {
+        refused.push(`${where}: ${kind} ${JSON.stringify(value)} — ${result.error.issues.map((issue) => issue.message).join('; ')}`);
+      }
+    };
+
+    for (const skill of skills) {
+      for (const file of filesUnder(path.join(skillsRoot, skill)).filter((entry) => entry.endsWith('.md'))) {
+        const where = `${skill}/${file}`;
+        for (const example of jsonExamples(read(skill, file))) {
+          for (const command of commandsWithin(example)) check('command', commandSchema, command, where);
+          // The API skill's other JSON is the hub's answers, which only the
+          // device skill's examples are not.
+          if (skill !== 'gethome-mqtt-device') continue;
+          if (typeof example !== 'object' || example === null || Array.isArray(example)) continue;
+          if ('type' in example) {
+            if (!isCommandType(example.type)) check('command', commandSchema, example, where);
+          } else if ('endpoints' in example) check('discovery document', mqttDiscoverySchema, example, where);
+          else if ('endpointId' in example) check('endpoint', endpointDescriptorSchema, example, where);
+          else check('state report', statePatchSchema, example, where);
+        }
+      }
+    }
+
+    expect(refused).toEqual([]);
+    // Enough of each that the scan is plainly reaching them.
+    expect(counted.command).toBeGreaterThan(40);
+    expect(counted['discovery document']).toBeGreaterThanOrEqual(4);
+    expect(counted.endpoint).toBeGreaterThanOrEqual(6);
+    expect(counted['state report']).toBeGreaterThan(10);
   });
 });
 
@@ -353,10 +498,10 @@ describe.skipIf(!handle)('the skills, against the routes this hub serves', () =>
   });
 
   it('names only routes that exist', () => {
-    const named = filesUnder(pluginRoot)
+    const named = filesUnder(skillsRoot)
       .filter((file) => file.endsWith('.md'))
       .flatMap((file) =>
-        routesIn(readFileSync(path.join(pluginRoot, file), 'utf8')).map((route) => ({ ...route, file })),
+        routesIn(readFileSync(path.join(skillsRoot, file), 'utf8')).map((route) => ({ ...route, file })),
       );
     // Enough that the scan is plainly reaching the skills.
     expect(named.length).toBeGreaterThan(60);
@@ -364,6 +509,30 @@ describe.skipIf(!handle)('the skills, against the routes this hub serves', () =>
       ({ method, url }) => !app.hasRoute({ method: method as HTTPMethods, url }),
     );
     expect(missing).toEqual([]);
+  });
+
+  it('names every route a key can use', () => {
+    // The other direction from the test above: a route added for keys and
+    // left out of the skill is one no agent will ever find. What a key can
+    // never reach — a permission it cannot be given, or a route that takes no
+    // credential at all, such as `POST /pair` — has nothing to document.
+    const dir = path.join(skillsRoot, 'gethome-hub-api');
+    const named = new Set(
+      filesUnder(dir)
+        .filter((file) => file.endsWith('.md'))
+        .flatMap((file) => routesIn(readFileSync(path.join(dir, file), 'utf8')))
+        .map(({ method, url }) => shape(method, url)),
+    );
+    const reachable = [...policies.entries()]
+      .filter(([key, row]) => {
+        if (row.policy === 'deny') return false;
+        if (row.policy === 'public') return key === 'GET /api/v1/hub';
+        if (row.policy === 'permission') return (KEY_GRANTABLE as readonly string[]).includes(row.permission!);
+        return true;
+      })
+      .map(([key]) => key);
+    expect(reachable.length).toBeGreaterThan(40);
+    expect(reachable.filter((key) => !named.has(key))).toEqual([]);
   });
 
   it('never sends a key to a route no key may use', () => {
