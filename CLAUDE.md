@@ -894,10 +894,14 @@ rules.
   *gethome for iPhone*, never *for iOS*. Studio's page on gethome.me
   (`https://gethome.me/studio/`), never its disk image, whose name changes with
   every release. Re-check the do-not-claim list in the site repo's `CLAUDE.md`
-  before a new claim about either. The three phone screens are byte-identical copies of what
-  gethome.me already shows (`docs/assets/README.md` says which and when):
-  replace them when the app's interface changes, and never crop, annotate or
-  frame one.
+  before a new claim about either. The three phone screens are captures
+  gethome.me already published (`docs/assets/README.md` says which and when),
+  shown in a drawn iPhone frame (the owner's call, 2026-10-16) from
+  `docs/assets/screens/`: make the set again when the app's interface changes,
+  never crop or annotate a capture, and never edit a framed file by hand.
+  **Only the framed pictures live here** — the script that makes them and the
+  bare captures it reads stay in the marketing and site repositories, because
+  they are marketing tooling, not the hub.
 - **Say what ships, in the brand's voice.** `gethome hub` is lowercase in every
   string a person reads — a sentence never begins with it, and the H1 is a label
   and exempt. Never "open source" (it is source-available), never "works without
