@@ -527,7 +527,7 @@ describe('conditions', () => {
     await settle();
     expect(registry.sent).toHaveLength(0);
 
-    await engine.setActive(securityId, true, 'Anna');
+    await engine.setActive(securityId, true, { name: 'Anna' });
     now += 60_000;
     registry.report(motionId, 1, { sensors: { occupied: false } });
     await settle();
@@ -555,7 +555,7 @@ describe('what a person presses', () => {
     registry.report(lampId, 1, { onOff: true });
     registry.report(otherLampId, 1, { onOff: true });
 
-    expect(await engine.runManually(id, 'Anna')).toBe(true);
+    expect(await engine.runManually(id, { name: 'Anna' })).toBe(true);
     await settle();
 
     // The selector reached both lamps.
@@ -563,6 +563,27 @@ describe('what a person presses', () => {
     const entries = await activity.list(10);
     expect(entries[0]?.kind).toBe('automation.ran');
     expect(entries[0]?.message).toContain('Anna');
+  });
+
+  it('writes the press as the presser’s, and still writes it once they have gone', async () => {
+    const id = await install({
+      name: 'Lights out',
+      triggers: [{ kind: 'manual' }],
+      actions: [{ kind: 'deviceCommand', target: { deviceIds: [lampId] }, command: { type: 'toggle' } }],
+    });
+    // Nobody has this id — a member removed while a `wait` held the run, and
+    // `activity.member_id` is a foreign key, so the row naming them is
+    // refused. The press is still written, with the sentence saying who.
+    await engine.runManually(id, {
+      name: 'Anna’s “Node-RED”',
+      memberId: randomUUID(),
+      data: { via: 'api', apiKeyName: 'Node-RED' },
+    });
+    await engine.settled();
+    const [entry] = await activity.list(1);
+    expect(entry).toMatchObject({ kind: 'automation.ran', message: 'Anna’s “Node-RED” pressed Lights out' });
+    expect(entry?.memberId).toBeNull();
+    expect(entry?.data).toMatchObject({ via: 'api', apiKeyName: 'Node-RED', automationName: 'Lights out' });
   });
 
   it('answers a press as soon as the run is under way, never when it ends', async () => {
@@ -589,7 +610,7 @@ describe('what a person presses', () => {
     });
     registry.hold = () => held;
 
-    expect(await engine.runManually(id, 'Anna')).toBe(true);
+    expect(await engine.runManually(id, { name: 'Anna' })).toBe(true);
     await settle();
     // The first command is with the radio and the second has not been reached,
     // so the run is plainly still going — and the press has already answered.
@@ -639,10 +660,10 @@ describe('what a person presses', () => {
       return commands === 1 ? first : rest;
     };
 
-    await engine.runManually(id, 'Anna');
+    await engine.runManually(id, { name: 'Anna' });
     await settle();
-    await engine.runManually(id, 'Anna');
-    await engine.runManually(id, 'Anna');
+    await engine.runManually(id, { name: 'Anna' });
+    await engine.runManually(id, { name: 'Anna' });
     await settle();
     expect(registry.sent).toHaveLength(1);
 
@@ -722,11 +743,11 @@ describe('what a person presses', () => {
       ],
     });
 
-    await engine.setActive(id, true, 'Anna');
+    await engine.setActive(id, true, { name: 'Anna' });
     await settle();
     expect(registry.sent).toHaveLength(0);
 
-    await engine.setActive(id, false, 'Anna');
+    await engine.setActive(id, false, { name: 'Anna' });
     await settle();
     expect(registry.sent).toHaveLength(1);
     expect(registry.sent[0]?.command).toEqual({ type: 'power', on: true });

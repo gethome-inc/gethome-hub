@@ -6,6 +6,7 @@ import { invites, members, tokens } from '../db/schema.js';
 import { generateNumericCode, generateToken, sha256Hex } from './crypto.js';
 import type { AccessService } from './access.js';
 import { proofTokenId } from './hub-proof.js';
+import { lastUsedDue } from './last-used.js';
 import type { Logger } from '../logging.js';
 
 /**
@@ -52,7 +53,6 @@ function toMember(row: { id: string; name: string; role: string; roleId: string 
 
 const INVITE_TTL_MS = 15 * 60 * 1000;
 const CLAIM_REPLAY_TTL_MS = 5 * 60 * 1000;
-const LAST_USED_RESOLUTION_MS = 60 * 60 * 1000;
 
 /**
  * Pairing-code claim flow:
@@ -302,11 +302,9 @@ export class PairingService {
     if (!row) return null;
     const member = await this.db.query.members.findFirst({ where: eq(members.id, row.memberId) });
     if (!member) return null;
-    // Every authenticated request would otherwise write a row. "Last used" is
-    // shown to a human in units of days; an hour's resolution is plenty, and
-    // this runs on a machine whose disk is an SD card.
-    const last = row.lastUsedAt?.getTime() ?? 0;
-    if (Date.now() - last > LAST_USED_RESOLUTION_MS) {
+    // Every authenticated request would otherwise write a row — see
+    // `LAST_USED_RESOLUTION_MS`, which API keys share.
+    if (lastUsedDue(row.lastUsedAt?.getTime() ?? 0, Date.now())) {
       try {
         await this.db.update(tokens).set({ lastUsedAt: new Date() }).where(eq(tokens.id, row.id));
       } catch {

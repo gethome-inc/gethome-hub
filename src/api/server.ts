@@ -42,7 +42,7 @@ import {
 // `MappingLibrary.repair` loads the agent on demand.
 import type { MappingLibrary } from '../ai/library.js';
 import type { AiRunLog } from '../core/ai-runs.js';
-import type { AutomationEngine } from '../automations/engine.js';
+import type { AutomationEngine, AutomationPresser } from '../automations/engine.js';
 import {
   AutomationNotConfiguredError,
   type AutomationChat,
@@ -548,6 +548,21 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       memberId: member.id,
       data: { memberName: member.name, via: 'api', apiKeyId: key.id, apiKeyName: key.name },
     };
+  };
+
+  /**
+   * Who pressed a scene or switched a mode, for the run's activity row:
+   * `actor` without `data.memberName`, the one field that row must not
+   * carry. The iPhone app titles a line about no device by `memberName`, and
+   * a phone keeps whichever build it has — so that row would read "Anna" over
+   * "Anna pressed I’m leaving", the name twice, where it has always read
+   * "Hub". `memberId` and a key's fields change nothing an app draws, and they
+   * are what makes the row the presser's.
+   */
+  const presser = (request: FastifyRequest): AutomationPresser => {
+    const { name, memberId, data } = actor(request);
+    const { memberName: _shownTwice, ...attribution } = data;
+    return { name, memberId, data: attribution };
   };
 
   /**
@@ -2569,12 +2584,21 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     return undefined;
   };
 
-  const renderKey = async (key: ApiKeyRecord, callerId: string, names?: Map<string, string>) =>
+  /**
+   * A key as the caller sees it, named without a query per key: a caller's
+   * own key carries the caller's name, which the request already holds, and
+   * anybody else's is named from the one read of the members table that
+   * listing everybody's makes.
+   */
+  const renderKey = (
+    key: ApiKeyRecord,
+    caller: { id: string; name: string },
+    names?: ReadonlyMap<string, string>,
+  ) =>
     apiKeyWire(key, {
       access: deps.access,
-      memberName:
-        names?.get(key.memberId) ?? (await deps.pairing.member(key.memberId))?.name ?? null,
-      callerId,
+      memberName: key.memberId === caller.id ? caller.name : (names?.get(key.memberId) ?? null),
+      callerId: caller.id,
       connections: sessions.countKey(key.id),
       lastRefusal: apiKeys.lastRefusal(key.id),
     });
@@ -2591,8 +2615,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const me = request.member!;
     const everybody = can(deps.access, request, 'member.remove');
     const keys = await apiKeys.list(everybody ? undefined : me.id);
-    const names = new Map((await deps.db.query.members.findMany()).map((row) => [row.id, row.name]));
-    return Promise.all(keys.map((key) => renderKey(key, me.id, names)));
+    // Only everybody's needs other people's names; a list of the caller's own
+    // reads nobody else's row.
+    const names = everybody
+      ? new Map((await deps.db.query.members.findMany()).map((row) => [row.id, row.name]))
+      : undefined;
+    return keys.map((key) => renderKey(key, me, names));
   });
 
   /**
@@ -2606,16 +2634,17 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const refused = grantRefusal(request, control, permissions);
     if (refused) return reply.code(refused.status).send(refused.body);
     const me = request.member!;
-    if ((await apiKeys.countFor(me.id)) >= MAX_KEYS_PER_MEMBER) {
-      return reply.code(409).send({ error: 'too_many_keys', limit: MAX_KEYS_PER_MEMBER });
-    }
-    const { record, secret } = await apiKeys.create({
+    const created = await apiKeys.create({
       memberId: me.id,
       name: body.name,
       control,
       permissions: permissions as PermissionKey[],
       expiresAt: expiryFrom(body.expiresInDays),
     });
+    if (!created) {
+      return reply.code(409).send({ error: 'too_many_keys', limit: MAX_KEYS_PER_MEMBER });
+    }
+    const { record, secret } = created;
     const who = actor(request);
     await deps.activity.record({
       kind: 'apikey.added',
@@ -2623,7 +2652,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       memberId: who.memberId,
       data: { ...who.data, apiKeyId: record.id, apiKeyName: record.name },
     });
-    return reply.code(201).send({ key: await renderKey(record, me.id), secret });
+    return reply.code(201).send({ key: renderKey(record, me), secret });
   });
 
   /**
@@ -2684,7 +2713,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         },
       });
     }
-    return renderKey(updated, me.id);
+    return renderKey(updated, me);
   });
 
   /**
@@ -3728,8 +3757,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       return reply.code(409).send({ error: 'not_pressable' });
     }
     // The sentence the run writes names who pressed it — a key by name, so a
-    // scene a script pressed at three in the morning says which script.
-    await deps.automations.runManually(id, actor(request).name);
+    // scene a script pressed at three in the morning says which script — and
+    // the row is theirs, the way every row a key causes is its member's.
+    await deps.automations.runManually(id, presser(request));
     return reply.code(202).send({ accepted: true });
   });
 
@@ -3752,7 +3782,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (automationShape(record.document) !== 'toggle') {
       return reply.code(409).send({ error: 'not_a_toggle' });
     }
-    await deps.automations.setActive(id, active, actor(request).name);
+    await deps.automations.setActive(id, active, presser(request));
     return { active };
   });
 
@@ -4482,8 +4512,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     { websocket: true, exposeHeadRoute: false, config: { apiKey: 'handler' } },
     (socket, request) => {
       // Subscribe synchronously, before the async token check, so an event
-      // fired the moment the socket opens is buffered instead of lost in the
-      // gap between "connected" and "authorized".
+      // fired the moment the socket opens is held — and rendered once the
+      // socket knows who is reading — instead of lost in the gap between
+      // "connected" and "authorized".
       const handle = attachWebSocket(socket, deps, sessions, hubStatus);
       void (async () => {
         const credential = extractCredential(request);

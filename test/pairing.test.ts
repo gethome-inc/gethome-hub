@@ -220,14 +220,14 @@ describe.skipIf(!handle)('PairingService', () => {
   it('does not take an API key for a member token', async () => {
     const code = readFileSync(path.join(dataDir, 'pairing-code'), 'utf8').trim();
     const owner = await pairing.claim(code, 'Georgy');
-    const { secret } = await new ApiKeyService(db).create({
+    const created = await new ApiKeyService(db).create({
       memberId: owner!.member.id,
       name: 'Script',
       control: true,
       permissions: [],
       expiresAt: null,
     });
-    expect(await pairing.verifyToken(secret)).toBeNull();
+    expect(await pairing.verifyToken(created!.secret)).toBeNull();
     // What a key resolves to instead: its member, read afresh.
     expect(await pairing.member(owner!.member.id)).toMatchObject({ name: 'Georgy', role: 'owner' });
     expect(await pairing.member('11111111-1111-4111-a111-111111111111')).toBeNull();

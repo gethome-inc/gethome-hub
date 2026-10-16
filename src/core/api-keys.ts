@@ -3,6 +3,7 @@ import type { Db } from '../db/client.js';
 import { apiKeys } from '../db/schema.js';
 import { KEY_GRANTABLE, type KeyGrant, type PermissionKey } from './access.js';
 import { generateApiKeySecret, sha256Hex } from './crypto.js';
+import { lastUsedDue } from './last-used.js';
 
 /**
  * A member's keys for their own software.
@@ -34,9 +35,6 @@ export const MAX_KEYS_PER_MEMBER = 25;
 /** Ten years — "never" is `null`, and a number bigger than this is a typo. */
 export const MAX_KEY_LIFETIME_DAYS = 3650;
 
-/** How long the stored "last used" may lag the real one. */
-const LAST_USED_RESOLUTION_MS = 60 * 60 * 1000;
-
 /**
  * The rate a key may sustain, and the burst it may spend first.
  *
@@ -51,15 +49,17 @@ export const KEY_RATE_BURST = 50;
 /** How many event streams one key may hold open at once. */
 export const MAX_SOCKETS_PER_KEY = 5;
 
+/**
+ * A key as the table holds it. `control` and `permissions` are its
+ * `KeyGrant` — what it was given, with `permissions` read back through the
+ * allowlist — and are declared there alone, so the two cannot drift apart.
+ */
 export interface ApiKeyRecord extends KeyGrant {
   id: string;
   memberId: string;
   name: string;
   /** The secret's last four characters. */
   hint: string;
-  control: boolean;
-  /** What it was given, read back through the allowlist. */
-  permissions: PermissionKey[];
   createdAt: Date;
   expiresAt: Date | null;
   lastUsedAt: Date | null;
@@ -168,35 +168,41 @@ export class ApiKeyService {
     return rows.map((row) => this.record(row));
   }
 
-  async countFor(memberId: string): Promise<number> {
-    const [row] = await this.db
-      .select({ n: count() })
-      .from(apiKeys)
-      .where(eq(apiKeys.memberId, memberId));
-    return row?.n ?? 0;
-  }
-
   /**
    * Make a key, and hand back its secret — the only time it exists anywhere
    * but in the caller's hands. The row keeps its hash and its last four
    * characters, which is enough to recognise it and never enough to use it.
+   *
+   * `undefined` when the member already holds `MAX_KEYS_PER_MEMBER`. **The
+   * count and the insert are one synchronous transaction**, deliberately with
+   * no `await` between them: counted in one query and inserted in the next,
+   * requests sent together each found room for one more, and a member could
+   * pass the cap by as many as they could send at once.
    */
-  async create(input: NewApiKey): Promise<{ record: ApiKeyRecord; secret: string }> {
+  async create(input: NewApiKey): Promise<{ record: ApiKeyRecord; secret: string } | undefined> {
     const secret = generateApiKeySecret();
-    const [row] = await this.db
-      .insert(apiKeys)
-      .values({
-        memberId: input.memberId,
-        name: input.name,
-        keyHash: sha256Hex(secret),
-        hint: secret.slice(-4),
-        control: input.control,
-        permissions: grantablePermissions(input.permissions),
-        expiresAt: input.expiresAt,
-      })
-      .returning();
-    if (!row) throw new Error('api key insert returned nothing');
-    return { record: this.record(row), secret };
+    const row = this.db.transaction((tx) => {
+      const held = tx
+        .select({ n: count() })
+        .from(apiKeys)
+        .where(eq(apiKeys.memberId, input.memberId))
+        .get();
+      if ((held?.n ?? 0) >= MAX_KEYS_PER_MEMBER) return undefined;
+      return tx
+        .insert(apiKeys)
+        .values({
+          memberId: input.memberId,
+          name: input.name,
+          keyHash: sha256Hex(secret),
+          hint: secret.slice(-4),
+          control: input.control,
+          permissions: grantablePermissions(input.permissions),
+          expiresAt: input.expiresAt,
+        })
+        .returning()
+        .get();
+    });
+    return row ? { record: this.record(row), secret } : undefined;
   }
 
   async update(id: string, patch: ApiKeyPatch): Promise<ApiKeyRecord | undefined> {
@@ -237,7 +243,7 @@ export class ApiKeyService {
     const previous = this.uses.get(key.id);
     const writtenAt = previous?.writtenAt ?? key.lastUsedAt?.getTime() ?? 0;
     const writtenFrom = previous ? previous.writtenFrom : key.lastUsedFrom;
-    const due = now - writtenAt > LAST_USED_RESOLUTION_MS || writtenFrom !== address;
+    const due = lastUsedDue(writtenAt, now) || writtenFrom !== address;
     this.uses.set(key.id, {
       at: new Date(now),
       from: address,

@@ -168,11 +168,15 @@ export async function authenticate(
       const state = apiKeyState(key, deps.access);
       if (state === 'expired') return refuse(401, { ...UNAUTHORIZED, reason: 'key_expired' });
       if (state === 'suspended') return refuse(401, { ...UNAUTHORIZED, reason: 'key_suspended' });
-      deps.apiKeys.noteUse(key, context.ip);
       const allowed = deps.apiKeys.take(key.id);
       if (!allowed.ok) {
         return refuse(429, { error: 'rate_limited', retryAfterMs: allowed.retryAfterMs });
       }
+      // A use is noted only once the request is through the door. A request
+      // turned away at it is a refusal and nothing else: counting it would
+      // move "last used" on — and write the row, when the address is new —
+      // for a script the hub is busy refusing.
+      deps.apiKeys.noteUse(key, context.ip);
       return { ok: true, member, key };
     }
   }

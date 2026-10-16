@@ -179,7 +179,9 @@ somebody wondering why a key stopped. `state` is an **open** vocabulary —
 holds open. `lastRefusal` is the last thing the hub told it no, with the path
 and never the query: the answer to "why has my integration stopped". It is
 held in memory, so it starts empty after a restart, and `lastUsedAt` is exact
-while the stored copy is written at most hourly.
+while the stored copy is written at most hourly. `lastUsedAt` is the last
+request the hub **let in**: one turned away at the door — rate-limited, expired,
+paused — is a `lastRefusal` and moves nothing.
 
 **Why keys are a table of their own.** `install.sh` puts the previous build back
 when a new one fails its health check, by which time the migration has run. An
@@ -2173,8 +2175,10 @@ The kinds: `device.command`, `device.added`, `device.removed`,
 `hub.wifi`, `adapter.error`,
 `zigbee.interview-failed`, `zigbee.left`, `zigbee.permit-join`,
 `zigbee.permit-join-closed`, `matter.commission`, `apikey.added`,
-`apikey.changed`, `apikey.removed`. Treat the list as open — a client must
-render an unknown kind from `message` rather than drop it.
+`apikey.changed`, `apikey.removed`, `automation.added`, `automation.renamed`,
+`automation.removed`, `automation.ran`, `automation.note`,
+`automation.disabled`. Treat the list as open — a client must render an
+unknown kind from `message` rather than drop it.
 
 **What an [API key](#api-keys) does is written as its member, and says it came
 through one.** `memberId` and `data.memberName` are the member's — the row is
@@ -2182,8 +2186,9 @@ still somebody's, and a member without `activity.read` still sees it among their
 own — and `data.via: "api"`, `data.apiKeyId` and `data.apiKeyName` say which
 key. The **sentence** names the key, because `message` is all an app that has
 never heard of keys shows: `Anna’s “Node-RED” · Desk lamp: power` rather than a
-line that reads as Anna's phone at three in the morning. A scene a key pressed
-says so in its run's `cause`, the same way. The three `apikey.*` kinds are things
+line that reads as Anna's phone at three in the morning. A scene a key pressed,
+or a mode it switched, says so the same way, in its run's `cause` and its
+`automation.ran` row. The three `apikey.*` kinds are things
 done *to* a key by a person, so they carry `data.apiKeyId`/`apiKeyName` with no
 `via`; `apikey.removed` adds `subjectName` when it was somebody else's key, and
 `apikey.changed` adds `previousName` on a rename.
@@ -2203,6 +2208,18 @@ what was touched (`roomName`, `zoneName`, `deviceName`), with `previousName`
 on the renames and `roomName` absent on a device taken out of every room. See
 [what a structural edit records](#what-a-structural-edit-writes-to-the-log)
 for the two things that are deliberately *not* logged.
+
+`automation.ran` is somebody pressing a scene or switching a mode, written once
+the run has sent a command — a rule firing by itself never reaches this log
+(see [automations](automations.md#what-is-written-down)). It carries
+`automationId`, `automationName` and `commands`, and `memberId` is whoever
+pressed it, so a member without `activity.read` still finds their own presses;
+through a key it adds the key's three fields as above. It is the one row about
+somebody that carries **no** `data.memberName`: the gethome iPhone app titles a
+row that names no device by that field, and this row's sentence already begins
+with the presser's name. `automation.disabled` is the circuit breaker switching
+a rule off and names nobody; `automation.note` is a rule's own `logActivity`
+line.
 
 The last three, plus `hub.radio`, all carry `data.memberName`: they are the
 things any member may do to the whole home, so the log is where it says which

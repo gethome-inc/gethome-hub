@@ -1,12 +1,16 @@
 import { readdirSync, readFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { EventEmitter } from 'node:events';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { pino, type Logger } from 'pino';
 import WebSocket from 'ws';
 import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { buildServer } from '../src/api/server.js';
+import { attachWebSocket, LATE_ADMISSION_MS, MemberSessions } from '../src/api/ws.js';
+import { ApiKeyService, type ApiKeyRecord, type NewApiKey } from '../src/core/api-keys.js';
+import type { HubStatusReader } from '../src/core/hub-status.js';
 import { HubEventBus } from '../src/core/bus.js';
 import { ActivityService } from '../src/core/activity.js';
 import { PairingService } from '../src/core/pairing.js';
@@ -574,6 +578,46 @@ describe.skipIf(!handle)('API keys', () => {
       expect(response.json()).toMatchObject({ error: 'too_many_keys', limit: 25 });
     });
 
+    it('holds the cap when the keys are asked for all at once', async () => {
+      const sasha = await join('Sasha');
+      const burst = 30;
+      // Every request is held at the door of the insert until all of them
+      // have reached it — the interleaving that put a member past the cap
+      // when the count was a query of its own, made certain rather than left
+      // to the scheduler, which on a synchronous driver almost never offers it.
+      let arrived = 0;
+      let release!: () => void;
+      const everyone = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const real = ApiKeyService.prototype.create;
+      const create = vi
+        .spyOn(ApiKeyService.prototype, 'create')
+        .mockImplementation(async function (this: ApiKeyService, input: NewApiKey) {
+          arrived += 1;
+          if (arrived === burst) release();
+          await everyone;
+          return real.call(this, input);
+        });
+      try {
+        const responses = await Promise.all(
+          Array.from({ length: burst }, (_, i) =>
+            app.inject({
+              method: 'POST',
+              url: '/api/v1/api-keys',
+              headers: auth(sasha.token),
+              payload: { name: `Burst ${i}` },
+            }),
+          ),
+        );
+        expect(responses.filter((response) => response.statusCode === 201)).toHaveLength(25);
+        expect(responses.filter((response) => response.statusCode === 409)).toHaveLength(burst - 25);
+      } finally {
+        create.mockRestore();
+      }
+      expect(await keysOf(sasha.token)).toHaveLength(25);
+    });
+
     it('writes making, changing and revoking a key to the activity log', async () => {
       const { key } = await mint(memberToken, { name: 'Node-RED' });
       await app.inject({
@@ -737,6 +781,59 @@ describe.skipIf(!handle)('API keys', () => {
         await app.inject({ method: 'GET', url: `/api/v1/automations/${created.id}/runs`, headers: auth(ownerToken) })
       ).json() as Array<{ cause: string }>;
       expect(runs[0]?.cause).toBe('Anna’s “Node-RED” pressed Leaving');
+    });
+
+    it('writes the press and the mode switch as its member’s, through the key', async () => {
+      // A second lamp, so the mode's command is not refused by the two-second
+      // floor the scene's command to the first one just started.
+      adapter.bus!.deviceUpserted({
+        adapter: 'mqtt',
+        externalId: 'lamp-2',
+        suggestedName: 'Floor lamp',
+        endpoints: [{ endpointId: 1, deviceKind: 'light', capabilities: ['onOff'], primary: 'onOff' }],
+      });
+      await registry.flush();
+      const floorLamp = registry.listDevices().find((device) => device.name === 'Floor lamp')!.id;
+      const switching = (id: string) => [
+        { kind: 'deviceCommand', target: { deviceIds: [id] }, command: { type: 'toggle' } },
+      ];
+      const make = async (payload: object): Promise<string> => {
+        const created = (
+          await app.inject({ method: 'POST', url: '/api/v1/automations', headers: auth(ownerToken), payload })
+        ).json() as { id: string };
+        await app.inject({
+          method: 'PATCH',
+          url: `/api/v1/automations/${created.id}`,
+          headers: auth(ownerToken),
+          payload: { enabled: true },
+        });
+        return created.id;
+      };
+      const scene = await make({ name: 'Lights out', triggers: [{ kind: 'manual' }], actions: switching(deviceId) });
+      const mode = await make({
+        name: 'Movie night',
+        triggers: [{ kind: 'manual' }],
+        actions: switching(floorLamp),
+        offActions: switching(floorLamp),
+      });
+      await run(controlKey, [
+        ['POST', `/api/v1/automations/${scene}/run`, undefined, 202, undefined],
+        ['PUT', `/api/v1/automations/${mode}/active`, { active: true }, 200, undefined],
+      ]);
+      await engine.settled();
+      const rows = (await activity()).filter((row) => row.kind === 'automation.ran');
+      expect(rows.map((row) => row.message)).toEqual([
+        'Anna’s “Node-RED” switched Movie night on',
+        'Anna’s “Node-RED” pressed Lights out',
+      ]);
+      for (const row of rows) {
+        expect(row.memberId).toBe(memberId);
+        expect(row.data).toMatchObject({ via: 'api', apiKeyName: 'Node-RED' });
+        expect(typeof row.data?.apiKeyId).toBe('string');
+        // Left off on purpose: the iPhone app titles a line about no device
+        // by it, over a sentence that already starts with it.
+        expect(row.data?.memberName).toBeUndefined();
+      }
     });
 
     /**
@@ -1131,6 +1228,121 @@ describe.skipIf(!handle)('API keys', () => {
     });
   });
 
+  // ── The handshake ─────────────────────────────────────────────────────────
+
+  /**
+   * The gap between a socket's credential being read and the socket being
+   * filed, driven directly. A real client cannot be made to land a revoke or
+   * an activity row inside a handshake on cue, and a test that only sometimes
+   * reaches the window it is about is a test of nothing.
+   */
+  describe('the handshake', () => {
+    class FakeSocket extends EventEmitter {
+      readonly OPEN = 1;
+      readyState = 1;
+      readonly sent: Array<Record<string, unknown>> = [];
+      closedWith: number | undefined;
+      send(data: string) {
+        this.sent.push(JSON.parse(data) as Record<string, unknown>);
+      }
+      close(code: number) {
+        this.closedWith = code;
+        this.readyState = 3;
+        this.emit('close', code);
+      }
+    }
+    const hubStatus = { snapshot: () => ({}) } as unknown as HubStatusReader;
+    const open = (sessions: MemberSessions) => {
+      const socket = new FakeSocket();
+      const handle = attachWebSocket(
+        socket as unknown as WebSocket,
+        { ...shared, log: silent },
+        sessions,
+        hubStatus,
+      );
+      return { socket, handle };
+    };
+    const record = async (id: string): Promise<ApiKeyRecord> => (await new ApiKeyService(db).get(id))!;
+    const line = (id: number, member?: string) => ({
+      id,
+      at: new Date().toISOString(),
+      kind: 'device.command',
+      message: `line ${id}`,
+      ...(member !== undefined ? { memberId: member } : {}),
+    });
+    const lineIds = (socket: FakeSocket) =>
+      socket.sent
+        .filter((frame) => frame.type === 'activity')
+        .map((frame) => (frame.entry as { id: number }).id);
+
+    it('renders what happened during it for the reader it turned out to be', async () => {
+      const { key } = await mint(memberToken, { name: 'Late reader' });
+      const narrow = open(new MemberSessions());
+      // Somebody else's line, nobody's, and the reader's own, all landing
+      // while the token is still being checked.
+      events.emit('activity', line(-1, ownerId));
+      events.emit('activity', line(-2));
+      events.emit('activity', line(-3, memberId));
+      expect(narrow.socket.sent).toEqual([]);
+      narrow.handle.authorize(memberId, await record(key.id));
+      expect(narrow.socket.sent[0]?.type).toBe('hello');
+      expect(lineIds(narrow.socket)).toEqual([-3]);
+      narrow.handle.close();
+
+      // A key that may read the house is handed the house.
+      const { key: reader } = await mint(memberToken, { name: 'Whole feed', permissions: ['activity.read'] });
+      const wide = open(new MemberSessions());
+      events.emit('activity', line(-4, ownerId));
+      events.emit('activity', line(-5));
+      wide.handle.authorize(memberId, await record(reader.id));
+      expect(lineIds(wide.socket)).toEqual([-4, -5]);
+      wide.handle.close();
+    });
+
+    it('turns a socket away when its key or member was revoked while it was let in', async () => {
+      const { key } = await mint(memberToken, { name: 'Gone mid-handshake' });
+      const read = await record(key.id);
+      const sessions = new MemberSessions();
+
+      // The key is read, the revoke lands and finds nothing open, and only
+      // then does the socket ask to be filed.
+      const keyed = open(sessions);
+      expect(sessions.revokeKey(key.id)).toBe(0);
+      keyed.handle.authorize(memberId, read);
+      expect(keyed.socket.closedWith).toBe(4001);
+      expect(keyed.socket.sent).toEqual([]);
+      expect(sessions.countKey(key.id)).toBe(0);
+
+      // The same gap, for somebody removed from the home.
+      const member = open(sessions);
+      expect(sessions.revoke(ownerId)).toBe(0);
+      member.handle.authorize(ownerId, null);
+      expect(member.socket.closedWith).toBe(4001);
+      expect(member.socket.sent).toEqual([]);
+    });
+
+    it('lets a socket in with the grant an edit made while it was let in', async () => {
+      const { key } = await mint(memberToken, { name: 'Before' });
+      const read = await record(key.id);
+      const sessions = new MemberSessions();
+      const { socket, handle } = open(sessions);
+      sessions.rekey({ ...read, name: 'After', permissions: ['activity.read'] });
+      handle.authorize(memberId, read);
+      const hello = socket.sent.find((frame) => frame.type === 'hello');
+      expect(hello?.apiKey).toMatchObject({ id: key.id, name: 'After' });
+      expect(hello?.permissions).toEqual(['activity.read']);
+      handle.close();
+    });
+
+    it('forgets a revocation once no handshake could still be waiting on it', () => {
+      const sessions = new MemberSessions();
+      const session = { revoke: () => {}, rekey: () => {} };
+      sessions.revoke(memberId, 0);
+      expect(sessions.admit(memberId, session, null, LATE_ADMISSION_MS)).toBeNull();
+      expect(sessions.admit(memberId, session, null, LATE_ADMISSION_MS + 1)).toEqual({ key: null });
+    });
+  });
+
   // ── The rate limit ────────────────────────────────────────────────────────
 
   describe('the rate limit', () => {
@@ -1153,6 +1365,24 @@ describe.skipIf(!handle)('API keys', () => {
       // And a stream opened from the empty bucket is told to try again later.
       const stream = connect({ secret });
       expect(await stream.closed).toBe(1013);
+    });
+
+    it('counts a request it turned away as a refusal, never as a use', async () => {
+      const { key, secret } = await mint(memberToken, { name: 'Turned away' });
+      // The bucket is empty for exactly one request — no timing to race.
+      const take = vi
+        .spyOn(ApiKeyService.prototype, 'take')
+        .mockReturnValueOnce({ ok: false, retryAfterMs: 1000 });
+      try {
+        const response = await app.inject({ method: 'GET', url: '/api/v1/home', headers: auth(secret) });
+        expect(response.statusCode).toBe(429);
+      } finally {
+        take.mockRestore();
+      }
+      const listed = (await keysOf(memberToken)).find((entry) => entry.id === key.id);
+      expect(listed?.lastUsedAt).toBeNull();
+      expect(listed?.lastUsedFrom).toBeNull();
+      expect(listed?.lastRefusal).toMatchObject({ status: 429, error: 'rate_limited' });
     });
 
     it('leaves member tokens alone', async () => {

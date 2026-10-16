@@ -777,7 +777,14 @@ adapter/registry/API change.
   And **registration is scoped to the socket's life** — `authorize` adds,
   the close handler removes — so the map holds one entry per open connection
   and none per closed one. `test/api.test.ts` opens a real socket, removes its
-  member, and asserts both the close code and the silence. **Revoking is what
+  member, and asserts both the close code and the silence. A handshake reads
+  its credential and *then* registers, so **a revocation is remembered for a
+  minute** (`LATE_ADMISSION_MS`): one landing in between found nothing to
+  close and let the socket file itself under a key or member that no longer
+  existed, streaming until it happened to drop. An edit is remembered the same
+  way, and what happens during the handshake is held as events and rendered
+  once there is a reader — rendered earlier, a key without `activity.read`
+  was handed the house. **Revoking is what
   this registry is for** — a member's sockets, or one API key's — plus the two
   things a key's sockets need from it: how many it holds (`countKey`, the
   five-stream limit) and the grant they render with (`rekey`, after a key is
@@ -821,7 +828,8 @@ adapter/registry/API change.
   for it. And **what a key does is written as its member, through it**: every
   activity row goes through `actor(request)`, which keeps `memberId` and
   `data.memberName` the member's and adds `via: "api"`, the key's id and name,
-  and the key in the sentence. An explicit helper, deliberately not
+  and the key in the sentence — `automation.ran` alone leaves `memberName` off,
+  and `presser` in `server.ts` says why. An explicit helper, deliberately not
   AsyncLocalStorage, which would follow a key into the timers the automation
   engine sets up during its request.
   Three smaller things that bite. **The socket authenticates inside its
