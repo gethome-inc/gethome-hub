@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "gethome",
+  "version": "1.0.0",
+  "description": "Build on a gethome hub: software that uses a home through an API key, and DIY devices that join it over MQTT.",
+  "author": {
+    "name": "gethome",
+    "url": "https://gethome.me"
+  },
+  "homepage": "https://github.com/gethome-inc/gethome-hub/tree/main/plugins/gethome",
+  "repository": "https://github.com/gethome-inc/gethome-hub",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "keywords": ["gethome", "smart-home", "home-automation", "api", "mqtt", "esphome", "matter", "zigbee"],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "gethome",
+        "shortDescription": "Build software and devices for a gethome home",
+        "longDescription": "Two skills for a gethome hub, the local smart-home hub: write scripts, dashboards, bridges and agents against its REST and WebSocket API with an API key, and make DIY boards appear as native devices over its MQTT broker.",
+        "developerName": "gethome",
+        "websiteURL": "https://gethome.me",
+        "defaultPrompt": [
+          "Write a script that switches my porch light on at dusk through my gethome hub.",
+          "Make my ESP32 relay board show up as a device in my gethome home."
+        ]
+      }
+    }
+  }
+}

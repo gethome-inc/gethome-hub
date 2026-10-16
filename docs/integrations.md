@@ -190,3 +190,28 @@ name that says what it is.
 
 A board can of course be both: a device over MQTT that also reads the home
 through a key.
+
+## With an AI coding agent
+
+This repository publishes two [agent skills](../plugins/gethome/README.md), so
+a coding agent knows the API, the device schema and the MQTT convention without
+being walked through them — and the rules that come with them: keep the key out
+of the conversation, ask before unlocking a door or switching on a rule it
+wrote, and read what a hub can do from what it advertises rather than from its
+version.
+
+- **`gethome-hub-api`** — software that uses a home, through an API key.
+- **`gethome-mqtt-device`** — firmware that makes a board a device: ESPHome,
+  Arduino, MicroPython or Python.
+
+| Agent | Install |
+|---|---|
+| Claude Code | `/plugin marketplace add gethome-inc/gethome-hub`, then `/plugin install gethome@gethome` |
+| Codex | `codex plugin marketplace add gethome-inc/gethome-hub`, then `codex plugin add gethome@gethome` — or `/plugins` inside Codex |
+| Cursor, OpenCode and other agents that read [Agent Skills](https://agentskills.io) | `npx skills add gethome-inc/gethome-hub` |
+
+Then give the agent the hub without giving it the secret: set `GETHOME_HUB_URL`
+and `GETHOME_API_KEY` in the shell you start it from, with a key made for the
+job — read-only for a dashboard, `control` and nothing else for a script that
+switches lights. What the agent's code does appears in the activity feed under
+the key's name, and revoking the key stops it on its next request.

@@ -99,6 +99,48 @@ jobs:
       # root CLAUDE.md says how, and why that one is safe).
       - run: npm audit --omit=dev --audit-level=moderate
 
+  plugin-version:
+    name: Plugin version
+    # Only a pull request has a base to compare with.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # Claude Code and Codex cache an installed plugin by its version, so a
+      # change to the agent skills that keeps the number reaches nobody who
+      # already has them: their update answers "already at the latest
+      # version". `test/skills.test.ts` holds the two manifests to one number;
+      # this holds the number to the change. `plugins/CLAUDE.md` has the rest.
+      - name: A change to plugins/gethome raises its version
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          base="$(git merge-base "$BASE_SHA" HEAD)"
+          if git diff --quiet "$base" HEAD -- plugins/gethome; then
+            echo "plugins/gethome is unchanged."
+            exit 0
+          fi
+          manifest=plugins/gethome/.claude-plugin/plugin.json
+          after="$(jq -r .version "$manifest")"
+          if ! before="$(git show "$base:$manifest" 2>/dev/null | jq -r .version)"; then
+            echo "The plugin is new, at $after."
+            exit 0
+          fi
+          if [[ "$before" == "$after" ]]; then
+            echo "::error file=$manifest::plugins/gethome changed, but its version is still $after. Raise it here and in plugins/gethome/plugin.json, or nobody who has the plugin will get the change."
+            exit 1
+          fi
+          highest="$(printf '%s\n%s\n' "$before" "$after" | sort -V | tail -n 1)"
+          if [[ "$highest" != "$after" ]]; then
+            echo "::error file=$manifest::the version went from $before to $after; it has to grow."
+            exit 1
+          fi
+          echo "plugins/gethome changed, and its version moved from $before to $after."
+
   shell:
     name: Shell scripts
     runs-on: ubuntu-latest

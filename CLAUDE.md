@@ -15,7 +15,8 @@ The `docs/` files are canonical for their domains; read the relevant one before
 touching that code: `architecture.md` (module boundaries, data flow),
 `device-schema.md` (**the** capability/unit/wire contract), `api.md`,
 `zigbee.md`, `matter.md`, `mqtt-integrations.md` (public integrator
-convention), `ai-adaptation.md`, `automations.md`, `assistant.md`,
+convention), `integrations.md` (building on a hub: API keys and the agent
+skills), `ai-adaptation.md`, `automations.md`, `assistant.md`,
 `portraits.md`, `ecosystem.md` — and the three a person reads before they have a
 hub: `hardware.md` (what is tested and recommended, in a buyer's terms),
 `installation.md` (install, claim, update, roll back) and `security.md` (what
@@ -832,6 +833,17 @@ adapter/registry/API change.
   `.strict()`**: zod strips what it does not know, so a narrowing field a later
   build adds would be dropped by an older hub and the key made broader than
   asked — a 400 is the only safe answer.
+- **The agent skills in `plugins/gethome/` are instructions other people's
+  agents follow, and they are held to this server.** `test/skills.test.ts`
+  builds the API and fails when a skill names a route that does not exist,
+  sends a key somewhere no key may go, or claims a key policy or a grantable
+  permission the server disagrees with — so a route, a refusal or a policy
+  change that would make a skill lie fails here, and the fix is the skill,
+  in the same change, with the plugin's version raised in both `plugin.json`
+  files (CI's *Plugin version* job checks the second half). The skills'
+  own rules — the frontmatter subset, the 200-character description, the
+  four manifests and what each client reads — are in `plugins/CLAUDE.md`,
+  which loads when you work under `plugins/`.
 - matter.js is pinned to a minor (`~0.17.x`) because its API churns; keep all
   matter.js-specific code inside `src/adapters/matter/`.
 - `tsconfig` uses `exactOptionalPropertyTypes` — build optional-field objects
@@ -971,7 +983,9 @@ rules.
 After landing a change, update the docs it invalidates in the same change:
 schema/units/wire → `docs/device-schema.md` (+ the iOS repo needs a matching
 change — flag it); routes/auth → `docs/api.md`; adapter behavior/topics →
-`docs/zigbee.md` / `docs/matter.md` / `docs/mqtt-integrations.md`; AI
+`docs/zigbee.md` / `docs/matter.md` / `docs/mqtt-integrations.md`; a route,
+a unit, the MQTT convention or what an API key may do → the agent skills under
+`plugins/gethome/` as well, with the plugin's version raised; AI
 trigger/DSL → `docs/ai-adaptation.md`; the assistant, the chat runtime or the
 delegate registry → `docs/assistant.md`; portraits → `docs/portraits.md`;
 module boundaries → this file and the subsystem file for the directory you
