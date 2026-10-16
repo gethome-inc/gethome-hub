@@ -2061,4 +2061,24 @@ describe.skipIf(!handle)('hub API', () => {
     const code = await new Promise<number>((resolve) => socket.on('close', resolve));
     expect(code).toBe(4001);
   });
+
+  /**
+   * Fastify gives every `GET` a `HEAD` twin, and `@fastify/websocket` leaves
+   * that twin's handler alone — so a `HEAD` here used to call the socket
+   * handler with the *request* standing in for the socket. It attached a
+   * listener to every always-on bus event, threw on `socket.on`, and never
+   * reached the line that takes them off again: one unauthenticated request,
+   * from anywhere on the LAN, and the hub held thirteen more listeners until
+   * it restarted.
+   */
+  it('answers a HEAD on the event stream without attaching anything', async () => {
+    const counts = () =>
+      Object.fromEntries(events.eventNames().map((name) => [String(name), events.listenerCount(name)]));
+    const before = counts();
+    for (let i = 0; i < 3; i += 1) {
+      const response = await app.inject({ method: 'HEAD', url: '/api/v1/ws' });
+      expect(response.statusCode).toBe(404);
+    }
+    expect(counts()).toEqual(before);
+  });
 });

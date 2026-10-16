@@ -3867,7 +3867,17 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
 
   // ── WebSocket event stream ───────────────────────────────────────────────
 
-  app.get('/api/v1/ws', { websocket: true }, (socket, request) => {
+  /**
+   * **No `HEAD` twin.** Fastify gives every `GET` one, and `@fastify/websocket`
+   * deliberately leaves a `HEAD` route's handler untouched — so the twin ran
+   * the handler below as an ordinary HTTP handler, with the *request* standing
+   * in for the socket. `attachWebSocket` put a listener on every always-on bus
+   * event, then threw on `socket.on`, before the close handler that takes them
+   * off was ever registered: an unauthenticated `HEAD` from anywhere on the LAN
+   * left thirteen listeners behind for the life of the process. Without the
+   * twin a `HEAD` here is the ordinary 404.
+   */
+  app.get('/api/v1/ws', { websocket: true, exposeHeadRoute: false }, (socket, request) => {
     // Subscribe synchronously, before the async token check, so an event
     // fired the moment the socket opens is buffered instead of lost in the
     // gap between "connected" and "authorized".
