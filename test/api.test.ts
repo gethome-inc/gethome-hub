@@ -151,6 +151,11 @@ describe.skipIf(!handle)('hub API', () => {
       // invite — which adds the duplicate person the whole feature exists to
       // stop, with nothing on the way back to say so.
       pairing: { signInCodes: true },
+      // Presence again, and both say what an app needs to know before it
+      // offers anything: the stream kinds the hub relays and how many cameras
+      // at once, and how big a panel may be.
+      cameras: { kinds: ['snapshot', 'mjpeg'], maxStreams: 4 },
+      webBlocks: { maxBytes: 512 * 1024, maxFiles: 64, perDevice: 4 },
     });
   });
 
@@ -341,6 +346,73 @@ describe.skipIf(!handle)('hub API', () => {
       'Georgy removed Masha from the home.',
     );
     expect(feed.find((row) => row.kind === 'member.left')?.memberId ?? null).toBeNull();
+  });
+
+  it('puts a panel on a device’s wire only when it has one, and serves it from the manifest', async () => {
+    adapter.bus!.deviceUpserted({
+      adapter: 'mqtt',
+      externalId: 'panel-device',
+      suggestedName: 'Hall display',
+      endpoints: [{ endpointId: 1, deviceKind: 'sensor', capabilities: ['custom'], primary: 'custom' }],
+    });
+    await registry.flush();
+    const device = registry.listDevices().find((candidate) => candidate.externalId === 'panel-device')!;
+    const wireOf = async () =>
+      ((await app.inject({ method: 'GET', url: '/api/v1/devices', headers: auth(memberToken) })).json() as Array<Record<string, unknown>>).find(
+        (candidate) => candidate.id === device.id,
+      )!;
+    // Absent, not empty: every other device's wire is what it always was.
+    expect(await wireOf()).not.toHaveProperty('webBlocks');
+
+    const html = '<!doctype html><p>Hall</p>';
+    const put = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/devices/${device.id}/web-blocks/hall`,
+      headers: auth(ownerToken),
+      payload: { title: 'Hall', height: 120, files: [{ path: 'index.html', dataBase64: Buffer.from(html).toString('base64') }] },
+    });
+    expect(put.statusCode).toBe(200);
+    expect(put.json()).toMatchObject({ changed: true, block: { id: 'hall', title: 'Hall', height: 120 } });
+    expect((await wireOf()).webBlocks).toEqual([expect.objectContaining({ id: 'hall', title: 'Hall', height: 120 })]);
+
+    const served = await app.inject({
+      method: 'GET',
+      url: `/api/v1/devices/${device.id}/web-blocks/hall/index.html`,
+      headers: auth(memberToken),
+    });
+    expect(served.statusCode).toBe(200);
+    expect(served.body).toBe(html);
+    expect(served.headers['content-type']).toBe('text/html; charset=utf-8');
+    expect(served.headers['x-content-type-options']).toBe('nosniff');
+    expect(String(served.headers['content-security-policy'])).toContain("connect-src 'none'");
+    const again = await app.inject({
+      method: 'GET',
+      url: `/api/v1/devices/${device.id}/web-blocks/hall/index.html`,
+      headers: { ...auth(memberToken), 'if-none-match': String(served.headers.etag) },
+    });
+    expect(again.statusCode).toBe(304);
+    const missing = await app.inject({
+      method: 'GET',
+      url: `/api/v1/devices/${device.id}/web-blocks/hall/../../secret.txt`,
+      headers: auth(memberToken),
+    });
+    expect(missing.statusCode).toBe(404);
+
+    const refused = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/devices/${device.id}/web-blocks/hall`,
+      headers: auth(ownerToken),
+      payload: { title: 'Hall', files: [{ path: 'app.js', dataBase64: Buffer.from('x').toString('base64') }] },
+    });
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json()).toMatchObject({ error: 'invalid_block' });
+
+    expect(
+      (await app.inject({ method: 'DELETE', url: `/api/v1/devices/${device.id}/web-blocks/hall`, headers: auth(ownerToken) }))
+        .statusCode,
+    ).toBe(204);
+    expect(await wireOf()).not.toHaveProperty('webBlocks');
+    await registry.removeDevice(device.id);
   });
 
   it('serves devices announced by adapters in the wire shape', async () => {

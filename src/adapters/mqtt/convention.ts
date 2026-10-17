@@ -12,8 +12,11 @@
  *   gethome/device/<deviceId>/availability     retained "online"/"offline" (use as MQTT LWT)
  *   gethome/device/<deviceId>/set              hub → device: canonical command JSON (endpoint 1)
  *   gethome/device/<deviceId>/set/<epId>       hub → device: per-endpoint command
+ *   gethome/device/<deviceId>/camera[/<epId>]  retained JSON — the streams a camera serves on the LAN
  *
  * Publishing an empty retained payload to the config topic removes the device.
+ * The hub publishes one itself when the device is deleted in an app, which a
+ * device listening to its own config topic hears as "stay out".
  */
 
 export const MQTT_NAMESPACE = 'gethome';
@@ -24,6 +27,7 @@ export type ParsedMqttTopic =
   | { kind: 'discovery'; deviceId: string }
   | { kind: 'state'; deviceId: string; endpointId: number }
   | { kind: 'availability'; deviceId: string }
+  | { kind: 'camera'; deviceId: string; endpointId: number }
   | null;
 
 export function parseTopic(topic: string): ParsedMqttTopic {
@@ -46,6 +50,11 @@ export function parseTopic(topic: string): ParsedMqttTopic {
     if (parts[3] === 'availability' && parts.length === 4) {
       return { kind: 'availability', deviceId };
     }
+    if (parts[3] === 'camera' && (parts.length === 4 || parts.length === 5)) {
+      const endpointId = parts.length === 5 ? Number(parts[4]) : 1;
+      if (!Number.isInteger(endpointId) || endpointId < 0) return null;
+      return { kind: 'camera', deviceId, endpointId };
+    }
   }
   return null;
 }
@@ -56,6 +65,23 @@ export function commandTopic(deviceId: string, endpointId: number): string {
     : `${MQTT_NAMESPACE}/device/${deviceId}/set/${endpointId}`;
 }
 
+export function configTopic(deviceId: string): string {
+  return `${MQTT_NAMESPACE}/discovery/${deviceId}/config`;
+}
+
+export function cameraTopic(deviceId: string, endpointId: number): string {
+  return endpointId === 1
+    ? `${MQTT_NAMESPACE}/device/${deviceId}/camera`
+    : `${MQTT_NAMESPACE}/device/${deviceId}/camera/${endpointId}`;
+}
+
 export function subscriptionPatterns(): string[] {
-  return [`${MQTT_NAMESPACE}/discovery/+/config`, `${MQTT_NAMESPACE}/device/+/state`, `${MQTT_NAMESPACE}/device/+/state/+`, `${MQTT_NAMESPACE}/device/+/availability`];
+  return [
+    `${MQTT_NAMESPACE}/discovery/+/config`,
+    `${MQTT_NAMESPACE}/device/+/state`,
+    `${MQTT_NAMESPACE}/device/+/state/+`,
+    `${MQTT_NAMESPACE}/device/+/availability`,
+    `${MQTT_NAMESPACE}/device/+/camera`,
+    `${MQTT_NAMESPACE}/device/+/camera/+`,
+  ];
 }

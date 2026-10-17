@@ -64,6 +64,7 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
   const db = handle?.db!;
   let app: FastifyInstance;
   let registry: DeviceRegistry;
+  let mqttAdapter: MqttAdapter;
   let fake: mqtt.MqttClient;
   let token: string;
   const observed: Array<{ topic: string; payload: string }> = [];
@@ -107,7 +108,8 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
     registry = new DeviceRegistry(db, events, activity, log);
     const zigbee = new ZigbeeAdapter({ mqttUrl: MQTT_URL, baseTopic: 'zigbee2mqtt', log });
     registry.registerAdapter(zigbee);
-    registry.registerAdapter(new MqttAdapter({ mqttUrl: MQTT_URL, log }));
+    mqttAdapter = new MqttAdapter({ mqttUrl: MQTT_URL, log });
+    registry.registerAdapter(mqttAdapter);
     await registry.start();
 
     const settings = new SettingsService(db, Buffer.alloc(32).toString('base64'));
@@ -316,6 +318,68 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
     expect(typeof doorbell.endpoints[0]!.state.event?.at).toBe('number');
 
     await fake.publishAsync('gethome/discovery/doorbell/config', '', { retain: true }).catch(() => {});
+  });
+
+  it('derives a camera from the camera topic, and no address ever reaches GET /devices', async () => {
+    await fake.publishAsync(
+      'gethome/discovery/porch-cam/config',
+      JSON.stringify({
+        name: 'Porch camera',
+        endpoints: [{ endpointId: 1, deviceKind: 'camera', capabilities: ['onOff'], primary: 'onOff' }],
+      }),
+      { retain: true },
+    );
+    await fake.publishAsync(
+      'gethome/device/porch-cam/camera',
+      JSON.stringify({
+        streams: [
+          { id: 'still', kind: 'snapshot', url: 'http://192.168.1.31/snapshot' },
+          { id: 'live', kind: 'mjpeg', url: 'http://192.168.1.31:81/stream' },
+        ],
+      }),
+      { retain: true },
+    );
+    const porch = () => registry.listDevices().find((device) => device.externalId === 'porch-cam');
+    await waitFor(() => porch()?.endpoints[0]?.capabilities.includes('camera') === true, 8000, 'the porch camera’s camera capability');
+    await waitFor(() => porch()?.endpoints[0]?.state.camera?.streams.length === 2, 8000, 'the porch camera’s two streams');
+    const body = (await app.inject({ method: 'GET', url: '/api/v1/devices', headers: { authorization: `Bearer ${token}` } })).body;
+    expect(body).toContain('"camera"');
+    expect(body).not.toContain('http://');
+  });
+
+  it('deletes an MQTT device for good: its retained topics are cleared and it stays gone', async () => {
+    const porch = registry.listDevices().find((device) => device.externalId === 'porch-cam');
+    expect(porch, 'the camera from the test before').toBeDefined();
+    const deleted = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/devices/${porch!.id}`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(deleted.statusCode).toBe(204);
+    await waitFor(() => !registry.listDevices().some((device) => device.externalId === 'porch-cam'), 8000, 'the camera leaving');
+
+    // Somebody subscribing now is handed nothing retained for it.
+    const probe = await mqtt.connectAsync(MQTT_URL);
+    const retained: string[] = [];
+    probe.on('message', (topic, payload) => {
+      if (payload.length > 0) retained.push(topic);
+    });
+    await probe.subscribeAsync(['gethome/discovery/porch-cam/config', 'gethome/device/porch-cam/camera']);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    await probe.endAsync();
+    expect(retained).toEqual([]);
+
+    // And the hub coming back finds nothing to bring it back with.
+    await mqttAdapter.stop();
+    await mqttAdapter.start(registry);
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(registry.listDevices().some((device) => device.externalId === 'porch-cam')).toBe(false);
+
+    // One removal, recorded once — our own empty config echoing back is not a second.
+    const feed = (
+      await app.inject({ method: 'GET', url: '/api/v1/activity?limit=50', headers: { authorization: `Bearer ${token}` } })
+    ).json() as Array<{ kind: string; message: string }>;
+    expect(feed.filter((row) => row.kind === 'device.removed' && row.message.startsWith('Porch camera'))).toHaveLength(1);
   });
 
   it('exposes device settings as generic custom fields and writes them back', async () => {

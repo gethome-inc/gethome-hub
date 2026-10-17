@@ -38,10 +38,14 @@ endpoint `1`.
 | `gethome/device/<deviceId>/state/<endpointId>` | device | recommended | state patch for that endpoint |
 | `gethome/device/<deviceId>/set` | hub | no | command for endpoint 1 |
 | `gethome/device/<deviceId>/set/<endpointId>` | hub | no | command for that endpoint |
+| `gethome/device/<deviceId>/camera` | device | **yes** | the streams a camera serves on the LAN (endpoint 1) — see the hub's `docs/mqtt-integrations.md`, *Cameras* |
+| `gethome/device/<deviceId>/camera/<endpointId>` | device | **yes** | the same, for that endpoint |
 
 The hub subscribes to `gethome/discovery/+/config`, `gethome/device/+/state`,
-`gethome/device/+/state/+` and `gethome/device/+/availability`. Anything else
-under `gethome/` is ignored by the hub today.
+`gethome/device/+/state/+`, `gethome/device/+/availability`,
+`gethome/device/+/camera` and `gethome/device/+/camera/+`. Anything else under
+`gethome/` is ignored by the hub today. A hub from before cameras ignores the
+two camera topics as well.
 
 ## What the hub does with each message
 
@@ -99,7 +103,10 @@ device; the capabilities decide the controls.
 `contact`, `illuminance`, `pressure`, `flow`, `airQuality`, `pm25`, `co2`,
 `smokeCOAlarm`, `battery`, `electricalPower`, `mode`, `rvcRun`,
 `mediaPlayback`, `event`, `irRemote`, `custom`. What each one means is in
-[capabilities.md](capabilities.md).
+[capabilities.md](capabilities.md). **Never declare `camera`**: the hub adds
+that capability itself to an endpoint whose device announces streams on its
+camera topic, and a document naming it is refused whole — by this hub and by
+every hub from before cameras.
 
 ## State patches
 

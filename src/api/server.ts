@@ -129,6 +129,8 @@ import {
   MemberSessions,
   UNAUTHORIZED_CLOSE_CODE,
 } from './ws.js';
+import { WebBlockError, WebBlockService } from '../web-blocks/store.js';
+import { CameraError, CameraProxy, cameraStatus } from '../cameras/proxy.js';
 
 export interface ApiDeps {
   db: Db;
@@ -145,6 +147,14 @@ export interface ApiDeps {
   history: HistoryService;
   /** The pictures a home has had drawn of its devices — `portraits/store.ts`. */
   portraits: PortraitService;
+  /**
+   * The panels installed on devices' pages — `web-blocks/store.ts`. Optional
+   * for the reason `allowedHosts` gives: a suite that doesn't care gets one
+   * made here, empty.
+   */
+  webBlocks?: WebBlockService;
+  /** The camera proxy — `cameras/proxy.ts`. Optional for the same reason. */
+  cameras?: CameraProxy;
   settings: SettingsService;
   /**
    * The hub's name, and the one place it lives. `GET /hub`, `GET /home` and the
@@ -300,6 +310,8 @@ interface CommissionJob {
  * way to hand a Raspberry Pi ten megabytes of anything.
  */
 const PHOTO_BODY_LIMIT = 12 * 1024 * 1024;
+/** A web block's 512 KB, base64'd, with room for the JSON around it. */
+const WEB_BLOCK_BODY_LIMIT = 1024 * 1024;
 
 const COMMISSION_JOB_TTL_MS = 10 * 60 * 1000;
 /**
@@ -611,6 +623,16 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     }),
   );
 
+  /**
+   * Made here when a suite didn't pass them, so the routes are always there;
+   * `src/index.ts` passes the real ones, loaded and shut down with the hub.
+   */
+  const webBlocks = deps.webBlocks ?? new WebBlockService(deps.db, deps.events, deps.dataDir, deps.log);
+  const cameras = deps.cameras ?? new CameraProxy({ log: deps.log });
+  /** What the socket reads: the same services the routes use, never a second copy. */
+  const socketDeps: ApiDeps = { ...deps, webBlocks, cameras };
+  // A stream left relaying after the server closed would hold its socket open.
+  app.addHook('onClose', async () => cameras.close());
   const commissionJobs = new Map<string, CommissionJob>();
   /**
    * Who is holding a live event stream, so removing them can hang it up.
@@ -772,6 +794,14 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // is a different question, and it is answered by `GET /settings/ai` —
     // which not every member of a home may read.
     portraits: deps.portraits.describe(),
+    // Additive, presence the capability: a hub carrying this block shows
+    // cameras through itself (`/cameras/…`), and these are the stream kinds it
+    // relays and how many cameras it streams at once.
+    cameras: cameras.describe(),
+    // Additive, presence the capability: a hub carrying this block keeps web
+    // blocks on devices' pages (`/devices/:id/web-blocks/…`), within these
+    // bounds. An app that doesn't find it offers no panel to install.
+    webBlocks: webBlocks.describe(),
     // Additive, and presence is the capability once more: a hub carrying this
     // block mints **sign-in codes** (`POST /invites {memberId}`), so somebody
     // already in the home comes back on another device as themselves rather
@@ -1286,7 +1316,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const view = deviceWireView(deps, memberId, request.apiKey);
     return deps.registry
       .listDevices()
-      .map((device) => deviceWire(device, deps.favorites.isFavorite(memberId, device.id), view));
+      .map((device) =>
+        deviceWire(device, deps.favorites.isFavorite(memberId, device.id), view, webBlocks.list(device.id)),
+      );
   });
 
   /**
@@ -1431,6 +1463,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       device,
       deps.favorites.isFavorite(memberId, id),
       deviceWireView(deps, memberId, request.apiKey),
+      webBlocks.list(id),
     );
   });
 
@@ -1707,6 +1740,179 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     announcePortraits(deviceId);
     return reply.code(204).send();
   });
+
+  // ── Web blocks ───────────────────────────────────────────────────────────
+
+  /**
+   * Install a panel on a device's page, or replace the one with that id.
+   *
+   * `device.edit`, because a panel changes what everybody in the house sees on
+   * that device's page — the same reason a rename needs it. JSON with the files
+   * as base64 rather than an archive, as portraits take a photo: no archive
+   * library on a 512 MB board, and every byte is checked as it is decoded.
+   * An upload identical to what is stored writes nothing and records nothing.
+   *
+   * **The member's, never an API key's** — a panel is code every phone in the
+   * house runs, which is more than `device.edit` hands a key elsewhere (a
+   * name, a room, a portrait). Closed is the default a key's route table
+   * gives an undecided write, and the reversible one: opening it later is
+   * additive, closing it after it shipped is not.
+   */
+  app.put(
+    '/api/v1/devices/:id/web-blocks/:blockId',
+    { ...memberOnlyNeeds('device.edit'), bodyLimit: WEB_BLOCK_BODY_LIMIT },
+    async (request, reply) => {
+      const { id, blockId } = z.object({ id: z.uuid(), blockId: z.string().max(40) }).parse(request.params);
+      const device = deps.registry.getDevice(id);
+      if (!device) return reply.code(404).send({ error: 'not_found' });
+      const body = z
+        .object({
+          title: z.string().min(1).max(60),
+          height: z.number().int().min(60).max(800).optional(),
+          files: z
+            .array(z.object({ path: z.string().min(1).max(120), dataBase64: z.string().max(WEB_BLOCK_BODY_LIMIT) }).strict())
+            .min(1)
+            .max(64),
+        })
+        .strict()
+        .parse(request.body);
+      try {
+        const member = request.member!;
+        const who = actor(request);
+        const { changed, block } = await webBlocks.put(
+          id,
+          blockId,
+          { title: body.title, files: body.files, ...(body.height !== undefined ? { height: body.height } : {}) },
+          { id: member.id, name: member.name },
+        );
+        if (changed) {
+          await deps.activity.record({
+            kind: 'device.web-block',
+            message: `${who.name} installed the panel “${block.title}” on ${device.name}.`,
+            memberId: who.memberId,
+            deviceId: id,
+            data: { deviceName: device.name, blockId, title: block.title, ...who.data },
+          });
+        }
+        return { block, changed };
+      } catch (error) {
+        if (error instanceof WebBlockError) {
+          const status = error.code === 'invalid_block' ? 400 : error.code === 'storage_low' ? 507 : 409;
+          return reply.code(status).send({ error: error.code, message: error.message });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.delete('/api/v1/devices/:id/web-blocks/:blockId', memberOnlyNeeds('device.edit'), async (request, reply) => {
+    const { id, blockId } = z.object({ id: z.uuid(), blockId: z.string().max(40) }).parse(request.params);
+    const device = deps.registry.getDevice(id);
+    if (!device || !(await webBlocks.remove(id, blockId))) return reply.code(404).send({ error: 'not_found' });
+    const who = actor(request);
+    await deps.activity.record({
+      kind: 'device.web-block',
+      message: `${who.name} removed a panel from ${device.name}.`,
+      memberId: who.memberId,
+      deviceId: id,
+      data: { deviceName: device.name, blockId, removed: true, ...who.data },
+    });
+    return reply.code(204).send();
+  });
+
+  /**
+   * One file of a panel, for the apps' web-block host to load.
+   *
+   * The floor, as reading the device is. The path is looked up in the stored
+   * manifest — never on disk — and every answer says what it is and that it
+   * may not be sniffed into anything else; the CSP is for anything that opens
+   * one of these outside an app, where it must not reach the network either.
+   */
+  // For the apps' web-block host, which holds a member's token; a key has
+  // nothing to run a panel in.
+  app.get('/api/v1/devices/:id/web-blocks/:blockId/*', memberOnly, async (request, reply) => {
+    const params = z
+      .object({ id: z.uuid(), blockId: z.string().max(40), '*': z.string().max(200) })
+      .parse(request.params);
+    const found = await webBlocks.file(params.id, params.blockId, params['*']);
+    if (!found) return reply.code(404).send({ error: 'not_found' });
+    const etag = `"${found.file.sha256}"`;
+    if (request.headers['if-none-match'] === etag) return reply.code(304).send();
+    return reply
+      .header('content-type', found.file.type)
+      .header('x-content-type-options', 'nosniff')
+      .header('cache-control', 'no-cache')
+      .header('etag', etag)
+      .header(
+        'content-security-policy',
+        "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'",
+      )
+      .send(found.data);
+  });
+
+  // ── Cameras ──────────────────────────────────────────────────────────────
+
+  /**
+   * A still from a camera, through the hub.
+   *
+   * `camera.view` — Owner and Member by default, not Guest — because a camera
+   * shows people. The app names the stream by device, endpoint and stream id
+   * and never learns where the camera is; the hub fetches it from the address
+   * the camera announced, after the checks in `cameras/`.
+   */
+  app.get(
+    '/api/v1/cameras/:deviceId/:endpointId/:streamId/snapshot',
+    needs('camera.view'),
+    async (request, reply) => {
+      const target = cameraTarget(request.params, 'snapshot');
+      if (!target) return reply.code(404).send({ error: 'camera_not_found' });
+      try {
+        const jpeg = await cameras.snapshot(target);
+        return reply.header('content-type', 'image/jpeg').header('cache-control', 'no-store').send(jpeg);
+      } catch (error) {
+        if (error instanceof CameraError) return reply.code(cameraStatus(error.code)).send({ error: error.code });
+        throw error;
+      }
+    },
+  );
+
+  /**
+   * A camera live, as MJPEG, through the hub — shared with anybody already
+   * watching it, since the camera serves one client.
+   */
+  app.get(
+    '/api/v1/cameras/:deviceId/:endpointId/:streamId/mjpeg',
+    needs('camera.view'),
+    async (request, reply) => {
+      const target = cameraTarget(request.params, 'mjpeg');
+      if (!target) return reply.code(404).send({ error: 'camera_not_found' });
+      try {
+        reply.hijack();
+        await cameras.watch(target, reply.raw, (listener) => request.raw.on('close', listener));
+      } catch (error) {
+        const code = error instanceof CameraError ? error.code : 'camera_unreachable';
+        const status = error instanceof CameraError ? cameraStatus(error.code) : 502;
+        if (!reply.raw.headersSent) {
+          reply.raw.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
+          reply.raw.end(JSON.stringify({ error: code }));
+        } else {
+          reply.raw.end();
+        }
+      }
+    },
+  );
+
+  /** The stream a camera route names, if the device announced one of that kind. */
+  function cameraTarget(params: unknown, kind: 'snapshot' | 'mjpeg') {
+    const parsed = z
+      .object({ deviceId: z.uuid(), endpointId: z.coerce.number().int().min(0), streamId: z.string().max(32) })
+      .safeParse(params);
+    if (!parsed.success) return null;
+    const { deviceId, endpointId, streamId } = parsed.data;
+    const source = deps.registry.cameraSource(deviceId, endpointId, streamId);
+    if (!source || source.kind !== kind) return null;
+    return { key: `${deviceId}/${String(endpointId)}/${streamId}`, externalId: source.externalId, url: source.url };
+  }
 
   // ── Matter commissioning & Zigbee joining ────────────────────────────────
 
@@ -4515,7 +4721,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       // fired the moment the socket opens is held — and rendered once the
       // socket knows who is reading — instead of lost in the gap between
       // "connected" and "authorized".
-      const handle = attachWebSocket(socket, deps, sessions, hubStatus);
+      const handle = attachWebSocket(socket, socketDeps, sessions, hubStatus);
       void (async () => {
         const credential = extractCredential(request);
         const result = credential

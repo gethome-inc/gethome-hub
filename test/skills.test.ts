@@ -18,6 +18,7 @@ import type { AutomationEngine } from '../src/automations/engine.js';
 import type { ZodType } from 'zod';
 import {
   CAPABILITY_KINDS,
+  DECLARABLE_CAPABILITY_KINDS,
   DEVICE_KINDS,
   commandSchema,
   endpointDescriptorSchema,
@@ -318,8 +319,13 @@ describe('the skills, against the schema', () => {
   });
 
   it('name every capability, and no other', () => {
+    // The list under the discovery document is what a document may *declare*,
+    // so it is held to the declarable vocabulary: `camera` is the hub's to
+    // derive, and a document naming it is refused whole — by this hub and by
+    // every hub from before cameras. The loop below still wants every kind
+    // named, which is how the derived one gets its sentence.
     expect(listAfter(read('gethome-mqtt-device', 'references/convention.md'), '**Capabilities**:').sort()).toEqual(
-      [...CAPABILITY_KINDS].sort(),
+      [...DECLARABLE_CAPABILITY_KINDS].sort(),
     );
     for (const [skill, file] of [
       ['gethome-mqtt-device', 'references/capabilities.md'],

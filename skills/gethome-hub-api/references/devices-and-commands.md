@@ -78,6 +78,11 @@ open: show an unknown kind generically.
 | `irRemote` | `irRemote.commands[]` | an IR blaster's learned codes, replayed by id |
 | `custom` | `custom.fields[]`, `custom.values` | generic controls for any other parameter |
 
+`camera` is a capability the hub adds itself, to a device that announces
+pictures over MQTT: its state carries `camera.streams[]` — ids, kinds and sizes,
+never an address — and the pictures come through the hub's own camera routes,
+which need `camera.view`, a permission no key may be given.
+
 Conversions to keep at hand:
 
 ```text

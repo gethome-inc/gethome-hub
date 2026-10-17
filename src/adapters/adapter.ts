@@ -106,6 +106,12 @@ export interface AdapterBus {
   activity(entry: { kind: string; message: string; externalId?: string; adapter?: AdapterId }): void;
 }
 
+/** Where one camera stream is on the LAN, as an adapter knows it — never sent to an app. */
+export interface CameraSource {
+  kind: string;
+  url: string;
+}
+
 export interface ProtocolAdapter {
   readonly id: AdapterId;
   start(bus: AdapterBus): Promise<void>;
@@ -113,4 +119,10 @@ export interface ProtocolAdapter {
   execute(externalId: string, endpointId: number, command: HubCommand): Promise<void>;
   /** Forget a device at the protocol level (unpair / decommission), if supported. */
   forget?(externalId: string): Promise<void>;
+  /**
+   * The LAN address of a camera stream this adapter's device announced, for
+   * the hub's camera proxy (`src/cameras/`). Optional: only the MQTT adapter
+   * has cameras today.
+   */
+  cameraSource?(externalId: string, endpointId: number, streamId: string): CameraSource | null;
 }
