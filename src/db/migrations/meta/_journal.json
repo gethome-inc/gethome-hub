@@ -124,8 +124,22 @@
     {
       "idx": 17,
       "version": "6",
-      "when": 1791442285965,
-      "tag": "0017_known_firebird",
+      "when": 1791355799875,
+      "tag": "0017_wifi_networks_for_members",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1792149181364,
+      "tag": "0018_api_keys",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1792229986514,
+      "tag": "0019_device_web_blocks",
       "breakpoints": true
     }
   ]

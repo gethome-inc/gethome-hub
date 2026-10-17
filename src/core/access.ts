@@ -145,11 +145,22 @@ export const PERMISSIONS: readonly PermissionDescriptor[] = [
       'Install a newer build when one exists. The home is offline for a few minutes while it happens.',
   },
   {
+    key: 'hub.wifi',
+    group: 'Hub',
+    title: 'Wi-Fi networks',
+    summary:
+      'Add a Wi-Fi network for the hub to join somewhere else, and remove ones it no longer ' +
+      'needs. The network it is on now can never be removed from an app.',
+  },
+  {
     key: 'hub.ai',
     group: 'Hub',
     title: 'AI keys and portraits',
+    // "AI provider keys" rather than "API keys": the home's Anthropic and
+    // OpenAI keys are a different thing from the `hub.apikeys` keys below, and
+    // one word apart in a matrix is exactly where the two would be confused.
     summary:
-      'The API keys and the adaptation switch, drawing a device portrait, what has been spent, and the device-mapping library.',
+      'The AI provider keys and the adaptation switch, drawing a device portrait, what has been spent, and the device-mapping library.',
   },
   {
     key: 'hub.mqtt',
@@ -168,6 +179,15 @@ export const PERMISSIONS: readonly PermissionDescriptor[] = [
       'See the hub’s own broker password, which can control every Zigbee device directly ' +
       'and open the network for pairing. Worth having for debugging; it is the keys to the home.',
   },
+  {
+    key: 'hub.apikeys',
+    group: 'Hub',
+    title: 'API keys for your own software',
+    summary:
+      'Create keys that let your own scripts, bridges and AI agents use this hub as you, with ' +
+      'only the parts of your access you choose. Taking this away pauses every key the people ' +
+      'in this role already have.',
+  },
 ] as const;
 
 export type PermissionKey =
@@ -184,11 +204,69 @@ export type PermissionKey =
   | 'role.manage'
   | 'hub.radio'
   | 'hub.update'
+  | 'hub.wifi'
   | 'hub.ai'
   | 'hub.mqtt'
-  | 'hub.mqtt.admin';
+  | 'hub.mqtt.admin'
+  | 'hub.apikeys';
 
 export const PERMISSION_KEYS: readonly PermissionKey[] = PERMISSIONS.map((entry) => entry.key);
+
+/**
+ * What an API key may be handed, beyond reading the home and — with
+ * `control` — working it.
+ *
+ * **An allowlist, and the safe direction is the default.** A key is a secret
+ * that lives in somebody's script, on another machine, often for years; the
+ * question for each permission is whether the home would mind it being done
+ * by software it cannot see, and the answer has to be yes for everything here
+ * to be *withheld* rather than written down one key at a time. So a permission
+ * a later build adds is not grantable until somebody decides it is — the
+ * opposite of the owner rule, and for the opposite reason.
+ *
+ * What is missing, and why:
+ *  - `member.*` and `role.manage` — who is in the home and what they may do is
+ *    a person's decision, and a key that could invite or promote would mint
+ *    credentials of its own.
+ *  - `hub.apikeys` — a key never makes another key.
+ *  - `hub.ai` — it reads and repoints the home's AI provider keys and reads
+ *    what was said to them, which is somebody's money and somebody's words.
+ *  - `hub.mqtt`, `hub.mqtt.admin` — a broker password is a secret that leaves
+ *    the building, and a key is already one.
+ *  - `hub.wifi` — where the hub has been, and the one change that can take it
+ *    off its network.
+ */
+export const KEY_GRANTABLE: readonly PermissionKey[] = PERMISSION_KEYS.filter((key) =>
+  (
+    [
+      'device.edit',
+      'device.add',
+      'device.remove',
+      'home.structure',
+      'home.rename',
+      'activity.read',
+      'automation.manage',
+      'hub.radio',
+      'hub.update',
+    ] as readonly PermissionKey[]
+  ).includes(key),
+);
+
+const GRANTABLE = new Set<PermissionKey>(KEY_GRANTABLE);
+
+/** Whether a key may ever be handed this permission. */
+export function isKeyGrantable(permission: string): permission is PermissionKey {
+  return GRANTABLE.has(permission as PermissionKey);
+}
+
+/**
+ * What an API key was given: whether it may work the home, and which of the
+ * grantable permissions. Read-only by default — a key with neither reads.
+ */
+export interface KeyGrant {
+  control: boolean;
+  permissions: readonly PermissionKey[];
+}
 
 const KNOWN_KEYS = new Set<string>(PERMISSION_KEYS);
 
@@ -250,13 +328,36 @@ export const BUILTIN_ROLES = [
      * matrix, and `hub.mqtt` alone is the safe half of the answer: it is the
      * account that cannot switch anything on.
      *
+     * `hub.wifi` is here on the `hub.update` reading again — the person
+     * carrying the hub to its new home is rarely the laptop that claimed it —
+     * and it passes the same three tests. **Bounded**: adding a network
+     * changes nothing until the hub is somewhere the network it is on has gone,
+     * and NetworkManager prefers the one it used last, so the home network
+     * still wins at home. **Destroys nothing that cannot be typed again**: the
+     * one removal that would cost a trip to the Pi — the network it is
+     * connected through — is refused outright, by the hub and again by the
+     * root script. **Named**: both changes write a row. Guest is where the line
+     * falls, as it does for every key in this list. It travels with `0017`.
+     *
+     * `hub.apikeys` is here on the reading that put every other key in this
+     * list: the person who wants a lamp on a script, or an agent writing a
+     * bridge, is the one standing in the house. And it passes the three tests
+     * the way `hub.update` does. **Bounded**: a key carries its member's own
+     * authority and never more (`canThrough`), so it adds a way in for what
+     * that person could already do, narrowed further by what they chose. It
+     * **destroys nothing**: revoking one ends it on the next request and hangs
+     * up its sockets, unlike a broker password. **Named**: making, changing
+     * and revoking each write a row, and everything a key does is written as
+     * the member it belongs to, through that key. Guest is where the line
+     * falls. It travels with `0018`.
+     *
      * `camera.view` is here because watching the porch is what living in a
      * home with a camera on its porch means — the person at the door is
      * looking at a phone, not at a laptop in a drawer. It is a permission at
      * all, rather than the floor, because a camera shows *people*: a home
      * that has somebody staying decides whether they see the hallway, and
      * Guest starts without it. It reaches homes that already exist through
-     * migration `0017`, the way `hub.ai` travelled in `0006`.
+     * migration `0019`, the way `hub.ai` travelled in `0006`.
      */
     permissions: [
       'device.edit',
@@ -267,7 +368,9 @@ export const BUILTIN_ROLES = [
       'automation.manage',
       'hub.radio',
       'hub.update',
+      'hub.wifi',
       'hub.ai',
+      'hub.apikeys',
     ] as PermissionKey[],
   },
   {
@@ -405,6 +508,67 @@ export class AccessService {
 
   isOwner(memberId: string): boolean {
     return this.roleFor(memberId)?.key === OWNER_ROLE_KEY;
+  }
+
+  /**
+   * Whether this id is somebody in the home — a member this service has read
+   * or been told about.
+   *
+   * Asked separately because `roleFor` deliberately answers the default role
+   * for an id it has never seen (that is what lets a legacy row resolve), so
+   * `can()` alone grants Member's permissions to any string at all. Nothing
+   * that reaches `can()` from a route is a stranger — the token resolved to a
+   * member row first — but a key's checks go through here, and a key whose
+   * member is gone must be worth nothing.
+   */
+  isMember(memberId: string): boolean {
+    return this.roleByMember.has(memberId);
+  }
+
+  /**
+   * May this member do this **through one of their API keys**?
+   *
+   * Four things, all of them: the member is still here, the permission is one
+   * a key may ever hold, this key was given it, and the member may do it right
+   * now. The last is asked live, so a person moved to a smaller role narrows
+   * every key they made on the next request — and the owner rule never
+   * reaches a key: an owner's key holds what it was given and nothing else,
+   * because "never evaluated" is about a person who can always put the matrix
+   * back, and a script cannot.
+   *
+   * `automation.manage` also needs `control`. A rule switches devices on a
+   * schedule, so a key that may write rules but not work the home would be a
+   * key that works the home a minute later; the route refuses that grant, and
+   * this refuses it again in case a row ever holds one.
+   */
+  canThrough(memberId: string, permission: PermissionKey, grant: KeyGrant): boolean {
+    if (!this.isMember(memberId)) return false;
+    if (!GRANTABLE.has(permission)) return false;
+    if (!grant.permissions.includes(permission)) return false;
+    if (permission === 'automation.manage' && !grant.control) return false;
+    return this.can(memberId, permission);
+  }
+
+  /** What a key may do right now, in catalog order — `GET /me` through a key. */
+  permissionsThrough(memberId: string, grant: KeyGrant): PermissionKey[] {
+    return KEY_GRANTABLE.filter((permission) => this.canThrough(memberId, permission, grant));
+  }
+
+  /**
+   * The one question every caller-aware check asks: may *this caller* — a
+   * member, or a member through a key — do this?
+   *
+   * A null grant is the member themselves. Routes ask it through
+   * `api/auth.ts`'s `can`, and the socket asks it directly, so there is one
+   * answer for the two ways in.
+   */
+  canAs(memberId: string, permission: PermissionKey, grant: KeyGrant | null | undefined): boolean {
+    return grant ? this.canThrough(memberId, permission, grant) : this.can(memberId, permission);
+  }
+
+  /** `permissionsFor`, asked as a caller who may be holding a key. */
+  permissionsAs(memberId: string, grant: KeyGrant | null | undefined): PermissionKey[] {
+    return grant ? this.permissionsThrough(memberId, grant) : this.permissionsFor(memberId);
   }
 
   /**

@@ -1,5 +1,15 @@
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -103,6 +113,20 @@ function run(options: {
   script_(path.join(bin, 'systemctl'), 'exit 0');
   if (options.networkManager !== false) script_(path.join(bin, 'nmcli'), 'exit 0');
 
+  // No NetworkManager is a PATH holding only the fakes, without `nmcli` — and
+  // without the host's own, which any machine with NetworkManager installed
+  // has beside every other tool in /usr/bin. Leaving the fake out is not
+  // enough there: `command -v nmcli` finds the real one, and the function
+  // installs a dispatcher. The PATH narrows after the lift, which needs `sed`,
+  // keeping by name whichever of the host tools the function runs on either
+  // branch the host has, and `cat` for the fake `iw` — so a branch taken
+  // wrongly fails on what it wrote rather than on a missing command. One left
+  // off the list fails the test rather than passing it, since each is on the
+  // way to something it asserts.
+  const host = path.join(dir, 'host');
+  mkdirSync(host);
+  const runPath = options.networkManager === false ? `${bin}:${host}` : `${bin}:${process.env.PATH ?? ''}`;
+
   const output = execFileSync(
     'bash',
     [
@@ -120,6 +144,10 @@ function run(options: {
          prog="/^$fn() {/,/^}/p"
          eval "$(sed -n "$prog" "$1")"
        done
+       for tool in awk tee grep dirname mkdir chown chmod cat; do
+         if found="$(command -v "$tool")"; then ln -s "$found" "$HOST_TOOLS/$tool"; fi
+       done
+       PATH="$RUN_PATH"
        keep_wifi_awake`,
       'bash',
       INSTALLER,
@@ -129,6 +157,8 @@ function run(options: {
       env: {
         ...process.env,
         PATH: `${bin}:${process.env.PATH ?? ''}`,
+        RUN_PATH: runPath,
+        HOST_TOOLS: host,
         FAKE_ROUTE: options.route,
         FAKE_RADIO_OBEYS: options.radioObeys === false ? 'no' : 'yes',
         GETHOME_NET_DIR: net,
@@ -156,10 +186,22 @@ const WIFI_ROUTE = 'default via 192.168.0.1 dev wlan0 proto dhcp src 192.168.0.2
  * Returns the unit and the script it writes, or empty strings for the wired
  * hub that must get neither.
  */
-function keepalive(options: { route: string; wireless: string[]; arping?: boolean; kernelProbes?: boolean }): {
+function keepalive(options: {
+  route: string;
+  wireless: string[];
+  arping?: boolean;
+  kernelProbes?: boolean;
+  /** Where the build being installed lives; a directory without the watchdog in it is an install that cannot place it. */
+  hubDir?: string;
+}): {
   unit: string;
   script: string;
   scriptMode: string;
+  /** The watchdog as installed, and its mode, or '' when there is none. */
+  watchdog: string;
+  watchdogMode: string;
+  /** Where it was installed. */
+  watchdogPath: string;
   /** Every `systemctl` invocation, in order. */
   systemctl: string;
   output: string;
@@ -170,6 +212,7 @@ function keepalive(options: { route: string; wireless: string[]; arping?: boolea
   const net = path.join(dir, 'net');
   const unit = path.join(dir, 'gethome-wifi-keepalive.service');
   const script = path.join(dir, 'lib', 'gethome-wifi-keepalive.sh');
+  const watchdog = path.join(dir, 'lib', 'gethome-wifi-watchdog.sh');
   mkdirSync(bin, { recursive: true });
   for (const iface of options.wireless) mkdirSync(path.join(net, iface, 'wireless'), { recursive: true });
   const systemctl = path.join(dir, 'systemctl-calls');
@@ -221,6 +264,8 @@ function keepalive(options: { route: string; wireless: string[]; arping?: boolea
         GETHOME_NET_DIR: net,
         GETHOME_KEEPALIVE_UNIT: unit,
         GETHOME_KEEPALIVE_SCRIPT: script,
+        GETHOME_WIFI_WATCHDOG_BIN: watchdog,
+        HUB_DIR: options.hubDir ?? repoRoot,
       },
     },
   );
@@ -229,6 +274,9 @@ function keepalive(options: { route: string; wireless: string[]; arping?: boolea
     unit: existsSync(unit) ? readFileSync(unit, 'utf8') : '',
     script: existsSync(script) ? readFileSync(script, 'utf8') : '',
     scriptMode: existsSync(script) ? (statSync(script).mode & 0o777).toString(8) : '',
+    watchdog: existsSync(watchdog) ? readFileSync(watchdog, 'utf8') : '',
+    watchdogMode: existsSync(watchdog) ? (statSync(watchdog).mode & 0o777).toString(8) : '',
+    watchdogPath: watchdog,
     systemctl: existsSync(systemctl) ? readFileSync(systemctl, 'utf8') : '',
     output,
   };
@@ -364,7 +412,10 @@ describe('keeping the hub reachable after a quiet spell', () => {
  * the hub keeps of its Matter accessories. Returns every command the round
  * ran, in order, and what it remembered afterwards.
  */
-function oneRound(options: { neigh: string; state?: string; matter?: string }): { calls: string[]; state: string } {
+function oneRound(options: { neigh: string; state?: string; matter?: string; route?: string }): {
+  calls: string[];
+  state: string;
+} {
   const written = keepalive({ route: WIFI_ROUTE, wireless: ['wlan0'] });
   const dir = mkdtempSync(path.join(tmpdir(), 'gethome-round-'));
   dirs.push(dir);
@@ -395,6 +446,9 @@ function oneRound(options: { neigh: string; state?: string; matter?: string }): 
   );
   script_(path.join(bin, 'arping'), `echo "arping $*" >> "${calls}"`);
   script_(path.join(bin, 'ping'), `echo "ping $*" >> "${calls}"`);
+  // The watchdog the round ends with has its own suite below; here it only
+  // has to be called, so it is a fake that says it was.
+  script_(path.join(bin, 'watchdog'), `echo "watchdog [$*]" >> "${calls}"`);
   if (options.state !== undefined) writeFileSync(state, options.state);
   // The installer bakes in whichever `arping` it resolved, which on a machine
   // that has one is the real thing. This round has to call the fake.
@@ -405,11 +459,12 @@ function oneRound(options: { neigh: string; state?: string; matter?: string }): 
     env: {
       ...process.env,
       PATH: `${bin}:${process.env.PATH ?? ''}`,
-      FAKE_ROUTE: WIFI_ROUTE,
+      FAKE_ROUTE: options.route ?? WIFI_ROUTE,
       FAKE_NEIGH: options.neigh,
       GETHOME_KEEPALIVE_ONCE: '1',
       GETHOME_NEIGH_STATE: state,
       GETHOME_MATTER_NEIGHBOURS: matter,
+      GETHOME_WIFI_WATCHDOG: path.join(bin, 'watchdog'),
     },
   });
   return {
@@ -418,9 +473,9 @@ function oneRound(options: { neigh: string; state?: string; matter?: string }): 
   };
 }
 
-/** The commands a round ran that changed anything, minus the reads. */
+/** The commands a round ran that changed anything, minus the reads and the watchdog's call. */
 function writes(calls: string[]): string[] {
-  return calls.filter((call) => !/^ip (route show|-4 -o addr show|neigh show)/.test(call));
+  return calls.filter((call) => !/^(ip (route show|-4 -o addr show|neigh show)|watchdog )/.test(call));
 }
 
 const now = (): number => Math.floor(Date.now() / 1000);
@@ -719,6 +774,754 @@ describe('finding a Matter accessory that has been gone for longer than a day', 
   });
 });
 
+const WATCHDOG = path.join(repoRoot, 'deploy', 'wifi-watchdog.sh');
+/** What `ip neigh show … nud reachable` prints when the gateway has answered. */
+const ANSWER = '192.168.0.1 lladdr 02:00:00:00:00:01 REACHABLE';
+/** The keep-alive's memory, as it writes it: address, link address, last reached. */
+const MEMORY = ['192.168.0.1 02:00:00:00:00:01 1792009718', 'fe80::81b:2cff:fe3d:4e5f 0a:1b:2c:3d:4e:5f 1792009700', ''].join(
+  '\n',
+);
+
+/**
+ * A hub for `deploy/wifi-watchdog.sh` to look after, run for real.
+ *
+ * A fake sysfs with one radio — wlan0, driven by `driver`, brcmfmac unless
+ * said otherwise — and the driver's bus counters in a fake debugfs; fakes for
+ * everything the script asks or changes (`ip`, `nmcli`, `modprobe`, `iw`,
+ * `tc`, `logger`, `systemctl`, `sleep`), and a clock the test moves. The PATH
+ * holds those fakes and a handful of host tools by name and nothing else, so
+ * no run can reach the machine's own `modprobe`, `systemctl` or `nmcli`, and
+ * a hub with no NetworkManager is a fake left out rather than a host that
+ * happens to have none.
+ *
+ * Each `run(at)` is one call at `at` seconds of uptime, the way the keep-alive
+ * makes one at the end of each round. What the network does is a set of
+ * switches: whether anything answers now, whether asking again brings an
+ * answer, whether re-joining or reloading cures it, and whether a reloaded
+ * driver brings the radio back at all.
+ */
+function watchdogHub(
+  options: {
+    driver?: string;
+    nmcli?: boolean;
+    memory?: string;
+    /** A second Wi-Fi adapter beside the hub's own, driven by something else. */
+    otherRadio?: boolean;
+  } = {},
+) {
+  const dir = mkdtempSync(path.join(tmpdir(), 'gethome-watchdog-'));
+  dirs.push(dir);
+  const bin = path.join(dir, 'bin');
+  const net = path.join(dir, 'net');
+  const calls = path.join(dir, 'calls');
+  const log = path.join(dir, 'log');
+  const reach = path.join(dir, 'reachable');
+  const driver = options.driver ?? 'brcmfmac';
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(path.join(dir, 'ieee80211', 'phy0'), { recursive: true });
+  mkdirSync(path.join(dir, 'module', driver), { recursive: true });
+  mkdirSync(path.join(dir, 'module', 'brcmfmac', 'holders', 'brcmfmac_cyw'), { recursive: true });
+  mkdirSync(path.join(dir, 'debug', 'phy0'), { recursive: true });
+  mkdirSync(path.join(dir, 'proc-ipv6', 'wlan0'), { recursive: true });
+  writeFileSync(path.join(dir, 'proc-ipv6', 'wlan0', 'disable_ipv6'), '0\n');
+  writeFileSync(
+    path.join(dir, 'debug', 'phy0', 'counters'),
+    'intrcount:    24124\nf2rxdata:     28794\nf2txdata:     14390\nfcqueued:     20035\nfc_xoff:      1\nfc_xon:       1\n',
+  );
+  // The radio as sysfs shows it, made by a shell snippet so the fake
+  // `modprobe` can take it away and put it back the way a reload does — under
+  // `$name`, which a reload may change (the `radio-name` flag's contents).
+  const radio = [
+    `mkdir -p "${net}/$name/wireless" "${net}/$name/statistics" "${net}/$name/device/driver"`,
+    `ln -s "${dir}/ieee80211/phy0" "${net}/$name/phy80211"`,
+    `ln -s "${dir}/module/${driver}" "${net}/$name/device/driver/module"`,
+    `for c in rx_packets:36063 tx_packets:20050 rx_dropped:38 tx_dropped:0 tx_errors:0; do echo "\${c#*:}" > "${net}/$name/statistics/\${c%%:*}"; done`,
+  ].join('\n');
+  execFileSync('/bin/sh', ['-c', `name=wlan0\n${radio}`]);
+  if (options.otherRadio) {
+    mkdirSync(path.join(dir, 'module', 'iwlwifi'), { recursive: true });
+    mkdirSync(path.join(net, 'wlan9', 'wireless'), { recursive: true });
+    mkdirSync(path.join(net, 'wlan9', 'device', 'driver'), { recursive: true });
+    execFileSync('/bin/ln', ['-s', path.join(dir, 'module', 'iwlwifi'), path.join(net, 'wlan9', 'device', 'driver', 'module')]);
+  }
+  // And an Ethernet interface beside it, which is never the watchdog's.
+  mkdirSync(path.join(net, 'eth0', 'statistics'), { recursive: true });
+  writeFileSync(path.join(dir, 'nm-state'), '100 (connected)\n');
+  writeFileSync(path.join(dir, 'neighbours'), options.memory ?? MEMORY);
+
+  script_(
+    path.join(bin, 'ip'),
+    `case "$*" in
+       "neigh show dev "*" nud reachable") [ -f "${reach}" ] && cat "${reach}"; exit 0 ;;
+       "neigh show dev "*) printf '192.168.0.1  FAILED\\nfe80::1  FAILED\\n192.168.0.218 lladdr 0a:1b:2c:3d:4e:5f STALE\\n' ;;
+       "neigh replace "*) echo "ip $*" >> "${calls}"; [ -f "${dir}/answers-when-asked" ] && echo "${ANSWER}" > "${reach}"; exit 0 ;;
+       *) echo "unexpected ip $*" >> "${calls}" ;;
+     esac`,
+  );
+  if (options.nmcli !== false) {
+    // The state is only ever asked for in the C locale: in any other, this
+    // NetworkManager answers in German, as a real one would. Nothing else is
+    // ever asked of it, and anything else is a call the suite will see.
+    script_(
+      path.join(bin, 'nmcli'),
+      `case "$*" in
+         "-g GENERAL.STATE device show wlan0")
+           if [ "\${LC_ALL:-}" = C ]; then cat "${dir}/nm-state"; else echo "100 (verbunden)"; fi ;;
+         *) echo "unexpected nmcli $*" >> "${calls}"; exit 1 ;;
+       esac`,
+    );
+  }
+  script_(
+    path.join(bin, 'modprobe'),
+    `echo "modprobe $*" >> "${calls}"
+     if [ "$1" = -r ]; then
+       for d in "${net}"/*; do case "$(readlink "$d/device/driver/module" 2>/dev/null)" in */brcmfmac) rm -rf "$d" ;; esac; done
+       exit 0
+     fi
+     name=$(cat "${dir}/radio-name" 2>/dev/null || echo wlan0)
+     n=$(cat "${dir}/loads" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "${dir}/loads"
+     [ -f "${dir}/radio-never-returns" ] && exit 1
+     if [ -f "${dir}/radio-returns-second-time" ] && [ "$n" -lt 2 ]; then exit 0; fi
+     ${radio.split('\n').join('\n     ')}
+     [ -f "${dir}/reload-cures" ] && echo "${ANSWER}" > "${reach}"
+     exit 0`,
+  );
+  script_(path.join(bin, 'systemctl'), `echo "systemctl $*" >> "${calls}"; [ "$1" = reboot ] && [ -f "${dir}/reboot-refused" ] && exit 1; exit 0`);
+  script_(
+    path.join(bin, 'logger'),
+    `if [ "$1 $2 $3" = "-t gethome-wifi-watchdog --" ]; then shift 3; printf '%s\\n' "$*" >> "${log}"
+     else echo "logger with the wrong tag: $*" >> "${log}"; fi`,
+  );
+  script_(
+    path.join(bin, 'iw'),
+    `case "$*" in "dev "*" station dump") ;; *) exit 1 ;; esac
+     printf 'Station 02:00:00:00:00:01 (on wlan0)\\n\\tinactive time:\\t48020 ms\\n\\trx bytes:\\t932185\\n\\trx packets:\\t4662\\n\\ttx bytes:\\t979691\\n\\ttx packets:\\t2785\\n\\ttx retries:\\t12\\n\\ttx failed:\\t0\\n\\tsignal:  \\t-59 dBm\\n\\tconnected time:\\t878 seconds\\n'`,
+  );
+  script_(
+    path.join(bin, 'tc'),
+    `printf 'qdisc fq_codel 0: root refcnt 2 limit 10240p flows 1024\\n Sent 2690647 bytes 20053 pkt (dropped 0, overlimits 0 requeues 0)\\n backlog 0b 0p requeues 0\\n'`,
+  );
+  script_(path.join(bin, 'sleep'), 'exit 0');
+  const host = path.join(dir, 'host');
+  mkdirSync(host);
+  const which = (tool: string): string => execFileSync('/bin/sh', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).trim();
+  for (const tool of ['cat', 'head', 'awk', 'readlink', 'mv', 'rm', 'mkdir', 'ln']) {
+    execFileSync('/bin/ln', ['-s', which(tool), path.join(host, tool)]);
+  }
+  // By path, because the PATH the script runs with has no shell on it.
+  const bash = which('bash');
+
+  const flag = (name: string, on = true): void => {
+    if (on) writeFileSync(path.join(dir, name), '');
+    else rmSync(path.join(dir, name), { force: true });
+  };
+  const read = (file: string): string[] =>
+    existsSync(file) ? readFileSync(file, 'utf8').split('\n').filter(Boolean) : [];
+
+  return {
+    /** Whether a neighbour is REACHABLE right now. */
+    answering(yes: boolean): void {
+      if (yes) writeFileSync(reach, `${ANSWER}\n`);
+      else rmSync(reach, { force: true });
+    },
+    /** What NetworkManager says the device's state is. */
+    nm(state: string): void {
+      writeFileSync(path.join(dir, 'nm-state'), `${state}\n`);
+    },
+    /** What the watchdog remembers from earlier calls, written as it would be. */
+    remember(text: string): void {
+      writeFileSync(path.join(dir, 'state'), text);
+    },
+    flag,
+    /** One call, at `at` seconds since boot; `iface` null is a round with no default route. */
+    run(at: number, iface: string | null = 'wlan0'): void {
+      writeFileSync(path.join(dir, 'uptime'), `${at}.42 ${at * 3}.17\n`);
+      execFileSync(bash, iface === null ? [WATCHDOG] : [WATCHDOG, iface], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${bin}:${host}`,
+          LANG: 'de_DE.UTF-8',
+          GETHOME_NET_DIR: net,
+          GETHOME_WATCHDOG_STATE: path.join(dir, 'state'),
+          GETHOME_NEIGH_STATE: path.join(dir, 'neighbours'),
+          GETHOME_UPTIME: path.join(dir, 'uptime'),
+          GETHOME_SYS_MODULE: path.join(dir, 'module'),
+          GETHOME_DEBUGFS: path.join(dir, 'debug'),
+          GETHOME_PROC_IPV6: path.join(dir, 'proc-ipv6'),
+          GETHOME_WATCHDOG_ASK_WAIT: '0',
+          GETHOME_WATCHDOG_RADIO_WAIT: '3',
+        },
+      });
+    },
+    /** Every call from `from` to `to` seconds, `every` apart: the keep-alive's rounds. */
+    rounds(from: number, to: number, every = 20, iface: string | null = 'wlan0'): void {
+      for (let at = from; at <= to; at += every) this.run(at, iface);
+    },
+    /** Everything it changed or asked to change, in order. */
+    calls: (): string[] => read(calls),
+    /** What it wrote to the journal. */
+    log: (): string[] => read(log),
+    state: (): string => (existsSync(path.join(dir, 'state')) ? readFileSync(path.join(dir, 'state'), 'utf8') : ''),
+    wlan0: (): boolean => existsSync(path.join(net, 'wlan0')),
+    /** The name the next reload brings the radio back under. */
+    reloadsAs(name: string): void {
+      writeFileSync(path.join(dir, 'radio-name'), name);
+    },
+    /** An interface renamed after it appeared, the way a udev rule renames one. */
+    rename(from: string, to: string): void {
+      renameSync(path.join(net, from), path.join(net, to));
+    },
+  };
+}
+
+const RELOAD = ['modprobe -r brcmfmac_cyw brcmfmac', 'modprobe brcmfmac'];
+const RESTART = 'systemctl reboot';
+const HUB_RESTART = 'systemctl --no-block try-restart gethome-hubd.service';
+const actions = (calls: string[]): string[] => calls.filter((call) => !call.startsWith('ip neigh replace'));
+
+/**
+ * **A hub that stays connected while nothing gets through restarts its radio,
+ * then itself.**
+ *
+ * Found on the hub the rest of this file came from, on 2026-10-15: from 00:28
+ * nothing passed over its Wi-Fi for fifty minutes — no ping, no SSH, no API,
+ * no mDNS, one ping reply in all that time — while the machine ran perfectly,
+ * NetworkManager said it was connected and nobody logged a word, until its
+ * owner switched it off and on. The radio's firmware went on answering ARP for
+ * it, which is how the Mac could tell the radio was alive. What broke is not
+ * known, so the watchdog writes down what each side counted and then takes two
+ * steps, cheapest first: it reloads the radio's driver, and five minutes later,
+ * if nothing has answered, restarts the machine.
+ *
+ * Its trigger is the kernel's own word for an answer, a neighbour in
+ * REACHABLE: on that hub, in almost three hours of a night sampled every 5 s,
+ * there was never a gap longer than 10 s without one,
+ * and a probe at a link address nobody has went to FAILED in three seconds —
+ * the firmware answers ARP *for* the hub, never the hub's own questions.
+ *
+ * Most of these run at more than an hour of uptime, because a machine in its
+ * first hour is never restarted; the test that says so starts earlier.
+ */
+describe('a hub whose Wi-Fi stays connected while nothing gets through', () => {
+  /** The moments that matter: the two-minute line, the reload, the restart, and long after. */
+  const MILESTONES = [5120, 5300, 5600, 9000];
+
+  it('leaves a working network alone, and writes nothing about it', () => {
+    const hub = watchdogHub();
+    hub.answering(true);
+    hub.rounds(5000, 5600);
+    expect(hub.calls()).toEqual([]);
+    expect(hub.log()).toEqual([]);
+  });
+
+  /**
+   * **Only after an answer since the machine started.** A hub that boots onto
+   * a network that never answers is not one whose Wi-Fi stopped, and the
+   * memory of an answer is in /run, so a restart always starts here — which is
+   * what keeps one from turning into a loop.
+   */
+  it('never acts on a hub that has not heard an answer since it started', () => {
+    const hub = watchdogHub();
+    hub.rounds(100, 9100, 600);
+    hub.rounds(100, 9100, 600, null);
+    expect(hub.calls()).toEqual([]);
+    expect(hub.log()).toEqual([]);
+  });
+
+  /** Two minutes is long enough to be worth a line, and short of anything worth doing. */
+  it('says so at two minutes, with what each side counted, once', () => {
+    const hub = watchdogHub();
+    hub.answering(true);
+    hub.run(5000);
+    hub.answering(false);
+    hub.rounds(5020, 5280);
+    expect(hub.calls()).toEqual([]);
+    const said = hub.log();
+    expect(said.filter((line) => line.startsWith('Nothing on the network has answered'))).toHaveLength(1);
+    expect(said[0]).toMatch(/for 120 s, though NetworkManager says it is connected\. At 300 s it reloads the Wi-Fi driver\./);
+    // Linux's own count, the radio's from its firmware, the driver's bus
+    // counters, the transmit queue and the neighbour table: two of these a
+    // few minutes apart are what says which side stopped.
+    expect(said).toContain(
+      '120 s in — Linux: rx_packets=36063 tx_packets=20050 rx_dropped=38 tx_dropped=0 tx_errors=0 disable_ipv6=0',
+    );
+    expect(said).toContain(
+      '120 s in — radio: station=02:00:00:00:00:01 inactive_time=48020ms rx_packets=4662 tx_packets=2785 tx_retries=12 tx_failed=0 signal=-59dBm connected_time=878seconds',
+    );
+    expect(said).toContain('120 s in — bus: intrcount=24124 f2rxdata=28794 f2txdata=14390 fcqueued=20035 fc_xoff=1 fc_xon=1');
+    expect(said.some((line) => /^120 s in — queue: Sent 2690647 bytes 20053 pkt \(dropped 0/.test(line))).toBe(true);
+    expect(said.some((line) => /^120 s in — neighbours: .*FAILED=2/.test(line))).toBe(true);
+  });
+
+  /**
+   * **The reload first**, and not a re-join: re-joining needs the very path
+   * that has stopped — the 4-way handshake and DHCP both cross it — while a
+   * reload restarts the firmware and joins the network afresh in one step.
+   */
+  it('reloads the driver at five minutes, asking everybody it remembers first', () => {
+    const hub = watchdogHub();
+    hub.answering(true);
+    hub.run(5000);
+    hub.answering(false);
+    hub.rounds(5020, 5280);
+    expect(actions(hub.calls())).toEqual([]);
+    hub.run(5300);
+    expect(hub.calls()).toEqual([
+      // The keep-alive's own question, asked again now and by unicast, so the
+      // decision rests on answers from the last few seconds.
+      'ip neigh replace 192.168.0.1 lladdr 02:00:00:00:00:01 nud probe dev wlan0',
+      'ip neigh replace fe80::81b:2cff:fe3d:4e5f lladdr 0a:1b:2c:3d:4e:5f nud probe dev wlan0',
+      ...RELOAD,
+    ]);
+    expect(hub.wlan0()).toBe(true);
+    expect(hub.log()).toContain(
+      "Nothing on the network has answered this hub over wlan0 for 300 s, though NetworkManager says it is connected. Reloading the Wi-Fi driver (brcmfmac), which restarts the radio's firmware and joins the network afresh.",
+    );
+    expect(hub.log()).toContain('The Wi-Fi radio is back after reloading its driver.');
+    expect(hub.log().some((line) => line.startsWith('Before reloading the driver — bus:'))).toBe(true);
+  });
+
+  /**
+   * **Ask again before each step.** A keep-alive starved of CPU for minutes
+   * sent no questions in that time, and its silence is not the network's.
+   */
+  it('does nothing when asking again brings an answer', () => {
+    const hub = watchdogHub();
+    hub.answering(true);
+    hub.run(5000);
+    hub.answering(false);
+    hub.flag('answers-when-asked');
+    hub.run(5400);
+    expect(actions(hub.calls())).toEqual([]);
+    expect(hub.log()).toContain(
+      'The network answers this hub over wlan0 again, 400 s after it last did, when asked once more. Last step taken: none.',
+    );
+    // And the silence starts again from that answer, not from the old one.
+    expect(hub.state()).toBe('5400 0 0 0 0 wlan0\n');
+  });
+
+  /**
+   * **NetworkManager first.** When the link has really gone it is already
+   * reconnecting — which is also why a router switched off or restarting
+   * never sets this off: its access point goes, the link times out in 15 s,
+   * and NetworkManager says so.
+   */
+  it('leaves the link to NetworkManager while it is not connected', () => {
+    for (const state of ['30 (disconnected)', '70 (connecting (getting IP configuration))', '120 (failed)']) {
+      const hub = watchdogHub();
+      hub.answering(true);
+      hub.run(5000);
+      hub.answering(false);
+      hub.nm(state);
+      for (const at of MILESTONES) hub.run(at);
+      expect(hub.calls(), state).toEqual([]);
+      expect(hub.log(), state).toEqual([]);
+    }
+  });
+
+  /** A device NetworkManager does not manage is somebody else's to fix. */
+  it('never acts on a device NetworkManager says it does not manage', () => {
+    const hub = watchdogHub();
+    hub.answering(true);
+    hub.run(5000);
+    hub.answering(false);
+    hub.nm('100 (connected (externally))');
+    for (const at of MILESTONES) hub.run(at);
+    expect(hub.calls()).toEqual([]);
+  });
+
+  /** Nothing without NetworkManager's word — the matter-ipv6 rule. */
+  it('does nothing on a hub without NetworkManager', () => {
+    const hub = watchdogHub({ nmcli: false });
+    hub.answering(true);
+    hub.run(5000);
+    hub.answering(false);
+    for (const at of MILESTONES) hub.run(at);
+    expect(hub.calls()).toEqual([]);
+    expect(hub.log()).toEqual([]);
+  });
+
+  /**
+   * **After the reload, NetworkManager's word no longer decides.** An
+   * activation over the path that stopped cannot finish — measured on the hub
+   * with its own traffic dropped: NetworkManager associated, timed out in DHCP
+   * and cycled between connecting and disconnected — so the hub has no default
+   * route; the keep-alive calls with no interface, and the restart comes all
+   * the same.
+   */
+  it('restarts the machine five minutes after the reload, whatever NetworkManager says by then', () => {
+    const hub = watchdogHub();
+    hub.answering(true);
+    hub.run(5000);
+    hub.answering(false);
+    hub.run(5300);
+    hub.nm('70 (connecting (getting IP configuration))');
+    hub.rounds(5320, 5580, 20, null);
+    expect(actions(hub.calls())).toEqual(RELOAD);
+    hub.run(5600, null);
+    expect(actions(hub.calls())).toEqual([...RELOAD, RESTART]);
+    // Asked again first, on the interface the reload was about.
+    expect(hub.calls().filter((call) => call.startsWith('ip neigh replace')).at(-1)).toMatch(/ dev wlan0$/);
+    expect(hub.log()).toContain(
+      'Nothing on the network has answered this hub over wlan0 for 600 s, 300 s of them since the driver was reloaded. Restarting this machine, the nearest it can come to the power cycle that brought the hub back the one time this was seen.',
+    );
+    expect(hub.log().some((line) => line.startsWith('Before restarting — Linux:'))).toBe(true);
+  });
+
+  it('and with a default route back, connected and still answered by nobody', () => {
+    const hub = watchdogHub();
+    hub.answering(true);
+    hub.run(5000);
+    hub.answering(false);
+    hub.rounds(5020, 5580);
+    expect(actions(hub.calls())).toEqual(RELOAD);
+    hub.run(5600);
+    expect(actions(hub.calls())).toEqual([...RELOAD, RESTART]);
+  });
+
+  /**
+   * **Never in its first hour**, which is what keeps restarts to one an hour
+   * whatever happens after: each starts the clock again.
+   */
+  it('never restarts a machine in its first hour', () => {
+    const hub = watchdogHub();
+    hub.answering(true);
+    hub.run(1000);
+    hub.answering(false);
+    hub.run(1300);
+    expect(actions(hub.calls())).toEqual(RELOAD);
+    for (const at of [1600, 2000, 3000, 3580]) hub.run(at, null);
+    expect(actions(hub.calls())).toEqual(RELOAD);
+    const waiting = hub.log().filter((line) => line.includes('is not restarted in its first hour'));
+    expect(waiting).toEqual([
+      'Nothing on the network has answered this hub over wlan0 for 600 s. This machine has been up for 1600 s and is not restarted in its first hour; it will be at 3600 s if nothing has answered by then.',
+    ]);
+    hub.run(3600, null);
+    expect(actions(hub.calls())).toEqual([...RELOAD, RESTART]);
+  });
+
+  /** A restart it was refused is asked for again five minutes later, never every round. */
+  it('asks again five minutes after a restart is refused', () => {
+    const hub = watchdogHub();
+    hub.flag('reboot-refused');
+    hub.answering(true);
+    hub.run(5000);
+    hub.answering(false);
+    hub.rounds(5020, 5300);
+    hub.rounds(5320, 5880, 20, null);
+    expect(actions(hub.calls())).toEqual([...RELOAD, RESTART]);
+    expect(hub.log()).toContain('The restart was refused; asking again in five minutes.');
+    hub.run(5900, null);
+    expect(actions(hub.calls())).toEqual([...RELOAD, RESTART, RESTART]);
+    expect(hub.log()).toContain(
+      'Nothing on the network has answered this hub over wlan0 for 900 s, and a restart asked for 300 s ago has not happened. Restarting this machine, the nearest it can come to the power cycle that brought the hub back the one time this was seen.',
+    );
+  });
+
+  /** brcmfmac is the one driver this was tried on; any other radio goes straight to the restart. */
+  it('restarts a machine whose radio has another driver at five minutes, reloading nothing', () => {
+    const hub = watchdogHub({ driver: 'iwlwifi' });
+    hub.answering(true);
+    hub.run(5000);
+    hub.answering(false);
+    hub.rounds(5020, 5300);
+    expect(actions(hub.calls())).toEqual([RESTART]);
+    // And the two-minute line said so, rather than promising a reload.
+    expect(hub.log().some((line) => /for 120 s, .*At 300 s it restarts this machine\.$/.test(line))).toBe(true);
+    expect(hub.log()).toContain(
+      'Nothing on the network has answered this hub over wlan0 for 300 s — its driver is iwlwifi, and reloading one has only been tried with brcmfmac. Restarting this machine, the nearest it can come to the power cycle that brought the hub back the one time this was seen.',
+    );
+  });
+
+  /**
+   * **The line that says which step worked.** Whether the reload cures the
+   * fault that was seen is unmeasured — it has happened once — and this is
+   * what will say, the next time.
+   *
+   * **And the hub restarts after a reload.** matter.js joins its mDNS groups
+   * once, when it starts — measured on the hub: after a reload only avahi was
+   * in the groups on the new wlan0, and a restart of the hub put matter.js
+   * back — so the answer coming back after a silence that took a reload
+   * restarts the hub, once and without waiting on it.
+   */
+  it('says when the network answers again after the reload, and restarts the hub once', () => {
+    const hub = watchdogHub();
+    hub.answering(true);
+    hub.run(5000);
+    hub.answering(false);
+    hub.flag('reload-cures');
+    hub.rounds(5020, 5320);
+    expect(hub.log()).toContain(
+      'The network answers this hub over wlan0 again, 320 s after it last did. Last step taken: reloading the Wi-Fi driver, 20 s before.',
+    );
+    expect(hub.log().some((line) => line.startsWith('Back — Linux:'))).toBe(true);
+    expect(actions(hub.calls())).toEqual([...RELOAD, HUB_RESTART]);
+    expect(hub.log().some((line) => line.startsWith('Restarting the hub (gethome-hubd): Matter joined its mDNS groups'))).toBe(
+      true,
+    );
+    // And it is over: a working network is left alone again.
+    hub.rounds(5340, 6000, 60);
+    expect(actions(hub.calls())).toEqual([...RELOAD, HUB_RESTART]);
+    expect(hub.state()).toBe('6000 0 0 0 0 wlan0\n');
+  });
+
+  /** The interface was replaced, however the answer came: asked once more is an answer too. */
+  it('restarts the hub when asking again before the restart brings the answer', () => {
+    const hub = watchdogHub();
+    hub.answering(true);
+    hub.run(5000);
+    hub.answering(false);
+    hub.run(5300);
+    hub.flag('answers-when-asked');
+    hub.run(5600, null);
+    expect(actions(hub.calls())).toEqual([...RELOAD, HUB_RESTART]);
+    expect(hub.log()).toContain(
+      'The network answers this hub over wlan0 again, 600 s after it last did, when asked once more. Last step taken: reloading the Wi-Fi driver, 300 s before.',
+    );
+  });
+
+  /** Without a reload in the silence the hub's own sockets are where they were, and it is left running. */
+  it('leaves the hub running when the network answers before any step', () => {
+    const hub = watchdogHub();
+    hub.answering(true);
+    hub.run(5000);
+    hub.answering(false);
+    hub.rounds(5020, 5200);
+    hub.answering(true);
+    hub.run(5220);
+    expect(hub.log()).toContain('The network answers this hub over wlan0 again, 220 s after it last did. Last step taken: none.');
+    expect(hub.calls()).toEqual([]);
+  });
+
+  /**
+   * **A driver that does not bring its radio back is a restart at once**, in
+   * the first hour or not: this step took the radio away, and a hub with no
+   * Wi-Fi at all is one nobody can reach to give it back.
+   */
+  it('restarts the machine at once when the reloaded driver brings no radio back', () => {
+    const hub = watchdogHub();
+    hub.answering(true);
+    hub.run(1000);
+    hub.answering(false);
+    hub.flag('radio-never-returns');
+    hub.run(1300);
+    expect(actions(hub.calls())).toEqual([...RELOAD, 'modprobe brcmfmac', RESTART]);
+    expect(hub.log()).toContain(
+      'The Wi-Fi radio did not come back after its driver was reloaded. Restarting this machine, which is the only thing known to bring it back.',
+    );
+  });
+
+  it('and not when loading it a second time brings the radio back', () => {
+    const hub = watchdogHub();
+    hub.answering(true);
+    hub.run(5000);
+    hub.answering(false);
+    hub.flag('radio-returns-second-time');
+    hub.run(5300);
+    expect(actions(hub.calls())).toEqual([...RELOAD, 'modprobe brcmfmac']);
+    expect(hub.log()).toContain('The Wi-Fi radio is back after loading its driver a second time.');
+  });
+
+  /**
+   * **The silence follows the radio, not its name.** On the hub this was
+   * written on a reload brought wlan0 back as wlan0 three times out of three,
+   * but the kernel takes the next free name and udev may rename it — and a
+   * memory kept under the old name would follow up on an interface that no
+   * longer exists, or forget the silence when a default route comes back on
+   * the new one.
+   */
+  it('follows the radio when the reload brings it back under another name', () => {
+    const hub = watchdogHub();
+    hub.reloadsAs('wlan1');
+    hub.answering(true);
+    hub.run(5000);
+    hub.answering(false);
+    hub.run(5300);
+    expect(hub.log()).toContain(
+      'The Wi-Fi radio is back after reloading its driver, as wlan1 rather than wlan0; following it there.',
+    );
+    expect(hub.state()).toMatch(/ wlan1\n$/);
+    hub.rounds(5320, 5600, 20, null);
+    expect(actions(hub.calls())).toEqual([...RELOAD, RESTART]);
+    expect(hub.calls().filter((call) => call.startsWith('ip neigh replace')).at(-1)).toMatch(/ dev wlan1$/);
+  });
+
+  it('and restarts the hub when the network answers again on the new name', () => {
+    const hub = watchdogHub();
+    hub.reloadsAs('wlan1');
+    hub.answering(true);
+    hub.run(5000);
+    hub.answering(false);
+    hub.run(5300);
+    hub.answering(true);
+    hub.run(5320, 'wlan1');
+    expect(actions(hub.calls())).toEqual([...RELOAD, HUB_RESTART]);
+    expect(hub.log()).toContain(
+      'The network answers this hub over wlan1 again, 320 s after it last did. Last step taken: reloading the Wi-Fi driver, 20 s before.',
+    );
+  });
+
+  /** Renamed after the reload had already found it: the memory still follows. */
+  it('follows a radio renamed after the reload, with or without a default route', () => {
+    for (const route of [null, 'wlan1'] as const) {
+      const hub = watchdogHub();
+      hub.answering(true);
+      hub.run(5000);
+      hub.answering(false);
+      hub.run(5300);
+      hub.rename('wlan0', 'wlan1');
+      hub.rounds(5320, 5600, 20, route);
+      expect(actions(hub.calls()), String(route)).toEqual([...RELOAD, RESTART]);
+    }
+  });
+
+  /** A second Wi-Fi adapter is not the radio coming back: only one brcmfmac drives counts. */
+  it('does not take another radio in the machine for the one it reloaded', () => {
+    const hub = watchdogHub({ otherRadio: true });
+    hub.answering(true);
+    hub.run(1000);
+    hub.answering(false);
+    hub.flag('radio-never-returns');
+    hub.run(1300);
+    expect(actions(hub.calls())).toEqual([...RELOAD, 'modprobe brcmfmac', RESTART]);
+  });
+
+  /** A hub moved to a cable keeps its keep-alive, and has no radio for this to restart. */
+  it('is only ever about a Wi-Fi interface', () => {
+    const hub = watchdogHub();
+    hub.answering(true);
+    hub.run(5000, 'eth0');
+    hub.answering(false);
+    for (const at of MILESTONES) hub.run(at, 'eth0');
+    expect(hub.calls()).toEqual([]);
+    expect(hub.state()).toBe('');
+  });
+
+  /** A round with no default route is NetworkManager's business, unless this took a step it has to follow up. */
+  it('with no default route, only follows up a reload of its own', () => {
+    const hub = watchdogHub();
+    hub.answering(true);
+    hub.run(5000);
+    hub.answering(false);
+    for (const at of MILESTONES) hub.run(at, null);
+    expect(hub.calls()).toEqual([]);
+    expect(hub.log()).toEqual([]);
+  });
+
+  /**
+   * What it remembers is about one interface, and anything it cannot read —
+   * or that claims an answer later than now — is no memory at all.
+   */
+  it('treats a memory it cannot read, or one about another interface, as none', () => {
+    for (const memory of [
+      'garbage\n',
+      '5000 0 0 0 0 wlan1\n',
+      '5000 x 0 0 0 wlan0\n',
+      '99999 0 0 0 0 wlan0\n',
+      '5000\n',
+      // A line one field short.
+      '5000 0 0 0 wlan0\n',
+    ]) {
+      const hub = watchdogHub();
+      hub.remember(memory);
+      for (const at of MILESTONES) hub.run(at);
+      expect(hub.calls(), memory).toEqual([]);
+      expect(hub.log(), memory).toEqual([]);
+    }
+    // The control: the same calls after a memory it can read do act.
+    const hub = watchdogHub();
+    hub.remember('5000 0 0 0 0 wlan0\n');
+    for (const at of [5120, 5300, 5600]) hub.run(at);
+    expect(actions(hub.calls())).toEqual([...RELOAD, RESTART]);
+  });
+
+  /**
+   * **The memory is root's, and still checked.** The keep-alive writes it, but
+   * a value only reaches `ip` as an address and a MAC, each its own argument.
+   */
+  it('asks nobody from the memory but an address at a MAC', () => {
+    const hub = watchdogHub({
+      memory: [
+        '192.168.0.1 02:00:00:00:00:01 1792009718',
+        '192.168.0.9 not-a-mac 1792009718',
+        '192.168.0.10 02:00:00:00:00:1 1792009718',
+        'proxy 02:00:00:00:00:11 1792009718',
+        '192.168.0.12;reboot 02:00:00:00:00:12 1792009718',
+        'FE80::13 02:00:00:00:00:13 1792009718',
+        `fe80:${':1'.repeat(20)} 02:00:00:00:00:14 1792009718`,
+        'fe80::15 02:00:00:00:00:15',
+        '',
+      ].join('\n'),
+    });
+    hub.answering(true);
+    hub.run(5000);
+    hub.answering(false);
+    hub.run(5300);
+    expect(hub.calls().filter((call) => call.startsWith('ip neigh replace'))).toEqual([
+      'ip neigh replace 192.168.0.1 lladdr 02:00:00:00:00:01 nud probe dev wlan0',
+      'ip neigh replace fe80::15 lladdr 02:00:00:00:00:15 nud probe dev wlan0',
+    ]);
+  });
+
+  /**
+   * **Seconds since boot, never the wall clock.** A Pi has no RTC, and the
+   * jump when timesyncd first corrects it would read as minutes of silence.
+   */
+  it('keeps time by the uptime, and asks nothing by broadcast', () => {
+    const code = readFileSync(WATCHDOG, 'utf8')
+      .split('\n')
+      .filter((line) => !/^\s*#/.test(line));
+    expect(code.some((line) => /\bdate\b/.test(line))).toBe(false);
+    expect(readFileSync(WATCHDOG, 'utf8')).toMatch(/GETHOME_UPTIME:-\/proc\/uptime/);
+    // The keep-alive's rule: nothing is ever broadcast at a neighbour, and the
+    // gateway ping stays gone.
+    expect(code.some((line) => /\b(arping|ping)\b/.test(line))).toBe(false);
+  });
+});
+
+/** Where the installer puts the watchdog, and how the keep-alive reaches it. */
+describe('the watchdog in the keep-alive', () => {
+  it('installs the watchdog from the build being installed, and bakes in where', () => {
+    const result = keepalive({ route: WIFI_ROUTE, wireless: ['wlan0'] });
+    expect(result.watchdog).toBe(readFileSync(WATCHDOG, 'utf8'));
+    expect(result.watchdogMode).toBe('755');
+    expect(result.script).toContain(`wifi_watchdog="${result.watchdogPath}"`);
+    expect(result.output).toMatch(/SAY If its Wi-Fi ever stays connected while nothing gets through/);
+  });
+
+  it('says what the hub goes without when it cannot be installed', () => {
+    const empty = mkdtempSync(path.join(tmpdir(), 'gethome-nobuild-'));
+    dirs.push(empty);
+    const result = keepalive({ route: WIFI_ROUTE, wireless: ['wlan0'], hubDir: empty });
+    expect(result.watchdog).toBe('');
+    expect(result.output).toMatch(/WARN Could not install the Wi-Fi watchdog/);
+    expect(result.output).not.toMatch(/SAY If its Wi-Fi ever stays connected/);
+    // The rest of the keep-alive stands, and its round skips what is not there.
+    expect(result.script).toContain('wifi_watchdog="/nonexistent"');
+    expect(result.unit).toContain('Restart=always');
+  });
+
+  it('ends every round with it, after every question the round asked', () => {
+    const round = oneRound({ neigh: '192.168.0.145 lladdr 02:00:00:00:01:45 STALE\n' });
+    expect(round.calls.at(-1)).toBe('watchdog [wlan0]');
+    expect(round.calls.filter((call) => call.startsWith('watchdog'))).toHaveLength(1);
+  });
+
+  /** A reload that did not help can leave the hub with no default route, and the watchdog still has to see it. */
+  it('calls it with no interface on a round with no default route', () => {
+    const round = oneRound({ neigh: '', route: '' });
+    expect(round.calls.filter((call) => call.startsWith('watchdog'))).toEqual(['watchdog []']);
+    expect(writes(round.calls)).toEqual([]);
+  });
+
+  it('goes with an uninstall, and so does its memory', () => {
+    const hubctl = readFileSync(path.join(repoRoot, 'deploy', 'gethome-hubctl'), 'utf8');
+    expect(hubctl).toContain('/usr/local/lib/gethome-wifi-watchdog.sh');
+    expect(hubctl).toContain('/run/gethome-wifi-watchdog');
+  });
+});
+
 /** Run `zigbee_channel_clear_of_wifi` out of install.sh for one Wi-Fi centre. */
 function zigbeeChannelFor(wifiMhz: string): number {
   return Number(
@@ -782,8 +1585,11 @@ function collisionWarning(options: {
        Z2M_CONFIG="$2/configuration.yaml"
        say()  { printf 'SAY %s\n' "$*"; }
        warn() { printf 'WARN %s\n' "$*"; }
+       # Zigbee2MQTT's files are read as the hub's account; a test cannot switch
+       # users, and deploy-hub-account.test.ts pins that it is the account.
+       as_service_user() { "$@"; }
        CONF_DIR="$2"
-       for fn in find_iw lan_wifi_iface wifi_frequency_mhz zigbee_channel_clear_of_wifi \
+       for fn in read_hub_file find_iw lan_wifi_iface wifi_frequency_mhz zigbee_channel_clear_of_wifi \
                  zigbee_network_channel zigbee_notice_file warn_if_zigbee_jams_wifi; do
          prog="/^$fn() {/,/^}/p"
          eval "$(sed -n "$prog" "$1")"
@@ -954,10 +1760,14 @@ describe('choosing a Zigbee channel', () => {
    * device needing to be paired again.
    */
   it('leaves an existing network on the channel it formed on', () => {
+    // The branch that creates a missing configuration.yaml asks for the backup
+    // before it picks a channel. deploy-hub-account.test.ts runs both cases.
     const installer = readFileSync(INSTALLER, 'utf8');
-    expect(installer).toContain('coordinator_backup.json');
-    const guarded = installer.slice(installer.indexOf('if [[ ! -f "$Z2M_CONFIG" ]]; then'));
-    expect(guarded.slice(0, guarded.indexOf('elif'))).toContain('coordinator_backup.json');
+    const start = installer.indexOf('if ! as_service_user test -e "$Z2M_CONFIG"');
+    expect(start).toBeGreaterThan(0);
+    const absent = installer.slice(start, installer.indexOf('current="$(read_hub_file "$Z2M_CONFIG")"', start));
+    expect(absent.indexOf('coordinator_backup.json')).toBeGreaterThan(0);
+    expect(absent.indexOf('coordinator_backup.json')).toBeLessThan(absent.indexOf('zigbee_channel_clear_of_wifi'));
   });
 });
 

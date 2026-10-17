@@ -30,15 +30,15 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screens/home-dark.webp">
-    <img src="docs/assets/screens/home-light.webp" width="30%" alt="The gethome app's Home pane: a pulse panel, scenes and favorite devices, with one light running.">
+    <img src="docs/assets/screens/home-light.webp" width="31%" alt="The gethome app's Home pane for a demo home, City Apartment: all calm, 22.4° inside, one light on, everything secured, with scenes and favorite devices under it.">
   </picture>
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screens/assistant-dark.webp">
-    <img src="docs/assets/screens/assistant-light.webp" width="30%" alt="The gethome app's assistant: a glass orb asking “How can I help?”, with a box to type in and a microphone.">
+    <img src="docs/assets/screens/assistant-light.webp" width="31%" alt="The gethome app's assistant: a glass orb asking “How can I help?”, with a box to type in and a microphone.">
   </picture>
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screens/device-dark.webp">
-    <img src="docs/assets/screens/device-light.webp" width="30%" alt="The gethome app's page for a lamp: power, brightness and color controls.">
+    <img src="docs/assets/screens/device-light.webp" width="31%" alt="The gethome app's page for a lamp: power, brightness and color controls.">
   </picture>
 </p>
 
@@ -73,7 +73,7 @@ flowchart TB
 - **Devices it has never seen.** Pair a Zigbee device the hub doesn't know and an agent works out what it is, so it gets real controls instead of a blank tile. It needs your AI key; without one the device still appears, flagged *needs review*. → [AI device recognition](docs/ai-adaptation.md)
 - **A home for everyone in it.** Invite family with a short-lived code. Owner, Member and Guest come built in, you can add roles of your own, and the same person can sign in on a second device as themselves. → [Roles and sharing](docs/api.md#roles-and-permissions-in-full)
 - **What happened, and when.** Temperature, humidity, air quality and power are kept in five-minute steps for a week, and an activity feed shows what was asked of the home, and by whom. → [History](docs/api.md#recorded-readings-get-devicesidhistory)
-- **Build your own.** Anything that can publish JSON over MQTT can be a device, with no hub-side code, and the hub's local REST and WebSocket API is documented. → [The MQTT convention](docs/mqtt-integrations.md) · [The API](docs/api.md)
+- **Build your own.** Anything that can publish JSON over MQTT can be a device, with no hub-side code. Your own scripts, dashboards and AI agents use the hub's local REST and WebSocket API with an API key — narrowed to what you give it, and taken back with one tap. → [Building on a hub](docs/integrations.md) · [Agent skills](#build-with-an-ai-agent) · [The MQTT convention](docs/mqtt-integrations.md) · [The API](docs/api.md)
 - **Private by default.** No cloud account, and your AI key stays on the hub. → [Private by design](#private-by-design)
 
 Also: AI portraits of your devices, drawn on the hub with your OpenAI key and shared by everyone in the home ([portraits](docs/portraits.md)).
@@ -87,29 +87,44 @@ Also: AI portraits of your devices, drawn on the hub with your OpenAI key and sh
 
 ## Get started
 
-You need:
+Three steps: get a small computer, install the hub on it, then open the app.
 
-- **A small computer with 64-bit Linux** — we test on Raspberry Pi. **2 GB of memory or more** runs Matter and Zigbee together and never has to choose. With 1 GB or less the hub runs one at a time by default; you can switch both on, and it works while your Zigbee network stays small — as that network grows, the hub hands a radio back and says so. → [Choosing hardware](docs/hardware.md)
-- **Raspberry Pi OS Lite (64-bit)** on its card. Lite, not the desktop edition: it is one level down in Raspberry Pi Imager.
-- **A USB Zigbee stick**, if you want Zigbee. We develop against the SONOFF ZBDongle-E, which needs a one-minute firmware update when new. Without a stick you get Matter, Wi-Fi and MQTT devices only.
+### 1. Get the hardware
 
-### The easy way: gethome studio *(recommended)*
+- **A small computer running 64-bit Linux**, such as a Raspberry Pi. → [Choosing hardware](docs/hardware.md)
+  - **2 GB of memory or more** runs Matter and Zigbee together and never has to choose.
+  - **1 GB or less** runs one radio at a time by default. You can switch both on, and it works while your Zigbee network is small — as that network grows, the hub hands a radio back and says so.
+- **Raspberry Pi OS Lite (64-bit)** for its card. Lite, not the desktop edition that Raspberry Pi Imager shows first: it is one level down, under *Raspberry Pi OS (other)*.
+- **A USB Zigbee stick**, if you want Zigbee. We develop against the SONOFF ZBDongle-E, which needs a one-minute firmware update when new. Without a stick you get Matter, Wi-Fi and MQTT devices.
 
-On a Mac, [download gethome studio](https://gethome.me/studio/) and let it set the hub up — it is the way we recommend. It prepares the SD card or finds a Pi already on your network, runs the same installer on it, watches every step and names anything that goes wrong, and claims the hub for you: no terminal, and no pairing code to type. Afterwards it looks after every hub you own, with what the iPhone app doesn't show — the broker's live traffic, the device-schema library and every AI run with what it cost. It runs on macOS 14 or later.
+### 2. Install the hub
 
-### By hand, with one command
+Pick one way. Both run the same installer.
 
-No Mac, or rather a terminal? Switch SSH on when you write the card in Raspberry Pi Imager, then, [on the hub](#getting-a-shell-on-the-hub), run:
+#### The easy way: gethome studio *(recommended)*
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/gethome-inc/gethome-hub/main/deploy/install.sh | bash
-```
+On a Mac with macOS 14 or later, [download gethome studio](https://gethome.me/studio/) and follow it. It prepares the SD card or finds a Pi already on your network, installs the hub and tells you if anything goes wrong, then claims it for you — no terminal, and no pairing code to type. Afterwards it shows what the iPhone app doesn't: the broker's live traffic, the device-schema library and every AI run with what it cost.
 
-It downloads a prebuilt hub for your machine, installs Node.js 22 and Mosquitto, starts everything as services that come back on their own after a power cut, picks up a Zigbee stick by itself and prints a **pairing code**. Whoever claims the hub first becomes its owner, and the owner invites everyone else. → [The full install guide](docs/installation.md)
+#### By hand, with one command
 
-### Then get the app
+No Mac, or prefer a terminal?
 
-Live with your hub in [gethome for iPhone](https://apps.apple.com/app/id6792362722), free on the App Store: it finds the hub on your Wi-Fi. A hub you installed by hand is claimed there with its pairing code. One that gethome studio set up is already yours — studio claimed it as your Mac — so press **Add device** on your own row in studio's People tab and enter that code in the app instead: your iPhone joins as you.
+1. Write Raspberry Pi OS Lite to the card with Raspberry Pi Imager, and switch SSH on as you do.
+2. Start the Pi and [log in to it](#getting-a-shell-on-the-hub).
+3. Run:
+
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/gethome-inc/gethome-hub/main/deploy/install.sh | bash
+   ```
+
+It downloads a prebuilt hub for your machine, installs Node.js 22 and Mosquitto, sets everything up to come back by itself after a power cut, picks up a Zigbee stick on its own and prints a **pairing code** — you'll use it in step 3. → [The full install guide](docs/installation.md)
+
+### 3. Get the app
+
+Install [gethome for iPhone](https://apps.apple.com/app/id6792362722), free on the App Store. It finds the hub on your Wi-Fi.
+
+- **Installed by hand?** Claim the hub in the app with its pairing code. Whoever claims it first becomes its owner, and the owner invites everyone else.
+- **Set up by gethome studio?** The hub is already yours — studio claimed it as your Mac. In studio's **People** tab, press **Add device** on your own row, then enter the code it shows in the app: your iPhone joins as you, not as somebody new.
 
 ### Getting a shell on the hub
 
@@ -144,7 +159,7 @@ The API answers at `http://<hub>:8420/api/v1/hub`. An update keeps the running b
 
 - **No cloud account, relay or tunnel.** The hub opens nothing through your router, and your home lives in one file on its own card. **Don't forward port 8420 (the API) or 1883 (MQTT)** — both are plain connections meant for your home network, and your router is the boundary.
 - **Your AI key stays on the hub**, encrypted, and the API never returns it — not even to your phone. AI is optional, and [what each feature sends](https://gethome.me/privacy#ai) is written down.
-- **Every request but two needs a token**, and the hub refuses any request addressed to a public domain name, which stops a web page from reaching it through your browser.
+- **Every request but three needs a token or an API key** (the hub's public description, the claim, and the hub proving it is itself to an app that already has one), and the hub refuses any request addressed to a public domain name, which stops a web page from reaching it through your browser.
 - **The installer checks what it downloads** against published checksums, and leaves your running hub alone if anything doesn't match.
 
 → [Privacy and network security](docs/security.md), including the short, honest list of what does leave the hub.
@@ -155,6 +170,19 @@ The API answers at `http://<hub>:8420/api/v1/hub`. An update keeps the running b
 - **Zigbee needs a USB stick.** Without one: Matter, Wi-Fi and MQTT.
 - **AI features need your own Anthropic or OpenAI key.** Without one the hub works, and devices it can't place are flagged *needs review*.
 - **One radio at a time on 1 GB or less**, by default — [what that costs](docs/hardware.md#one-radio-or-both).
+
+## Build with an AI agent
+
+Two **agent skills** teach Claude Code, Codex, Cursor and the other coding agents that read [Agent Skills](https://agentskills.io) to build on a hub, and the agent picks the right one by itself when a task fits:
+
+- **`gethome-hub-api`** for software that *uses* your home — a script, a dashboard, a bridge, an agent of your own — through the API and an API key.
+- **`gethome-mqtt-device`** for hardware that *is* a device — ESPHome, Arduino, MicroPython or Python on a board of your own — joining over MQTT.
+
+```sh
+npx skills add gethome-inc/gethome-hub
+```
+
+That needs Node.js and no copy of this repository: it asks which of your agents to install for, copies in just the two skill folders, and nothing else stays on your machine. For the API one, [make an API key](docs/integrations.md#get-a-key) and give it to the agent through its environment, never in the conversation. → [The skills](skills/README.md) · [Building on a hub](docs/integrations.md)
 
 ## Documentation
 
@@ -168,6 +196,7 @@ The API answers at `http://<hub>:8420/api/v1/hub`. An update keeps the running b
 
 **Build on it**
 
+- [Building on a hub](docs/integrations.md) — API keys and your own software, and the [agent skills](skills/README.md) for Claude Code, Codex and others
 - [The API](docs/api.md) · [The device schema](docs/device-schema.md) · [Architecture](docs/architecture.md) · [The gethome family](docs/ecosystem.md)
 
 ## For developers

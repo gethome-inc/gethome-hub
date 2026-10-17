@@ -1,5 +1,40 @@
+import type { AccessService, KeyGrant } from '../core/access.js';
+import { hubWifiView, offlineElsewhere, type HubWifiView } from '../core/device-network.js';
 import type { RegistryDevice } from '../core/registry.js';
 import type { WebBlockSummary } from '../web-blocks/store.js';
+
+/**
+ * What a device's rendering depends on besides the device: the reader, and
+ * the hub's own Wi-Fi at this moment.
+ */
+export interface DeviceWireView {
+  /** See `core/device-network.ts`. Absent means the hub cannot say. */
+  hubWifi?: HubWifiView | undefined;
+  /**
+   * Whether the reader may see Wi-Fi network names — `hub.wifi`, the
+   * permission that already guards the hub's own list of them. Everybody else
+   * is told a device is on another network and not which one.
+   */
+  namesNetworks?: boolean;
+}
+
+/**
+ * The view for one reader, asked once per render rather than per device.
+ *
+ * `grant` is the key the reader came through, if they came through one — a
+ * key reads as its member narrowed, and `hub.wifi` is not something a key is
+ * ever given, so a key is told a device is on another network and not which.
+ */
+export function deviceWireView(
+  deps: { dataDir: string; hubWifi?: () => HubWifiView | undefined; access: AccessService },
+  memberId: string | null,
+  grant?: KeyGrant | null,
+): DeviceWireView {
+  return {
+    hubWifi: (deps.hubWifi ?? (() => hubWifiView(deps.dataDir)))(),
+    namesNetworks: memberId !== null && deps.access.canAs(memberId, 'hub.wifi', grant),
+  };
+}
 
 /**
  * Device shape served by GET /devices and the deviceUpserted WS frame.
@@ -10,8 +45,18 @@ import type { WebBlockSummary } from '../web-blocks/store.js';
  * without knowing anything happened. It has to be passed in rather than read
  * off the device, because one device answers differently to each member, and
  * the WebSocket renders this per socket for exactly that reason.
+ *
+ * `webBlocks` is the device's own — the panels installed on its page,
+ * `web-blocks/store.ts` — and is passed per device rather than carried in the
+ * view, which is the reader's and asked once per render.
  */
-export function deviceWire(device: RegistryDevice, favorite: boolean, webBlocks?: WebBlockSummary[]) {
+export function deviceWire(
+  device: RegistryDevice,
+  favorite: boolean,
+  view: DeviceWireView = {},
+  webBlocks?: WebBlockSummary[],
+) {
+  const elsewhere = offlineElsewhere(device, view.hubWifi);
   return {
     id: device.id,
     // The device's address on its own protocol — a Zigbee IEEE, an MQTT
@@ -46,6 +91,14 @@ export function deviceWire(device: RegistryDevice, favorite: boolean, webBlocks?
               : {}),
           },
         }
+      : {}),
+    // Presence is the answer here too: the device is offline because it is on
+    // a Wi-Fi network the hub is not on, and every rule in
+    // `core/device-network.ts` held. Rendered per reader, like `favorite`,
+    // because the name is `hub.wifi`'s to show — the field is not, since
+    // "this one is fine where it is" is what every member's dashboard needs.
+    ...(elsewhere !== undefined
+      ? { offlineElsewhere: view.namesNetworks === true ? { network: elsewhere.network } : {} }
       : {}),
     // **Presence is the capability once more**: only a device with panels
     // carries the key, so the wire of every other device is byte-for-byte what

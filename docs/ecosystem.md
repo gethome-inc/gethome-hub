@@ -28,6 +28,12 @@ integrations, which phones can't do at all.
 - **One schema:** the hub serves devices in the same capability schema the
   apps use natively ([device-schema.md](device-schema.md)), so every device —
   Matter, Zigbee, or MQTT — renders with the apps' existing device controls.
+- **Your own software** reaches the same API with an
+  [API key](api.md#api-keys) a member makes — narrowed to what they give it and
+  revocable on the next request — and a board of your own joins as a device
+  over the [MQTT convention](mqtt-integrations.md). The
+  [integrations guide](integrations.md) covers both, and how to hand either job
+  to an AI coding agent.
 - **Remote access** (controlling the home away from Wi-Fi) is future work: a
   relay through the gethome service, end-to-end authenticated — the hub will
   never require port forwarding.

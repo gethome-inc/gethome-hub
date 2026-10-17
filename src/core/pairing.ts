@@ -5,6 +5,8 @@ import type { Db } from '../db/client.js';
 import { invites, members, tokens } from '../db/schema.js';
 import { generateNumericCode, generateToken, sha256Hex } from './crypto.js';
 import type { AccessService } from './access.js';
+import { proofTokenId } from './hub-proof.js';
+import { lastUsedDue } from './last-used.js';
 import type { Logger } from '../logging.js';
 
 /**
@@ -40,9 +42,17 @@ export interface ClaimResult {
   signedIn: boolean;
 }
 
+function toMember(row: { id: string; name: string; role: string; roleId: string | null }): Member {
+  return {
+    id: row.id,
+    name: row.name,
+    role: row.role === 'owner' ? 'owner' : 'member',
+    roleId: row.roleId,
+  };
+}
+
 const INVITE_TTL_MS = 15 * 60 * 1000;
 const CLAIM_REPLAY_TTL_MS = 5 * 60 * 1000;
-const LAST_USED_RESOLUTION_MS = 60 * 60 * 1000;
 
 /**
  * Pairing-code claim flow:
@@ -292,23 +302,39 @@ export class PairingService {
     if (!row) return null;
     const member = await this.db.query.members.findFirst({ where: eq(members.id, row.memberId) });
     if (!member) return null;
-    // Every authenticated request would otherwise write a row. "Last used" is
-    // shown to a human in units of days; an hour's resolution is plenty, and
-    // this runs on a machine whose disk is an SD card.
-    const last = row.lastUsedAt?.getTime() ?? 0;
-    if (Date.now() - last > LAST_USED_RESOLUTION_MS) {
+    // Every authenticated request would otherwise write a row — see
+    // `LAST_USED_RESOLUTION_MS`, which API keys share.
+    if (lastUsedDue(row.lastUsedAt?.getTime() ?? 0, Date.now())) {
       try {
         await this.db.update(tokens).set({ lastUsedAt: new Date() }).where(eq(tokens.id, row.id));
       } catch {
         // Never fail a request because a timestamp didn't stick.
       }
     }
-    return {
-      id: member.id,
-      name: member.name,
-      role: member.role === 'owner' ? 'owner' : 'member',
-      roleId: member.roleId,
-    };
+    return toMember(member);
+  }
+
+  /**
+   * A member by id — what an API key resolves to.
+   *
+   * Read from the table on every request, the way `verifyToken` reads it, so a
+   * key whose member has just been removed is worth nothing and the name on
+   * what it does is the member's name as it stands now.
+   */
+  async member(memberId: string): Promise<Member | null> {
+    const member = await this.db.query.members.findFirst({ where: eq(members.id, memberId) });
+    return member ? toMember(member) : null;
+  }
+
+  /**
+   * The stored hash of the token an app names by `proofTokenId` — for
+   * `POST /hub/proof`, which proves this hub to an app without the token
+   * travelling. A scan rather than an index: a home holds a few dozen tokens,
+   * and the id is a hash of the stored hash, which no column carries.
+   */
+  async tokenHashForProof(id: string): Promise<string | undefined> {
+    const rows = await this.db.select({ tokenHash: tokens.tokenHash }).from(tokens);
+    return rows.find((row) => proofTokenId(row.tokenHash) === id)?.tokenHash;
   }
 
   private async issueToken(

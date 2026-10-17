@@ -5,8 +5,11 @@ Base URL: `http://<hub>:8420/api/v1`. JSON everywhere. Discover hubs via mDNS
 
 ## Authentication
 
-`GET /hub` is public (discovery/health). Everything else requires
-`Authorization: Bearer <token>` (or `?token=` for the WebSocket).
+`GET /hub` is public (discovery/health), and so are `POST /pair` and
+`POST /hub/proof`. Everything else requires `Authorization: Bearer <token>`,
+where the token is a member's — from [claiming](#claiming) — or one of a
+member's [API keys](#api-keys). A member token may also ride `?token=`, which
+the apps' sockets have used; an API key may do that on the WebSocket only.
 
 ### The hub only answers to local names
 
@@ -82,6 +85,121 @@ the machine the code exists to prove access to, so requiring them to recite the
 number adds a step that can only fail. Studio uses it over SSH, which
 is why the person who installs a hub is never shown a code at all.
 
+### API keys
+
+A member's token belongs to an app on a device the member holds. **An API key
+is for their own software** — a script, a dashboard, a bridge to another
+system, an AI agent writing an integration — and it is **a member's token with a
+leash**: it acts as the member who made it, their name is on everything it does
+and it goes when they do, but it does only what they chose to hand it, and only
+while their role lets them have keys at all.
+
+A hub that has them says so on `GET /hub` with `apiKeys: {grantable: […]}`;
+presence is the capability. An older hub answers `404` on `/api-keys` and `401`
+to a key.
+
+**The secret** is `gethome_` followed by 43 letters and digits — 51 characters,
+letters and digits only so it copies whole from a terminal. `POST /api-keys`
+hands it back **once** and the hub keeps only its sha256, so an app that loses
+it makes another; `hint` (its last four characters) is what tells two keys apart
+in a list. Send it as `Authorization: Bearer <key>`. **Not in a query string**:
+a key there is refused on REST (`401 {error:"unauthorized", reason:"key_in_query"}`)
+and taken only on the WebSocket, where some clients cannot set a header — and
+no query string reaches the hub's log either way.
+
+**What a key may do.**
+
+- **Read** everything its member may read — the floor's `GET`s, and those
+  behind a permission it was given.
+- **`control`** — work the home: send device commands (locks included: a key
+  with `control` opens the door its member can), press a scene, switch a mode,
+  pin a favorite. Without it a key is read-only and those answer
+  `403 {error:"key_read_only"}`.
+- **`permissions`** — any of the `grantable` ones: `device.edit`, `device.add`,
+  `device.remove`, `home.structure`, `home.rename`, `activity.read`,
+  `automation.manage`, `hub.radio`, `hub.update`. A key can never be given what
+  its member does not hold, and what it holds is **asked live**: move the
+  member to a smaller role and every key they made narrows on the next request.
+  `automation.manage` needs `control`, because a rule switches devices by
+  itself.
+- **Never**, whatever it was given: `member.*`, `role.manage`, `hub.apikeys`
+  (a key never makes another key), `hub.ai` (it would read and repoint the
+  home's AI provider keys and read what was said to them), `hub.mqtt` and
+  `hub.mqtt.admin` (a broker password is a secret of its own), `hub.wifi` (where
+  the hub has been, and the one change that can take it off its network) — and
+  **any permission a later build adds**, until somebody decides it is grantable.
+  Those routes answer `403 {error:"key_not_allowed", permission}`. And a few
+  routes are the member's and never a key's, with no permission named:
+  `POST /invites`, `PATCH`/`DELETE /members/me`, every `/api-keys` route, a
+  device's [panels](#web-blocks) (`/devices/:id/web-blocks/…` — a panel is
+  code every phone in the house runs, which is more than `device.edit` hands a
+  key anywhere else, and its files are for the apps' web-block host), and
+  every conversation — the automations agent's, the assistant's, reading them
+  included, and the voice session. A key does not mint a credential, change or
+  end a membership, install code on the phones, or read or speak in what
+  people in the home said.
+- **An owner's key is no exception.** The owner is never evaluated, because a
+  person can always put the matrix back; a script cannot, so an owner's key
+  holds what it was given and nothing more.
+
+**A key works only while its member's role holds `hub.apikeys`.** Taking it away
+from a role pauses every key its people have — `state: "suspended"`, and
+`401 {error:"unauthorized", reason:"key_suspended"}` on use — and giving it back
+resumes them; nothing about the keys changes. A key past its expiry answers
+`reason: "key_expired"`, and changing its expiry brings it back.
+
+**Rate.** A key may burst 50 requests and sustain 10 a second; past that,
+`429 {error:"rate_limited", retryAfterMs}` with a `Retry-After` header. One key
+holds at most five event streams. Member tokens are not limited. On a 512 MB
+board the difference between a slow integration and an unreachable hub is a
+loop with no sleep in it — prefer the WebSocket to polling.
+
+**What it leaves behind.** Making, changing and revoking a key are activity rows
+(`apikey.added`, `apikey.changed`, `apikey.removed`). Everything done *through*
+one is written as its member — `memberId` and `data.memberName` are theirs — with
+`data.via: "api"`, `data.apiKeyId` and `data.apiKeyName`, and the sentence names
+it: `Anna’s “Node-RED” · Desk lamp: power`. See [the activity log](#the-activity-log).
+
+**What the hub shows about each key** — `GET /api-keys`:
+
+```json
+{
+  "id": "…", "name": "Node-RED", "hint": "X7aQ",
+  "memberId": "…", "memberName": "Anna", "isMine": true,
+  "state": "active",
+  "control": true, "permissions": ["device.edit"], "effective": ["device.edit"],
+  "createdAt": "2026-10-16T11:35:56.000Z", "expiresAt": null,
+  "lastUsedAt": "2026-10-16T11:42:10.512Z", "lastUsedFrom": "192.168.1.40",
+  "connections": 1,
+  "lastRefusal": { "at": "…", "status": 403, "error": "forbidden",
+                   "permission": "home.rename", "method": "PATCH", "path": "/api/v1/home" }
+}
+```
+
+`permissions` is what it was given and `effective` is that narrowed by what its
+member may do now, so an app can say a grant has gone inert rather than leave
+somebody wondering why a key stopped. `state` is an **open** vocabulary —
+`active`, `expired`, `suspended` today. `connections` is the event streams it
+holds open. `lastRefusal` is the last thing the hub told it no, with the path
+and never the query: the answer to "why has my integration stopped". It is
+held in memory, so it starts empty after a restart, and `lastUsedAt` is exact
+while the stored copy is written at most hourly. `lastUsedAt` is the last
+request the hub **let in**: one turned away at the door — rate-limited, expired,
+paused — is a `lastRefusal` and moves nothing.
+
+**Why keys are a table of their own.** `install.sh` puts the previous build back
+when a new one fails its health check, by which time the migration has run. An
+older build has never heard of `api_keys`, so every key is a `401` there and an
+integration stops — where keys stored as rows of `tokens` would have been taken
+for full member tokens, with none of the narrowing, for as long as the rollback
+lasted.
+
+**The bodies are strict**, unlike nearly every other body here: an unknown field
+is `400 invalid_body`. zod strips what it does not know, so a field a later build
+adds to *narrow* a key would be dropped by an older one, which would then make
+the key broader than the person asked for. A 400 is the only safe thing an older
+hub can say.
+
 ### Roles and permissions
 
 A **permission** is a verb this hub understands. A **role** is a named set of
@@ -113,7 +231,8 @@ everyone.
   role must hold is a row in the matrix that can only ever be wrong: somebody
   would turn it off, and find out. So the key is gone rather than shipped
   switched on for everybody, and `POST /devices/:id/endpoints/:id/commands`
-  takes any token.
+  takes any member's token — and any of their [API keys](#api-keys) given
+  `control`, since a key that may read has not thereby been given the house.
 - **The owner is never evaluated.** Every check answers `true` for the owner
   without reading a stored set, so a permission a later hub build adds is theirs
   automatically and no edit to any table can lock a home out of itself. That
@@ -133,23 +252,24 @@ than no button.
 
 | Method & path | Needs | Notes |
 |---|---|---|
-| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `matter: {bluetooth, bluetoothReason?, wifi, commissioning, settlingUntil?}` is present only while Matter is running and says what pairing this hub can actually do — and, in `settlingUntil`, whether it has finished finding the devices it already owns — see [below](#pairing-a-matter-accessory). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid). `cameras: {kinds, maxStreams}` and `webBlocks: {maxBytes, maxFiles, perDevice}` are the same answer for [cameras](#cameras) and [web blocks](#web-blocks): what this hub relays and how many at once, and how big a panel may be. A hub without them has never heard of either, so an app offers neither |
+| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `matter: {bluetooth, bluetoothReason?, wifi, commissioning, settlingUntil?}` is present only while Matter is running and says what pairing this hub can actually do — and, in `settlingUntil`, whether it has finished finding the devices it already owns — see [below](#pairing-a-matter-accessory). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid). `wifiNetworks: {available, reason?}` is present on a hub that can be told about another Wi-Fi network before it is moved — `available: false` with `reason` `"no-networkmanager"` or `"not-installed"` when this machine cannot — see [below](#wi-fi-networks-settingswifi). `apiKeys: {grantable}` is present on a hub that takes [API keys](#api-keys), and lists the permissions a key may be given. `cameras: {kinds, maxStreams}` and `webBlocks: {maxBytes, maxFiles, perDevice}` are the same answer for [cameras](#cameras) and [web blocks](#web-blocks): what this hub relays and how many at once, and how big a panel may be. A hub without them has never heard of either, so an app offers neither |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
+| `POST /hub/proof` | — | `{nonce, address, tokenId}` → `{hubId, proof}`: this hub proving it is itself **at the address the app dialled**, to an app holding one of its tokens, without the token being sent. `403 proof_refused` for an address that is not this hub's or a token it does not hold — one answer for both. For an app following a saved hub to a new address — see [below](#following-a-hub-to-a-new-address-post-hubproof) |
 | `GET /home` · `PATCH /home` | floor · `home.rename` | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name) |
 | `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | floor · `home.structure` | `{id, name, zoneId, icon, accent, sortOrder}`. `POST` takes `{name, zoneId?, icon?, accent?, sortOrder?}` — the name is the only required field anywhere here — and `PATCH` takes the same set with every field optional; `zoneId: null` means "in no zone", and `icon: null` / `accent: null` mean "back to the look the app derives" — each different from leaving the field out. `icon`/`accent` are opaque app tokens (1–40 chars, see [below](#rooms-and-zones)). Names are trimmed before they are measured (1–80), an unknown `zoneId` is `404 unknown_zone`, and a new room goes to the *end* of the order. Deleting a room does not delete its devices — they are simply in no room. Every write broadcasts the [`structure` frame](#rooms-and-zones) |
 | `GET /zones` · `POST /zones` · `PATCH /zones/:id` · `DELETE /zones/:id` | floor · `home.structure` | `{id, name, sortOrder}` — the optional layer above rooms, see [below](#rooms-and-zones). `POST {name, sortOrder?}`, `PATCH {name?, sortOrder?}`; a zone carries no look of its own, since nothing draws a zone as a thing. Deleting a zone keeps its rooms and leaves them in none |
 | `GET /devices` | floor | full device list (wire shape below) |
-| `PATCH /devices/:id` | `device.edit` / floor | `{name?, roomId?, favorite?, offlineExpected?}`. Name, room and `offlineExpected` describe the house and everybody sees the same ones; **`favorite` is the caller's own** and nobody else's — see [below](#favorites-are-per-member). `roomId: null` takes a device out of its room; an unknown one is `404 unknown_room`. `offlineExpected` is a boolean in and a moment back out — see [below](#a-device-that-is-meant-to-be-offline). The response is this caller's view of the device |
+| `PATCH /devices/:id` | `device.edit` / floor (a key: `control`) | `{name?, roomId?, favorite?, offlineExpected?}`. Name, room and `offlineExpected` describe the house and everybody sees the same ones; **`favorite` is the caller's own** and nobody else's — see [below](#favorites-are-per-member). `roomId: null` takes a device out of its room; an unknown one is `404 unknown_room`. `offlineExpected` is a boolean in and a moment back out — see [below](#a-device-that-is-meant-to-be-offline). The response is this caller's view of the device |
 | `DELETE /devices/:id` | `device.remove` | also unpairs at the protocol level |
-| `POST /devices/:id/endpoints/:endpointId/commands` | floor | body = canonical command; `202`. IR-remote intents (`irLearn`/`irSaveLearned`/`irSend`/`irDeleteCommand`/`irRenameCommand`) are resolved against the endpoint's stored code library (see [device-schema.md](device-schema.md)) |
+| `POST /devices/:id/endpoints/:endpointId/commands` | floor (a key: `control`) | body = canonical command; `202`. IR-remote intents (`irLearn`/`irSaveLearned`/`irSend`/`irDeleteCommand`/`irRenameCommand`) are resolved against the endpoint's stored code library (see [device-schema.md](device-schema.md)) |
 | `GET /devices/:id/history?from=&to=&points=&series=` | floor | what this device's readings did over a window, already thinned to a drawable size — see [below](#recorded-readings-get-devicesidhistory). `from`/`to` are epoch ms and default to the last day; `from >= to` is `400 invalid_range`; an unknown device is `404` |
 | `GET /devices/:id/portraits` | floor | the pictures this home has had drawn of a device, newest first: `{id, at, bytes, provider, model, fromPhoto, selected, drawnBy?}`. `drawnBy: {id, name}` is who had it drawn — `id` is null once that person has left the home and absent altogether on a portrait drawn before the hub recorded it, so an app draws no line rather than an empty one. Reading is the floor — a portrait is what the device *looks like*, so a guest whose dashboard could not draw it would be looking at a different home. See [below](#device-portraits) |
 | `GET /portraits/:portraitId` | floor | the PNG itself — `image/png`, a strong `ETag` and `Cache-Control: immutable`, because a portrait's bytes never change (a new one gets a new id) |
 | `POST /devices/:id/portraits` | `hub.ai` | draw one. `{photo?: base64, photoType?}` — absent draws from the device's kind alone. Synchronous, and it holds the request for the minutes an image takes. `409 openai_not_configured` (its own code: portraits are OpenAI's job, and a hub can be configured for recognition and not for this), `409 portrait_busy`, `409 no_space`, `502 {error:"provider_failed", kind, detail}` carrying OpenAI's own sentence |
 | `PATCH /devices/:id/portraits` | `device.edit` | `{selected: id\|null}` — which one the home sees. `null` is a *state*: the procedural sphere, chosen over every picture there is |
 | `DELETE /portraits/:portraitId` | `device.edit` | forget one, file and row |
-| `PUT /devices/:id/web-blocks/:blockId` · `DELETE /devices/:id/web-blocks/:blockId` | `device.edit` | install, replace or remove a panel on a device's page — see [below](#web-blocks). `PUT {title, height?, files: [{path, dataBase64}]}` → `{block, changed}`, and `changed: false` is an upload identical to the stored one, which wrote and logged nothing. `400 invalid_block` (with a `message` saying what), `409 too_many_web_blocks`, `409 web_blocks_full`, `507 storage_low`. `DELETE` answers `204`, or `404` for a block that isn't there |
-| `GET /devices/:id/web-blocks/:blockId/*` | floor | one file of a panel, looked up in the manifest stored at install and never on disk; an empty path is `index.html`. A strong `ETag` (`304` on a match), `no-cache`, `nosniff`, and a CSP that allows no network |
+| `PUT /devices/:id/web-blocks/:blockId` · `DELETE /devices/:id/web-blocks/:blockId` | `device.edit` — the member's, never a key's | install, replace or remove a panel on a device's page — see [below](#web-blocks). `PUT {title, height?, files: [{path, dataBase64}]}` → `{block, changed}`, and `changed: false` is an upload identical to the stored one, which wrote and logged nothing. `400 invalid_block` (with a `message` saying what), `409 too_many_web_blocks`, `409 web_blocks_full`, `507 storage_low`. `DELETE` answers `204`, or `404` for a block that isn't there |
+| `GET /devices/:id/web-blocks/:blockId/*` | floor — the member's, never a key's | one file of a panel, looked up in the manifest stored at install and never on disk; an empty path is `index.html`. A strong `ETag` (`304` on a match), `no-cache`, `nosniff`, and a CSP that allows no network |
 | `GET /cameras/:deviceId/:endpointId/:streamId/snapshot` · `GET /cameras/:deviceId/:endpointId/:streamId/mjpeg` | `camera.view` | a still (`image/jpeg`) or the live picture (`multipart/x-mixed-replace`) of a stream the device announced, fetched by the hub — see [below](#cameras). `404 camera_not_found` for a stream that isn't announced or is the other kind, `409 camera_busy`, and `502` with the reason: `camera_unreachable`, `camera_unverified`, `camera_address_refused`, `camera_bad_response` |
 | `POST /devices/:id/remap` | `hub.ai` | force-regenerate the AI mapping (Zigbee devices) → `{requested}`. **It answers as soon as the run is under way, never when it ends**: a run is minutes and this is an HTTP request, so what the agent then did arrives on the `ai` stream and in `GET /ai/runs`. `requested: false` means the radio has no published schema for that device right now — a device row can outlive its `bridge/devices` entry — which is a different answer from a run that failed. Being explicit, it also drops a `rejected` mapping and **ignores the backoff gate**, because it is how somebody retries after fixing a key or changing the model. The hub also remaps automatically when a device publishes unknown parameters — see [ai-adaptation.md](ai-adaptation.md). `409 ai_not_configured` with no credential, `409 ai_disabled` when the owner has switched device recognition off |
 | `POST /matter/commission` | `device.add` | `{pairingCode, wifi?: {ssid, passphrase}}` → `202 {jobId, deadline}` (async). `wifi` is only for a hub that cannot read its own — see [below](#pairing-a-matter-accessory). `409 already_commissioning` when one is already running, `409 matter_disabled` when this hub has no Matter |
@@ -157,9 +277,13 @@ than no button.
 | `POST /matter/commission/:jobId/cancel` | `device.add` | stop looking → the job as it now stands. `404` for a job the hub has forgotten; a job that has already finished is answered, not refused |
 | `GET /matter/discoverable?seconds=` | `device.add` | what the hub can hear **right now** → `{scannedMs, bluetooth, devices: [{discriminator, vendorId?, productId?, name?, transport, pairingHint?, pairingInstruction?}]}`. `seconds` is 2–15, default 6, and the request is held open for all of it. `409 already_commissioning` — see [below](#what-the-hub-can-hear-get-matterdiscoverable) |
 | `POST /zigbee/permit-join` | `device.add` | `{seconds}`, 0–900 (0 = close the network) → `{permitJoin, seconds}` describing the **live** window, which is not always what was asked for. See [below](#the-zigbee-join-window) |
-| `GET /members` · `PATCH /members/me` · `DELETE /members/me` · `DELETE /members/:id` | floor · floor (itself) · floor (itself) · `member.remove` | rows carry `isSelf`, `roleId` and `roleName`; `PATCH` takes `{name}` and renames **the caller**; `DELETE` on either route answers `204` and revokes that member's tokens; the owner cannot be removed, by anyone or by itself. See [below](#which-member-you-are-isself-and-patch-membersme) |
-| `GET /invites` · `POST /invites` | `member.invite` · see notes | `POST {roleId?}` → `201 {code, expiresAt, roleId, roleName, memberId: null, memberName: null}`. Omitting `roleId` mints a **Member** invite, which is what every invite this hub has ever made was. An **owner** invite is allowed and needs the caller to be one (`403 not_owner`). **`POST {memberId}` mints a sign-in code** for somebody already here — `roleId` beside it is `400 invalid_target`, an unknown one is `404 unknown_member`, and the answer carries `memberId`/`memberName` with `roleId: null`. Who may ask is asked of the body: your own (`memberId: "me"` is accepted) is the **floor**, somebody else's is `member.invite`, an **owner's** needs an owner. `GET` lists the live codes, each with `memberId` — null for an invite — and `memberName`. See [below](#signing-in-again-post-invites-with-a-memberid) |
+| `GET /members` · `PATCH /members/me` · `DELETE /members/me` · `DELETE /members/:id` | floor · floor (itself) · floor (itself) · `member.remove` | rows carry `isSelf`, `roleId` and `roleName`; `PATCH` takes `{name}` and renames **the caller**; `DELETE` on either route answers `204` and revokes that member's tokens and API keys; the owner cannot be removed, by anyone or by itself. The two `/members/me` routes are never an API key's. See [below](#which-member-you-are-isself-and-patch-membersme) |
+| `GET /invites` · `POST /invites` | `member.invite` · see notes | `POST {roleId?}` → `201 {code, expiresAt, roleId, roleName, memberId: null, memberName: null}`. Omitting `roleId` mints a **Member** invite, which is what every invite this hub has ever made was. An **owner** invite is allowed and needs the caller to be one (`403 not_owner`). **`POST {memberId}` mints a sign-in code** for somebody already here — `roleId` beside it is `400 invalid_target`, an unknown one is `404 unknown_member`, and the answer carries `memberId`/`memberName` with `roleId: null`. Who may ask is asked of the body: your own (`memberId: "me"` is accepted) is the **floor**, somebody else's is `member.invite`, an **owner's** needs an owner. `GET` lists the live codes, each with `memberId` — null for an invite — and `memberName`. `POST` is never an API key's: a key does not mint credentials. See [below](#signing-in-again-post-invites-with-a-memberid) |
 | `GET /activity?limit=&before=` | floor · `activity.read` | reverse-chronological, cursor = `before` id; rows carry `data` — see [below](#the-activity-log) |
+| `GET /api-keys` | floor (your own) · `member.remove` (everybody's) | the caller's [API keys](#api-keys), or everybody's: `[{id, name, hint, memberId, memberName, isMine, state, control, permissions, effective, createdAt, expiresAt, lastUsedAt, lastUsedFrom, connections, lastRefusal?}]`. Your own are the floor, so somebody whose role has stopped letting them have keys can still find and revoke theirs |
+| `POST /api-keys` | `hub.apikeys` | `{name, control?, permissions?, expiresInDays?}` → `201 {key, secret}`. The **only** time the secret exists anywhere but in the caller's hands. `expiresInDays` is 1–3650, or `null`/absent for never. **Strict body** — an unknown field is `400 invalid_body`. `400 {error:"not_grantable", permission}` for one no key may hold, `400 {error:"needs_control", permission:"automation.manage"}`, `403 {error:"forbidden", permission}` for one the caller does not hold, `409 {error:"too_many_keys", limit:25}` |
+| `PATCH /api-keys/:id` | `hub.apikeys`, **your own key** | the same fields, every one optional → the key. `null` expiry is never, a number restarts the count from now. `403 not_your_key` for anybody else's, an owner's edit included; only what is being *added* is checked against the caller's role, so renaming a key whose grant has since gone inert is not refused for it |
+| `DELETE /api-keys/:id` | floor (your own) · `member.remove` (anybody's) | revoke → `204`, and its event streams are closed with `4001`. An owner's key needs an owner (`403 not_owner`). None of the four `/api-keys` routes is ever an API key's |
 | `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | `hub.ai` | The home's AI: two credentials, a model per job (recognition, the assistant, the automations agent), which provider recognises devices, and the switch. **PATCH is the write** — every field optional, absence means "leave this alone": `{enabled?, recordExchanges?, anthropicApiKey?, openaiApiKey?, anthropicModel?, openaiModel?, model?, mappingProvider?, assistantModel?, automationsModel?, clear?}`. `model` is `anthropicModel` under the name this route has always used; a model id this hub has **retired** is still taken, and resolved to its successor when it is read — see [below](#the-ai-settings-answer); `assistantModel` / `automationsModel` name the vendor as well as the model, and `null` puts either back on the default; `clear: "anthropic"\|"openai"` forgets one credential and leaves the other; `recordExchanges` starts or stops keeping what each round said, and is off unless asked; `mappingProvider` naming a provider with no key is `400 provider_not_configured`. Keys are told apart by prefix, so one pasted in the other's field is a 400 rather than a 401 an hour later, and a `sk-ant-oat…` subscription token is still refused. **PUT is unchanged** (`{apiKey, model?}`, an Anthropic key, required) for apps that have not moved. See [the answer's shape](#the-ai-settings-answer) |
 | `GET /ai/runs?limit=` | `hub.ai` | what the mapping agent did, newest first: `{id, at, kind, vendor, model, exposesHash, provider, modelId, effort, via, ok, costUsd, turns, durationMs, errorKind, errorMessage, steps, exchanges}`. A summary, never a transcript — see [ai-adaptation.md](ai-adaptation.md). `exchanges` is how many **rounds** this run kept, `0` unless recording was on when it ran. `effort` (`low`/`medium`/`high`) and `via` (`voice`/`typed`) say what that turn ran at and how it was asked — both **null** on a row written before them and on a run the idea does not apply to: a portrait has no effort, a device recognition nobody asked for has no `via`, and the `voice` meter is a line rather than a generation, so it carries `via` and no effort |
 | `GET /ai/runs/:id/exchanges` | `hub.ai` | what that run actually said, round by round, oldest first: `[{seq, at, durationMs, provider, modelId, status, ok, inputTokens, outputTokens, sent, received}]`. `sent`/`received` are `[{kind, label, text?, bytes?}]` — the round's **main data**, not its bodies; `bytes` is present only on a part that was cut, and is what it weighed whole. A run is a *loop*, so one recognition is several rounds and a failed one is followed by the next in the same list. Empty is the ordinary answer — recording is off unless the owner asked, and rounds age out after a week. See [ai-adaptation.md](ai-adaptation.md) |
@@ -167,25 +291,25 @@ than no button.
 | `GET /automations/:id` · `GET /automations/:id/runs` | floor | one rule, and why it fired. The trace names the commands a guard **refused** as well as the ones it sent: "nothing happened" and "the hub declined to switch that relay for the fortieth time this hour" look identical from outside |
 | `GET /automations/capabilities` | floor | what a rule can be made of, **generated from the live zod schema**. Render this rather than shipping a copy — the `GET /permissions` rule applied to a vocabulary that will keep growing |
 | `GET /automations/templates` | floor | the shipped presets, with the inputs each needs |
-| `POST /automations/:id/run` | floor | press a button automation → `202`. **The floor, deliberately**: pressing "I'm leaving" switches lights, and working the home is what being a member means. `409 automation_disabled`, `409 not_pressable` for a rule that watches the home and has nothing to press |
-| `PUT /automations/:id/active` | floor | `{active}` — switch a *mode* on or off. Also the floor, and a different thing from `enabled` below: turning a mode on is working the home, enabling a rule is editing it. `409 not_a_toggle` |
+| `POST /automations/:id/run` | floor (a key: `control`) | press a button automation → `202`. **The floor, deliberately**: pressing "I'm leaving" switches lights, and working the home is what being a member means. `409 automation_disabled`, `409 not_pressable` for a rule that watches the home and has nothing to press |
+| `PUT /automations/:id/active` | floor (a key: `control`) | `{active}` — switch a *mode* on or off. Also the floor, and a different thing from `enabled` below: turning a mode on is working the home, enabling a rule is editing it. `409 not_a_toggle` |
 | `POST /automations` | `automation.manage` | the document as the body → `201`, **always switched off**, with `warnings`. `422 {error:"invalid_automation", issues}` for a shape the schema refuses, `422 {…, problems, warnings}` for one it accepts and the home cannot use — a threshold on a continuously-varying reading with no `for` or `hysteresis` is the commonest |
 | `PATCH /automations/:id` | `automation.manage` | `{document?, enabled?, name?, icon?}`. Switching it back on clears whatever the circuit breaker wrote. **`name` and `icon` are what a rule is called and how it is drawn**, and they are here rather than only inside `document` because a rename is a different act from an edit: the apps hold the `summary`, so asking a phone to send a whole rule back to fix a typo would mean every app carrying a second copy of the DSL. A rename is written into `document.name` as well as the column — they are one fact stored twice, and an edit made in conversation afterwards would otherwise put the old name back. It costs no version (ten are kept per rule to walk back out of a bad afternoon, and the behaviour is untouched) and it *is* written to the activity log, where a restyle is not — the rooms rule. `icon` is an opaque app token, `null` for "the app derives one" |
 | `DELETE /automations/:id` | `automation.manage` | forget it, and its versions and traces with it |
 | `GET /automations/:id/versions` · `POST /automations/:id/revert` | `automation.manage` | what it used to say, and going back to it. `{versionId}` |
 | `POST /automations/dry-run` | `automation.manage` | check a document without saving: `{problems, warnings, shape, summary, outline}` — the same pair every rule carries, so a preview draws exactly what the saved rule would |
 | `POST /automations/templates/:key` | `automation.manage` | install a preset. A template may install **more than one** rule — "light on movement" is genuinely two — so this answers with a list |
-| `POST /automations/chat` | `automation.manage` **+** `hub.ai` | start a conversation: `{message, automationId?}` → `201 {sessionId, messages}`. **An acknowledgement, not an outcome**: `messages` is the person's own row and nothing else, and it answers the moment the hub takes the message — a turn is a provider loop with a three-minute watchdog and no client waits that long. What the agent says arrives on the opt-in `automations` stream, and its `turn` frame is what says the transcript is ready to re-read. Two refusals, both `409 {error, detail}` because they lead to two different screens: `ai_not_configured` (no key) and `automation_needs_anthropic` (a key the hub holds and cannot use — a Claude subscription token, with no OpenAI key beside it; the code is kept because both apps branch on it, but it no longer means "only OpenAI's", since either vendor now runs either agent). **Device recognition's switch is not asked** — an older hub answered `ai_disabled` here too, which is why both apps still read that code. `detail` is a sentence, so an app that has never met one of these codes still shows something true. The route names `automation.manage` in a refusal; the second key is checked in the handler and refused in the same `{error, permission}` shape |
-| `POST /automations/chat/:id/messages` | `automation.manage` **+** `hub.ai` | `{message}` → the same acknowledgement shape, and the same rule: it returns when the message is taken, never when the turn ends. Turns are chained per conversation, so a second message sent while one is running is queued rather than run beside it. A typed reply to a question is treated as the *answer* to it, since only the conversation knows whether a tool call is outstanding. **`410 conversation_ended`** only when there is nothing left to read — a session that never existed, or one past the fortnight transcripts are kept for. A hub that has merely *forgotten how to continue* (a restart, or the two-hour idle sweep) rebuilds the model's memory from the stored transcript and carries on under the same session id, because that state is the ordinary one and refusing it made the whole conversations list read-only |
-| `GET /automations/chats` | `automation.manage` **+** `hub.ai` | every conversation this home has had, newest first: `[{sessionId, startedAt, updatedAt, messageCount, title, live, spend?}]`. `title` is the **first thing the person said** — the agent's opening line is about the home rather than about what was asked — and `live` is whether it can still be *continued*, which is a different question from whether it can be read. `spend` is `{usd, provider, modelId, model}`: what it cost and what answered, with `model` the label to draw and `modelId` the id as recorded. It is **absent rather than zero** when the hub cannot say — `ai_runs` keeps sixty runs and a transcript a fortnight, so a readable conversation can outlive its own spend row, and `$0.00` about one that plainly cost something is a claim |
-| `GET /automations/chat/:id` | `automation.manage` **+** `hub.ai` | `{sessionId, live, spend?, messages}` — the transcript, oldest first, with the same `spend` block the list carries so a chat opened from a link says what it cost without the list having been read. `live: false` is history. A message is `{id, at, role, text, data?}` with `role` an **open** vocabulary (`user`/`agent`/`question`/`preview`/`note`); see [`docs/automations.md`](automations.md) for what `data` carries per row. **One turn can write several `preview` rows** — a reply that delivers two rules is one `agent` line followed by a card each, in submission order, so draw a card per row rather than assuming one per turn. The **first** row a round writes also carries `data.steps` — `[{text, kind, detail?}]`, what the agent did to produce it, the same three fields the `step` frame streams — so a conversation read back next week shows the working and not only the answer |
-| `DELETE /automations/chat/:id` | `automation.manage` **+** `hub.ai` | end it and write down what it spent |
-| `POST /assistant/chat` | `hub.ai` | start a conversation with the **assistant** — the agent behind the app's assistant button: `{message}` → `201 {sessionId, messages}`. Same acknowledgement shape and same rule as the automations chat above, and the same two `409` refusals. Guarded by `hub.ai` **alone**: asking what the kitchen is doing and switching a lamp on is the floor, and the key is asked because a conversation spends the home's money. Handing a job to another agent is where `automation.manage` is asked, and it is asked *inside the tool* — so a member whose role cannot do it gets a sentence the model reads out rather than a route that 403s |
-| `POST /assistant/chat/:id/messages` | `hub.ai` | `{message}` → the same acknowledgement. `410 conversation_ended` only when there is nothing left to read |
-| `GET /assistant/chats` | `hub.ai` | the assistant's own conversations, newest first, in the same shape `GET /automations/chats` answers. The two lists are **disjoint**: rows carry a `surface`, and a row written before that column existed is an automations row |
-| `GET /assistant/chat/:id` | `hub.ai` | `{sessionId, live, spend?, messages}`, the same shape as an automations transcript with one more `role`: **`handoff`**, a job handed to another agent. Its `data` is `{agent, title, brief, sessionId, status, automationIds}` — `sessionId` is the *other* agent's conversation, which is where the live trail, its questions and the rules it wrote are read from; `status` is `working`/`asked`/`delivered`/`failed` and is an **open** string; `automationIds` fills as that agent saves rules. Nothing about the other conversation is copied into this one |
-| `DELETE /assistant/chat/:id` | `hub.ai` | end it and write down what it spent |
-| `POST /assistant/voice/session` | `hub.ai` | open a live **voice** session: `{sdp, sessionId?}` → `201 {answerSdp, audioRate, sessionId}`. `sdp` is the client's own **WebRTC offer** and is required, because that is the only transport a phone can hold: Live authenticates a WebSocket with the *project API key* and has no ephemeral client secret anywhere in the family, so the hub does the offer/answer exchange with the home's key and the client is handed **no credential at all** — a stronger containment than the expiring secret this route was first built around. The hub builds the whole session — model, voice, instructions, history, delegation mode — and never sends it to the app, so a prompt change or a configuration key this API grows next month reaches the microphone with no app release. `delegation.type` is **`client`**, which is the architecture in one field: the voice asks *this hub* for help rather than a model OpenAI hosts, so the home keeps its own agent, its own tools, its own transcript and whichever provider it picked. No `audio.format` is sent — WebRTC negotiates its own and refuses the field — and `audioRate` is the rate the app's graph is pointed at. `sessionId` is the assistant conversation to write into — **sent back** when the app already has one, since stopping and restarting the microphone on a page is one conversation rather than two, and minted fresh when it is absent; when it is sent, that conversation's last few exchanges are seeded into `session.input`, so pressing the microphone on a page you have been typing on continues one conversation. It grants nothing new — a home's transcripts are shared by design. When it is sent, that conversation's history is bounded in **characters as well as messages** — `session.input` is capped at 8,192 tokens as well as at 128 messages, and a transcript row holds up to 4,000 characters, so a count alone had a long conversation refused outright on every attempt. A `sessionId` belonging to **somebody else** in the home is `409 not_your_conversation`: reading a home's transcripts is shared by design and writing into one is not. Refuses `409 openai_not_configured` — a code of its own, and a real one: GPT-Live is OpenAI's and there is no substitute, so a home whose assistant answers perfectly well on Anthropic still cannot *speak* without an OpenAI key. `502 voice_unavailable` when OpenAI itself refuses, with their sentence in `detail` — a different screen from a `409`, which is something in this home's settings. **The hub then attaches its own sideband** to the same session (`wss://api.openai.com/v1/live/sessions/{id}/attach`, the home's key again) and that is where the delegation loop lives: client delegation says "I need help" and nothing else, so somebody has to assemble the request from the transcript and answer it — doing that on the phone added two LAN legs to the one thing on this surface measured in how fast a lamp goes off. The sideband owns three facts outright, on the API's own rule that two connections onto one session need one owner per action: **delegations** (the phone answers none), **the transcript** (`askAloud` writes the person's row and the answer, so a spoken exchange leaves exactly what a typed one does) and **what it cost** (`session.usage.updated` / `session.closed`, the seconds OpenAI will bill). Audio is deliberately not one of them: media stays on the phone's WebRTC connection. `POST /assistant/voice/said` and `POST /assistant/voice/ended` are **gone** with it — the phone wrote the transcript and measured the seconds with a stopwatch only because the hub was not in the session at all |
+| `POST /automations/chat` | `automation.manage` **+** `hub.ai` · never a key | start a conversation: `{message, automationId?}` → `201 {sessionId, messages}`. **An acknowledgement, not an outcome**: `messages` is the person's own row and nothing else, and it answers the moment the hub takes the message — a turn is a provider loop with a three-minute watchdog and no client waits that long. What the agent says arrives on the opt-in `automations` stream, and its `turn` frame is what says the transcript is ready to re-read. Two refusals, both `409 {error, detail}` because they lead to two different screens: `ai_not_configured` (no key) and `automation_needs_anthropic` (a key the hub holds and cannot use — a Claude subscription token, with no OpenAI key beside it; the code is kept because both apps branch on it, but it no longer means "only OpenAI's", since either vendor now runs either agent). **Device recognition's switch is not asked** — an older hub answered `ai_disabled` here too, which is why both apps still read that code. `detail` is a sentence, so an app that has never met one of these codes still shows something true. The route names `automation.manage` in a refusal; the second key is checked in the handler and refused in the same `{error, permission}` shape |
+| `POST /automations/chat/:id/messages` | `automation.manage` **+** `hub.ai` · never a key | `{message}` → the same acknowledgement shape, and the same rule: it returns when the message is taken, never when the turn ends. Turns are chained per conversation, so a second message sent while one is running is queued rather than run beside it. A typed reply to a question is treated as the *answer* to it, since only the conversation knows whether a tool call is outstanding. **`410 conversation_ended`** only when there is nothing left to read — a session that never existed, or one past the fortnight transcripts are kept for. A hub that has merely *forgotten how to continue* (a restart, or the two-hour idle sweep) rebuilds the model's memory from the stored transcript and carries on under the same session id, because that state is the ordinary one and refusing it made the whole conversations list read-only |
+| `GET /automations/chats` | `automation.manage` **+** `hub.ai` · never a key | every conversation this home has had, newest first: `[{sessionId, startedAt, updatedAt, messageCount, title, live, spend?}]`. `title` is the **first thing the person said** — the agent's opening line is about the home rather than about what was asked — and `live` is whether it can still be *continued*, which is a different question from whether it can be read. `spend` is `{usd, provider, modelId, model}`: what it cost and what answered, with `model` the label to draw and `modelId` the id as recorded. It is **absent rather than zero** when the hub cannot say — `ai_runs` keeps sixty runs and a transcript a fortnight, so a readable conversation can outlive its own spend row, and `$0.00` about one that plainly cost something is a claim |
+| `GET /automations/chat/:id` | `automation.manage` **+** `hub.ai` · never a key | `{sessionId, live, spend?, messages}` — the transcript, oldest first, with the same `spend` block the list carries so a chat opened from a link says what it cost without the list having been read. `live: false` is history. A message is `{id, at, role, text, data?}` with `role` an **open** vocabulary (`user`/`agent`/`question`/`preview`/`note`); see [`docs/automations.md`](automations.md) for what `data` carries per row. **One turn can write several `preview` rows** — a reply that delivers two rules is one `agent` line followed by a card each, in submission order, so draw a card per row rather than assuming one per turn. The **first** row a round writes also carries `data.steps` — `[{text, kind, detail?}]`, what the agent did to produce it, the same three fields the `step` frame streams — so a conversation read back next week shows the working and not only the answer |
+| `DELETE /automations/chat/:id` | `automation.manage` **+** `hub.ai` · never a key | end it and write down what it spent |
+| `POST /assistant/chat` | `hub.ai` · never a key | start a conversation with the **assistant** — the agent behind the app's assistant button: `{message}` → `201 {sessionId, messages}`. Same acknowledgement shape and same rule as the automations chat above, and the same two `409` refusals. Guarded by `hub.ai` **alone**: asking what the kitchen is doing and switching a lamp on is the floor, and the key is asked because a conversation spends the home's money. Handing a job to another agent is where `automation.manage` is asked, and it is asked *inside the tool* — so a member whose role cannot do it gets a sentence the model reads out rather than a route that 403s |
+| `POST /assistant/chat/:id/messages` | `hub.ai` · never a key | `{message}` → the same acknowledgement. `410 conversation_ended` only when there is nothing left to read |
+| `GET /assistant/chats` | `hub.ai` · never a key | the assistant's own conversations, newest first, in the same shape `GET /automations/chats` answers. The two lists are **disjoint**: rows carry a `surface`, and a row written before that column existed is an automations row |
+| `GET /assistant/chat/:id` | `hub.ai` · never a key | `{sessionId, live, spend?, messages}`, the same shape as an automations transcript with one more `role`: **`handoff`**, a job handed to another agent. Its `data` is `{agent, title, brief, sessionId, status, automationIds}` — `sessionId` is the *other* agent's conversation, which is where the live trail, its questions and the rules it wrote are read from; `status` is `working`/`asked`/`delivered`/`failed` and is an **open** string; `automationIds` fills as that agent saves rules. Nothing about the other conversation is copied into this one |
+| `DELETE /assistant/chat/:id` | `hub.ai` · never a key | end it and write down what it spent |
+| `POST /assistant/voice/session` | `hub.ai` · never a key | open a live **voice** session: `{sdp, sessionId?}` → `201 {answerSdp, audioRate, sessionId}`. `sdp` is the client's own **WebRTC offer** and is required, because that is the only transport a phone can hold: Live authenticates a WebSocket with the *project API key* and has no ephemeral client secret anywhere in the family, so the hub does the offer/answer exchange with the home's key and the client is handed **no credential at all** — a stronger containment than the expiring secret this route was first built around. The hub builds the whole session — model, voice, instructions, history, delegation mode — and never sends it to the app, so a prompt change or a configuration key this API grows next month reaches the microphone with no app release. `delegation.type` is **`client`**, which is the architecture in one field: the voice asks *this hub* for help rather than a model OpenAI hosts, so the home keeps its own agent, its own tools, its own transcript and whichever provider it picked. No `audio.format` is sent — WebRTC negotiates its own and refuses the field — and `audioRate` is the rate the app's graph is pointed at. `sessionId` is the assistant conversation to write into — **sent back** when the app already has one, since stopping and restarting the microphone on a page is one conversation rather than two, and minted fresh when it is absent; when it is sent, that conversation's last few exchanges are seeded into `session.input`, so pressing the microphone on a page you have been typing on continues one conversation. It grants nothing new — a home's transcripts are shared by design. When it is sent, that conversation's history is bounded in **characters as well as messages** — `session.input` is capped at 8,192 tokens as well as at 128 messages, and a transcript row holds up to 4,000 characters, so a count alone had a long conversation refused outright on every attempt. A `sessionId` belonging to **somebody else** in the home is `409 not_your_conversation`: reading a home's transcripts is shared by design and writing into one is not. Refuses `409 openai_not_configured` — a code of its own, and a real one: GPT-Live is OpenAI's and there is no substitute, so a home whose assistant answers perfectly well on Anthropic still cannot *speak* without an OpenAI key. `502 voice_unavailable` when OpenAI itself refuses, with their sentence in `detail` — a different screen from a `409`, which is something in this home's settings. **The hub then attaches its own sideband** to the same session (`wss://api.openai.com/v1/live/sessions/{id}/attach`, the home's key again) and that is where the delegation loop lives: client delegation says "I need help" and nothing else, so somebody has to assemble the request from the transcript and answer it — doing that on the phone added two LAN legs to the one thing on this surface measured in how fast a lamp goes off. The sideband owns three facts outright, on the API's own rule that two connections onto one session need one owner per action: **delegations** (the phone answers none), **the transcript** (`askAloud` writes the person's row and the answer, so a spoken exchange leaves exactly what a typed one does) and **what it cost** (`session.usage.updated` / `session.closed`, the seconds OpenAI will bill). Audio is deliberately not one of them: media stays on the phone's WebRTC connection. `POST /assistant/voice/said` and `POST /assistant/voice/ended` are **gone** with it — the phone wrote the transcript and measured the seconds with a stopwatch only because the hub was not in the session at all |
 | `GET /settings/timezone` · `PUT /settings/timezone` | floor · `automation.manage` | what "at ten in the evening" means. The system's zone seeds it and the database owns it; `400 unknown_timezone` for one `Intl` cannot use, refused here rather than taking every schedule down on every tick |
 | `GET /device-mappings` | `hub.ai` | the mapping library: one entry per device model, `{adapter, exposesHash, vendor, model, status, source, problems, endpoints, deviceIds, createdAt, updatedAt}` |
 | `GET /device-mappings/:exposesHash` | `hub.ai` | the download — an envelope naming the device, see [below](#the-device-mapping-library) |
@@ -194,7 +318,10 @@ than no button.
 | `POST /device-mappings/:exposesHash/repair` | `hub.ai` | hand a rejected descriptor to the agent with the complaints. `409 ai_not_configured` / `409 ai_disabled` / `409 nothing_to_repair`, `422 no_device` |
 | `PUT /settings/radio` | `hub.radio` | `{mode: "auto"\|"zigbee"\|"matter"\|"both"}` → `{budget, mode, matter, canRunBoth, modes, applying: true}`. Records a *request*; see below. It also hands back the hub's two automatic retries when `mode` is `"both"`. `both` is accepted on **any** board — `budget` is advice, not a ceiling — and is refused with 400 by a hub too old for it, which is why `radio.modes` exists |
 | `GET /settings/mqtt` | `hub.mqtt` | the broker's credentials: `{requiresPassword, host, port, baseTopic, accounts[]}`. Each account is `{id, username, password, recommended, title, summary, publish[], subscribe[]}`. `hub.mqtt.admin` **adds** the hub's own full-access account; without it only the limited one is returned. See [below](#the-mqtt-broker-asks-for-a-password) |
-| `GET /me` | floor | `{id, name, role: {id, key, name}, permissions, isOwner}` — who this token belongs to and what it may do. See [below](#roles-and-permissions-in-full) |
+| `GET /settings/wifi` | `hub.wifi` | the Wi-Fi networks this hub knows: `{available, reason?, networks: [{id, ssid, connected}], updatedAt?, bands?, maxNetworks, pending, lastChange?}`. `bands` is what the hub's radio can join (`"2.4"`, `"5"`, `"6"`). **No password ever comes back** — the hub never has one to return. See [below](#wi-fi-networks-settingswifi) |
+| `POST /settings/wifi/networks` | `hub.wifi` | `{ssid, passphrase, hidden?}` — tell the hub about a network to join when it is somewhere that network reaches. Nothing changes now. Answers with the outcome: `200 {…settings, change}` once the machine has applied it, `202` with `change.state: "pending"` if it has not got to it yet. `400` with a sentence in `detail` for a name or password Wi-Fi does not allow — including **no password**, which is refused. `409 wifi_network_exists`, `409 wifi_network_limit` (16), `409 wifi_change_pending`, `409 wifi_unsupported {reason}`, `409 wifi_change_failed {detail}` |
+| `DELETE /settings/wifi/networks/:id` | `hub.wifi` | forget a network. **`409 wifi_network_connected` for the one the hub is on now** — never offered behind a confirmation, because it would take the hub off its only network. `404 not_found`, and the same `409`s as above |
+| `GET /me` | floor | `{id, name, role: {id, key, name}, permissions, isOwner}` — who this token belongs to and what it may do. Through an [API key](#api-keys), `permissions` is what *the key* may do and `apiKey: {id, name, control, permissions, state, expiresAt}` says it is one; `role` and `isOwner` stay facts about the member. See [below](#roles-and-permissions-in-full) |
 | `GET /permissions` | floor | the catalog: `{key, group, title, summary}` per permission. The hub owns the wording |
 | `GET /roles` | floor | `[{id, key, name, builtin, permissions, memberCount, sortOrder}]` |
 | `POST /roles` · `PATCH /roles/:id` · `DELETE /roles/:id` | `role.manage` | `POST {name, permissions?}` → 201. `PATCH {name?, permissions?}`. `409 role_is_owner`, `409 role_is_builtin`, `409 role_in_use` |
@@ -205,7 +332,7 @@ than no button.
 
 ### Roles and permissions in full
 
-#### The sixteen permissions
+#### The eighteen permissions
 
 `GET /permissions` is the authority and carries a `title` and a `summary` for
 each. **Render those rather than shipping copy of your own** — it is the
@@ -229,9 +356,11 @@ it gates its own screens on.
 | `role.manage` | People |
 | `hub.radio` | Hub |
 | `hub.update` | Hub |
+| `hub.wifi` | Hub |
 | `hub.ai` | Hub |
 | `hub.mqtt` | Hub |
 | `hub.mqtt.admin` | Hub |
+| `hub.apikeys` | Hub |
 
 #### What the three built-in roles start with
 
@@ -245,11 +374,13 @@ it gates its own screens on.
 | `automation.manage` | ✓ | ✓ | |
 | `hub.radio` | ✓ | ✓ | |
 | `hub.update` | ✓ | ✓ | |
+| `hub.wifi` | ✓ | ✓ | |
 | `hub.ai` | ✓ | ✓ | |
+| `hub.apikeys` | ✓ | ✓ | |
 | `home.rename` · `device.remove` · `member.invite` · `member.remove` · `role.manage` | ✓ | | |
 | `hub.mqtt` · `hub.mqtt.admin` | ✓ | | |
 
-**Member is the old behaviour written down, with two deliberate exceptions.**
+**Member is the old behaviour written down, with four deliberate exceptions.**
 Those keys are, key for key, the routes that used to be open to any member; the
 five on the row below them are the ones that used to be owner-only. A hub that
 updates into this changes nothing about what anybody can do — the migration
@@ -278,6 +409,30 @@ that grants it to hubs that already exist — `ensureBuiltins()` inserts with
 `ON CONFLICT DO NOTHING` and would never reach a `member` row that is already
 there.
 
+`hub.wifi` is the third, on the `hub.update` argument again: the person carrying
+the hub to its new home is rarely the Mac that claimed it. It passes the three
+tests a default has to. **Bounded** — adding a network changes nothing until the
+hub is somewhere its current network has gone, and at home the home network
+still wins. **Destroys nothing that cannot be typed in again** — the one removal
+that would cost a trip to the Pi, the network it is connected through, is
+refused outright. **Named** — both changes write a `hub.wifi` row. Reading the
+list needs the key too rather than the floor, because the list is where the hub
+has been — and so does reading a device's network in `offlineElsewhere`, which
+narrows to `{}` without it rather than refusing. `0017` grants it to hubs that already exist, as `0006` did for
+`hub.ai`.
+
+`hub.apikeys` is the fourth, on the same reading of who lives in a home: the
+person who wants a lamp on a script, or an agent writing them a bridge, is the
+one standing in the house. It passes the three tests the way `hub.update` does.
+**Bounded** — a key carries its member's own authority narrowed and never more,
+so it adds a way in for what that person could already do. **Destroys
+nothing** — revoking one ends it on the next request and hangs up its streams,
+unlike a broker password. **Named** — making, changing and revoking a key each
+write a row, and what a key does is written as its member through it. Taking it
+from a role pauses every key that role's people hold, which is what makes it
+safe to grant: the switch that hands it out also stops it. `0018` grants it to
+hubs that already exist.
+
 **The two MQTT keys are neither exception, and they are the one place the
 "bounded cost" test comes out the other way.** They are newer than the rest of
 this table — the broker took anonymous connections when it was written — and
@@ -299,7 +454,7 @@ anybody's alone. It is a key at all, rather than the floor, because a camera
 shows *people*: a home with somebody staying decides whether they see the
 hallway. Nothing it guards existed before it, so updating takes nothing from
 anybody; it still needs the `member` row to hold it, so it travels with a
-migration (`0017`), the way `hub.ai` did.
+migration (`0019`), the way `hub.ai` did.
 
 **Guest is somebody staying in the house** — and a role with **no keys at all**,
 which is its honest shape rather than an oversight. They work the lights and keep
@@ -372,7 +527,9 @@ re-read `GET /invites` after deleting a role.
 
 Three ways in, and they answer the same question:
 
-- `GET /me` — `{id, name, role: {id, key, name}, permissions, isOwner}`.
+- `GET /me` — `{id, name, role: {id, key, name}, permissions, isOwner}`. Asked
+  through an [API key](#api-keys), `permissions` is what the key may do and
+  `apiKey` is present.
 - The WebSocket `hello` frame carries `permissions`, so a client knows in its
   first frame and never paints a control it is about to lose.
 - The `access` frame — [below](#what-you-may-do-access) — arrives behind `hello`
@@ -983,6 +1140,50 @@ reading a week later. The automatic clear writes nothing of its own: the device
 coming back already writes `device.online`, and two lines for one event is the
 burst the feed's whole shape exists to avoid.
 
+#### A device on another Wi-Fi (`offlineElsewhere`)
+
+A hub can be told about another Wi-Fi network before it is carried there, and
+when it arrives it joins that one. Its Wi-Fi accessories cannot follow: a
+Matter accessory is moved to another network by its administrator *while it is
+reachable*, and once the hub has gone it never is. So every one of them goes
+offline the moment the hub moves, and both apps drew a plain "Offline" under
+*Needs attention* over a plug that was exactly where it had been left. Found on
+a hub carried onto its owner's iPhone hotspot.
+
+A device in that state comes back carrying `offlineElsewhere`, and **presence
+is the answer**, as for `offlineExpected`. An app draws it as offline, says
+why, and **does not count it as something needing attention** — nothing in the
+house is broken, and it comes back by itself when the hub and the device are on
+the same network again. The hub claims it only when every one of these holds,
+because a device it covers is one the apps stop raising an alarm about:
+
+- the device is **offline** — one that answers is on a network the hub
+  reaches, whatever it is called;
+- it **said which Wi-Fi it is on** — a Matter accessory's own
+  `NetworkCommissioning` list, read from matter.js's cache, so it is known for
+  an accessory out of reach right now. Nothing else reports one yet;
+- the hub is on **Wi-Fi and only Wi-Fi** — a hub on a cable reaches a Wi-Fi
+  accessory through the router, whatever its radio is joined to;
+- the device's network is **one the hub holds a profile for, and not the one
+  it is on**. That is what makes it the hub having moved: an accessory paired
+  by this hub was given the network the hub was on at the time. And it keeps a
+  router with a name per band out of it — a hub on the 5 GHz name holds no
+  profile for the 2.4 GHz one its accessories use, so an accessory there that
+  goes offline is reported as offline.
+
+`offlineElsewhere.network` names the device's network **only to a member with
+`hub.wifi`** — the key that already guards the hub's own list of them, which is
+where it has been. Everybody else gets `offlineElsewhere: {}`: told that the
+device is on another network, not which. Narrowed rather than refused, like
+`activity.read`, because the field is what keeps every dashboard calm and the
+name is only a convenience. The WebSocket's `deviceUpserted` renders it the same
+way, per socket, asking at send time.
+
+Nothing is stored: the hub compares what the device last said with its own
+network list on every render, so it is right the moment the hub moves and gone
+the moment the device answers. An older app reads past the field and draws a
+plain "Offline", which is what it drew before.
+
 #### A radio switch in flight (`radio.applying`)
 
 Applying a radio **restarts the hub** — around seventy seconds of a closed port
@@ -1342,6 +1543,13 @@ what Zigbee2MQTT and every MQTT integration already call the device.
 `needsReview: true` marks devices whose automatic mapping was incomplete
 (see [ai-adaptation.md](ai-adaptation.md)).
 
+Two optional fields explain an offline device and are absent for nearly every
+one: `offlineExpected` (somebody said it is meant to be —
+[A device that is meant to be offline](#a-device-that-is-meant-to-be-offline))
+and `offlineElsewhere` (it is on a Wi-Fi network the hub is not on —
+[A device on another Wi-Fi](#a-device-on-another-wi-fi-offlineelsewhere)).
+Neither is counted as needing attention.
+
 `online` is **whether the hub can reach the device**, and it answers for the
 radio as well as for the device. A radio that is switched off, failed to start,
 or lost its Zigbee2MQTT bridge takes every device behind it `offline` — with a
@@ -1490,6 +1698,148 @@ two minutes.
 Taking something *away* is still guarded harder — a device, a member, the
 credential that spends their money. That line has not moved.
 
+### Wi-Fi networks (`/settings/wifi`)
+
+A hub is set up on one Wi-Fi and then carried somewhere else — a new flat, a
+house in the country — where it finds a network it has never heard of, joins
+nothing, and answers no app. These routes are how it is told about the other
+network **before** the move. NetworkManager already joins any network it holds a
+profile for, preferring the one it used most recently, so that is the whole of
+the fix: the hub stays on the network it is on today, and joins the new one the
+first time it powers up in range of it.
+
+**The hub records the request; it never applies it** — the shape of
+`PUT /settings/radio` and `POST /system/update`. The profiles are root's, so the
+hub writes one file into its own data directory, `gethome-wifi.path` notices,
+and `deploy/wifi-networks.sh` changes NetworkManager as root and writes back
+the list and the outcome. Unlike an update this is quick — a path unit and one
+`nmcli` call — so **the route waits for it** (up to twenty seconds) and answers
+with what happened, rather than a receipt to poll.
+
+```jsonc
+// GET /settings/wifi
+{
+  "available": true,
+  "networks": [
+    { "id": "1f0c…", "ssid": "Flat 3", "connected": true },   // the one it is on: first
+    { "id": "8a2d…", "ssid": "Dacha", "connected": false }
+  ],
+  "updatedAt": "2026-10-07T09:12:44Z",  // when the list was last read off the machine
+  "bands": ["2.4"],                     // what the radio can join — a Pi Zero 2 W
+  "maxNetworks": 16,
+  "pending": false,                     // a change is in hand and not yet answered
+  "lastChange": {                       // what became of the last one, from anybody
+    "id": "…", "action": "add", "state": "applied", "ssid": "Dacha",
+    "networkId": "8a2d…", "at": "2026-10-07T09:12:44Z"
+  }
+}
+```
+
+`POST /settings/wifi/networks` and `DELETE /settings/wifi/networks/:id` answer
+with the same object plus `change` — `200` and `change.state: "applied"`, or
+`202` and `"pending"` on a board too busy to finish inside the wait (the change
+is still queued; `GET` reports it when it lands). A refusal is the usual
+`{error}`. Eight things a client has to know.
+
+- **`available` is the machine, not the build.** `false` with
+  `reason: "no-networkmanager"` is a system that manages Wi-Fi some other way —
+  Bullseye's `wpa_supplicant`, Ubuntu's netplan — and changing that is not an
+  app's business; `"not-installed"` is a hub whose installer predates this, and
+  updating it is the fix. `GET /hub` carries the same `wifiNetworks` block, read
+  once at start, so an app can decide whether to draw the section without a
+  second request. A hub without either is older still.
+- **The password never comes back, and is never stored as typed.** The hub turns
+  it into the network's 64-hex WPA key before anything is written — the
+  derivation Raspberry Pi Imager and gethome studio use for a card, so the
+  passphrase somebody uses everywhere is not on the Pi. `passphrase` may also
+  *be* that 64-hex key, which is what a card carries. The cost is a **WPA3-only**
+  network, whose handshake needs the passphrase; WPA2 and mixed-mode networks —
+  every home router's default — join with the key.
+- **`bands` is what the hub's radio can join, and an app says so before a
+  network is added.** A Pi Zero 2 W and a Pi 3B answer `["2.4"]`, and a hub
+  given a 5 GHz network stores it, answers `applied`, and never joins it — the
+  hub cannot see the network it is being told about, so this is advice in the
+  form rather than a refusal. The case that found it: an iPhone 12 or later
+  runs its Personal Hotspot on 5 GHz unless *Maximize Compatibility* is on, and
+  a hub carried onto its owner's hotspot stayed off the network until it was.
+  Read from NetworkManager's own report of the radio on every association,
+  never from a board name; **absent** means the hub cannot say (a
+  build older than the field, an `nmcli` that does not report bands, no Wi-Fi
+  device), and an app then says nothing.
+- **An open network is refused** (`400`, with the reason in `detail`). This API is
+  plain HTTP with bearer tokens, and on a network with no password every token
+  a phone sends is readable by anybody in range.
+- **The network the hub is connected through cannot be removed** —
+  `409 wifi_network_connected`, from the hub and again from the root script
+  against NetworkManager itself. Deleting an active profile takes the
+  connection down with it, and a hub off its only network is one no app can
+  reach to put it back. An app should not offer the button on that row at all.
+- **One profile per name.** Adding a name the hub already knows is
+  `409 wifi_network_exists`; changing a saved network's password is remove,
+  then add — which is why the connected network's password cannot be changed
+  from here either.
+- **`hidden` is opt-in, and should stay that way.** It is for a network whose
+  router does not announce its name, and it costs something: to find one, the
+  hub calls the name out when it scans, wherever it is — NetworkManager's own
+  reference calls those probes "distinctly recognizable on the air" — and a
+  device heard asking for a network by name invites somebody to stand one up
+  under that name and collect a handshake to attack the password offline.
+  Marking every network hidden would join just as well, since a router that
+  announces its name answers a probe for it too, and would pay that cost for
+  every network to spare the rare hidden one a switch. An app should ask it as
+  something a person can check from anywhere — *did you have to type its name
+  to join it?* — because the network being added is usually one they are not
+  in range of.
+- **One change at a time.** `409 wifi_change_pending` while a request is written
+  and unconsumed (a request nothing picks up within a minute is treated as
+  abandoned), and after a `202` until that change's own result lands (two
+  minutes at most), so a second change cannot write its result over the first
+  before `GET` has reported it. `pending` is `true` for the whole of that. `409 wifi_change_failed` carries NetworkManager's own sentence in
+  `detail` for the refusals that have no better name.
+
+The move itself changes the hub's address, and that is the client's half. The
+hub advertises `_gethome._tcp` with its `id` TXT record on whatever network it
+joins, and its address there is a new DHCP lease — so an app has to find a hub
+it has saved **by that id** and take the new address, rather than trust the one
+it saved at the claim.
+
+#### Following a hub to a new address (`POST /hub/proof`)
+
+The `id` in an mDNS record and in `GET /hub` is public, and anything on the LAN
+can announce it — so before an app writes a new address down, and before it
+sends a token there, it asks that address to prove it is the hub:
+
+```jsonc
+// POST /hub/proof — no Authorization header
+{ "nonce": "<64 hex, random per attempt>",
+  "address": "192.168.1.60:8420",        // exactly the host:port the app dialled
+  "tokenId": "<64 hex>" }                // sha256 of the raw sha256 of the token
+// 200
+{ "hubId": "…", "proof": "<64 hex>" }
+```
+
+`proof` is HMAC-SHA256, keyed by the **raw 32 bytes of sha256(token)** — which
+is all the hub stores of a token — over the UTF-8 bytes of
+`gethome-hub-proof\n<hubId>\n<nonce>\n<address>`. The app computes the same
+and compares, in constant time. Three rules.
+
+- **The hub signs only for an IPv4 address it holds right now, on the port
+  the challenge arrived on.** That is what stops an impostor relaying the
+  challenge to the real hub: the relayed `address` is the impostor's, which
+  the real hub refuses, and rewriting it to the real hub's makes the proof
+  cover an address the app never dialled. The port is checked as well because
+  the host alone was not enough. Anything able to listen on another port of
+  the hub's own machine could otherwise relay a challenge naming `<hub>:9999`
+  and be signed for.
+- **No answer but a valid proof moves an app.** `403 proof_refused`, a `404`
+  from a hub older than this route, a timeout and a proof that does not match
+  all mean "not proven", and the app keeps the address it has. There is no
+  capability on `GET /hub` for this on purpose: the address in question is the
+  one that cannot be trusted to say so.
+- **Nothing secret travels.** `tokenId` is a one-way function of the stored
+  hash, and the nonce and address are the app's own. The token goes to the new
+  address only after the proof has matched.
+
 ### The Zigbee join window
 
 `POST /zigbee/permit-join` opens the network for `seconds` and the hub owns
@@ -1536,25 +1886,30 @@ the second provider reads exactly what it read before — plus a per-provider ha
 
   "providers": {
     "anthropic": { "hasKey": true, "model": "claude-opus-5-5",
-                   "models": [ { "id": "claude-opus-5-5", "label": "Opus 5.5",
-                                 "note": "Anthropic’s most thorough model.",
+                   "models": [ { "id": "claude-fable-5-1", "label": "Fable 5.1", … },
+                               { "id": "claude-opus-5-5", "label": "Opus 5.5",
+                                 "note": "Thorough, at two fifths of Fable’s price.",
                                  "recommended": true } ] },
-    "openai":    { "hasKey": true, "model": "gpt-6-sol",
+    "openai":    { "hasKey": true, "model": "gpt-6.1-sol",
                    "models": [ { "id": "gpt-6-astra", "label": "GPT-6 Astra", … },
-                               { "id": "gpt-6-sol", "label": "GPT-6 Sol", …, "recommended": true } ] }
+                               { "id": "gpt-6.1-sol", "label": "GPT-6.1 Sol", …, "recommended": true } ] }
   },
   "mapping":   { "provider": "anthropic", "choosable": true, "enabled": true },
   "assistant": { "model": "claude-opus-5-5", "provider": "anthropic", "choosable": true,
-                 "models": [ { "id": "claude-opus-5-5", "label": "Opus 5.5",
-                               "note": "The most capable Claude. …", "recommended": true },
+                 "models": [ { "id": "claude-fable-5-1", "label": "Fable 5.1", … },
+                             { "id": "claude-opus-5-5", "label": "Opus 5.5",
+                               "note": "Best when it has to work things out, …", "recommended": true },
                              { "id": "claude-sonnet-5-5", "label": "Sonnet 5.5",
-                               "note": "Quicker, and half the price of Opus 5.5." } ],
-                 "choices": { "anthropic": [ { "id": "claude-opus-5-5", … },
-                                             { "id": "claude-sonnet-5-5", … } ],
+                               "note": "Quicker, and half the price of Opus 5.5." },
+                             { "id": "claude-haiku-5-5", "label": "Haiku 5.5", … } ],
+                 "choices": { "anthropic": [ { "id": "claude-fable-5-1", … },
+                                             { "id": "claude-opus-5-5", … },
+                                             { "id": "claude-sonnet-5-5", … },
+                                             { "id": "claude-haiku-5-5", … } ],
                               "openai":    [ { "id": "gpt-6-astra", "label": "GPT-6 Astra", … },
-                                             { "id": "gpt-6-sol", "label": "GPT-6 Sol", … },
+                                             { "id": "gpt-6.1-sol", "label": "GPT-6.1 Sol", … },
                                              { "id": "gpt-6-luna", "label": "GPT-6 Luna", … } ] } },
-  "automations": { "model": "gpt-6-sol", "provider": "openai", "choosable": true, "models": [ … ], "choices": { … } },
+  "automations": { "model": "gpt-6.1-sol", "provider": "openai", "choosable": true, "models": [ … ], "choices": { … } },
   "portraits": { "model": "gpt-image-2.5-flare", "maxPerDevice": 6, "budgetBytes": 314572800 }
 }
 ```
@@ -1592,25 +1947,25 @@ than its default. The cheaper tier was retired from it after it produced
 descriptors the hub had to reject and one that named `custom` as an outlet's
 primary capability — a paid run whose result was a tile with no control on it,
 cached against the device *model* for ever. That argument is about *cheaper*
-models, so OpenAI offers GPT-6 Astra above GPT-6 Sol (the default) and Anthropic
-offers Opus 5.5 alone. Writing it is `anthropicModel` / `openaiModel`, with
-`mappingProvider` beside it when the vendor changes too — one `PATCH` carries
-both, and the hub writes the models before the vendor so neither half is
-refused for the other. Send the vendor only when it actually changes: a
-one-key home that stores one has pinned it, and adding a second key later no
-longer moves recognition to the default vendor.
+models, so OpenAI offers GPT-6 Astra above GPT-6.1 Sol (the default) and
+Anthropic offers Fable 5.1 above Opus 5.5 (the default). Writing it is
+`anthropicModel` / `openaiModel`, with `mappingProvider` beside it when the
+vendor changes too — one `PATCH` carries both, and the hub writes the models
+before the vendor so neither half is refused for the other. Send the vendor only
+when it actually changes: a one-key home that stores one has pinned it, and
+adding a second key later no longer moves recognition to the default vendor.
 
 **`model` is what will run, not what is stored — and a retired model is
 succeeded.** Every model the hub has known carries the model that replaced it
 (Opus 5 → Opus 5.5; Sonnet 5 → Sonnet 5.5; GPT-5.6 Sol, the `gpt-5.6` alias and
-GPT-5.6 Terra → GPT-6 Sol), and a stored choice counts only while it is still
-offered: otherwise the hub runs the first model along that chain which is, and
-only where there is none the vendor's default. A successor is always the same
-vendor's — the vendor was a choice somebody made, the retired id was not. **This
-is resolved on every read and never written back**, which is what makes an
-update all it takes and a rollback harmless: the previous build, which
-`install.sh` falls back to when a new one fails its health check, reads the
-column exactly as it always did. The flat `model`, `anthropic.model` and
+GPT-5.6 Terra → GPT-6 Sol → GPT-6.1 Sol), and a stored choice counts only while
+it is still offered: otherwise the hub runs the first model along that chain
+which is, and only where there is none the vendor's default. A successor is
+always the same vendor's — the vendor was a choice somebody made, the retired id
+was not. **This is resolved on every read and never written back**, which is
+what makes an update all it takes and a rollback harmless: the previous build,
+which `install.sh` falls back to when a new one fails its health check, reads
+the column exactly as it always did. The flat `model`, `anthropic.model` and
 `openai.model` are those raw columns and have never been what runs; nothing
 should draw them.
 
@@ -1978,10 +2333,27 @@ The kinds: `device.command`, `device.added`, `device.removed`,
 `member.left`, `member.removed`,
 `member.renamed`, `member.role-changed`, `role.added`, `role.renamed`,
 `role.changed`, `role.removed`, `home.renamed`, `hub.radio`,
-`hub.radio-stood-down`, `hub.radio-restored`, `hub.mqtt`, `adapter.error`,
+`hub.radio-stood-down`, `hub.radio-restored`, `hub.mqtt`, `hub.update`,
+`hub.wifi`, `adapter.error`,
 `zigbee.interview-failed`, `zigbee.left`, `zigbee.permit-join`,
-`zigbee.permit-join-closed`, `matter.commission`. Treat the list as open — a
-client must render an unknown kind from `message` rather than drop it.
+`zigbee.permit-join-closed`, `matter.commission`, `apikey.added`,
+`apikey.changed`, `apikey.removed`, `automation.added`, `automation.renamed`,
+`automation.removed`, `automation.ran`, `automation.note`,
+`automation.disabled`. Treat the list as open — a client must render an
+unknown kind from `message` rather than drop it.
+
+**What an [API key](#api-keys) does is written as its member, and says it came
+through one.** `memberId` and `data.memberName` are the member's — the row is
+still somebody's, and a member without `activity.read` still sees it among their
+own — and `data.via: "api"`, `data.apiKeyId` and `data.apiKeyName` say which
+key. The **sentence** names the key, because `message` is all an app that has
+never heard of keys shows: `Anna’s “Node-RED” · Desk lamp: power` rather than a
+line that reads as Anna's phone at three in the morning. A scene a key pressed,
+or a mode it switched, says so the same way, in its run's `cause` and its
+`automation.ran` row. The three `apikey.*` kinds are things
+done *to* a key by a person, so they carry `data.apiKeyId`/`apiKeyName` with no
+`via`; `apikey.removed` adds `subjectName` when it was somebody else's key, and
+`apikey.changed` adds `previousName` on a rename.
 
 The five that move access — `member.role-changed` and the `role.*` four —
 carry `data.memberName` (who did it) and `data.roleName`, with `previousName`
@@ -1998,6 +2370,18 @@ what was touched (`roomName`, `zoneName`, `deviceName`), with `previousName`
 on the renames and `roomName` absent on a device taken out of every room. See
 [what a structural edit records](#what-a-structural-edit-writes-to-the-log)
 for the two things that are deliberately *not* logged.
+
+`automation.ran` is somebody pressing a scene or switching a mode, written once
+the run has sent a command — a rule firing by itself never reaches this log
+(see [automations](automations.md#what-is-written-down)). It carries
+`automationId`, `automationName` and `commands`, and `memberId` is whoever
+pressed it, so a member without `activity.read` still finds their own presses;
+through a key it adds the key's three fields as above. It is the one row about
+somebody that carries **no** `data.memberName`: the gethome iPhone app titles a
+row that names no device by that field, and this row's sentence already begins
+with the presser's name. `automation.disabled` is the circuit breaker switching
+a rule off and names nobody; `automation.note` is a rule's own `logActivity`
+line.
 
 The last three, plus `hub.radio`, all carry `data.memberName`: they are the
 things any member may do to the whole home, so the log is where it says which
@@ -2167,11 +2551,13 @@ table and a different control, not a widening of this one.
 
 ## WebSocket
 
-`GET /api/v1/ws?token=<token>` upgrades to a WebSocket. One JSON frame per
-message. These go to every authorized socket:
+`GET /api/v1/ws` upgrades to a WebSocket, authorized by the
+`Authorization` header or by `?token=<token>` — an [API key](#api-keys) is taken
+either way here, and only here. One JSON frame per message. These go to every
+authorized socket:
 
 ```
-{"type":"hello","hubId","name","apiVersion":1,"streams":["mqtt","zigbee","ai"],"permissions":[…]}
+{"type":"hello","hubId","name","apiVersion":1,"streams":["mqtt","zigbee","ai"],"permissions":[…],"apiKey"?:{id,name,control}}
 {"type":"access","role":{id,key,name},"permissions":[…],"roles":[…]}   what *you* may do
 {"type":"state","deviceId","endpointId","state":{…}}    full canonical state after each change
 {"type":"deviceUpserted","device":{…}}                  new device, structure/name change, or its web blocks
@@ -2353,6 +2739,20 @@ and then:
 {"type":"assistantChat","chat":{…the same shape…}}      the assistant, on the same stream
 ```
 
+**A socket opened with an [API key](#api-keys) is the key's view of all of
+it.** `hello` carries `apiKey` and the key's own `permissions`, the `access`
+frame is the key's, and the activity it hears is narrowed by the key's
+`activity.read`. `mqtt` and `ai` are never available to a key — the broker's
+traffic is `hub.mqtt`'s and the mapping agent's runs are `hub.ai`'s, neither of
+which a key may hold — and on the `automations` stream a key hears the rules
+firing (`automationRun`) and **never a conversation**: `automationChat` and
+`assistantChat` are what people in the home said. A key that is revoked, or
+whose member is removed, is closed with `4001` at once; one that expires or is
+paused by a role edit is closed with `4001` on the next frame the hub would have
+sent it. A key holds at most five streams — a sixth is closed with `1008` — and
+one opened faster than the key's rate allows is closed with `1013`, "try again
+later".
+
 **The assistant rides the `automations` stream too, deliberately.** A job the
 assistant hands over is an *automations* conversation, so an app drawing a
 handoff card has to receive both kinds of frame for one screen — asking it to
@@ -2451,7 +2851,9 @@ been missed) — but **not on `4001`**, which is the hub saying this token is no
 good. It carries two cases and neither is fixed by trying again: a token that
 never authenticated, and one belonging to a member who has since been removed
 or left, whose live socket is closed with the same code the moment their row
-goes. Treat it as a stop, and say so; every other close is worth retrying.
+goes. An [API key](#api-keys) that is revoked, expired or paused is the same case
+and gets the same code. Treat it as a stop, and say so; every other close is
+worth retrying — `1013` after a pause.
 
 ## Errors
 
@@ -2460,6 +2862,15 @@ goes. Treat it as a stop, and say so; every other close is worth retrying.
 protocol-level refusals (unsupported command, adapter disabled,
 `cannot_remove_owner`, `cannot_change_owner`, `not_owner`, `role_is_owner`,
 `role_is_builtin`, `role_in_use`).
+
+Through an [API key](#api-keys) there are a few more, each for a different fix:
+`401 {error:"unauthorized", reason}` with `reason` one of `key_expired`,
+`key_suspended` and `key_in_query`; `403 {error:"key_not_allowed", permission?}`
+for a route no key may use — with the permission when it is one no key may
+hold; `403 {error:"key_read_only"}` for working the home with a key that has no
+`control`; and `429 {error:"rate_limited", retryAfterMs}` with `Retry-After`.
+Making and changing keys adds `400 not_grantable`, `400 needs_control`,
+`403 not_your_key` and `409 too_many_keys`.
 
 **A refusal names the permission**, because "the hub said no" leaves a person
 with no idea what to ask for; turn it into a sentence naming the thing, not the

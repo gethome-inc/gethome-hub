@@ -44,6 +44,13 @@ export interface AdapterDeviceDescriptor {
   needsReview?: boolean;
   /** How it was placed, and what was left over. */
   recognition?: DeviceRecognition;
+  /**
+   * The Wi-Fi network this device is itself joined to, as the device says —
+   * absent for anything not on Wi-Fi, or that has not said. A fact about the
+   * device rather than the hub's network: the hub compares the two to say a
+   * device is offline because they are apart (`core/device-network.ts`).
+   */
+  wifiNetwork?: string;
 }
 
 /**

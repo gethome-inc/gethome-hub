@@ -327,8 +327,8 @@ describe('the mapping agent on OpenAI', () => {
   it('bills a cached prompt once, at the cache rate', async () => {
     queue(
       ok([submitCall(validDescriptor)], {
-        input_tokens: 1_000_000,
-        input_tokens_details: { cached_tokens: 1_000_000 },
+        input_tokens: 100_000,
+        input_tokens_details: { cached_tokens: 100_000 },
         output_tokens: 0,
       }),
     );
@@ -336,22 +336,45 @@ describe('the mapping agent on OpenAI', () => {
     // Named rather than the default, so the arithmetic below is about the
     // cache rate and not about whichever model the default happens to be.
     await agent('gpt-6-sol').generate('system', 'user', { onStats: (stats) => (cost = stats.costUsd) });
-    // A million cached input tokens at a tenth of $2, and nothing else.
-    expect(cost).toBeCloseTo(0.2, 5);
+    // A hundred thousand cached input tokens at a tenth of $2, and nothing else.
+    expect(cost).toBeCloseTo(0.02, 5);
   });
 
   it('counts a cache write at its documented cache-write rate', async () => {
     queue(
       ok([submitCall(validDescriptor)], {
-        input_tokens: 2_000_000,
-        input_tokens_details: { cache_write_tokens: 1_000_000 },
+        input_tokens: 200_000,
+        input_tokens_details: { cache_write_tokens: 100_000 },
         output_tokens: 0,
       }),
     );
     let cost = -1;
     await agent('gpt-6-sol').generate('system', 'user', { onStats: (stats) => (cost = stats.costUsd) });
-    // One million regular input tokens ($2) plus one million cache-write
-    // tokens ($2.50 = 1.25x the input rate).
-    expect(cost).toBeCloseTo(4.5, 5);
+    // A hundred thousand regular input tokens ($0.20) plus a hundred thousand
+    // cache-write tokens ($0.25 = 1.25x the input rate).
+    expect(cost).toBeCloseTo(0.45, 5);
+  });
+
+  /**
+   * GPT-6 bills a prompt past 272K tokens at twice its input rate and one and
+   * a half times its output rate — for that whole request, and only that one.
+   * A run re-sends its whole conversation every turn, so its turns added up
+   * cross that line long before any one prompt does: a run priced from its
+   * running total was billed the dearer rates for prompts nobody sent.
+   */
+  it('prices each turn on its own prompt, never on the run’s running total', async () => {
+    const turn = (input: number) => ({ input_tokens: input, output_tokens: 0 });
+    queue(ok([reasoning(), prose()], turn(200_000)), ok([reasoning('rs_2'), submitCall(validDescriptor)], turn(200_000)));
+    let cost = -1;
+    await agent('gpt-6.1-sol').generate('system', 'user', { onStats: (stats) => (cost = stats.costUsd) });
+    // Two prompts of 200K at $2 — not one of 400K at $4.
+    expect(cost).toBeCloseTo(0.8, 5);
+
+    sent.length = 0;
+    replies.length = 0;
+    queue(ok([submitCall(validDescriptor)], { input_tokens: 300_000, output_tokens: 10_000 }));
+    await agent('gpt-6.1-sol').generate('system', 'user', { onStats: (stats) => (cost = stats.costUsd) });
+    // One prompt past the line: 300K at $4, and 10K out at $15.
+    expect(cost).toBeCloseTo(1.35, 5);
   });
 });

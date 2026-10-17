@@ -1,5 +1,16 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -68,6 +79,9 @@ function runUpdate(options: {
   /** Explicitly undefined-able: "this machine has no gethome-hubctl" is a case. */
   hubctl?: string | undefined;
   hubAnswers?: string | null;
+  /** Plant a name in <data>/update as a symlink before the run, to prove root
+   *  does not follow it. The target is whatever the test wants left untouched. */
+  plantLink?: { name: string; target: string };
 }): Outcome {
   const conf = tmp();
   const data = tmp();
@@ -95,6 +109,10 @@ function runUpdate(options: {
       : `#!/usr/bin/env bash\nprintf '{"hubId":"h","name":"Home","version":"0.1.0","build":"%s","apiVersion":1}\\n' ${JSON.stringify(answers)}\n`,
     { mode: 0o755 },
   );
+
+  if (options.plantLink !== undefined) {
+    symlinkSync(options.plantLink.target, path.join(updateDir, options.plantLink.name));
+  }
 
   const id = options.id ?? 'run-0123456789abcdef';
   writeFileSync(path.join(updateDir, 'request'), `${id}\n`);
@@ -323,5 +341,71 @@ exit 1
     });
     expect(status?.state).toBe('failed');
     expect(status?.error).toContain('another update is already running');
+  });
+});
+
+describe('root, in the hub’s own data directory', () => {
+  /**
+   * The runner is root, `Type=oneshot`, with no sandboxing, and everything it
+   * reads or writes in `<data>/update` is a name the hub's unprivileged account
+   * owns. Root opening one follows whatever the account planted there — a
+   * `last.log` linked to `/etc/profile.d/x.sh`, say, into which root then writes
+   * the installer's output. So every one of those reads and writes is done as
+   * the account (`as_hub`), the rule `deploy/wifi-networks.sh` already follows.
+   * Pinned against the source, because this only ever runs for real on a Pi.
+   */
+  it('routes every <data> read and write through as_hub, with no chmod through a path', () => {
+    const script = readFileSync(SCRIPT, 'utf8')
+      .split('\n')
+      .filter((line) => !line.trimStart().startsWith('#'))
+      .join('\n');
+    // No chmod at all — a chmod follows a planted link to the target's mode, and
+    // the hub's own files take their mode from the account's umask instead.
+    expect(script).not.toMatch(/\bch(mod|own|grp)\b/);
+    // The request, the status file and the log all go through the account.
+    expect(script).toMatch(/as_hub cat "\$REQUEST"/);
+    expect(script).toMatch(/as_hub rm -f "\$REQUEST"/);
+    expect(script).toMatch(/\| as_hub sh -c/); // status.json, whole-file + rename
+    expect(script).toMatch(/as_hub sh -c 'cat >> "\$1"'/); // log_line
+    expect(script).toMatch(/as_hub sh -c 'umask 022; : > "\$1"'/); // the log truncate
+    expect(script).toMatch(/setpriv --reuid=/);
+    // And root does not reach into the log or status itself any more.
+    expect(script).not.toMatch(/[^_]> "\$LOG_FILE"/);
+    expect(script).not.toMatch(/>> "\$LOG_FILE"/);
+    expect(script).not.toMatch(/> "\$STATUS_FILE\.tmp"/);
+    expect(script).not.toMatch(/< "\$REQUEST"/);
+  });
+
+  /**
+   * And shown, not just read: plant the status writer's *old* fixed temp name as
+   * a link to a file outside the directory and run a clean update. The old code
+   * wrote the status through `status.json.tmp` and `chmod`-ed it, so a link
+   * there handed root's pen to the target; the new writer uses a pid-suffixed
+   * temp it creates itself and renames into place, so the planted name is never
+   * opened and the target keeps its content and its mode. Run as the same user
+   * the test suite is — `as_hub` then runs the command directly — so what this
+   * proves is the *mechanism* (a name root no longer writes through), not the
+   * privilege drop that backs it on the Pi.
+   */
+  it('does not write through a link left where its temp file used to be', () => {
+    const outside = tmp();
+    const sentinel = path.join(outside, 'root-only');
+    writeFileSync(sentinel, 'KEEP\n');
+    chmodSync(sentinel, 0o600);
+
+    const { status, updateDir } = runUpdate({
+      hubctl: HAPPY,
+      plantLink: { name: 'status.json.tmp', target: sentinel },
+    });
+
+    // The update still ran and wrote its status the new way.
+    expect(status?.state).toBe('succeeded');
+    // The planted name was never followed: the target is untouched, content and
+    // mode both. (The old code clobbered the content and chmod-ed it to 0644.)
+    expect(readFileSync(sentinel, 'utf8')).toBe('KEEP\n');
+    expect(statSync(sentinel).mode & 0o777).toBe(0o600);
+    // The link is still a link where it was planted — nothing wrote through it,
+    // and nothing renamed it onto status.json the way the old temp name was.
+    expect(lstatSync(path.join(updateDir, 'status.json.tmp')).isSymbolicLink()).toBe(true);
   });
 });

@@ -303,6 +303,64 @@ export const tokens = sqliteTable('tokens', {
   lastUsedAt: integer('last_used_at', { mode: 'timestamp_ms' }),
 });
 
+/**
+ * A member's keys for their own software — a script, a bridge, an AI agent.
+ *
+ * **A table of its own, not more rows in `tokens`, and the reason is the
+ * rollback.** `install.sh` puts the previous release back when a build fails
+ * its health check, by which time this table exists — and that build has never
+ * heard of it. Here, it ignores the table and every key fails closed: a 401,
+ * the integration stops, nothing is done. As rows in `tokens` the older build
+ * would have accepted each key as the member's own token, with none of the
+ * narrowing below — a read-only key quietly able to do everything its member
+ * can, for as long as the failed update lasted.
+ *
+ * A key carries its member's authority, narrowed: `control` and `permissions`
+ * are what it was *given*, and what it may actually do is asked live against
+ * the member's role on every request (`AccessService.canThrough`), so a person
+ * moved to a smaller role narrows their keys at once. The cascade is real —
+ * this is a `CREATE TABLE`, so SQLite accepts the action — and removing a
+ * member takes their keys with the row.
+ *
+ * Only the sha256 of the secret is stored, like a token's; `hint` is its last
+ * four characters, which is what lets a person tell two keys apart without the
+ * hub keeping anything that would let somebody use one.
+ */
+export const apiKeys = sqliteTable(
+  'api_keys',
+  {
+    id: uuidPk(),
+    memberId: text('member_id')
+      .notNull()
+      .references(() => members.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    /** sha256 hex of the whole secret, prefix included. */
+    keyHash: text('key_hash').notNull().unique(),
+    hint: text('hint').notNull(),
+    /** Whether it may work the home — commands, scenes, modes, favorites. */
+    control: integer('control', { mode: 'boolean' }).notNull().default(false),
+    /**
+     * `PermissionKey[]` as JSON — the grantable permissions it was given.
+     * Written explicitly on every insert rather than defaulted, and read back
+     * through the same allowlist, so a key a newer build wrote is never read
+     * as holding more than this build would grant.
+     */
+    permissions: text('permissions', { mode: 'json' }).notNull(),
+    createdAt: createdAt(),
+    /** Null is a key that does not expire. */
+    expiresAt: integer('expires_at', { mode: 'timestamp_ms' }),
+    /**
+     * When and from where it was last used — written at most hourly per key,
+     * for the reason `tokens.last_used_at` is: every request through a key
+     * would otherwise be a row write on an SD card. The hub holds the exact
+     * answer in memory and serves that.
+     */
+    lastUsedAt: integer('last_used_at', { mode: 'timestamp_ms' }),
+    lastUsedFrom: text('last_used_from'),
+  },
+  (table) => [index('api_keys_member').on(table.memberId)],
+);
+
 export const invites = sqliteTable('invites', {
   id: uuidPk(),
   /** sha256 hex of the 8-digit invite code. */

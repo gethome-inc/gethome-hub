@@ -147,6 +147,44 @@ fi
 command -v systemctl >/dev/null 2>&1 \
   || fail "This installer needs systemd, which every current Raspberry Pi OS, Debian and Ubuntu has. Install the hub by hand on a system without it — see deploy/ in the repository."
 
+# Run a command as the hub's account, for anything that touches the hub's own
+# data directory — making those directories, reading the pairing code, writing
+# the files that tell the hub what plumbing it has. Root runs only what needs
+# root. The account owns that directory, so every name in it is whatever the
+# account made it, and root following one follows whatever was planted there: a
+# link from a file to one only root may touch, or a directory pointed elsewhere
+# so the `chmod` after it changes the target's mode. Done as the account, a
+# planted link reaches only what that account could reach already — `as_hub` in
+# deploy/wifi-networks.sh and deploy/update-runner.sh, for the same reason.
+# setpriv first (a plain setresuid, no PAM session), then runuser, both
+# util-linux. (`chown -R` stays root's: without -H or -L it changes a link
+# itself and never descends through one.)
+as_service_user() {
+  local uid gid
+  uid="$(id -u "$SERVICE_USER" 2>/dev/null)" || return 1
+  gid="$(id -g "$SERVICE_USER" 2>/dev/null)" || return 1
+  if command -v setpriv >/dev/null 2>&1; then
+    $SUDO setpriv --reuid="$uid" --regid="$gid" --clear-groups -- "$@"
+  elif command -v runuser >/dev/null 2>&1; then
+    $SUDO runuser -u "$SERVICE_USER" -- "$@"
+  else
+    return 1
+  fi
+}
+
+# A file in the hub's own directories, read as the hub's account: its contents
+# when it is a regular file, and a failure with nothing printed otherwise —
+# missing, unreadable, or something else at that name (a FIFO would hold the
+# installer for ever). As the account for the reason above, and for a second
+# one that is easy to miss: run by a login user with sudo — `curl … | bash`, or
+# `gethome-hubctl update` without sudo — the installer cannot see into
+# /var/lib/gethome at all once "Accounts and directories" has made it 0750, so a
+# check it made in its own name would find nothing there and say so.
+read_hub_file() {
+  as_service_user test -f "$1" 2>/dev/null || return 1
+  as_service_user cat "$1" 2>/dev/null
+}
+
 # ── System ─────────────────────────────────────────────────────────────────
 step system "Checking this machine…"
 
@@ -605,9 +643,16 @@ if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
 fi
 # Serial access for a Zigbee coordinator, without running anything as root.
 $SUDO usermod -aG dialout "$SERVICE_USER" >/dev/null 2>&1 || true
-$SUDO mkdir -p "$INSTALL_DIR" "$DATA_DIR" "$DATA_DIR/update" "$Z2M_DATA_DIR" "$CONF_DIR"
+# INSTALL_DIR and CONF_DIR are root's own. The hub's tree under /var/lib/gethome
+# is the hub account's, so root makes only the top of it and hands it over, and
+# the account makes the rest: a name under it the account replaced with a link
+# is then one root never follows — as `mkdir -p` and `chmod` both do. `chown -R`
+# stays root's; without -H/-L it changes a link itself and never descends one.
+$SUDO mkdir -p "$INSTALL_DIR" "$CONF_DIR" /var/lib/gethome
+$SUDO chown "$SERVICE_USER:$SERVICE_USER" /var/lib/gethome
+as_service_user mkdir -p "$DATA_DIR" "$DATA_DIR/update" "$Z2M_DATA_DIR"
 $SUDO chown -R "$SERVICE_USER:$SERVICE_USER" /var/lib/gethome
-$SUDO chmod 0750 /var/lib/gethome "$DATA_DIR"
+as_service_user chmod 0750 /var/lib/gethome "$DATA_DIR"
 
 # ── Downloads are checked against a digest ─────────────────────────────────
 # Both things this script fetches and then *executes* — the hub bundle and the
@@ -1437,9 +1482,22 @@ UNIT
 # disproved, and kept afterwards "because it costs nothing" — but the gateway
 # is a neighbour like any other now and is re-checked with the rest. A wired
 # hub gets none of this, for the reason it gets no dispatcher.
+#
+# **And every round ends by asking whether anything answered at all.** A hub
+# whose Wi-Fi stays connected while nothing gets through — seen once, for fifty
+# minutes, with NetworkManager and the kernel saying nothing — is one no amount
+# of asking can help, because none of the questions is answered. So the round
+# calls `deploy/wifi-watchdog.sh` (installed as `/usr/local/lib/gethome-wifi-
+# watchdog.sh`), which after five minutes with no answer from anything while
+# NetworkManager says the hub is connected reloads the radio's driver, and five
+# minutes after that restarts the machine. It is called with no interface on a
+# round with no default route, because that is what a reload that did not help
+# looks like. That file says why, and what keeps it from acting on a hub that
+# is fine.
 keep_wifi_reachable() {
   local iface self arping_bin gateway gateway_mac unit="${GETHOME_KEEPALIVE_UNIT:-/etc/systemd/system/gethome-wifi-keepalive.service}"
   local script="${GETHOME_KEEPALIVE_SCRIPT:-/usr/local/lib/gethome-wifi-keepalive.sh}"
+  local watchdog="${GETHOME_WIFI_WATCHDOG_BIN:-/usr/local/lib/gethome-wifi-watchdog.sh}"
 
   iface="$(lan_wifi_iface)"
   [[ -n "$iface" ]] || return 0
@@ -1476,21 +1534,31 @@ keep_wifi_reachable() {
     warn "This hub could not ask the kernel to re-check a neighbour, so a phone that has not talked to the hub for 20 minutes may not find it for a while, on a router that is slow to pass broadcasts on."
   fi
 
-  # The body is quoted, so it is written exactly as it reads. Two values are
+  # The watchdog every round ends with, from the build being installed. A hub
+  # it cannot be installed on still gets the rest of the round, and is told
+  # what it goes without.
+  if ! { $SUDO mkdir -p "$(dirname "$watchdog")" \
+    && $SUDO install -m 0755 "$HUB_DIR/deploy/wifi-watchdog.sh" "$watchdog"; } >/dev/null 2>&1; then
+    warn "Could not install the Wi-Fi watchdog. The hub works, but if its Wi-Fi ever stops passing traffic while it stays connected, it stays off the network until it is switched off and on again."
+    watchdog=""
+  fi
+
+  # The body is quoted, so it is written exactly as it reads. Three values are
   # baked in at install time: the `arping` resolved above, by path — see
-  # `find_arping` for why it is never looked up at run time — and where the
-  # hub keeps its list of Matter accessories (`src/adapters/matter/
+  # `find_arping` for why it is never looked up at run time — where the hub
+  # keeps its list of Matter accessories (`src/adapters/matter/
   # neighbours.ts`, `MATTER_NEIGHBOURS_FILE`; the suite holds the two names
-  # together). **No line in it may begin with `}`**: the suites lift this
-  # function out of the file with `sed '/^keep_wifi_reachable() {/,/^}/p'`,
-  # which would end it there — which is why the loop below has no functions
-  # of its own.
+  # together), and the watchdog just installed. **No line in it may begin
+  # with `}`**: the suites lift this function out of the file with
+  # `sed '/^keep_wifi_reachable() {/,/^}/p'`, which would end it there — which
+  # is why the loop below has no functions of its own.
   $SUDO mkdir -p "$(dirname "$script")"
   if ! {
     printf '#!/bin/sh\n'
     printf '# Installed by GetHome. deploy/install.sh says why in full.\n'
     printf 'arping_bin="%s"\n' "${arping_bin:-/nonexistent}"
     printf 'matter_neighbours="%s"\n' "${DATA_DIR}/matter-neighbours"
+    printf 'wifi_watchdog="%s"\n' "${watchdog:-/nonexistent}"
     cat <<'KEEPALIVE'
 #
 # The short version: a router can sit on the broadcasts it owes this hub's
@@ -1504,7 +1572,11 @@ keep_wifi_reachable() {
 #    does by asking that one machine, by unicast. That is what refreshes the
 #    neighbour's own record of this hub: macOS and iOS take nothing from a
 #    gratuitous ARP, and once their record expires they can only ask by
-#    broadcast, which is the question that goes missing.
+#    broadcast, which is the question that goes missing;
+#  - and last, whether anything answered at all. After five minutes in which
+#    nothing has while NetworkManager says this hub is connected, the
+#    watchdog reloads the radio's driver, then restarts the machine; its own
+#    file says why, and what keeps it from acting on a hub that is fine.
 # Neighbours the kernel has given up on are remembered for a day and asked
 # about the same way every two minutes, at the address they had, so a phone
 # that comes home is known again before anybody opens the app. Nothing is ever
@@ -1534,6 +1606,7 @@ keep_wifi_reachable() {
 state="${GETHOME_NEIGH_STATE:-/run/gethome-wifi-neighbours}"
 # $matter holds one "link-local-address link-address" per accessory.
 matter="${GETHOME_MATTER_NEIGHBOURS:-$matter_neighbours}"
+watchdog="${GETHOME_WIFI_WATCHDOG:-$wifi_watchdog}"
 round=0
 while :; do
   iface=$(ip route show default 2>/dev/null |
@@ -1600,6 +1673,13 @@ while :; do
         ip neigh replace "$addr" lladdr "$mac" nud probe dev "$iface" 2>/dev/null
       done
     fi
+    # Last, after every question this round has asked: did anything answer?
+    [ -x "$watchdog" ] && "$watchdog" "$iface"
+  else
+    # No default route, which is also what a reload looks like when the
+    # network it joins afresh still passes nothing: the watchdog has to see
+    # that round too, to take its last step.
+    [ -x "$watchdog" ] && "$watchdog"
   fi
   # One round and out, for the suite that runs this file.
   [ -z "${GETHOME_KEEPALIVE_ONCE:-}" ] || exit 0
@@ -1639,6 +1719,8 @@ UNIT
     # while the old one kept running. `restart` starts a stopped unit too.
     if $SUDO systemctl restart gethome-wifi-keepalive >/dev/null 2>&1; then
       say "The hub will keep itself known on the network — to the router every 20 seconds, and to every phone and computer that talks to it — so it stays reachable after a quiet spell."
+      [[ -z "$watchdog" ]] \
+        || say "If its Wi-Fi ever stays connected while nothing gets through, it restarts the radio after five minutes, and the whole hub if that is not enough."
       return 0
     fi
   fi
@@ -1741,6 +1823,88 @@ DISPATCH
   $SUDO env GETHOME_GROUP="$SERVICE_USER" "$helper" --conf "$CONF_DIR" || true
 }
 
+# ── The hub's own Wi-Fi profile, kept where a power cut cannot empty it ────
+# **A hub that loses its Wi-Fi profile is a hub nobody can reach to fix it.**
+# On 2026-10-12 one was unplugged seconds after it was switched on, while
+# NetworkManager was saving its profiles, and both were left at 0 bytes: every
+# boot after that came up healthy and off the network, with no Wi-Fi profile at
+# all, until the card was taken to another computer. Raspberry Pi OS Trixie's
+# NetworkManager keeps the profile Imager set up as netplan YAML and writes it
+# back in place, with no temporary file and no fsync — deploy/wifi-profile.sh
+# says what that costs.
+# So the hub keeps its own copy of the profile it last connected with, taken by
+# a dispatcher whenever a connection comes up (atomically, fsynced, root-only,
+# and only when it changed), and a oneshot puts it back at boot when
+# NetworkManager no longer holds that profile and the hub is not on the network
+# another way — whether or not it holds others, since the hub can be told about
+# more than one network (manage_wifi_networks, below). It never edits a profile
+# that exists, so whatever the owner has changed stands, and becomes the copy
+# the next time it connects.
+#
+# Installed wherever NetworkManager is, a wired hub included: the dispatcher
+# keeps nothing until a Wi-Fi connection comes up, the oneshot does not run
+# without a copy (`ConditionPathExists`), and a hub moved to Wi-Fi later is
+# covered from its first connection rather than from its next update.
+keep_wifi_profile() {
+  local helper="${GETHOME_WIFI_PROFILE_BIN:-/usr/local/lib/gethome-wifi-profile.sh}"
+  local dispatcher="${GETHOME_WIFI_PROFILE_DISPATCHER:-/etc/NetworkManager/dispatcher.d/53-gethome-wifi-profile}"
+  local unit="${GETHOME_WIFI_RESTORE_UNIT:-/etc/systemd/system/gethome-wifi-restore.service}"
+
+  # A machine without NetworkManager keeps its Wi-Fi elsewhere, written by
+  # something else: nothing to do and nothing to say.
+  command -v nmcli >/dev/null 2>&1 || return 0
+
+  if ! $SUDO install -m 0755 "$HUB_DIR/deploy/wifi-profile.sh" "$helper" 2>/dev/null; then
+    warn "Could not install the Wi-Fi profile helper, so a power cut at the wrong moment could still leave this hub off the network until its SD card is repaired on another computer."
+    return 0
+  fi
+
+  $SUDO mkdir -p "$(dirname "$dispatcher")" 2>/dev/null || true
+  # NM ignores a dispatcher script anybody but root can write, so the
+  # ownership and the mode are part of the fix, as for the two above.
+  if $SUDO tee "$dispatcher" >/dev/null <<DISPATCH
+#!/bin/sh
+# Installed by GetHome. Keeps a copy of the Wi-Fi profile this hub connects
+# with, so a power cut that empties NetworkManager's own cannot leave the hub
+# off the network. deploy/wifi-profile.sh says why.
+[ "\$2" = "up" ] || exit 0
+exec ${helper} backup --conf ${CONF_DIR} --quiet
+DISPATCH
+  then
+    $SUDO chown root:root "$dispatcher" 2>/dev/null || true
+    $SUDO chmod 0755 "$dispatcher" 2>/dev/null || true
+  fi
+
+  # After NetworkManager, and not `Wants=` it: a machine where somebody has
+  # turned NetworkManager off has its reasons, and this must not start it.
+  # Not ordered before anything either — the hub does not wait for a network,
+  # and the restored profile comes up on NetworkManager's own autoconnect.
+  if $SUDO tee "$unit" >/dev/null <<UNIT
+[Unit]
+Description=Put back this hub's Wi-Fi profile if NetworkManager has lost it
+After=NetworkManager.service
+ConditionPathExists=${CONF_DIR}/wifi-profile.nmconnection
+
+[Service]
+Type=oneshot
+ExecStart=${helper} restore --conf ${CONF_DIR}
+SyslogIdentifier=gethome-wifi-restore
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  then
+    $SUDO systemctl daemon-reload >/dev/null 2>&1 || true
+    # Enabled and not started: it is for the next boot, and there is nothing
+    # to put back on a machine that is running this installer over a network.
+    $SUDO systemctl enable gethome-wifi-restore >/dev/null 2>&1 || true
+  fi
+
+  # And once now, so a hub nobody reconnects is covered from tonight.
+  $SUDO "$helper" backup --conf "$CONF_DIR" || true
+}
+
 # ── IPv6, which is the network Matter actually runs on ─────────────────────
 # **Matter is IPv6, and on one Wi-Fi the link-local address is all it needs** —
 # no IPv6 from the internet provider, no DHCPv6. What more it needs is for one
@@ -1766,6 +1930,8 @@ matter_ipv6() {
   local conf="${GETHOME_SYSCTL_MATTER:-/etc/sysctl.d/61-gethome-matter.conf}"
   local proc="${GETHOME_PROC_IPV6:-/proc/sys/net/ipv6/conf}"
   local net_dir="${GETHOME_NET_DIR:-/sys/class/net}"
+  local helper="${GETHOME_MATTER_IPV6_BIN:-/usr/local/lib/gethome-matter-ipv6.sh}"
+  local dispatcher="${GETHOME_MATTER_IPV6_DISPATCHER:-/etc/NetworkManager/dispatcher.d/51-gethome-matter-ipv6}"
   local body entry iface lan
 
   # No IPv6 at all is the one thing Matter cannot work around.
@@ -1799,17 +1965,55 @@ matter_ipv6() {
   if [[ "$(cat "$proc/all/forwarding" 2>/dev/null || echo 0)" == "1" ]]; then
     warn "IPv6 forwarding is on here, which stops this machine learning routes to Thread accessories and noticing when a border router goes away, so Matter over Thread may be unreliable until it is off (net.ipv6.conf.all.forwarding=0)."
   fi
-  # And a LAN interface with IPv6 disabled has no link-local address, which
-  # Matter will not start without.
+  # **NetworkManager switches IPv6 off by itself, and leaves it off.** A
+  # connection that says `ipv6.method=ignore`, which is what Raspberry Pi
+  # Imager's Wi-Fi profile says, can come back up with IPv6 disabled on its
+  # interface after the network has gone away and returned, and stays that way
+  # until NetworkManager restarts; deploy/matter-ipv6.sh says exactly when. So a
+  # dispatcher puts the kernel's IPv6 back every time a connection comes up.
+  # Installed wherever NetworkManager is, a wired hub included, because it acts
+  # only on a connection that leaves IPv6 to the kernel. NetworkManager ignores
+  # a dispatcher script anybody but root can write, so the ownership and the
+  # mode are part of it, as for the Wi-Fi ones.
+  if $SUDO install -m 0755 "$HUB_DIR/deploy/matter-ipv6.sh" "$helper" 2>/dev/null \
+    && command -v nmcli >/dev/null 2>&1; then
+    $SUDO mkdir -p "$(dirname "$dispatcher")" 2>/dev/null || true
+    if $SUDO tee "$dispatcher" >/dev/null <<DISPATCH
+#!/bin/sh
+# Installed by GetHome. NetworkManager can leave IPv6 off on an interface whose
+# connection leaves IPv6 to the kernel, and Matter reaches everything that is
+# only on IPv6 through it; this turns it back on when a connection comes up.
+# deploy/matter-ipv6.sh says why.
+[ "\$2" = "up" ] || exit 0
+exec ${helper} "\$1" --quiet
+DISPATCH
+    then
+      $SUDO chown root:root "$dispatcher" 2>/dev/null || true
+      $SUDO chmod 0755 "$dispatcher" 2>/dev/null || true
+    fi
+  fi
+
+  # And a LAN interface with IPv6 disabled has no link-local address, which is
+  # what Matter is built on: an accessory that also answers on IPv4 is still
+  # reached that way, but one that is only on IPv6, which every Thread accessory
+  # is, is not. Turned back on now when it is NetworkManager's doing, so a hub
+  # this already happened to is not left waiting for its next reconnect; said
+  # when it is not ours to change.
   lan="$(ip -o route show default 2>/dev/null \
     | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }' || true)"
   if [[ -n "$lan" && "$(cat "$proc/$lan/disable_ipv6" 2>/dev/null || echo 0)" == "1" ]]; then
-    warn "IPv6 is disabled on ${lan}, and Matter needs at least its link-local address there, so the hub cannot reach Matter accessories until it is turned back on."
+    if [[ -x "$helper" ]]; then $SUDO "$helper" "$lan" --quiet >/dev/null 2>&1 || true; fi
+    if [[ "$(cat "$proc/$lan/disable_ipv6" 2>/dev/null || echo 0)" == "1" ]]; then
+      warn "IPv6 is disabled on ${lan}, so the hub has no IPv6 link-local address there and cannot reach a Matter accessory that is only on IPv6, which every Thread accessory is, until it is turned back on."
+    else
+      say "IPv6 was off on ${lan}, which NetworkManager leaves that way after some reconnects, and is back on, so Matter accessories can be reached over IPv6 again."
+    fi
   fi
 }
 
 matter_bluetooth
 share_wifi_for_matter
+keep_wifi_profile
 matter_ipv6
 
 
@@ -1946,15 +2150,18 @@ $SUDO chown -R "$SERVICE_USER:$SERVICE_USER" "$Z2M_DATA_DIR"
 # else in the system ever will: Zigbee is connected, the devices report, and
 # what suffers is the other radio. Said as a standing handicap, never as a
 # diagnosis — see the sizing above.
+#
+# Both files are read as the hub's account, for the reasons the config section
+# below gives.
 zigbee_network_channel() {
-  local backup="$Z2M_DATA_DIR/coordinator_backup.json" channel=""
-  if [[ -f "$backup" ]]; then
-    channel="$($SUDO grep -o '"logical_channel"[[:space:]]*:[[:space:]]*[0-9]*' "$backup" 2>/dev/null \
-      | head -n1 | grep -o '[0-9]*$' || true)"
-  fi
-  if [[ -z "$channel" && -f "$Z2M_CONFIG" ]]; then
-    channel="$($SUDO sed -n 's/^[[:space:]]*channel:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
-      "$Z2M_CONFIG" 2>/dev/null | head -n1 || true)"
+  local channel=""
+  channel="$(read_hub_file "$Z2M_DATA_DIR/coordinator_backup.json" \
+    | grep -o '"logical_channel"[[:space:]]*:[[:space:]]*[0-9]*' \
+    | head -n1 | grep -o '[0-9]*$' || true)"
+  if [[ -z "$channel" ]]; then
+    channel="$(read_hub_file "$Z2M_CONFIG" \
+      | sed -n 's/^[[:space:]]*channel:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+      | head -n1 || true)"
   fi
   printf '%s' "$channel"
 }
@@ -2037,28 +2244,77 @@ zigbee_channel_clear_of_wifi() {
   printf '%s' "$best"
 }
 
+# ── configuration.yaml is touched only as the hub's account ────────────────
+# **Doing it as root was two bugs, and the second could cost a network.** The
+# directory is the hub account's, so every name in it is whatever the account
+# made it, and root writing `configuration.yaml` followed a link planted there:
+# `tee` wrote where it pointed and the `chown` after it handed the target to the
+# account — a file of its choosing anywhere on the machine, made its own.
+#
+# And the checks that decide *whether* to write ran as whoever ran the
+# installer, which for `curl … | bash` and for `gethome-hubctl update` without
+# sudo is the login user. By this point "Accounts and directories" has made
+# /var/lib/gethome 0750 — systemd's `StateDirectory=` puts it back to 0755 only
+# when the hub restarts, further down — so that user saw no configuration.yaml
+# and no coordinator backup, took the hub for one that had never formed a
+# network, and wrote a fresh three-line file over a working one — its network
+# key, its PAN IDs and its channel, gone. Measured on a Zero 2 W: with
+# /var/lib/gethome at 0750, `pi` sees neither file.
+#
+# As the account, the checks see what is there and a planted link reaches only
+# what the account could reach already. Creating is create-only (`set -C`), so
+# no check that is wrong can ever replace a file that exists. And an edit is the
+# whole file written beside the old one with the old one's mode (`cp -p`),
+# flushed, and renamed over it — read in full first, so a read that fails part
+# way is never what gets written back — so a power cut leaves the old file or
+# the new one, never half of the file the key is in.
 Z2M_CONFIG="$Z2M_DATA_DIR/configuration.yaml"
 Z2M_ONBOARDING_CHANGED=""
-if [[ ! -f "$Z2M_CONFIG" ]]; then
-  # A backup means a network exists even with the config gone, and its channel
-  # is not ours to move.
-  if [[ -f "$Z2M_DATA_DIR/coordinator_backup.json" ]]; then
-    Z2M_NEW_CONFIG=$'onboarding: false\n'
-  else
-    ZIGBEE_CHANNEL="$(zigbee_channel_clear_of_wifi "$(wifi_frequency_mhz)")"
-    Z2M_NEW_CONFIG=$'onboarding: false\nadvanced:\n  channel: '"${ZIGBEE_CHANNEL}"$'\n'
-    say "Zigbee will form its network on channel ${ZIGBEE_CHANNEL}, clear of this hub's Wi-Fi."
+
+z2m_onboarding_off() {
+  local current updated channel=""
+  if ! as_service_user test -e "$Z2M_CONFIG" 2>/dev/null; then
+    # A backup means a network exists even with the config gone, and its channel
+    # is not ours to move.
+    if as_service_user test -f "$Z2M_DATA_DIR/coordinator_backup.json" 2>/dev/null; then
+      updated=$'onboarding: false\n'
+    else
+      channel="$(zigbee_channel_clear_of_wifi "$(wifi_frequency_mhz)")"
+      updated=$'onboarding: false\nadvanced:\n  channel: '"${channel}"$'\n'
+    fi
+    printf '%s' "$updated" \
+      | as_service_user sh -c 'set -C; cat > "$1"' sh "$Z2M_CONFIG" 2>/dev/null || return 0
+    [[ -z "$channel" ]] || say "Zigbee will form its network on channel ${channel}, clear of this hub's Wi-Fi."
+    Z2M_ONBOARDING_CHANGED=1
+    return 0
   fi
-  printf '%s' "$Z2M_NEW_CONFIG" | $SUDO tee "$Z2M_CONFIG" >/dev/null \
-    && $SUDO chown "$SERVICE_USER:$SERVICE_USER" "$Z2M_CONFIG" \
-    && Z2M_ONBOARDING_CHANGED=1
-elif grep -qE '^onboarding:[[:space:]]*true' "$Z2M_CONFIG" 2>/dev/null; then
-  $SUDO sed -i 's/^onboarding:[[:space:]]*true.*/onboarding: false/' "$Z2M_CONFIG" \
-    && Z2M_ONBOARDING_CHANGED=1
-elif ! grep -qE '^onboarding:' "$Z2M_CONFIG" 2>/dev/null; then
-  printf 'onboarding: false\n' | $SUDO tee -a "$Z2M_CONFIG" >/dev/null \
-    && Z2M_ONBOARDING_CHANGED=1
-fi
+  current="$(read_hub_file "$Z2M_CONFIG")" || return 0
+  if grep -qE '^onboarding:[[:space:]]*true' <<<"$current"; then
+    updated="$(sed 's/^onboarding:[[:space:]]*true.*/onboarding: false/' <<<"$current")"
+  elif ! grep -qE '^onboarding:' <<<"$current"; then
+    updated="$current"
+    [[ -z "$updated" ]] || updated+=$'\n'
+    updated+='onboarding: false'
+  else
+    return 0
+  fi
+  replace_z2m_config "$updated" && Z2M_ONBOARDING_CHANGED=1
+  return 0
+}
+
+replace_z2m_config() {
+  local tmp="${Z2M_CONFIG}.gethome-$$"
+  if as_service_user cp -p "$Z2M_CONFIG" "$tmp" 2>/dev/null \
+    && printf '%s\n' "$1" | as_service_user tee "$tmp" >/dev/null 2>&1 \
+    && { as_service_user sync "$tmp" 2>/dev/null || sync; } \
+    && as_service_user mv -f "$tmp" "$Z2M_CONFIG" 2>/dev/null; then
+    return 0
+  fi
+  as_service_user rm -f "$tmp" 2>/dev/null || true
+  return 1
+}
+
+z2m_onboarding_off
 # A running Z2M read the old file at startup, and the detector below only
 # restarts it when the *device path* changed — so without this an existing hub
 # would keep waiting for its browser until the next reboot.
@@ -2451,6 +2707,11 @@ Type=oneshot
 RemainAfterExit=no
 Environment=GETHOME_CONF=${CONF_DIR}
 Environment=GETHOME_DIR=${INSTALL_DIR}
+# The account that owns <data>/update. The runner is root and does its file I/O
+# in that directory as this account, so a link the account planted there is one
+# root never follows — see as_hub in update-runner.sh.
+Environment=GETHOME_USER=${SERVICE_USER}
+Environment=GETHOME_GROUP=${SERVICE_USER}
 ExecStart=/usr/local/lib/gethome-update.sh
 # Not a number, and not the 90-second default a Type=oneshot otherwise gets.
 # A real run is apt, a bundle over a domestic line, migrations onto an SD card,
@@ -2467,14 +2728,112 @@ UNIT
 # the hub's own directory rather than a systemd path it would have to know
 # about: the hub stays portable, and this is written in the same breath as the
 # units, so it cannot promise plumbing that was never installed.
-$SUDO touch "${DATA_DIR}/update/enabled" 2>/dev/null || true
 $SUDO chown -R "$SERVICE_USER:$SERVICE_USER" "${DATA_DIR}/update" 2>/dev/null || true
+as_service_user touch "${DATA_DIR}/update/enabled" 2>/dev/null || true
+
+# ── The Wi-Fi networks the hub knows, changed from an app ──────────────────
+# So a hub set up on one network can be told about another before it is carried
+# there. Same shape as the update: the hub writes a request into its own data
+# directory, the path unit notices, and the root script applies it with nmcli.
+# deploy/wifi-networks.sh says what it refuses and why.
+#
+# NetworkManager or nothing: it is what every current Raspberry Pi OS manages
+# Wi-Fi with, and a machine without it (Bullseye's wpa_supplicant, Ubuntu's
+# netplan, a wired box) gets no units and a one-word reason the hub passes on,
+# so an app says why rather than offering a form that can only fail. The
+# reason file and the capability are written in the same breath as the units,
+# for the reason `update/enabled` is: `hub.env` never reaches an upgraded hub.
+manage_wifi_networks() {
+  local helper="${GETHOME_WIFI_NETWORKS_BIN:-/usr/local/lib/gethome-wifi-networks.sh}"
+  local dispatcher="${GETHOME_WIFI_NETWORKS_DISPATCHER:-/etc/NetworkManager/dispatcher.d/54-gethome-wifi-networks}"
+  local wifi_dir="${DATA_DIR}/wifi"
+
+  # 54, because the profile copy (keep_wifi_profile) has 53. This dispatcher
+  # was 53 on its branch before that landed, so a hub that tried the branch has
+  # it under the old name too, and would run it twice on every association.
+  $SUDO rm -f "$(dirname "$dispatcher")/53-gethome-wifi-networks" 2>/dev/null || true
+  # Everything inside the directory as the hub's account (`as_service_user`).
+  as_service_user mkdir -p "$wifi_dir" 2>/dev/null || true
+  as_service_user rm -f "$wifi_dir/enabled" "$wifi_dir/unsupported" 2>/dev/null || true
+
+  # Installed is not running: nmcli can be on a machine whose Wi-Fi something
+  # else manages (dhcpcd, on an older Raspberry Pi OS), and there every change
+  # would fail with "NetworkManager is not running" behind a form the app had
+  # offered. `general status` answers only when the daemon does.
+  if ! command -v nmcli >/dev/null 2>&1 || ! $SUDO nmcli -t general status >/dev/null 2>&1; then
+    printf 'no-networkmanager\n' | as_service_user tee "$wifi_dir/unsupported" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  if ! $SUDO install -m 0755 "$HUB_DIR/deploy/wifi-networks.sh" "$helper" 2>/dev/null; then
+    warn "Could not install the Wi-Fi helper, so this hub's Wi-Fi networks can't be changed from an app."
+    return 0
+  fi
+
+  $SUDO tee /etc/systemd/system/gethome-wifi.path >/dev/null <<UNIT
+[Unit]
+Description=Notice that a change to the GetHome Hub's Wi-Fi networks was asked for
+
+[Path]
+PathModified=${DATA_DIR}/wifi/request
+Unit=gethome-wifi.service
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+  # Started by the path unit and nothing else, like the update service: no
+  # [Install], never enabled, so it never runs at boot with nothing to do.
+  $SUDO tee /etc/systemd/system/gethome-wifi.service >/dev/null <<UNIT
+[Unit]
+Description=Change the GetHome Hub's Wi-Fi networks
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+Environment=GETHOME_CONF=${CONF_DIR}
+Environment=GETHOME_USER=${SERVICE_USER}
+Environment=GETHOME_GROUP=${SERVICE_USER}
+ExecStart=${helper} --quiet
+TimeoutStartSec=120
+UNIT
+
+  # Which network is the live one changes on every association, so the list is
+  # written again then. NM ignores a dispatcher script anybody but root can
+  # write, so the ownership and the mode are part of it.
+  $SUDO mkdir -p "$(dirname "$dispatcher")" 2>/dev/null || true
+  if $SUDO tee "$dispatcher" >/dev/null <<DISPATCH
+#!/bin/sh
+# Installed by GetHome. Writes down which Wi-Fi networks this hub knows and
+# which one it is on, for the hub to show. deploy/wifi-networks.sh says why.
+case "\$2" in up|down) ;; *) exit 0 ;; esac
+GETHOME_CONF=${CONF_DIR} GETHOME_USER=${SERVICE_USER} GETHOME_GROUP=${SERVICE_USER} exec ${helper} --list --quiet
+DISPATCH
+  then
+    $SUDO chown root:root "$dispatcher" 2>/dev/null || true
+    $SUDO chmod 0755 "$dispatcher" 2>/dev/null || true
+  fi
+
+  # A hub installed by an earlier build may hold files root made here; `chown -R`
+  # hands them back without following anything (see `as_service_user`).
+  $SUDO chown -R "$SERVICE_USER:$SERVICE_USER" "$wifi_dir" 2>/dev/null || true
+  as_service_user touch "$wifi_dir/enabled" 2>/dev/null || true
+  as_service_user chmod 0750 "$wifi_dir" 2>/dev/null || true
+  # Once now, so the list is there before anybody reconnects.
+  $SUDO env GETHOME_CONF="$CONF_DIR" GETHOME_USER="$SERVICE_USER" GETHOME_GROUP="$SERVICE_USER" "$helper" --list --quiet || true
+  WIFI_NETWORKS_UNITS=1
+}
+WIFI_NETWORKS_UNITS=""
+manage_wifi_networks
 
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable gethome-hubd.service >/dev/null 2>&1
 $SUDO systemctl enable gethome-zigbee-detect.service >/dev/null 2>&1 || true
 $SUDO systemctl enable --now gethome-radio.path >/dev/null 2>&1 || true
 $SUDO systemctl enable --now gethome-update.path >/dev/null 2>&1 || true
+if [[ -n "$WIFI_NETWORKS_UNITS" ]]; then
+  $SUDO systemctl enable --now gethome-wifi.path >/dev/null 2>&1 || true
+fi
 # Zigbee2MQTT, when it is already running, is holding a broker connection that
 # was opened before any of this and may have been anonymous. Its unit has just
 # gained the credentials, so it needs restarting to pick them up — but only if
@@ -2547,7 +2906,11 @@ fi
 
 INFO=$(curl -fsS http://localhost:8420/api/v1/hub)
 if echo "$INFO" | grep -q '"claimed":false'; then
-  CODE=$($SUDO cat "$DATA_DIR/pairing-code" 2>/dev/null | tr -d '[:space:]' || true)
+  # Read as the hub's account, not by root through a path: pairing-code is a
+  # name in the hub's own directory, so a link the account planted there (this
+  # output lands in the hub-readable update log) is followed as that account
+  # rather than turned into a read of any root-only file.
+  CODE=$(as_service_user cat "$DATA_DIR/pairing-code" 2>/dev/null | tr -d '[:space:]' || true)
   if [[ -n "$CODE" ]]; then
     printf '@@PAIRING:%s@@\n' "$CODE"
     say "Pairing code: ${CODE}"
@@ -2687,10 +3050,12 @@ fi
 printf '@@CAPABILITIES:%s@@\n' "$CAPS"
 say "This hub can talk to: ${CAPS}."
 
-RADIO_MODE=auto
-if [[ -r "$DATA_DIR/radio-mode" ]]; then
-  RADIO_MODE=$(tr -d '[:space:]' < "$DATA_DIR/radio-mode" 2>/dev/null || echo auto)
-fi
+# Read as the hub's account, like everything else in its directory — which is
+# also what lets an install run by the login user read it at all (<data> is
+# 0750), rather than settle on `auto` and tell somebody who chose both radios
+# that their coordinator has the board.
+RADIO_MODE="$(read_hub_file "$DATA_DIR/radio-mode" | tr -d '[:space:]' || true)"
+[[ -n "$RADIO_MODE" ]] || RADIO_MODE=auto
 
 if [[ "$RADIO_BUDGET" == "one" && "$RADIO_MODE" == "both" ]]; then
   # The owner has already overridden the measurement, on this board, before

@@ -22,6 +22,7 @@ import type { MqttBrokerConfig } from '../../src/core/mqtt-access.js';
 import {
   activity,
   aiMappings,
+  apiKeys,
   aiRuns,
   automationChatMessages,
   automationRuns,
@@ -84,6 +85,7 @@ export async function resetDb(db: Db): Promise<void> {
   // between tests: a suite asserting on the conversations *list* was reading
   // the previous test's chats as well as its own.
   await db.delete(automationChatMessages);
+  await db.delete(apiKeys);
   await db.delete(tokens);
   await db.delete(invites);
   await db.delete(endpoints);

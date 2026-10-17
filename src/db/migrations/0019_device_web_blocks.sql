@@ -13,13 +13,14 @@ CREATE TABLE `device_web_blocks` (
 	FOREIGN KEY (`device_id`) REFERENCES `devices`(`id`) ON UPDATE no action ON DELETE cascade
 );
 --> statement-breakpoint
--- `camera.view` joins the member's set, `hub.ai`'s path in `0006`: the default
--- in `access.ts` reaches no hub that already exists, because `ensureBuiltins()`
--- inserts with `ON CONFLICT DO NOTHING` and an existing `member` row keeps the
--- set it was created with. Idempotent, and it overrides no decision a home has
--- made: `camera.view` is new, so no one has ever taken it out. Guest is left
--- alone — a camera shows people, and that is the home's call to make for
--- somebody staying.
+-- `camera.view` joins the member's set, `hub.ai`'s path in `0006` and
+-- `hub.wifi`'s in `0017`: the default in `access.ts` reaches no hub that
+-- already exists, because `ensureBuiltins()` inserts with
+-- `ON CONFLICT DO NOTHING` and an existing `member` row keeps the set it was
+-- created with. Idempotent, and it overrides no decision a home has made:
+-- `camera.view` is new, so no one has ever taken it out. Guest is left alone —
+-- a camera shows people, and that is the home's call to make for somebody
+-- staying.
 UPDATE `roles`
 SET `permissions` = json_insert(`permissions`, '$[#]', 'camera.view')
 WHERE `key` = 'member' AND `builtin` = 1 AND `permissions` NOT LIKE '%camera.view%';

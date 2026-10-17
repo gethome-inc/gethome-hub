@@ -217,6 +217,14 @@ circuit breaker switching a rule off, because that is a discrete transition
 somebody has to be able to find a week later when they notice the hall light
 has stopped working and nothing on any screen says why.
 
+That row is **the presser's**: the engine is handed who pressed it rather than
+only their name, so `memberId` is theirs and a press made through an API key
+carries the key the way every other row a key causes does. It is written when
+the run ends, which can be fifteen minutes later behind a `wait`, so a presser
+removed from the home in the meantime is a row the foreign key refuses — it is
+written again without the id, and the sentence still says who it was.
+[The API reference](api.md#the-activity-log) has the fields.
+
 A trace records the commands a guard **refused** as well as the ones it sent:
 "nothing happened" and "the hub declined to switch that relay for the fortieth
 time this hour" look identical from outside.

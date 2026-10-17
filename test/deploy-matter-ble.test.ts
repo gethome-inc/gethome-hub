@@ -239,23 +239,36 @@ function credentials(options: {
     );
   }
 
-  const output = execFileSync('bash', [CREDENTIALS, '--conf', conf], {
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      PATH: `${bin}:${process.env.PATH ?? ''}`,
-      FAKE_SSID: options.ssid ?? 'Flat 3',
-      FAKE_PSK: options.psk ?? 'hunter2hunter2',
-      FAKE_ACTIVE: options.active === false ? 'no' : 'yes',
-      FAKE_FREQ: options.freq === undefined ? '' : String(options.freq),
-      FAKE_SCAN: (options.scan ?? []).map((row) => `${row}\n`).join(''),
-      FAKE_SCAN_FAILS: options.scanFails === true ? 'yes' : 'no',
-      GETHOME_GROUP: 'staff',
-      // A dispatcher sets this; without it the script asks nmcli which
-      // connection carries the wireless link.
-      CONNECTION_UUID: '',
+  // No NetworkManager is a PATH holding only the fakes, without `nmcli` — and
+  // without the host's own, which any machine with NetworkManager installed
+  // has beside every other tool in /usr/bin. Leaving the fake out is not
+  // enough there: `command -v nmcli` finds the real one, and asks it.
+  // Nothing the script runs before deciding there is none comes from the
+  // PATH, so only `bash` itself is found on the host's, and it hands the
+  // script the narrow one.
+  const runPath = options.nmcli === false ? bin : `${bin}:${process.env.PATH ?? ''}`;
+  const output = execFileSync(
+    'bash',
+    ['-c', 'PATH="$RUN_PATH"; exec "$BASH" "$@"', 'bash', CREDENTIALS, '--conf', conf],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH ?? ''}`,
+        RUN_PATH: runPath,
+        FAKE_SSID: options.ssid ?? 'Flat 3',
+        FAKE_PSK: options.psk ?? 'hunter2hunter2',
+        FAKE_ACTIVE: options.active === false ? 'no' : 'yes',
+        FAKE_FREQ: options.freq === undefined ? '' : String(options.freq),
+        FAKE_SCAN: (options.scan ?? []).map((row) => `${row}\n`).join(''),
+        FAKE_SCAN_FAILS: options.scanFails === true ? 'yes' : 'no',
+        GETHOME_GROUP: 'staff',
+        // A dispatcher sets this; without it the script asks nmcli which
+        // connection carries the wireless link.
+        CONNECTION_UUID: '',
+      },
     },
-  });
+  );
 
   const file = path.join(conf, 'wifi.env');
   return {
@@ -369,10 +382,93 @@ describe('a network the accessory can actually join', () => {
   });
 });
 
+const MATTER_IPV6 = path.join(repoRoot, 'deploy', 'matter-ipv6.sh');
+
+/** What a fake `nmcli` knows: the connection on each device, and each connection's `ipv6.method`. */
+interface FakeNm {
+  devices: Record<string, string>;
+  methods: Record<string, string>;
+}
+
+/**
+ * A fake `nmcli` answering the two questions deploy/matter-ipv6.sh asks, and a
+ * fake `logger` writing what it is given to `<dir>/journal` rather than to the
+ * machine the suite runs on.
+ */
+function nmFakes(bin: string, dir: string, given: FakeNm | undefined): string {
+  const journal = path.join(dir, 'journal');
+  script_(path.join(bin, 'logger'), `shift 2; [ "$1" = "--" ] && shift; printf '%s\\n' "$*" >> '${journal}'`);
+  // Without one, an `nmcli` that knows nothing — not the host's own, which a
+  // contributor's Linux laptop would have and would answer about its own wlan0.
+  const nm = given ?? { devices: {}, methods: {} };
+  const lines = [
+    // nmcli -g GENERAL.CON-UUID device show IFACE
+    'if [ "$1" = "-g" ] && [ "$2" = "GENERAL.CON-UUID" ] && [ "$3 $4" = "device show" ]; then',
+    '  case "$5" in',
+    ...Object.entries(nm.devices).map(([iface, uuid]) => `    ${iface}) echo ${uuid}; exit 0 ;;`),
+    '  esac',
+    '  exit 10',
+    'fi',
+    // nmcli -g ipv6.method connection show uuid UUID
+    'if [ "$1" = "-g" ] && [ "$2" = "ipv6.method" ] && [ "$3 $4 $5" = "connection show uuid" ]; then',
+    '  case "$6" in',
+    ...Object.entries(nm.methods).map(([uuid, method]) => `    ${uuid}) echo ${method}; exit 0 ;;`),
+    '  esac',
+    '  exit 10',
+    'fi',
+    'exit 2',
+  ];
+  script_(path.join(bin, 'nmcli'), lines.join('\n'));
+  return journal;
+}
+
+/** Where a test's fake `/proc/sys/net/ipv6/conf` and `/sys/class/net` live, and what is in them. */
+function fakeNet(
+  dir: string,
+  options: {
+    interfaces?: string[];
+    physical?: string[];
+    noIpv6?: boolean;
+    noRouteInfo?: boolean;
+    forwarding?: boolean;
+    disabledOn?: string | string[];
+  },
+): { proc: string; net: string; interfaces: string[] } {
+  const proc = path.join(dir, 'proc');
+  const net = path.join(dir, 'net');
+  const interfaces = options.interfaces ?? ['lo', 'wlan0'];
+  const physical = options.physical ?? ['wlan0'];
+  const disabled = ([] as string[]).concat(options.disabledOn ?? []);
+  if (options.noIpv6 !== true) {
+    for (const name of ['all', 'default', ...interfaces]) {
+      mkdirSync(path.join(proc, name), { recursive: true });
+      if (options.noRouteInfo !== true) writeFileSync(path.join(proc, name, 'accept_ra_rt_info_max_plen'), '0');
+      writeFileSync(path.join(proc, name, 'forwarding'), options.forwarding === true ? '1' : '0');
+      writeFileSync(path.join(proc, name, 'disable_ipv6'), disabled.includes(name) ? '1' : '0');
+    }
+  }
+  for (const name of interfaces) {
+    mkdirSync(path.join(net, name), { recursive: true });
+    if (physical.includes(name)) writeFileSync(path.join(net, name, 'device'), '');
+  }
+  return { proc, net, interfaces };
+}
+
+function disabledState(proc: string, names: string[]): Record<string, string> {
+  const state: Record<string, string> = {};
+  for (const name of names) {
+    const file = path.join(proc, name, 'disable_ipv6');
+    if (existsSync(file)) state[name] = readFileSync(file, 'utf8').trim();
+  }
+  return state;
+}
+
 /**
  * Run `matter_ipv6` out of install.sh against a fake `/proc/sys/net/ipv6/conf`
  * and `/sys/class/net`. `interfaces` names the interfaces the fake knows,
- * `physical` the ones with a `device` link, as a real NIC has.
+ * `physical` the ones with a `device` link, as a real NIC has. The helper and
+ * the dispatcher it installs land in the test's own directory; `nm` stands up a
+ * fake `nmcli`, without which the machine has no NetworkManager.
  */
 function ipv6(options: {
   interfaces?: string[];
@@ -380,30 +476,29 @@ function ipv6(options: {
   noIpv6?: boolean;
   noRouteInfo?: boolean;
   forwarding?: boolean;
-  disabledOn?: string;
-}): { output: string; conf: string; live: Record<string, string> } {
+  disabledOn?: string | string[];
+  nm?: FakeNm;
+}): {
+  output: string;
+  conf: string;
+  live: Record<string, string>;
+  disabled: Record<string, string>;
+  dispatcher: string;
+  helper: string;
+  journal: string;
+  dir: string;
+} {
   const dir = scratch('gethome-ipv6-');
   const bin = path.join(dir, 'bin');
-  const proc = path.join(dir, 'proc');
-  const net = path.join(dir, 'net');
   const conf = path.join(dir, 'sysctl.d', '61-gethome-matter.conf');
+  const helper = path.join(dir, 'lib', 'gethome-matter-ipv6.sh');
+  const dispatcher = path.join(dir, 'dispatcher.d', '51-gethome-matter-ipv6');
   mkdirSync(bin, { recursive: true });
   mkdirSync(path.dirname(conf), { recursive: true });
-  const interfaces = options.interfaces ?? ['lo', 'wlan0'];
-  const physical = options.physical ?? ['wlan0'];
-  if (options.noIpv6 !== true) {
-    for (const name of ['all', 'default', ...interfaces]) {
-      mkdirSync(path.join(proc, name), { recursive: true });
-      if (options.noRouteInfo !== true) writeFileSync(path.join(proc, name, 'accept_ra_rt_info_max_plen'), '0');
-      writeFileSync(path.join(proc, name, 'forwarding'), options.forwarding === true ? '1' : '0');
-      writeFileSync(path.join(proc, name, 'disable_ipv6'), options.disabledOn === name ? '1' : '0');
-    }
-  }
-  for (const name of interfaces) {
-    mkdirSync(path.join(net, name), { recursive: true });
-    if (physical.includes(name)) writeFileSync(path.join(net, name, 'device'), '');
-  }
+  mkdirSync(path.dirname(helper), { recursive: true });
+  const { proc, net, interfaces } = fakeNet(dir, options);
   script_(path.join(bin, 'ip'), `printf 'default via 192.168.0.1 dev wlan0 proto dhcp metric 600\\n'`);
+  const journal = nmFakes(bin, dir, options.nm);
 
   const output = execFileSync(
     'bash',
@@ -411,6 +506,7 @@ function ipv6(options: {
       '-c',
       `set -euo pipefail
        SUDO=""
+       HUB_DIR="$2"
        say()  { printf 'SAY %s\\n' "$*"; }
        warn() { printf 'WARN %s\\n' "$*"; }
        prog="/^matter_ipv6() {/,/^}/p"
@@ -418,6 +514,7 @@ function ipv6(options: {
        matter_ipv6`,
       'bash',
       INSTALLER,
+      repoRoot,
     ],
     {
       encoding: 'utf8',
@@ -427,6 +524,9 @@ function ipv6(options: {
         GETHOME_SYSCTL_MATTER: conf,
         GETHOME_PROC_IPV6: proc,
         GETHOME_NET_DIR: net,
+        GETHOME_MATTER_IPV6_BIN: helper,
+        GETHOME_MATTER_IPV6_DISPATCHER: dispatcher,
+        GETHOME_SYSCTL_FILES: path.join(dir, 'sysctl.d', '*.conf'),
       },
     },
   );
@@ -435,8 +535,59 @@ function ipv6(options: {
     const file = path.join(proc, name, 'accept_ra_rt_info_max_plen');
     if (existsSync(file)) live[name] = readFileSync(file, 'utf8').trim();
   }
-  return { output, conf: existsSync(conf) ? readFileSync(conf, 'utf8') : '', live };
+  return {
+    output,
+    conf: existsSync(conf) ? readFileSync(conf, 'utf8') : '',
+    live,
+    disabled: disabledState(proc, ['all', 'default', ...interfaces]),
+    dispatcher: existsSync(dispatcher) ? readFileSync(dispatcher, 'utf8') : '',
+    helper: existsSync(helper) ? helper : '',
+    journal: existsSync(journal) ? readFileSync(journal, 'utf8') : '',
+    dir,
+  };
 }
+
+/**
+ * Run deploy/matter-ipv6.sh itself, the way the dispatcher does: `args` is its
+ * command line, and `connection` the `CONNECTION_UUID` NetworkManager hands a
+ * dispatcher (absent, as at install time, it asks the device).
+ */
+function relink(options: {
+  interfaces?: string[];
+  physical?: string[];
+  disabledOn?: string | string[];
+  nm?: FakeNm;
+  connection?: string;
+  sysctl?: string;
+  args?: string[];
+}): { output: string; disabled: Record<string, string>; journal: string } {
+  const dir = scratch('gethome-relink-');
+  const bin = path.join(dir, 'bin');
+  mkdirSync(bin, { recursive: true });
+  const { proc, net, interfaces } = fakeNet(dir, options);
+  const journal = nmFakes(bin, dir, options.nm);
+  mkdirSync(path.join(dir, 'sysctl.d'), { recursive: true });
+  if (options.sysctl !== undefined) writeFileSync(path.join(dir, 'sysctl.d', '90-local.conf'), options.sysctl);
+  const output = execFileSync('bash', [MATTER_IPV6, ...(options.args ?? ['wlan0'])], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH ?? ''}`,
+      GETHOME_PROC_IPV6: proc,
+      GETHOME_NET_DIR: net,
+      GETHOME_SYSCTL_FILES: `${path.join(dir, 'sysctl.d', '*.conf')} ${path.join(dir, 'sysctl.conf')}`,
+      ...(options.connection !== undefined ? { CONNECTION_UUID: options.connection } : {}),
+    },
+  });
+  return {
+    output,
+    disabled: disabledState(proc, ['all', 'default', ...interfaces]),
+    journal: existsSync(journal) ? readFileSync(journal, 'utf8') : '',
+  };
+}
+
+/** The profile Raspberry Pi Imager writes: IPv6 left to the kernel. */
+const IMAGER: FakeNm = { devices: { wlan0: 'keti' }, methods: { keti: 'ignore' } };
 
 /**
  * **A Thread accessory is reached through a route its border router
@@ -477,8 +628,111 @@ describe('reaching a Thread accessory through its border router', () => {
     expect(ipv6({ forwarding: true }).output).toMatch(/WARN IPv6 forwarding is on/);
   });
 
-  it('warns when the LAN interface has no IPv6, which Matter will not start without', () => {
+  it('warns when the LAN interface has no IPv6 and nothing here may turn it back on', () => {
     expect(ipv6({ disabledOn: 'wlan0' }).output).toMatch(/WARN IPv6 is disabled on wlan0/);
+  });
+});
+
+/**
+ * **NetworkManager switches IPv6 off by itself and leaves it off.** Imager's
+ * Wi-Fi profile says `ipv6.method=ignore` — IPv6 is the kernel's business — and
+ * activating such a connection NetworkManager turns `disable_ipv6` on to restart
+ * the kernel's link-local address, then puts back the value it saved when it
+ * took the device over. It forgets that value when the access point under a
+ * connection changes, which on the hub this was found on was every time its
+ * network went away, so the next connection had nothing to put back: wlan0 sat
+ * with `disable_ipv6=1` and no link-local address until a reboot, and nothing
+ * only on IPv6 — every Thread accessory — could be reached. (NetworkManager
+ * 1.52.1, Trixie; unchanged on its main branch.)
+ */
+describe('keeping the link-local address Matter runs on', () => {
+  it('turns IPv6 back on at install when NetworkManager has left it off', () => {
+    const run = ipv6({ disabledOn: 'wlan0', nm: IMAGER });
+    expect(run.disabled.wlan0).toBe('0');
+    expect(run.output).toMatch(/SAY IPv6 was off on wlan0/);
+    expect(run.output).not.toContain('WARN');
+    expect(run.journal).toContain('turned it back on');
+  });
+
+  it('leaves it off, and says so, when the connection turns IPv6 off on purpose', () => {
+    const run = ipv6({ disabledOn: 'wlan0', nm: { devices: { wlan0: 'x' }, methods: { x: 'disabled' } } });
+    expect(run.disabled.wlan0).toBe('1');
+    expect(run.output).toMatch(/WARN IPv6 is disabled on wlan0/);
+  });
+
+  it('installs a dispatcher that does it on every connection that comes up, and nothing else', () => {
+    const run = ipv6({ nm: IMAGER });
+    expect(run.dispatcher).toMatch(/^#!\/bin\/sh\n/);
+    expect(run.dispatcher).toContain('[ "$2" = "up" ] || exit 0');
+    expect(run.dispatcher).toContain(`exec ${run.helper} "$1" --quiet`);
+    // Run it the way NetworkManager does, after a reconnect that left IPv6 off.
+    const proc = path.join(run.dir, 'proc');
+    writeFileSync(path.join(proc, 'wlan0', 'disable_ipv6'), '1');
+    const env = {
+      ...process.env,
+      PATH: `${path.join(run.dir, 'bin')}:${process.env.PATH ?? ''}`,
+      GETHOME_PROC_IPV6: proc,
+      GETHOME_NET_DIR: path.join(run.dir, 'net'),
+      GETHOME_SYSCTL_FILES: path.join(run.dir, 'sysctl.d', '*.conf'),
+      CONNECTION_UUID: 'keti',
+    };
+    const dispatcher = path.join(run.dir, 'dispatcher.d', '51-gethome-matter-ipv6');
+    execFileSync('sh', [dispatcher, 'wlan0', 'down'], { env });
+    expect(readFileSync(path.join(proc, 'wlan0', 'disable_ipv6'), 'utf8')).toBe('1');
+    execFileSync('sh', [dispatcher, 'wlan0', 'up'], { env });
+    expect(readFileSync(path.join(proc, 'wlan0', 'disable_ipv6'), 'utf8')).toBe('0');
+  });
+
+  it('turns the kernel’s IPv6 back on for a connection that leaves it to the kernel', () => {
+    const run = relink({ disabledOn: 'wlan0', nm: IMAGER, connection: 'keti', args: ['wlan0', '--quiet'] });
+    expect(run.disabled.wlan0).toBe('0');
+    expect(run.journal).toMatch(/NetworkManager left IPv6 off on wlan0.*turned it back on/);
+    expect(run.output).toBe('');
+  });
+
+  it('asks about the connection that came up, and the device only when nobody says', () => {
+    const nm = { devices: { wlan0: 'other' }, methods: { keti: 'ignore', other: 'disabled' } };
+    expect(relink({ disabledOn: 'wlan0', nm, connection: 'keti' }).disabled.wlan0).toBe('0');
+    expect(relink({ disabledOn: 'wlan0', nm }).disabled.wlan0).toBe('1');
+    // At install time there is no dispatcher's word, and the device's is the one.
+    expect(relink({ disabledOn: 'wlan0', nm: IMAGER }).disabled.wlan0).toBe('0');
+  });
+
+  it('never overrides a connection that turns IPv6 off, or one NetworkManager runs itself', () => {
+    for (const method of ['disabled', 'auto', 'link-local', 'manual']) {
+      const nm = { devices: { wlan0: 'x' }, methods: { x: method } };
+      expect(relink({ disabledOn: 'wlan0', nm }).disabled.wlan0, method).toBe('1');
+    }
+  });
+
+  it('never overrides IPv6 switched off on this machine', () => {
+    expect(relink({ disabledOn: ['wlan0', 'all'], nm: IMAGER }).disabled.wlan0).toBe('1');
+    expect(relink({ disabledOn: ['wlan0', 'default'], nm: IMAGER }).disabled.wlan0).toBe('1');
+    for (const line of [
+      'net.ipv6.conf.wlan0.disable_ipv6 = 1',
+      'net/ipv6/conf/wlan0/disable_ipv6=1',
+      'net.ipv6.conf.all.disable_ipv6 = 1',
+      '-net.ipv6.conf.*.disable_ipv6 = 1',
+    ]) {
+      expect(relink({ disabledOn: 'wlan0', nm: IMAGER, sysctl: `# local\n${line}\n` }).disabled.wlan0, line).toBe('1');
+    }
+    // A setting that turns it on, or one about another interface, is no reason to leave it off.
+    for (const line of ['net.ipv6.conf.wlan0.disable_ipv6 = 0', 'net.ipv6.conf.eth0.disable_ipv6 = 1']) {
+      expect(relink({ disabledOn: 'wlan0', nm: IMAGER, sysctl: `${line}\n` }).disabled.wlan0, line).toBe('0');
+    }
+  });
+
+  it('leaves alone an interface that is not a physical one, or a name that is a path', () => {
+    const nm = { devices: { wg0: 'v' }, methods: { v: 'ignore' } };
+    expect(relink({ interfaces: ['wg0'], physical: [], disabledOn: 'wg0', nm, args: ['wg0'] }).disabled.wg0).toBe('1');
+    expect(relink({ disabledOn: 'wlan0', nm: IMAGER, args: ['wlan0/../wlan0'] }).disabled.wlan0).toBe('1');
+  });
+
+  it('does nothing without NetworkManager’s word, and nothing to an interface already on', () => {
+    expect(relink({ disabledOn: 'wlan0' }).disabled.wlan0).toBe('1');
+    const quiet = relink({ nm: IMAGER, connection: 'keti' });
+    expect(quiet.disabled.wlan0).toBe('0');
+    expect(quiet.journal).toBe('');
   });
 });
 

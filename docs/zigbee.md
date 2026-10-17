@@ -182,6 +182,16 @@ puts the setting in the file — creating it if absent, or replacing the single
 list have to survive. If that change is made while Z2M is running, `install.sh`
 restarts it, because the detector only restarts on a changed device path.
 
+All of that is done as the hub's own account, which owns the directory, and
+never as root. Root had been doing the checks in the name of whoever ran the
+installer, and a login user running it with sudo (`curl … | bash`, or
+`gethome-hubctl update` without sudo) cannot see into `/var/lib/gethome` while
+the install has it at 0750. The existing `configuration.yaml` looked absent, and
+a fresh one was written over a working network's key, PAN IDs and channel. Now
+the file is only ever created where nothing exists (create-only, so a wrong
+check cannot replace anything), and an edit writes the whole file beside the
+old one and renames it into place, so a power cut leaves one or the other.
+
 **And its log keeps none of the traffic.** At `info`, its default, Zigbee2MQTT
 logs every message it publishes — `MQTT publish: topic '…', payload '…'`, a line
 per device report — into `<Z2M data>/log/` and, through the console, into the

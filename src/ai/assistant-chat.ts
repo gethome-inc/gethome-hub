@@ -495,7 +495,10 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
         );
       },
       runAutomation: async (id) =>
-        this.options.engine.runManually(id, (await this.memberName(memberId)) ?? 'the assistant'),
+        this.options.engine.runManually(id, {
+          name: (await this.memberName(memberId)) ?? 'the assistant',
+          memberId,
+        }),
       delegate: async (agent, brief, fresh) =>
         this.delegate({ memberId, sessionId, agentKey: agent, brief, fresh }),
       delegates: this.delegates.map((agent) => ({

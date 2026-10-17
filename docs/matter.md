@@ -163,6 +163,19 @@ kills the CASE session outright. Both halves, and why the interval is not ours
 to shorten, are in
 [`api.md`](api.md#and-how-long-it-takes-to-notice-one-has-gone).
 
+### Or that the hub has gone from it
+
+A Wi-Fi accessory stays on the network it was given at commissioning, and a
+controller can move it to another only while it can reach it. So a hub carried
+to another network — which it can be told about in advance — leaves its Wi-Fi
+accessories behind, offline for as long as the two are apart. The hub reads
+which network each accessory is on from its own `NetworkCommissioning` list,
+out of matter.js's cache, so the answer exists for an accessory that is out of
+reach right now; a device in that state carries `offlineElsewhere`
+([`api.md`](api.md#a-device-on-another-wi-fi-offlineelsewhere)), and the apps
+stop counting it as a fault. Wi-Fi only: a Thread accessory's network id is an
+extended PAN ID, not a name anybody knows.
+
 ## Runtime requirements
 
 - **Host networking.** Matter uses site-local UDP (port 5540) and mDNS
@@ -173,6 +186,16 @@ to shorten, are in
   is off on the machine or on the LAN interface.
 - Fabric storage lives in `<data>/matter/`; keep the `/data` volume to keep
   your fabric.
+- **Logging follows the hub's `LOG_LEVEL`** (`/etc/gethome/hub.env`, `info`
+  unless changed). matter.js's own default is debug, which logs every message
+  exchange and every attribute report. On a hub with one Matter plug that was
+  98.6% of everything the hub wrote to the journal, and it left the 64 MB
+  journal holding about an hour. At `info` those lines are gone, while
+  matter.js's info, notice, warning and error lines still reach the journal.
+  To read the debug lines while chasing a pairing problem, set
+  `LOG_LEVEL=debug`, run `sudo gethome-hubctl restart`, and set it back
+  afterwards. `MATTER_LOG_LEVEL` and matter.js's own `config.json` are
+  overridden: the hub's level is the one setting.
 
 ## The network Matter needs, and what the hub does about each part
 
@@ -208,6 +231,20 @@ than on the one it was written on:
   warns when IPv6 forwarding is on, which undoes this. A NetworkManager profile
   with `ipv6.method=auto` learns these routes itself (1.42 or later, which
   Bookworm and Trixie both ship).
+- **A link-local address on the hub's own interface**, which NetworkManager
+  can take away. The Wi-Fi profile Raspberry Pi Imager writes says
+  `ipv6.method=ignore`, so IPv6 is the kernel's. NetworkManager 1.52 switches
+  it off when such a connection comes up, and sometimes cannot switch it back
+  on: when the network has gone away and come back, it has forgotten the value
+  it was going to restore. The interface is then left with no IPv6 at all
+  until a reboot. An accessory that also answers on IPv4 is still reached that
+  way, but one that is only on IPv6, which every Thread accessory is, is not.
+  So a
+  NetworkManager dispatcher (`deploy/matter-ipv6.sh`) turns the kernel's IPv6
+  back on each time a connection comes up. It acts only for an `ignore`
+  connection on a physical interface, and never where the profile or this
+  machine's own sysctl settings turn IPv6 off. The installer does the same
+  once, for a hub that is already in that state.
 - **Multicast has to cross the router**, because discovery (mDNS) and IPv6
   neighbour discovery are multicast. Three router features break it, and none
   can be fixed from the hub: a guest network or client isolation (nothing can

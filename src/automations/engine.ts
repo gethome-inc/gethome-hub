@@ -117,6 +117,30 @@ interface RunHandle {
   queued: number;
 }
 
+/**
+ * Who pressed a button or switched a mode, for the one activity row a manual
+ * run writes.
+ *
+ * More than a name, because the row is somebody's. `memberId` is what lets a
+ * member without `activity.read` still find their own press in the feed, and
+ * `data` is how they did it — through an API key, `via: "api"` with the key's
+ * id and name, the rule every other row a key causes already keeps. It used
+ * to be the name alone, so a scene a script pressed was a sentence and nothing
+ * an app could attribute.
+ */
+export interface AutomationPresser {
+  /** The sentence's subject: "Anna", or "Anna’s “Node-RED”" through a key. */
+  name: string;
+  memberId?: string;
+  data?: Record<string, unknown>;
+}
+
+interface FireOptions {
+  manual?: boolean;
+  useOffActions?: boolean;
+  by?: AutomationPresser;
+}
+
 export class AutomationEngine {
   private readonly guards: AutomationGuards;
   private readonly now: () => number;
@@ -432,7 +456,7 @@ export class AutomationEngine {
    * leaving"), and it is the floor rather than a permission — pressing it
    * switches lights, and working the home is what being a member means.
    */
-  async runManually(id: string, memberName: string): Promise<boolean> {
+  async runManually(id: string, by: AutomationPresser): Promise<boolean> {
     const record = this.get(id);
     if (!record) return false;
     // **Started, not finished** — the `POST /devices/:id/remap` lesson, and
@@ -441,7 +465,7 @@ export class AutomationEngine {
     // the hub ten seconds. Awaiting the run reported a failure on every
     // press that actually did something slow, over a house doing precisely
     // what it was asked. `settled()` is how a test waits for the rest.
-    this.detach(this.fire(record, 'manual', `${memberName} pressed ${record.name}`, 0, { manual: true }));
+    this.detach(this.fire(record, 'manual', `${by.name} pressed ${record.name}`, 0, { manual: true, by }));
     return true;
   }
 
@@ -452,7 +476,7 @@ export class AutomationEngine {
    * asking `automationActive` during this run sees the new answer — which is
    * what somebody writing "only while Security is on" means.
    */
-  async setActive(id: string, active: boolean, memberName: string): Promise<boolean> {
+  async setActive(id: string, active: boolean, by: AutomationPresser): Promise<boolean> {
     const record = this.get(id);
     if (!record) return false;
     await this.options.store.setActive(id, active);
@@ -470,9 +494,9 @@ export class AutomationEngine {
       this.fire(
         updated,
         'manual',
-        `${memberName} switched ${record.name} ${active ? 'on' : 'off'}`,
+        `${by.name} switched ${record.name} ${active ? 'on' : 'off'}`,
         0,
-        { manual: true, useOffActions: !active },
+        { manual: true, useOffActions: !active, by },
       ),
     );
     return true;
@@ -508,7 +532,7 @@ export class AutomationEngine {
     trigger: string,
     cause: string,
     depth: number,
-    options: { manual?: boolean; useOffActions?: boolean } = {},
+    options: FireOptions = {},
   ): Promise<void> {
     const mode = record.document.mode;
     const existing = this.running.get(record.id);
@@ -591,7 +615,7 @@ export class AutomationEngine {
     trigger: string,
     cause: string,
     depth: number,
-    options: { manual?: boolean; useOffActions?: boolean },
+    options: FireOptions,
     handle: RunHandle,
   ): Promise<void> {
     const startedAt = this.now();
@@ -670,12 +694,19 @@ export class AutomationEngine {
      * and it is bounded per rule so it can afford them.
      */
     if (options.manual && sent > 0) {
+      const by = options.by;
+      const row = {
+        kind: 'automation.ran',
+        message: cause,
+        data: { ...by?.data, automationId: record.id, automationName: record.name, commands: sent },
+      };
       await this.options.activity
-        .record({
-          kind: 'automation.ran',
-          message: cause,
-          data: { automationId: record.id, automationName: record.name, commands: sent },
-        })
+        .record(by?.memberId !== undefined ? { ...row, memberId: by.memberId } : row)
+        // A run can outlive its presser's membership — a `wait` holds it for
+        // up to fifteen minutes, and the row is written at the end — while
+        // `activity.member_id` is a foreign key, so naming somebody removed in
+        // the meantime is refused. The sentence still says who it was.
+        .catch(() => this.options.activity.record(row))
         .catch(() => undefined);
     }
   }

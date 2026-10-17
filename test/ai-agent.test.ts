@@ -180,9 +180,15 @@ describe('supported models', () => {
     expect(isSupportedModel('gpt-4')).toBe(false);
   });
 
-  it('does not offer Claude Fable 5', () => {
+  /**
+   * Fable 5.1 is offered on Anthropic where GPT-6 Astra is on OpenAI: above the
+   * default, at the same $10/$50. Its sibling Mythos 5.1 shares its weights and
+   * is only for organisations Anthropic has verified, so a home's key would be
+   * refused — it is never offered. Nor is Fable 5, which this hub never ran.
+   */
+  it('offers Fable 5.1, and no other Fable or any Mythos', () => {
     const every = [...supportedModelIds('anthropic'), ...supportedModelIds('openai')];
-    expect(every.some((id) => id.includes('fable') || id.includes('mythos'))).toBe(false);
+    expect(every.filter((id) => id.includes('fable') || id.includes('mythos'))).toEqual(['claude-fable-5-1']);
   });
 
   /**
@@ -221,10 +227,13 @@ describe('supported models', () => {
    * `choices` so nothing new picks it up.
    */
   it('pins Opus 5.5, Astra and Sol by their explicit ids', () => {
-    expect(PROVIDER_MODELS.anthropic.choices.map((choice) => choice.id)).toEqual(['claude-opus-5-5']);
-    expect(PROVIDER_MODELS.openai.choices.map((choice) => choice.id)).toEqual(['gpt-6-astra', 'gpt-6-sol']);
+    expect(PROVIDER_MODELS.anthropic.choices.map((choice) => choice.id)).toEqual([
+      'claude-fable-5-1',
+      'claude-opus-5-5',
+    ]);
+    expect(PROVIDER_MODELS.openai.choices.map((choice) => choice.id)).toEqual(['gpt-6-astra', 'gpt-6.1-sol']);
     expect(defaultModelFor('anthropic')).toBe('claude-opus-5-5');
-    expect(defaultModelFor('openai')).toBe('gpt-6-sol');
+    expect(defaultModelFor('openai')).toBe('gpt-6.1-sol');
 
     // Retired from the picker, still known: a run recorded months ago names
     // the model it ran on, and a stored setting naming one must still be taken.
@@ -232,6 +241,8 @@ describe('supported models', () => {
     expect(isSupportedModel('claude-sonnet-5', 'anthropic')).toBe(true);
     expect(isSupportedModel('gpt-5.6-sol', 'openai')).toBe(true);
     expect(isSupportedModel('gpt-5.6-terra', 'openai')).toBe(true);
+    expect(isSupportedModel('gpt-6-sol', 'openai')).toBe(true);
+    expect(PROVIDER_MODELS.openai.choices.some((choice) => choice.id === 'gpt-6-sol')).toBe(false);
 
     // Accepted, priced, and never offered.
     expect(isSupportedModel('gpt-5.6', 'openai')).toBe(true);
@@ -258,13 +269,17 @@ describe('supported models', () => {
   it('runs a stored model only while it is still offered, and succeeds a retired one', () => {
     expect(effectiveModel('anthropic', 'claude-opus-5')).toBe('claude-opus-5-5');
     expect(effectiveModel('anthropic', 'claude-opus-4-6')).toBe('claude-opus-5-5');
-    expect(effectiveModel('openai', 'gpt-5.6-sol')).toBe('gpt-6-sol');
-    expect(effectiveModel('openai', 'gpt-5.6-terra')).toBe('gpt-6-sol');
+    // GPT-6 Sol is replaced by GPT-6.1 Sol, and the GPT-5.6 tiers it had
+    // replaced walk on down the same chain.
+    expect(effectiveModel('openai', 'gpt-6-sol')).toBe('gpt-6.1-sol');
+    expect(effectiveModel('openai', 'gpt-5.6-sol')).toBe('gpt-6.1-sol');
+    expect(effectiveModel('openai', 'gpt-5.6-terra')).toBe('gpt-6.1-sol');
     // The bare alias was never offered, so it was never a preference either.
-    expect(effectiveModel('openai', 'gpt-5.6')).toBe('gpt-6-sol');
+    expect(effectiveModel('openai', 'gpt-5.6')).toBe('gpt-6.1-sol');
     // Offered to the agents and not here: the default, never the cheap tier.
     expect(effectiveModel('anthropic', 'claude-sonnet-5-5')).toBe('claude-opus-5-5');
-    expect(effectiveModel('openai', 'gpt-6-luna')).toBe('gpt-6-sol');
+    expect(effectiveModel('anthropic', 'claude-haiku-5-5')).toBe('claude-opus-5-5');
+    expect(effectiveModel('openai', 'gpt-6-luna')).toBe('gpt-6.1-sol');
     // Nor at the end of a chain: Sonnet 5 is succeeded by Sonnet 5.5, which
     // this list does not offer either.
     expect(effectiveModel('anthropic', 'claude-sonnet-5')).toBe('claude-opus-5-5');
@@ -272,6 +287,7 @@ describe('supported models', () => {
     // A model still on the list is still honoured, and so is silence.
     expect(effectiveModel('anthropic', 'claude-opus-5-5')).toBe('claude-opus-5-5');
     expect(effectiveModel('openai', 'gpt-6-astra')).toBe('gpt-6-astra');
+    expect(effectiveModel('anthropic', 'claude-fable-5-1')).toBe('claude-fable-5-1');
     expect(effectiveModel('anthropic', null)).toBe('claude-opus-5-5');
     expect(effectiveModel('anthropic', undefined)).toBe('claude-opus-5-5');
     // Nothing a stranger could put in the column becomes a model either — and
@@ -309,17 +325,60 @@ describe('supported models', () => {
     expect(
       estimateCostUsd('claude-sonnet-5-5', { input_tokens: 1_000_000, output_tokens: 1_000_000 }),
     ).toBeCloseTo(12, 5);
-    expect(estimateCostUsd('gpt-6-astra', { input_tokens: 1_000_000, output_tokens: 1_000_000 })).toBeCloseTo(60, 5);
-    expect(estimateCostUsd('gpt-6-sol', { input_tokens: 1_000_000, output_tokens: 1_000_000 })).toBeCloseTo(12, 5);
-    expect(estimateCostUsd('gpt-6-luna', { input_tokens: 1_000_000, output_tokens: 1_000_000 })).toBeCloseTo(0.6, 5);
+    // Fable 5.1 is GPT-6 Astra's $10/$50.
+    expect(
+      estimateCostUsd('claude-fable-5-1', { input_tokens: 1_000_000, output_tokens: 1_000_000 }),
+    ).toBeCloseTo(60, 5);
+    // GPT-6 and Haiku 5.5 bill a long prompt at dearer rates, so their list
+    // prices are checked on a prompt short of either line (`longPrompt`).
+    const short = { input_tokens: 100_000, output_tokens: 100_000 };
+    expect(estimateCostUsd('gpt-6-astra', short)).toBeCloseTo(6, 5);
+    expect(estimateCostUsd('gpt-6-sol', short)).toBeCloseTo(1.2, 5);
+    // GPT-6.1 Sol kept GPT-6 Sol's $2/$10.
+    expect(estimateCostUsd('gpt-6.1-sol', short)).toBeCloseTo(1.2, 5);
+    expect(estimateCostUsd('gpt-6-luna', short)).toBeCloseTo(0.06, 5);
+    expect(estimateCostUsd('claude-haiku-5-5', short)).toBeCloseTo(0.06, 5);
+  });
+
+  /**
+   * Two vendors bill a long prompt at dearer rates for the whole request: GPT-6
+   * past 272K tokens (2× input and cache, 1.5× output), Haiku 5.5 past 100K
+   * (5× everything). The prompt is everything sent in — cache reads and writes
+   * included — and a prompt exactly on the line is still the cheaper one.
+   */
+  it('prices a long prompt at the vendor’s long-prompt rates', () => {
+    expect(estimateCostUsd('gpt-6.1-sol', { input_tokens: 272_000 })).toBeCloseTo(0.544, 5);
+    expect(estimateCostUsd('gpt-6.1-sol', { input_tokens: 300_000, output_tokens: 10_000 })).toBeCloseTo(1.35, 5);
+    // 100K uncached and 200K read from the cache is a 300K prompt: both at twice
+    // their usual rate, $0.40 and $0.04.
+    expect(
+      estimateCostUsd('gpt-6.1-sol', { input_tokens: 100_000, cache_read_input_tokens: 200_000 }),
+    ).toBeCloseTo(0.44, 5);
+    expect(estimateCostUsd('gpt-6-astra', { input_tokens: 1_000_000, output_tokens: 1_000_000 })).toBeCloseTo(95, 5);
+
+    expect(estimateCostUsd('claude-haiku-5-5', { input_tokens: 100_000, output_tokens: 10_000 })).toBeCloseTo(
+      0.015,
+      5,
+    );
+    // One token past the line and the whole request is at $0.50/$2.50, the
+    // cache read with it ($0.05).
+    expect(
+      estimateCostUsd('claude-haiku-5-5', {
+        input_tokens: 1,
+        cache_read_input_tokens: 100_000,
+        output_tokens: 10_000,
+      }),
+    ).toBeCloseTo(0.0000005 + 0.005 + 0.025, 7);
+    // Every other Claude is one price across its whole window.
+    expect(estimateCostUsd('claude-opus-5-5', { input_tokens: 900_000 })).toBeCloseTo(3.6, 5);
   });
 
   it('bills cache reads at a tenth of the input rate', () => {
     const cached = estimateCostUsd('claude-opus-5', { cache_read_input_tokens: 1_000_000 });
     expect(cached).toBeCloseTo(0.5, 5);
-    // $0.20, like Opus 5.5 — but as a tenth of $2, not a twentieth of $4.
-    expect(estimateCostUsd('claude-sonnet-5-5', { cache_read_input_tokens: 1_000_000 })).toBeCloseTo(0.2, 5);
-    expect(estimateCostUsd('claude-sonnet-5-5', { cache_creation_input_tokens: 1_000_000 })).toBeCloseTo(2.5, 5);
+    // A tenth of $2: Sonnet 5 and GPT-6 Sol have no rate of their own.
+    expect(estimateCostUsd('claude-sonnet-5', { cache_read_input_tokens: 1_000_000 })).toBeCloseTo(0.2, 5);
+    expect(estimateCostUsd('gpt-6-sol', { cache_read_input_tokens: 100_000 })).toBeCloseTo(0.02, 5);
   });
 
   /**
@@ -331,6 +390,15 @@ describe('supported models', () => {
     expect(estimateCostUsd('claude-opus-5-5', { cache_read_input_tokens: 1_000_000 })).toBeCloseTo(0.2, 5);
     // Writes are the usual 1.25x of $4.
     expect(estimateCostUsd('claude-opus-5-5', { cache_creation_input_tokens: 1_000_000 })).toBeCloseTo(5, 5);
+    // Sonnet 5.5 and GPT-6.1 Sol read at a twentieth of $2 — half what their
+    // predecessors charged for the same read — and write at the usual 1.25x.
+    expect(estimateCostUsd('claude-sonnet-5-5', { cache_read_input_tokens: 1_000_000 })).toBeCloseTo(0.1, 5);
+    expect(estimateCostUsd('claude-sonnet-5-5', { cache_creation_input_tokens: 1_000_000 })).toBeCloseTo(2.5, 5);
+    expect(estimateCostUsd('gpt-6.1-sol', { cache_read_input_tokens: 100_000 })).toBeCloseTo(0.01, 5);
+    expect(estimateCostUsd('gpt-6.1-sol', { cache_creation_input_tokens: 100_000 })).toBeCloseTo(0.25, 5);
+    // Fable 5.1 reads at a fortieth of $10, a quarter of what Opus 5 charged.
+    expect(estimateCostUsd('claude-fable-5-1', { cache_read_input_tokens: 1_000_000 })).toBeCloseTo(0.25, 5);
+    expect(estimateCostUsd('claude-fable-5-1', { cache_creation_input_tokens: 1_000_000 })).toBeCloseTo(12.5, 5);
   });
 
   /**
@@ -341,6 +409,8 @@ describe('supported models', () => {
    */
   it('stretches the spend caps for a model priced above the one they were set against', () => {
     expect(budgetScale('gpt-6-astra')).toBeCloseTo(2, 5);
+    expect(budgetScale('claude-fable-5-1')).toBeCloseTo(2, 5);
+    expect(budgetScale('claude-haiku-5-5')).toBe(1);
     expect(budgetScale('claude-opus-5')).toBe(1);
     expect(budgetScale('claude-opus-5-5')).toBe(1);
     expect(budgetScale('claude-sonnet-5-5')).toBe(1);
@@ -359,6 +429,11 @@ describe('supported models', () => {
     const unknown = estimateCostUsd('claude-something-new', { output_tokens: 1_000_000 });
     const cheapest = estimateCostUsd('claude-sonnet-5', { output_tokens: 1_000_000 });
     expect(unknown).toBeGreaterThanOrEqual(cheapest);
+    // Each rate is the dearest the table has, whichever row it is on: Fable
+    // 5.1 and Astra tie at $10/$50 and differ fourfold on a cached read, and
+    // the fallback takes Astra's tenth rather than Fable's fortieth.
+    const read = { cache_read_input_tokens: 100_000 };
+    expect(estimateCostUsd('claude-something-new', read)).toBeCloseTo(estimateCostUsd('gpt-6-astra', read), 5);
   });
 });
 

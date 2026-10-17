@@ -44,6 +44,14 @@ export interface RegistryDevice {
   offlineExpectedAt: number | null;
   offlineExpectedBy: string | null;
   offlineExpectedByName: string | null;
+  /**
+   * The Wi-Fi network the device says it is joined to, and null when it has
+   * not said (anything not on Wi-Fi, or a device not yet announced since the
+   * hub started). **Held in memory only**: the adapter re-announces it from
+   * its own cache at every start, and a column would be a second copy of a
+   * fact the device already keeps.
+   */
+  wifiNetwork: string | null;
   endpoints: RegistryEndpoint[];
 }
 
@@ -163,6 +171,8 @@ export class DeviceRegistry implements AdapterBus {
         offlineExpectedAt: row.offlineExpectedAt,
         offlineExpectedBy: row.offlineExpectedBy,
         offlineExpectedByName: row.offlineExpectedByName,
+        // Until its adapter announces it again, a moment from now.
+        wifiNetwork: null,
         endpoints: (byDevice.get(row.id) ?? []).map((endpoint) => ({
           endpointId: endpoint.endpointId,
           deviceKind: endpoint.deviceKind as DeviceKind,
@@ -754,6 +764,7 @@ export class DeviceRegistry implements AdapterBus {
       offlineExpectedAt: null,
       offlineExpectedBy: null,
       offlineExpectedByName: null,
+      wifiNetwork: descriptor.wifiNetwork ?? null,
       endpoints: [],
     };
     for (const endpoint of descriptor.endpoints) {
@@ -798,6 +809,7 @@ export class DeviceRegistry implements AdapterBus {
     device.model = descriptor.model ?? device.model;
     device.needsReview = descriptor.needsReview ?? false;
     device.recognition = descriptor.recognition ?? null;
+    device.wifiNetwork = descriptor.wifiNetwork ?? null;
     await this.db
       .update(devices)
       .set({

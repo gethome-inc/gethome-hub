@@ -127,5 +127,55 @@ update it in the same change.
   waits on it. And **the file object is made in `start()`**, not the
   constructor, because the API reads this adapter before it has started and
   a test constructs one with no data directory at all.
+- **matter.js joins its mDNS groups once, when it starts, so an interface
+  replaced underneath it leaves it deaf.** `UdpMulticastServer` adds the
+  memberships when it creates its sockets, on the interfaces there are then,
+  and never again; only its *sending* channel is rebuilt after an error, which
+  is why a single `send ENODEV` is all the journal shows. Measured on a
+  Zero 2 W: reloading brcmfmac replaced wlan0 (ifindex 2, then 3), and
+  afterwards only avahi was in 224.0.0.251 and ff02::fb on it — sessions went
+  on by unicast, but no accessory could be heard announcing itself — until the
+  hub restarted. `deploy/wifi-watchdog.sh` is the one thing that replaces the
+  interface on purpose, and it restarts the hub when the network answers again
+  (`deploy/CLAUDE.md`); anything else that recreates an interface under a
+  running hub owes the same restart, or a change here that joins the groups
+  again.
+- **The hub reads which Wi-Fi each accessory is on, from the same cache.**
+  `wifi-network.ts` takes the accessory's own `NetworkCommissioning` list. It
+  uses the connected entry, or the only one, and drops a name that is not
+  UTF-8. It covers Wi-Fi accessories only. `announceNode` puts the result in
+  the descriptor as `wifiNetwork`, which is how `offlineElsewhere` can name the
+  network of a plug left behind when the hub moved (`src/core/CLAUDE.md`).
+  Never allowed to throw, like the neighbour read. On the hub this came from,
+  the cache held `[{ networkId: "Keti", connected: true }]` for a plug out of
+  reach since the hub had restarted on its owner's hotspot.
+- **matter.js logs at the hub's level, never at its own default, which is
+  debug.** Nothing set it, so a hub at `LOG_LEVEL=info` wrote every matter.js
+  debug line to the journal. With one plug reporting its power, that was
+  3,468 of the 3,517 lines `gethome-hubd` wrote in ten minutes, and it left the
+  64 MB journal holding about an hour (`deploy/CLAUDE.md` has the
+  measurement). `log-level.ts` maps the hub's level onto matter.js's: debug
+  only at `debug` or `trace`, the same name otherwise, and `info` for anything
+  it does not recognise. `start()` applies it **first**, before Bluetooth or the
+  controller. Importing `@matter/main` logs nothing (measured on 0.17.9), and
+  every other path into matter.js goes through the controller that `start()`
+  builds, so the constructor stays free of side effects as the bullet above
+  requires. Three choices to keep. **The level is read from the adapter's own
+  logger** (`options.log.level`, a child of the hub's), not plumbed from config
+  as a second option, so matter.js and the adapter's own lines cannot
+  disagree. **It is set through matter.js's `log.level` variable, not by
+  assigning `Logger.level`**: the Node.js environment registers a configurator
+  that rewrites `Logger.level` from that variable whenever any `log.*`
+  variable changes. An assignment holds only until the next such run, which
+  would bring back a `MATTER_LOG_LEVEL` or `config.json` level. **So the hub's
+  `LOG_LEVEL` is the one setting**, and `MATTER_LOG_LEVEL` is deliberately
+  overridden; turning matter.js debug on means `LOG_LEVEL=debug` for the whole
+  hub, for as long as it is needed. `test/matter-log-level.test.ts` covers the
+  mapping, typed against the config's own enum. Against real matter.js it
+  checks that debug lines are dropped while warnings and errors still get
+  through, that the variable holds when the configurator runs again, and that
+  the adapter applies it before it builds a controller. On a matter.js upgrade,
+  re-check the two facts this rests on: importing still logs nothing, and the
+  configurator still reads `log.level`.
 - The Matter reducer (`src/adapters/matter/reducer.ts`) is a 1:1 port of the
   iOS `MatterStateReducer` — keep them in lockstep if either changes.

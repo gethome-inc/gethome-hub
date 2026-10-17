@@ -39,6 +39,16 @@ the [REST API](api.md), which works for every protocol rather than just Zigbee.
 The connection is unencrypted. That is right for a home LAN and wrong for the
 internet: don't forward 1883 through your router.
 
+> **MQTT or the API?** This convention is for a thing that **is** a device — a
+> board with a relay on it, a sensor, a bridge that presents other hardware as
+> devices. Software that **uses** the home — a dashboard, a script that switches
+> the porch light at dusk, a bridge to another system, an AI agent — wants an
+> [API key](api.md#api-keys) and the REST API instead: it works for every
+> protocol rather than only for what is on this broker, it is narrowed to what
+> you give it, and revoking it takes effect on the next request rather than
+> after a trip round every board that knows a password. See
+> [integrations.md](integrations.md).
+
 > **A hub installed before this** takes anonymous connections and needs no
 > credentials. Updating it closes the broker and prints a warning saying so —
 > at which point anything you had wired in needs the username and password

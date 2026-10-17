@@ -117,7 +117,7 @@ in `deploy/install.sh` must stay accurate.
   `gethome-hubctl update`. That is what lets a phone update a hub at all —
   Studio does it over SSH with a key it planted, and an iPhone has none.
   Any member may ask; see the owner-only bullet above for why that moved.
-  Six things to keep. **The unit is never enabled and never ordered after the
+  Seven things to keep. **The unit is never enabled and never ordered after the
   hub**: an enabled update service updates on every boot, and a unit ordered
   after `gethome-hubd` is one systemd may take down with the hub *this very run
   is restarting*. **`TimeoutStartSec=infinity`**, because a `Type=oneshot`
@@ -131,7 +131,33 @@ in `deploy/install.sh` must stay accurate.
   or not, and `current` points at the same build either way, so `@@ROLLBACK@@`
   was added to the marker vocabulary rather than matching its prose. **What is
   running afterwards is read back from `GET /hub`**, never from the log, the same
-  rule the radio card follows. And **`<data>/update/enabled` is the capability**:
+  rule the radio card follows. **Root runs only `gethome-hubctl update`;
+  everything in `<data>/update` is read and written as the hub's account**
+  (`as_hub`: `setpriv`, else `runuser`, both util-linux — the Wi-Fi bullet's
+  rule, in the runner). That directory is the account's, so a name in it is
+  whatever the account made it, and root following one follows its links — a
+  `request` or a `last.log` planted as a link to a file only root may read or
+  write, and the log is where the installer's output (part of it the account's
+  own) lands. So the request and the pairing code are read as the account, the
+  status file is written whole and renamed past any planted name, the log is
+  appended to as the account, and there is no `chmod` through a path (umask sets
+  the mode). `install.sh` keeps the same rule for its own `<data>` writes:
+  `as_service_user` makes the hub's data directories, `read_hub_file` reads
+  `pairing-code` and `radio-mode`, everything in Zigbee2MQTT's directory goes
+  through the account too (the `onboarding` bullet below), and only a
+  `chown -R` stays root's, because without `-H`/`-L` it changes a link itself
+  and never descends through one. `gethome-hubctl` reads `pairing-code` the
+  same way — `claim` sends it to the hub's own port, so root reading it through
+  a planted link would hand a root-only file to whatever answers there.
+  **Reading as the account is also what makes the read work at all** when the
+  installer runs as a login user with sudo (`curl … | bash`, or
+  `gethome-hubctl update` without sudo): from "Accounts and directories" until
+  the hub restarts, `/var/lib/gethome` is 0750 (the hub unit's
+  `StateDirectory=` sets it back to 0755 on every start), and that user cannot
+  see into it. `test/deploy-update.test.ts`, `test/deploy-config.test.ts` and
+  `test/deploy-hub-account.test.ts` pin that no root write or chmod inside
+  `<data>` comes back, and plant a link to show its target untouched. And
+  **`<data>/update/enabled` is the capability**:
   `install.sh` touches it in the same breath as it writes the units, because
   `hub.env` is written *only when absent* and so would never reach an upgraded
   hub — the trap that makes a `GETHOME_UPDATE=1` variable there the wrong answer.
@@ -139,6 +165,74 @@ in `deploy/install.sh` must stay accurate.
   when an app asks it to, cached six hours: a hub nobody looks at never calls
   out. `docs/api.md` is canonical, including why `available` is *absent* rather
   than false when the hub cannot tell.
+- **A hub can be told about another Wi-Fi network before it is moved, on the
+  update's terms.** It is set up on one network and carried to another, where
+  it joins nothing and no app can reach it; NetworkManager already joins any
+  network it has a profile for, preferring the one it used last, so handing it
+  the profile beforehand is the whole fix. `POST /settings/wifi/networks`
+  writes `<data>/wifi/request`, `gethome-wifi.path` notices, and
+  `deploy/wifi-networks.sh` (installed as `/usr/local/lib/gethome-wifi-networks.sh`,
+  root, `Type=oneshot`) applies it with `nmcli` and writes `networks` and
+  `result` back, 0640. `networks` also carries one `bands=` line: what the
+  radio can join, from `nmcli -t -f WIFI-PROPERTIES device show`, because a
+  2.4 GHz-only board given a 5 GHz network (an iPhone hotspot without
+  *Maximize Compatibility*) stores it, says nothing, and never joins it. Eight things to keep. **The service is never
+  enabled** and the script **always exits 0**, for the update runner's reasons.
+  **Root runs `nmcli` and nothing else; everything in `<data>/wifi/` is read
+  and written as the hub's account** (`as_hub`: `setpriv`, else `runuser`, both
+  util-linux). The directory is that account's, so every name in it is
+  whatever the account made it, and root following one follows its links —
+  measured on this branch: a list written as root through a link the account
+  had planted overwrote a root-only file, and the `chmod`/`chown` after it
+  handed that file to the hub's group. As the account, a planted link reaches
+  only what it could reach already. `test/deploy-wifi-networks.test.ts` pins
+  that no `chmod`, `chown` or `chgrp` comes back. **The installer keeps the
+  same rule for its own writes there**: `install.sh`'s `as_service_user`
+  creates `wifi/enabled` and `wifi/unsupported`, sets `wifi`'s mode and
+  touches `update/enabled` as that account. Only a `chown -R` stays root's,
+  because without `-H`/`-L` it changes a link itself and never descends
+  through one. `test/deploy-config.test.ts` pins both.
+  **The network the hub is on is never deleted** — checked again here against
+  `nmcli`'s own `ACTIVE`, because the hub's list can be a minute stale and a hub
+  off its only network is the one outcome that costs a trip to the Pi, and then
+  a second way, against `connection show --active`, which reads no yes-or-no
+  column: the hub's list and the first check come from the same parse, so one
+  misread table must not be enough to allow the step that cannot be undone. **One
+  profile per name, sixteen at most, Wi-Fi profiles only**: two profiles for one
+  name are tried in turn and a stale password holds the other up. **Every field
+  is validated before it reaches `nmcli`, and every value is its own argument**
+  — the request is the hub user's file and this is root, the
+  `matter-neighbours` rule. The key in it is the derived 64-hex PSK, never the
+  passphrase, and it sits in `nmcli`'s argv for the moment the profile takes to
+  write, which reaches nobody who could not already read the active network's
+  key. **SSIDs cross as hex**, written with `od`, because a network can be called
+  anything and `nmcli -t` escapes colons. And **the list is rewritten on every
+  association** by its own dispatcher (`54-gethome-wifi-networks`; 53 is the
+  profile copy's, below), so "connected" stays true; a profile somebody adds by
+  hand appears at the next reconnect or the next change, which is the one thing
+  this does not watch. **A change is on the card before it is reported, and a
+  removed network leaves the profile copy too.** Measured on the hub this was
+  tried on (Raspberry Pi OS Trixie, NetworkManager 1.52.1-1+rpt4, netplan
+  1.1.2): a profile `nmcli connection add` creates lands as a keyfile in
+  `/etc/NetworkManager/system-connections`, which NetworkManager writes safely,
+  while a profile that came from netplan — the one Raspberry Pi Imager sets up
+  through cloud-init — is written back to `/etc/netplan/90-NM-<uuid>.yaml`
+  through netplan's `netplan_netdef_write_yaml`, which is `fopen(path, "wb")`
+  and nothing more: the writer that left a hub with two empty profiles on
+  2026-10-12 (the profile-copy bullet below). Which writer NetworkManager picks
+  is its own and can change in an update, so every successful add and delete is
+  followed by `sync` before the result is written — one flush covers either
+  writer and the directory entry a delete removes, and a hub unplugged the
+  moment an app says "added" is the ordinary case for a feature about moving.
+  And a delete runs `gethome-wifi-profile.sh forget
+  <uuid>`, which drops the copy only when it is of that very connection, so a
+  power cut can never bring back a network somebody removed on purpose.
+  NetworkManager or nothing: a machine without `nmcli` gets no units and
+  `<data>/wifi/unsupported` saying `no-networkmanager`, which the hub passes on
+  so an app says why rather than offering a form that can only fail.
+  `gethome-hubctl uninstall` removes the units, the dispatchers and the script
+  and **leaves the profiles** — they are the machine's way onto a network by
+  then, not the hub's.
 - **64-bit only, and the two 32-bit cases are different problems.** Bundles are
   built for `linux-arm64` and `linux-x64` and nothing else. `armv6l` (Pi 1 /
   Zero / Zero W) is unfixable — no Node.js build exists — and the answer is
@@ -352,6 +446,20 @@ in `deploy/install.sh` must stay accurate.
   every other bound here (`STATE_FLUSH_MS`, the activity log's two, the history
   buckets) exists to *stop* writing, and this one exists because the alternative
   is a support question with no evidence behind it.
+  **And a bound in megabytes is only as long as what fills it**, which the
+  first outage diagnosed from this journal measured: about an hour. matter.js
+  ran at its own default, debug, and on that hub — a Zero 2 W with one Matter
+  plug and three Zigbee devices, ten minutes after boot — `gethome-hubd` wrote
+  **3,517 journal lines in ten minutes, 3,468 of them (98.6%) matter.js
+  debug** (`MessageExchange` 2,231, `MessageChannel` 751, `PairedNode` 465):
+  about 1.06 MB of message text per ten minutes, roughly 150 MB a day before
+  journald's own per-entry overhead, with `journalctl --disk-usage` at 56M
+  against the cap. matter.js follows the hub's `LOG_LEVEL` now
+  (`src/adapters/matter/log-level.ts`). The rule it leaves is to read the
+  cap as time rather than as space: anything that writes per report rather
+  than per event shortens the history the cap buys, so measure the rate
+  (`journalctl -u gethome-hubd --since -10min | wc -l`) before and after a
+  change that adds logging.
 - **The hub's Wi-Fi must not doze — though not for the reason this was first
   written for.** 802.11 power save is on by default on the Pi's brcmfmac
   (`brcmf_cfg80211_set_power_mgmt: power save enabled`, in every Pi's kernel
@@ -494,6 +602,96 @@ in `deploy/install.sh` must stay accurate.
   reaches it; and the hub exchanging traffic with the gateway throughout rules
   out its own radio, its power save and anything the *hub* buffers. Those two
   fixes are real and stand on their own measurements. Neither was this.
+- **A hub whose Wi-Fi stays connected while nothing gets through restarts its
+  radio, then itself.** A third shape, and the one the two above are not: on
+  2026-10-15 the owner's Zero 2 W passed no traffic at all for fifty minutes —
+  from a Mac no ping, no SSH, nothing on 8420, no mDNS, one ping reply in all
+  that time — while cron and logrotate ran, NetworkManager's last line was an
+  ordinary DHCP renewal, and neither it, wpa_supplicant nor the kernel logged
+  anything. The Mac's ARP entry for the hub went on being refreshed, which is
+  the firmware's `arpoe` answering: the radio was associated and alive while
+  nothing crossed between it and Linux. A power cycle ended it and took every
+  counter that could have said which side stopped, so **the cause is not
+  known**. `deploy/wifi-watchdog.sh` (installed as `/usr/local/lib/gethome-wifi-
+  watchdog.sh`) is called at the end of every keep-alive round, and five rules
+  hold it up.
+  **REACHABLE is the answer, and the firmware cannot fake it.** The kernel
+  marks a neighbour REACHABLE only for an answer to its own unicast question or
+  a connection making progress, and the loop above asks every stale neighbour
+  every round. Measured on that hub, almost three hours of a night sampled every
+  5 s: never more than 10 s without a REACHABLE neighbour, never more than 30 s
+  without the gateway; and a probe at a link address nobody has went from
+  PROBE to FAILED in three seconds, IPv4 and IPv6 alike — `arp_ol=0x9` answers
+  ARP *for* the hub, never the hub's own questions. Five minutes is the trigger.
+  **Only after an answer since boot** (the state is in `/run`, so a network that
+  never answers can never start a loop), **only while NetworkManager says
+  `100 (connected)`** (asked in the C locale; `connected (externally)` is
+  somebody else's), so a router that is off or restarting — the link times out
+  in 15 s — never sets it off, **and only after asking again**: every neighbour
+  the keep-alive remembers, by unicast at its old link address, three seconds
+  for answers, so a round starved of CPU is not read as the network's silence.
+  **The driver first, then the machine.** brcmfmac only, the one driver this was
+  tried on: `modprobe -r` the vendor half and brcmfmac, `modprobe brcmfmac`,
+  once more if the radio is not back, and an immediate restart if it still is
+  not. "Back" means an interface brcmfmac drives, under any name — a second
+  adapter in the machine is not it — and the watchdog's memory follows that
+  radio rather than the name: wlan0 came back as wlan0 three times out of
+  three on that hub, but the kernel takes the next free name and udev may
+  rename it, and a memory kept under the old one would follow up on an
+  interface that is gone, or forget the silence when a default route returned
+  on the new one. Measured on that Zero 2 W: wlan0 gone for under a second, NetworkManager
+  connected 3.5 s after the reload began, 2.8 s of a Mac's 0.2-second pings
+  lost, Bluetooth up throughout, IPv6 on, power save off again through its
+  dispatcher. Five minutes later, if nothing has answered — whatever
+  NetworkManager says by then, and from rounds with no default route too, which
+  is why the keep-alive calls it with no interface there — it restarts the
+  machine, but never one that has been up for less than an hour, so at most
+  once an hour. Any other driver goes straight to the restart. **Not a
+  re-join**, though it is cheaper (measured: 2.5 s, 2.2 s of pings lost): an
+  activation runs the 4-way handshake in wpa_supplicant — this firmware lists
+  no FWSUP — and then DHCP, both across the path that stopped, so in this
+  failure it cannot finish and leaves NetworkManager not connected, where the
+  rule above would stop every later step — measured on that hub with every
+  IPv4, IPv6 and ARP frame dropped at wlan0 (EAPOL let through): after the
+  reload NetworkManager associated, finished the handshake, timed out in DHCP
+  after 45 s and cycled between connecting and disconnected for five minutes,
+  never connected and never with a default route.
+  And on NetworkManager 1.52.1 an activation of an `ipv6.method=ignore` profile
+  can leave `disable_ipv6=1` once the device has roamed — measured during the
+  re-join test, put right 0.2 s later by `51-gethome-matter-ipv6` where it is
+  installed — while the reload hands NetworkManager a new device and kept IPv6
+  on.
+  **A reload is followed by a restart of the hub, when the network answers
+  again.** matter.js joins its mDNS groups once, when it starts: after the
+  reload only avahi was in 224.0.0.251 and ff02::fb on the new wlan0
+  (`/proc/net/igmp` and `igmp6`, one user where there had been two), so Matter
+  kept its sessions and could not hear an accessory announce itself, until a
+  restart of `gethome-hubd` put it back — 35 s of the API on that board.
+  `src/adapters/matter/CLAUDE.md` carries the Matter half.
+  **It writes down what each side counted**: Linux's statistics and
+  `disable_ipv6`, the firmware's station counters through `iw`, brcmfmac's SDIO
+  bus counters (`/sys/kernel/debug/ieee80211/phy0/counters` — `intrcount`,
+  `f2rxdata`, `f2txdata`, `fc_xoff`/`fc_xon`), the transmit queue and the
+  neighbour table by state, at two minutes, before each step and when an answer
+  comes back, and that last line names the step taken before it. **The whole
+  ladder ran on that hub** with its own traffic dropped as above, a runtime
+  udev rule dropping it again on the interface a reload created, and the
+  restart written down instead of done: the two-minute line at 121 s, the
+  reload at 302 s (radio back in 1.9 s), the restart asked for at 608 s from a
+  round with no default route; then, with the drop lifted, the answer at the
+  next round and `gethome-hubd` restarted, matter.js back in both groups. The
+  counters told the sides apart — `tx_packets` and `f2txdata` stood still,
+  `f2rxdata` and the radio's counts went on — and a Mac saw what it saw in the
+  real outage: no ping, its ARP entry still refreshed by the firmware. **What
+  is still unmeasured is the cure**: whether a reload ends the fault that was
+  seen — it has happened once — and the "answers again" line is what will say.
+  One case it cannot tell
+  apart: an access point that stays up with nothing behind it and nobody else
+  on it to answer. Nobody can reach the hub either way. The clock is
+  `/proc/uptime`, never the wall clock; everything it does is under
+  `journalctl -t gethome-wifi-watchdog`; and `test/deploy-wifi.test.ts` runs
+  the real script against a fake sysfs, `ip`, `nmcli`, `modprobe`, `iw`, `tc`,
+  `logger` and `systemctl` and a clock it moves.
 - **A Matter accessory out of its box needs Bluetooth, and a Raspberry Pi ships
   with it off.** A factory-new — or factory-reset — Wi-Fi Matter accessory
   advertises over BLE and nowhere else: it has no network to be found on yet.
@@ -548,6 +746,105 @@ in `deploy/install.sh` must stay accurate.
   code while it was written: bash 3.2 keeps the quotes of a quoted replacement
   in `${var//pattern/"$x"}`, so escaping the name in the shell produced
   `My"\:"Net` on macOS and `My\:Net` on the Pi.)
+- **A hub that loses its Wi-Fi profile is a hub nobody can reach to fix it, so
+  it keeps its own copy and puts it back.** On 2026-10-12 the owner's Zero 2 W
+  (Trixie, NetworkManager 1.52.1 storing profiles through netplan, Wi-Fi from
+  Raspberry Pi Imager via cloud-init) was unplugged 15–45 s after power-on.
+  NetworkManager had been re-writing `/etc/netplan/90-NM-<uuid>.yaml` for the
+  hub's Wi-Fi and one other profile, and both were left at **0 bytes**. Every
+  boot after that was healthy and off the network: hubd on 8420, Zigbee2MQTT
+  with its devices, and wlan0 "disconnected" for ever, because **an empty YAML
+  is not an error to netplan — it defines nothing**, so the profile was simply
+  gone and nothing said so. It came back only by taking the card to a Mac.
+  **Why a cut can do that, from the source** (Ubuntu's NetworkManager netplan
+  patch and netplan 1.1.2, which is what NetworkManager links): a profile is
+  persisted with `netplan_netdef_write_yaml`, which is `fopen(path, "wb")` —
+  truncate, then write, no temporary file, no rename, no fsync — and *deleting*
+  any netplan-backed profile runs `netplan_delete_connection`, which rewrites
+  every file in `/etc/netplan` (temporary file and rename, still no fsync), so
+  one profile's deletion puts all the others in the window too. NetworkManager's
+  own keyfile writer, the other storage and Bookworm's, does fsync and rename.
+  The other shape the same cut can leave is a file of zeros rather than an
+  empty one, and that is worse: measured with netplan 1.1.2, one file with a
+  NUL in it makes `netplan generate` refuse **the whole directory**, so every
+  profile there goes at once.
+  **How wide the window is, measured on that hub after the repair** (12:27:08
+  boot, 2026-10-13): NetworkManager loaded the hand-written
+  `system-connections/Keti.nmconnection`, connected 29.4 s after boot, and did
+  **not** migrate or re-write it — `/etc/netplan` stayed empty and the keyfile
+  kept the mtime it was written with. So re-persisting is not an every-boot
+  event; NetworkManager does run `netplan generate` on every start (~25 s in),
+  which writes only `/run`. What made it re-persist in the boot that was cut is
+  **unknown** — that boot's journal stops at 14 s — so treat the window as
+  "whenever something on the machine changes or deletes a profile", which is
+  rare and not ours to close.
+  `deploy/wifi-profile.sh` is the fix, installed as
+  `/usr/local/lib/gethome-wifi-profile.sh` with two callers. **The dispatcher
+  (`53-gethome-wifi-profile`, on `up`) keeps the copy** in
+  `/etc/gethome/wifi-profile.nmconnection`, root 0600. **`gethome-wifi-
+  restore.service` puts it back**: a oneshot `After=NetworkManager.service`
+  (never `Wants=` — a machine with NetworkManager turned off has its reasons),
+  `ConditionPathExists=` the copy, enabled and never started by the installer.
+  Eight rules hold it up.
+  **The copy is asked of NetworkManager, never read from a path**: the active
+  wireless connection (`CONNECTION_UUID` from the dispatcher) and the file
+  NetworkManager says it loaded it from (`nmcli -t -f TYPE,UUID,FILENAME
+  connection show --active`, `\:` decoded). That hub has had the same profile
+  as netplan YAML rendered to `/run/NetworkManager/system-connections/netplan-*`
+  and as a native keyfile, and the file is a keyfile either way — so the copy
+  is the whole profile, open networks, 5 GHz, hidden SSIDs and static addresses
+  included, which is why it is not `wifi.env` (that file means "what to hand an
+  accessory" and holds nothing for an open or a 5 GHz-only network).
+  **A copy gets the UUID NetworkManager reports** when the file has none:
+  netplan's rendering of a cloud-init profile carries no `uuid=` and
+  NetworkManager derives one from the file's path, so the same profile put back
+  under another name would come back as another connection.
+  **Atomic, fsynced, and only when it changed** — a dot-named temporary file
+  (NetworkManager never loads one), fsync, rename, fsync of the directory — so
+  the copy is never the thing a cut empties, and a dispatcher that runs on every
+  association writes nothing on almost all of them. A profile that is empty,
+  not Wi-Fi, a hotspot the machine runs (`mode=ap`), some other UUID, or has no
+  file never replaces a good copy.
+  **"Missing" means NetworkManager no longer holds the profile the copy is
+  of** — the wireless profile with the copy's UUID, from `nmcli -t -f UUID,TYPE
+  connection show` — never the absence of a file, because the failure was a
+  file that *existed* and defined nothing, and never "no Wi-Fi profile at all".
+  It was that for the first day, and that was right only while a hub knew one
+  network: once an app can add the one it is about to be moved to (the
+  networks bullet above), a cut that empties the profile for the network the
+  hub stands on strands it just the same while the other survives, and the
+  other — out of range, or it would already have put the hub on a network — is
+  no reason to stay off this one. A healthy boot answers at once and does
+  nothing else; only a boot without it waits for `nm-online -s` (startup
+  complete) and asks again, so a slow start is not mistaken for a stranded hub,
+  and an `nmcli` that fails is never read as "no profiles".
+  **It leaves alone** every profile that exists, the copy's or another — it
+  never edits one, and a network or password the owner changed stands and
+  becomes the copy the next time it connects — a hub with a default route or an
+  Ethernet device connecting or connected (through a cable or through another
+  network it knows; somebody who moved it to a cable and deleted its Wi-Fi meant
+  both), and a machine with no Wi-Fi device.
+  **A network removed through the hub leaves the copy too**: `wifi-networks.sh`
+  runs `forget <uuid>` after NetworkManager has deleted it, and the copy goes
+  only if it is of that connection. The hub never deletes the network it is on,
+  so this matters on a board reached another way — Ethernet — where the copy
+  can be of a Wi-Fi the hub is not using, and would otherwise put back a
+  network somebody removed on purpose the first boot the cable was out.
+  **It puts the profile back as a keyfile** —
+  `system-connections/gethome-restored-wifi.nmconnection`, written the same
+  atomic way, then `nmcli connection load` and NetworkManager's own autoconnect
+  — because NetworkManager reads a keyfile with or without netplan, including
+  when a damaged YAML makes `netplan generate` refuse everything. That is also
+  exactly what the hand repair did.
+  **`/etc/netplan` is the distribution's and is never touched**: an empty or
+  zero-filled file there is *named* in the journal line and left in place. And
+  uninstall leaves a restored profile where it is, since by then it is the
+  machine's Wi-Fi. Everything it did is one line under
+  `journalctl -u gethome-wifi-restore`. The paths are overridable
+  (`GETHOME_NM_CONNECTIONS`, `GETHOME_NETPLAN_DIR`, and the installer's three
+  `GETHOME_WIFI_PROFILE_*`/`GETHOME_WIFI_RESTORE_UNIT`) so
+  `test/deploy-wifi-profile.test.ts` runs the real script and the real
+  `keep_wifi_profile` against a fake `nmcli` and files it owns.
 - **A Thread accessory is reached through a route the border router
   announces, and Linux ignores it by default.** An Apple TV, HomePod or Google
   hub tells the LAN how to reach its Thread network with a Route Information
@@ -569,6 +866,46 @@ in `deploy/install.sh` must stay accurate.
   advertisements and stop probing a border router that has gone). Unverifiable
   end to end on the hub it was written on, which has no border router — measured
   there: 0 router advertisements in three days.
+- **NetworkManager switches a hub's IPv6 off by itself and leaves it off, so a
+  dispatcher turns it back on.** That same `ipv6.method=ignore` means "IPv6 is
+  the kernel's", and activating such a connection NetworkManager sets
+  `disable_ipv6=1` to restart the kernel's link-local address, then puts back
+  the value it saved when it first took the device over. It forgets the saved
+  value whenever the access point under an active connection changes
+  (`nm_device_update_dynamic_ip_setup`, "roamed to a different AP" — logged
+  only as `ip:dhcp4: restarting`), and on the owner's hub that happened every
+  time the network it was on went away, so the next activation set `1` and had
+  nothing to put back. wlan0 then has no IPv6 and no link-local address until
+  NetworkManager restarts, which in practice means a reboot; a router that
+  disappears for longer than the 15-second link timeout is enough. **What that
+  costs is everything Matter reaches over IPv6**, and it is worth being exact:
+  the owner's Wi-Fi plug went on answering at its IPv4 address for the five
+  hours it lasted, while an accessory that is only on IPv6 — every Thread one —
+  cannot be reached at all, and the keep-alive's link-local seeding has nothing
+  to work with. Read in NetworkManager 1.52.1 (Trixie), unchanged on its main
+  branch on 2026-10-15, and reproduced on that Zero 2 W: `busctl call
+  fi.w1.wpa_supplicant1 /fi/w1/wpa_supplicant1/Interfaces/0
+  fi.w1.wpa_supplicant1.Interface Disconnect`, then `… Reconnect` (the
+  connection stays activated and the journal says `ip:dhcp4: restarting`), then
+  `nmcli connection up <profile>` leaves `disable_ipv6=1` and no link-local
+  address, where the same reactivation without the drop leaves it at `0`.
+  `iw dev wlan0 disconnect` is refused while NetworkManager holds the link, and
+  `Reassociate` on a live link changes nothing, so neither reproduces it.
+  `deploy/matter-ipv6.sh` (`/usr/local/lib/gethome-matter-ipv6.sh`) is run by
+  `51-gethome-matter-ipv6` on every `up`, and once by `matter_ipv6()` for a hub
+  it has already happened to, and writes `0` back — which is all `ignore`
+  asked for: no address of its own, no listener, no change to the profile.
+  Four limits keep it from overriding anybody. **Only `ignore`**, asked of
+  NetworkManager (the dispatcher's own `CONNECTION_UUID`, else the device's
+  connection): `disabled` is somebody's choice, and every other method has
+  NetworkManager running IPv6 itself. **Only a physical interface.** **Never
+  against this machine's own setting**: `all` or `default` already `1`, or a
+  sysctl file turning it off for that interface, `all`, `default` or `*`.
+  **Nothing without NetworkManager's word** — no `nmcli`, or one that cannot
+  say, changes nothing and the installer's warning stands. Numbered 51 so it
+  runs before the slower Wi-Fi dispatchers. A change is one line under
+  `journalctl -t gethome-matter-ipv6`, and `test/deploy-matter-ble.test.ts`
+  runs the script and the dispatcher against a fake `nmcli` and `/proc`.
 - **The detector exits 1 for an ordinary state, so the unit says
   `SuccessExitStatus=1`.** "Zigbee is not the radio here" — no coordinator, or
   one plugged into a board the owner has set to Matter — is correct and
@@ -787,6 +1124,21 @@ in `deploy/install.sh` must stay accurate.
   a rewrite, because the key and the device list must survive. It restarts Z2M
   itself when it changes that, since the detector only restarts on a changed
   *device path*.
+  **All of it is done as the hub's account (`z2m_onboarding_off`), and doing it
+  as root could cost a network.** The checks ran as whoever ran the installer,
+  and a login user with sudo cannot see into `/var/lib/gethome` while it is
+  0750 (the `<data>` bullet above) — measured on a Zero 2 W: `pi` sees neither
+  `configuration.yaml` nor `coordinator_backup.json` — so the file looked
+  absent and a fresh one went over a working network's key, PAN IDs and
+  channel. And root writing there followed a link the account could plant, with
+  a `chown` after it that handed the target over. Three things keep it safe
+  now. Every test, read and write is the account's. **Creating is create-only**
+  (`set -C`), so a check that is wrong can never replace a file that exists.
+  And an edit reads the whole file first, writes the new one beside it with the
+  old one's mode (`cp -p`), flushes it and renames it over — so a read that
+  fails part way is never written back, and a power cut leaves one file or the
+  other. `test/deploy-hub-account.test.ts` runs the real functions with a fake
+  `sudo` that records every root command and requires each to be `setpriv`.
   **Writing that override is load-bearing and used to fail silently.** The
   write was `{ … [[ -n "$PINNED" ]] && echo … } > tmp && mv tmp real`; a
   group's exit status is its last command's, so with nothing pinned — every
