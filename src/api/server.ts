@@ -1470,9 +1470,19 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   const roomExists = async (id: string): Promise<boolean> =>
     (await deps.db.query.rooms.findFirst({ where: eq(rooms.id, id) })) !== undefined;
 
+  /**
+   * Take a device out of the home, and unpair it.
+   *
+   * Answers once the home has let go — the row, the activity line naming who
+   * did it, the `deviceRemoved` frame — and **not** once the radio has: that
+   * is seconds for a Zigbee device that has to be asked and then forced, and
+   * indefinite for one whose radio is off on a one-radio board. The registry
+   * keeps the device off the home until its radio lets it go
+   * (`DeviceRegistry.removeDevice`), so a 204 is the whole answer an app needs.
+   */
   app.delete('/api/v1/devices/:id', needs('device.remove'), async (request, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
-    const removed = await deps.registry.removeDevice(id);
+    const removed = await deps.registry.removeDevice(id, actor(request));
     if (!removed) return reply.code(404).send({ error: 'not_found' });
     return reply.code(204).send();
   });

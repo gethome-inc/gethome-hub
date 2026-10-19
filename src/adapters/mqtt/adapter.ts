@@ -97,7 +97,9 @@ export class MqttAdapter implements ProtocolAdapter {
     const config = this.known.get(externalId);
     this.known.delete(externalId);
     this.cameras.delete(externalId);
-    if (!this.client) return;
+    // Not a quiet success: the retained config is what would bring the device
+    // back on the next start, and the registry keeps it waiting until it goes.
+    if (!this.client) throw new Error('The MQTT adapter is not connected to the broker.');
     const endpointIds = new Set([1, ...(config?.endpoints.map((endpoint) => endpoint.endpointId) ?? [])]);
     const topics = [configTopic(externalId), ...[...endpointIds].map((id) => cameraTopic(externalId, id))];
     await Promise.all(topics.map((topic) => this.client!.publishAsync(topic, '', { qos: 1, retain: true })));

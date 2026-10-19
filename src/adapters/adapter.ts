@@ -117,7 +117,19 @@ export interface ProtocolAdapter {
   start(bus: AdapterBus): Promise<void>;
   stop(): Promise<void>;
   execute(externalId: string, endpointId: number, command: HubCommand): Promise<void>;
-  /** Forget a device at the protocol level (unpair / decommission), if supported. */
+  /**
+   * Forget a device at the protocol level (unpair / decommission), if supported.
+   *
+   * Called after the device's row has already gone, and **not awaited by the
+   * request that removed it** (`DeviceRegistry.removeDevice`). Three rules
+   * follow. Stop treating the device as yours **before the first `await`**:
+   * a report or an announcement in flight must not bring it back while the
+   * radio is still being asked. **Resolve only once the radio has really let
+   * it go** — the registry holds the device on a waiting list until then and
+   * asks again on the adapter's next start, so resolving early is the one way
+   * to lose it. And **reject, rather than resolve, when you cannot ask** —
+   * no connection, no controller — for the same reason.
+   */
   forget?(externalId: string): Promise<void>;
   /**
    * The LAN address of a camera stream this adapter's device announced, for

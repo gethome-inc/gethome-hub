@@ -375,11 +375,14 @@ describe.skipIf(!enabled || !handle)('MQTT round-trip (fake Z2M + convention dev
     await new Promise((resolve) => setTimeout(resolve, 600));
     expect(registry.listDevices().some((device) => device.externalId === 'porch-cam')).toBe(false);
 
-    // One removal, recorded once — our own empty config echoing back is not a second.
+    // One removal, recorded once — our own empty config echoing back is not a
+    // second — and in the name of whoever asked for it.
     const feed = (
       await app.inject({ method: 'GET', url: '/api/v1/activity?limit=50', headers: { authorization: `Bearer ${token}` } })
-    ).json() as Array<{ kind: string; message: string }>;
-    expect(feed.filter((row) => row.kind === 'device.removed' && row.message.startsWith('Porch camera'))).toHaveLength(1);
+    ).json() as Array<{ kind: string; message: string; data?: { deviceName?: string; memberName?: string } }>;
+    const removals = feed.filter((row) => row.kind === 'device.removed' && row.data?.deviceName === 'Porch camera');
+    expect(removals).toHaveLength(1);
+    expect(removals[0]).toMatchObject({ message: 'E2E removed Porch camera.', data: { memberName: 'E2E' } });
   });
 
   it('exposes device settings as generic custom fields and writes them back', async () => {
