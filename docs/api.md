@@ -260,7 +260,7 @@ than no button.
 | `GET /zones` · `POST /zones` · `PATCH /zones/:id` · `DELETE /zones/:id` | floor · `home.structure` | `{id, name, sortOrder}` — the optional layer above rooms, see [below](#rooms-and-zones). `POST {name, sortOrder?}`, `PATCH {name?, sortOrder?}`; a zone carries no look of its own, since nothing draws a zone as a thing. Deleting a zone keeps its rooms and leaves them in none |
 | `GET /devices` | floor | full device list (wire shape below) |
 | `PATCH /devices/:id` | `device.edit` / floor (a key: `control`) | `{name?, roomId?, favorite?, offlineExpected?}`. Name, room and `offlineExpected` describe the house and everybody sees the same ones; **`favorite` is the caller's own** and nobody else's — see [below](#favorites-are-per-member). `roomId: null` takes a device out of its room; an unknown one is `404 unknown_room`. `offlineExpected` is a boolean in and a moment back out — see [below](#a-device-that-is-meant-to-be-offline). The response is this caller's view of the device |
-| `DELETE /devices/:id` | `device.remove` | also unpairs at the protocol level |
+| `DELETE /devices/:id` | `device.remove` | take a device out of the home and unpair it → `204`, or `404`. It answers once the home has let go — the row, a `device.removed` line naming who asked, the `deviceRemoved` frame — and **before the radio has**: the device is held off the home until its radio lets it go, however long that takes — see [below](#taking-a-device-out-of-the-home-delete-devicesid) |
 | `POST /devices/:id/endpoints/:endpointId/commands` | floor (a key: `control`) | body = canonical command; `202`. IR-remote intents (`irLearn`/`irSaveLearned`/`irSend`/`irDeleteCommand`/`irRenameCommand`) are resolved against the endpoint's stored code library (see [device-schema.md](device-schema.md)) |
 | `GET /devices/:id/history?from=&to=&points=&series=` | floor | what this device's readings did over a window, already thinned to a drawable size — see [below](#recorded-readings-get-devicesidhistory). `from`/`to` are epoch ms and default to the last day; `from >= to` is `400 invalid_range`; an unknown device is `404` |
 | `GET /devices/:id/portraits` | floor | the pictures this home has had drawn of a device, newest first: `{id, at, bytes, provider, model, fromPhoto, selected, drawnBy?}`. `drawnBy: {id, name}` is who had it drawn — `id` is null once that person has left the home and absent altogether on a portrait drawn before the hub recorded it, so an app draws no line rather than an empty one. Reading is the floor — a portrait is what the device *looks like*, so a guest whose dashboard could not draw it would be looking at a different home. See [below](#device-portraits) |
@@ -1183,6 +1183,48 @@ Nothing is stored: the hub compares what the device last said with its own
 network list on every render, so it is right the moment the hub moves and gone
 the moment the device answers. An older app reads past the field and draws a
 plain "Offline", which is what it drew before.
+
+#### Taking a device out of the home (`DELETE /devices/:id`)
+
+Removing a device is two things: the home lets go of its row — its name, its
+room, its history, its portraits, its place on everybody's dashboard — and the
+radio unpairs it. Only the first can be done on the spot. The second is
+seconds for a Zigbee device that has to be asked to leave and then removed by
+force, and has no end at all for one whose radio is off on a board that runs one
+at a time. So the route **answers once the home has let go** — `204`, with a
+`device.removed` activity row naming who asked (`data.memberName`, the key's
+name when it was one, and `memberId` on the row) and a `deviceRemoved` frame on
+every socket — and the radio is asked afterwards. It used to wait for the
+radio, and a removal that worked read as one that failed in both apps.
+
+**The device is held off the home until its radio lets it go.** A radio that has
+not unpaired a device still *has* it, and the next time it speaks — Zigbee2MQTT's
+retained device list, a Matter node attaching at start — it would hand the
+device back as a new one: a fresh id, its default name, no room, in a home whose
+owner had removed it. So the hub keeps a short list of removed devices whose
+radio has not let go (in its settings table, so a restart remembers them),
+adopts nothing a radio announces about them, and asks their radio again whenever
+it starts. Per radio:
+
+- **Zigbee** is asked the way Zigbee2MQTT's own frontend asks: the device is
+  told to leave, which also leaves it ready to pair again. A device that cannot
+  answer — switched off, out of range, asleep, broken — is refused by
+  Zigbee2MQTT and kept in its database, so the hub then removes it **by force**
+  (`force: true`, out of the database without the device's say). It is let go
+  when the bridge's own device list stops naming it, and a bridge that is not
+  running is asked the moment it comes back.
+- **Matter** takes the node off the hub's fabric, telling the accessory first
+  when it can be reached, so it forgets the hub too and can be paired again
+  straight away; one that cannot be reached is removed from the hub regardless.
+- **MQTT** clears the device's retained discovery document and camera topics, so
+  a board that is switched on hears that it was removed and stays out. A board
+  that is **switched off** misses it, and an empty retained message leaves
+  nothing to hear later, so it comes back as a new device when it is switched on
+  again — the device SDK's documented limit, which per-device broker accounts
+  are what fix.
+
+A device removed and then paired again is a new device, with a new id, whichever
+radio it is on.
 
 #### A radio switch in flight (`radio.applying`)
 

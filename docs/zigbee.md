@@ -949,7 +949,38 @@ Published topics:
 | `zigbee2mqtt/<friendly_name>/set` | commands (translated from canonical intents) |
 | `zigbee2mqtt/<friendly_name>/get` | state refresh after join |
 | `zigbee2mqtt/bridge/request/permit_join` | open/close the network, `{"time": <0–254>}` |
-| `zigbee2mqtt/bridge/request/device/remove` | forget a device |
+| `zigbee2mqtt/bridge/request/device/remove` | take a device off the network — asked plainly, then with `force: true` when the device could not be told; each carries a `transaction`, which is how its answer on `bridge/response/device/remove` is told apart from another client's |
+
+### Taking a device off the network
+
+`DELETE /devices/:id` takes the device out of the home at once and leaves the
+radio to the adapter (`docs/api.md`, *Taking a device out of the home*). The
+adapter asks Zigbee2MQTT to remove it the way Zigbee2MQTT's own frontend does
+— the device is told to leave, which also leaves it ready to pair again — and
+that is where the old code stopped. **Zigbee2MQTT keeps a device that did not
+answer**: `removeFromNetwork` waits for the coordinator's ZDO timeout (around
+fifteen seconds), the request comes back `status: "error"`, and the device stays
+in its database. Its retained `bridge/devices` then handed it back on the next
+hub start as a new device, with its default name and no room — and a device
+that cannot answer (switched off, out of range, asleep, broken) is exactly the
+kind somebody removes. So a refusal, or no answer in thirty seconds, is followed
+by a forced removal (`force: true`): out of Zigbee2MQTT's database without the
+device's say, which Zigbee2MQTT answers in a moment. A device removed by force
+that later powers up still holds the network key; Zigbee2MQTT ignores what it
+sends until it announces itself, and then interviews it as a new join, which is
+what pairing it again would have done.
+
+Three rules hold it together. **The device is let go when the bridge's own
+list stops naming it**, which Zigbee2MQTT publishes just before it answers, and
+which is the one answer that cannot be wrong; until then nothing about the
+device is adopted — not from a republished list, not from a mapping run that was
+already under way. **A bridge that is not running is asked the moment it is
+back** (`bridge/state` turning `online`), because requests are not retained and
+one published into a stopped bridge is never heard. And **the hub remembers
+across restarts**: the registry keeps the device on a list in its settings table
+until the adapter says it has gone, and hands it to the adapter again at every
+start — which is what covers a board running Matter, where the Zigbee adapter
+does not exist at all until the radio is switched back.
 
 ### The join window is several grants
 

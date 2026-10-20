@@ -37,12 +37,27 @@ class FakeAdapter implements ProtocolAdapter {
   readonly id = 'mqtt' as const;
   bus: AdapterBus | null = null;
   executed: Array<{ externalId: string; endpointId: number; command: HubCommand }> = [];
+  forgotten: string[] = [];
+  /** What every `forget` waits on — a radio still being asked, until released. */
+  private holding: Promise<void> = Promise.resolve();
   async start(bus: AdapterBus) {
     this.bus = bus;
   }
   async stop() {}
   async execute(externalId: string, endpointId: number, command: HubCommand) {
     this.executed.push({ externalId, endpointId, command });
+  }
+  async forget(externalId: string) {
+    this.forgotten.push(externalId);
+    await this.holding;
+  }
+  /** Hold every `forget` open, the way a device that has to be asked and then forced does; returns the release. */
+  holdForgets(): () => void {
+    let release = () => {};
+    this.holding = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return release;
   }
 }
 
@@ -654,6 +669,52 @@ describe.skipIf(!handle)('hub API', () => {
     expect(renamed?.data?.previousName).toBe('Reading light');
     expect(moved?.data?.roomName).toBe('Study');
     expect(moved?.data?.memberName).toBeTruthy();
+  });
+
+  /**
+   * Taking a device out of the home answers once the home has let go — not
+   * once the radio has, which is seconds for a Zigbee device that has to be
+   * asked and then forced, and longer than either app waits — and, like every
+   * other change to the home's shape, says who did it.
+   */
+  it('writes down who removed a device, and answers before its radio has let go', async () => {
+    adapter.bus!.deviceUpserted({
+      adapter: 'mqtt',
+      externalId: 'hall-lamp',
+      suggestedName: 'Hall lamp',
+      endpoints: [{ endpointId: 1, deviceKind: 'light', capabilities: ['onOff'], primary: 'onOff' }],
+    });
+    await registry.flush();
+    const device = registry.listDevices().find((candidate) => candidate.externalId === 'hall-lamp')!;
+
+    const release = adapter.holdForgets();
+    try {
+      const response = await app.inject({
+        method: 'DELETE',
+        url: `/api/v1/devices/${device.id}`,
+        headers: auth(ownerToken),
+      });
+      expect(response.statusCode).toBe(204);
+      // Asked, and still being asked — the answer did not wait for it.
+      expect(adapter.forgotten).toContain('hall-lamp');
+      expect(registry.getDevice(device.id)).toBeUndefined();
+    } finally {
+      release();
+    }
+
+    const entries = (
+      await app.inject({ method: 'GET', url: '/api/v1/activity', headers: auth(ownerToken) })
+    ).json() as Array<{ kind: string; message: string; memberId?: string; data?: Record<string, unknown> }>;
+    const removed = entries.find((entry) => entry.kind === 'device.removed' && entry.data?.deviceName === 'Hall lamp');
+    expect(removed).toMatchObject({
+      message: 'Georgy removed Hall lamp.',
+      memberId: expect.any(String),
+      data: { deviceName: 'Hall lamp', memberName: 'Georgy' },
+    });
+
+    // A device that is not there is still a 404, not a quiet success.
+    const again = await app.inject({ method: 'DELETE', url: `/api/v1/devices/${device.id}`, headers: auth(ownerToken) });
+    expect(again.statusCode).toBe(404);
   });
 
   it('refuses a name of spaces and a room that does not exist', async () => {

@@ -191,6 +191,16 @@ export class MatterAdapter implements ProtocolAdapter {
   private bus: AdapterBus | null = null;
   private readonly nodes = new Map<string, PairedNode>();
   /**
+   * Nodes taken out of the home that matter.js has not finished removing.
+   *
+   * Decommissioning is a round trip to the accessory, and the node's own
+   * events keep firing until `removeNode` closes it — one that finishes
+   * initialising, or changes its structure, in that window would announce it
+   * to a registry that has already let it go, and it would come back as a new
+   * device. Marked before anything is awaited, and read by `announceNode`.
+   */
+  private readonly forgetting = new Set<string>();
+  /**
    * Nodes that have reached `Connected` since this controller started.
    *
    * The set is what makes `settlingUntil` an *answer* rather than a blind
@@ -400,11 +410,30 @@ export class MatterAdapter implements ProtocolAdapter {
     await executeMatterCommand(endpoint, command);
   }
 
+  /**
+   * Take a node off the hub's fabric.
+   *
+   * matter.js tries to tell the accessory first — `removeFabric`, so it
+   * forgets the hub too and can be paired again straight away — and removes
+   * the node from the controller whether or not that works: an accessory that
+   * is switched off, or already reset, cannot be told anything, and must not
+   * keep the node commissioned here for ever. Not answered within the request
+   * that asked (`DeviceRegistry.removeDevice`), so a slow accessory costs
+   * nobody a wait.
+   */
   async forget(externalId: string): Promise<void> {
-    if (!this.controller) return;
-    await this.controller.removeNode(NodeId(BigInt(externalId)), true);
-    this.nodes.delete(externalId);
-    this.neighbours?.delete(externalId);
+    this.forgetting.add(externalId);
+    // Thrown rather than returned: a node left commissioned is attached and
+    // announced again at the next start, and the registry keeps the device
+    // waiting until this has really run.
+    if (!this.controller) throw new Error('The Matter controller is not running.');
+    try {
+      await this.controller.removeNode(NodeId(BigInt(externalId)), true);
+      this.nodes.delete(externalId);
+      this.neighbours?.delete(externalId);
+    } finally {
+      this.forgetting.delete(externalId);
+    }
   }
 
   /**
@@ -756,6 +785,8 @@ export class MatterAdapter implements ProtocolAdapter {
   }
 
   private announceNode(externalId: string, node: PairedNode): void {
+    // Being taken off the fabric — see `forgetting`.
+    if (this.forgetting.has(externalId)) return;
     const endpoints: Array<{
       endpointId: number;
       deviceKind: ReturnType<typeof descriptorFor>['kind'];

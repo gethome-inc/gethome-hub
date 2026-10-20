@@ -6,7 +6,7 @@ import { ActivityService } from '../src/core/activity.js';
 import type { AdapterBus, ProtocolAdapter } from '../src/adapters/adapter.js';
 import type { HubCommand } from '../src/schema/index.js';
 import { eq } from 'drizzle-orm';
-import { activity, devices, endpoints } from '../src/db/schema.js';
+import { activity, devices, endpoints, settings } from '../src/db/schema.js';
 import { openTestDb, resetDb } from './helpers/db.js';
 
 const handle = await openTestDb();
@@ -486,6 +486,120 @@ describe.skipIf(!handle)('DeviceRegistry', () => {
     expect(adapter.forgotten).toEqual(['lamp-1']);
     expect(registry.listDevices()).toHaveLength(0);
     expect(removed).toHaveBeenCalledWith(deviceId);
+  });
+
+  /**
+   * Removing a device is two things — the home lets go of the row, and the
+   * radio unpairs it — and only the first can be done on the spot. A radio
+   * that is off (a board running the other one), or that cannot do it yet,
+   * still *has* the device, and the next time it speaks it would hand the
+   * device back as a new one: a fresh id, its default name, no room. So the
+   * device waits on a list kept in the database until its radio lets it go.
+   */
+  describe('a device whose radio has not let it go', () => {
+    /** A radio that is off: its adapter never starts. */
+    class OffAdapter extends FakeAdapter {
+      override async start(): Promise<void> {
+        throw new Error('radio off');
+      }
+    }
+    /** A radio that, the moment it starts, replays the device it still holds — as a retained list does. */
+    class HoldingAdapter extends FakeAdapter {
+      override async start(bus: AdapterBus): Promise<void> {
+        this.bus = bus;
+        bus.deviceUpserted(lampDescriptor);
+      }
+    }
+    /** A radio that cannot do it right now. */
+    class RefusingAdapter extends FakeAdapter {
+      override async forget(externalId: string): Promise<void> {
+        this.forgotten.push(externalId);
+        throw new Error('not now');
+      }
+    }
+
+    const waiting = async () =>
+      (await db.query.settings.findFirst({ where: (row, { eq: is }) => is(row.key, 'devices.pending_forgets') }))?.value;
+
+    const registryWith = async (radio: ProtocolAdapter) => {
+      const fresh = new DeviceRegistry(db, events, new ActivityService(db, events), log);
+      fresh.registerAdapter(radio);
+      await fresh.start();
+      return fresh;
+    };
+
+    beforeEach(async () => {
+      adapter.bus!.deviceUpserted(lampDescriptor);
+      await registry.flush();
+      await registry.stop();
+    });
+
+    it('waits through a restart for the radio, and is not adopted again meanwhile', async () => {
+      const off = new OffAdapter();
+      const quiet = await registryWith(off);
+      expect(await quiet.removeDevice(quiet.listDevices()[0]!.id)).toBe(true);
+      await quiet.flush();
+      expect(quiet.listDevices()).toHaveLength(0);
+      expect(off.forgotten).toEqual([]);
+      expect(await waiting()).toEqual([expect.objectContaining({ adapter: 'mqtt', externalId: 'lamp-1' })]);
+      await quiet.stop();
+
+      // The radio comes back holding the device, and is asked to let it go.
+      const back = new HoldingAdapter();
+      const restarted = await registryWith(back);
+      await restarted.flush();
+      expect(restarted.listDevices()).toHaveLength(0);
+      expect(back.forgotten).toEqual(['lamp-1']);
+      await vi.waitFor(async () => expect(await waiting()).toBeUndefined());
+
+      // Let go, it is a device like any other: paired again, it is adopted.
+      back.bus!.deviceUpserted(lampDescriptor);
+      await restarted.flush();
+      expect(restarted.listDevices()).toHaveLength(1);
+    });
+
+    it('asks again at the next start when the radio could not do it', async () => {
+      const refusing = new RefusingAdapter();
+      const first = await registryWith(refusing);
+      await first.removeDevice(first.listDevices()[0]!.id);
+      await first.flush();
+      expect(refusing.forgotten).toEqual(['lamp-1']);
+      // Settled into a refusal, so still waiting.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(await waiting()).toHaveLength(1);
+      await first.stop();
+
+      const willing = new FakeAdapter();
+      await registryWith(willing);
+      expect(willing.forgotten).toEqual(['lamp-1']);
+      await vi.waitFor(async () => expect(await waiting()).toBeUndefined());
+    });
+
+    it('finishes a removal the process did not live to finish', async () => {
+      // The list is written before the row goes; a row still standing beside
+      // its entry is a removal that was cut off between the two.
+      await db.insert(settings).values({
+        key: 'devices.pending_forgets',
+        value: [{ adapter: 'mqtt', externalId: 'lamp-1', at: Date.now() }],
+      });
+      const willing = new FakeAdapter();
+      const restarted = await registryWith(willing);
+      await restarted.flush();
+      expect(restarted.listDevices()).toHaveLength(0);
+      expect(willing.forgotten).toEqual(['lamp-1']);
+    });
+
+    it('skips an entry it cannot read rather than trusting it', async () => {
+      await db.insert(settings).values({
+        key: 'devices.pending_forgets',
+        value: [{ adapter: 'carrier-pigeon', externalId: 'lamp-1', at: 1 }, 'lamp-1', null],
+      });
+      const willing = new FakeAdapter();
+      const restarted = await registryWith(willing);
+      await restarted.flush();
+      expect(restarted.listDevices()).toHaveLength(1);
+      expect(willing.forgotten).toEqual([]);
+    });
   });
 
   describe('a write that reached the protocol and not the device', () => {
