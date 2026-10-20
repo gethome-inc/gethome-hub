@@ -10,6 +10,7 @@
  *   gethome/device/<deviceId>/state            retained JSON — canonical state patch (endpoint 1)
  *   gethome/device/<deviceId>/state/<epId>     retained JSON — per-endpoint state patch
  *   gethome/device/<deviceId>/availability     retained "online"/"offline" (use as MQTT LWT)
+ *   gethome/device/<deviceId>/heartbeat        retained "<seconds>": how often the device speaks, said that often
  *   gethome/device/<deviceId>/set              hub → device: canonical command JSON (endpoint 1)
  *   gethome/device/<deviceId>/set/<epId>       hub → device: per-endpoint command
  *   gethome/device/<deviceId>/camera[/<epId>]  retained JSON — the streams a camera serves on the LAN
@@ -27,6 +28,7 @@ export type ParsedMqttTopic =
   | { kind: 'discovery'; deviceId: string }
   | { kind: 'state'; deviceId: string; endpointId: number }
   | { kind: 'availability'; deviceId: string }
+  | { kind: 'heartbeat'; deviceId: string }
   | { kind: 'camera'; deviceId: string; endpointId: number }
   | null;
 
@@ -50,6 +52,9 @@ export function parseTopic(topic: string): ParsedMqttTopic {
     if (parts[3] === 'availability' && parts.length === 4) {
       return { kind: 'availability', deviceId };
     }
+    if (parts[3] === 'heartbeat' && parts.length === 4) {
+      return { kind: 'heartbeat', deviceId };
+    }
     if (parts[3] === 'camera' && (parts.length === 4 || parts.length === 5)) {
       const endpointId = parts.length === 5 ? Number(parts[4]) : 1;
       if (!Number.isInteger(endpointId) || endpointId < 0) return null;
@@ -69,6 +74,10 @@ export function configTopic(deviceId: string): string {
   return `${MQTT_NAMESPACE}/discovery/${deviceId}/config`;
 }
 
+export function heartbeatTopic(deviceId: string): string {
+  return `${MQTT_NAMESPACE}/device/${deviceId}/heartbeat`;
+}
+
 export function cameraTopic(deviceId: string, endpointId: number): string {
   return endpointId === 1
     ? `${MQTT_NAMESPACE}/device/${deviceId}/camera`
@@ -81,6 +90,7 @@ export function subscriptionPatterns(): string[] {
     `${MQTT_NAMESPACE}/device/+/state`,
     `${MQTT_NAMESPACE}/device/+/state/+`,
     `${MQTT_NAMESPACE}/device/+/availability`,
+    `${MQTT_NAMESPACE}/device/+/heartbeat`,
     `${MQTT_NAMESPACE}/device/+/camera`,
     `${MQTT_NAMESPACE}/device/+/camera/+`,
   ];

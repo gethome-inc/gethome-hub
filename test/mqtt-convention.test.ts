@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cameraTopic, commandTopic, configTopic, parseTopic, subscriptionPatterns } from '../src/adapters/mqtt/convention.js';
+import { cameraTopic, commandTopic, configTopic, heartbeatTopic, parseTopic, subscriptionPatterns } from '../src/adapters/mqtt/convention.js';
 import { mqttDiscoverySchema, statePatchSchema } from '../src/schema/index.js';
 import { cameraUrlProblem, isPrivateIPv4, readCameraAnnouncement } from '../src/cameras/policy.js';
 
@@ -46,6 +46,13 @@ describe('MQTT convention topics', () => {
     expect(cameraTopic('porch-cam', 3)).toBe('gethome/device/porch-cam/camera/3');
     expect(configTopic('porch-cam')).toBe('gethome/discovery/porch-cam/config');
     expect(subscriptionPatterns()).toEqual(expect.arrayContaining(['gethome/device/+/camera', 'gethome/device/+/camera/+']));
+  });
+
+  it('reads a heartbeat topic, and listens for it', () => {
+    expect(parseTopic('gethome/device/pool-pump/heartbeat')).toEqual({ kind: 'heartbeat', deviceId: 'pool-pump' });
+    expect(parseTopic('gethome/device/pool-pump/heartbeat/2')).toBeNull();
+    expect(heartbeatTopic('pool-pump')).toBe('gethome/device/pool-pump/heartbeat');
+    expect(subscriptionPatterns()).toContain('gethome/device/+/heartbeat');
   });
 });
 

@@ -92,6 +92,7 @@ def connect_hub():
     client.connect()
     client.publish("gethome/discovery/%s/config" % DEVICE_ID, json.dumps(DISCOVERY), retain=True)
     client.publish(BASE + "/availability", "online", retain=True)
+    client.publish(BASE + "/heartbeat", "30", retain=True)   # how often we speak, in seconds
     publish("/state", {"onOff": bool(led.value())})
     client.subscribe(BASE + "/set")
 
@@ -100,7 +101,7 @@ def run():
     connect_wifi()
     connect_hub()
     last_sent, last_value = time.ticks_ms(), None
-    last_ping = time.ticks_ms()
+    last_beat = time.ticks_ms()
     while True:
         client.check_msg()                              # delivers commands to on_message
         now = time.ticks_ms()
@@ -108,9 +109,9 @@ def run():
         if last_value is None or abs(value - last_value) >= 50 or time.ticks_diff(now, last_sent) > 120000:
             publish("/state/2", {"sensors": {"temperatureCenti": value}})
             last_sent, last_value = now, value
-        if time.ticks_diff(now, last_ping) > 30000:     # umqtt.simple never pings by itself
-            client.ping()
-            last_ping = now
+        if time.ticks_diff(now, last_beat) > 30000:     # the heartbeat, and the ping umqtt.simple never sends
+            client.publish(BASE + "/heartbeat", "30", retain=True)
+            last_beat = now
         time.sleep_ms(200)
 
 
@@ -124,9 +125,13 @@ while True:
 
 ## Why it is written this way
 
-- **`keepalive=60` and a ping every 30 seconds.** The broker only notices a
-  silent client — and publishes its last will — once a keepalive has been
-  missed, and `umqtt.simple` sends no pings unless asked.
+- **`keepalive=60` and a heartbeat every 30 seconds.** The broker only notices
+  a silent client — and publishes its last will — once a keepalive has been
+  missed, and `umqtt.simple` sends no pings unless asked; any publish keeps
+  the connection alive, so the heartbeat is the ping. It also covers what a
+  will can't: a hub that lost power comes back with its broker holding the
+  board's `online`, and a board that stays quiet for 75 s reads offline all
+  the same.
 - **The last will is set before `connect()`**, retained, so the hub sees
   `offline` when the board loses power.
 - **Document, availability, state, then subscribe** on every connection.

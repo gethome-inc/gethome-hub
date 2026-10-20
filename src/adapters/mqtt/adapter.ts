@@ -7,7 +7,8 @@ import {
   type HubCommand,
   type MqttDiscoveryConfig,
 } from '../../schema/index.js';
-import { cameraTopic, commandTopic, configTopic, parseTopic, subscriptionPatterns } from './convention.js';
+import { cameraTopic, commandTopic, configTopic, heartbeatTopic, parseTopic, subscriptionPatterns } from './convention.js';
+import { HeartbeatWatch, readHeartbeat } from './heartbeat.js';
 import type { Logger } from '../../logging.js';
 import { brokerCredentials } from '../../mqtt-auth.js';
 import { publicStream, readCameraAnnouncement, type CameraStreamSource } from '../../cameras/policy.js';
@@ -23,7 +24,12 @@ export interface MqttAdapterOptions {
   username?: string;
   password?: string;
   log: Logger;
+  /** The clock a device's heartbeat is judged by. Tests set it. */
+  now?: () => number;
 }
+
+/** How often the adapter looks for devices that have gone quiet past their heartbeat. */
+const HEARTBEAT_SWEEP_MS = 5_000;
 
 /**
  * Camera announcements kept for devices the hub hasn't met yet, so a retained
@@ -51,8 +57,13 @@ export class MqttAdapter implements ProtocolAdapter {
    * them off the card and out of every backup.
    */
   private readonly cameras = new Map<string, Map<number, CameraStreamSource[]>>();
+  /** Devices that said how often they speak, and whether they still do (`heartbeat.ts`). */
+  private readonly heartbeats: HeartbeatWatch;
+  private sweepTimer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(private readonly options: MqttAdapterOptions) {}
+  constructor(private readonly options: MqttAdapterOptions) {
+    this.heartbeats = new HeartbeatWatch(options.now ?? Date.now);
+  }
 
   async start(bus: AdapterBus): Promise<void> {
     this.bus = bus;
@@ -62,18 +73,26 @@ export class MqttAdapter implements ProtocolAdapter {
       ...brokerCredentials(this.options),
     });
     this.client = client;
-    client.on('message', (topic, payload) => {
+    client.on('message', (topic, payload, packet) => {
       try {
-        this.handleMessage(topic, payload.toString('utf8'));
+        this.handleMessage(topic, payload.toString('utf8'), packet.retain);
       } catch (error) {
         this.options.log.warn({ err: error, topic }, 'Failed to handle MQTT integration message');
       }
     });
+    // A reconnect means the broker hands every retained message over again —
+    // a stale `online` among them, when it was the broker that restarted — so
+    // every heartbeat's allowance starts again from it.
+    client.on('connect', () => this.heartbeats.restart());
     await client.subscribeAsync(subscriptionPatterns());
+    this.sweepTimer = setInterval(() => this.sweepQuiet(), HEARTBEAT_SWEEP_MS);
+    this.sweepTimer.unref?.();
     this.options.log.info('MQTT integration adapter listening on gethome/#');
   }
 
   async stop(): Promise<void> {
+    if (this.sweepTimer) clearInterval(this.sweepTimer);
+    this.sweepTimer = null;
     await this.client?.endAsync();
     this.client = null;
   }
@@ -86,8 +105,9 @@ export class MqttAdapter implements ProtocolAdapter {
 
   /**
    * Deleted in an app: clear the device's retained discovery document — and
-   * its camera topics — so it doesn't come back on the next boot, and so a
-   * device listening to its own config topic hears that it was removed.
+   * its camera and heartbeat topics — so it doesn't come back on the next
+   * boot, and so a device listening to its own config topic hears that it was
+   * removed.
    *
    * The id leaves `known` **first**: our own subscription hears the empty
    * config a moment later, and finding nothing to remove is what keeps that
@@ -97,11 +117,16 @@ export class MqttAdapter implements ProtocolAdapter {
     const config = this.known.get(externalId);
     this.known.delete(externalId);
     this.cameras.delete(externalId);
+    this.heartbeats.forget(externalId);
     // Not a quiet success: the retained config is what would bring the device
     // back on the next start, and the registry keeps it waiting until it goes.
     if (!this.client) throw new Error('The MQTT adapter is not connected to the broker.');
     const endpointIds = new Set([1, ...(config?.endpoints.map((endpoint) => endpoint.endpointId) ?? [])]);
-    const topics = [configTopic(externalId), ...[...endpointIds].map((id) => cameraTopic(externalId, id))];
+    const topics = [
+      configTopic(externalId),
+      heartbeatTopic(externalId),
+      ...[...endpointIds].map((id) => cameraTopic(externalId, id)),
+    ];
     await Promise.all(topics.map((topic) => this.client!.publishAsync(topic, '', { qos: 1, retain: true })));
   }
 
@@ -111,14 +136,22 @@ export class MqttAdapter implements ProtocolAdapter {
     return stream ? { kind: stream.kind, url: stream.url } : null;
   }
 
-  private handleMessage(topic: string, payload: string): void {
+  /**
+   * @param retained Whether the broker handed this over from what it holds —
+   *   as it does with everything retained when the hub subscribes — rather
+   *   than as the device published it. Only a live message is the device
+   *   speaking now (`heartbeat.ts`).
+   */
+  private handleMessage(topic: string, payload: string, retained = false): void {
     const parsed = parseTopic(topic);
     if (!parsed) return;
+    const live = !retained;
 
     switch (parsed.kind) {
       case 'discovery': {
         if (payload.trim() === '') {
           // Empty retained config = the integration removed the device.
+          this.heartbeats.forget(parsed.deviceId);
           if (this.known.delete(parsed.deviceId)) {
             this.cameras.delete(parsed.deviceId);
             this.bus?.deviceRemoved('mqtt', parsed.deviceId);
@@ -144,6 +177,7 @@ export class MqttAdapter implements ProtocolAdapter {
         for (const [endpointId, streams] of this.cameras.get(parsed.deviceId) ?? []) {
           this.publishCameraState(parsed.deviceId, endpointId, streams);
         }
+        this.noteHeard(parsed.deviceId, live);
         return;
       }
 
@@ -180,19 +214,66 @@ export class MqttAdapter implements ProtocolAdapter {
           // bridges exactOptionalPropertyTypes.
           patch as Partial<import('../../schema/index.js').EndpointState>,
         );
+        this.noteHeard(parsed.deviceId, live);
         return;
       }
 
       case 'availability': {
         if (!this.known.has(parsed.deviceId)) return;
-        this.bus?.reachabilityChanged('mqtt', parsed.deviceId, payload.trim() === 'online');
+        const online = payload.trim() === 'online';
+        this.bus?.reachabilityChanged('mqtt', parsed.deviceId, online);
+        if (online) this.heartbeats.heardFrom(parsed.deviceId, live);
+        else this.heartbeats.wentOffline(parsed.deviceId);
+        return;
+      }
+
+      case 'heartbeat': {
+        // Kept for a device the hub hasn't met yet as well: retained messages
+        // arrive in whatever order the broker holds them, and the heartbeat
+        // can come before the discovery document it belongs to.
+        const seconds = readHeartbeat(payload);
+        if (seconds === 'withdrawn') {
+          this.heartbeats.forget(parsed.deviceId);
+          return;
+        }
+        if (seconds === null) {
+          this.options.log.warn({ deviceId: parsed.deviceId }, 'Ignored a heartbeat that is not a whole number of seconds');
+          return;
+        }
+        if (this.heartbeats.declare(parsed.deviceId, seconds, live) && this.known.has(parsed.deviceId)) {
+          this.bus?.reachabilityChanged('mqtt', parsed.deviceId, true);
+        }
         return;
       }
 
       case 'camera': {
         this.cameraAnnounced(parsed.deviceId, parsed.endpointId, payload);
+        if (this.known.has(parsed.deviceId)) this.noteHeard(parsed.deviceId, live);
         return;
       }
+    }
+  }
+
+  /**
+   * The device published something. Arriving live, from a device its
+   * heartbeat had called quiet, it says the device is there after all.
+   */
+  private noteHeard(deviceId: string, live: boolean): void {
+    if (this.heartbeats.heardFrom(deviceId, live) && this.known.has(deviceId)) {
+      this.bus?.reachabilityChanged('mqtt', deviceId, true);
+    }
+  }
+
+  /**
+   * A device that said how often it speaks and has been silent well past that
+   * is offline, whatever the broker still holds for it — the will it left can
+   * have been lost with the broker itself.
+   */
+  private sweepQuiet(): void {
+    for (const deviceId of this.heartbeats.sweep()) {
+      if (!this.known.has(deviceId)) continue;
+      this.options.log.info({ deviceId }, 'An MQTT device has been silent past its heartbeat; marking it offline.');
+      this.bus?.reachabilityChanged('mqtt', deviceId, false);
     }
   }
 

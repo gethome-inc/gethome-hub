@@ -51,6 +51,7 @@ and works what is already in the home, it is API software.
 |---|---|---|
 | `gethome/discovery/<deviceId>/config` | device → hub, **retained** | the discovery document |
 | `gethome/device/<deviceId>/availability` | device → hub, **retained** | `online` / `offline` — also your **last will** |
+| `gethome/device/<deviceId>/heartbeat` | device → hub, **retained** | how often you speak, in whole seconds (`60`) — published that often |
 | `gethome/device/<deviceId>/state` | device → hub, retained | a state patch for endpoint 1 |
 | `gethome/device/<deviceId>/state/<endpointId>` | device → hub, retained | a state patch for another endpoint |
 | `gethome/device/<deviceId>/set` | hub → device | a command for endpoint 1 |
@@ -59,18 +60,28 @@ and works what is already in the home, it is API software.
 On **every** connection, not only at power-up:
 
 ```text
-connect    with a last will: availability = "offline", retained
+connect    with a last will: availability = "offline", retained   (keepalive 15–60 s)
 publish    discovery document                  retained
 publish    availability "online"               retained
+publish    heartbeat "60"                      retained
 publish    the full current state              retained   (each endpoint)
 subscribe  .../set   and .../set/<endpointId> for every other endpoint
 then       on a change  → publish the endpoint's state again
            on a command → apply it, then publish the resulting state
+           every 60 s   → publish heartbeat "60" again
 ```
 
 **Order matters**: the hub ignores state and availability from a device it has
 not yet seen a discovery document for. Retaining all three is what lets the
 hub recover the device after its own restart without waiting for you.
+
+**The heartbeat is what keeps a lost will from leaving you online.** Only a
+running broker sends a will, and a hub that loses power comes back holding your
+retained `online`; switched off meanwhile, you would read online until you are
+switched on again. A hub that reads the heartbeat marks you offline after two
+and a half intervals with nothing live from you, and your next message brings
+you back. It is optional: a hub from before it ignores the topic, and without
+one your will is all the hub goes by.
 
 ## Declaring the device
 
@@ -142,7 +153,7 @@ A state message is a JSON object in the hub's canonical schema:
 - **Report on change, and at least every minute or two even when nothing
   moves**, and no more often than about once a second. A sensor that drifts
   reports when it moves by a meaningful step (0.1 °C, 1 % RH); the steady
-  heartbeat is what keeps the hub's history from drawing a quiet sensor as a
+  re-send is what keeps the hub's history from drawing a quiet sensor as a
   gap. The hub may be a 512 MB board running the whole house, and it records
   readings in five-minute buckets anyway.
 - A patch for an endpoint the document did not declare is dropped.
