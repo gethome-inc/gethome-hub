@@ -49,6 +49,19 @@ The hub subscribes to `gethome/discovery/+/config`, `gethome/device/+/state`,
 hub today. A hub from before cameras ignores the two camera topics as well, and
 one from before heartbeats the heartbeat topic.
 
+One branch of what is ignored is set aside on purpose: `gethome/project/<key>/`
+and everything below it is a project's own. When what you are building has
+more than one part — a board and a program on a computer, or two boards — the
+parts can talk to each other there, in whatever levels and payloads they agree
+on, and the hub never acts on it or claims it. `<key>` is the project's own
+stable key, one topic level of letters, digits, `_` and `-`, chosen by whoever
+builds the project; keep it the same when the project is renamed, or parts
+flashed at different times stop finding each other. It is **not a security
+boundary**: every board and program signed in with the `gethome` account can
+read and write it. Never put a secret there — no password, key or token — and
+never retain one, since a retained message goes to every client that
+subscribes afterwards.
+
 ## What the hub does with each message
 
 - **A discovery document** it has not seen: creates the device, named with the

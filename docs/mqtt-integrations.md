@@ -81,6 +81,33 @@ arriving on that subscription is not a deletion. (A device that is switched off
 at that moment misses it, and comes back when it is switched on: an empty
 retained message leaves nothing behind for it to hear later.)
 
+### A project's own topics (`gethome/project/<key>/…`)
+
+The hub reads only the topics above, and anything else under `gethome/` is
+ignored. One branch of that is set aside for you: **`gethome/project/<key>/…`
+belongs to a project**. A thing you build is often more than one part — a board
+with a camera and a program on a computer that looks at its pictures, say, or
+two boards that work as a pair — and the parts need somewhere to talk to each
+other that is not the home's device topics. The hub never acts on anything
+under `gethome/project/` and does not claim it, so what a project's parts agree
+to say there is theirs: any levels below the key, any payload.
+
+`<key>` is the project's own, chosen by whoever builds it: one topic level of
+letters, digits, `_` and `-`, like a device id. Keep it **stable** — the same
+when the project is renamed or copied elsewhere — because a board flashed today
+has to find a program deployed next month, and a key derived from a name stops
+matching the first time the name changes.
+
+**It is a place, not a lock.** The `gethome` account can read and write
+everything under `gethome/`, so every board in the house and anything else
+holding that password can read and write every project's topics too, and
+anybody in the home allowed to watch the broker sees them go by. It keeps
+projects out of each other's way; it does not keep anybody out. So **never put
+a secret there** — a password, an API key, a token — and never retain one: a
+retained message is handed to every client that subscribes later, for as long
+as the broker keeps it. Retain only what a part that connects later needs at
+once, and clear it with an empty retained message when the project goes.
+
 ## Staying online
 
 Your last will is how the hub hears that you have gone: the broker publishes
