@@ -757,7 +757,10 @@ in `deploy/install.sh` must stay accurate.
   `test/deploy-wifi.test.ts`, in a second place. (The same family bit the 5 GHz
   code while it was written: bash 3.2 keeps the quotes of a quoted replacement
   in `${var//pattern/"$x"}`, so escaping the name in the shell produced
-  `My"\:"Net` on macOS and `My\:Net` on the Pi.)
+  `My"\:"Net` on macOS and `My\:Net` on the Pi.) **And the hub undoes the
+  quoting, not only the quotes** (`readWifiCredentials`): it once took off the
+  outer pair and nothing else, so `Dave's Wi-Fi` reached an accessory as
+  `Dave'\''s Wi-Fi`.
 - **A hub that loses its Wi-Fi profile is a hub nobody can reach to fix it, so
   it keeps its own copy and puts it back.** On 2026-10-12 the owner's Zero 2 W
   (Trixie, NetworkManager 1.52.1 storing profiles through netplan, Wi-Fi from

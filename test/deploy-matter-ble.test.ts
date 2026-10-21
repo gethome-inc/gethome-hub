@@ -324,6 +324,23 @@ describe('the Wi-Fi the hub passes on to an accessory', () => {
     expect(readWifiCredentials(run.path)).toEqual({ ssid, passphrase: psk });
   });
 
+  /**
+   * The quoting above, undone on the other side. The hub took off only the
+   * outer quotes, so `Dave's Wi-Fi` — written `'Dave'\''s Wi-Fi'` — reached an
+   * accessory as `Dave'\''s Wi-Fi`. Wherever the apostrophe falls, and in the
+   * password too.
+   */
+  it('hands over a name and a password with apostrophes in them unchanged', () => {
+    const cases = [
+      { ssid: "Dave's Wi-Fi", psk: "Dave's password" },
+      { ssid: "'Flat 3'", psk: "ends with '" },
+    ];
+    for (const { ssid, psk } of cases) {
+      const run = credentials({ ssid, psk });
+      expect(readWifiCredentials(run.path), ssid).toEqual({ ssid, passphrase: psk });
+    }
+  });
+
   it('writes an empty password for an open network rather than pretending', () => {
     // The hub reads that as "no credentials": an accessory handed an empty
     // password for a network it cannot join is worse than being told the hub
