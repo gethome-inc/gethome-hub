@@ -39,10 +39,13 @@ The only connections the hub itself ever makes outward are:
   ([why only those two](ai-adaptation.md)).
 
 On your own network, the hub also fetches from **the cameras you have added**
-— and only when somebody with `camera.view` opens one in an app. It fetches only
-plain `http` from a private address on the home network that isn't the hub's
-own, never follows a redirect, sends no credentials, relays nothing but images,
-and only once the board has proved it is the device it says it is
+— and only when somebody with `camera.view` opens one in an app, or software
+holding an API key given it asks for one. The hub keeps no record of each look,
+for a person or for a key, so give a key `camera.view` only for software you
+trust with every camera in the home. It fetches only plain `http` from a
+private address on the home network that isn't the hub's own, never follows a
+redirect, sends no credentials, relays nothing but images, and only once the
+board has proved it is the device it says it is
 ([`api.md`](api.md#cameras)). The pictures pass
 through and are not stored. That rule exists because a camera's address is
 announced by the device itself, over a broker account every board in the house

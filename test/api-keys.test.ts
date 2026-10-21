@@ -1,4 +1,6 @@
 import { readdirSync, readFileSync, mkdtempSync } from 'node:fs';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
@@ -23,7 +25,8 @@ import { MappingLibrary } from '../src/ai/library.js';
 import { KEY_GRANTABLE, PERMISSION_KEYS, type AccessService, type RoleWire } from '../src/core/access.js';
 import type { AutomationEngine } from '../src/automations/engine.js';
 import { apiKeys as apiKeysTable } from '../src/db/schema.js';
-import type { AdapterBus, ProtocolAdapter } from '../src/adapters/adapter.js';
+import { CameraProxy } from '../src/cameras/proxy.js';
+import type { AdapterBus, CameraSource, ProtocolAdapter } from '../src/adapters/adapter.js';
 import type { HubCommand } from '../src/schema/index.js';
 import {
   bootedHome,
@@ -54,6 +57,8 @@ class FakeAdapter implements ProtocolAdapter {
   readonly id = 'mqtt' as const;
   bus: AdapterBus | null = null;
   executed: Array<{ externalId: string; endpointId: number; command: HubCommand }> = [];
+  /** Camera streams by `<externalId>/<endpointId>/<streamId>`, as an announcement would leave them. */
+  cameras = new Map<string, CameraSource>();
   async start(bus: AdapterBus) {
     this.bus = bus;
   }
@@ -61,6 +66,76 @@ class FakeAdapter implements ProtocolAdapter {
   async execute(externalId: string, endpointId: number, command: HubCommand) {
     this.executed.push({ externalId, endpointId, command });
   }
+  cameraSource(externalId: string, endpointId: number, streamId: string): CameraSource | null {
+    return this.cameras.get(`${externalId}/${String(endpointId)}/${streamId}`) ?? null;
+  }
+}
+
+const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(200, 7), Buffer.from([0xff, 0xd9])]);
+
+/**
+ * A camera on loopback that proves it is `id` and streams to whoever asks —
+ * just what the routes need; `test/cameras.test.ts` has the fuller one.
+ */
+async function startCamera(id: string) {
+  const state = { streamRequests: 0 };
+  const server = http.createServer((request, response) => {
+    if (request.url === '/gethome/id') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ id, sdk: '0.1.0' }));
+      return;
+    }
+    if (request.url === '/stream') {
+      state.streamRequests += 1;
+      response.writeHead(200, { 'content-type': 'multipart/x-mixed-replace;boundary=gethome-frame' });
+      const timer = setInterval(() => {
+        response.write(`\r\n--gethome-frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${String(JPEG.length)}\r\n\r\n`);
+        response.write(JPEG);
+      }, 20);
+      request.on('close', () => clearInterval(timer));
+      return;
+    }
+    response.writeHead(404);
+    response.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as AddressInfo).port;
+  return {
+    url: `http://127.0.0.1:${String(port)}`,
+    get streamRequests() {
+      return state.streamRequests;
+    },
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections();
+        server.close(() => resolve());
+      }),
+  };
+}
+
+/**
+ * Asks a listening hub for a live stream with `token`: an open stream with the
+ * request to hang up, or a refusal with what it said. A stream never ends, so
+ * this has to be a real request rather than `app.inject`.
+ */
+function watchStream(
+  url: string,
+  token: string,
+): Promise<{ status: number; body: unknown; request: http.ClientRequest }> {
+  return new Promise((resolve, reject) => {
+    const request = http.get(url, { headers: { authorization: `Bearer ${token}` } }, (response) => {
+      const status = response.statusCode ?? 0;
+      if (status === 200) {
+        response.resume();
+        resolve({ status, body: null, request });
+        return;
+      }
+      let body = '';
+      response.on('data', (chunk: Buffer) => (body += chunk.toString()));
+      response.on('end', () => resolve({ status, body: JSON.parse(body) as unknown, request }));
+    });
+    request.on('error', reject);
+  });
 }
 
 /** One key, as `GET /api-keys` and `POST /api-keys` render it. */
@@ -219,7 +294,14 @@ describe.skipIf(!handle)('API keys', () => {
       aiRuns: new AiRunLog(db, events),
       mappings: new MappingLibrary({ db, settings, registry, log: silent }),
     };
-    app = await buildServer({ ...shared, log: silent });
+    // Loopback is exactly what the real camera policy refuses, so this
+    // server's proxy admits it for the one test that streams from a camera
+    // here; `test/cameras.test.ts` proves the default refuses it.
+    app = await buildServer({
+      ...shared,
+      log: silent,
+      cameras: new CameraProxy({ log: silent, addressAllowed: (host) => host === '127.0.0.1' }),
+    });
     await app.listen({ port: 0, host: '127.0.0.1' });
     const address = app.server.address();
     port = typeof address === 'object' && address ? address.port : 0;
@@ -296,8 +378,10 @@ describe.skipIf(!handle)('API keys', () => {
     'PUT /api/v1/devices/:id/web-blocks/:blockId': 'deny',
     'DELETE /api/v1/devices/:id/web-blocks/:blockId': 'deny',
     'GET /api/v1/devices/:id/web-blocks/:blockId/*': 'deny',
-    // `camera.view` is not in `KEY_GRANTABLE`, so a key is refused here
-    // whatever it was given: a camera shows people, and that is a person's.
+    // A camera shows people, so `camera.view` is a key's only when it was
+    // given it on purpose. A still is a fresh request under the key's rate
+    // limit; a live stream is held by the proxy to one a key at a time, and
+    // never the last free one (`test/cameras.test.ts`).
     'GET /api/v1/cameras/:deviceId/:endpointId/:streamId/snapshot': 'permission camera.view',
     'GET /api/v1/cameras/:deviceId/:endpointId/:streamId/mjpeg': 'permission camera.view',
     'POST /api/v1/matter/commission': 'permission device.add',
@@ -891,6 +975,74 @@ describe.skipIf(!handle)('API keys', () => {
         ['POST', '/api/v1/roles', { name: 'Root' }, 403, { error: 'key_not_allowed', permission: 'role.manage' }],
         ['DELETE', `/api/v1/members/${ownerId}`, undefined, 403, { error: 'key_not_allowed', permission: 'member.remove' }],
       ]);
+    });
+
+    /**
+     * The camera routes are `camera.view` for a key as for a member, so a key
+     * given it gets as far as the camera — here a stream nobody announced,
+     * which is the answer a member gets too — and one without it is told which
+     * permission it lacks rather than that no key may ever have it.
+     */
+    it('reaches the cameras with camera.view, and is told what it lacks without it', async () => {
+      const uuid = '55555555-5555-4555-a555-555555555555';
+      const { key, secret: watcher } = await mint(memberToken, { name: 'Doorbell watcher', permissions: ['camera.view'] });
+      await run(watcher, [
+        ['GET', `/api/v1/cameras/${uuid}/1/still/snapshot`, undefined, 404, { error: 'camera_not_found' }],
+        ['GET', `/api/v1/cameras/${uuid}/1/live/mjpeg`, undefined, 404, { error: 'camera_not_found' }],
+        ['GET', `/api/v1/cameras/${deviceId}/1/live/mjpeg`, undefined, 404, { error: 'camera_not_found' }],
+      ]);
+      const refused = { error: 'forbidden', permission: 'camera.view' };
+      await run(readOnly, [
+        ['GET', `/api/v1/cameras/${uuid}/1/still/snapshot`, undefined, 403, refused],
+        ['GET', `/api/v1/cameras/${uuid}/1/live/mjpeg`, undefined, 403, refused],
+      ]);
+      // Anna's keys are counted against a limit later tests reach.
+      await app.inject({ method: 'DELETE', url: `/api/v1/api-keys/${key.id}`, headers: auth(memberToken) });
+    });
+
+    /**
+     * The proxy holds a key to one live stream at a time only when the route
+     * names the key to it; dropped, a key would open streams as a person
+     * does, the last free one included, and the proxy's own suite would never
+     * notice. So this is the route, end to end: two streams of one camera on
+     * a hub relaying four, a key refused the second while it holds the first,
+     * and its member let open that same second one.
+     */
+    it('holds a key to one live stream at a time, and leaves its member theirs', async () => {
+      const camera = await startCamera('porch-cam');
+      const open: http.ClientRequest[] = [];
+      const { key, secret: watcher } = await mint(memberToken, { name: 'Porch watcher', permissions: ['camera.view'] });
+      try {
+        for (const stream of ['front', 'side']) {
+          adapter.cameras.set(`porch-cam/1/${stream}`, { kind: 'mjpeg', url: `${camera.url}/stream` });
+        }
+        adapter.bus!.deviceUpserted({
+          adapter: 'mqtt',
+          externalId: 'porch-cam',
+          suggestedName: 'Porch camera',
+          endpoints: [{ endpointId: 1, deviceKind: 'camera', capabilities: ['onOff', 'camera'], primary: 'onOff' }],
+        });
+        await registry.flush();
+        const cameraId = registry.listDevices().find((device) => device.name === 'Porch camera')!.id;
+        const live = (stream: string) =>
+          `http://127.0.0.1:${String(port)}/api/v1/cameras/${cameraId}/1/${stream}/mjpeg`;
+
+        const first = await watchStream(live('front'), watcher);
+        open.push(first.request);
+        expect(first.status).toBe(200);
+        const second = await watchStream(live('side'), watcher);
+        open.push(second.request);
+        expect(second).toMatchObject({ status: 409, body: { error: 'camera_busy' } });
+        const member = await watchStream(live('side'), memberToken);
+        open.push(member.request);
+        expect(member.status).toBe(200);
+        expect(camera.streamRequests).toBe(2);
+      } finally {
+        for (const request of open) request.destroy();
+        await camera.close();
+        // Anna's keys are counted against a limit later tests reach.
+        await app.inject({ method: 'DELETE', url: `/api/v1/api-keys/${key.id}`, headers: auth(memberToken) });
+      }
     });
 
     it('reads only its member’s lines without activity.read, and the home’s with it', async () => {

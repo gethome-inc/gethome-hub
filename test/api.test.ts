@@ -167,9 +167,10 @@ describe.skipIf(!handle)('hub API', () => {
       // stop, with nothing on the way back to say so.
       pairing: { signInCodes: true },
       // Presence again, and both say what an app needs to know before it
-      // offers anything: the stream kinds the hub relays and how many cameras
-      // at once, and how big a panel may be.
-      cameras: { kinds: ['snapshot', 'mjpeg'], maxStreams: 4 },
+      // offers anything: the stream kinds the hub relays, how many cameras at
+      // once and how many of those one API key may open, and how big a panel
+      // may be.
+      cameras: { kinds: ['snapshot', 'mjpeg'], maxStreams: 4, maxStreamsPerKey: 1 },
       webBlocks: { maxBytes: 512 * 1024, maxFiles: 64, perDevice: 4 },
     });
   });

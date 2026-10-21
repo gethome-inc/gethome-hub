@@ -53,5 +53,19 @@ the fetch in *What leaves the hub*. Update them in the same change.
   `maxUpstreams` (4) at once — `camera_busy`, the one refusal that is a `409`
   (`cameraStatus`); everything else the camera did is a `502`. Nothing is
   written to disk.
+- **An API key may open one stream at a time, and never the last free one.**
+  `camera.view` is key-grantable, and software holding a key tends to keep a
+  stream for as long as it runs, while the four upstreams are shared with the
+  people in the home — so `watch()` takes the key as its `opener`, the upstream
+  remembers who opened it until it closes, and `refuseOpening` holds a key to
+  `MAX_UPSTREAMS_PER_KEY` (1) and to `maxUpstreams - 1`, asked again after
+  attestation, because other streams can open while a board is proving itself.
+  **Joining an open upstream is never refused**, for anybody: it costs the
+  camera and the hub nothing. Both refusals are `camera_busy` rather than new
+  words, since an app already has a sentence for it and to whoever reads it
+  the fix is the same. Stills are not counted — each is a fresh request, paced
+  by the key's rate limit — and a person is held only to `maxUpstreams`, as
+  before, though that is now asked after attestation too.
 - **`describe()` is read by `GET /hub`**, which is the installer's health check
-  and must never throw — keep it a constant.
+  and must never throw — keep it a constant. `maxStreamsPerKey` is the per-key
+  limit above, and a hub without it lets no key watch a camera at all.

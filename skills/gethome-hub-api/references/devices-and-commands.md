@@ -81,7 +81,14 @@ open: show an unknown kind generically.
 `camera` is a capability the hub adds itself, to a device that announces
 pictures over MQTT: its state carries `camera.streams[]` — ids, kinds and sizes,
 never an address — and the pictures come through the hub's own camera routes,
-which need `camera.view`, a permission no key may be given.
+`GET /api/v1/cameras/{deviceId}/{endpointId}/{streamId}/snapshot` for a stream
+whose `kind` is `snapshot` and `…/mjpeg` for one whose `kind` is `mjpeg`. They
+need `camera.view`, which a key holds only when the person gave it on purpose
+(see [rest-api.md](rest-api.md) for what it allows and the limits on streams).
+A stream that isn't announced, or is the other kind, is `404 camera_not_found`;
+a camera the hub could not or would not reach is a `502` naming why. Always go
+through the hub rather than to a camera's own address: the hub checks the
+board is the device it says it is, and the address is not in the state.
 
 Conversions to keep at hand:
 

@@ -235,6 +235,18 @@ export const PERMISSION_KEYS: readonly PermissionKey[] = PERMISSIONS.map((entry)
  *    the building, and a key is already one.
  *  - `hub.wifi` — where the hub has been, and the one change that can take it
  *    off its network.
+ *
+ * What is here and needs saying:
+ *  - `camera.view` — a camera shows people, so it is given to a key on purpose
+ *    and never by default, and what it gives is wide: a key holding it sees
+ *    every camera in the home, at any hour, and the hub keeps no record of each
+ *    look, for a key as for a person. It is here because software that watches
+ *    a camera for the home (somebody at the door, a parcel on the step) is a
+ *    fair thing to want, and it would otherwise be handed a member's own token
+ *    with everything else in it. Stills are fresh requests under the key's rate
+ *    limit; a stream holds one of the few the hub relays at once, so the proxy
+ *    lets a key open one and never the last free one (`cameras/proxy.ts`).
+ *    Software should prefer stills on a schedule.
  */
 export const KEY_GRANTABLE: readonly PermissionKey[] = PERMISSION_KEYS.filter((key) =>
   (
@@ -242,6 +254,7 @@ export const KEY_GRANTABLE: readonly PermissionKey[] = PERMISSION_KEYS.filter((k
       'device.edit',
       'device.add',
       'device.remove',
+      'camera.view',
       'home.structure',
       'home.rename',
       'activity.read',

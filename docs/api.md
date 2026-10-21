@@ -116,12 +116,16 @@ no query string reaches the hub's log either way.
   pin a favorite. Without it a key is read-only and those answer
   `403 {error:"key_read_only"}`.
 - **`permissions`** — any of the `grantable` ones: `device.edit`, `device.add`,
-  `device.remove`, `home.structure`, `home.rename`, `activity.read`,
-  `automation.manage`, `hub.radio`, `hub.update`. A key can never be given what
-  its member does not hold, and what it holds is **asked live**: move the
-  member to a smaller role and every key they made narrows on the next request.
-  `automation.manage` needs `control`, because a rule switches devices by
-  itself.
+  `device.remove`, `camera.view`, `home.structure`, `home.rename`,
+  `activity.read`, `automation.manage`, `hub.radio`, `hub.update`. A key can
+  never be given what its member does not hold, and what it holds is **asked
+  live**: move the member to a smaller role and every key they made narrows on
+  the next request. `automation.manage` needs `control`, because a rule
+  switches devices by itself. `camera.view` is given on purpose and is wide —
+  every camera in the home, at any hour, with no record of each look — and a
+  key may open only one live stream at a time; see
+  [the built-in roles](#what-the-three-built-in-roles-start-with) and
+  [Cameras](#cameras).
 - **Never**, whatever it was given: `member.*`, `role.manage`, `hub.apikeys`
   (a key never makes another key), `hub.ai` (it would read and repoint the
   home's AI provider keys and read what was said to them), `hub.mqtt` and
@@ -159,6 +163,7 @@ loop with no sleep in it — prefer the WebSocket to polling.
 one is written as its member — `memberId` and `data.memberName` are theirs — with
 `data.via: "api"`, `data.apiKeyId` and `data.apiKeyName`, and the sentence names
 it: `Anna’s “Node-RED” · Desk lamp: power`. See [the activity log](#the-activity-log).
+Looking through a camera writes nothing, for a key as for a member.
 
 **What the hub shows about each key** — `GET /api-keys`:
 
@@ -252,7 +257,7 @@ than no button.
 
 | Method & path | Needs | Notes |
 |---|---|---|
-| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `matter: {bluetooth, bluetoothReason?, wifi, commissioning, settlingUntil?}` is present only while Matter is running and says what pairing this hub can actually do — and, in `settlingUntil`, whether it has finished finding the devices it already owns — see [below](#pairing-a-matter-accessory). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid). `wifiNetworks: {available, reason?}` is present on a hub that can be told about another Wi-Fi network before it is moved — `available: false` with `reason` `"no-networkmanager"` or `"not-installed"` when this machine cannot — see [below](#wi-fi-networks-settingswifi). `apiKeys: {grantable}` is present on a hub that takes [API keys](#api-keys), and lists the permissions a key may be given. `cameras: {kinds, maxStreams}` and `webBlocks: {maxBytes, maxFiles, perDevice}` are the same answer for [cameras](#cameras) and [web blocks](#web-blocks): what this hub relays and how many at once, and how big a panel may be. A hub without them has never heard of either, so an app offers neither |
+| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `matter: {bluetooth, bluetoothReason?, wifi, commissioning, settlingUntil?}` is present only while Matter is running and says what pairing this hub can actually do — and, in `settlingUntil`, whether it has finished finding the devices it already owns — see [below](#pairing-a-matter-accessory). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid). `wifiNetworks: {available, reason?}` is present on a hub that can be told about another Wi-Fi network before it is moved — `available: false` with `reason` `"no-networkmanager"` or `"not-installed"` when this machine cannot — see [below](#wi-fi-networks-settingswifi). `apiKeys: {grantable}` is present on a hub that takes [API keys](#api-keys), and lists the permissions a key may be given. `cameras: {kinds, maxStreams, maxStreamsPerKey}` and `webBlocks: {maxBytes, maxFiles, perDevice}` are the same answer for [cameras](#cameras) and [web blocks](#web-blocks): what this hub relays and how many at once (and how many of those one API key may open — newer than the rest of the block), and how big a panel may be. A hub without them has never heard of either, so an app offers neither |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
 | `POST /hub/proof` | — | `{nonce, address, tokenId}` → `{hubId, proof}`: this hub proving it is itself **at the address the app dialled**, to an app holding one of its tokens, without the token being sent. `403 proof_refused` for an address that is not this hub's or a token it does not hold — one answer for both. For an app following a saved hub to a new address — see [below](#following-a-hub-to-a-new-address-post-hubproof) |
 | `GET /home` · `PATCH /home` | floor · `home.rename` | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name) |
@@ -270,7 +275,7 @@ than no button.
 | `DELETE /portraits/:portraitId` | `device.edit` | forget one, file and row |
 | `PUT /devices/:id/web-blocks/:blockId` · `DELETE /devices/:id/web-blocks/:blockId` | `device.edit` — the member's, never a key's | install, replace or remove a panel on a device's page — see [below](#web-blocks). `PUT {title, height?, files: [{path, dataBase64}]}` → `{block, changed}`, and `changed: false` is an upload identical to the stored one, which wrote and logged nothing. `400 invalid_block` (with a `message` saying what), `409 too_many_web_blocks`, `409 web_blocks_full`, `507 storage_low`. `DELETE` answers `204`, or `404` for a block that isn't there |
 | `GET /devices/:id/web-blocks/:blockId/*` | floor — the member's, never a key's | one file of a panel, looked up in the manifest stored at install and never on disk; an empty path is `index.html`. A strong `ETag` (`304` on a match), `no-cache`, `nosniff`, and a CSP that allows no network |
-| `GET /cameras/:deviceId/:endpointId/:streamId/snapshot` · `GET /cameras/:deviceId/:endpointId/:streamId/mjpeg` | `camera.view` | a still (`image/jpeg`) or the live picture (`multipart/x-mixed-replace`) of a stream the device announced, fetched by the hub — see [below](#cameras). `404 camera_not_found` for a stream that isn't announced or is the other kind, `409 camera_busy`, and `502` with the reason: `camera_unreachable`, `camera_unverified`, `camera_address_refused`, `camera_bad_response` |
+| `GET /cameras/:deviceId/:endpointId/:streamId/snapshot` · `GET /cameras/:deviceId/:endpointId/:streamId/mjpeg` | `camera.view` | a still (`image/jpeg`) or the live picture (`multipart/x-mixed-replace`) of a stream the device announced, fetched by the hub — see [below](#cameras). `404 camera_not_found` for a stream that isn't announced or is the other kind, `409 camera_busy` (for an API key, also when it already has a stream open or only the last one is free), and `502` with the reason: `camera_unreachable`, `camera_unverified`, `camera_address_refused`, `camera_bad_response` |
 | `POST /devices/:id/remap` | `hub.ai` | force-regenerate the AI mapping (Zigbee devices) → `{requested}`. **It answers as soon as the run is under way, never when it ends**: a run is minutes and this is an HTTP request, so what the agent then did arrives on the `ai` stream and in `GET /ai/runs`. `requested: false` means the radio has no published schema for that device right now — a device row can outlive its `bridge/devices` entry — which is a different answer from a run that failed. Being explicit, it also drops a `rejected` mapping and **ignores the backoff gate**, because it is how somebody retries after fixing a key or changing the model. The hub also remaps automatically when a device publishes unknown parameters — see [ai-adaptation.md](ai-adaptation.md). `409 ai_not_configured` with no credential, `409 ai_disabled` when the owner has switched device recognition off |
 | `POST /matter/commission` | `device.add` | `{pairingCode, wifi?: {ssid, passphrase}}` → `202 {jobId, deadline}` (async). `wifi` is only for a hub that cannot read its own — see [below](#pairing-a-matter-accessory). `409 already_commissioning` when one is already running, `409 matter_disabled` when this hub has no Matter |
 | `GET /matter/commission/:jobId` | floor | `{status: running\|done\|failed, step?, nodeId?, error?, failure?, startedAt, deadline}` — see [below](#pairing-a-matter-accessory) |
@@ -455,6 +460,22 @@ shows *people*: a home with somebody staying decides whether they see the
 hallway. Nothing it guards existed before it, so updating takes nothing from
 anybody; it still needs the `member` row to hold it, so it travels with a
 migration (`0019`), the way `hub.ai` did.
+
+**An [API key](#api-keys) may be given `camera.view` too, and only on
+purpose.** Software that watches a camera for the home — somebody at the door,
+a parcel left on the step — is a fair thing to want, and without the grant it
+would have to be handed a member's own token, with everything else in it. What
+the grant gives is wide, and worth saying in so many words wherever a key is
+made: **every camera in the home, at any hour, and the hub keeps no record of
+each look** — no activity row, for a key as for a person. A still is a fresh
+request each time, paced by the key's rate limit. A live stream holds one of
+the few the hub relays at once, so a key may open one at a time and never the
+last one free, while joining a stream that is already open costs nothing — see
+[Cameras](#cameras). Software should prefer a still on a schedule. A key is
+still its member narrowed: a role without `camera.view` cannot hand it to a
+key, taking it from a role takes it from every key that role's people made,
+and a hub rolled back to a build from before this drops it from the key rather
+than keeping it.
 
 **Guest is somebody staying in the house** — and a role with **no keys at all**,
 which is its honest shape rather than an oversight. They work the lights and keep
@@ -2264,8 +2285,8 @@ app fetches through the hub, by the names the state gives it:
   `multipart/x-mixed-replace; boundary=gethomeframe`, one JPEG per part, for as
   long as the request is held open.
 
-Both need `camera.view`. A stream that isn't announced, or is the other kind, is
-`404 camera_not_found`.
+Both need `camera.view`, for a member or for an [API key](#api-keys) given it.
+A stream that isn't announced, or is the other kind, is `404 camera_not_found`.
 
 **What the hub will fetch is narrow on purpose.** The address came from a
 device, every board in the house shares one broker account, and the hub is the
@@ -2295,6 +2316,20 @@ re-framed in its own multipart; a viewer that falls behind skips frames rather
 than holding the others back. The upstream closes when the last viewer leaves.
 `maxStreams` cameras stream at once (four); one more is `409 camera_busy`.
 **Nothing is recorded** — frames pass through memory and are gone.
+
+**An API key gets fewer of those streams than a person does**, because it
+shares them with the people in the home, and software tends to hold a stream
+for as long as it runs. A key may **open** `maxStreamsPerKey` streams at a time
+(one), and never the last one free, so whoever is at the door with a phone can
+always open the porch camera however many the home's software is watching.
+Either refusal is the same `409 camera_busy` a person meets when every stream
+is taken — to whoever reads it, both mean "take a still, or try again later".
+A key may always **join** a stream somebody already has open, since that costs
+the camera and the hub nothing, and a stream a key opened stays its own until
+it closes, whoever joins it meanwhile. Stills are not counted: each one is a
+fresh request, and the key's rate limit already paces them. A hub whose
+`cameras` block has no `maxStreamsPerKey` is from before keys could watch a
+camera, and refuses `camera.view` on a key with `400 not_grantable`.
 
 Deleting the device clears its camera topic along with its discovery document,
 so a camera that is removed stays removed.

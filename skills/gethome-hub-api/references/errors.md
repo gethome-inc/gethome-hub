@@ -26,11 +26,14 @@ not.
 | 400 | `{error:"invalid_body", detail, issues}` | the body did not match; `detail` is the first problem in words |
 | 404 | `{error:"not_found"}` | that id does not exist (any more) |
 | 404 | `{error:"unknown_room"}` / `{error:"unknown_zone"}` | a `roomId`/`zoneId` that does not exist |
+| 404 | `{error:"camera_not_found"}` | a camera stream that isn't announced, or is the other kind (a still asked for as a stream) |
 | 404 | (Fastify's `Not Found`) on a documented route | **an older hub** — say so and degrade |
 | 409 | `{error:"<message>"}` on a command | the device cannot honour that command |
 | 409 | `automation_disabled`, `not_pressable`, `not_a_toggle` | pressing a rule that is off, has nothing to press, or is not a mode |
 | 409 | `already_commissioning`, `matter_disabled`, `zigbee_disabled` | pairing refusals |
 | 409 | `update_in_progress`, `update_unsupported` | hub update refusals |
+| 409 | `{error:"camera_busy"}` | the hub is streaming as many cameras as it relays, this key already has a stream open, or only the last free stream is left (it is kept for people) — take a still, or try later |
+| 502 | `camera_unreachable`, `camera_unverified`, `camera_address_refused`, `camera_bad_response` | the hub could not, or would not, fetch from that camera |
 | 422 | `{error:"invalid_automation", issues}` or `{…, problems, warnings}` | a rule the schema refuses, or one this home cannot use |
 | 403 | `{error:"host_not_allowed", host}` | the hub was reached by a public domain name; use its IP or `.local` name |
 
