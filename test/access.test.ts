@@ -339,6 +339,8 @@ describe.skipIf(!handle)('access service', () => {
    * `hub.apikeys` is an ordinary key in the catalog, and what a key may be
    * *given* is a separate, shorter list — an allowlist, so a permission a
    * later build adds is not grantable until somebody decides it is.
+   * `camera.view` joined it a release after the permission itself, which is
+   * what that decision looks like.
    */
   it('lists hub.apikeys, and exactly the grantable keys', () => {
     expect(PERMISSION_KEYS).toContain('hub.apikeys');
@@ -346,6 +348,7 @@ describe.skipIf(!handle)('access service', () => {
       'device.edit',
       'device.add',
       'device.remove',
+      'camera.view',
       'home.structure',
       'home.rename',
       'activity.read',

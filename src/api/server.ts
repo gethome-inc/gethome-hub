@@ -796,7 +796,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     portraits: deps.portraits.describe(),
     // Additive, presence the capability: a hub carrying this block shows
     // cameras through itself (`/cameras/…`), and these are the stream kinds it
-    // relays and how many cameras it streams at once.
+    // relays and how many cameras it streams at once. `maxStreamsPerKey`
+    // arrived later and says how many of those one API key may open itself;
+    // a hub without it lets no key watch a camera at all.
     cameras: cameras.describe(),
     // Additive, presence the capability: a hub carrying this block keeps web
     // blocks on devices' pages (`/devices/:id/web-blocks/…`), within these
@@ -1866,9 +1868,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * A still from a camera, through the hub.
    *
    * `camera.view` — Owner and Member by default, not Guest — because a camera
-   * shows people. The app names the stream by device, endpoint and stream id
-   * and never learns where the camera is; the hub fetches it from the address
-   * the camera announced, after the checks in `cameras/`.
+   * shows people; a key holds it only when it was given it on purpose
+   * (`KEY_GRANTABLE` says why). The app names the stream by device, endpoint
+   * and stream id and never learns where the camera is; the hub fetches it
+   * from the address the camera announced, after the checks in `cameras/`.
    */
   app.get(
     '/api/v1/cameras/:deviceId/:endpointId/:streamId/snapshot',
@@ -1889,6 +1892,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   /**
    * A camera live, as MJPEG, through the hub — shared with anybody already
    * watching it, since the camera serves one client.
+   *
+   * A key is named to the proxy, which lets it open one stream at a time and
+   * never the last free one; a still is a fresh request each time and already
+   * paced by the key's rate limit, so the route above names nobody.
    */
   app.get(
     '/api/v1/cameras/:deviceId/:endpointId/:streamId/mjpeg',
@@ -1896,9 +1903,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     async (request, reply) => {
       const target = cameraTarget(request.params, 'mjpeg');
       if (!target) return reply.code(404).send({ error: 'camera_not_found' });
+      const opener = request.apiKey ? { keyId: request.apiKey.id } : undefined;
       try {
         reply.hijack();
-        await cameras.watch(target, reply.raw, (listener) => request.raw.on('close', listener));
+        await cameras.watch(target, reply.raw, (listener) => request.raw.on('close', listener), opener);
       } catch (error) {
         const code = error instanceof CameraError ? error.code : 'camera_unreachable';
         const status = error instanceof CameraError ? cameraStatus(error.code) : 502;

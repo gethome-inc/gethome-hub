@@ -14,6 +14,12 @@ import { isPrivateIPv4 } from './policy.js';
  * seconds of silence, never a redirect, never the app's token passed on, and
  * at most four cameras streaming at once.
  *
+ * **Software holding an API key shares those four with the people in the
+ * home, so it gets fewer of them.** A key may open one stream at a time, and
+ * never the last one free: whoever is at the door with a phone can always open
+ * the porch camera, however many cameras the home's software is watching. A
+ * key may always join a stream that is already open, which costs nothing.
+ *
  * **One upstream per stream, however many people watch.** An ESP32 serves one
  * client at a time, so the second phone opening the porch camera joins the
  * first one's stream rather than knocking it off. Frames are re-framed into
@@ -43,6 +49,11 @@ export function cameraStatus(code: CameraRefusal): number {
   return code === 'camera_busy' ? 409 : 502;
 }
 
+/** Who is opening a stream, when it is software holding an API key. */
+export interface CameraOpener {
+  keyId: string;
+}
+
 export interface CameraTarget {
   /** The stream, as `<deviceId>/<endpointId>/<streamId>` — one upstream each. */
   key: string;
@@ -70,6 +81,8 @@ export interface CameraProxyOptions {
 }
 
 const BOUNDARY = 'gethomeframe';
+/** How many streams one API key may have open at once. */
+const MAX_UPSTREAMS_PER_KEY = 1;
 /** A viewer more than this far behind skips frames until it catches up. */
 const VIEWER_BACKLOG_BYTES = 512 * 1024;
 
@@ -95,8 +108,12 @@ export class CameraProxy {
   }
 
   /** What `GET /hub` advertises. */
-  describe(): { kinds: string[]; maxStreams: number } {
-    return { kinds: ['snapshot', 'mjpeg'], maxStreams: this.options.maxUpstreams };
+  describe(): { kinds: string[]; maxStreams: number; maxStreamsPerKey: number } {
+    return {
+      kinds: ['snapshot', 'mjpeg'],
+      maxStreams: this.options.maxUpstreams,
+      maxStreamsPerKey: MAX_UPSTREAMS_PER_KEY,
+    };
   }
 
   /** How many cameras are streaming right now. */
@@ -127,23 +144,34 @@ export class CameraProxy {
    * watching it. Resolves once the viewer is attached and the multipart
    * headers are written; throws a `CameraError` before anything is written.
    * The viewer is detached when `onClose` fires (the app went away).
+   *
+   * `opener` is the API key asking, when it is one. Joining a stream that is
+   * already open is never refused; opening one is held to `refuseOpening`.
    */
   async watch(
     target: CameraTarget,
     viewer: http.ServerResponse,
     onClose: (listener: () => void) => void,
+    opener?: CameraOpener,
   ): Promise<void> {
     let upstream = this.upstreams.get(target.key);
     if (!upstream) {
-      if (this.upstreams.size >= this.options.maxUpstreams) {
-        throw new CameraError('camera_busy', 'The hub is already streaming as many cameras as it relays at once.');
-      }
+      this.refuseOpening(opener);
       const url = this.checkedUrl(target.url);
       await this.attest(url, target.externalId);
-      // Someone else may have started it while this one was being verified.
+      // Someone else may have started it while this one was being verified,
+      // and other streams may have been opened meanwhile, so the room left is
+      // asked again before this one takes any of it.
       upstream = this.upstreams.get(target.key);
       if (!upstream) {
-        const created = new Upstream(target.key, url, this.options, () => this.upstreams.delete(target.key));
+        this.refuseOpening(opener);
+        const created = new Upstream(
+          target.key,
+          url,
+          this.options,
+          () => this.upstreams.delete(target.key),
+          opener?.keyId ?? null,
+        );
         this.upstreams.set(target.key, created);
         try {
           await created.open();
@@ -173,6 +201,31 @@ export class CameraProxy {
   }
 
   // MARK: The rules
+
+  /**
+   * Whether a new stream may be opened, and by whom. A person may take any
+   * free one. A key may take one at a time and never the last, so the home's
+   * software can never leave the people in it with no stream to open. Both
+   * refusals are `camera_busy`, the word every app already has for "the hub
+   * is streaming as much as it will", because to whoever reads it they mean
+   * the same thing: try a still, or try again later.
+   */
+  private refuseOpening(opener: CameraOpener | undefined): void {
+    if (this.upstreams.size >= this.options.maxUpstreams) {
+      throw new CameraError('camera_busy', 'The hub is already streaming as many cameras as it relays at once.');
+    }
+    if (!opener) return;
+    if (this.upstreams.size >= this.options.maxUpstreams - 1) {
+      throw new CameraError('camera_busy', 'The hub keeps its last free stream for the people in the home.');
+    }
+    let opened = 0;
+    for (const upstream of this.upstreams.values()) {
+      if (upstream.openedBy === opener.keyId) opened += 1;
+    }
+    if (opened >= MAX_UPSTREAMS_PER_KEY) {
+      throw new CameraError('camera_busy', 'This key already has a camera stream open.');
+    }
+  }
 
   /**
    * The announcement was checked when it arrived (`readCameraAnnouncement`);
@@ -343,6 +396,11 @@ class Upstream {
     private readonly url: URL,
     private readonly options: Required<Omit<CameraProxyOptions, 'addressAllowed'>>,
     private readonly onClosed: () => void,
+    /**
+     * The API key that opened it, or null for a person. It stays the key's
+     * until it closes, whoever else joins it meanwhile.
+     */
+    readonly openedBy: string | null,
   ) {}
 
   async open(): Promise<void> {

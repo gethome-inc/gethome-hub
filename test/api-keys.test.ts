@@ -296,8 +296,10 @@ describe.skipIf(!handle)('API keys', () => {
     'PUT /api/v1/devices/:id/web-blocks/:blockId': 'deny',
     'DELETE /api/v1/devices/:id/web-blocks/:blockId': 'deny',
     'GET /api/v1/devices/:id/web-blocks/:blockId/*': 'deny',
-    // `camera.view` is not in `KEY_GRANTABLE`, so a key is refused here
-    // whatever it was given: a camera shows people, and that is a person's.
+    // A camera shows people, so `camera.view` is a key's only when it was
+    // given it on purpose. A still is a fresh request under the key's rate
+    // limit; a live stream is held by the proxy to one a key at a time, and
+    // never the last free one (`test/cameras.test.ts`).
     'GET /api/v1/cameras/:deviceId/:endpointId/:streamId/snapshot': 'permission camera.view',
     'GET /api/v1/cameras/:deviceId/:endpointId/:streamId/mjpeg': 'permission camera.view',
     'POST /api/v1/matter/commission': 'permission device.add',
@@ -891,6 +893,29 @@ describe.skipIf(!handle)('API keys', () => {
         ['POST', '/api/v1/roles', { name: 'Root' }, 403, { error: 'key_not_allowed', permission: 'role.manage' }],
         ['DELETE', `/api/v1/members/${ownerId}`, undefined, 403, { error: 'key_not_allowed', permission: 'member.remove' }],
       ]);
+    });
+
+    /**
+     * The camera routes are `camera.view` for a key as for a member, so a key
+     * given it gets as far as the camera — here a stream nobody announced,
+     * which is the answer a member gets too — and one without it is told which
+     * permission it lacks rather than that no key may ever have it.
+     */
+    it('reaches the cameras with camera.view, and is told what it lacks without it', async () => {
+      const uuid = '55555555-5555-4555-a555-555555555555';
+      const { key, secret: watcher } = await mint(memberToken, { name: 'Doorbell watcher', permissions: ['camera.view'] });
+      await run(watcher, [
+        ['GET', `/api/v1/cameras/${uuid}/1/still/snapshot`, undefined, 404, { error: 'camera_not_found' }],
+        ['GET', `/api/v1/cameras/${uuid}/1/live/mjpeg`, undefined, 404, { error: 'camera_not_found' }],
+        ['GET', `/api/v1/cameras/${deviceId}/1/live/mjpeg`, undefined, 404, { error: 'camera_not_found' }],
+      ]);
+      const refused = { error: 'forbidden', permission: 'camera.view' };
+      await run(readOnly, [
+        ['GET', `/api/v1/cameras/${uuid}/1/still/snapshot`, undefined, 403, refused],
+        ['GET', `/api/v1/cameras/${uuid}/1/live/mjpeg`, undefined, 403, refused],
+      ]);
+      // Anna's keys are counted against a limit later tests reach.
+      await app.inject({ method: 'DELETE', url: `/api/v1/api-keys/${key.id}`, headers: auth(memberToken) });
     });
 
     it('reads only its member’s lines without activity.read, and the home’s with it', async () => {

@@ -168,8 +168,13 @@ or newer than these docs.
 - **Prefer reading to writing, and a scene to a sequence**: pressing an
   existing scene (`POST /api/v1/automations/{id}/run`) is one call the home
   already understands.
-- Everything a key does is written to the home's activity log under the
+- **A camera shows people.** With `camera.view`, look only when the task the
+  person gave needs it, prefer a still to a stream, and never keep pictures or
+  send them anywhere the person has not agreed to — that includes logs and a
+  model you call.
+- Everything a key changes is written to the home's activity log under the
   member's name and the key's name. Write code that is fine to be seen doing.
+  Looking through a camera is not: it leaves no line anybody can read later.
 
 ## Errors that tell you what to fix
 
