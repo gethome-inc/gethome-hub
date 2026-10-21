@@ -264,10 +264,24 @@ export class AutomationEngine {
   private readonly onDeviceRemoved = (deviceId: string): void => {
     this.guards.forgetDevice(deviceId);
     for (const key of [...this.edges.keys()]) {
-      if (key.endsWith(`:${deviceId}`)) this.edges.delete(key);
+      if (key.endsWith(`:${deviceId}`)) this.forgetEdge(key);
     }
     this.onHomeMoved();
   };
+
+  /**
+   * Forget one trigger's answer, and any `for` it was waiting out. The hold
+   * would find no answer and fire nothing — but until it ran out it would go
+   * on telling the hub's automatic updates that a rule is mid-way.
+   */
+  private forgetEdge(key: string): void {
+    this.edges.delete(key);
+    const hold = this.holds.get(key);
+    if (hold !== undefined) {
+      clearTimeout(hold);
+      this.holds.delete(key);
+    }
+  }
 
   private evaluateDevice(deviceId: string, endpointId: number, state: EndpointState): void {
     const home = this.homeView();
@@ -439,12 +453,16 @@ export class AutomationEngine {
   // ── What an update has to stay out of the way of ───────────────────────────
 
   /**
-   * Whether any rule is in the middle of a run — most likely sitting in a
-   * `wait`, which does not survive a restart. Asked by the hub's automatic
-   * updates, which would otherwise end such a run half done.
+   * Whether any rule is in the middle of something a restart would lose: a
+   * run — most likely sitting in a `wait` — or a `for` still waiting out its
+   * time. Asked by the hub's automatic updates, which would otherwise end a run
+   * half done, or drop "the hall has been empty for twenty minutes" ten
+   * minutes in: after a restart that trigger adopts the hall as it finds it
+   * and says nothing, so the light it was going to switch off stays on all
+   * night.
    */
   hasRunInFlight(): boolean {
-    return this.running.size > 0;
+    return this.running.size > 0 || this.holds.size > 0;
   }
 
   /**
@@ -997,7 +1015,7 @@ export class AutomationEngine {
     // Forget what belongs to a rule or a device that has gone, or the map
     // grows by one entry per rule the home has ever had.
     for (const key of [...this.edges.keys()]) {
-      if (!live.has(key)) this.edges.delete(key);
+      if (!live.has(key)) this.forgetEdge(key);
     }
     this.watched = watched;
   }

@@ -287,18 +287,35 @@ there, because those reach the routes as well. `docs/api.md` and
   narrower than "used"**: a rule the *clock* starts counts toward the rhythm but
   never holds the hub off, or a ten-minute interval rule would hold it off for
   ever. **Everything that can say "not now" is asked before GitHub is** — half
-  an hour of quiet, nobody pairing, no rule mid-run or due in twenty minutes,
-  no update running. **Merging is releasing, so a build is a day on `main`
-  first** (the commit's own date, via the commit *list*, which carries no
-  files); a hub a week behind a `main` that never sits still stops waiting, and
-  still gives CI two hours. **Never a build that rolled back here, never one
-  more than three times, one request a night**, attempts counted *when the
-  request is made* so a runner that never comes back still runs out. And **it
-  says so before it does it** — bookkeeping and the activity row (no member,
-  `outcome: auto-started`) before the request, which restarts this process;
-  postponements go in `describe().last`, never the feed. A branch build or one
-  from source never updates itself, whatever the switch says (`blocked`).
-  `docs/api.md` is canonical.
+  an hour of quiet, nobody pairing, no rule mid-run or waiting out a `for`,
+  none due in twenty minutes, no update running — **and GitHub once a
+  window**: an answer holds until the window closes, or until the build it
+  waits for comes of age if that is sooner, and only no answer is asked again,
+  half-hourly. **Merging is releasing, so a build is a day on `main` first**
+  (the commit's own date, via the commit *list*, which carries no files); a hub
+  whose *running build* has been a week behind a `main` that never sits still
+  stops waiting, and still gives CI two hours. `behindFrom` ties that week to
+  the build: carried across updates, it had every hub that updates regularly
+  installing builds two hours old a week after its first. **Never a build that
+  rolled back here, never one more than three times, one request a night**,
+  attempts counted *when the request is made* so a runner that never comes back
+  still runs out. **How a run ended is never known at the boot after it**: the
+  runner writes its last word only once the hub it restarted answers again, so
+  `watchUpdateOutcomes` (`update.ts`) reads the status file until it settles
+  and tells `runEnded` before the row is written — read once at boot, which is
+  what this did first, no rollback was ever written down. **The switch is asked
+  again once GitHub has answered** (`generation`): "off" said during those eight
+  seconds must not be followed by a restart. **The books go before the request
+  and the row straight after it**, nothing between them waiting on anything
+  outside this process — before, so even a runner that never comes back has the
+  attempt counted; after, so a request that could not be written is never
+  announced. Postponements go in `describe().last`, never the feed. A branch
+  build or one from source never updates itself, whatever the switch says
+  (`blocked`). **Counting starts at boot and looking only once the rules have
+  started** (`start` / `startLooking`): before they load, the engine says
+  nothing is scheduled or running. And **nothing is dated against an unset
+  clock** — learning begun in 1970 is stamped by the first true reading and
+  written down only then. `docs/api.md` is canonical.
 - **A name is the house's, a favorite is one person's, and that split decides
   where each is stored.** Device names, rooms and zones sit on shared rows and
   everybody sees the same ones; a favorite is `device_favorites` keyed by member
