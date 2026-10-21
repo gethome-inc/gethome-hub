@@ -72,10 +72,11 @@ if [[ -z "$UUID" ]]; then
   exit 0
 fi
 
-# `-s` is what includes secrets, and is why this needs root. Two fields in one
-# call so the SSID and the password can never come from different profiles.
-SSID=$(nmcli -s -g 802-11-wireless.ssid connection show uuid "$UUID" 2>/dev/null | head -n1)
-PSK=$(nmcli -s -g 802-11-wireless-security.psk connection show uuid "$UUID" 2>/dev/null | head -n1)
+# `-s` is what includes secrets, and is why this needs root. Both ask for the
+# same UUID, so the SSID and the password cannot come from different profiles.
+# `-e no`, as `profile_ssid` explains: one field has no columns to keep apart.
+SSID=$(nmcli -s -e no -g 802-11-wireless.ssid connection show uuid "$UUID" 2>/dev/null | head -n1)
+PSK=$(nmcli -s -e no -g 802-11-wireless-security.psk connection show uuid "$UUID" 2>/dev/null | head -n1)
 
 if [[ -z "$SSID" ]]; then
   say "Could not read this hub's Wi-Fi name; leaving the last known one in place."
