@@ -2680,7 +2680,9 @@ UNIT
 #
 # The service is deliberately *not* enabled and carries no [Install] section:
 # it is started by the path unit and must never run at boot, where it would
-# update a hub nobody asked to update. It is also not ordered after the hub,
+# update a hub nobody asked to update. (A hub whose home switched on automatic
+# updates asks by itself, at a quiet hour, by writing the same request — never
+# by this unit starting on its own.) It is also not ordered after the hub,
 # because the installer it runs restarts the hub half way through and this must
 # outlive that.
 $SUDO install -m 0755 "$HUB_DIR/deploy/update-runner.sh" /usr/local/lib/gethome-update.sh 2>/dev/null \

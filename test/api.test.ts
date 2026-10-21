@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -2051,6 +2051,75 @@ describe.skipIf(!handle)('hub API', () => {
       });
       expect(response.statusCode).toBe(200);
       expect(response.json()).toMatchObject({ lines: [], total: 0 });
+    });
+
+    describe('by itself', () => {
+      const switchTo = (enabled: unknown, token = memberToken, extra: object = {}) =>
+        app.inject({
+          method: 'PUT',
+          url: '/api/v1/system/update/automatic',
+          headers: auth(token),
+          payload: { enabled, ...extra },
+        });
+      const switchRows = async () =>
+        (
+          (await app
+            .inject({ method: 'GET', url: '/api/v1/activity?limit=50', headers: auth(ownerToken) })
+            .then((r) => r.json())) as Array<{ kind: string; message: string; data?: { outcome?: string } }>
+        ).filter((row) => row.kind === 'hub.update' && /^auto-o(n|ff)$/.test(row.data?.outcome ?? ''));
+
+      it('is off until somebody says otherwise, and says when it could not run here anyway', async () => {
+        // Its presence is how an app knows to offer the switch at all. This
+        // hub has no CI stamp, so even switched on it would have nothing to
+        // compare — said now, before anybody switches it on and waits.
+        const body = await app
+          .inject({ method: 'GET', url: '/api/v1/system/update', headers: auth(memberToken) })
+          .then((r) => r.json());
+        expect(body.automatic).toEqual({ enabled: false, blocked: 'no_build_stamp' });
+      });
+
+      it('lets a member switch it on, and names them', async () => {
+        const response = await switchTo(true);
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({ automatic: { enabled: true, blocked: 'no_build_stamp' } });
+        const rows = await switchRows();
+        expect(rows).toHaveLength(1);
+        expect(rows[0]?.message).toMatch(/turned on automatic hub updates\.$/);
+
+        const body = await app
+          .inject({ method: 'GET', url: '/api/v1/system/update', headers: auth(ownerToken) })
+          .then((r) => r.json());
+        expect(body.automatic).toMatchObject({ enabled: true });
+      });
+
+      it('writes one row per change, not one per request', async () => {
+        expect((await switchTo(true)).statusCode).toBe(200);
+        expect(await switchRows()).toHaveLength(1);
+      });
+
+      it('refuses a field it does not know rather than dropping it', async () => {
+        // A field a later build adds to narrow this — certain nights, say —
+        // stripped here would mean a hub updating itself more freely than it
+        // was asked to.
+        expect((await switchTo(true, memberToken, { nights: [5, 6] })).statusCode).toBe(400);
+        expect((await switchTo('yes')).statusCode).toBe(400);
+      });
+
+      it('always switches off, and will not switch on where the machine cannot update itself', async () => {
+        rmSync(path.join(updateDir(), 'enabled'));
+        try {
+          const off = await switchTo(false);
+          expect(off.statusCode).toBe(200);
+          expect(off.json()).toMatchObject({ automatic: { enabled: false, blocked: 'unsupported' } });
+          expect((await switchRows()).at(0)?.message).toMatch(/turned off automatic hub updates\.$/);
+
+          const on = await switchTo(true);
+          expect(on.statusCode).toBe(409);
+          expect(on.json()).toMatchObject({ error: 'update_unsupported' });
+        } finally {
+          writeFileSync(path.join(updateDir(), 'enabled'), '');
+        }
+      });
     });
   });
 

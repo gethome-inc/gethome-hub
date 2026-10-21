@@ -11,6 +11,7 @@ import { ActivityService } from './core/activity.js';
 import { HistoryService } from './core/history.js';
 import { PortraitService } from './portraits/store.js';
 import { recordFinishedUpdate } from './core/update.js';
+import { createAutoUpdater } from './core/auto-update.js';
 import { HomeService } from './core/home.js';
 import { FavoritesService } from './core/favorites.js';
 import { AccessService } from './core/access.js';
@@ -106,12 +107,6 @@ async function main(): Promise<void> {
 
   const pairing = new PairingService(db, config.DATA_DIR, log, access);
   await pairing.boot();
-
-  // An update restarts this process, so the hub cannot write down how its own
-  // update went while it is happening. The runner leaves the outcome in a file
-  // and this is where it becomes one line of the home's history — once, keyed
-  // on the run id, so a reboot a month later doesn't re-announce it.
-  void recordFinishedUpdate(config.DATA_DIR, activity, log).catch(() => undefined);
 
   const registry = new DeviceRegistry(db, events, activity, log.child({ module: 'registry' }));
   // What the readings did, so an app can draw the last few days. Listens on
@@ -268,6 +263,37 @@ async function main(): Promise<void> {
 
   let radioPressure: RadioPressureWatch | undefined;
 
+  // Somebody standing in front of a device: a Matter pairing in flight, or the
+  // Zigbee network open for joining. Neither the radio watch's retry nor an
+  // automatic update restarts the hub in the middle of one.
+  const somebodyIsPairing = (): boolean => matter?.isCommissioning === true || permitJoin.state.active;
+
+  // The hub updating itself, when its home has said it may. *Loaded* here,
+  // before the API listens, so `GET /system/update` never answers "off" for a
+  // hub that is on in the seconds after a boot — and *started* below, once
+  // there is a home and its rules to stay out of the way of.
+  const autoUpdate = createAutoUpdater({
+    dataDir: config.DATA_DIR,
+    build,
+    settings,
+    timezone: () => settings.timezone,
+    activity,
+    events,
+    rules: automations,
+    busy: somebodyIsPairing,
+    log: log.child({ module: 'update' }),
+  });
+  await autoUpdate.load();
+
+  // An update restarts this process, so the hub cannot write down how its own
+  // update went while it is happening. The runner leaves the outcome in a file
+  // and this is where it becomes one line of the home's history — once, keyed
+  // on the run id, so a reboot a month later doesn't re-announce it. After the
+  // updater is loaded, because a run the hub asked for by itself says so.
+  void recordFinishedUpdate(config.DATA_DIR, activity, log, autoUpdate.automaticRunId()).catch(
+    () => undefined,
+  );
+
   const app = await buildServer({
     db,
     log,
@@ -332,6 +358,7 @@ async function main(): Promise<void> {
       runs: aiRuns,
       ...(zigbee ? { zigbee } : {}),
     }),
+    autoUpdate,
     ...(build ? { build } : {}),
     ...(matter ? { matter } : {}),
     ...(zigbee ? { zigbee } : {}),
@@ -402,7 +429,7 @@ async function main(): Promise<void> {
     // Somebody standing in front of a device. Only the retry waits for it: a
     // hub that restarted itself mid-pairing would take the pairing with it,
     // for a trial that had no reason to happen in that particular minute.
-    busy: () => matter?.isCommissioning === true || permitJoin.state.active,
+    busy: somebodyIsPairing,
     log: log.child({ module: 'radio' }),
     onStandDown: async (record) => {
       // Both, in this order, and both before the mode is written: the frame is
@@ -441,6 +468,12 @@ async function main(): Promise<void> {
   });
   radioPressure.start();
 
+  // Counting when the home is used and, if it may, looking each five minutes
+  // for its quiet hour. Unconditional and `unref`ed like the watch above: with
+  // the switch off a look is one comparison, and the switch can be turned on
+  // at any time without a restart.
+  autoUpdate.start();
+
   const stopping = { value: false };
   const shutdown = async (signal: string) => {
     if (stopping.value) return;
@@ -448,6 +481,8 @@ async function main(): Promise<void> {
     log.info(`${signal} received, shutting down…`);
     permitJoin.stop();
     radioPressure?.stop();
+    // Before the database closes: the hour being counted is written here.
+    await autoUpdate.stop().catch(() => {});
     await automations.stop().catch(() => {});
     await mdns?.stop().catch(() => {});
     await app.close().catch(() => {});

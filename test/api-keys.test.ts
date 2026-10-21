@@ -331,6 +331,7 @@ describe.skipIf(!handle)('API keys', () => {
     'PUT /api/v1/settings/radio': 'permission hub.radio',
     'GET /api/v1/system/update': 'read',
     'POST /api/v1/system/update': 'permission hub.update',
+    'PUT /api/v1/system/update/automatic': 'permission hub.update',
     'GET /api/v1/system/update/log': 'read',
     'GET /api/v1/settings/wifi': 'permission hub.wifi',
     'POST /api/v1/settings/wifi/networks': 'permission hub.wifi',

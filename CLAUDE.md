@@ -66,7 +66,7 @@ section. The iOS and Studio repositories carry the same section from their side
 
 | | It ships when | It reaches somebody | What is still out there |
 |---|---|---|---|
-| **gethome hub** | a pull request merges to `main` — merging *is* releasing, and we choose when | a new install at once (every path runs `main`'s `install.sh` and downloads `bundle-main`); an existing hub only when somebody asks it to (*Update* in an app, where it is offered the next time an app looks, or `gethome-hubctl update`) | every build ever merged — a hub never updates itself |
+| **gethome hub** | a pull request merges to `main` — merging *is* releasing, and we choose when | a new install at once (every path runs `main`'s `install.sh` and downloads `bundle-main`); an existing hub when somebody asks it to (*Update* in an app, where it is offered the next time an app looks, or `gethome-hubctl update`) — or by itself, on a quiet night once the build has been on `main` for a day, where somebody in that home has switched automatic updates on (off by default) | every build ever merged — a hub updates itself only where its home has switched that on |
 | **gethome studio** | we run `scripts/release.sh` and merge the site's pull request — we choose when | Sparkle offers it within a day; installing it is the reader's click, since installing by itself is off by default | every release, and every SD card one of them wrote |
 | **gethome for iPhone** | Apple passes it — App Review takes a day to a week, and can reject | when the phone updates, which for some phones is never | every build that ever passed review |
 
@@ -901,7 +901,12 @@ outside `deploy/`, so they stay here:
   (`src/core/update.ts`) writes one line into `<data>/update/` and a root
   oneshot runs it; `<data>/update/enabled` is the capability. What is running
   afterwards is read back from `GET /hub`, never from the log, and a rollback
-  is its own outcome that only the `@@ROLLBACK@@` marker can report.
+  is its own outcome that only the `@@ROLLBACK@@` marker can report. **The hub
+  may now write that line itself** — `src/core/auto-update.ts`, at a quiet hour,
+  only where somebody switched automatic updates on — and nothing on the root
+  side knows the difference: the unit is still never enabled, and the runner
+  still only installs `main`. The rules for when it may are in
+  `src/core/CLAUDE.md`.
 - **The hub records a Wi-Fi network change the same way, and waits for it.**
   `POST`/`DELETE /settings/wifi/networks` (`src/core/wifi-networks.ts`) write
   one request into `<data>/wifi/`, `gethome-wifi.path` notices, and

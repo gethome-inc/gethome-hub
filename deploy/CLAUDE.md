@@ -117,6 +117,13 @@ in `deploy/install.sh` must stay accurate.
   `gethome-hubctl update`. That is what lets a phone update a hub at all —
   Studio does it over SSH with a key it planted, and an iPhone has none.
   Any member may ask; see the owner-only bullet above for why that moved.
+  **The hub may also ask by itself**, at a quiet hour, where somebody in its
+  home switched automatic updates on (`src/core/auto-update.ts`, off by
+  default). Nothing here changes for it — it writes the same request — and two
+  rules here are what keep it safe: the unit is never enabled, so the only way
+  an update starts is a request somebody (or the hub, on somebody's say-so)
+  wrote, and the runner only ever installs `main`, which is why the hub refuses
+  to update a branch build by itself rather than undo somebody's test.
   Seven things to keep. **The unit is never enabled and never ordered after the
   hub**: an enabled update service updates on every boot, and a unit ordered
   after `gethome-hubd` is one systemd may take down with the hub *this very run

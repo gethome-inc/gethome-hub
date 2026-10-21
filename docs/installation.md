@@ -174,6 +174,23 @@ default and Guest does not** (the roles table is editable —
 happen. A hub installed before that existed has to be updated once from gethome
 studio or from here, after which it can do it itself.
 
+**Or by itself, if you let it.** Both apps have an *Update automatically*
+switch beside the version (the iPhone app's Hub page, gethome studio's hub page),
+and it is **off until somebody turns it on**. Switched on, the hub installs new
+builds by itself, at the two hours of the day your home asks least of it — it
+learns which from the last fortnight, and uses 3 to 5 in the morning until it
+has a few days to go on — and only once nothing is happening: nobody has used
+the home for half an hour, no rule is running or about to, and nobody is
+pairing a device. It waits until a build has been on `main` for a day before
+installing it, never retries one that put itself back, and writes each update
+into the home's activity like any other. Turning it on needs the same
+`hub.update` permission as pressing *Update*.
+
+A hub running a branch build never updates itself, whatever the switch says —
+`--branch` is somebody testing something, and an automatic update only ever
+installs `main`. To keep a hub on `main` exactly where it is, leave the switch
+off; `api.md` has [the whole of it](api.md#automatic-updates).
+
 **Installing a branch.** `update` takes `--branch`, which is how an unmerged
 change gets onto real hardware — and how you go back afterwards:
 

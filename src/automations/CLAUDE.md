@@ -67,6 +67,13 @@ directory. `docs/automations.md` is canonical — update it in the same change.
   elapsing. A `wait` does not survive a restart and is capped at fifteen
   minutes to say so. `tick()` is public for the reason `HistoryService.flush()`
   is — a scheduler that reads `Date.now()` can only be tested by waiting.
+  **The hub's automatic updates ask the engine two things before restarting
+  the hub**: whether a run is in flight (`hasRunInFlight` — a `wait` would be
+  lost) and whether a `schedule` falls in the next twenty minutes
+  (`scheduledWithin`, worked out minute by minute with the helpers `tick`
+  itself uses, so "will this fire" cannot disagree with "did this fire").
+  `MIN_PLAUSIBLE_CLOCK` lives in `evaluate.ts` so the two read one answer to
+  "is the clock real yet".
   **Only a manual run reaches the activity log**, which is the log's own rule
   (what was *asked*, never what was reported): a motion rule's forty daily
   firings would drown a feed bounded at 5 000 rows. Traces live in

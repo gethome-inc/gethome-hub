@@ -19,7 +19,7 @@ reading; the key's member must also hold any permission named. The hub's
 | `activity.read` | read everybody's activity, not only its member's |
 | `automation.manage` | create, change, delete and revert rules (needs `control`) |
 | `hub.radio` | switch which radio the hub runs |
-| `hub.update` | start a hub update |
+| `hub.update` | start a hub update, or let the hub update itself |
 
 `GET /api/v1/hub` lists the grantable permissions in `apiKeys.grantable`; a key
 can never be given anything else. These are **never** a key's, whatever it is
@@ -47,7 +47,7 @@ API keys, and every conversation with the hub's assistant or automations agent.
 | `GET /api/v1/automations/capabilities` | the rule vocabulary, generated from the hub's own schema |
 | `GET /api/v1/automations/templates` | the shipped presets |
 | `GET /api/v1/settings/timezone` | the home's timezone, which schedules use |
-| `GET /api/v1/system/update` · `GET /api/v1/system/update/log` | what is installed and how an update is going |
+| `GET /api/v1/system/update` · `GET /api/v1/system/update/log` | what is installed, how an update is going, and `automatic`: whether the hub updates itself and when it next may |
 | `GET /api/v1/matter/commission/{jobId}` | a Matter pairing in progress |
 
 ## Working the home (`control`)
@@ -76,6 +76,7 @@ API keys, and every conversation with the hub's assistant or automations agent.
 | `PUT /api/v1/settings/timezone` | `automation.manage` |
 | `PUT /api/v1/settings/radio` `{"mode": "auto"}` | `hub.radio` — restarts the hub's radios; ask first |
 | `POST /api/v1/system/update` | `hub.update` — the home goes offline for minutes; ask first |
+| `PUT /api/v1/system/update/automatic` `{"enabled": true}` | `hub.update` — from then on the hub updates itself at an hour its home is usually quiet; ask first. `409 update_unsupported` on a hub that cannot update itself |
 
 ## Patterns worth knowing
 

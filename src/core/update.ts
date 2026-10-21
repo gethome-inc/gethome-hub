@@ -83,8 +83,10 @@ export function canApplyUpdate(dataDir: string): boolean {
  * `PathModified` is guaranteed to notice, and the runner validates and re-reads
  * once — so a torn read costs a retry, not a wrong action.
  */
-export function requestUpdate(dataDir: string): string {
-  const id = randomUUID();
+export function requestUpdate(dataDir: string, id: string = randomUUID()): string {
+  // An id can be handed in by a caller that has to write it down *before* the
+  // request exists — the hub's automatic updates, whose request is what
+  // restarts the process that would otherwise write it afterwards.
   mkdirSync(updateDir(dataDir), { recursive: true });
   writeFileSync(path.join(updateDir(dataDir), 'request'), `${id}\n`, { mode: 0o644 });
   return id;
@@ -268,6 +270,79 @@ export function forgetUpdateCheck(): void {
   cachedCheck = undefined;
 }
 
+/**
+ * Whether two commits are the same one.
+ *
+ * A build stamp carries seven characters and GitHub can answer with forty, so
+ * these are compared by prefix in whichever direction is shorter. Same test
+ * Studio makes.
+ */
+export function sameCommit(a: string, b: string): boolean {
+  return a.startsWith(b) || b.startsWith(a);
+}
+
+/** `main`'s newest commit and when it landed there, or why the hub cannot say. */
+export interface HeadCommit {
+  sha?: string;
+  /** Epoch ms. The committer's date, which for a merged pull request is the merge. */
+  committedAt?: number;
+  error?: UpdateCheckError;
+}
+
+/**
+ * The same head, asked through the list of commits rather than the commit.
+ *
+ * An automatic update needs one thing the bare sha cannot say: **how long the
+ * commit has been on `main`**, because merging is releasing and a build is
+ * installed by itself only once it has been out for a day. `commits/main` would
+ * answer that too, with the commit's whole file list attached — hundreds of
+ * kilobytes after a large merge — while one entry of the list carries no files
+ * and is a few kilobytes. Asked at most a few times a night, and only by a hub
+ * whose owner switched automatic updates on.
+ */
+const HEAD_LIST_URL = 'https://api.github.com/repos/gethome-inc/gethome-hub/commits?sha=main&per_page=1';
+
+const headListSchema = z.array(
+  z.object({
+    sha: z.string(),
+    commit: z.object({
+      committer: z.object({ date: z.string() }).nullish(),
+    }),
+  }),
+);
+
+export async function fetchHead(now = Date.now()): Promise<HeadCommit> {
+  let head: HeadCommit;
+  try {
+    const response = await fetch(HEAD_LIST_URL, {
+      headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'gethome-hub' },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (response.status === 403 || response.status === 429) {
+      head = { error: 'rate_limited' };
+    } else if (!response.ok) {
+      head = { error: 'offline' };
+    } else {
+      const parsed = headListSchema.safeParse(await response.json());
+      const first = parsed.success ? parsed.data[0] : undefined;
+      const committedAt = Date.parse(first?.commit.committer?.date ?? '');
+      head =
+        first !== undefined && /^[0-9a-f]{7,40}$/i.test(first.sha) && Number.isFinite(committedAt)
+          ? { sha: first.sha.slice(0, 7), committedAt }
+          : { error: 'offline' };
+    }
+  } catch {
+    // The same "cannot say" as `checkForUpdate`, for the same reasons.
+    head = { error: 'offline' };
+  }
+  // One answer for the whole hub: an app opening the Software card after a
+  // night check sees what the night saw, without asking GitHub again.
+  if (head.sha !== undefined) {
+    cachedCheck = { check: { sha: head.sha, checkedAt: new Date(now).toISOString() }, at: now };
+  }
+  return head;
+}
+
 // ── Saying afterwards what happened ────────────────────────────────────────
 
 /**
@@ -283,6 +358,15 @@ export async function recordFinishedUpdate(
   dataDir: string,
   activity: ActivityService,
   log: Logger,
+  /**
+   * The run the hub asked for by itself, if it asked for one.
+   *
+   * Its outcome is worded for what it was — nobody pressed anything, so "the
+   * hub updated itself" is the sentence somebody needs a week later — and
+   * carries `automatic`. The outcome words stay the same five, so an app built
+   * before automatic updates still draws the row it always drew.
+   */
+  automaticRunId?: string,
 ): Promise<void> {
   const run = readUpdateRun(dataDir);
   if (run === undefined || run.state === 'running') return;
@@ -295,8 +379,17 @@ export async function recordFinishedUpdate(
   }
 
   const build = run.liveBuild ?? run.fromBuild;
-  const message =
-    run.state === 'succeeded'
+  const automatic = automaticRunId !== undefined && automaticRunId === run.id;
+  const message = automatic
+    ? run.state === 'succeeded'
+      ? `The hub updated itself to ${build}.`
+      : run.state === 'rolled-back'
+        ? `The hub's automatic update didn't work, so it went back to ${build} and is running again. ` +
+          `It won't try that version by itself again.`
+        : run.state === 'stalled'
+          ? `The hub's automatic update stopped before it finished.`
+          : `The hub's automatic update didn't finish.`
+    : run.state === 'succeeded'
       ? `The hub updated to ${build}.`
       : run.state === 'rolled-back'
         ? `The hub update didn't work, so it went back to ${build} and is running again.`
@@ -312,6 +405,7 @@ export async function recordFinishedUpdate(
         outcome: run.state,
         build,
         fromBuild: run.fromBuild,
+        ...(automatic ? { automatic: true } : {}),
         ...(run.error !== undefined ? { detail: run.error.slice(0, 300) } : {}),
       },
     });

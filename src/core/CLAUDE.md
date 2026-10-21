@@ -269,6 +269,36 @@ there, because those reach the routes as well. `docs/api.md` and
   every restart — which is bounded by `MemoryHigh` throttling long before
   anything is killed rather than by luck; `docs/zigbee.md` records the two
   alternatives that were considered and left out.
+- **A hub updates itself only where its home said it may, and only when
+  nobody would notice** (`auto-update.ts`, `quiet-hours.ts`). It is **off on
+  every hub until somebody with `hub.update` switches it on** — a hub a
+  developer installed from a branch, or one somebody keeps on the build they
+  know, must not move under them, and an app older than the switch cannot say
+  no — and when on it asks for an update exactly as `POST /system/update`
+  does, so the runner, the health check and the rollback are untouched.
+  Seven rules. **What counts as use is what an update would interrupt**: an
+  activity row with a member on it, and a rule that ran and sent a command —
+  not a sensor report that caused nothing. **It is its own record**, because
+  the activity log holds three days of a busy home and never sees a rule that
+  fires by itself; counted in memory, written at most hourly, fourteen days in
+  UTC buckets read in the home's timezone, and **only while the switch is on**
+  — turning it on starts from nothing and turning it off forgets, because a
+  fortnight switched off was not a quiet fortnight. **"Somebody is about" is
+  narrower than "used"**: a rule the *clock* starts counts toward the rhythm but
+  never holds the hub off, or a ten-minute interval rule would hold it off for
+  ever. **Everything that can say "not now" is asked before GitHub is** — half
+  an hour of quiet, nobody pairing, no rule mid-run or due in twenty minutes,
+  no update running. **Merging is releasing, so a build is a day on `main`
+  first** (the commit's own date, via the commit *list*, which carries no
+  files); a hub a week behind a `main` that never sits still stops waiting, and
+  still gives CI two hours. **Never a build that rolled back here, never one
+  more than three times, one request a night**, attempts counted *when the
+  request is made* so a runner that never comes back still runs out. And **it
+  says so before it does it** — bookkeeping and the activity row (no member,
+  `outcome: auto-started`) before the request, which restarts this process;
+  postponements go in `describe().last`, never the feed. A branch build or one
+  from source never updates itself, whatever the switch says (`blocked`).
+  `docs/api.md` is canonical.
 - **A name is the house's, a favorite is one person's, and that split decides
   where each is stored.** Device names, rooms and zones sit on shared rows and
   everybody sees the same ones; a favorite is `device_favorites` keyed by member

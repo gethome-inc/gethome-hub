@@ -29,7 +29,9 @@ The only connections the hub itself ever makes outward are:
   in [`ai-adaptation.md`](ai-adaptation.md), [`assistant.md`](assistant.md) and
   [`portraits.md`](portraits.md). With no key, nothing goes to any AI provider
   and devices still appear, flagged *needs review*.
-- **To GitHub**, when it checks whether a newer build exists.
+- **To GitHub**, when it checks whether a newer build exists: when an app asks,
+  and — only where somebody has switched on automatic updates — a few times a
+  night, at the hour the hub has chosen to update in.
 - **To two documentation sites** — `zigbee2mqtt.io` and
   `raw.githubusercontent.com` — while the mapping agent is working out what a
   Zigbee device is, and only on a hub set up for OpenAI: on Anthropic the

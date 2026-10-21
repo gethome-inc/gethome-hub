@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   canApplyUpdate,
   checkForUpdate,
+  fetchHead,
   forgetUpdateCheck,
   parseBuild,
   readUpdateLog,
@@ -113,6 +114,12 @@ describe('the runner\'s status file', () => {
 });
 
 describe('asking for an update', () => {
+  it('takes an id the caller had to write down first', () => {
+    const data = tmp();
+    expect(requestUpdate(data, 'e5c1a3f0-automatic')).toBe('e5c1a3f0-automatic');
+    expect(readFileSync(path.join(data, 'update', 'request'), 'utf8').trim()).toBe('e5c1a3f0-automatic');
+  });
+
   it('writes an id the runner will accept', () => {
     const data = tmp();
     const id = requestUpdate(data);
@@ -183,6 +190,55 @@ describe('is there anything newer', () => {
   });
 });
 
+describe('how long the newest build has been out', () => {
+  /**
+   * What an automatic update asks, and the bare sha cannot answer: merging is
+   * releasing, so a hub installs a build by itself only once it has been on
+   * `main` for a day. One entry of the commit list carries the date and none
+   * of the files.
+   */
+  function githubLists(status: number, body: unknown) {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify(body), { status }));
+    vi.stubGlobal('fetch', fetcher);
+    return fetcher;
+  }
+
+  it('reads the head and when it landed', async () => {
+    githubLists(200, [
+      { sha: 'a86c1dcabcdef1234567890abcdef1234567890a', commit: { committer: { date: '2026-10-20T10:00:00Z' } } },
+    ]);
+    expect(await fetchHead()).toEqual({ sha: 'a86c1dc', committedAt: Date.parse('2026-10-20T10:00:00Z') });
+  });
+
+  it('asks for the list, which carries no files', async () => {
+    const fetcher = githubLists(200, []);
+    await fetchHead();
+    expect(String((fetcher.mock.calls[0] as unknown[] | undefined)?.[0])).toContain('commits?sha=main&per_page=1');
+  });
+
+  it('leaves its answer for an app to read without asking again', async () => {
+    const fetcher = githubLists(200, [
+      { sha: 'a86c1dcabcdef1234567890abcdef1234567890a', commit: { committer: { date: '2026-10-20T10:00:00Z' } } },
+    ]);
+    await fetchHead();
+    expect(await checkForUpdate()).toMatchObject({ sha: 'a86c1dc' });
+    expect(fetcher, 'the night\'s answer is the morning\'s').toHaveBeenCalledTimes(1);
+  });
+
+  it('says rate-limited, offline, or nothing it can use — never a date it made up', async () => {
+    githubLists(429, { message: 'slow down' });
+    expect(await fetchHead()).toEqual({ error: 'rate_limited' });
+    githubLists(502, { message: 'bad gateway' });
+    expect(await fetchHead()).toEqual({ error: 'offline' });
+    githubLists(200, [{ sha: 'not a commit', commit: { committer: { date: '2026-10-20T10:00:00Z' } } }]);
+    expect(await fetchHead()).toEqual({ error: 'offline' });
+    githubLists(200, [{ sha: 'a86c1dcabcdef1234567890abcdef1234567890a', commit: { committer: null } }]);
+    expect(await fetchHead()).toEqual({ error: 'offline' });
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('ENOTFOUND'); }));
+    expect(await fetchHead()).toEqual({ error: 'offline' });
+  });
+});
+
 describe('the installer log', () => {
   it('is empty, not an error, before anything has run', () => {
     expect(readUpdateLog(tmp(), 10)).toEqual({ lines: [], total: 0, truncated: false });
@@ -243,6 +299,37 @@ describe('writing down what happened', () => {
     const { rows, activity, log } = recorder();
     await recordFinishedUpdate(data, activity, log);
     expect(rows[0]?.message).toContain('running again');
+  });
+
+  it('says the hub updated itself when it was the one that asked', async () => {
+    // Nobody pressed anything, so a sentence that reads like somebody did is
+    // the wrong one to find a week later.
+    const data = tmp();
+    writeStatus(data, { id: 'run-auto', state: 'succeeded', liveBuild: '0.1.0-a86c1dc-main' });
+    const { rows, activity, log } = recorder();
+    await recordFinishedUpdate(data, activity, log, 'run-auto');
+    expect(rows[0]?.message).toBe('The hub updated itself to 0.1.0-a86c1dc-main.');
+    // The same outcome word an app built before automatic updates already draws.
+    expect(rows[0]?.data).toMatchObject({ outcome: 'succeeded', automatic: true });
+  });
+
+  it('says a rollback of its own will not be tried again by itself', async () => {
+    const data = tmp();
+    writeStatus(data, { id: 'run-auto', state: 'rolled-back', liveBuild: '0.1.0-1590564-main' });
+    const { rows, activity, log } = recorder();
+    await recordFinishedUpdate(data, activity, log, 'run-auto');
+    expect(rows[0]?.message).toContain('running again');
+    expect(rows[0]?.message).toContain("won't try that version by itself again");
+    expect(rows[0]?.data).toMatchObject({ outcome: 'rolled-back', automatic: true });
+  });
+
+  it('leaves somebody else\'s run worded as it always was', async () => {
+    const data = tmp();
+    writeStatus(data, { id: 'run-1', state: 'succeeded', liveBuild: '0.1.0-a86c1dc-main' });
+    const { rows, activity, log } = recorder();
+    await recordFinishedUpdate(data, activity, log, 'run-auto');
+    expect(rows[0]?.message).toBe('The hub updated to 0.1.0-a86c1dc-main.');
+    expect(rows[0]?.data).not.toHaveProperty('automatic');
   });
 
   it('says nothing at all about a run still going', async () => {

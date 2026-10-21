@@ -59,6 +59,7 @@ import { automationRoom } from '../automations/scope.js';
 import type { AutomationHomeView } from '../automations/targets.js';
 import type { MemoryPressure } from '../core/radio-pressure.js';
 import { recordRadioChoice, RADIO_MODES, writeRadioMode, type RadioBudget, type RadioMode } from '../core/radio.js';
+import { createAutoUpdater, type AutoUpdater } from '../core/auto-update.js';
 import {
   canApplyUpdate,
   checkForUpdate,
@@ -66,6 +67,7 @@ import {
   readUpdateLog,
   readUpdateRun,
   requestUpdate,
+  sameCommit,
 } from '../core/update.js';
 import {
   awaitWifiChange,
@@ -156,6 +158,17 @@ export interface ApiDeps {
   version: string;
   /** CI's build stamp, when this install came from a published bundle. */
   build?: string;
+  /**
+   * The hub updating itself, when its home has said it may — `core/auto-update.ts`.
+   *
+   * Optional, for the reason `allowedHosts` is: a required field is one every
+   * `buildServer` call in `test/` has to grow. Left out, the server makes its
+   * own from the deps it already has, loaded and switched off and never
+   * started — which is a hub where nobody has turned automatic updates on, so
+   * every suite still meets the real routes. `src/index.ts` always passes the
+   * one it started.
+   */
+  autoUpdate?: AutoUpdater;
   /** Present when the corresponding adapter is enabled and running. */
   matter?: MatterAdapter;
   zigbee?: ZigbeeAdapter;
@@ -245,17 +258,6 @@ export interface ApiDeps {
    * needs rather than a missing route it cannot tell from an old hub.
    */
   assistantChat: AssistantChat;
-}
-
-/**
- * Whether two commits are the same one.
- *
- * A build stamp carries seven characters and GitHub can answer with forty, so
- * these are compared by prefix in whichever direction is shorter. Same test
- * Studio makes.
- */
-function sameCommit(a: string, b: string): boolean {
-  return a.startsWith(b) || b.startsWith(a);
 }
 
 /**
@@ -437,6 +439,25 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     ) as unknown as FastifyBaseLogger,
   });
   await app.register(websocket);
+
+  // See `ApiDeps.autoUpdate`. Loaded, never started: it answers and it
+  // switches, and only the process that owns the clock lets it look at one.
+  const autoUpdate =
+    deps.autoUpdate ??
+    (await (async () => {
+      const made = createAutoUpdater({
+        dataDir: deps.dataDir,
+        build: deps.build,
+        settings: deps.settings,
+        timezone: () => deps.settings.timezone,
+        activity: deps.activity,
+        events: deps.events,
+        rules: deps.automations,
+        log: deps.log.child({ module: 'update' }),
+      });
+      await made.load();
+      return made;
+    })());
 
   app.decorateRequest('member', null);
   app.decorateRequest('apiKey', null);
@@ -3277,7 +3298,51 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       /** Whether this machine has the runner and the units at all. */
       canApply: canApplyUpdate(deps.dataDir),
       ...(run !== undefined ? { run } : {}),
+      // Always present on a hub that has automatic updates at all, so its
+      // presence is how an app knows to offer the switch — see `PUT` below.
+      automatic: autoUpdate.describe(),
     };
+  });
+
+  /**
+   * Let the hub update itself, or stop it.
+   *
+   * **`hub.update`, the same key as pressing the button**: whoever may start an
+   * update now may decide that the hub starts one at an hour the home is quiet,
+   * which is less disruption rather than more. A key that holds it may switch
+   * this too, as it may `POST` — nothing new is grantable.
+   *
+   * **The body is strict**, the `/api-keys` reasoning: a field a later build
+   * adds to *narrow* this — certain nights, say — would be stripped by an
+   * older hub, which would then update itself more freely than it was asked
+   * to. A 400 is the only safe answer from a build that cannot read it.
+   *
+   * Switching it on where this machine has no update runner is the refusal
+   * `POST` already gives there: an app offering a switch that cannot do
+   * anything is the same dead end as a button that cannot. Switching it off is
+   * always allowed.
+   */
+  app.put('/api/v1/system/update/automatic', needs('hub.update'), async (request, reply) => {
+    const body = z.object({ enabled: z.boolean() }).strict().parse(request.body);
+    if (body.enabled && !autoUpdate.enabled && !canApplyUpdate(deps.dataDir)) {
+      return reply.code(409).send({ error: 'update_unsupported' });
+    }
+    const changed = body.enabled !== autoUpdate.enabled;
+    const automatic = await autoUpdate.setEnabled(body.enabled);
+    if (changed) {
+      // Read a week later by somebody asking why the hub restarted at three in
+      // the morning — so it names who said it could.
+      const who = actor(request);
+      await deps.activity.record({
+        kind: 'hub.update',
+        message: body.enabled
+          ? `${who.name} turned on automatic hub updates.`
+          : `${who.name} turned off automatic hub updates.`,
+        memberId: who.memberId,
+        data: { ...who.data, outcome: body.enabled ? 'auto-on' : 'auto-off' },
+      });
+    }
+    return { automatic };
   });
 
   /**
