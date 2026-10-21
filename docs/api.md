@@ -1633,9 +1633,13 @@ power, or the OOM killer took the runner — and it exists so that one power cut
 does not leave a progress bar that never moves and a `409` on every attempt to
 try again. `running` is the rest.
 
-The outcome also reaches the activity log as a `hub.update` row, written at the
-next boot: the hub cannot record its own update while it is being restarted by
-it. The request is recorded straight away, with the member's name.
+The outcome also reaches the activity log as a `hub.update` row, written once the
+runner says how the run ended. That is never at the boot that follows it: the
+runner writes its last word only after the hub it restarted is answering again
+(or, for a rollback, after the old build is), so the hub keeps reading the
+status file — every ten seconds while a run is going, every five minutes
+otherwise, which also catches a run that ended without restarting the hub at
+all. The request is recorded straight away, with the member's name.
 
 **Why `hub.update` is a key, and why Member starts with it.** It was owner-only
 first, on the reasoning that an update is not quite "bringing something new in" —
@@ -1709,8 +1713,9 @@ brings it. Every field but `enabled` is optional:
   night, 03:00 to 05:00 home time.
 - **`last`** — what the hub decided the last time it looked inside its window:
   `started`, `up_to_date`, `postponed` (with a `reason`), `waiting` (the newest
-  build is not a day old yet; `until` says when it will be) or `skipped` (with a
-  `reason`). Absent while it is off. Reasons today are `in_use`, `pairing`,
+  build may not be installed by itself yet; `until` says when it may — a day
+  after it merged, or sooner where the hub has been behind for a week) or
+  `skipped` (with a `reason`). Absent while it is off. Reasons today are `in_use`, `pairing`,
   `rule_running`, `rule_due`, `update_running`, `offline`, `rate_limited`,
   `request_failed`, `rolled_back` and `too_many_attempts`. **Treat both
   vocabularies as open** — a word an app has not met gets a general sentence.
@@ -1734,25 +1739,31 @@ itself never reaches it.
 minutes: nobody has asked for anything, and no device has set a rule off, for
 half an hour (a rule the *clock* starts does not count — one that runs every
 ten minutes all night must not hold the hub off for ever); nobody is pairing a
-device; no rule is mid-run (a `wait` does not survive a restart); none is due in
-the next twenty minutes; and no update is already running. Only then is GitHub
-asked; one it could not reach is asked again half an hour later. Then:
+device; no rule is mid-run or waiting out a `for` (neither survives a restart);
+none is due in the next twenty minutes; and no update is already running. Only
+then is GitHub asked, and **once a window**: its answer holds until the window
+closes — or, for a build that is not old enough yet, until it is, if that comes
+first. A question it could not get answered is asked again half an hour later.
+Then:
 
 - **A build is installed by itself only once it has been on `main` for a day**,
   read from the commit's own date. Merging is releasing, and without the wait
   every hub that updates itself would carry a merge into its home the same
   night. A `main` that never sits still for a day stops being waited for once
-  the hub has been behind for a week, and even then a build gets two hours —
-  long enough for CI to publish its bundle.
+  the build the hub runs has been behind for a week — counted from nothing
+  again whenever the hub updates — and even then a build gets two hours, long
+  enough for CI to publish its bundle.
 - **Never a build that put itself back here.** A rolled-back automatic update is
-  remembered and that build is not tried by itself again; nor is any one build
-  tried more than three times. A nightly update that rolls back is a home that
+  remembered as soon as the runner says so, and that build is not tried by
+  itself again; nor is any one build tried more than three times. A nightly update that rolls back is a home that
   restarts every night for nothing.
 - **One request a night.**
 
-**It says so before it does it, and nowhere else.** The activity row and the
-bookkeeping are written before the request, because the request restarts the
-process. A postponement is *not* written to the activity log — that would be a
+**It keeps its books before it asks, and says so the moment it has.** The
+bookkeeping is written before the request, because the request restarts the
+process, and the activity row straight after it — so a request that could not
+be written is never announced. A postponement is *not* written to the activity
+log — that would be a
 line in the feed every night — and `last` answers "why hasn't my hub updated"
 for anybody who looks. Three `hub.update` rows are new, and each carries a whole
 sentence for an app that has never heard of this:
@@ -1762,8 +1773,8 @@ sentence for an app that has never heard of this:
 - `outcome: "auto-started"` — the hub asking for an update by itself. **No
   member**, like `hub.radio-stood-down`: nobody pressed anything. `data` carries
   `automatic: true`, `fromBuild` and `toSha`.
-- The outcome written at the next boot keeps its five words, and adds
-  `automatic: true` with a sentence that says the hub did it itself.
+- The outcome, written once the runner says how it went, keeps its five words,
+  and adds `automatic: true` with a sentence that says the hub did it itself.
 
 **Who may switch it is `hub.update`** — whoever may start an update may decide
 that the hub starts one at an hour the home is quiet, which is less disruption,
@@ -1773,10 +1784,12 @@ the [API key](#api-keys) reasoning: a field a later build adds to *narrow* this
 update itself more freely than it was asked to.
 
 **What leaves the hub changes, a little.** With the switch on, the hub asks
-GitHub for `main`'s newest commit at most a few times a night — the same address
-it already asks when an app opens its Software card, through the commit list
-rather than the commit, since one entry of the list carries the date and none of
-the files. With it off, a hub nobody looks at still never calls out.
+GitHub for `main`'s newest commit once a night — again that night only if GitHub
+did not answer, or a build it waits for comes of age before the window closes.
+It is the same address it already asks when an app opens its Software card,
+through the commit list rather than the commit, since one entry of the list
+carries the date and none of the files. With it off, a hub nobody looks at still
+never calls out.
 
 ### Wi-Fi networks (`/settings/wifi`)
 
@@ -2333,7 +2346,7 @@ line.
 The last three, plus `hub.radio`, all carry `data.memberName`: they are the
 things any member may do to the whole home, so the log is where it says which
 phone did. `hub.update` is the exception twice over: the outcome of an update is
-written at the hub's next boot, when there is nobody left to name, and an update
+written once the runner says how it ended, when there is nobody left to name, and an update
 the hub [started by itself](#automatic-updates) names nobody because nobody
 did. `hub.radio-stood-down` and `hub.radio-restored` are the two entries here with
 **no member at all** — the hub handed a radio back by itself and later gave it

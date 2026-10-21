@@ -120,7 +120,16 @@ export interface QuietHoursDeps {
 
 export class QuietHours {
   private readonly now: () => number;
-  /** When learning began, or undefined while automatic updates are off. */
+  /**
+   * When learning began, or undefined while automatic updates are off.
+   *
+   * Learning can begin before the clock is set — a boot that repairs the
+   * switch's record does exactly that — and a beginning in 1970 read against
+   * the real date later would be decades "learned" with nothing counted. So a
+   * `since` before `MIN_PLAUSIBLE_CLOCK` means "begun, not yet dated": it is
+   * stamped the first time the clock reads true, never written down before,
+   * and never taken for a learned window.
+   */
   private since: number | undefined;
   /** UTC hour index → how many times the home was used in it. */
   private readonly counts = new Map<number, number>();
@@ -147,7 +156,14 @@ export class QuietHours {
       if (stored.success) {
         this.since = stored.data.since;
         this.counts.clear();
-        for (const [hour, uses] of stored.data.hours) this.counts.set(hour, uses);
+        if (stored.data.since >= MIN_PLAUSIBLE_CLOCK) {
+          for (const [hour, uses] of stored.data.hours) this.counts.set(hour, uses);
+        } else {
+          // Dated before the clock was set, by a build that wrote that down:
+          // nothing in it can be trusted, so it is begun again — and dated,
+          // and written, once the clock reads true.
+          this.dirty = true;
+        }
       }
     } catch (error) {
       this.deps.log.warn({ err: error }, 'Could not read when this home is used');
@@ -188,12 +204,24 @@ export class QuietHours {
     return this.since !== undefined;
   }
 
-  /** Start learning from nothing. Called when automatic updates are switched on. */
+  /**
+   * Start learning from nothing. Called when automatic updates are switched
+   * on, and at a boot that finds them on with nothing learned. Against a clock
+   * that has not been set yet it is begun and dated later — see `since`.
+   */
   async begin(): Promise<void> {
     this.since = this.now();
     this.counts.clear();
     this.dirty = true;
     await this.flush();
+  }
+
+  /** Date a beginning made before the clock was set, now that it is. */
+  private stamp(now: number): void {
+    if (this.since === undefined || this.since >= MIN_PLAUSIBLE_CLOCK || now < MIN_PLAUSIBLE_CLOCK) return;
+    this.since = now;
+    this.counts.clear();
+    this.dirty = true;
   }
 
   /** Stop learning and forget what was learned. Called when they are switched off. */
@@ -238,7 +266,8 @@ export class QuietHours {
 
   private workOut(timezone: string, scheduledHours: readonly number[], now: number): QuietWindow {
     const fallback: QuietWindow = { startHour: DEFAULT_WINDOW_START, hours: WINDOW_HOURS, learned: false };
-    if (this.since === undefined || now - this.since < MIN_LEARNING_DAYS * DAY_MS) return fallback;
+    if (this.since === undefined || this.since < MIN_PLAUSIBLE_CLOCK) return fallback;
+    if (now - this.since < MIN_LEARNING_DAYS * DAY_MS) return fallback;
 
     const observedDays = Math.min(RHYTHM_DAYS, (now - this.since) / DAY_MS);
     const oldest = Math.floor((now - RHYTHM_DAYS * DAY_MS) / HOUR_MS);
@@ -264,9 +293,14 @@ export class QuietHours {
 
   /** Write what was counted, if anything was. */
   async flush(): Promise<void> {
-    if (!this.dirty || this.since === undefined) return;
+    if (this.since === undefined) return;
+    const now = this.now();
+    this.stamp(now);
+    // Never a record dated before the clock was set: read back by a build
+    // that trusts its date, it is a fortnight learned from nothing.
+    if (!this.dirty || this.since < MIN_PLAUSIBLE_CLOCK) return;
     this.dirty = false;
-    const oldest = Math.floor((this.now() - RHYTHM_DAYS * DAY_MS) / HOUR_MS);
+    const oldest = Math.floor((now - RHYTHM_DAYS * DAY_MS) / HOUR_MS);
     for (const hour of [...this.counts.keys()]) {
       if (hour < oldest) this.counts.delete(hour);
     }
@@ -306,6 +340,7 @@ export class QuietHours {
     if (now < MIN_PLAUSIBLE_CLOCK) return;
     if (somebody) this.lastUse = now;
     if (this.since === undefined) return;
+    this.stamp(now);
     const hour = Math.floor(now / HOUR_MS);
     this.counts.set(hour, (this.counts.get(hour) ?? 0) + 1);
     this.dirty = true;

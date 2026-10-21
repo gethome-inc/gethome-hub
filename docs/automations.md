@@ -200,6 +200,38 @@ never reported always sends: silence is not evidence.
   database afterwards — the `HUB_NAME` split. An unusable zone is refused at
   the route rather than taking every schedule down on every tick.
 
+### What a restart costs a rule, and why the hub's own updates ask first
+
+A restart — an update, a radio switched, the power — costs a rule exactly
+what is in memory at that moment, and nothing that is written down:
+
+- **A run mid-way** loses the rest of itself, most often a `wait`, which is why a
+  `wait` is capped at fifteen minutes.
+- **A `for` still waiting out its time** is lost too. After the restart the
+  trigger adopts the reading as it finds it and says nothing — that is what keeps
+  a reboot from firing every rule in the house — so "the hall has been empty for
+  twenty minutes", ten minutes in, never fires, and the light it was going to
+  switch off stays on until somebody walks past again.
+- **An `interval`** arms again from the moment the hub is back, so its next beat
+  comes one whole period after the restart rather than on its old rhythm.
+- **A `schedule`** whose minute passed while the hub was down does not fire late.
+
+So a hub that [updates itself](api.md#automatic-updates) asks the engine before
+it goes. It waits while any run is mid-way or any `for` is waiting out its time
+(`rule_running`), and while an enabled `schedule` falls in the next twenty
+minutes (`rule_due`) — worked out minute by minute with the helpers the tick
+itself uses, so "will this fire" cannot disagree with "did this fire", across
+midnight and a list of days alike. The two hours it updates in are also chosen
+away from the hours scheduled rules fire in, and it starts looking only once the
+rules have loaded, since before then the engine answers that nothing is
+scheduled and nothing is running.
+
+An `interval` is deliberately not asked about: one that runs every ten minutes
+would hold the hub off for ever, and a restart only moves its rhythm. Nor does a
+rule the clock started count as somebody being about — it counts towards which
+hours are busy, while a rule a *device* set off, which sent a command, keeps the
+hub waiting for half an hour like a person would.
+
 ---
 
 ## What is written down

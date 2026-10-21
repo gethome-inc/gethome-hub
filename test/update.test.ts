@@ -12,6 +12,7 @@ import {
   readUpdateRun,
   recordFinishedUpdate,
   requestUpdate,
+  watchUpdateOutcomes,
 } from '../src/core/update.js';
 
 /**
@@ -338,5 +339,33 @@ describe('writing down what happened', () => {
     const { rows, activity, log } = recorder();
     await recordFinishedUpdate(data, activity, log);
     expect(rows).toHaveLength(0);
+  });
+
+  it('keeps looking while a run is going, and writes it down once it has ended', async () => {
+    // The boot after an update always finds it still going: the runner says
+    // how it went only once the hub it restarted is answering again.
+    const data = tmp();
+    writeStatus(data, { state: 'running', heartbeat: new Date().toISOString() });
+    const { rows, activity, log } = recorder();
+    const ended: string[] = [];
+    const watch = watchUpdateOutcomes({
+      dataDir: data,
+      activity,
+      log,
+      ended: async (run) => void ended.push(run.state),
+      settlingMs: 5,
+      idleMs: 60_000,
+    });
+    watch.start();
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(rows).toHaveLength(0);
+      writeStatus(data, { state: 'succeeded', liveBuild: '0.1.0-a86c1dc-main' });
+      await vi.waitFor(() => expect(rows).toHaveLength(1));
+      expect(rows[0]?.message).toBe('The hub updated to 0.1.0-a86c1dc-main.');
+      expect(ended, 'told before the row, and once per look').toEqual(['succeeded']);
+    } finally {
+      watch.stop();
+    }
   });
 });

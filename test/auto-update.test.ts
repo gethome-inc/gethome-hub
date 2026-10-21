@@ -15,7 +15,7 @@ import {
 import { HubEventBus, type AutomationRunEvent } from '../src/core/bus.js';
 import { DEFAULT_WINDOW_START, QuietHours, quietestStart } from '../src/core/quiet-hours.js';
 import { SettingsService } from '../src/core/settings.js';
-import type { HeadCommit } from '../src/core/update.js';
+import { watchUpdateOutcomes, type HeadCommit, type UpdateOutcomeWatch } from '../src/core/update.js';
 import { members } from '../src/db/schema.js';
 import { openTestDb, resetDb, type TestDb } from './helpers/db.js';
 
@@ -129,12 +129,25 @@ function quietHours(): QuietHours {
 }
 
 async function updater(
-  options: { build?: string | undefined; recordRow?: (row: ActivityInput) => void } = {},
+  options: {
+    build?: string | undefined;
+    recordRow?: (row: ActivityInput) => void;
+    /** Told about every setting the updater writes, before it is written. */
+    onSet?: (key: string, value: unknown) => void;
+    fetchHead?: () => Promise<HeadCommit>;
+  } = {},
 ): Promise<AutoUpdater> {
   const made = createAutoUpdater({
     dataDir,
     build: 'build' in options ? options.build : BUILD,
-    settings,
+    settings: {
+      get: <T>(key: string) => settings.get<T>(key),
+      set: async (key, value) => {
+        options.onSet?.(key, value);
+        await settings.set(key, value);
+      },
+      unset: (key) => settings.unset(key),
+    },
     timezone: () => timezone,
     activity: {
       lastAskedAt: () => activity.lastAskedAt(),
@@ -148,10 +161,12 @@ async function updater(
     busy: () => busy,
     log: silent,
     now: () => now,
-    fetchHead: async () => {
-      fetches += 1;
-      return head;
-    },
+    fetchHead:
+      options.fetchHead ??
+      (async () => {
+        fetches += 1;
+        return head;
+      }),
   });
   await made.load();
   made.start();
@@ -159,29 +174,57 @@ async function updater(
   return made;
 }
 
+/** How a hub hears the runner's last word: the watch `src/index.ts` starts at boot. */
+function outcomes(hub: AutoUpdater): UpdateOutcomeWatch {
+  return watchUpdateOutcomes({
+    dataDir,
+    activity,
+    log: silent,
+    ended: (run) => hub.runEnded(run),
+    automaticRunId: () => hub.automaticRunId(),
+    now: () => now,
+  });
+}
+
 const requestFile = (): string => path.join(dataDir, 'update', 'request');
+const statusFile = (): string => path.join(dataDir, 'update', 'status.json');
 const requested = (): string | undefined =>
   existsSync(requestFile()) ? readFileSync(requestFile(), 'utf8').trim() : undefined;
 
-/** What the root runner does with a request: consume it, and write how it went. */
-function runnerFinishes(state: 'succeeded' | 'rolled-back' | 'failed', liveBuild = BUILD): void {
-  const id = requested();
-  rmSync(requestFile(), { force: true });
+function writeStatus(id: string | undefined, state: string, extra: Record<string, unknown> = {}): void {
   writeFileSync(
-    path.join(dataDir, 'update', 'status.json'),
+    statusFile(),
     JSON.stringify({
       id,
       state,
-      step: 'done',
+      step: state === 'running' ? 'download' : 'done',
       startedAt: new Date(now).toISOString(),
       heartbeat: new Date(now).toISOString(),
       fromBuild: BUILD,
-      hubAnswering: true,
+      hubAnswering: state !== 'running',
       warnings: [],
-      liveBuild,
-      finishedAt: new Date(now).toISOString(),
+      ...extra,
     }),
   );
+}
+
+/** What the root runner does with a request first: consume it, and say it is running. */
+function runnerStarts(): void {
+  const id = requested();
+  rmSync(requestFile(), { force: true });
+  writeStatus(id, 'running');
+}
+
+/**
+ * …and last — which, for every run that restarts the hub, is *after* the hub
+ * is back: the installer waits for the new build's health check (or flips back
+ * and restarts the old one) before the runner asks what is live and says how
+ * it went.
+ */
+function runnerFinishes(state: 'succeeded' | 'rolled-back' | 'failed', liveBuild = BUILD): void {
+  if (requested() !== undefined) runnerStarts();
+  const id = (JSON.parse(readFileSync(statusFile(), 'utf8')) as { id: string }).id;
+  writeStatus(id, state, { liveBuild, finishedAt: new Date(now).toISOString() });
 }
 
 /** Ten past three in the morning, `days` after today — inside the default window. */
@@ -286,6 +329,37 @@ describe('when the home is used', () => {
     await quiet.stop();
     expect((await settings.get<{ hours: unknown[] }>('update_rhythm'))?.hours).toEqual([]);
     expect(quiet.lastUseAt()).toBeUndefined();
+  });
+
+  it('dates a beginning made before the clock was set by the first true reading, and writes nothing before', async () => {
+    // A boot that finds automatic updates on with nothing learned begins
+    // again — and on a board with no RTC that can be 1970, which read back
+    // against the real date is decades "learned" from nothing.
+    now = Date.UTC(1970, 0, 1, 0, 0, 10);
+    const quiet = quietHours();
+    await quiet.load();
+    quiet.start();
+    await quiet.begin();
+    expect(quiet.recording).toBe(true);
+    expect(await settings.get('update_rhythm'), 'nothing dated 1970 is written down').toBeNull();
+
+    now = NOON;
+    expect(quiet.window('UTC').learned, 'the clock is set, and nothing has been learned yet').toBe(false);
+    asked();
+    await quiet.flush();
+    expect(await settings.get('update_rhythm')).toEqual({ v: 1, since: NOON, hours: [[Math.floor(NOON / HOUR), 1]] });
+    await quiet.stop();
+  });
+
+  it('begins again a record that was dated against a clock that had not been set', async () => {
+    // What the first build of this wrote in that case.
+    await settings.set('update_rhythm', { v: 1, since: 10_000, hours: [[Math.floor(NOON / HOUR), 40]] });
+    const quiet = quietHours();
+    await quiet.load();
+    expect(quiet.recording).toBe(true);
+    expect(quiet.window('UTC')).toEqual({ startHour: DEFAULT_WINDOW_START, hours: 2, learned: false });
+    await quiet.flush();
+    expect(await settings.get('update_rhythm')).toEqual({ v: 1, since: NOON, hours: [] });
   });
 
   it('remembers, across a restart, the last time somebody asked for anything', async () => {
@@ -445,21 +519,40 @@ describe('a night with an update waiting', () => {
     expect(row?.data).toMatchObject({ outcome: 'auto-started', automatic: true, fromBuild: BUILD, toSha: 'bbbbbbb' });
   });
 
-  it('writes everything down before it asks, because asking restarts it', async () => {
+  it('writes its books before it asks, because asking restarts it — and the feed only once it has', async () => {
+    let requestExistedWhenBooked: boolean | undefined;
     let requestExistedWhenWritten: boolean | undefined;
     const hub = await switchedOn({
+      onSet: (key, value) => {
+        if (key === 'update_automatic_state' && (value as { request?: unknown }).request !== undefined) {
+          requestExistedWhenBooked ??= existsSync(requestFile());
+        }
+      },
       recordRow: (row) => {
         if (row.data?.['outcome'] === 'auto-started') requestExistedWhenWritten = existsSync(requestFile());
       },
     });
     now = tenPastThree();
     await hub.tick();
-    expect(requestExistedWhenWritten).toBe(false);
+    expect(requestExistedWhenBooked, 'an attempt counted after the request is one a dead runner never counts').toBe(
+      false,
+    );
+    expect(requestExistedWhenWritten, 'a row before the request is a claim the request may not keep').toBe(true);
     // And the bookkeeping is on disk, not only in this process.
     expect(await settings.get('update_automatic_state')).toMatchObject({
       request: { id: requested(), sha: 'bbbbbbb' },
       attempts: { sha: 'bbbbbbb', count: 1 },
     });
+  });
+
+  it('says nothing in the feed about an update it could not ask for', async () => {
+    const hub = await switchedOn();
+    // Something already sits where the request goes, so it cannot be written.
+    mkdirSync(requestFile());
+    now = tenPastThree();
+    await hub.tick();
+    expect(await rows()).toHaveLength(0);
+    expect(hub.describe().last).toMatchObject({ outcome: 'postponed', reason: 'request_failed' });
   });
 
   it('asks once a night, however many times it looks', async () => {
@@ -594,15 +687,133 @@ describe('a night with an update waiting', () => {
     expect(requested()).toBeDefined();
   });
 
+  it('counts the week behind again from nothing once it has updated', async () => {
+    // Without this, a hub that updated on its first night was "a week behind"
+    // seven days later, however often it had updated since — and from then on
+    // installed every build two hours after it merged.
+    const hub = await switchedOn();
+    now = tenPastThree(1);
+    await hub.tick();
+    expect(requested()).toBeDefined();
+    runnerFinishes('succeeded', '0.1.0-bbbbbbb-main');
+
+    // Back on the new build, behind a main that gets a merge every afternoon.
+    await hub.stop();
+    const updated = await updater({ build: '0.1.0-bbbbbbb-main' });
+    for (let night = 2; night <= 8; night++) {
+      now = tenPastThree(night);
+      head = { sha: `c${night}c${night}c${night}c`, committedAt: now - 12 * HOUR };
+      await updated.tick();
+      expect(requested(), `night ${night}: this build has been behind ${night - 2} days`).toBeUndefined();
+    }
+    now = tenPastThree(9);
+    head = { sha: 'e9e9e9e', committedAt: now - 12 * HOUR };
+    await updated.tick();
+    expect(requested(), 'a week after this build fell behind').toBeDefined();
+  });
+
+  it('asks GitHub once a window when there is nothing to do', async () => {
+    head = { sha: 'aaaaaaa', committedAt: NOON - 2 * DAY };
+    const hub = await switchedOn();
+    for (let minute = 10; minute < 120; minute += 5) {
+      now = Date.UTC(2026, 9, 22, 3, minute);
+      await hub.tick();
+    }
+    expect(fetches, 'two hours of looks, one question').toBe(1);
+    expect(hub.describe().last).toMatchObject({ outcome: 'up_to_date' });
+    now = tenPastThree(2);
+    await hub.tick();
+    expect(fetches, 'and one the next night').toBe(2);
+  });
+
+  it('asks again inside the window when the build it waits for comes of age there', async () => {
+    const hub = await switchedOn();
+    now = tenPastThree();
+    head = { sha: 'bbbbbbb', committedAt: now + 30 * MINUTE - SOAK_MS };
+    await hub.tick();
+    expect(hub.describe().last).toMatchObject({
+      outcome: 'waiting',
+      until: new Date(now + 30 * MINUTE).toISOString(),
+    });
+    now += 25 * MINUTE;
+    await hub.tick();
+    expect(fetches).toBe(1);
+    now += 5 * MINUTE;
+    await hub.tick();
+    expect(fetches).toBe(2);
+    expect(requested()).toBeDefined();
+  });
+
+  it('names the moment the week behind runs out, when that comes before the day', async () => {
+    const hub = await switchedOn();
+    // First seen behind at four one night…
+    now = Date.UTC(2026, 9, 22, 4, 0);
+    head = { sha: 'c1c1c1c', committedAt: now - 30 * MINUTE };
+    await hub.tick();
+    // …so a week later the week runs out at four, while a build merged at two
+    // would otherwise be waited for until two the next day.
+    now = Date.UTC(2026, 9, 29, 3, 10);
+    head = { sha: 'c8c8c8c', committedAt: Date.UTC(2026, 9, 29, 2, 0) };
+    await hub.tick();
+    expect(hub.describe().last).toMatchObject({ outcome: 'waiting', until: '2026-10-29T04:00:00.000Z' });
+    now = Date.UTC(2026, 9, 29, 4, 0);
+    await hub.tick();
+    expect(requested()).toBeDefined();
+  });
+
+  it('lets go of an answer that arrives after the switch went off', async () => {
+    let answer!: (head: HeadCommit) => void;
+    const hub = await switchedOn({
+      fetchHead: () =>
+        new Promise<HeadCommit>((resolve) => {
+          answer = resolve;
+        }),
+    });
+    now = tenPastThree();
+    const looking = hub.tick();
+    // GitHub takes its time; somebody switches it off meanwhile.
+    await hub.setEnabled(false);
+    answer(head);
+    await looking;
+    expect(requested()).toBeUndefined();
+    expect(await rows()).toHaveLength(0);
+    expect(await settings.get('update_automatic_state')).not.toHaveProperty('request');
+  });
+
+  it('works its window out again when the clock is put back', async () => {
+    // A board that booted months ahead of the real time, and was put right.
+    now = Date.UTC(2027, 2, 1, 12, 0);
+    const hub = await switchedOn();
+    expect(hub.describe().window?.from).toBe('2027-03-02T03:00:00.000Z');
+    now = tenPastThree();
+    expect(hub.describe().window?.from).toBe('2026-10-22T03:00:00.000Z');
+    await hub.tick();
+    expect(requested()).toBeDefined();
+  });
+
   it('never tries a build again by itself that put itself back', async () => {
     const hub = await switchedOn();
     now = tenPastThree();
     await hub.tick();
-    runnerFinishes('rolled-back');
+    runnerStarts();
 
-    // The hub restarted in between, as it does after any update.
+    // The installer restarts the hub — the new build, which fails its health
+    // check, and then the old one — before the runner says how it went. So the
+    // boot that follows finds the run still going…
     await hub.stop();
+    now += 4 * MINUTE;
     const restarted = await updater();
+    const watch = outcomes(restarted);
+    expect(await watch.check(), 'the boot after an update never hears how it ended').toBe(true);
+
+    // …and the runner's last word lands with the hub already up.
+    now += MINUTE;
+    runnerFinishes('rolled-back');
+    expect(await watch.check()).toBe(false);
+    const [row] = await rows();
+    expect(row?.message).toContain("won't try that version by itself again");
+    expect(row?.data).toMatchObject({ outcome: 'rolled-back', automatic: true });
+
     now = tenPastThree(2);
     await restarted.tick();
     expect(requested()).toBeUndefined();
@@ -613,6 +824,24 @@ describe('a night with an update waiting', () => {
     now = tenPastThree(3);
     await restarted.tick();
     expect(requested()).toBeDefined();
+  });
+
+  it('writes down how a run ended that never restarted the hub, once', async () => {
+    // A download that failed, a lock somebody else held: this process stays
+    // up, and nothing else would ever say so.
+    const hub = await switchedOn();
+    const watch = outcomes(hub);
+    now = tenPastThree();
+    await hub.tick();
+    expect(await watch.check(), 'the runner has not picked it up yet').toBe(false);
+    runnerStarts();
+    expect(await watch.check()).toBe(true);
+    runnerFinishes('failed');
+    await watch.check();
+    await watch.check();
+    const ended = (await rows()).filter((row) => (row.data as { outcome?: string } | null)?.outcome === 'failed');
+    expect(ended).toHaveLength(1);
+    expect(ended[0]?.message).toBe("The hub's automatic update didn't finish.");
   });
 
   it(`tries one build at most ${MAX_ATTEMPTS} times`, async () => {

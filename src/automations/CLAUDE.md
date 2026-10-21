@@ -68,8 +68,11 @@ directory. `docs/automations.md` is canonical — update it in the same change.
   minutes to say so. `tick()` is public for the reason `HistoryService.flush()`
   is — a scheduler that reads `Date.now()` can only be tested by waiting.
   **The hub's automatic updates ask the engine two things before restarting
-  the hub**: whether a run is in flight (`hasRunInFlight` — a `wait` would be
-  lost) and whether a `schedule` falls in the next twenty minutes
+  the hub**: whether anything is in flight (`hasRunInFlight` — a run, whose
+  `wait` would be lost, or a `for` still waiting out its time, which a restart
+  drops and the re-primed trigger never makes up; so a rule or device that
+  goes takes its hold with it, `forgetEdge`) and whether a `schedule` falls in
+  the next twenty minutes
   (`scheduledWithin`, worked out minute by minute with the helpers `tick`
   itself uses, so "will this fire" cannot disagree with "did this fire").
   `MIN_PLAUSIBLE_CLOCK` lives in `evaluate.ts` so the two read one answer to

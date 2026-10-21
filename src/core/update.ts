@@ -225,6 +225,45 @@ const REFRESH_FLOOR_MS = 60 * 1000;
 let cachedCheck: { check: UpdateCheck; at: number } | undefined;
 
 /**
+ * One question to GitHub's API, asked the way this hub always asks it.
+ *
+ * Both callers below go through here so they cannot drift apart on the parts
+ * that are easy to get subtly wrong: who is calling, how long to wait, and —
+ * the one that matters — a refusal told apart from no answer at all. The body
+ * is read inside, so a connection that drops half way through is "offline"
+ * too, and `read` answering `undefined` means GitHub said something this hub
+ * cannot use, which is never a "no".
+ */
+async function askGitHub<T>(
+  url: string,
+  accept: string,
+  read: (response: Response) => Promise<T | undefined>,
+): Promise<{ answer: T } | { error: UpdateCheckError }> {
+  try {
+    const response = await fetch(url, {
+      // Node's fetch would otherwise send `User-Agent: node`, which GitHub
+      // accepts but which says nothing about who is calling; the API's own
+      // guidance is to send something identifying.
+      headers: { Accept: accept, 'User-Agent': 'gethome-hub' },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (response.status === 403 || response.status === 429) return { error: 'rate_limited' };
+    if (!response.ok) return { error: 'offline' };
+    const answer = await read(response);
+    return answer === undefined ? { error: 'offline' } : { answer };
+  } catch {
+    // No internet, DNS, a captive portal, a timeout. All one thing to a caller:
+    // the hub cannot say, which is not the same as "you are up to date".
+    return { error: 'offline' };
+  }
+}
+
+/** A commit as this hub carries one — seven characters — or nothing, if it is not one. */
+function shortSha(raw: string): string | undefined {
+  return /^[0-9a-f]{7,40}$/i.test(raw) ? raw.slice(0, 7) : undefined;
+}
+
+/**
  * Asked only from `GET /system/update`, never on a timer: a hub nobody looks at
  * never calls out at all — the same rule `MqttObserver` follows for the broker
  * tap. Unauthenticated GitHub allows sixty requests an hour per address, and a
@@ -237,30 +276,11 @@ export async function checkForUpdate(refresh = false, now = Date.now()): Promise
     if (age < (refresh ? REFRESH_FLOOR_MS : ttl)) return cachedCheck.check;
   }
 
-  let check: UpdateCheck;
-  try {
-    const response = await fetch(HEAD_URL, {
-      // Node's fetch would otherwise send `User-Agent: node`, which GitHub
-      // accepts but which says nothing about who is calling; the API's own
-      // guidance is to send something identifying.
-      headers: { Accept: 'application/vnd.github.sha', 'User-Agent': 'gethome-hub' },
-      signal: AbortSignal.timeout(8000),
-    });
-    if (response.status === 403 || response.status === 429) {
-      check = { error: 'rate_limited' };
-    } else if (!response.ok) {
-      check = { error: 'offline' };
-    } else {
-      const sha = (await response.text()).trim();
-      check = /^[0-9a-f]{7,40}$/i.test(sha)
-        ? { sha: sha.slice(0, 7), checkedAt: new Date(now).toISOString() }
-        : { error: 'offline' };
-    }
-  } catch {
-    // No internet, DNS, a captive portal, a timeout. All one thing to a caller:
-    // the hub cannot say, which is not the same as "you are up to date".
-    check = { error: 'offline' };
-  }
+  const asked = await askGitHub(HEAD_URL, 'application/vnd.github.sha', async (response) =>
+    shortSha((await response.text()).trim()),
+  );
+  const check: UpdateCheck =
+    'error' in asked ? { error: asked.error } : { sha: asked.answer, checkedAt: new Date(now).toISOString() };
   cachedCheck = { check, at: now };
   return check;
 }
@@ -297,8 +317,10 @@ export interface HeadCommit {
  * installed by itself only once it has been out for a day. `commits/main` would
  * answer that too, with the commit's whole file list attached — hundreds of
  * kilobytes after a large merge — while one entry of the list carries no files
- * and is a few kilobytes. Asked at most a few times a night, and only by a hub
- * whose owner switched automatic updates on.
+ * and is a few kilobytes. Asked only by a hub whose owner switched automatic
+ * updates on, once a night — and again that night only when GitHub did not
+ * answer, half an hour later, or when a build it is waiting for comes of age
+ * before the window closes.
  */
 const HEAD_LIST_URL = 'https://api.github.com/repos/gethome-inc/gethome-hub/commits?sha=main&per_page=1';
 
@@ -312,35 +334,18 @@ const headListSchema = z.array(
 );
 
 export async function fetchHead(now = Date.now()): Promise<HeadCommit> {
-  let head: HeadCommit;
-  try {
-    const response = await fetch(HEAD_LIST_URL, {
-      headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'gethome-hub' },
-      signal: AbortSignal.timeout(8000),
-    });
-    if (response.status === 403 || response.status === 429) {
-      head = { error: 'rate_limited' };
-    } else if (!response.ok) {
-      head = { error: 'offline' };
-    } else {
-      const parsed = headListSchema.safeParse(await response.json());
-      const first = parsed.success ? parsed.data[0] : undefined;
-      const committedAt = Date.parse(first?.commit.committer?.date ?? '');
-      head =
-        first !== undefined && /^[0-9a-f]{7,40}$/i.test(first.sha) && Number.isFinite(committedAt)
-          ? { sha: first.sha.slice(0, 7), committedAt }
-          : { error: 'offline' };
-    }
-  } catch {
-    // The same "cannot say" as `checkForUpdate`, for the same reasons.
-    head = { error: 'offline' };
-  }
+  const asked = await askGitHub(HEAD_LIST_URL, 'application/vnd.github+json', async (response) => {
+    const parsed = headListSchema.safeParse(await response.json());
+    const first = parsed.success ? parsed.data[0] : undefined;
+    const sha = first !== undefined ? shortSha(first.sha) : undefined;
+    const committedAt = Date.parse(first?.commit.committer?.date ?? '');
+    return sha !== undefined && Number.isFinite(committedAt) ? { sha, committedAt } : undefined;
+  });
+  if ('error' in asked) return { error: asked.error };
   // One answer for the whole hub: an app opening the Software card after a
   // night check sees what the night saw, without asking GitHub again.
-  if (head.sha !== undefined) {
-    cachedCheck = { check: { sha: head.sha, checkedAt: new Date(now).toISOString() }, at: now };
-  }
-  return head;
+  cachedCheck = { check: { sha: asked.answer.sha, checkedAt: new Date(now).toISOString() }, at: now };
+  return asked.answer;
 }
 
 // ── Saying afterwards what happened ────────────────────────────────────────
@@ -349,14 +354,15 @@ export async function fetchHead(now = Date.now()): Promise<HeadCommit> {
  * Write the outcome of a finished update to the activity log, once.
  *
  * The hub cannot record its own update while it happens — it is the thing being
- * restarted — so the runner's status file is read at the next boot and turned
- * into one row. `recorded` holds the id of the run already written, because
- * this runs on every start and a home does not want "the hub updated" again on
+ * restarted — so the runner's status file is turned into one row once it says
+ * the run has ended (`watchUpdateOutcomes`, below). `recorded` holds the id of
+ * the run already written, because that is asked again on every start and
+ * every few minutes after, and a home does not want "the hub updated" again on
  * every reboot for the rest of the year.
  */
 export async function recordFinishedUpdate(
   dataDir: string,
-  activity: ActivityService,
+  activity: Pick<ActivityService, 'record'>,
   log: Logger,
   /**
    * The run the hub asked for by itself, if it asked for one.
@@ -414,4 +420,112 @@ export async function recordFinishedUpdate(
     // A hub that cannot write its own history still has to boot.
     log.warn({ err: error }, 'Could not record the outcome of the last update');
   }
+}
+
+/** How soon a run still in progress is looked at again. */
+const SETTLING_LOOK_MS = 10 * 1000;
+
+/**
+ * How soon the status is looked at otherwise — for a run that ended without
+ * restarting this process at all: a download that failed, another update
+ * already holding the lock, a card with no room for the new build.
+ */
+const IDLE_LOOK_MS = 5 * 60 * 1000;
+
+export interface UpdateOutcomeDeps {
+  dataDir: string;
+  activity: Pick<ActivityService, 'record'>;
+  log: Logger;
+  /**
+   * Told about a run that has ended *before* its row is written, so whatever
+   * keeps books on runs — the hub's own updates, which never try a build again
+   * that rolled back on them — is settled first.
+   */
+  ended?: (run: UpdateRun) => Promise<void>;
+  /** The run the hub last asked for by itself, so its row is worded that way. */
+  automaticRunId?: () => string | undefined;
+  now?: () => number;
+  settlingMs?: number;
+  idleMs?: number;
+}
+
+export interface UpdateOutcomeWatch {
+  /** Look now, and keep looking. */
+  start(): void;
+  stop(): void;
+  /** One look. Public so a test can drive it. Answers whether a run is still going. */
+  check(): Promise<boolean>;
+}
+
+/**
+ * Hear how an update ended — which is never at the boot that follows it.
+ *
+ * The runner writes its last word *after* the hub has come back: the installer
+ * restarts the hub, waits for its health check (or, for a rollback, flips back
+ * and restarts the old build), and only then does the runner ask the hub what
+ * it is running and write `succeeded` or `rolled-back`. So the boot that
+ * follows an update always finds `running`, and reading the file once at boot
+ * — which is all this hub used to do — wrote nothing then, and nothing ever
+ * once the next update overwrote the file. With automatic updates that is the
+ * ordinary path: a rollback nobody wrote down was a build tried again the next
+ * night, and the next.
+ *
+ * So the file is looked at every ten seconds while a run is going and every
+ * five minutes otherwise — one small read, from the page cache, of a file this
+ * hub's own directory holds. A run is written down once (`recordFinishedUpdate`
+ * keeps the id), and `ended` hears every look at a finished run, so it has to
+ * be as idempotent as that is.
+ */
+export function watchUpdateOutcomes(deps: UpdateOutcomeDeps): UpdateOutcomeWatch {
+  const now = deps.now ?? (() => Date.now());
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let running = false;
+  let looking: Promise<boolean> | undefined;
+
+  async function look(): Promise<boolean> {
+    const run = readUpdateRun(deps.dataDir, now());
+    if (run === undefined) return false;
+    if (run.state === 'running') return true;
+    try {
+      await deps.ended?.(run);
+    } catch (error) {
+      deps.log.warn({ err: error }, 'Could not settle the bookkeeping for the last update');
+    }
+    await recordFinishedUpdate(deps.dataDir, deps.activity, deps.log, deps.automaticRunId?.());
+    return false;
+  }
+
+  // One look at a time: two at once could both find the same run unwritten.
+  function check(): Promise<boolean> {
+    looking ??= look().finally(() => {
+      looking = undefined;
+    });
+    return looking;
+  }
+
+  function next(stillGoing: boolean): void {
+    if (!running) return;
+    timer = setTimeout(
+      () => {
+        void check().then(next, () => next(false));
+      },
+      stillGoing ? (deps.settlingMs ?? SETTLING_LOOK_MS) : (deps.idleMs ?? IDLE_LOOK_MS),
+    );
+    // Never the reason the process stays up.
+    timer.unref?.();
+  }
+
+  return {
+    start() {
+      if (running) return;
+      running = true;
+      void check().then(next, () => next(false));
+    },
+    stop() {
+      running = false;
+      if (timer !== undefined) clearTimeout(timer);
+      timer = undefined;
+    },
+    check,
+  };
 }

@@ -10,7 +10,7 @@ import { HubEventBus } from './core/bus.js';
 import { ActivityService } from './core/activity.js';
 import { HistoryService } from './core/history.js';
 import { PortraitService } from './portraits/store.js';
-import { recordFinishedUpdate } from './core/update.js';
+import { watchUpdateOutcomes } from './core/update.js';
 import { createAutoUpdater } from './core/auto-update.js';
 import { HomeService } from './core/home.js';
 import { FavoritesService } from './core/favorites.js';
@@ -270,8 +270,9 @@ async function main(): Promise<void> {
 
   // The hub updating itself, when its home has said it may. *Loaded* here,
   // before the API listens, so `GET /system/update` never answers "off" for a
-  // hub that is on in the seconds after a boot — and *started* below, once
-  // there is a home and its rules to stay out of the way of.
+  // hub that is on in the seconds after a boot; counting from boot, below;
+  // and looking at the clock only once there is a home and its rules to stay
+  // out of the way of.
   const autoUpdate = createAutoUpdater({
     dataDir: config.DATA_DIR,
     build,
@@ -284,15 +285,24 @@ async function main(): Promise<void> {
     log: log.child({ module: 'update' }),
   });
   await autoUpdate.load();
+  autoUpdate.start();
 
   // An update restarts this process, so the hub cannot write down how its own
   // update went while it is happening. The runner leaves the outcome in a file
-  // and this is where it becomes one line of the home's history — once, keyed
-  // on the run id, so a reboot a month later doesn't re-announce it. After the
-  // updater is loaded, because a run the hub asked for by itself says so.
-  void recordFinishedUpdate(config.DATA_DIR, activity, log, autoUpdate.automaticRunId()).catch(
-    () => undefined,
-  );
+  // — and writes it only *after* the hub is back, so this boot finds the run
+  // still going and the watch keeps looking until it is not. Then it becomes
+  // one line of the home's history — once, keyed on the run id, so a reboot a
+  // month later doesn't re-announce it — and the hub's own updates hear a
+  // rollback before that line is written. After the updater is loaded,
+  // because a run the hub asked for by itself says so.
+  const updateOutcomes = watchUpdateOutcomes({
+    dataDir: config.DATA_DIR,
+    activity,
+    log: log.child({ module: 'update' }),
+    ended: (run) => autoUpdate.runEnded(run),
+    automaticRunId: () => autoUpdate.automaticRunId(),
+  });
+  updateOutcomes.start();
 
   const app = await buildServer({
     db,
@@ -413,7 +423,14 @@ async function main(): Promise<void> {
     .then(() => automations.start())
     .catch((error) => {
       log.error({ err: error }, 'Device registry failed to start.');
-    });
+    })
+    // The hub's own updates look at the clock once the rules are running,
+    // because the rules are what an update has to stay out of the way of —
+    // and look even where the home failed to load, since an update is how a
+    // hub gets past a build that cannot load it. With the switch off a look
+    // is one comparison, and the switch can be turned on at any time without
+    // a restart.
+    .finally(() => autoUpdate.startLooking());
 
   // A hub asked to run both radios on a board measured for one is watched, and
   // hands a radio back itself if the board really does run out. Started
@@ -468,12 +485,6 @@ async function main(): Promise<void> {
   });
   radioPressure.start();
 
-  // Counting when the home is used and, if it may, looking each five minutes
-  // for its quiet hour. Unconditional and `unref`ed like the watch above: with
-  // the switch off a look is one comparison, and the switch can be turned on
-  // at any time without a restart.
-  autoUpdate.start();
-
   const stopping = { value: false };
   const shutdown = async (signal: string) => {
     if (stopping.value) return;
@@ -481,6 +492,7 @@ async function main(): Promise<void> {
     log.info(`${signal} received, shutting down…`);
     permitJoin.stop();
     radioPressure?.stop();
+    updateOutcomes.stop();
     // Before the database closes: the hour being counted is written here.
     await autoUpdate.stop().catch(() => {});
     await automations.stop().catch(() => {});

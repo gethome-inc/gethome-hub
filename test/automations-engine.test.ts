@@ -910,6 +910,41 @@ describe('what the hub asks before updating itself', () => {
     await engine.settled();
     expect(engine.hasRunInFlight()).toBe(false);
   });
+
+  it('counts a "for" still waiting out its time, and lets go of it with its rule', async () => {
+    // "The hall has been empty for twenty minutes", ten minutes in. A restart
+    // would adopt the hall as it finds it and say nothing, so the light this
+    // rule was about to switch off would stay on all night.
+    registry.report(lampId, 1, { onOff: true });
+    registry.report(motionId, 1, { sensors: { occupied: true } });
+    const id = await install({
+      name: 'Hall empty',
+      triggers: [
+        {
+          kind: 'deviceState',
+          target: { deviceIds: [motionId] },
+          path: 'sensors.occupied',
+          op: 'eq',
+          value: false,
+          for: 20 * 60_000,
+        },
+      ],
+      actions: [
+        { kind: 'deviceCommand', target: { deviceIds: [lampId] }, command: { type: 'power', on: false } },
+      ],
+    });
+    expect(engine.hasRunInFlight()).toBe(false);
+
+    registry.report(motionId, 1, { sensors: { occupied: false } });
+    await settle(2);
+    expect(engine.hasRunInFlight()).toBe(true);
+
+    // A rule switched off takes its hold with it, rather than holding off the
+    // hub's updates for a light it will never switch.
+    await store.setEnabled(id, false);
+    await engine.reload();
+    expect(engine.hasRunInFlight()).toBe(false);
+  });
 });
 
 // ── Rules this build cannot read ─────────────────────────────────────────────
