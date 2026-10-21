@@ -30,7 +30,7 @@ not.
 | 409 | `{error:"<message>"}` on a command | the device cannot honour that command |
 | 409 | `automation_disabled`, `not_pressable`, `not_a_toggle` | pressing a rule that is off, has nothing to press, or is not a mode |
 | 409 | `already_commissioning`, `matter_disabled`, `zigbee_disabled` | pairing refusals |
-| 409 | `update_in_progress`, `update_unsupported` | hub update refusals |
+| 409 | `update_in_progress`, `update_unsupported` | hub update refusals; `update_unsupported` also refuses switching on automatic updates |
 | 422 | `{error:"invalid_automation", issues}` or `{…, problems, warnings}` | a rule the schema refuses, or one this home cannot use |
 | 403 | `{error:"host_not_allowed", host}` | the hub was reached by a public domain name; use its IP or `.local` name |
 
@@ -52,4 +52,5 @@ not.
 - **`needsReview: true`** means the hub could not map every one of the device's
   parameters, not that it is unusable.
 - **The hub restarting** (an update, a radio switch) is unreachable for a minute
-  or two, then back.
+  or two, then back. A hub with automatic updates on can do this by itself,
+  at an hour its home is usually quiet.

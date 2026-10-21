@@ -1852,6 +1852,28 @@ describe.skipIf(!handle)('roles and permissions', () => {
     expect(allowed.json()).toMatchObject({ error: 'update_unsupported' });
   });
 
+  it('lets only hub.update decide that the hub updates itself', async () => {
+    // The same key as the button: letting the hub start an update at an hour
+    // the home is quiet is less than starting one now, never more.
+    const refused = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/system/update/automatic',
+      headers: auth(guestToken),
+      payload: { enabled: false },
+    });
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json()).toMatchObject({ error: 'forbidden', permission: 'hub.update' });
+
+    const allowed = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/system/update/automatic',
+      headers: auth(memberToken),
+      payload: { enabled: false },
+    });
+    expect(allowed.statusCode).toBe(200);
+    expect(allowed.json()).toMatchObject({ automatic: { enabled: false } });
+  });
+
   // ── What the wire actually carries ────────────────────────────────────────
 
   /**

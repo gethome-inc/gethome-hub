@@ -14,6 +14,7 @@ import {
   dayOfWeekIn,
   evaluateConditions,
   evaluateEdge,
+  MIN_PLAUSIBLE_CLOCK,
   readPath,
   timeOfDayIn,
   type ConditionContext,
@@ -58,18 +59,6 @@ import {
 /** How often the scheduler looks at the clock. Three ticks inside any minute,
  *  so a `schedule` cannot be stepped over, and cheap enough to `unref`. */
 const TICK_MS = 20_000;
-
-/**
- * Before this, the clock is not to be trusted.
- *
- * A Raspberry Pi has no real-time clock: it boots at whatever the last shutdown
- * wrote, or at the epoch, and NTP corrects it seconds to minutes later. A
- * scheduler that ran during that window would fire every rule whose time
- * happened to match a fictional clock. Nothing is skipped by waiting — the
- * tick fires on the minute it *is* in, so the moment the clock is right the
- * right minute comes round.
- */
-const MIN_PLAUSIBLE_CLOCK = Date.UTC(2025, 0, 1);
 
 /** Queued runs held for one rule in `queued` mode, before new ones are dropped. */
 const MAX_QUEUED = 5;
@@ -445,6 +434,60 @@ export class AutomationEngine {
         }
       }
     }
+  }
+
+  // ── What an update has to stay out of the way of ───────────────────────────
+
+  /**
+   * Whether any rule is in the middle of a run — most likely sitting in a
+   * `wait`, which does not survive a restart. Asked by the hub's automatic
+   * updates, which would otherwise end such a run half done.
+   */
+  hasRunInFlight(): boolean {
+    return this.running.size > 0;
+  }
+
+  /**
+   * Whether an enabled rule's `schedule` falls in the next `horizonMs`.
+   *
+   * Asked minute by minute with the helpers `tick` itself uses, so "will this
+   * fire" and "did this fire" cannot disagree — across midnight, a list of
+   * days or a change of summer time. Twenty minutes is twenty formatter calls,
+   * asked a few times a night. A timezone `Intl` cannot use holds every
+   * schedule (see `tick`), so nothing is due in one.
+   */
+  scheduledWithin(now: number, horizonMs: number): boolean {
+    const schedules = this.enabledSchedules();
+    if (schedules.length === 0) return false;
+    const timezone = this.options.timezone();
+    try {
+      for (let at = now; at < now + horizonMs; at += 60_000) {
+        const time = timeOfDayIn(timezone, at);
+        const day = dayOfWeekIn(timezone, at);
+        if (schedules.some((trigger) => trigger.at === time && (trigger.days?.includes(day) ?? true))) {
+          return true;
+        }
+      }
+    } catch {
+      return false;
+    }
+    return false;
+  }
+
+  /** The home-local hours enabled rules are set to fire in, one entry per trigger. */
+  scheduledHours(): number[] {
+    return this.enabledSchedules().map((trigger) => Number(trigger.at.slice(0, 2)));
+  }
+
+  private enabledSchedules(): Extract<AutomationTrigger, { kind: 'schedule' }>[] {
+    const found: Extract<AutomationTrigger, { kind: 'schedule' }>[] = [];
+    for (const record of this.records) {
+      if (!record.enabled) continue;
+      for (const trigger of record.document.triggers) {
+        if (trigger.kind === 'schedule') found.push(trigger);
+      }
+    }
+    return found;
   }
 
   // ── Running ────────────────────────────────────────────────────────────────

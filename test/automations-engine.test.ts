@@ -844,6 +844,74 @@ describe('the scheduler', () => {
   });
 });
 
+// ── What an automatic update has to stay out of the way of ───────────────────
+
+describe('what the hub asks before updating itself', () => {
+  const twentyMinutes = 20 * 60_000;
+  const atFiveToMidnight = {
+    name: 'Night',
+    triggers: [{ kind: 'schedule', at: '00:05' }],
+    actions: [{ kind: 'logActivity', message: 'night' }],
+  };
+
+  it('sees a schedule coming inside the horizon, and not one beyond it', async () => {
+    await install({ ...atFiveToMidnight, triggers: [{ kind: 'schedule', at: '14:00' }] });
+    // 11:50 UTC is 13:50 in Berlin: ten minutes out.
+    expect(engine.scheduledWithin(Date.UTC(2026, 5, 15, 11, 50), twentyMinutes)).toBe(true);
+    // Half an hour out is beyond twenty minutes.
+    expect(engine.scheduledWithin(Date.UTC(2026, 5, 15, 11, 30), twentyMinutes)).toBe(false);
+  });
+
+  it('looks across midnight, at the day the rule fires on', async () => {
+    // 15 June 2026 is a Monday, and 21:50 UTC is 23:50 in Berlin — so the next
+    // 00:05 is Tuesday's, which is the day this rule is for.
+    await install({ ...atFiveToMidnight, triggers: [{ kind: 'schedule', at: '00:05', days: [2] }] });
+    expect(engine.scheduledWithin(Date.UTC(2026, 5, 15, 21, 50), twentyMinutes)).toBe(true);
+  });
+
+  it('honours the days a rule was given', async () => {
+    // Monday's 00:05 has been and gone, and Tuesday is not one of its days.
+    await install({ ...atFiveToMidnight, triggers: [{ kind: 'schedule', at: '00:05', days: [1] }] });
+    expect(engine.scheduledWithin(Date.UTC(2026, 5, 15, 21, 50), twentyMinutes)).toBe(false);
+  });
+
+  it('counts only the rules that are switched on', async () => {
+    const id = await install(atFiveToMidnight);
+    expect(engine.scheduledHours()).toEqual([0]);
+    await store.setEnabled(id, false);
+    await engine.reload();
+    expect(engine.scheduledHours()).toEqual([]);
+    expect(engine.scheduledWithin(Date.UTC(2026, 5, 15, 21, 50), twentyMinutes)).toBe(false);
+  });
+
+  it('knows when a run is still going', async () => {
+    // What a restart would end half done — a `wait`, or a radio still holding
+    // the first of two commands.
+    const id = await install({
+      name: 'Slow one',
+      triggers: [{ kind: 'manual' }],
+      actions: [
+        { kind: 'deviceCommand', target: { deviceIds: [lampId] }, command: { type: 'power', on: true } },
+      ],
+    });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    registry.hold = () => held;
+
+    expect(engine.hasRunInFlight()).toBe(false);
+    await engine.runManually(id, { name: 'Anna' });
+    await settle();
+    expect(engine.hasRunInFlight()).toBe(true);
+
+    registry.hold = undefined;
+    release();
+    await engine.settled();
+    expect(engine.hasRunInFlight()).toBe(false);
+  });
+});
+
 // ── Rules this build cannot read ─────────────────────────────────────────────
 
 describe('a document from a newer build', () => {

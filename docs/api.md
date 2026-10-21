@@ -319,8 +319,9 @@ than no button.
 | `GET /roles` | floor | `[{id, key, name, builtin, permissions, memberCount, sortOrder}]` |
 | `POST /roles` · `PATCH /roles/:id` · `DELETE /roles/:id` | `role.manage` | `POST {name, permissions?}` → 201. `PATCH {name?, permissions?}`. `409 role_is_owner`, `409 role_is_builtin`, `409 role_in_use` |
 | `PATCH /members/:id` | `role.manage` | `{roleId}` — put somebody in a different role, the owner's included. Granting or revoking that one needs the caller to be an owner (`403 not_owner`); the last owner cannot be moved out of it (`409 cannot_change_owner`). `404 unknown_role` |
-| `GET /system/update` | floor | what is installed, whether anything newer exists, and how a run is going — see [below](#updating-the-hub). `?refresh=1` asks GitHub again, behind a one-minute floor. **Reading is the floor on purpose**: somebody who may not press the button still has to see why the home went quiet for two minutes |
+| `GET /system/update` | floor | what is installed, whether anything newer exists, how a run is going, and whether the hub updates itself (`automatic`) — see [below](#updating-the-hub). `?refresh=1` asks GitHub again, behind a one-minute floor. **Reading is the floor on purpose**: somebody who may not press the button still has to see why the home went quiet for two minutes |
 | `POST /system/update` | `hub.update` | ask the hub to update itself → `202 {id, state:"queued"}`. `409 update_unsupported` on a machine with no update plumbing, `409 update_in_progress` while one is running |
+| `PUT /system/update/automatic` | `hub.update` | `{enabled}` → `{automatic}`: let the hub update itself at an hour its home is quiet, or stop it — see [automatic updates](#automatic-updates). The body is **strict** (`400` on a field it does not know). `409 update_unsupported` switching it on where the machine has no update plumbing; switching it off is always allowed |
 | `GET /system/update/log?tail=` | floor | the tail of what the installer printed: `{lines, total, truncated}`. Default 200 lines, max 2000 |
 
 ### Roles and permissions in full
@@ -1669,6 +1670,114 @@ two minutes.
 Taking something *away* is still guarded harder — a device, a member, the
 credential that spends their money. That line has not moved.
 
+### Automatic updates
+
+A hub can also update itself, **once somebody in its home has said it may** —
+at an hour the home is usually quiet, and only when nothing is happening. It is
+**off on every hub until somebody switches it on**, new and old alike: a hub
+installed from a branch on a developer's desk, or one somebody deliberately
+keeps on the build they know, must not move under them, and an app built before
+this existed has no way to say no to it. It asks for the update exactly the way
+`POST /system/update` does, so the runner, the health check and the automatic
+rollback are the same on every path; what is new is only *when*.
+
+```jsonc
+// GET /system/update — beside everything above
+"automatic": {
+  "enabled": true,
+  "window": { "from": "2026-10-22T01:00:00.000Z", "to": "2026-10-22T03:00:00.000Z" },
+  "learned": true,
+  "last": { "at": "2026-10-21T01:10:00.000Z", "outcome": "postponed", "reason": "in_use" }
+}
+
+// PUT /system/update/automatic   {"enabled": true}   → 200 {"automatic": {…}}
+```
+
+**`automatic` is always there on a hub that has this**, so its presence is how
+an app knows to offer the switch; a hub without it is older, and one update
+brings it. Every field but `enabled` is optional:
+
+- **`blocked`** — why it cannot run here even switched on, said whether or not it
+  is: `branch_build` (the hub runs a `--branch` build, and the runner only ever
+  installs `main`, so updating by itself would undo somebody's test),
+  `no_build_stamp` (built from source — there is no commit to compare) or
+  `unsupported` (no update runner on this machine; `canApply` is `false` too).
+- **`window`** — the stretch of time it will look in next, or is in now, as
+  absolute times. Absent while it is off or blocked. Draw it in the reader's own
+  time; it was chosen in the home's (`GET /settings/timezone`).
+- **`learned`** — whether that window came from this home, or is the default
+  night, 03:00 to 05:00 home time.
+- **`last`** — what the hub decided the last time it looked inside its window:
+  `started`, `up_to_date`, `postponed` (with a `reason`), `waiting` (the newest
+  build is not a day old yet; `until` says when it will be) or `skipped` (with a
+  `reason`). Absent while it is off. Reasons today are `in_use`, `pairing`,
+  `rule_running`, `rule_due`, `update_running`, `offline`, `rate_limited`,
+  `request_failed`, `rolled_back` and `too_many_attempts`. **Treat both
+  vocabularies as open** — a word an app has not met gets a general sentence.
+
+**The window is the two hours this home asks least of the hub.** While the
+switch is on, the hub counts two things per hour: a request somebody made (an
+activity row with a member on it — a command, a press, a setting, through an
+app, a key or a conversation) and a rule that ran and sent a command. A sensor
+report that caused nothing is not counted, because nobody it would disturb is
+using the hub. It keeps fourteen days of that, in UTC hours, and turns them
+into the home's own hours when it chooses: the 2-hour block with the fewest
+uses, half-weighting the hour either side of it, with a heavy weight on any hour
+a scheduled rule fires in and ties going to the night. Under three days of
+counting, it is the default night. **Counting starts again from nothing each
+time the switch is turned on, and switching it off forgets it** — a fortnight
+with the switch off was not a quiet fortnight. The activity log could not have
+carried this: it holds three days of a busy home, and a rule that fires by
+itself never reaches it.
+
+**Inside the window it waits until nothing is happening**, looking every five
+minutes: nobody has asked for anything, and no device has set a rule off, for
+half an hour (a rule the *clock* starts does not count — one that runs every
+ten minutes all night must not hold the hub off for ever); nobody is pairing a
+device; no rule is mid-run (a `wait` does not survive a restart); none is due in
+the next twenty minutes; and no update is already running. Only then is GitHub
+asked; one it could not reach is asked again half an hour later. Then:
+
+- **A build is installed by itself only once it has been on `main` for a day**,
+  read from the commit's own date. Merging is releasing, and without the wait
+  every hub that updates itself would carry a merge into its home the same
+  night. A `main` that never sits still for a day stops being waited for once
+  the hub has been behind for a week, and even then a build gets two hours —
+  long enough for CI to publish its bundle.
+- **Never a build that put itself back here.** A rolled-back automatic update is
+  remembered and that build is not tried by itself again; nor is any one build
+  tried more than three times. A nightly update that rolls back is a home that
+  restarts every night for nothing.
+- **One request a night.**
+
+**It says so before it does it, and nowhere else.** The activity row and the
+bookkeeping are written before the request, because the request restarts the
+process. A postponement is *not* written to the activity log — that would be a
+line in the feed every night — and `last` answers "why hasn't my hub updated"
+for anybody who looks. Three `hub.update` rows are new, and each carries a whole
+sentence for an app that has never heard of this:
+
+- `outcome: "auto-on"` / `"auto-off"` — somebody switched it, named like every
+  member's row.
+- `outcome: "auto-started"` — the hub asking for an update by itself. **No
+  member**, like `hub.radio-stood-down`: nobody pressed anything. `data` carries
+  `automatic: true`, `fromBuild` and `toSha`.
+- The outcome written at the next boot keeps its five words, and adds
+  `automatic: true` with a sentence that says the hub did it itself.
+
+**Who may switch it is `hub.update`** — whoever may start an update may decide
+that the hub starts one at an hour the home is quiet, which is less disruption,
+not more. A key holding `hub.update` may switch it too. **The body is strict**,
+the [API key](#api-keys) reasoning: a field a later build adds to *narrow* this
+— certain nights, say — would be stripped by an older hub, which would then
+update itself more freely than it was asked to.
+
+**What leaves the hub changes, a little.** With the switch on, the hub asks
+GitHub for `main`'s newest commit at most a few times a night — the same address
+it already asks when an app opens its Software card, through the commit list
+rather than the commit, since one entry of the list carries the date and none of
+the files. With it off, a hub nobody looks at still never calls out.
+
 ### Wi-Fi networks (`/settings/wifi`)
 
 A hub is set up on one Wi-Fi and then carried somewhere else — a new flat, a
@@ -2223,7 +2332,10 @@ line.
 
 The last three, plus `hub.radio`, all carry `data.memberName`: they are the
 things any member may do to the whole home, so the log is where it says which
-phone did. `hub.radio-stood-down` and `hub.radio-restored` are the two entries here with
+phone did. `hub.update` is the exception twice over: the outcome of an update is
+written at the hub's next boot, when there is nobody left to name, and an update
+the hub [started by itself](#automatic-updates) names nobody because nobody
+did. `hub.radio-stood-down` and `hub.radio-restored` are the two entries here with
 **no member at all** — the hub handed a radio back by itself and later gave it
 another go, and naming somebody would be attributing a decision nobody made.
 They carry `reason`/`detail`/`count` and `attempt`/`count` instead. A feed that

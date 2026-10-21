@@ -251,7 +251,11 @@ export class SettingsService {
       .onConflictDoUpdate({ target: settings.key, set: { value } });
   }
 
-  private async unset(key: string): Promise<void> {
+  /**
+   * Remove a key, which is how a setting goes back to its default — never by
+   * writing `null` into a `NOT NULL` json column.
+   */
+  async unset(key: string): Promise<void> {
     await this.db.delete(settings).where(eq(settings.key, key));
   }
 

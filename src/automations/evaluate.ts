@@ -139,6 +139,22 @@ export function evaluateEdge(
 
 // ── Time ─────────────────────────────────────────────────────────────────────
 
+/**
+ * Before this, the clock is not to be trusted.
+ *
+ * A Raspberry Pi has no real-time clock: it boots at whatever the last shutdown
+ * wrote, or at the epoch, and NTP corrects it seconds to minutes later. A
+ * scheduler that ran during that window would fire every rule whose time
+ * happened to match a fictional clock. Nothing is skipped by waiting — the
+ * tick fires on the minute it *is* in, so the moment the clock is right the
+ * right minute comes round.
+ *
+ * Exported because it is not only the scheduler's: the hub's automatic updates
+ * read the same clock to decide when the home is asleep, and two copies of
+ * "when is the clock real" would be two places for one of them to be wrong.
+ */
+export const MIN_PLAUSIBLE_CLOCK = Date.UTC(2025, 0, 1);
+
 const formatters = new Map<string, Intl.DateTimeFormat>();
 
 /**
