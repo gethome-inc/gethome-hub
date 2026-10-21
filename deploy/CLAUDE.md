@@ -745,7 +745,12 @@ in `deploy/install.sh` must stay accurate.
   an earlier association left, and the app asks, as it does for an Ethernet hub.
   A scan that fails or does not show the network changes nothing. `nmcli -t`
   escapes `\` and `:` inside a name, so the comparison decodes in awk, with the
-  name passed in the environment because `awk -v` processes backslashes. And the
+  name passed in the environment because `awk -v` processes backslashes. **The
+  profile's own name and PSK are read with `nmcli -e no -g`**, because `-g` is
+  terse output and escapes the same two characters, and one field has no
+  columns to keep apart — `profile_ssid`'s reasoning. Read without it, `My:Net`
+  was handed to every accessory as `My\:Net`, a network that does not exist,
+  and the decoded scan, compared with the escaped name, never matched. And the
   shell-quoting is built into a variable before it is used, because inline
   inside the `printf` the replacement's backslashes go through a second round of
   quote removal and `Dave's Wi-Fi` comes out mangled — the sed-program rule from
