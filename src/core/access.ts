@@ -75,6 +75,13 @@ export const PERMISSIONS: readonly PermissionDescriptor[] = [
     summary: 'Take a device out of the home and unpair it. Nothing in the apps undoes this.',
   },
   {
+    key: 'camera.view',
+    group: 'Devices',
+    title: 'Watch the cameras',
+    summary:
+      'See what the home\u2019s cameras see \u2014 a still, or live. The pictures come through the hub and are not recorded.',
+  },
+  {
     key: 'home.structure',
     group: 'Home',
     title: 'Change rooms and zones',
@@ -187,6 +194,7 @@ export type PermissionKey =
   | 'device.edit'
   | 'device.add'
   | 'device.remove'
+  | 'camera.view'
   | 'home.structure'
   | 'home.rename'
   | 'activity.read'
@@ -342,10 +350,19 @@ export const BUILTIN_ROLES = [
      * and revoking each write a row, and everything a key does is written as
      * the member it belongs to, through that key. Guest is where the line
      * falls. It travels with `0018`.
+     *
+     * `camera.view` is here because watching the porch is what living in a
+     * home with a camera on its porch means — the person at the door is
+     * looking at a phone, not at a laptop in a drawer. It is a permission at
+     * all, rather than the floor, because a camera shows *people*: a home
+     * that has somebody staying decides whether they see the hallway, and
+     * Guest starts without it. It reaches homes that already exist through
+     * migration `0019`, the way `hub.ai` travelled in `0006`.
      */
     permissions: [
       'device.edit',
       'device.add',
+      'camera.view',
       'home.structure',
       'activity.read',
       'automation.manage',

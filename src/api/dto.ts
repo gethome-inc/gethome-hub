@@ -1,6 +1,7 @@
 import type { AccessService, KeyGrant } from '../core/access.js';
 import { hubWifiView, offlineElsewhere, type HubWifiView } from '../core/device-network.js';
 import type { RegistryDevice } from '../core/registry.js';
+import type { WebBlockSummary } from '../web-blocks/store.js';
 
 /**
  * What a device's rendering depends on besides the device: the reader, and
@@ -44,8 +45,17 @@ export function deviceWireView(
  * without knowing anything happened. It has to be passed in rather than read
  * off the device, because one device answers differently to each member, and
  * the WebSocket renders this per socket for exactly that reason.
+ *
+ * `webBlocks` is the device's own — the panels installed on its page,
+ * `web-blocks/store.ts` — and is passed per device rather than carried in the
+ * view, which is the reader's and asked once per render.
  */
-export function deviceWire(device: RegistryDevice, favorite: boolean, view: DeviceWireView = {}) {
+export function deviceWire(
+  device: RegistryDevice,
+  favorite: boolean,
+  view: DeviceWireView = {},
+  webBlocks?: WebBlockSummary[],
+) {
   const elsewhere = offlineElsewhere(device, view.hubWifi);
   return {
     id: device.id,
@@ -90,6 +100,10 @@ export function deviceWire(device: RegistryDevice, favorite: boolean, view: Devi
     ...(elsewhere !== undefined
       ? { offlineElsewhere: view.namesNetworks === true ? { network: elsewhere.network } : {} }
       : {}),
+    // **Presence is the capability once more**: only a device with panels
+    // carries the key, so the wire of every other device is byte-for-byte what
+    // it was, and an app from before web blocks never meets it at all.
+    ...(webBlocks && webBlocks.length > 0 ? { webBlocks } : {}),
     endpoints: device.endpoints.map((endpoint) => ({
       endpointId: endpoint.endpointId,
       deviceKind: endpoint.deviceKind,

@@ -39,6 +39,15 @@ export interface HubEvents {
    * happened to reconnect. Same argument as `structure`.
    */
   portraitsChanged: [deviceId: string];
+  /**
+   * A device's web blocks changed — one was installed, replaced or removed.
+   *
+   * Its own event rather than `deviceUpserted`, which is the registry's: the
+   * automations engine reloads on that one, and a panel on a device's page
+   * changes nothing a rule reads. The socket answers it with the same
+   * `deviceUpserted` frame, because the blocks are part of the device's wire.
+   */
+  webBlocksChanged: [deviceId: string];
   activity: [entry: ActivityEvent];
   permitJoin: [active: boolean, remainingSeconds: number];
   /**

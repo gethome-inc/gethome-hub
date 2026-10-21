@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
-import { devices, endpoints } from '../db/schema.js';
+import { devices, endpoints, settings } from '../db/schema.js';
 import type {
   AdapterBus,
   AdapterDeviceDescriptor,
@@ -61,6 +61,54 @@ export interface RegistryEndpoint {
   capabilities: CapabilityKind[];
   primary: CapabilityKind;
   state: EndpointState;
+}
+
+/**
+ * Who took a device out of the home, the way the API's `actor()` hands it
+ * over: the subject of the sentence, the member the row is filed under, and
+ * what the row's `data` says about them (a key's name and id when it was one).
+ */
+export interface DeviceRemover {
+  name: string;
+  memberId: string;
+  data: Record<string, string>;
+}
+
+/**
+ * Where the devices waiting for their radio are kept — see `pendingForgets`.
+ * A settings row rather than a table, because it is a short list that only
+ * this file reads, and a build that has never heard of it simply never looks.
+ */
+const PENDING_FORGETS_KEY = 'devices.pending_forgets';
+
+/**
+ * Most devices held waiting for their radio. The list only grows while a radio
+ * is away, and each entry is a few dozen bytes; past this the oldest goes,
+ * because a device removed that long before its radio came back is one the
+ * person can remove a second time when it does.
+ */
+const MAX_PENDING_FORGETS = 200;
+
+/** A device the home has let go of and its radio has not, yet. */
+interface PendingForget {
+  adapter: AdapterId;
+  externalId: string;
+  /** When it was removed, epoch ms. */
+  at: number;
+}
+
+const ADAPTER_IDS: readonly AdapterId[] = ['zigbee', 'mqtt', 'matter'];
+
+/** A stored entry this build can act on — anything else is skipped, never trusted. */
+function isPendingForget(value: unknown): value is PendingForget {
+  if (typeof value !== 'object' || value === null) return false;
+  const entry = value as Record<string, unknown>;
+  return (
+    ADAPTER_IDS.includes(entry.adapter as AdapterId) &&
+    typeof entry.externalId === 'string' &&
+    entry.externalId.length > 0 &&
+    typeof entry.at === 'number'
+  );
 }
 
 /** Commands the registry resolves against stored IR state (not the adapter). */
@@ -126,6 +174,32 @@ export class DeviceRegistry implements AdapterBus {
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   /** When `start()` began, for `REACHABILITY_QUIET_MS`. 0 until it does. */
   private startedAt = 0;
+  /** Adapters whose `start()` resolved — the only ones that can be asked to forget anything. */
+  private readonly running = new Set<AdapterId>();
+
+  /**
+   * Devices taken out of the home whose radio has not let them go yet, keyed
+   * like `cache`, and kept in the settings table so a restart remembers them.
+   *
+   * Removing a device is two things — the home lets go of its row, and the
+   * protocol unpairs it — and only the first can be done on the spot. The
+   * second needs the radio, which may be slow (a Zigbee device that does not
+   * answer is asked for ten seconds and more before Zigbee2MQTT gives up on
+   * it), or not there at all: a board that runs one radio at a time has the
+   * other one off, and its adapter was never even constructed. Neither may
+   * leave the device half-gone, because the radio still *has* it, and the next
+   * time the radio speaks — its retained device list, a Matter node attaching
+   * at start — the device would come back as a new one, with a fresh id, its
+   * default name and no room, in a home whose owner had removed it.
+   *
+   * So the device waits here until its adapter says it has let go, and while
+   * it waits nothing the radio announces about it is adopted. An adapter that
+   * is not running is asked when it next starts (`replayForgets`); one that
+   * could not do it is asked again then too.
+   */
+  private readonly pendingForgets = new Map<string, PendingForget>();
+  /** Forgets handed to an adapter and not answered yet, keyed like `cache`. */
+  private readonly forgetsInFlight = new Set<string>();
 
   constructor(
     private readonly db: Db,
@@ -186,12 +260,23 @@ export class DeviceRegistry implements AdapterBus {
     }
     this.log.info(`Device registry loaded ${this.cache.size} device(s).`);
 
-    const running = new Set<AdapterId>();
+    // Before any adapter starts, because starting is when a radio replays what
+    // it holds — and a device waiting to be let go must not be adopted again.
+    await this.loadPendingForgets();
+    // A removal the process did not live to finish: the waiting list is
+    // written before the row goes, so a row still here was being removed.
+    for (const pending of this.pendingForgets.values()) {
+      if (this.cache.has(this.key(pending.adapter, pending.externalId))) {
+        this.removeRow(pending.adapter, pending.externalId);
+      }
+    }
+
     for (const adapter of this.adapters.values()) {
       try {
         await adapter.start(this);
-        running.add(adapter.id);
+        this.running.add(adapter.id);
         this.log.info(`Adapter "${adapter.id}" started.`);
+        this.replayForgets(adapter.id);
       } catch (error) {
         // Adapter failures are isolated: the hub keeps running with the rest.
         this.log.error({ err: error }, `Adapter "${adapter.id}" failed to start — continuing without it.`);
@@ -210,7 +295,7 @@ export class DeviceRegistry implements AdapterBus {
     // over. Registration, not the start, is the test that matters: an adapter
     // the environment left out was never constructed at all.
     for (const adapter of new Set([...this.cache.values()].map((device) => device.adapter))) {
-      if (!running.has(adapter)) this.radioReachabilityChanged(adapter, false);
+      if (!this.running.has(adapter)) this.radioReachabilityChanged(adapter, false);
     }
   }
 
@@ -218,6 +303,7 @@ export class DeviceRegistry implements AdapterBus {
     for (const adapter of this.adapters.values()) {
       await adapter.stop().catch(() => {});
     }
+    this.running.clear();
     await this.flush();
   }
 
@@ -260,8 +346,12 @@ export class DeviceRegistry implements AdapterBus {
   // ── AdapterBus ────────────────────────────────────────────────────────────
 
   deviceUpserted(descriptor: AdapterDeviceDescriptor): void {
-    this.enqueue(this.key(descriptor.adapter, descriptor.externalId), async () => {
-      const existing = this.cache.get(this.key(descriptor.adapter, descriptor.externalId));
+    const key = this.key(descriptor.adapter, descriptor.externalId);
+    this.enqueue(key, async () => {
+      // Taken out of the home, and its radio has not let it go yet: what is
+      // announcing it is the radio's memory of it, not the device arriving.
+      if (this.pendingForgets.has(key)) return;
+      const existing = this.cache.get(key);
       if (!existing) {
         await this.insertDevice(descriptor);
       } else {
@@ -270,7 +360,20 @@ export class DeviceRegistry implements AdapterBus {
     });
   }
 
+  /** The radio has let a device go by itself — removed in Zigbee2MQTT, an empty MQTT config. */
   deviceRemoved(adapter: AdapterId, externalId: string): void {
+    this.removeRow(adapter, externalId);
+  }
+
+  /**
+   * Take the device's row out of the home, and say so in the activity log.
+   *
+   * `by` is the person who asked, when somebody did — the sentence names them
+   * the way every other change to the home's shape does ("Anna removed the
+   * kettle."), and the row is filed under them. Without it the radio did it on
+   * its own, and the sentence says only that the device went.
+   */
+  private removeRow(adapter: AdapterId, externalId: string, by?: DeviceRemover): void {
     this.enqueue(this.key(adapter, externalId), async () => {
       const cached = this.cache.get(this.key(adapter, externalId));
       if (!cached) return;
@@ -285,8 +388,11 @@ export class DeviceRegistry implements AdapterBus {
       this.events.emit('deviceRemoved', cached.id);
       await this.activityLog.record({
         kind: 'device.removed',
-        message: `${cached.name} was removed.`,
-        data: { deviceName: cached.name },
+        message: by ? `${by.name} removed ${cached.name}.` : `${cached.name} was removed.`,
+        ...(by ? { memberId: by.memberId } : {}),
+        // The name rides along because the row outlives the device: a week
+        // from now this sentence may be all that is left of it.
+        data: { deviceName: cached.name, ...by?.data },
       });
     });
   }
@@ -667,18 +773,124 @@ export class DeviceRegistry implements AdapterBus {
     }
   }
 
-  async removeDevice(deviceId: string): Promise<boolean> {
+  /**
+   * Take a device out of the home, and off its radio.
+   *
+   * **The home lets go now; the radio is asked and not waited for.** The row,
+   * the activity line and the `deviceRemoved` event are done before this
+   * returns, so an app's request answers in the time a database write takes.
+   * Unpairing is the adapter's, and it can take seconds — a Zigbee device that
+   * does not answer is asked, refused, and then removed by force — or wait for
+   * a radio that is off. It used to be awaited here, which held the request
+   * open for as long as the slowest radio took and longer than either app
+   * waits, so a removal that worked read as one that failed.
+   *
+   * What makes not waiting safe is `pendingForgets`, written before the row
+   * goes: the device cannot be adopted again until its radio has let it go,
+   * however long that takes and whichever restarts happen in between.
+   */
+  async removeDevice(deviceId: string, by?: DeviceRemover): Promise<boolean> {
     const device = this.getDevice(deviceId);
     if (!device) return false;
-    const adapter = this.adapters.get(device.adapter);
-    if (adapter?.forget) {
-      await adapter.forget(device.externalId).catch((error) => {
-        this.log.warn({ err: error }, `Adapter "${device.adapter}" could not forget ${device.externalId}.`);
-      });
+    const key = this.key(device.adapter, device.externalId);
+    this.pendingForgets.set(key, { adapter: device.adapter, externalId: device.externalId, at: Date.now() });
+    while (this.pendingForgets.size > MAX_PENDING_FORGETS) {
+      // A `Map` keeps insertion order, and entries go in as devices are
+      // removed, so the first key is the oldest.
+      const oldest = this.pendingForgets.keys().next();
+      if (oldest.done) break;
+      this.pendingForgets.delete(oldest.value);
     }
-    this.deviceRemoved(device.adapter, device.externalId);
-    await this.flush(this.key(device.adapter, device.externalId));
+    await this.savePendingForgets();
+    this.removeRow(device.adapter, device.externalId, by);
+    await this.flush(key);
+    this.forgetOnRadio(key);
     return true;
+  }
+
+  /**
+   * Ask a waiting device's radio to let it go, if that radio is running, and
+   * take it off the list once the adapter says it has. A radio that is not
+   * running — or that could not do it — is asked again when it next starts.
+   */
+  private forgetOnRadio(key: string): void {
+    const pending = this.pendingForgets.get(key);
+    if (!pending || this.forgetsInFlight.has(key) || !this.running.has(pending.adapter)) return;
+    const adapter = this.adapters.get(pending.adapter);
+    if (!adapter?.forget) {
+      // A protocol with nothing to unpair has already let go.
+      void this.clearPendingForget(key);
+      return;
+    }
+    this.forgetsInFlight.add(key);
+    let asked: Promise<void>;
+    try {
+      asked = adapter.forget(pending.externalId);
+    } catch (error) {
+      // An adapter that throws before it has a promise to hand back is one
+      // that could not ask either.
+      asked = Promise.reject(error);
+    }
+    void asked
+      .then(() => this.clearPendingForget(key))
+      .catch((error: unknown) => {
+        this.log.warn(
+          { err: error },
+          `Adapter "${pending.adapter}" has not let ${pending.externalId} go yet — it will be asked again when it next starts.`,
+        );
+      })
+      .finally(() => this.forgetsInFlight.delete(key));
+  }
+
+  /** Hand a freshly started adapter every device that was waiting for it. */
+  private replayForgets(adapter: AdapterId): void {
+    for (const [key, pending] of this.pendingForgets) {
+      if (pending.adapter === adapter) this.forgetOnRadio(key);
+    }
+  }
+
+  private async clearPendingForget(key: string): Promise<void> {
+    if (!this.pendingForgets.delete(key)) return;
+    await this.savePendingForgets();
+  }
+
+  private async loadPendingForgets(): Promise<void> {
+    const row = await this.db.query.settings.findFirst({ where: eq(settings.key, PENDING_FORGETS_KEY) });
+    const stored: unknown[] = Array.isArray(row?.value) ? row.value : [];
+    for (const entry of stored) {
+      if (isPendingForget(entry)) this.pendingForgets.set(this.key(entry.adapter, entry.externalId), entry);
+    }
+  }
+
+  private async savePendingForgets(): Promise<void> {
+    const value = [...this.pendingForgets.values()];
+    if (value.length === 0) {
+      await this.db.delete(settings).where(eq(settings.key, PENDING_FORGETS_KEY));
+      return;
+    }
+    await this.db
+      .insert(settings)
+      .values({ key: PENDING_FORGETS_KEY, value })
+      .onConflictDoUpdate({ target: settings.key, set: { value } });
+  }
+
+  /**
+   * Where a camera stream is on the LAN, for the camera proxy — with the
+   * device's own id, which the board has to answer with before anything is
+   * relayed. Null when the device, the endpoint's camera or the stream is
+   * unknown, including a camera that hasn't re-announced since a restart.
+   */
+  cameraSource(
+    deviceId: string,
+    endpointId: number,
+    streamId: string,
+  ): { externalId: string; kind: string; url: string } | null {
+    const device = this.getDevice(deviceId);
+    if (!device) return null;
+    const endpoint = device.endpoints.find((candidate) => candidate.endpointId === endpointId);
+    if (!endpoint?.capabilities.includes('camera')) return null;
+    const source = this.adapters.get(device.adapter)?.cameraSource?.(device.externalId, endpointId, streamId);
+    return source ? { externalId: device.externalId, ...source } : null;
   }
 
   /**

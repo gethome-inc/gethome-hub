@@ -64,11 +64,46 @@ internet: don't forward 1883 through your router.
 | `gethome/device/<deviceId>/state` | device → hub, retained recommended | canonical **state patch** for endpoint 1 |
 | `gethome/device/<deviceId>/state/<endpointId>` | device → hub | per-endpoint state patch |
 | `gethome/device/<deviceId>/availability` | device → hub, retained | `online` / `offline` — set as your MQTT **LWT** |
+| `gethome/device/<deviceId>/heartbeat` | device → hub, **retained** | how often you speak, in whole seconds (`60`), published that often — optional ([Staying online](#staying-online)) |
 | `gethome/device/<deviceId>/set` | hub → device | canonical **command** for endpoint 1 |
 | `gethome/device/<deviceId>/set/<endpointId>` | hub → device | per-endpoint command |
+| `gethome/device/<deviceId>/camera[/<endpointId>]` | device → hub, **retained** | the streams a camera serves ([Cameras](#cameras)) |
 
 Publish an **empty retained payload** to the config topic to remove the
 device.
+
+**The hub does the same when somebody deletes the device in an app**: it clears
+the retained config (and any heartbeat and camera topics), so the device
+doesn't come back on the hub's next boot. A device that subscribes to its own config topic hears that
+as a live empty message — its cue to stop announcing itself until it is set up
+again, rather than putting itself straight back. Its own retained config
+arriving on that subscription is not a deletion. (A device that is switched off
+at that moment misses it, and comes back when it is switched on: an empty
+retained message leaves nothing behind for it to hear later.)
+
+## Staying online
+
+Your last will is how the hub hears that you have gone: the broker publishes
+your `offline` once your keepalive has run out, one and a half keepalives
+with nothing from you. A keepalive of 15–60 s is right; the shorter it is,
+the sooner an unplugged device reads offline.
+
+**Only a broker that is running can send a will.** When the hub itself loses
+power, its broker comes back from the copy it last saved, still holding your
+retained `online`. A device switched off in the meantime has no connection
+left for the broker to time out, so nothing would ever say `offline`, and it
+would read online until it is switched on again.
+
+So say how often you speak. Publish a whole number of seconds (10–3600; `60`
+suits most devices), retained, to `gethome/device/<deviceId>/heartbeat` when
+you connect and that often afterwards. A device that has said so and then
+stays silent for two and a half of those intervals, never less than 30 s, is
+marked offline as its will would have marked it. Anything it publishes on its
+own topics brings it back. What the broker hands over from what it already
+holds doesn't count as you speaking, since after a restart it can be hours
+old. An empty retained payload withdraws the heartbeat. A hub from before
+heartbeats doesn't subscribe to the topic, and a device that never publishes
+one is judged by its will alone.
 
 ## Discovery document
 
@@ -99,6 +134,7 @@ On boot, the device publishes (retained):
 ```
 topic:  gethome/discovery/pool-pump/config     → the document above
 topic:  gethome/device/pool-pump/availability  → "online"   (LWT: "offline")
+topic:  gethome/device/pool-pump/heartbeat     → "60"       (and again every 60 s)
 topic:  gethome/device/pool-pump/state         → {"onOff":false,"power":{"activeMilliwatts":0}}
 ```
 
@@ -125,7 +161,8 @@ behavior: declare `capabilities: ["temperature","humidity"]` and publish
 Input devices — doorbell buttons, DIY remotes, anything that *emits* rather
 than holds state — declare the `event` capability (device kind `remote` for
 pure senders). Publish the button inventory once (retained), then one small
-patch per press:
+patch per press — **not retained**: a retained press is handed back to the hub
+every time it reconnects, and fires automations again each time:
 
 ```
 gethome/discovery/workshop-button/config →
@@ -135,7 +172,7 @@ gethome/discovery/workshop-button/config →
 gethome/device/workshop-button/state (retained) →
   {"event":{"buttons":[{"id":"main","label":"Button","gestures":["single","double","hold"]}]}}
 
-gethome/device/workshop-button/state (per press) →
+gethome/device/workshop-button/state (per press, not retained) →
   {"event":{"action":"double","button":"main","gesture":"double"}}
 ```
 
@@ -170,13 +207,58 @@ gethome/device/pump/set ← {"type":"setCustomField","fieldId":"schedule_mode","
 Your device receives the intent and applies it. This lets a DIY device expose
 *any* knob without a new capability.
 
+## Cameras
+
+A camera on the home network — an ESP32-CAM, say — shows up in the apps through
+the hub. Declare the endpoint as an ordinary device (device kind `camera`) with
+an ordinary capability — `onOff` for its light, or a `custom` value — and
+**never declare `camera`**: the hub adds that capability itself, and a hub from
+before cameras refuses a discovery document naming it. Then announce what it
+serves, retained, on its camera topic:
+
+```
+gethome/device/porch-cam/camera →
+  {"streams":[
+    {"id":"still","kind":"snapshot","label":"Still","width":640,"height":480,"url":"http://192.168.1.31/snapshot"},
+    {"id":"live","kind":"mjpeg","label":"Live","width":640,"height":480,"url":"http://192.168.1.31:81/stream"}]}
+```
+
+Publish it again whenever the device's address changes, and an empty retained
+payload to withdraw it.
+
+- **`kind`** is `snapshot` (a GET that answers one `image/jpeg`) or `mjpeg` (a
+  `multipart/x-mixed-replace` stream of JPEGs). A stream of another kind is
+  ignored, not refused, so a newer device still works with an older hub.
+- **`url`** must be plain `http://` to the camera's **private IPv4 address** —
+  not a name, not `https`, no user name or password in it. Anything else is
+  dropped.
+- **Prove it is you**: the hub fetches nothing until
+  `GET http://<camera>/gethome/id` (asked on the stream's own port, then on
+  port 80) answers `{"id":"<deviceId>"}` with this device's id.
+- **One viewer at a time is fine**: the hub opens one connection per stream and
+  shares it with everybody watching, so a board that serves a single client
+  serves the whole house.
+
+The apps never see the address: the endpoint's state carries the streams' ids,
+kinds and sizes, and a phone fetches them from the hub
+(`GET /api/v1/cameras/…`, [api.md](api.md)), which needs the `camera.view`
+permission. Nothing is recorded.
+
 ## Rules & tips
 
 - **Units are canonical**, not native: centi-°C, mireds, percent-100ths with
   0 = open, milliwatts. The full table is in
   [device-schema.md](device-schema.md).
 - Retain your config, availability, and state topics so the hub recovers your
-  device after a restart without waiting for your next publish.
+  device after a restart without waiting for your next publish. **A retained
+  state message is the endpoint's whole current state**, every sub-object
+  complete — `level`, `colorTemperature`, `thermostat`, `fan` and `covering`
+  are filled in with defaults where you leave a field out, and the defaults are
+  stored over what the hub had. `sensors` is the one partial that merges
+  safely.
+- **Discovery first**: the hub drops state for a device it hasn't met yet.
+- Never publish `reachable` — availability is the hub's to work out from your
+  availability topic.
 - One physical device with several functions = one deviceId with several
   endpoints, not several devices.
 - The broker is LAN-internal; don't expose 1883 to the internet. It asks for

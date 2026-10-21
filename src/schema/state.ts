@@ -167,6 +167,15 @@ export interface EndpointState {
     values?: Record<string, string | number | boolean>;
   };
 
+  /**
+   * What a camera endpoint can show: its streams by id, kind and size — never
+   * an address. The hub writes this from what an MQTT camera announces and
+   * serves each stream through its own camera routes.
+   */
+  camera?: {
+    streams: Array<{ id: string; kind: string; label?: string; width?: number; height?: number }>;
+  };
+
   /** Current mode for ModeSelect / RVC run-mode style capabilities. */
   currentMode?: number;
   /**
@@ -280,5 +289,6 @@ export function presentCapabilities(state: EndpointState): CapabilityKind[] {
   if (state.event !== undefined) kinds.push('event');
   if (state.irRemote !== undefined) kinds.push('irRemote');
   if (state.custom !== undefined) kinds.push('custom');
+  if (state.camera !== undefined) kinds.push('camera');
   return kinds;
 }

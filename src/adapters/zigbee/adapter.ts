@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import mqtt from 'mqtt';
 import type { AdapterBus, DeviceRecognition, ProtocolAdapter } from '../adapter.js';
 import type { CapabilityKind, DeviceKind, EndpointState, HubCommand } from '../../schema/index.js';
@@ -76,6 +77,47 @@ export interface Z2mBridgeEvent {
     status?: string;
   };
 }
+
+/**
+ * Zigbee2MQTT's answer to a request, on `<base>/bridge/response/<request>`.
+ * `transaction` is ours, echoed back — the topic is shared with every other
+ * client asking the same thing, so it is the only way to tell answers apart.
+ */
+interface Z2mResponse {
+  status?: string;
+  error?: string;
+  transaction?: string;
+}
+
+/** A device being taken off the network — see `ZigbeeAdapter.forgetting`. */
+interface Forgetting {
+  /** The promise `forget` handed back, settled once the bridge lets it go. */
+  promise: Promise<void>;
+  settle: () => void;
+  /** Zigbee2MQTT is being asked right now. */
+  asking: boolean;
+  /** When the last ask finished, epoch ms — 0 before the first, and after the bridge comes back. */
+  askedAt: number;
+}
+
+/**
+ * How long Zigbee2MQTT gets to answer a removal. It asks the device to leave
+ * first, and a device that does not answer is given up on only after the
+ * coordinator's own ZDO timeout — around fifteen seconds — so a shorter wait
+ * would be forcing devices that were still being asked.
+ */
+const REMOVE_ANSWER_MS = 30_000;
+
+/** A forced removal is a database delete inside Zigbee2MQTT: a moment. */
+const FORCED_REMOVE_ANSWER_MS = 10_000;
+
+/**
+ * Least time between two attempts at one removal. The bridge republishes its
+ * device list whenever anything on the network changes, and each of those is
+ * a prompt to try again; this keeps a removal Zigbee2MQTT keeps refusing from
+ * becoming a request per republish.
+ */
+const REMOVE_RETRY_MS = 60_000;
 
 /** The join-window fields of `<base>/bridge/info`. `permit_join_end` is epoch
  *  seconds (current Z2M); `permit_join_timeout` is seconds remaining (older). */
@@ -179,6 +221,24 @@ export class ZigbeeAdapter implements ProtocolAdapter {
    * be adopted.
    */
   private readonly pendingAvailability = new Map<string, boolean>();
+  /**
+   * Devices taken out of the home that Zigbee2MQTT still has, by IEEE.
+   *
+   * The hub's row goes at once and the bridge's entry may take a while — the
+   * device has to be asked, and when it cannot answer it is removed by force,
+   * a request later — or wait for a bridge that is not running. Until the
+   * bridge's own list stops naming the device it is not adopted again, from
+   * that list or from a mapping run that was already under way, and every
+   * report about it falls through the lookups like a stranger's.
+   */
+  private readonly forgetting = new Map<string, Forgetting>();
+  /** Requests to Zigbee2MQTT waiting for their answer, by `transaction`. */
+  private readonly answers = new Map<string, (answer: Z2mResponse | null) => void>();
+  /**
+   * Every IEEE on the bridge's last device list, interviewed or not — what
+   * Zigbee2MQTT actually holds. Null until a list has arrived.
+   */
+  private bridgeList: Set<string> | null = null;
   private readonly base: string;
   private bridgeOnline = false;
 
@@ -219,9 +279,13 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     for (const device of this.byIeee.values()) {
       if (device.remapTimer) clearTimeout(device.remapTimer);
     }
+    // Nothing will answer now. `forgetting` stays: the bridge still has those
+    // devices, and a start in this process asks again from its first list.
+    for (const answer of [...this.answers.values()]) answer(null);
     await this.client?.endAsync();
     this.client = null;
     this.bridgeOnline = false;
+    this.bridgeList = null;
   }
 
   async execute(externalId: string, endpointId: number, command: HubCommand): Promise<void> {
@@ -240,13 +304,48 @@ export class ZigbeeAdapter implements ProtocolAdapter {
     await this.publish(`${this.base}/${device.friendlyName}/set`, JSON.stringify(payload));
   }
 
-  async forget(externalId: string): Promise<void> {
-    const device = this.byIeee.get(externalId);
-    if (!device) return;
-    await this.publish(
-      `${this.base}/bridge/request/device/remove`,
-      JSON.stringify({ id: device.friendlyName }),
-    );
+  /**
+   * Take a device off the Zigbee network.
+   *
+   * First the way Zigbee2MQTT's own frontend does it — the device is asked to
+   * leave, which also leaves it ready to pair again — and, when it cannot be
+   * told (switched off, out of range, asleep, broken), by force: out of
+   * Zigbee2MQTT's database without its say. This used to ask plainly and
+   * stop there, and Zigbee2MQTT keeps a device that did not answer — so its
+   * retained device list handed that device back on the next hub start, as a
+   * new one with its default name and no room. A device that cannot answer is
+   * exactly the kind somebody removes.
+   *
+   * Resolves once the bridge's own list no longer has the device, which is the
+   * one answer that cannot be wrong. Until then the removal is asked again
+   * whenever the bridge comes back or republishes its list, because
+   * Zigbee2MQTT may be stopped — a board running Matter instead — or
+   * restarting. Its address is what is sent, rather than its friendly name,
+   * which can change between the two requests.
+   */
+  forget(externalId: string): Promise<void> {
+    // Before anything is awaited — see `ProtocolAdapter.forget`.
+    const tracked = this.byIeee.get(externalId);
+    if (tracked) {
+      if (tracked.remapTimer) clearTimeout(tracked.remapTimer);
+      this.byIeee.delete(externalId);
+      this.byFriendlyName.delete(tracked.friendlyName);
+    }
+    this.rawDefinitions.delete(externalId);
+    const existing = this.forgetting.get(externalId);
+    if (existing) return existing.promise;
+    let settle = (): void => {};
+    const promise = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    this.forgetting.set(externalId, { promise, settle, asking: false, askedAt: 0 });
+    if (this.bridgeList !== null && !this.bridgeList.has(externalId)) {
+      // Already off the bridge's list: there is nothing to ask it.
+      this.letGo(externalId);
+    } else {
+      void this.askToRemove(externalId);
+    }
+    return promise;
   }
 
   /** Open (or close, with 0) the network for joining, in seconds. */
@@ -366,8 +465,24 @@ export class ZigbeeAdapter implements ProtocolAdapter {
       if (online !== this.bridgeOnline) {
         this.bridgeOnline = online;
         this.bus?.radioReachabilityChanged('zigbee', online);
+        // A bridge that has just come back is the moment a removal it never
+        // heard can be heard — straight away, whatever the last try was.
+        if (online) {
+          for (const [ieee, request] of this.forgetting) {
+            request.askedAt = 0;
+            void this.askToRemove(ieee);
+          }
+        }
       }
       this.options.log.info(`Zigbee2MQTT is ${state}.`);
+      return;
+    }
+    // Answers to what this adapter asked the bridge for — the only requests it
+    // makes with a `transaction` are removals.
+    if (suffix.startsWith('bridge/response/')) {
+      if (!payload.startsWith('{')) return;
+      const answer = JSON.parse(payload) as Z2mResponse;
+      if (typeof answer.transaction === 'string') this.answers.get(answer.transaction)?.(answer);
       return;
     }
     // Two bridge topics are relayed rather than dropped. `bridge/event` is the
@@ -494,10 +609,20 @@ export class ZigbeeAdapter implements ProtocolAdapter {
   }
 
   private async syncDevices(devices: Z2mDevice[]): Promise<void> {
+    // Everything the bridge holds, interviewed or not, and before the first
+    // `await`: Zigbee2MQTT publishes this list just ahead of answering a
+    // removal, and the device being gone from it is what `forget` waits for.
+    this.bridgeList = new Set(devices.map((device) => device.ieee_address));
+    for (const ieee of [...this.forgetting.keys()]) {
+      if (this.bridgeList.has(ieee)) void this.askToRemove(ieee);
+      else this.letGo(ieee);
+    }
     const seen = new Set<string>();
     for (const device of devices) {
       if (device.type === 'Coordinator' || device.disabled) continue;
       if (!interviewFinished(device)) continue;
+      // Taken out of the home, and still on the bridge's list.
+      if (this.forgetting.has(device.ieee_address)) continue;
       seen.add(device.ieee_address);
       this.rawDefinitions.set(device.ieee_address, device);
       const known = this.byIeee.get(device.ieee_address);
@@ -519,6 +644,7 @@ export class ZigbeeAdapter implements ProtocolAdapter {
   }
 
   private async adoptDevice(device: Z2mDevice, options: AdoptOptions = {}): Promise<void> {
+    if (this.forgetting.has(device.ieee_address)) return;
     const { announce = false, regenerate = false, consultMapping = false, forgetMapping = false } = options;
     const raw = this.rawDefinitions.get(device.ieee_address) ?? device;
     const profile = mapExposes(raw);
@@ -582,6 +708,10 @@ export class ZigbeeAdapter implements ProtocolAdapter {
         this.options.log.warn({ err: error }, `AI mapping failed for ${raw.friendly_name}`);
       }
     }
+
+    // Removed while the agent was working on it: `forget` has already taken
+    // it out of the two maps, and announcing it now would bring it back.
+    if (this.forgetting.has(raw.ieee_address)) return;
 
     this.bus?.deviceUpserted({
       adapter: 'zigbee',
@@ -674,6 +804,70 @@ export class ZigbeeAdapter implements ProtocolAdapter {
   private async publish(topic: string, payload: string): Promise<void> {
     if (!this.client) throw new Error('Zigbee adapter is not connected');
     await this.client.publishAsync(topic, payload);
+  }
+
+  /** The bridge has let a device go: settle its `forget`, and stop guarding it. */
+  private letGo(ieee: string): void {
+    const request = this.forgetting.get(ieee);
+    if (!request) return;
+    this.forgetting.delete(ieee);
+    request.settle();
+  }
+
+  /**
+   * Ask Zigbee2MQTT to remove a device being forgotten — plainly, then by
+   * force if the device could not be told. Nothing while it is already being
+   * asked, while the bridge is not up to hear it, or within `REMOVE_RETRY_MS`
+   * of the last try. The answer that matters is not this one: an `ok` comes
+   * after the bridge has published its list without the device, and that
+   * list is what settles `forget` (`syncDevices`).
+   */
+  private async askToRemove(ieee: string): Promise<void> {
+    const request = this.forgetting.get(ieee);
+    if (!request || request.asking || !this.bridgeOnline || !this.client) return;
+    if (request.askedAt > 0 && Date.now() - request.askedAt < REMOVE_RETRY_MS) return;
+    request.asking = true;
+    try {
+      const plain = await this.request('device/remove', { id: ieee }, REMOVE_ANSWER_MS);
+      if (plain?.status === 'ok' || !this.forgetting.has(ieee)) return;
+      this.options.log.info(
+        `${ieee} could not be asked to leave the Zigbee network (${plain?.error ?? 'no answer'}) — removing it from Zigbee2MQTT by force.`,
+      );
+      const forced = await this.request('device/remove', { id: ieee, force: true }, FORCED_REMOVE_ANSWER_MS);
+      if (forced?.status !== 'ok' && this.forgetting.has(ieee)) {
+        this.options.log.warn(
+          `Zigbee2MQTT did not remove ${ieee} (${forced?.error ?? 'no answer'}); it will be asked again.`,
+        );
+      }
+    } finally {
+      request.asking = false;
+      request.askedAt = Date.now();
+    }
+  }
+
+  /**
+   * One request to Zigbee2MQTT's bridge API, and its answer — or null when
+   * nothing answered in time, because the bridge stopped or never heard it.
+   */
+  private request(name: string, body: Record<string, unknown>, timeoutMs: number): Promise<Z2mResponse | null> {
+    const transaction = `gethome-${randomUUID()}`;
+    return new Promise((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const settle = (answer: Z2mResponse | null): void => {
+        clearTimeout(timer);
+        this.answers.delete(transaction);
+        resolve(answer);
+      };
+      timer = setTimeout(() => settle(null), timeoutMs);
+      timer.unref?.();
+      this.answers.set(transaction, settle);
+      this.publish(`${this.base}/bridge/request/${name}`, JSON.stringify({ ...body, transaction })).catch(
+        (error: unknown) => {
+          this.options.log.warn({ err: error }, `Could not send Zigbee2MQTT a ${name} request.`);
+          settle(null);
+        },
+      );
+    });
   }
 }
 

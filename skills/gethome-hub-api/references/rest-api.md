@@ -65,7 +65,7 @@ API keys, and every conversation with the hub's assistant or automations agent.
 |---|---|
 | `PATCH /api/v1/devices/{deviceId}` with `name`, `roomId` or `offlineExpected` | `device.edit` |
 | `PATCH /api/v1/devices/{deviceId}/portraits` · `DELETE /api/v1/portraits/{portraitId}` | `device.edit` |
-| `DELETE /api/v1/devices/{deviceId}` | `device.remove` — **ask the person first** |
+| `DELETE /api/v1/devices/{deviceId}` | `device.remove` — **ask the person first**. `204` once the home has let go; the hub unpairs it from its radio afterwards, and a device paired again is a new device |
 | `POST /api/v1/zigbee/permit-join` `{"seconds": 120}` | `device.add` |
 | `POST /api/v1/matter/commission` `{"pairingCode": "…"}` · `POST /api/v1/matter/commission/{jobId}/cancel` · `GET /api/v1/matter/discoverable` | `device.add` |
 | `POST /api/v1/rooms` · `PATCH /api/v1/rooms/{roomId}` · `DELETE /api/v1/rooms/{roomId}` | `home.structure` |

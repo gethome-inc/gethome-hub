@@ -63,7 +63,8 @@ DISCOVERY = {
         {"endpointId": 2, "deviceKind": "sensor", "capabilities": ["temperature"], "primary": "temperature"},
     ],
 }
-HEARTBEAT_S = 60                                    # report a steady reading this often
+RESEND_S = 60                                       # report a steady reading this often
+BEAT_S = 30                                         # how often we speak: the loop below wakes this often
 
 relay = OutputDevice(17, initial_value=False)       # a known, safe state at start
 stop = threading.Event()
@@ -98,6 +99,7 @@ def on_connect(client, userdata, flags, reason_code, properties):
         return
     client.publish(f"gethome/discovery/{DEVICE_ID}/config", json.dumps(DISCOVERY), qos=1, retain=True)
     client.publish(f"{BASE}/availability", "online", qos=1, retain=True)
+    client.publish(f"{BASE}/heartbeat", str(BEAT_S), qos=1, retain=True)
     report_relay(client)
     centi = read_temperature_centi()
     if centi is not None:
@@ -145,13 +147,16 @@ signal.signal(signal.SIGTERM, shut_down)
 signal.signal(signal.SIGINT, shut_down)
 
 last, last_sent = None, 0.0
-while not stop.wait(30):
-    centi = read_temperature_centi()
-    if centi is None or not client.is_connected():
+while not stop.wait(BEAT_S):
+    if not client.is_connected():
         continue                                      # on_connect reports afresh when it is back
+    client.publish(f"{BASE}/heartbeat", str(BEAT_S), qos=1, retain=True)   # still here
+    centi = read_temperature_centi()
+    if centi is None:
+        continue
     now = time.monotonic()
-    if last is None or abs(centi - last) >= 10 or now - last_sent >= HEARTBEAT_S:
-        report_temperature(client, centi)             # a 0.1 °C move, or the heartbeat
+    if last is None or abs(centi - last) >= 10 or now - last_sent >= RESEND_S:
+        report_temperature(client, centi)             # a 0.1 °C move, or the steady re-send
         last, last_sent = centi, now
 
 relay.off()                                           # the safe state first, whatever follows
@@ -209,6 +214,10 @@ starts it now and at every boot.
   and only while connected, since `on_connect` reports afresh and anything
   sent meanwhile would queue up and arrive late. The reading is rounded to an
   integer, which the hub requires.
+- **A heartbeat on every pass of the loop**, every 30 s and retained: only a
+  running broker sends a will, and a hub that lost power comes back holding
+  the device's `online`. With the heartbeat, a device that stays quiet for 75 s
+  reads offline all the same.
 - **A retained command is ignored.** The hub never sends one, so it was
   published by hand, and the broker would replay it at every reconnect.
 - **Shutting down switches the relay off before anything else.** The goodbye
