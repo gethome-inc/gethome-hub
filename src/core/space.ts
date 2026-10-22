@@ -72,8 +72,13 @@ export class SpaceStore {
   }
 
   /** What `GET /hub` carries. Its presence is the capability. */
-  describe(): { maxBytes: number } {
-    return { maxBytes: MAX_SPACE_BYTES };
+  /**
+   * What `GET /hub` says about plans. `readsFloorPlans` is presence-read by
+   * the apps: a hub that has it answers `POST /space/floor-plan`, and one
+   * without it is older and is said to be.
+   */
+  describe(): { maxBytes: number; readsFloorPlans: true } {
+    return { maxBytes: MAX_SPACE_BYTES, readsFloorPlans: true };
   }
 
   read(): SpaceRecord {

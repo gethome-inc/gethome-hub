@@ -207,7 +207,7 @@ describe.skipIf(!handle)('hub API', () => {
     const info = await app.inject({ method: 'GET', url: '/api/v1/hub' });
     // Presence is the capability: an app that finds no block keeps a scan on
     // the phone that made it instead of sending it here.
-    expect(info.json()).toMatchObject({ space: { maxBytes: 4 * 1024 * 1024 } });
+    expect(info.json()).toMatchObject({ space: { maxBytes: 4 * 1024 * 1024, readsFloorPlans: true } });
 
     const empty = await app.inject({ method: 'GET', url: '/api/v1/space', headers: auth(memberToken) });
     expect(empty.statusCode).toBe(200);

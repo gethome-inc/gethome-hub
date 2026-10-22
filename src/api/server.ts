@@ -34,6 +34,7 @@ import type { ZigbeeAdapter } from '../adapters/zigbee/adapter.js';
 import {
   AGENT_MODELS,
   effectiveModel,
+  estimateCostUsd,
   isSupportedModel,
   offeredModelIds,
   PROVIDER_MODELS,
@@ -41,6 +42,8 @@ import {
 // Local operations on stored JSON — zod only, no Anthropic SDK in this graph.
 // `MappingLibrary.repair` loads the agent on demand.
 import type { MappingLibrary } from '../ai/library.js';
+// `fetch` and zod — no SDK — so the API layer can import it directly.
+import { FloorPlanReadError, readFloorPlan } from '../ai/floor-plan.js';
 import type { AiRunLog } from '../core/ai-runs.js';
 import type { AutomationEngine, AutomationPresser } from '../automations/engine.js';
 import {
@@ -1375,6 +1378,79 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const who = actor(request);
     return spaceWire(space.clear({ id: who.memberId, name: who.name }));
   });
+
+  /**
+   * Read a floor plan — a photo or screenshot of the home's drawing — into
+   * rooms in metres (`src/ai/floor-plan.ts`).
+   *
+   * `hub.ai`, because this is a route that spends the home's money — the
+   * portraits' key, for the portraits' reason. It changes nothing: the reading
+   * goes back to the app that asked, which shows it to be put right and saves
+   * it through `PUT /space` under `home.structure` like any other change to
+   * the plan. So the picture is not kept, and nothing is announced.
+   *
+   * It runs on device recognition's provider and model — reading a drawing is
+   * recognising what is in a picture, and that is the setting a home made for
+   * it — and, like the portraits, is not gated on recognition's switch:
+   * nobody reads a floor plan by accident.
+   *
+   * Synchronous, for the portraits' reason: the app shows one line from
+   * "Reading your plan" to the rooms, and a reading is a minute or two.
+   */
+  app.post(
+    '/api/v1/space/floor-plan',
+    { ...needs('hub.ai'), bodyLimit: PHOTO_BODY_LIMIT },
+    async (request, reply) => {
+      const body = z
+        .object({
+          /** The drawing, base64. */
+          image: z.string().min(64).max(PHOTO_BODY_LIMIT),
+          imageType: z.enum(['image/jpeg', 'image/png']).default('image/jpeg'),
+        })
+        .parse(request.body);
+
+      const ai = await deps.settings.getAiSettings();
+      // A legacy subscription token is a key this route cannot use; the
+      // other vendor's key, if there is one, can.
+      let provider = ai.provider;
+      if (provider === 'anthropic' && ai.legacySubscriptionToken) provider = ai.openai.hasKey ? 'openai' : null;
+      const apiKey = provider ? await deps.settings.aiKey(provider) : null;
+      if (!provider || !apiKey) return reply.code(409).send({ error: 'ai_not_configured' });
+      const modelId = effectiveModel(provider, ai[provider].model);
+
+      const homeRooms = (await readStructure()).rooms.map((room) => ({ id: room.id, name: room.name }));
+      const run = deps.aiRuns.begin({
+        kind: 'floorplan',
+        adapter: 'space',
+        // About a device model, which a drawing is not — the portraits leave
+        // it empty for the same reason.
+        exposesHash: '',
+        provider,
+        modelId,
+      });
+      try {
+        const result = await readFloorPlan({
+          provider,
+          modelId,
+          apiKey,
+          image: { bytes: Buffer.from(body.image, 'base64'), contentType: body.imageType },
+          homeRooms,
+        });
+        await run.finish({ ok: true, costUsd: estimateCostUsd(modelId, result.usage) });
+        return { ...result.reading, provider, model: modelId };
+      } catch (error) {
+        await run.finish({
+          ok: false,
+          ...(error instanceof FloorPlanReadError ? { errorKind: error.kind } : {}),
+          ...(error instanceof Error ? { errorMessage: error.message } : {}),
+        });
+        if (error instanceof FloorPlanReadError) {
+          return reply.code(502).send({ error: 'provider_failed', kind: error.kind, detail: error.message });
+        }
+        throw error;
+      }
+    },
+  );
 
   app.get('/api/v1/devices', authed, async (request) => {
     const memberId = request.member!.id;

@@ -280,6 +280,7 @@ describe.skipIf(!handle)('API keys', () => {
     'GET /api/v1/space': 'read',
     'PUT /api/v1/space': 'permission home.structure',
     'DELETE /api/v1/space': 'permission home.structure',
+    'POST /api/v1/space/floor-plan': 'permission hub.ai',
     'GET /api/v1/devices': 'read',
     // A pin is the floor's write and a name is `device.edit`, in one body.
     'PATCH /api/v1/devices/:id': 'handler',
