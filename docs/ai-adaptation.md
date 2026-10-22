@@ -541,8 +541,8 @@ A mapping run sends no home names, member names, tokens, or any other hub data
 that **none of that traffic is an input either**: see "What can reach the
 agent, and what cannot" above. Without a configured credential, or with the
 switch off, nothing is sent at all. That is recognition's promise, not the
-hub's: the assistant, the automations agent, the voice, portraits and a floor
-plan being read send more,
+hub's: the assistant, the automations agent, the voice, portraits, a floor plan
+being read and a room being drawn send more,
 because they have to, and the [privacy policy](https://gethome.me/privacy#ai)
 lists what each of them sends.
 

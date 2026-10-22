@@ -44,6 +44,8 @@ import {
 import type { MappingLibrary } from '../ai/library.js';
 // `fetch` and zod — no SDK — so the API layer can import it directly.
 import { FloorPlanReadError, readFloorPlan } from '../ai/floor-plan.js';
+import { PictureBusyError, PictureSpaceError, RoomPictureService, MAX_PHOTOS } from '../space/pictures.js';
+import { RoomPictureDrawError } from '../space/picture-draw.js';
 import type { AiRunLog } from '../core/ai-runs.js';
 import type { AutomationEngine, AutomationPresser } from '../automations/engine.js';
 import {
@@ -435,6 +437,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   // The home's 3D plan (`core/space.ts`): a file under the data directory,
   // so it needs nothing from the caller and every test gets a fresh one.
   const space = new SpaceStore(deps.dataDir, deps.events);
+  // Pictures of the plan's rooms (`space/pictures.ts`): files beside the plan.
+  const pictures = new RoomPictureService(deps.dataDir, deps.events, deps.log.child({ module: 'pictures' }), deps.aiRuns);
   const app = Fastify({
     loggerInstance: deps.log.child(
       { module: 'api' },
@@ -811,7 +815,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // the home's **3D plan** (`GET/PUT /space`) for everybody in it. Read it
     // rather than waiting for a 404: a client has to know where a scan will
     // be kept before somebody spends a quarter of an hour making one.
-    space: space.describe(),
+    // `pictures` inside it is presence-read the same way: a hub carrying it
+    // draws rooms (`POST /space/pictures`).
+    space: { ...space.describe(), pictures: pictures.describe() },
     // Additive, and presence is the capability once more: a hub carrying this
     // block mints **sign-in codes** (`POST /invites {memberId}`), so somebody
     // already in the home comes back on another device as themselves rather
@@ -1451,6 +1457,96 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       }
     },
   );
+
+  // ── Room pictures — `space/pictures.ts` ─────────────────────────────────
+
+  /** Every room's pictures, newest first. Reading is the floor, like the plan. */
+  app.get('/api/v1/space/pictures', authed, async () => ({ pictures: pictures.list() }));
+
+  /**
+   * One picture's bytes, by day or by night. Never changes once drawn (a new
+   * one gets a new id), so it is cached for good — the portraits' rule.
+   */
+  app.get('/api/v1/space/pictures/:id/:variant', authed, async (request, reply) => {
+    const params = z.object({ id: z.uuid(), variant: z.enum(['day', 'night']) }).parse(request.params);
+    const etag = `"${params.id}-${params.variant}"`;
+    if (request.headers['if-none-match'] === etag) return reply.code(304).send();
+    const bytes = await pictures.bytes(params.id, params.variant);
+    if (!bytes) return reply.code(404).send({ error: 'not_found' });
+    return reply
+      .header('content-type', 'image/png')
+      .header('cache-control', 'public, max-age=31536000, immutable')
+      .header('etag', etag)
+      .send(bytes);
+  });
+
+  /**
+   * Draw a room: the app's clay render of it, photos of it, and the camera the
+   * render was made from. `hub.ai`, because it spends the home's money — the
+   * portraits' key for the portraits' reason — and OpenAI's job, so its own
+   * refusal when that key is missing. Synchronous: a day and a night picture
+   * are about a minute, and the app shows one animation from the clay to the
+   * room. A second asker is refused rather than queued.
+   */
+  app.post(
+    '/api/v1/space/pictures',
+    { ...needs('hub.ai'), bodyLimit: PHOTO_BODY_LIMIT },
+    async (request, reply) => {
+      const body = z
+        .object({
+          roomId: z.string().min(1).max(160),
+          roomName: z.string().max(80).default(''),
+          /** The app's camera, kept whole: its vocabulary, not the hub's. */
+          view: z.looseObject({}),
+          size: z.enum(['1024x1536', '1536x1024']),
+          /** The clay render, a transparent PNG, base64. */
+          structure: z.string().min(64).max(PHOTO_BODY_LIMIT),
+          photos: z
+            .array(z.object({ data: z.string().min(64), type: z.enum(['image/jpeg', 'image/png']).default('image/jpeg') }))
+            .max(MAX_PHOTOS)
+            .default([]),
+          planRevision: z.number().int().nonnegative().nullable().optional(),
+        })
+        .parse(request.body);
+
+      const apiKey = await deps.settings.aiKey('openai');
+      if (!apiKey) return reply.code(409).send({ error: 'openai_not_configured' });
+
+      try {
+        const record = await pictures.draw({
+          roomId: body.roomId,
+          roomName: body.roomName,
+          view: body.view,
+          size: body.size,
+          structure: Buffer.from(body.structure, 'base64'),
+          photos: body.photos.map((photo) => ({ bytes: Buffer.from(photo.data, 'base64'), contentType: photo.type })),
+          planRevision: body.planRevision ?? null,
+          apiKey,
+          member: { id: request.member!.id, name: request.member!.name },
+        });
+        return record;
+      } catch (error) {
+        if (error instanceof PictureBusyError) {
+          return reply.code(409).send({ error: 'picture_busy', detail: error.message });
+        }
+        if (error instanceof PictureSpaceError) {
+          return reply.code(409).send({ error: 'no_space', detail: error.message });
+        }
+        if (error instanceof RoomPictureDrawError) {
+          return reply.code(502).send({ error: 'provider_failed', kind: error.kind, detail: error.message });
+        }
+        throw error;
+      }
+    },
+  );
+
+  /** A picture nobody wants — the plan's key, since it is how the home is shown. */
+  app.delete('/api/v1/space/pictures/:id', needs('home.structure'), async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const roomId = await pictures.remove(id);
+    if (roomId === null) return reply.code(404).send({ error: 'not_found' });
+    return { removed: id, roomId };
+  });
 
   app.get('/api/v1/devices', authed, async (request) => {
     const memberId = request.member!.id;

@@ -248,7 +248,7 @@ than no button.
 
 | Method & path | Needs | Notes |
 |---|---|---|
-| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `matter: {bluetooth, bluetoothReason?, wifi, commissioning, settlingUntil?}` is present only while Matter is running and says what pairing this hub can actually do — and, in `settlingUntil`, whether it has finished finding the devices it already owns — see [below](#pairing-a-matter-accessory). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid). `wifiNetworks: {available, reason?}` is present on a hub that can be told about another Wi-Fi network before it is moved — `available: false` with `reason` `"no-networkmanager"` or `"not-installed"` when this machine cannot — see [below](#wi-fi-networks-settingswifi). `apiKeys: {grantable}` is present on a hub that takes [API keys](#api-keys), and lists the permissions a key may be given. `space: {maxBytes, readsFloorPlans?}` is present on a hub that keeps the home's [3D plan](#the-3d-plan-space) — presence is the capability, and a hub without it has nowhere to keep one; `readsFloorPlans: true` is present on a hub that answers [`POST /space/floor-plan`](#reading-a-floor-plan-post-spacefloor-plan) |
+| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `matter: {bluetooth, bluetoothReason?, wifi, commissioning, settlingUntil?}` is present only while Matter is running and says what pairing this hub can actually do — and, in `settlingUntil`, whether it has finished finding the devices it already owns — see [below](#pairing-a-matter-accessory). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid). `wifiNetworks: {available, reason?}` is present on a hub that can be told about another Wi-Fi network before it is moved — `available: false` with `reason` `"no-networkmanager"` or `"not-installed"` when this machine cannot — see [below](#wi-fi-networks-settingswifi). `apiKeys: {grantable}` is present on a hub that takes [API keys](#api-keys), and lists the permissions a key may be given. `space: {maxBytes, readsFloorPlans?}` is present on a hub that keeps the home's [3D plan](#the-3d-plan-space) — presence is the capability, and a hub without it has nowhere to keep one; `readsFloorPlans: true` is present on a hub that answers [`POST /space/floor-plan`](#reading-a-floor-plan-post-spacefloor-plan), and `pictures: {model, maxPerRoom, maxPhotos}` on one that [draws rooms](#pictures-of-rooms-space-pictures) |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
 | `POST /hub/proof` | — | `{nonce, address, tokenId}` → `{hubId, proof}`: this hub proving it is itself **at the address the app dialled**, to an app holding one of its tokens, without the token being sent. `403 proof_refused` for an address that is not this hub's or a token it does not hold — one answer for both. For an app following a saved hub to a new address — see [below](#following-a-hub-to-a-new-address-post-hubproof) |
 | `GET /home` · `PATCH /home` | floor · `home.rename` | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name) |
@@ -256,6 +256,7 @@ than no button.
 | `GET /zones` · `POST /zones` · `PATCH /zones/:id` · `DELETE /zones/:id` | floor · `home.structure` | `{id, name, sortOrder}` — the optional layer above rooms, see [below](#rooms-and-zones). `POST {name, sortOrder?}`, `PATCH {name?, sortOrder?}`; a zone carries no look of its own, since nothing draws a zone as a thing. Deleting a zone keeps its rooms and leaves them in none |
 | `GET /space` · `PUT /space` · `DELETE /space` | floor · `home.structure` | the home's **3D plan**: `{space, revision, updatedAt, updatedBy: {id, name}}`, `space` `null` until somebody scans. `PUT {space, baseRevision?}` keeps a new one whole — `space` must be an object with `rooms` and `placements` lists, everything else in it is the app's — and answers the same shape with the next revision; a `baseRevision` older than the hub's is `409 {error: "space_conflict", revision}`, a plan over `maxBytes` is `413 space_too_large`. `DELETE` forgets it. Every write broadcasts the [`space` frame](#the-3d-plan-space) |
 | `POST /space/floor-plan` | `hub.ai` | read a picture of the home's floor plan into rooms in metres: `{image: base64, imageType?}` → `{rooms: [{name, matches, story, outline: [[x, z]…], doors: [{x, z, width}], windows: [{x, z, width}]}], scale, note, provider, model}`. Changes nothing — see [below](#reading-a-floor-plan-post-spacefloor-plan). `409 ai_not_configured`, `502 {error:"provider_failed", kind, detail}` |
+| `GET /space/pictures` · `GET /space/pictures/:id/day\|night` · `POST /space/pictures` · `DELETE /space/pictures/:id` | floor · floor · `hub.ai` · `home.structure` | pictures of the plan's rooms: the list `{pictures: [...]}` newest first, one picture's PNG (immutable), drawing one (`{roomId, roomName, view, size, structure, photos, planRevision?}`), removing one — see [below](#pictures-of-rooms-space-pictures). `409 openai_not_configured`, `409 picture_busy`, `409 no_space`, `502 {error:"provider_failed", kind, detail}` |
 | `GET /devices` | floor | full device list (wire shape below) |
 | `PATCH /devices/:id` | `device.edit` / floor (a key: `control`) | `{name?, roomId?, favorite?, offlineExpected?}`. Name, room and `offlineExpected` describe the house and everybody sees the same ones; **`favorite` is the caller's own** and nobody else's — see [below](#favorites-are-per-member). `roomId: null` takes a device out of its room; an unknown one is `404 unknown_room`. `offlineExpected` is a boolean in and a moment back out — see [below](#a-device-that-is-meant-to-be-offline). The response is this caller's view of the device |
 | `DELETE /devices/:id` | `device.remove` | also unpairs at the protocol level |
@@ -1465,6 +1466,33 @@ socket. It carries the revision and nothing else: the plan is one read away
 and may be a few hundred kilobytes, which no frame should carry to every
 phone. An app that already holds that revision ignores it.
 
+#### Pictures of rooms (`/space/pictures`)
+
+A room of the plan can be **drawn**: the app renders the room alone as plain
+clay through the camera it will show the picture through, sends that with up
+to eight photos of the room (`{roomId, roomName, view, size: "1024x1536" |
+"1536x1024", structure: base64 PNG, photos: [{data, type}], planRevision?}`),
+and the hub has OpenAI's `gpt-image-2.5-sunburst` redraw the clay in the
+room's own colours and materials — a **day** picture on a transparent ground,
+then a **night** one as an edit of the day, on an opaque ground the apps cut
+out with the day picture's outline. `view` is the app's camera and is kept
+exactly as sent; the hub never reads it.
+
+**It is the house's**, the portraits' argument: drawn once, every member's 3D
+view shows it. `hub.ai`, because it spends the home's OpenAI key, with its own
+`409 openai_not_configured`; **one drawing at a time**, refused rather than
+queued (`409 picture_busy`), because every drawing bills the home; a refusal
+to draw on a nearly full card (`409 no_space`). A night picture that fails
+keeps the day one (`hasNight: false`). The record is `{id, roomId, at, view,
+size, hasNight, photoCount, bytes, model, planRevision, drawnBy: {id, name}}`.
+
+**Files and a manifest**, the plan's shape: `<data>/space/pictures/<id>-day.png`
+and `-night.png` beside `<data>/space/pictures.json`. Three per room, the newest
+kept, and 200 MB in all, the oldest going first. **The photos are not kept** —
+they are used for the drawing and dropped. Each drawing writes one `ai_runs`
+row (`kind: "roompicture"`) priced from the response's usage. Each change
+broadcasts `{"type":"spacePictures","roomId"}`.
+
 #### Reading a floor plan (`POST /space/floor-plan`)
 
 A plan is put together from scans, and a scan needs a phone with LiDAR and a
@@ -2606,6 +2634,7 @@ authorized socket:
 {"type":"structure","rooms":[…],"zones":[…]}            rooms/zones changed — both lists in full
 {"type":"portraits","deviceId"}                         a device's portraits changed — go and re-read the list
 {"type":"space","revision"}                             the home's 3D plan was saved — read GET /space
+{"type":"spacePictures","roomId"}                      a room's pictures changed — read GET /space/pictures
 
 {"type":"activity","entry":{id,at,kind,message,deviceId?,memberId?,data?}}
 {"type":"permitJoin","active":true,"remainingSeconds":60}

@@ -372,6 +372,8 @@ export function attachWebSocket(
    * an always-on frame left to a `default` arm reaches nobody.
    */
   const onSpace = live((revision: number) => send({ type: 'space', revision }));
+  /** A room's pictures moved — the `space` frame's reason, for a room's pictures. */
+  const onSpacePictures = live((roomId: string) => send({ type: 'spacePictures', roomId }));
   /**
    * One line of the home's history.
    *
@@ -483,6 +485,7 @@ export function attachWebSocket(
   deps.events.on('structureChanged', onStructure);
   deps.events.on('portraitsChanged', onPortraits);
   deps.events.on('spaceChanged', onSpace);
+  deps.events.on('spacePicturesChanged', onSpacePictures);
   deps.events.on('activity', onActivity);
   deps.events.on('accessChanged', onAccessChanged);
   deps.events.on('permitJoin', onPermitJoin);
@@ -702,6 +705,7 @@ export function attachWebSocket(
     deps.events.off('structureChanged', onStructure);
     deps.events.off('portraitsChanged', onPortraits);
     deps.events.off('spaceChanged', onSpace);
+    deps.events.off('spacePicturesChanged', onSpacePictures);
     deps.events.off('automationChanged', onAutomationChanged);
     deps.events.off('activity', onActivity);
     deps.events.off('accessChanged', onAccessChanged);

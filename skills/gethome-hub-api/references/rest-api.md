@@ -37,6 +37,7 @@ API keys, and every conversation with the hub's assistant or automations agent.
 | `GET /api/v1/rooms` | `[{id, name, zoneId, icon, accent, sortOrder}]` |
 | `GET /api/v1/zones` | `[{id, name, sortOrder}]` |
 | `GET /api/v1/space` | the home's 3D plan, as the app saved it: `{space, revision, updatedAt, updatedBy}` — `space` is `null` until somebody scans. Rooms carry the id of the room they are the shape of; read it, don't write it (see below) |
+| `GET /api/v1/space/pictures` · `GET /api/v1/space/pictures/{id}/{variant}` | pictures of the plan’s rooms, drawn by the app’s users: the list `{pictures: [{id, roomId, at, hasNight, …}]}` newest first, and one picture as a PNG — `variant` is `day` or `night`. Read-only for a key — drawing one spends the home's OpenAI key and is the app's |
 | `GET /api/v1/devices` | every device — see [devices-and-commands.md](devices-and-commands.md) |
 | `GET /api/v1/devices/{deviceId}/history?from=&to=&points=&series=` | recorded readings in five-minute buckets for about a week; `from`/`to` epoch ms |
 | `GET /api/v1/devices/{deviceId}/portraits` · `GET /api/v1/portraits/{portraitId}` | the pictures drawn of a device, and one picture itself as `image/png` (it never changes; a new one gets a new id) |
@@ -72,6 +73,7 @@ API keys, and every conversation with the hub's assistant or automations agent.
 | `POST /api/v1/rooms` · `PATCH /api/v1/rooms/{roomId}` · `DELETE /api/v1/rooms/{roomId}` | `home.structure` |
 | `POST /api/v1/zones` · `PATCH /api/v1/zones/{zoneId}` · `DELETE /api/v1/zones/{zoneId}` | `home.structure` |
 | `PUT /api/v1/space` `{"space": {…}, "baseRevision": n}` · `DELETE /api/v1/space` | `home.structure` — the plan is the app's document, made from a LiDAR scan; **don't write one by hand**, and never without `baseRevision` from your own read (a stale one answers `409 space_conflict`) |
+| `DELETE /api/v1/space/pictures/{id}` | `home.structure` — takes a room's picture away for everybody; the 3D view shows the room's model again |
 | `PATCH /api/v1/home` `{"name": "…"}` | `home.rename` |
 | `POST /api/v1/automations/dry-run` · `POST /api/v1/automations` · `PATCH /api/v1/automations/{automationId}` · `DELETE /api/v1/automations/{automationId}` | `automation.manage` |
 | `GET /api/v1/automations/{automationId}/versions` · `POST /api/v1/automations/{automationId}/revert` · `POST /api/v1/automations/templates/{key}` | `automation.manage` |

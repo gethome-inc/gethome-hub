@@ -49,6 +49,11 @@ export interface HubEvents {
    * model and would keep the old one until it happened to reconnect.
    */
   spaceChanged: [revision: number];
+  /**
+   * A room's pictures changed (`space/pictures.ts`) — one was drawn or
+   * removed. Carries the room and nothing else, the portrait reason.
+   */
+  spacePicturesChanged: [roomId: string];
   activity: [entry: ActivityEvent];
   permitJoin: [active: boolean, remainingSeconds: number];
   /**

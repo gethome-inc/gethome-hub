@@ -281,6 +281,10 @@ describe.skipIf(!handle)('API keys', () => {
     'PUT /api/v1/space': 'permission home.structure',
     'DELETE /api/v1/space': 'permission home.structure',
     'POST /api/v1/space/floor-plan': 'permission hub.ai',
+    'GET /api/v1/space/pictures': 'read',
+    'GET /api/v1/space/pictures/:id/:variant': 'read',
+    'POST /api/v1/space/pictures': 'permission hub.ai',
+    'DELETE /api/v1/space/pictures/:id': 'permission home.structure',
     'GET /api/v1/devices': 'read',
     // A pin is the floor's write and a name is `device.edit`, in one body.
     'PATCH /api/v1/devices/:id': 'handler',

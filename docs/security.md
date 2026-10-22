@@ -30,7 +30,9 @@ The only connections the hub itself ever makes outward are:
   the [privacy policy](https://gethome.me/privacy#ai); the engineering side is
   in [`ai-adaptation.md`](ai-adaptation.md), [`assistant.md`](assistant.md) and
   [`portraits.md`](portraits.md). A floor plan somebody asks the hub to read
-  goes to the provider device recognition uses, and is not kept
+  goes to the provider device recognition uses, and is not kept; the photos a
+  room is drawn from go to OpenAI and are not kept either, while the drawn
+  pictures are, beside the plan
   ([`api.md`](api.md#reading-a-floor-plan-post-spacefloor-plan)). With no key,
   nothing goes to any AI provider and devices still appear, flagged *needs
   review*.
