@@ -145,6 +145,8 @@ describe.skipIf(!handle)('hub API', () => {
       // readings at all, which is how it knows to offer a chart rather than a
       // doorway to a 404.
       history: { bucketSeconds: 300, retentionDays: 7 },
+      // Presence again: a hub carrying it draws pictures of rooms.
+      roomPictures: { model: 'gpt-image-2.5-sunburst', maxPerRoom: 3, maxPhotos: 8 },
       // Same rule, and here it is load-bearing rather than tidy: an app that
       // does not find this block must not ask for a sign-in code, because an
       // older hub strips the unknown `memberId` and answers with an ordinary
@@ -202,61 +204,6 @@ describe.skipIf(!handle)('hub API', () => {
     memberToken = body.token;
   });
 
-
-  it('keeps the 3D plan whole, counts its saves, and refuses a stale one', async () => {
-    const info = await app.inject({ method: 'GET', url: '/api/v1/hub' });
-    // Presence is the capability: an app that finds no block keeps a scan on
-    // the phone that made it instead of sending it here.
-    expect(info.json()).toMatchObject({
-      space: { maxBytes: 4 * 1024 * 1024, readsFloorPlans: true, pictures: { maxPerRoom: 3, maxPhotos: 8 } },
-    });
-
-    const empty = await app.inject({ method: 'GET', url: '/api/v1/space', headers: auth(memberToken) });
-    expect(empty.statusCode).toBe(200);
-    expect(empty.json()).toMatchObject({ space: null, revision: 0 });
-
-    // A field this hub has never heard of survives the trip — the plan is the
-    // app's vocabulary, and a newer app must not lose what an older hub
-    // doesn't know about.
-    const plan = {
-      format: 1,
-      rooms: [{ id: 'kitchen', floor: [[0, 0], [3, 0], [3, 3]], futureField: { kept: true } }],
-      placements: [],
-    };
-    const saved = await app.inject({
-      method: 'PUT',
-      url: '/api/v1/space',
-      headers: auth(ownerToken),
-      payload: { space: plan, baseRevision: 0 },
-    });
-    expect(saved.statusCode).toBe(200);
-    expect(saved.json()).toMatchObject({ revision: 1, space: plan, updatedBy: { name: 'Georgy' } });
-
-    const read = await app.inject({ method: 'GET', url: '/api/v1/space', headers: auth(memberToken) });
-    expect(read.json()).toMatchObject({ revision: 1, space: plan });
-
-    // Somebody else saved since revision 0 was read: nothing is overwritten,
-    // and the answer says which revision to read.
-    const stale = await app.inject({
-      method: 'PUT',
-      url: '/api/v1/space',
-      headers: auth(ownerToken),
-      payload: { space: { ...plan, rooms: [] }, baseRevision: 0 },
-    });
-    expect(stale.statusCode).toBe(409);
-    expect(stale.json()).toMatchObject({ error: 'space_conflict', revision: 1 });
-
-    const malformed = await app.inject({
-      method: 'PUT',
-      url: '/api/v1/space',
-      headers: auth(ownerToken),
-      payload: { space: { rooms: 'not a list', placements: [] } },
-    });
-    expect(malformed.statusCode).toBe(400);
-
-    const cleared = await app.inject({ method: 'DELETE', url: '/api/v1/space', headers: auth(ownerToken) });
-    expect(cleared.json()).toMatchObject({ space: null, revision: 2 });
-  });
   it('points each caller at its own row in the member list', async () => {
     type Row = { id: string; name: string; role: string; isSelf: boolean };
     const asMember = (

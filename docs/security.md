@@ -17,9 +17,7 @@ outside.
 There is no cloud account, no relay and no tunnel: the hub opens no inbound
 path through your router. Your devices, your rooms, your rules, your history and
 your members live in one SQLite file on the hub's own card, and the apps reach
-it over your own Wi-Fi. The home's 3D plan — the shape of each room somebody
-scanned and where the devices stand in it, never a photograph — is a file
-beside it (`<data>/space/plan.json`), and goes nowhere either.
+it over your own Wi-Fi.
 
 ## What leaves the hub
 
@@ -29,13 +27,11 @@ The only connections the hub itself ever makes outward are:
   only for the AI feature you use. What each feature sends, and to whom, is in
   the [privacy policy](https://gethome.me/privacy#ai); the engineering side is
   in [`ai-adaptation.md`](ai-adaptation.md), [`assistant.md`](assistant.md) and
-  [`portraits.md`](portraits.md). A floor plan somebody asks the hub to read
-  goes to the provider device recognition uses, and is not kept; the photos a
-  room is drawn from go to OpenAI and are not kept either, while the drawn
-  pictures are, beside the plan
-  ([`api.md`](api.md#reading-a-floor-plan-post-spacefloor-plan)). With no key,
-  nothing goes to any AI provider and devices still appear, flagged *needs
-  review*.
+  [`portraits.md`](portraits.md). Photos of a room somebody has drawn go to
+  OpenAI and are not kept; the picture is, and is shown to the recognition
+  provider to read its devices off ([`api.md`](api.md#room-pictures)). With
+  no key, nothing goes to any AI provider and devices still appear, flagged
+  *needs review*.
 - **To GitHub**, when it checks whether a newer build exists: when an app asks,
   and — only where somebody has switched on automatic updates — once a night, at
   the hour the hub has chosen to update in (asked again that night only if

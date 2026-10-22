@@ -14,7 +14,7 @@ reading; the key's member must also hold any permission named. The hub's
 | `device.edit` | rename devices, move them between rooms, mark one as expected to be offline, choose a portrait |
 | `device.add` | open the Zigbee network, pair a Matter accessory, look for accessories to pair |
 | `device.remove` | take a device out of the home and unpair it |
-| `home.structure` | add, rename, restyle and delete rooms and zones, and save the home's 3D plan |
+| `home.structure` | add, rename, restyle and delete rooms and zones |
 | `home.rename` | rename the home (and the hub) |
 | `activity.read` | read everybody's activity, not only its member's |
 | `automation.manage` | create, change, delete and revert rules (needs `control`) |
@@ -36,10 +36,9 @@ API keys, and every conversation with the hub's assistant or automations agent.
 | `GET /api/v1/home` | `{id, name}` |
 | `GET /api/v1/rooms` | `[{id, name, zoneId, icon, accent, sortOrder}]` |
 | `GET /api/v1/zones` | `[{id, name, sortOrder}]` |
-| `GET /api/v1/space` | the home's 3D plan, as the app saved it: `{space, revision, updatedAt, updatedBy}` — `space` is `null` until somebody scans. Rooms carry the id of the room they are the shape of; read it, don't write it (see below) |
-| `GET /api/v1/space/pictures` · `GET /api/v1/space/pictures/{id}/{variant}` | pictures of the plan’s rooms, drawn by the app’s users: the list `{pictures: [{id, roomId, at, hasNight, …}]}` newest first, and one picture as a PNG — `variant` is `day` or `night`. Read-only for a key — drawing one spends the home's OpenAI key and is the app's |
 | `GET /api/v1/devices` | every device — see [devices-and-commands.md](devices-and-commands.md) |
 | `GET /api/v1/devices/{deviceId}/history?from=&to=&points=&series=` | recorded readings in five-minute buckets for about a week; `from`/`to` epoch ms |
+| `GET /api/v1/room-pictures` · `GET /api/v1/room-pictures/{id}/{variant}` | pictures of the home's rooms, drawn from photos by the app's users: the list `{pictures: [{id, roomId, at, hasNight, markers: [{deviceId, x, y, source}], …}]}` newest first, and one picture as `image/png` — `variant` is `day` or `night`. `x` and `y` are fractions of the picture, from its top-left corner. Drawing one spends the home's OpenAI key and is the app's |
 | `GET /api/v1/devices/{deviceId}/portraits` · `GET /api/v1/portraits/{portraitId}` | the pictures drawn of a device, and one picture itself as `image/png` (it never changes; a new one gets a new id) |
 | `GET /api/v1/members` | who is in the home |
 | `GET /api/v1/roles` · `GET /api/v1/permissions` | the role table and the permission catalog, with the hub's own wording |
@@ -67,13 +66,12 @@ API keys, and every conversation with the hub's assistant or automations agent.
 |---|---|
 | `PATCH /api/v1/devices/{deviceId}` with `name`, `roomId` or `offlineExpected` | `device.edit` |
 | `PATCH /api/v1/devices/{deviceId}/portraits` · `DELETE /api/v1/portraits/{portraitId}` | `device.edit` |
+| `PATCH /api/v1/room-pictures/{id}` `{"markers": [{"deviceId", "x", "y"}]}` · `DELETE /api/v1/room-pictures/{id}` | `home.structure` — moves where devices stand on a room's picture (the whole list, replacing the old), or takes the picture away, for everybody in the home |
 | `DELETE /api/v1/devices/{deviceId}` | `device.remove` — **ask the person first** |
 | `POST /api/v1/zigbee/permit-join` `{"seconds": 120}` | `device.add` |
 | `POST /api/v1/matter/commission` `{"pairingCode": "…"}` · `POST /api/v1/matter/commission/{jobId}/cancel` · `GET /api/v1/matter/discoverable` | `device.add` |
 | `POST /api/v1/rooms` · `PATCH /api/v1/rooms/{roomId}` · `DELETE /api/v1/rooms/{roomId}` | `home.structure` |
 | `POST /api/v1/zones` · `PATCH /api/v1/zones/{zoneId}` · `DELETE /api/v1/zones/{zoneId}` | `home.structure` |
-| `PUT /api/v1/space` `{"space": {…}, "baseRevision": n}` · `DELETE /api/v1/space` | `home.structure` — the plan is the app's document, made from a LiDAR scan; **don't write one by hand**, and never without `baseRevision` from your own read (a stale one answers `409 space_conflict`) |
-| `DELETE /api/v1/space/pictures/{id}` | `home.structure` — takes a room's picture away for everybody; the 3D view shows the room's model again |
 | `PATCH /api/v1/home` `{"name": "…"}` | `home.rename` |
 | `POST /api/v1/automations/dry-run` · `POST /api/v1/automations` · `PATCH /api/v1/automations/{automationId}` · `DELETE /api/v1/automations/{automationId}` | `automation.manage` |
 | `GET /api/v1/automations/{automationId}/versions` · `POST /api/v1/automations/{automationId}/revert` · `POST /api/v1/automations/templates/{key}` | `automation.manage` |
