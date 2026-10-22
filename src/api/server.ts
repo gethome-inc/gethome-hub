@@ -90,6 +90,14 @@ import { hostFromRequest, mqttAccess, type MqttBrokerConfig } from '../core/mqtt
 import { isHistoryKind, type HistoryKind, type HistoryService } from '../core/history.js';
 // Files and rows, and `fetch` when it draws. No SDK, so no dynamic import.
 import { PortraitBusyError, PortraitSpaceError, type PortraitService } from '../portraits/store.js';
+import {
+  MAX_SPACE_BYTES,
+  MAX_SPACE_PLACEMENTS,
+  MAX_SPACE_ROOMS,
+  SpaceSaveError,
+  SpaceStore,
+  type SpaceRecord,
+} from '../core/space.js';
 import { PortraitDrawError } from '../portraits/openai-images.js';
 import { MAX_WINDOW_SECONDS, type PermitJoinService } from '../core/permit-join.js';
 import { createHubStatusReader } from '../core/hub-status.js';
@@ -421,6 +429,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   // and leaving every other module at the configured level. An operator who
   // asked for `debug` or `trace` clearly wants the requests, so they keep them.
   const verbose = deps.log.level === 'trace' || deps.log.level === 'debug';
+  // The home's 3D plan (`core/space.ts`): a file under the data directory,
+  // so it needs nothing from the caller and every test gets a fresh one.
+  const space = new SpaceStore(deps.dataDir, deps.events);
   const app = Fastify({
     loggerInstance: deps.log.child(
       { module: 'api' },
@@ -793,6 +804,11 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // is a different question, and it is answered by `GET /settings/ai` —
     // which not every member of a home may read.
     portraits: deps.portraits.describe(),
+    // Additive, and presence is the capability: a hub carrying this block keeps
+    // the home's **3D plan** (`GET/PUT /space`) for everybody in it. Read it
+    // rather than waiting for a 404: a client has to know where a scan will
+    // be kept before somebody spends a quarter of an hour making one.
+    space: space.describe(),
     // Additive, and presence is the capability once more: a hub carrying this
     // block mints **sign-in codes** (`POST /invites {memberId}`), so somebody
     // already in the home comes back on another device as themselves rather
@@ -1301,6 +1317,64 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   };
 
   // ── Devices & commands ───────────────────────────────────────────────────
+
+  // ---------------------------------------------------------------------------
+  // The 3D plan — `core/space.ts`. The app's document, kept whole: the hub
+  // checks the envelope and counts saves, and never reads a wall.
+
+  const spaceWire = (record: SpaceRecord) => ({
+    space: record.space,
+    revision: record.revision,
+    updatedAt: record.updatedAt,
+    updatedBy: record.updatedBy,
+  });
+
+  app.get('/api/v1/space', authed, async () => spaceWire(space.read()));
+
+  app.put(
+    '/api/v1/space',
+    {
+      // The plan is the home's shape, so it is the permission rooms and zones
+      // already are — not a key of its own that every role would then need.
+      ...needs('home.structure'),
+      // The default is 1 MiB; a large house's plan can be a few. Per route, so
+      // nothing else grows a mouth this size.
+      bodyLimit: MAX_SPACE_BYTES + 64 * 1024,
+    },
+    async (request, reply) => {
+      const body = z
+        .object({
+          // Loose on purpose: everything inside a room is the app's vocabulary,
+          // and an app newer than this hub must be able to save fields the hub
+          // has never heard of without them being stripped on the way in.
+          space: z.looseObject({
+            format: z.number().int().positive().optional(),
+            rooms: z.array(z.unknown()).max(MAX_SPACE_ROOMS),
+            placements: z.array(z.unknown()).max(MAX_SPACE_PLACEMENTS),
+          }),
+          /** The revision this plan was read at; a newer one here answers 409. */
+          baseRevision: z.number().int().nonnegative().nullable().optional(),
+        })
+        .parse(request.body);
+      const who = actor(request);
+      try {
+        const saved = space.save(body.space, body.baseRevision, { id: who.memberId, name: who.name });
+        return spaceWire(saved);
+      } catch (error) {
+        if (error instanceof SpaceSaveError) {
+          return reply
+            .code(error.code === 'space_conflict' ? 409 : 413)
+            .send({ error: error.code, revision: error.revision });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.delete('/api/v1/space', needs('home.structure'), async (request) => {
+    const who = actor(request);
+    return spaceWire(space.clear({ id: who.memberId, name: who.name }));
+  });
 
   app.get('/api/v1/devices', authed, async (request) => {
     const memberId = request.member!.id;

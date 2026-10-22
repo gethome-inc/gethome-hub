@@ -14,7 +14,7 @@ reading; the key's member must also hold any permission named. The hub's
 | `device.edit` | rename devices, move them between rooms, mark one as expected to be offline, choose a portrait |
 | `device.add` | open the Zigbee network, pair a Matter accessory, look for accessories to pair |
 | `device.remove` | take a device out of the home and unpair it |
-| `home.structure` | add, rename, restyle and delete rooms and zones |
+| `home.structure` | add, rename, restyle and delete rooms and zones, and save the home's 3D plan |
 | `home.rename` | rename the home (and the hub) |
 | `activity.read` | read everybody's activity, not only its member's |
 | `automation.manage` | create, change, delete and revert rules (needs `control`) |
@@ -36,6 +36,7 @@ API keys, and every conversation with the hub's assistant or automations agent.
 | `GET /api/v1/home` | `{id, name}` |
 | `GET /api/v1/rooms` | `[{id, name, zoneId, icon, accent, sortOrder}]` |
 | `GET /api/v1/zones` | `[{id, name, sortOrder}]` |
+| `GET /api/v1/space` | the home's 3D plan, as the app saved it: `{space, revision, updatedAt, updatedBy}` — `space` is `null` until somebody scans. Rooms carry the id of the room they are the shape of; read it, don't write it (see below) |
 | `GET /api/v1/devices` | every device — see [devices-and-commands.md](devices-and-commands.md) |
 | `GET /api/v1/devices/{deviceId}/history?from=&to=&points=&series=` | recorded readings in five-minute buckets for about a week; `from`/`to` epoch ms |
 | `GET /api/v1/devices/{deviceId}/portraits` · `GET /api/v1/portraits/{portraitId}` | the pictures drawn of a device, and one picture itself as `image/png` (it never changes; a new one gets a new id) |
@@ -70,6 +71,7 @@ API keys, and every conversation with the hub's assistant or automations agent.
 | `POST /api/v1/matter/commission` `{"pairingCode": "…"}` · `POST /api/v1/matter/commission/{jobId}/cancel` · `GET /api/v1/matter/discoverable` | `device.add` |
 | `POST /api/v1/rooms` · `PATCH /api/v1/rooms/{roomId}` · `DELETE /api/v1/rooms/{roomId}` | `home.structure` |
 | `POST /api/v1/zones` · `PATCH /api/v1/zones/{zoneId}` · `DELETE /api/v1/zones/{zoneId}` | `home.structure` |
+| `PUT /api/v1/space` `{"space": {…}, "baseRevision": n}` · `DELETE /api/v1/space` | `home.structure` — the plan is the app's document, made from a LiDAR scan; **don't write one by hand**, and never without `baseRevision` from your own read (a stale one answers `409 space_conflict`) |
 | `PATCH /api/v1/home` `{"name": "…"}` | `home.rename` |
 | `POST /api/v1/automations/dry-run` · `POST /api/v1/automations` · `PATCH /api/v1/automations/{automationId}` · `DELETE /api/v1/automations/{automationId}` | `automation.manage` |
 | `GET /api/v1/automations/{automationId}/versions` · `POST /api/v1/automations/{automationId}/revert` · `POST /api/v1/automations/templates/{key}` | `automation.manage` |

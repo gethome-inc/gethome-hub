@@ -39,6 +39,16 @@ export interface HubEvents {
    * happened to reconnect. Same argument as `structure`.
    */
   portraitsChanged: [deviceId: string];
+  /**
+   * The home's 3D plan was saved or cleared (`core/space.ts`).
+   *
+   * Carries the new revision and nothing else, for the portrait reason: the
+   * plan is one read away and can be a few hundred kilobytes, which no frame
+   * should carry to every phone. Always-on and to every socket, because a
+   * plan is the house's — the phone in the next room is looking at the same
+   * model and would keep the old one until it happened to reconnect.
+   */
+  spaceChanged: [revision: number];
   activity: [entry: ActivityEvent];
   permitJoin: [active: boolean, remainingSeconds: number];
   /**

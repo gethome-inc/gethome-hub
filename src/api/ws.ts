@@ -227,6 +227,7 @@ const MAX_CLIENT_MESSAGE_BYTES = 4096;
  *   {"type":"deviceUpserted","device":{…GET /devices item…}}
  *   {"type":"deviceRemoved","deviceId"}
  *   {"type":"structure","rooms":[…GET /rooms…],"zones":[…GET /zones…]}
+ *   {"type":"space","revision"}   the home's 3D plan was saved — read GET /space
  *   {"type":"activity","entry":{id,at,kind,message,deviceId?,memberId?}}
  *   {"type":"permitJoin","active","remainingSeconds"}
  *   {"type":"commissioning","jobId","status","detail"?}
@@ -367,6 +368,11 @@ export function attachWebSocket(
    */
   const onPortraits = live((deviceId: string) => send({ type: 'portraits', deviceId }));
   /**
+   * The home's 3D plan moved. Wired beside `portraits` and for its reason —
+   * an always-on frame left to a `default` arm reaches nobody.
+   */
+  const onSpace = live((revision: number) => send({ type: 'space', revision }));
+  /**
    * One line of the home's history.
    *
    * Filtered per socket, and **asked at send time rather than captured when
@@ -476,6 +482,7 @@ export function attachWebSocket(
   deps.events.on('commandFailed', onCommandFailed);
   deps.events.on('structureChanged', onStructure);
   deps.events.on('portraitsChanged', onPortraits);
+  deps.events.on('spaceChanged', onSpace);
   deps.events.on('activity', onActivity);
   deps.events.on('accessChanged', onAccessChanged);
   deps.events.on('permitJoin', onPermitJoin);
@@ -694,6 +701,7 @@ export function attachWebSocket(
     deps.events.off('commandFailed', onCommandFailed);
     deps.events.off('structureChanged', onStructure);
     deps.events.off('portraitsChanged', onPortraits);
+    deps.events.off('spaceChanged', onSpace);
     deps.events.off('automationChanged', onAutomationChanged);
     deps.events.off('activity', onActivity);
     deps.events.off('accessChanged', onAccessChanged);

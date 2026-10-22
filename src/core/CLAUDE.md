@@ -445,3 +445,16 @@ there, because those reach the routes as well. `docs/api.md` and
   `gethome_` and 43 base-62 characters (`crypto.ts`) — letters and digits so it
   copies whole from a terminal, and fixed-length so a string of that shape is a
   gethome key and nothing else — and only its sha256 is ever stored.
+- **The home's 3D plan is the app's document, kept whole** (`src/core/space.ts`,
+  `docs/api.md` → *The 3D plan* is canonical). The hub checks the envelope —
+  an object with `rooms` and `placements` lists, bounded in count and in bytes
+  — and keeps everything inside it as sent, fields it has never heard of
+  included, because what a wall or a sofa is belongs to the app's vocabulary
+  and a second schema here would go stale on the first new piece of furniture.
+  What the hub owns is the **revision**: every save names the one it was read
+  at and a stale one is `409 space_conflict`, which is what lets two phones
+  scan two rooms at once without one losing its scan. A file, not a row, and
+  written beside a temporary then renamed: one deliberate write per save, so
+  it is bounded by size, the portrait argument. Saving is `home.structure`,
+  the permission rooms and zones already are; reading is the floor. The
+  `space` frame carries the revision only — the plan is one read away.

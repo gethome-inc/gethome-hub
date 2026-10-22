@@ -248,12 +248,13 @@ than no button.
 
 | Method & path | Needs | Notes |
 |---|---|---|
-| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `matter: {bluetooth, bluetoothReason?, wifi, commissioning, settlingUntil?}` is present only while Matter is running and says what pairing this hub can actually do — and, in `settlingUntil`, whether it has finished finding the devices it already owns — see [below](#pairing-a-matter-accessory). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid). `wifiNetworks: {available, reason?}` is present on a hub that can be told about another Wi-Fi network before it is moved — `available: false` with `reason` `"no-networkmanager"` or `"not-installed"` when this machine cannot — see [below](#wi-fi-networks-settingswifi). `apiKeys: {grantable}` is present on a hub that takes [API keys](#api-keys), and lists the permissions a key may be given |
+| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `matter: {bluetooth, bluetoothReason?, wifi, commissioning, settlingUntil?}` is present only while Matter is running and says what pairing this hub can actually do — and, in `settlingUntil`, whether it has finished finding the devices it already owns — see [below](#pairing-a-matter-accessory). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid). `wifiNetworks: {available, reason?}` is present on a hub that can be told about another Wi-Fi network before it is moved — `available: false` with `reason` `"no-networkmanager"` or `"not-installed"` when this machine cannot — see [below](#wi-fi-networks-settingswifi). `apiKeys: {grantable}` is present on a hub that takes [API keys](#api-keys), and lists the permissions a key may be given. `space: {maxBytes}` is present on a hub that keeps the home's [3D plan](#the-3d-plan-space) — presence is the capability, and a hub without it has nowhere to keep one |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
 | `POST /hub/proof` | — | `{nonce, address, tokenId}` → `{hubId, proof}`: this hub proving it is itself **at the address the app dialled**, to an app holding one of its tokens, without the token being sent. `403 proof_refused` for an address that is not this hub's or a token it does not hold — one answer for both. For an app following a saved hub to a new address — see [below](#following-a-hub-to-a-new-address-post-hubproof) |
 | `GET /home` · `PATCH /home` | floor · `home.rename` | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name) |
 | `GET /rooms` · `POST /rooms` · `PATCH /rooms/:id` · `DELETE /rooms/:id` | floor · `home.structure` | `{id, name, zoneId, icon, accent, sortOrder}`. `POST` takes `{name, zoneId?, icon?, accent?, sortOrder?}` — the name is the only required field anywhere here — and `PATCH` takes the same set with every field optional; `zoneId: null` means "in no zone", and `icon: null` / `accent: null` mean "back to the look the app derives" — each different from leaving the field out. `icon`/`accent` are opaque app tokens (1–40 chars, see [below](#rooms-and-zones)). Names are trimmed before they are measured (1–80), an unknown `zoneId` is `404 unknown_zone`, and a new room goes to the *end* of the order. Deleting a room does not delete its devices — they are simply in no room. Every write broadcasts the [`structure` frame](#rooms-and-zones) |
 | `GET /zones` · `POST /zones` · `PATCH /zones/:id` · `DELETE /zones/:id` | floor · `home.structure` | `{id, name, sortOrder}` — the optional layer above rooms, see [below](#rooms-and-zones). `POST {name, sortOrder?}`, `PATCH {name?, sortOrder?}`; a zone carries no look of its own, since nothing draws a zone as a thing. Deleting a zone keeps its rooms and leaves them in none |
+| `GET /space` · `PUT /space` · `DELETE /space` | floor · `home.structure` | the home's **3D plan**: `{space, revision, updatedAt, updatedBy: {id, name}}`, `space` `null` until somebody scans. `PUT {space, baseRevision?}` keeps a new one whole — `space` must be an object with `rooms` and `placements` lists, everything else in it is the app's — and answers the same shape with the next revision; a `baseRevision` older than the hub's is `409 {error: "space_conflict", revision}`, a plan over `maxBytes` is `413 space_too_large`. `DELETE` forgets it. Every write broadcasts the [`space` frame](#the-3d-plan-space) |
 | `GET /devices` | floor | full device list (wire shape below) |
 | `PATCH /devices/:id` | `device.edit` / floor (a key: `control`) | `{name?, roomId?, favorite?, offlineExpected?}`. Name, room and `offlineExpected` describe the house and everybody sees the same ones; **`favorite` is the caller's own** and nobody else's — see [below](#favorites-are-per-member). `roomId: null` takes a device out of its room; an unknown one is `404 unknown_room`. `offlineExpected` is a boolean in and a moment back out — see [below](#a-device-that-is-meant-to-be-offline). The response is this caller's view of the device |
 | `DELETE /devices/:id` | `device.remove` | also unpairs at the protocol level |
@@ -1422,6 +1423,47 @@ A room's `icon`/`accent` write nothing, and neither does the order rooms are
 listed in — that one never reaches the hub at all, because it is each phone's
 own preference (see the gethome app's `CLAUDE.md`).
 
+### The 3D plan (`/space`)
+
+A home's **3D plan** is the shape of its rooms and where its devices stand in
+them — the kind of thing a phone's LiDAR room scanner measures: each room's
+floor outline, its walls as lines with doors and windows measured along them,
+the furniture as labelled boxes, and where each device is. No mesh, no
+photograph — a room is a few kilobytes.
+
+**It is the house's, so it lives here**, for the reason rooms and portraits
+do: kept on one phone, it would be one person's. Kept on the hub, a room
+scanned on one phone is there for every member's.
+
+**The hub keeps the document whole and does not read it.** A room's shape and
+a piece of furniture's category are the client's vocabulary, which it grows;
+a second schema here would go stale the first time it learnt a new piece of
+furniture. So `PUT /space` checks the envelope — an object, a `rooms` list of
+at most 400 and a `placements` list of at most 4000, no larger than `maxBytes`
+(4 MiB) in all — and keeps everything inside it exactly as sent, fields this
+hub has never heard of included. A room's `id` is the hub room it is the shape
+of; nothing here enforces that, because a plan may hold a room scanned before
+anybody said which room it was.
+
+**`revision` is what lets two phones scan at once.** It counts saves. An app
+sends the revision it read as `baseRevision`; if somebody else saved in
+between, the hub writes nothing and answers `409 space_conflict` with the
+current revision, and the app reads the newer plan and makes its change to
+that — so neither scan is lost. A save without `baseRevision` is accepted as
+is, so send one.
+
+**A file, not a row**: `<data>/space/plan.json`, written beside a temporary and
+renamed over the old one, so a power cut mid-save leaves the previous plan.
+One deliberate write per save — a finished scan, a lamp moved by hand — so it
+is bounded by size rather than by frequency, the portrait argument. Saving
+needs `home.structure`, the permission rooms and zones already are: the plan
+is the home's shape. Reading is the floor.
+
+Each save or `DELETE` broadcasts `{"type":"space","revision"}` to every
+socket. It carries the revision and nothing else: the plan is one read away
+and may be a few hundred kilobytes, which no frame should carry to every
+phone. An app that already holds that revision ignores it.
+
 ### Which room a rule is in
 
 Every automation on the wire carries `roomId`: **the one room every device the
@@ -2528,6 +2570,7 @@ authorized socket:
 {"type":"commandFailed","deviceId","property","kind","detail"}   a write never reached the device
 {"type":"structure","rooms":[…],"zones":[…]}            rooms/zones changed — both lists in full
 {"type":"portraits","deviceId"}                         a device's portraits changed — go and re-read the list
+{"type":"space","revision"}                             the home's 3D plan was saved — read GET /space
 
 {"type":"activity","entry":{id,at,kind,message,deviceId?,memberId?,data?}}
 {"type":"permitJoin","active":true,"remainingSeconds":60}

@@ -17,7 +17,9 @@ outside.
 There is no cloud account, no relay and no tunnel: the hub opens no inbound
 path through your router. Your devices, your rooms, your rules, your history and
 your members live in one SQLite file on the hub's own card, and the apps reach
-it over your own Wi-Fi.
+it over your own Wi-Fi. The home's 3D plan — the shape of each room somebody
+scanned and where the devices stand in it, never a photograph — is a file
+beside it (`<data>/space/plan.json`), and goes nowhere either.
 
 ## What leaves the hub
 

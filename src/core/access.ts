@@ -79,7 +79,7 @@ export const PERMISSIONS: readonly PermissionDescriptor[] = [
     group: 'Home',
     title: 'Change rooms and zones',
     summary:
-      'Add, rename, restyle and delete rooms and zones. A deleted room keeps its devices.',
+      'Add, rename, restyle and delete rooms and zones, and scan rooms into the 3D plan. A deleted room keeps its devices.',
   },
   {
     key: 'home.rename',
