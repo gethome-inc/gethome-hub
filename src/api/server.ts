@@ -44,7 +44,6 @@ import type { MappingLibrary } from '../ai/library.js';
 import { RoomPictureDrawError } from '../room-pictures/draw.js';
 import {
   MAX_PHOTOS,
-  MAX_PORTRAITS,
   PictureBusyError,
   PictureSpaceError,
   RoomPictureService,
@@ -1392,16 +1391,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       const apiKey = await deps.settings.aiKey('openai');
       if (!apiKey) return reply.code(409).send({ error: 'openai_not_configured' });
 
+      // For the reading afterwards only: the drawing is told about no device,
+      // so it draws none the photos don't show (`room-pictures/prompts.ts`).
       const devices = pictureDevices(room.id);
-      // What the home already has a picture of: the selected portrait of a
-      // few of the room's devices, so the drawing knows what they look like.
-      const portraits: { device: (typeof devices)[number]; bytes: Buffer }[] = [];
-      for (const device of devices) {
-        if (portraits.length >= MAX_PORTRAITS) break;
-        const selected = (await deps.portraits.list(device.id)).find((portrait) => portrait.selected);
-        const file = selected ? await deps.portraits.read(selected.id) : null;
-        if (file) portraits.push({ device, bytes: file.bytes });
-      }
 
       try {
         return await roomPictures.draw({
@@ -1410,7 +1402,6 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
           orientation: body.orientation,
           photos: body.photos.map((photo) => ({ bytes: Buffer.from(photo.data, 'base64'), contentType: photo.type })),
           devices,
-          portraits,
           apiKey,
           locator: pictureLocator,
           member: { id: request.member!.id, name: request.member!.name },

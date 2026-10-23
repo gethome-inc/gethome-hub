@@ -2225,10 +2225,12 @@ been removed, and the row read next week is all that is left of them.
 A room can be **drawn**: from one to eight phone photos of it, the hub has
 OpenAI's `gpt-image-2.5-sunburst` draw the room as the isometric cutaway a
 smart-home app shows — the two near walls removed, the room's real shape,
-furniture, colours and materials — on a transparent ground. The room's devices
-are named in the prompt, so they are drawn where the photos show them or where
-they would plausibly be, and the selected [portrait](#device-portraits) of up
-to three of them goes with the photos, to show what they look like.
+furniture, colours and materials — on a transparent ground. **Only what the
+photos show is drawn**: the prompt names no device and asks for nothing the
+photos don't have, since a sensor too small to see in a photo would otherwise
+be invented — painted into the room, somewhere it isn't. A device the photos
+show is drawn because they show it; every device gets its place from the
+reading below.
 
 **Then the devices are read off it.** The day picture is shown to device
 recognition's provider and model (on the home's own key) with the room's

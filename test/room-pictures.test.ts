@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { HubEventBus } from '../src/core/bus.js';
 import { pictureCostUsd, RoomPictureDrawError } from '../src/room-pictures/draw.js';
 import { LocateError, locateDevices, normaliseAnswer } from '../src/room-pictures/locate.js';
-import { dayPrompt, describeKind } from '../src/room-pictures/prompts.js';
+import { dayPrompt, describeKind, locatePrompt } from '../src/room-pictures/prompts.js';
 import { PictureBusyError, RoomPictureService, type Locator } from '../src/room-pictures/store.js';
 
 /**
@@ -52,7 +52,6 @@ const input = {
     { bytes: png(4), contentType: 'image/jpeg' },
   ],
   devices,
-  portraits: [{ device: devices[0]!, bytes: png(7) }],
   apiKey: 'sk-test',
   locator,
   member: { id: 'member-1', name: 'Georgy' },
@@ -63,13 +62,15 @@ describe('RoomPictureService', () => {
     const { pictures, draw, locate, heard } = service();
     const record = await pictures.draw(input);
 
-    // The day: photos first, then the device's portrait, on a transparent ground.
+    // The day: the photos and nothing else, on a transparent ground — no
+    // device named and no portrait, so none is drawn the photos don't show.
     const day = (draw.mock.calls[0] as unknown[])[0] as Record<string, unknown>;
-    expect((day['images'] as unknown[]).length).toBe(3);
+    expect((day['images'] as unknown[]).length).toBe(2);
     expect(day['background']).toBe('transparent');
     expect(day['size']).toBe('1024x1536');
     expect(String(day['prompt'])).toContain('“Living Room”');
-    expect(String(day['prompt'])).toContain('image 3 is “Light TV”');
+    expect(String(day['prompt'])).not.toContain('Light TV');
+    expect(String(day['prompt'])).toContain('Draw only what the photos show.');
 
     // The devices were read off the day picture, and the answer came before the night.
     expect(locate).toHaveBeenCalledTimes(1);
@@ -226,10 +227,11 @@ describe('reading the devices off a picture', () => {
 });
 
 describe('the words', () => {
-  it('names the devices and what each kind is', () => {
-    const prompt = dayPrompt('Bedroom', 3, devices, [], 'portrait');
-    expect(prompt).toContain('“Light TV” (a smart plug — draw what it powers)');
+  it('draws from the photos alone, and reads the devices by name and kind', () => {
+    const prompt = dayPrompt('Bedroom', 3, 'portrait');
     expect(prompt).toContain('first 3 images are phone photos');
+    expect(prompt).toContain('no devices, sensors, gadgets');
+    expect(locatePrompt(devices)).toContain('- tv: “Light TV” (a smart plug — look for what it powers)');
     expect(describeKind('kettle-of-the-future')).toBe('a smart device');
   });
 

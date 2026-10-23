@@ -8,9 +8,15 @@
  * Each image's role is named, because a model given a pile of pictures blends
  * them.
  *
- * **The devices are asked for by name**, so they are drawn where the photos
- * show them or where they would plausibly be — which is what lets the reading
- * afterwards put each marker on the thing itself rather than on empty floor.
+ * **Nothing is asked for that the photos don't show.** The prompt names no
+ * device and carries no portrait. It did both once, so that every device would
+ * be drawn for its marker to stand on — and a sensor too small to see in any
+ * photo was then invented, drawn somewhere it is not, in a picture of a room
+ * the person who lives there is meant to recognise. The devices are found on
+ * the finished picture instead (`locatePrompt`): on the thing itself where it
+ * was drawn because the photos showed it, and where it most plausibly is where
+ * it wasn't — a marker, which a person can move, rather than an object painted
+ * into their room.
  *
  * **Day, then night as an edit of the day** — the same picture with the light
  * changed, so the apps cross from one to the other with nothing moving.
@@ -28,13 +34,13 @@ const STYLE =
   'subtle sheen, crisp clean geometry, walls cut as thick clean sections with a slightly darker top edge, a thin ' +
   'floor slab under the room. Calm, tidy and quietly luxurious, highly detailed';
 
-/** What a kind of device is, in the words an image model draws from. */
+/** What a kind of device is, in the words a picture is read with. */
 export function describeKind(kind: string): string {
   switch (kind) {
     case 'light':
       return 'a light';
     case 'outlet':
-      return 'a smart plug — draw what it powers';
+      return 'a smart plug — look for what it powers';
     case 'wallSwitch':
       return 'a light switch on a wall';
     case 'sensor':
@@ -68,17 +74,8 @@ export function describeKind(kind: string): string {
   }
 }
 
-/**
- * The day picture. `photoCount` photos come first, then one portrait for each
- * of `portraits` — devices whose look the home already has a picture of.
- */
-export function dayPrompt(
-  roomName: string,
-  photoCount: number,
-  devices: PictureDevice[],
-  portraits: PictureDevice[],
-  orientation: 'portrait' | 'landscape',
-): string {
+/** The day picture, from `photoCount` photos of the room and nothing else. */
+export function dayPrompt(roomName: string, photoCount: number, orientation: 'portrait' | 'landscape'): string {
   const name = roomName.trim().length > 0 ? `“${roomName.trim()}”` : 'one room';
   const lines: string[] = [];
   lines.push(
@@ -86,15 +83,6 @@ export function dayPrompt(
       ? `The first image is a phone photo of ${name}, a room of a real home.`
       : `The first ${photoCount} images are phone photos of ${name}, a room of a real home, taken from different corners.`,
   );
-  if (portraits.length > 0) {
-    lines.push(
-      `The last ${portraits.length === 1 ? 'image is a picture' : `${portraits.length} images are pictures`} of ` +
-        `${portraits.length === 1 ? 'a device' : 'devices'} in this room, to show what ` +
-        `${portraits.length === 1 ? 'it looks' : 'they look'} like: ` +
-        portraits.map((device, index) => `image ${photoCount + index + 1} is “${device.name}”`).join(', ') +
-        '.',
-    );
-  }
   lines.push(
     'Ignore any white guide lines, buttons and other on-screen overlays in the photos.',
     '',
@@ -105,16 +93,10 @@ export function dayPrompt(
       'colours, materials and textures — the floor, the wall paint, the furniture, the fabrics, the appliances, ' +
       'the curtains — so the person who lives here recognises their own room at a glance. Tidy away clutter, bags ' +
       'and mess, and ignore the photos’ dim lighting and colour casts.',
+    '',
+    'Draw only what the photos show. Add nothing that is not in them — no devices, sensors, gadgets, lamps or ' +
+      'other objects the room does not have.',
   );
-  if (devices.length > 0) {
-    lines.push(
-      '',
-      'These devices are in the room. Draw each one clearly visible, where the photos show it or where it would ' +
-        'naturally be: ' +
-        devices.map((device) => `“${device.name}” (${describeKind(device.kind)})`).join('; ') +
-        '.',
-    );
-  }
   lines.push(
     '',
     `${STYLE}. The room fills most of the ${orientation === 'portrait' ? 'tall' : 'wide'} image, standing on its own ` +

@@ -2,8 +2,7 @@ import { classifyApiError } from '../ai/errors.js';
 
 /**
  * The one call that draws a room: OpenAI’s Image API, over plain HTTP, with
- * several pictures in — photos of the room, and portraits of its devices —
- * and one picture out.
+ * the photos of the room in and one picture out.
  *
  * **`gpt-image-2.5-sunburst`, the quality half of the 2.5 pair**, where the
  * portraits take Flare. A portrait is one object at card size; a room is the

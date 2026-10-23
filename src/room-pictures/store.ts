@@ -37,9 +37,8 @@ import { dayPrompt, NIGHT_PROMPT, type PictureDevice } from './prompts.js';
 export const MAX_PER_ROOM = 3;
 export const BUDGET_BYTES = 200 * 1024 * 1024;
 export const MIN_FREE_BYTES = 500 * 1024 * 1024;
-/** Photos one drawing may be sent; device portraits ride beside them. */
+/** Photos one drawing may be sent. */
 export const MAX_PHOTOS = 8;
-export const MAX_PORTRAITS = 3;
 
 export type PictureOrientation = 'portrait' | 'landscape';
 
@@ -83,9 +82,8 @@ export interface DrawInput {
   roomName: string;
   orientation: PictureOrientation;
   photos: { bytes: Buffer; contentType: string }[];
+  /** Read off the finished picture — never named to the drawing (`prompts.ts`). */
   devices: PictureDevice[];
-  /** Pictures of some of the devices, to show what they look like. */
-  portraits: { device: PictureDevice; bytes: Buffer }[];
   apiKey: string;
   locator: Locator;
   member?: { id: string; name: string };
@@ -197,19 +195,12 @@ export class RoomPictureService {
       modelId: ROOM_PICTURE_MODEL,
     });
     const photos = input.photos.slice(0, MAX_PHOTOS);
-    const portraits = input.portraits.slice(0, MAX_PORTRAITS);
     let day;
     try {
       day = await this.draw_({
         apiKey: input.apiKey,
-        prompt: dayPrompt(
-          input.roomName,
-          photos.length,
-          input.devices,
-          portraits.map((portrait) => portrait.device),
-          input.orientation,
-        ),
-        images: [...photos, ...portraits.map((portrait) => ({ bytes: portrait.bytes, contentType: 'image/png' }))],
+        prompt: dayPrompt(input.roomName, photos.length, input.orientation),
+        images: photos,
         size,
         background: 'transparent',
       });
