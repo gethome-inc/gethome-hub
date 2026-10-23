@@ -366,6 +366,8 @@ export function attachWebSocket(
    * heavy opt-in streams, not after.
    */
   const onPortraits = live((deviceId: string) => send({ type: 'portraits', deviceId }));
+  /** A room's pictures moved — the `portraits` frame's reason, for a room. */
+  const onRoomPictures = live((roomId: string) => send({ type: 'roomPictures', roomId }));
   /**
    * One line of the home's history.
    *
@@ -476,6 +478,7 @@ export function attachWebSocket(
   deps.events.on('commandFailed', onCommandFailed);
   deps.events.on('structureChanged', onStructure);
   deps.events.on('portraitsChanged', onPortraits);
+  deps.events.on('roomPicturesChanged', onRoomPictures);
   deps.events.on('activity', onActivity);
   deps.events.on('accessChanged', onAccessChanged);
   deps.events.on('permitJoin', onPermitJoin);
@@ -694,6 +697,7 @@ export function attachWebSocket(
     deps.events.off('commandFailed', onCommandFailed);
     deps.events.off('structureChanged', onStructure);
     deps.events.off('portraitsChanged', onPortraits);
+    deps.events.off('roomPicturesChanged', onRoomPictures);
     deps.events.off('automationChanged', onAutomationChanged);
     deps.events.off('activity', onActivity);
     deps.events.off('accessChanged', onAccessChanged);

@@ -27,8 +27,11 @@ The only connections the hub itself ever makes outward are:
   only for the AI feature you use. What each feature sends, and to whom, is in
   the [privacy policy](https://gethome.me/privacy#ai); the engineering side is
   in [`ai-adaptation.md`](ai-adaptation.md), [`assistant.md`](assistant.md) and
-  [`portraits.md`](portraits.md). With no key, nothing goes to any AI provider
-  and devices still appear, flagged *needs review*.
+  [`portraits.md`](portraits.md). Photos of a room somebody has drawn go to
+  OpenAI and are not kept; the picture is, and is shown to the recognition
+  provider to read its devices off ([`api.md`](api.md#room-pictures)). With
+  no key, nothing goes to any AI provider and devices still appear, flagged
+  *needs review*.
 - **To GitHub**, when it checks whether a newer build exists: when an app asks,
   and — only where somebody has switched on automatic updates — once a night, at
   the hour the hub has chosen to update in (asked again that night only if

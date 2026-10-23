@@ -39,6 +39,12 @@ export interface HubEvents {
    * happened to reconnect. Same argument as `structure`.
    */
   portraitsChanged: [deviceId: string];
+  /**
+   * A room's pictures changed (`room-pictures/store.ts`) — one drawn, its
+   * night landed, its markers moved, or one removed. Carries the room and
+   * nothing else, the portrait reason: the list is one short read.
+   */
+  roomPicturesChanged: [roomId: string];
   activity: [entry: ActivityEvent];
   permitJoin: [active: boolean, remainingSeconds: number];
   /**

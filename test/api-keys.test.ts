@@ -289,6 +289,12 @@ describe.skipIf(!handle)('API keys', () => {
     'POST /api/v1/devices/:id/portraits': 'permission hub.ai',
     'PATCH /api/v1/devices/:id/portraits': 'permission device.edit',
     'DELETE /api/v1/portraits/:portraitId': 'permission device.edit',
+    'GET /api/v1/room-pictures': 'read',
+    'GET /api/v1/room-pictures/:id/:variant': 'read',
+    'POST /api/v1/room-pictures': 'permission hub.ai',
+    'PATCH /api/v1/room-pictures/:id': 'permission home.structure',
+    'POST /api/v1/room-pictures/:id/locate': 'permission hub.ai',
+    'DELETE /api/v1/room-pictures/:id': 'permission home.structure',
     'POST /api/v1/matter/commission': 'permission device.add',
     // Two GETs with side effects — this one drives a radio for seconds, and
     // `GET /settings/mqtt` writes a row and hands out a password — which is
