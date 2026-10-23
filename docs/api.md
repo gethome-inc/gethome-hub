@@ -262,9 +262,9 @@ than no button.
 | `GET /devices/:id/portraits` | floor | the pictures this home has had drawn of a device, newest first: `{id, at, bytes, provider, model, fromPhoto, selected, drawnBy?}`. `drawnBy: {id, name}` is who had it drawn — `id` is null once that person has left the home and absent altogether on a portrait drawn before the hub recorded it, so an app draws no line rather than an empty one. Reading is the floor — a portrait is what the device *looks like*, so a guest whose dashboard could not draw it would be looking at a different home. See [below](#device-portraits) |
 | `GET /portraits/:portraitId` | floor | the PNG itself — `image/png`, a strong `ETag` and `Cache-Control: immutable`, because a portrait's bytes never change (a new one gets a new id) |
 | `POST /devices/:id/portraits` | `hub.ai` | draw one. `{photo?: base64, photoType?}` — absent draws from the device's kind alone. Synchronous, and it holds the request for the minutes an image takes. `409 openai_not_configured` (its own code: portraits are OpenAI's job, and a hub can be configured for recognition and not for this), `409 portrait_busy`, `409 no_space`, `502 {error:"provider_failed", kind, detail}` carrying OpenAI's own sentence |
-| `GET /room-pictures` · `GET /room-pictures/:id/day\|night` | floor | pictures of the home's rooms, newest first: `{pictures: [{id, roomId, at, orientation, width, height, hasNight, photoCount, markers, bytes, model, drawnBy?}]}`, and one picture's PNG, immutable — see [below](#room-pictures) |
+| `GET /room-pictures` · `GET /room-pictures/:id/day\|night` | floor | pictures of the home's rooms, newest first: `{pictures: [{id, roomId, at, orientation, width, height, hasNight, photoCount, markers, bytes, model, drawnBy?, selected?}]}`, and one picture's PNG, immutable — see [below](#room-pictures) |
 | `POST /room-pictures` · `POST /room-pictures/:id/locate` | `hub.ai` | draw a room from photos of it (`{roomId, orientation?, photos: [{data, type}]}`, one to eight), or read its devices off a picture again. `409 openai_not_configured`, `409 picture_busy`, `409 no_space`, `502 {error:"provider_failed", kind, detail}` |
-| `PATCH /room-pictures/:id` · `DELETE /room-pictures/:id` | `home.structure` | where the devices stand on a picture (`{markers: [{deviceId, x, y}]}`, the whole list), or take the picture away |
+| `PATCH /room-pictures/:id` · `DELETE /room-pictures/:id` | `home.structure` | where the devices stand on a picture (`{markers: [{deviceId, x, y}]}`, the whole list) and/or show this picture for its room (`{selected: true}`), or take the picture away |
 | `PATCH /devices/:id/portraits` | `device.edit` | `{selected: id\|null}` — which one the home sees. `null` is a *state*: the procedural sphere, chosen over every picture there is |
 | `DELETE /portraits/:portraitId` | `device.edit` | forget one, file and row |
 | `POST /devices/:id/remap` | `hub.ai` | force-regenerate the AI mapping (Zigbee devices) → `{requested}`. **It answers as soon as the run is under way, never when it ends**: a run is minutes and this is an HTTP request, so what the agent then did arrives on the `ai` stream and in `GET /ai/runs`. `requested: false` means the radio has no published schema for that device right now — a device row can outlive its `bridge/devices` entry — which is a different answer from a run that failed. Being explicit, it also drops a `rejected` mapping and **ignores the backoff gate**, because it is how somebody retries after fixing a key or changing the model. The hub also remaps automatically when a device publishes unknown parameters — see [ai-adaptation.md](ai-adaptation.md). `409 ai_not_configured` with no credential, `409 ai_disabled` when the owner has switched device recognition off |
@@ -2253,10 +2253,15 @@ room at a time**, day to night, and refuses a second asker (`409
 picture_busy`) rather than queueing a second bill.
 
 **It is the house's**, the portraits' argument: drawn once, every member sees
-it, markers included. Drawing and reading need `hub.ai`; moving markers and
-removing a picture need `home.structure`, since that is how the home is shown.
+it, markers included. **A room shows one picture** (`selected: true`): a new
+drawing becomes it, `PATCH {selected: true}` chooses an older one, and taking
+the chosen one away hands the choice to the newest left; a record without the
+field — drawn before there was a choice — means the room shows its newest.
+Drawing and reading need `hub.ai`; moving markers, choosing and removing a
+picture need `home.structure`, since that is how the home is shown.
 **Files and a manifest**: `<data>/room-pictures/<id>-day.png`, `-night.png`
-and `pictures.json`, three per room (the newest kept) and 200 MB in all, with a
+and `pictures.json`, five per room (the newest kept, and the chosen one
+whatever its age) and 200 MB in all, with a
 refusal to draw on a nearly full card (`409 no_space`). **The photos are not
 kept.** Deleting a room forgets its pictures. Each drawing writes `ai_runs`
 rows (`kind: "roompicture"` for the day and the night, `"roomlocate"` for the

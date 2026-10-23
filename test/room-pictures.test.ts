@@ -161,6 +161,37 @@ describe('RoomPictureService', () => {
     expect(asked).toEqual(['sensor']);
   });
 
+  it('shows the newest drawing, lets an older one be chosen, and hands the choice on when it goes', async () => {
+    const { pictures } = service();
+    const first = await pictures.draw(input);
+    await pictures.settled();
+    const second = await pictures.draw(input);
+    await pictures.settled();
+    expect(pictures.get(second.id)?.selected).toBe(true);
+    expect(pictures.get(first.id)?.selected).toBe(false);
+
+    expect(pictures.select(first.id)?.selected).toBe(true);
+    expect(pictures.get(second.id)?.selected).toBe(false);
+    expect(pictures.select('missing')).toBeNull();
+
+    await pictures.remove(first.id);
+    expect(pictures.get(second.id)?.selected).toBe(true);
+  });
+
+  it('never lets the budget take the picture a room shows', async () => {
+    const { pictures } = service({ limits: { budgetBytes: 1 } });
+    const bedroom = await pictures.draw({ ...input, roomId: 'room-bed' });
+    await pictures.settled();
+    await pictures.draw(input);
+    await pictures.settled();
+    const newest = await pictures.draw(input);
+    await pictures.settled();
+    // Over budget, everything goes but the newest drawing and what each room
+    // shows — and the bedroom's picture is older than both of the living room's.
+    expect(pictures.list().map((record) => record.id).sort()).toEqual([bedroom.id, newest.id].sort());
+    expect(pictures.get(bedroom.id)?.selected).toBe(true);
+  });
+
   it('keeps a few per room, forgets a deleted room, and reads back after a restart', async () => {
     const { pictures, dir, draw, locate } = service({ limits: { maxPerRoom: 2 } });
     const one = await pictures.draw(input);

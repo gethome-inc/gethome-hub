@@ -28,13 +28,21 @@ import { dayPrompt, NIGHT_PROMPT, type PictureDevice } from './prompts.js';
  * apps cut it out with the day picture's outline — no image library on this
  * board, for the portraits' reason. A night that fails keeps the day.
  *
+ * **A room shows one picture, and it is the house's choice.** A new drawing is
+ * the one shown (`selected`); a person may choose an older one, and taking the
+ * chosen one away hands the choice to the newest left. The chosen picture is
+ * never pruned — not for its room's count, not for the budget — since it is
+ * what everybody's app is showing. A record with no `selected` (drawn before
+ * there was a choice) leaves the apps showing the room's newest.
+ *
  * **Markers are fractions of the picture**, read by the model or placed by a
  * person, and a placed one is never read over. **Files and a manifest**: one
  * deliberate write per drawing, bounded by bulk — a few per room, a budget for
  * all, a refusal to draw on a nearly full card. The photos are not kept.
  */
 
-export const MAX_PER_ROOM = 3;
+/** Drawings a room keeps — enough to choose between. */
+export const MAX_PER_ROOM = 5;
 export const BUDGET_BYTES = 200 * 1024 * 1024;
 export const MIN_FREE_BYTES = 500 * 1024 * 1024;
 /** Photos one drawing may be sent. */
@@ -66,6 +74,8 @@ export interface RoomPictureRecord {
   bytes: number;
   model: string;
   drawnBy?: { id: string | null; name: string };
+  /** The picture its room shows. One per room; absent on records drawn before there was a choice. */
+  selected?: boolean;
 }
 
 export interface PictureCapability {
@@ -233,8 +243,13 @@ export class RoomPictureService {
       bytes: day.png.byteLength,
       model: ROOM_PICTURE_MODEL,
       ...(input.member ? { drawnBy: { id: input.member.id, name: input.member.name } } : {}),
+      selected: true,
     };
-    this.write([...this.read(), record]);
+    // The new drawing is the one the room shows.
+    this.write([
+      ...this.read().map((other) => (other.roomId === input.roomId && other.selected ? { ...other, selected: false } : other)),
+      record,
+    ]);
     await this.prune(input.roomId);
     this.events?.emit('roomPicturesChanged', input.roomId);
     return record;
@@ -342,10 +357,35 @@ export class RoomPictureService {
     return next ?? null;
   }
 
+  /** The picture its room shows, from now on, for everybody. */
+  select(id: string): RoomPictureRecord | null {
+    const chosen = this.get(id);
+    if (!chosen) return null;
+    let next: RoomPictureRecord | undefined;
+    this.write(
+      this.read().map((record) => {
+        if (record.roomId !== chosen.roomId) return record;
+        const updated = { ...record, selected: record.id === id };
+        if (record.id === id) next = updated;
+        return updated;
+      }),
+    );
+    this.events?.emit('roomPicturesChanged', chosen.roomId);
+    return next ?? null;
+  }
+
   async remove(id: string): Promise<string | null> {
     const record = this.get(id);
     if (!record) return null;
-    this.write(this.read().filter((candidate) => candidate.id !== id));
+    let remaining = this.read().filter((candidate) => candidate.id !== id);
+    // The room's chosen picture went: the newest left is shown instead.
+    if (record.selected) {
+      const newest = remaining
+        .filter((candidate) => candidate.roomId === record.roomId)
+        .sort((a, b) => b.at.localeCompare(a.at))[0];
+      if (newest) remaining = remaining.map((candidate) => (candidate === newest ? { ...candidate, selected: true } : candidate));
+    }
+    this.write(remaining);
     await this.deleteFiles(id);
     this.events?.emit('roomPicturesChanged', record.roomId);
     return record.roomId;
@@ -360,19 +400,22 @@ export class RoomPictureService {
     this.events?.emit('roomPicturesChanged', roomId);
   }
 
-  /** Keeps `maxPerRoom` for the room, then the newest within the budget. */
+  /**
+   * Keeps `maxPerRoom` for the room, then the newest within the budget — and
+   * every room's chosen picture whatever its age, since it is on screen.
+   */
   private async prune(roomId: string): Promise<void> {
     const records = this.list();
     const doomed = new Set<string>();
-    records
-      .filter((record) => record.roomId === roomId)
-      .slice(this.limits.maxPerRoom)
-      .forEach((record) => doomed.add(record.id));
+    const room = records.filter((record) => record.roomId === roomId);
+    const others = room.filter((record) => !record.selected);
+    const spare = this.limits.maxPerRoom - (room.length > others.length ? 1 : 0);
+    others.slice(Math.max(spare, 0)).forEach((record) => doomed.add(record.id));
     let total = 0;
     for (const record of records) {
       if (doomed.has(record.id)) continue;
       total += record.bytes;
-      if (total > this.limits.budgetBytes && record !== records[0]) doomed.add(record.id);
+      if (total > this.limits.budgetBytes && record !== records[0] && !record.selected) doomed.add(record.id);
     }
     if (doomed.size === 0) return;
     this.write(this.read().filter((record) => !doomed.has(record.id)));

@@ -66,7 +66,7 @@ API keys, and every conversation with the hub's assistant or automations agent.
 |---|---|
 | `PATCH /api/v1/devices/{deviceId}` with `name`, `roomId` or `offlineExpected` | `device.edit` |
 | `PATCH /api/v1/devices/{deviceId}/portraits` · `DELETE /api/v1/portraits/{portraitId}` | `device.edit` |
-| `PATCH /api/v1/room-pictures/{id}` `{"markers": [{"deviceId", "x", "y"}]}` · `DELETE /api/v1/room-pictures/{id}` | `home.structure` — moves where devices stand on a room's picture (the whole list, replacing the old), or takes the picture away, for everybody in the home |
+| `PATCH /api/v1/room-pictures/{id}` `{"markers": [{"deviceId", "x", "y"}]}` and/or `{"selected": true}` · `DELETE /api/v1/room-pictures/{id}` | `home.structure` — moves where devices stand on a room's picture (the whole list, replacing the old), makes it the picture its room shows, or takes the picture away, for everybody in the home |
 | `DELETE /api/v1/devices/{deviceId}` | `device.remove` — **ask the person first** |
 | `POST /api/v1/zigbee/permit-join` `{"seconds": 120}` | `device.add` |
 | `POST /api/v1/matter/commission` `{"pairingCode": "…"}` · `POST /api/v1/matter/commission/{jobId}/cancel` · `GET /api/v1/matter/discoverable` | `device.add` |

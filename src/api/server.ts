@@ -1426,6 +1426,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * list, replacing the old — `home.structure`, since it is how the home is
    * shown to everybody in it.
    */
+  /**
+   * Where the devices stand on a picture, and which picture its room shows —
+   * both how the home is shown, so both `home.structure`. Either or both.
+   */
   app.patch('/api/v1/room-pictures/:id', needs('home.structure'), async (request, reply) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     const body = z
@@ -1439,12 +1443,16 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
               source: z.string().max(20).default('placed'),
             }),
           )
-          .max(400),
+          .max(400)
+          .optional(),
+        selected: z.literal(true).optional(),
       })
+      .refine((value) => value.markers !== undefined || value.selected === true, 'nothing to change')
       .parse(request.body);
-    const record = roomPictures.setMarkers(id, body.markers);
-    if (!record) return reply.code(404).send({ error: 'not_found' });
-    return record;
+    if (!roomPictures.get(id)) return reply.code(404).send({ error: 'not_found' });
+    if (body.markers) roomPictures.setMarkers(id, body.markers);
+    if (body.selected) roomPictures.select(id);
+    return roomPictures.get(id);
   });
 
   /** Read the devices off a picture again — for devices added since. Keeps placed markers. */
