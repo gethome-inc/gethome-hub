@@ -53,8 +53,8 @@ export interface Drawing {
 export interface EditInput {
   apiKey: string;
   prompt: string;
-  /** In the order the prompt names them. */
-  images: { bytes: Buffer; contentType: string }[];
+  /** In the order the prompt names them. Never shared memory, so a Blob can take them as they are. */
+  images: { bytes: Buffer<ArrayBuffer>; contentType: string }[];
   size: '1024x1536' | '1536x1024';
   background: 'transparent' | 'opaque';
   signal?: AbortSignal;
@@ -71,9 +71,11 @@ export async function drawRoomPicture(input: EditInput): Promise<Drawing> {
   form.set('quality', 'high');
   form.set('background', input.background);
   form.set('output_format', 'png');
+  // The bytes as they are: a Blob copies what it is given, so copying them
+  // first was one more photo-sized allocation per photo for nothing.
   input.images.forEach((image, index) => {
     const extension = image.contentType === 'image/png' ? 'png' : 'jpg';
-    form.append('image[]', new Blob([new Uint8Array(image.bytes)], { type: image.contentType }), `image${index}.${extension}`);
+    form.append('image[]', new Blob([image.bytes], { type: image.contentType }), `image${index}.${extension}`);
   });
 
   let response: Response;

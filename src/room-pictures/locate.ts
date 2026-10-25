@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { AiProvider } from '../core/settings.js';
 import { classifyApiError } from '../ai/errors.js';
@@ -27,6 +28,8 @@ const OPENAI_URL = 'https://api.openai.com/v1/responses';
 /** Two minutes — a reading is one image and a few lines of answer. */
 const TIMEOUT_MS = 2 * 60 * 1000;
 const MAX_OUTPUT_TOKENS = 8_000;
+/** Bytes of picture per piece of base64: a multiple of three, so the pieces join without padding. */
+const PIECE = 48 * 1024;
 
 export class LocateError extends Error {
   constructor(
@@ -104,7 +107,6 @@ export async function locateDevices(input: LocateInput): Promise<{ located: Loca
   if (input.devices.length === 0) return { located: [], usage: {} };
   const doFetch = input.fetchImpl ?? fetch;
   const prompt = locatePrompt(input.devices);
-  const base64 = input.picture.toString('base64');
 
   let response: Response;
   try {
@@ -114,7 +116,7 @@ export async function locateDevices(input: LocateInput): Promise<{ located: Loca
             method: 'POST',
             signal: AbortSignal.timeout(TIMEOUT_MS),
             headers: { authorization: `Bearer ${input.apiKey}`, 'content-type': 'application/json' },
-            body: JSON.stringify({
+            body: withPicture(input.picture, (picture) => ({
               model: input.modelId,
               reasoning: { effort: 'medium' },
               max_output_tokens: MAX_OUTPUT_TOKENS,
@@ -123,13 +125,13 @@ export async function locateDevices(input: LocateInput): Promise<{ located: Loca
                 {
                   role: 'user',
                   content: [
-                    { type: 'input_image', image_url: `data:image/png;base64,${base64}` },
+                    { type: 'input_image', image_url: `data:image/png;base64,${picture}` },
                     { type: 'input_text', text: prompt },
                   ],
                 },
               ],
               text: { format: { type: 'json_schema', name: 'device_points', schema: ANSWER_SCHEMA, strict: true } },
-            }),
+            })),
           })
         : await doFetch(ANTHROPIC_URL, {
             method: 'POST',
@@ -139,7 +141,7 @@ export async function locateDevices(input: LocateInput): Promise<{ located: Loca
               'anthropic-version': '2023-06-01',
               'content-type': 'application/json',
             },
-            body: JSON.stringify({
+            body: withPicture(input.picture, (picture) => ({
               model: input.modelId,
               max_tokens: MAX_OUTPUT_TOKENS,
               thinking: { type: 'adaptive' },
@@ -156,12 +158,12 @@ export async function locateDevices(input: LocateInput): Promise<{ located: Loca
                 {
                   role: 'user',
                   content: [
-                    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: base64 } },
+                    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: picture } },
                     { type: 'text', text: `${prompt}\n\nAnswer by calling submit_points.` },
                   ],
                 },
               ],
-            }),
+            })),
           });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -177,6 +179,29 @@ export async function locateDevices(input: LocateInput): Promise<{ located: Loca
   const answer = input.provider === 'openai' ? openAiAnswer(body) : anthropicAnswer(body);
   if (answer === undefined) throw new LocateError('The model answered without the devices.', 'unreadable');
   return { located: normaliseAnswer(answer, input.devices), usage: usageOf(input.provider, body) };
+}
+
+/**
+ * A JSON request body with the picture in it as base64, built as a Blob.
+ *
+ * **The picture is never one string.** A day picture is ~2.3 MB of PNG and
+ * ~3 MB of base64, and written the obvious way — `toString('base64')`, into a
+ * data URL, into `JSON.stringify`, into the bytes `fetch` sends — that was four
+ * 3 MB copies at once, the strings among them too big for V8's young
+ * generation and so kept until the next full collection: on a 512 MB board,
+ * where the hub runs ~15 MB under its `MemoryHigh`, most of the margin. So the
+ * JSON is written around a placeholder and the picture goes in between as
+ * base64 in pieces: the Blob holds the one copy `fetch` streams, and no string
+ * is bigger than a piece. `payload` is handed the placeholder where the base64
+ * belongs.
+ */
+function withPicture(picture: Buffer, payload: (slot: string) => unknown): Blob {
+  const slot = `picture-${randomUUID()}`;
+  const [head = '', tail = ''] = JSON.stringify(payload(slot)).split(slot);
+  const parts = [head];
+  for (let at = 0; at < picture.length; at += PIECE) parts.push(picture.subarray(at, at + PIECE).toString('base64'));
+  parts.push(tail);
+  return new Blob(parts, { type: 'application/json' });
 }
 
 function anthropicAnswer(body: Record<string, unknown> | null): unknown {

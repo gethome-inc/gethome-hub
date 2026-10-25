@@ -952,6 +952,15 @@ in `deploy/install.sh` must stay accurate.
   `--max-semi-space-size=1` beside it, at 176 → 139 MB resident with Matter
   loaded for about half a second of startup. They have to be **argv**:
   `NODE_OPTIONS` refuses `--optimize-for-size` outright.
+  **The 512 MB tier also hands a room drawing's memory back**: `--expose-gc`
+  in the same flags, which `src/room-pictures/store.ts` uses when it is there
+  and skips when it is not, and `HUB_MALLOC_ENV`
+  (`MALLOC_MMAP_THRESHOLD_=131072 MALLOC_ARENA_MAX=2`) on a line of its own in
+  the hub's unit, empty everywhere else. Both are **measured, not reasoned** —
+  by replaying a drawing on a Zero 2 W with `scripts/replay-room-picture.mjs`,
+  which spends nothing; the figures are in `docs/zigbee.md`. They are the fix
+  for a drawing that held the hub at its `MemoryHigh` until the pressure watch
+  stood Matter down, and the watch itself was right and was not touched.
   **The numbers above are the 512 MB tier's, and a 1 GB board gets its own**
   (`TIGHT_BOARD`): hub `MemoryHigh=400M` with a 320 MB heap, Z2M `320M`/`400M`,
   and `--optimize-for-size` without the semi-space pin, which buys memory with
