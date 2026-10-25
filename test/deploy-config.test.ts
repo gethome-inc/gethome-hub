@@ -472,6 +472,35 @@ describe('deploy/install.sh', () => {
   });
 
   /**
+   * A room drawing moves ~40 MB through the hub in objects only a full
+   * collection frees, and a 512 MB board's hub runs ~15 MB under its
+   * `MemoryHigh` — on 2026-10-23 one drawing held it at the limit long enough
+   * for the pressure watch to stand Matter down. Two things give it back, and
+   * both are this tier's alone: `--expose-gc`, which `src/room-pictures/store.ts`
+   * needs before it can collect, and glibc tuned to return what is freed.
+   */
+  it('lets a 512 MB hub hand a drawing’s memory back', () => {
+    const smallTier = installer.slice(
+      installer.indexOf('if [[ "$RAM_MB" -gt 0 && "$RAM_MB" -le 1024 ]]'),
+      installer.indexOf('# ── System packages'),
+    );
+    const splitAt = smallTier.indexOf('if [[ "$RAM_MB" -le "$TIGHT_BOARD_MAX_MB" ]]');
+    const tight = smallTier.slice(splitAt, smallTier.indexOf('  else', splitAt));
+    const roomy = smallTier.slice(smallTier.indexOf('  else', splitAt));
+
+    // Assignments, never prose: the comments beside them name both.
+    expect(tight.match(/HUB_V8_FLAGS="([^"]*)"/)?.[1]).toContain('--expose-gc');
+    expect(tight).toMatch(/^\s*HUB_MALLOC_ENV="Environment=MALLOC_MMAP_THRESHOLD_=131072 MALLOC_ARENA_MAX=2"$/m);
+    expect(roomy.match(/HUB_V8_FLAGS="([^"]*)"/)?.[1]).not.toContain('--expose-gc');
+    expect(roomy).not.toMatch(/^\s*HUB_MALLOC_ENV=/m);
+    // Empty everywhere else, and in the unit on its own line, where an empty
+    // value is an empty line rather than a broken directive.
+    expect(installer).toMatch(/^HUB_MALLOC_ENV=""$/m);
+    expect(unitBody('gethome-hubd.service')).toMatch(/^\$\{HUB_MALLOC_ENV\}$/m);
+    expect(unitBody('gethome-zigbee2mqtt.service')).not.toContain('MALLOC');
+  });
+
+  /**
    * `StartLimitIntervalSec=` and `StartLimitBurst=` are [Unit] options —
    * systemd moved them there in v230 and answers the old [Service] placement
    * with "Unknown key 'StartLimitIntervalSec' in section [Service], ignoring".

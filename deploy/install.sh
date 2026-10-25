@@ -263,6 +263,7 @@ HUB_MEM_HIGH=""
 Z2M_MEM_HIGH=""
 Z2M_MEM_MAX=""
 HUB_V8_FLAGS=""
+HUB_MALLOC_ENV=""
 # Where the small tier splits in two. Below this line is a 512 MB board, above
 # it a 1 GB one, and no board lands near it: a Zero 2 W reports 415-490 MB of
 # MemTotal and a "1 GB" Pi reports 920-970 once the GPU has taken its share.
@@ -321,7 +322,24 @@ if [[ "$RAM_MB" -gt 0 && "$RAM_MB" -le 1024 ]]; then
     # from 176 MB to 139 MB, for about half a second of extra startup and no
     # change in request latency. They have to be argv — NODE_OPTIONS refuses
     # --optimize-for-size outright ("not allowed in NODE_OPTIONS").
-    HUB_V8_FLAGS="--optimize-for-size --max-semi-space-size=1"
+    #
+    # --expose-gc is what lets a room drawing hand its memory back when it is
+    # done (src/room-pictures/store.ts calls gc() when one is there, and only
+    # then). A drawing moves ~40 MB through the hub in objects only a full
+    # collection frees, this hub runs ~15 MB under its MemoryHigh, and on
+    # 2026-10-23 one held it at the limit for four minutes after the night had
+    # landed — long enough for the pressure watch to stand Matter down.
+    HUB_V8_FLAGS="--optimize-for-size --max-semi-space-size=1 --expose-gc"
+    # And glibc's half of the same thing. By default it raises its mmap
+    # threshold to the size of the last large block it freed, so after the
+    # first picture every later multi-megabyte buffer comes out of the heap
+    # instead of mmap, and freeing one gives nothing back; and it gives every
+    # thread an arena of its own. Replaying a drawing on a Zero 2 W
+    # (scripts/replay-room-picture.mjs, which spends nothing): three minutes
+    # after the night, ~64 MB of anonymous memory with the defaults and ~44 MB
+    # with these two and the collection above; a second drawing added 8.9 MB
+    # before and nothing after; the peak fell from +40 MB to +26 MB.
+    HUB_MALLOC_ENV="Environment=MALLOC_MMAP_THRESHOLD_=131072 MALLOC_ARENA_MAX=2"
   else
     # A 1 GB board — a Pi 3, a Pi 3B+, a 1 GB Pi 4. It shares the tier above
     # for everything that is about *scarcity* (zram, the memory cgroup, no
@@ -2524,6 +2542,9 @@ ProtectSystem=full
 # Throttle, don't kill. See the sizing block near the top: a hard MemoryMax
 # anywhere near the real working set turns a busy minute into a restart.
 ${HUB_MEM_HIGH}
+# glibc tuned to hand freed memory back, on a 512 MB board only; the sizing
+# block says what it was measured at.
+${HUB_MALLOC_ENV}
 # **The hub is not where headroom comes from.** Compressed swap is what lets a
 # 512 MB board hold two radios, and the kernel spends it on whatever has been
 # idle longest — which on a hub is the hub. Nobody talks to it for hours, so
