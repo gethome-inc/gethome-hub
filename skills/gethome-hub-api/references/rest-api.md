@@ -38,6 +38,7 @@ API keys, and every conversation with the hub's assistant or automations agent.
 | `GET /api/v1/zones` | `[{id, name, sortOrder}]` |
 | `GET /api/v1/devices` | every device — see [devices-and-commands.md](devices-and-commands.md) |
 | `GET /api/v1/devices/{deviceId}/history?from=&to=&points=&series=` | recorded readings in five-minute buckets for about a week; `from`/`to` epoch ms |
+| `GET /api/v1/room-pictures` · `GET /api/v1/room-pictures/{id}/{variant}` | pictures of the home's rooms, drawn from photos by the app's users: the list `{pictures: [{id, roomId, at, hasNight, markers: [{deviceId, x, y, source}], …}]}` newest first, and one picture as `image/png` — `variant` is `day` or `night`. `x` and `y` are fractions of the picture, from its top-left corner. Drawing one spends the home's OpenAI key and is the app's |
 | `GET /api/v1/devices/{deviceId}/portraits` · `GET /api/v1/portraits/{portraitId}` | the pictures drawn of a device, and one picture itself as `image/png` (it never changes; a new one gets a new id) |
 | `GET /api/v1/members` | who is in the home |
 | `GET /api/v1/roles` · `GET /api/v1/permissions` | the role table and the permission catalog, with the hub's own wording |
@@ -65,6 +66,7 @@ API keys, and every conversation with the hub's assistant or automations agent.
 |---|---|
 | `PATCH /api/v1/devices/{deviceId}` with `name`, `roomId` or `offlineExpected` | `device.edit` |
 | `PATCH /api/v1/devices/{deviceId}/portraits` · `DELETE /api/v1/portraits/{portraitId}` | `device.edit` |
+| `PATCH /api/v1/room-pictures/{id}` `{"markers": [{"deviceId", "x", "y"}]}` and/or `{"selected": true}` · `DELETE /api/v1/room-pictures/{id}` | `home.structure` — moves where devices stand on a room's picture (the whole list, replacing the old), makes it the picture its room shows, or takes the picture away, for everybody in the home |
 | `DELETE /api/v1/devices/{deviceId}` | `device.remove` — **ask the person first** |
 | `POST /api/v1/zigbee/permit-join` `{"seconds": 120}` | `device.add` |
 | `POST /api/v1/matter/commission` `{"pairingCode": "…"}` · `POST /api/v1/matter/commission/{jobId}/cancel` · `GET /api/v1/matter/discoverable` | `device.add` |
