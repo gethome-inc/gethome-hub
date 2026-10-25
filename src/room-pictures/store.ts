@@ -159,8 +159,16 @@ export class RoomPictureService {
   }
 
   /** Newest first. */
+  /**
+   * Newest first. Two drawn in the same millisecond — only ever a test on a
+   * fast machine — go by the order they were written in, the later first:
+   * by their time alone the older stayed first, and pruning kept it.
+   */
   list(): RoomPictureRecord[] {
-    return [...this.read()].sort((a, b) => b.at.localeCompare(a.at));
+    return this.read()
+      .map((record, index) => ({ record, index }))
+      .sort((a, b) => b.record.at.localeCompare(a.record.at) || b.index - a.index)
+      .map(({ record }) => record);
   }
 
   get(id: string): RoomPictureRecord | undefined {
