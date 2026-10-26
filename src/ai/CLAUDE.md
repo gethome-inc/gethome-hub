@@ -758,8 +758,9 @@ domains — update them in the same change.
   meant a chat on a model offered to one surface only — and, the day it was
   retired, on *any* model — reported a raw id where the chat beside it had a
   name. Effort is `medium` here against the mapper's `high`; the mapper's is
-  exposed to nobody, while a chat message may ask for its own round's (see *A
-  spoken round thinks less* below).
+  exposed to nobody, while each agent keeps a word of its own on the home's AI
+  settings and a chat message may ask for its own round's (see *A spoken round
+  thinks less* below).
   **What the provider line resolves is what runs**, and `openConversation` asks
   the vendor exactly once. The automations agent kept a second
   `provider !== 'anthropic'` refusal for a week after both loops existed — the
@@ -942,7 +943,8 @@ domains — update them in the same change.
   (`output_config.effort`, `reasoning.effort`) and a word only one of them
   takes is a 400 in somebody's kitchen rather than a checker error — widening
   it means checking both, or giving the transport that cannot a mapping.
-  `ChatTurnContext.effort` is the override, and two things set it.
+  `ChatTurnContext.effort` is what a round runs at, and three things decide
+  it, the first that speaks winning.
   `AssistantChat.spokenOrigin` (`low`, `voice`) is the first. The same question
   genuinely costs differently out loud: a typed answer is read when it lands,
   so a few seconds more deliberation is free, while a spoken one is somebody
@@ -952,21 +954,40 @@ domains — update them in the same change.
   **turn's** because a transport is built once and holds the history, while one
   conversation is typed in the morning and talked to in the evening —
   `spokenSessions`' own reasoning.
-  **The second is the person, per message, from the hub's three words.** This
-  rule used to end "exposed to nobody: two knobs for one decision is one too
-  many", and it was a home-wide knob it was refusing — a setting that would
-  have moved every member's chats at once. What a chat's picker sends is the
-  opposite shape: `effort` on the one message (`ChatTurnRequest`), which `say`
-  turns into that turn's `TurnOrigin`, so it lasts exactly one round and is
-  written into `ai_runs.effort` like any other. Four rules hold it. **The
-  vocabulary is `CHAT_EFFORTS`, the hub's**, `satisfies`-pinned to `ChatEffort`,
-  validated by the routes and advertised on `GET /hub`'s `chat` block — an app
-  draws words for the hub's list and never ships its own, so widening it is
-  still the two-vendor check above and nothing else. **A spoken turn's `low`
-  still wins**: `askAloud` passes its own origin and `say` reads a request's
-  effort only when no origin was given, because the voice is answering
-  somebody standing in a room whatever the chat's picker last said. **Absent is
-  the transport's `medium`**, which is what an older app gets, unchanged.
+  **The second is the person, per message, from the hub's three words.** What
+  a chat's picker sends is `effort` on the one message (`ChatTurnRequest`),
+  which `say` turns into that turn's `TurnOrigin`, so it lasts exactly one
+  round and is written into `ai_runs.effort` like any other. **The third is the
+  home's own word for that agent** (`ai_assistant_effort`,
+  `ai_automations_effort`; `SettingsService.agentEffort`, `PATCH /settings/ai`'s
+  `assistantEffort`/`automationsEffort`), for every typed round that named
+  none. This rule used to end "exposed to nobody: two knobs for one decision is
+  one too many", and for as long as no round could choose, that was right —
+  the model was the one lever. Once people choose effort in a chat, the rounds
+  nobody chose for need an answer somebody can read and change: a job the
+  assistant hands to the automations agent has nobody in that conversation to
+  pick, and an app older than the picker sends nothing. So each agent keeps its
+  word **beside its model**, the shape the model already has — a home default,
+  a chat's own choice over it. Five rules hold it. **The vocabulary is
+  `CHAT_EFFORTS`, the hub's** (in `models.ts`, the one AI module the settings
+  service may import), `satisfies`-pinned to `ChatEffort`, validated by the
+  routes and advertised on `GET /hub`'s `chat` block and on each agent's block
+  of `GET /settings/ai` — an app draws words for the hub's list and never ships
+  its own, so widening it is still the two-vendor check above and nothing else.
+  **The home's word is validated on the way in and re-read on the way out**
+  (`knownEffort`), unlike a model id: an effort goes onto the wire as written,
+  so a word a rolled-back build cannot send falls back to `AGENT_EFFORT` rather
+  than reaching a vendor. **It is read when each turn begins** (`homeEffort` in
+  `runExchange`), never when the conversation opens, so a change on the AI page
+  reaches the next round of a conversation already open, and the round is
+  always *sent* an effort rather than left to the transport's own, so what
+  `ai_runs` records is what was asked for. **A spoken turn's `low` still
+  wins**: `askAloud` passes its own origin and `say` reads a request's effort
+  only when no origin was given, because the voice is answering somebody
+  standing in a room whatever the home or the chat's picker last said. **And a
+  home that never chose runs exactly as before**: the default is
+  `AGENT_EFFORT`, and an older app that sends no effort gets the home's word —
+  which, until somebody sets one, is the `medium` it always got.
   **And `AutomationTurnContext` declares `effort`** (and `images`) beside
   `ChatTurnContext` — the runtime passes one object to both agents, so leaving
   a field off one type worked at runtime and hid from the contract that this

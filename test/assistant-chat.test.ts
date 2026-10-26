@@ -71,8 +71,10 @@ describe('the assistant', () => {
   ) => Promise<{
     assistant: AssistantChat;
     automationChat: Awaited<ReturnType<typeof startedAutomations>>['chat'];
-    /** What each round was asked to work at — `undefined` is the
-     *  conversation's own setting. See the spoken-effort test. */
+    /** What each round was asked to work at. The runtime names one on every
+     *  round — the turn's own, or the home's word for this agent — so
+     *  `undefined` here would be a round left to the transport's own default.
+     *  See the spoken-effort tests. */
     efforts: (string | undefined)[];
     /** What each round was actually *sent*, priming included. The transcript
      *  is what was said; this is what the model read. */
@@ -427,10 +429,11 @@ describe('the assistant', () => {
   /**
    * **The same conversation, two speeds.** A spoken round is a person standing
    * in a room waiting for an answer, and a typed one is a message they read
-   * when it lands — so the turn asks for `low` out loud and leaves a typed
-   * round on the conversation's own `medium`. Per *turn* is the whole point:
-   * this asserts both against one session, because a transport is built once
-   * and a conversation typed in the morning is talked to in the evening.
+   * when it lands — so the turn asks for `low` out loud and puts a typed round
+   * on the home's own word for this agent, `medium` until somebody picks
+   * another. Per *turn* is the whole point: this asserts both against one
+   * session, because a transport is built once and a conversation typed in the
+   * morning is talked to in the evening.
    */
   it('thinks less when the answer is spoken, and only then', async () => {
     const { assistant, efforts } = await assistantFor([
@@ -442,10 +445,42 @@ describe('the assistant', () => {
     await assistant.askAloud({ sessionId, memberId, question: 'turn the kitchen light off' });
     expect(efforts).toEqual(['low']);
 
-    // The same conversation, carried on by typing.
+    // The same conversation, carried on by typing — named on the round rather
+    // than left to the transport, so the run log records what was asked for.
     await assistant.reply(sessionId, memberId, 'and the hall one?');
     await assistant.idle();
-    expect(efforts).toEqual(['low', undefined]);
+    expect(efforts).toEqual(['low', 'medium']);
+  });
+
+  /**
+   * **The home's word is a default for typing, and nothing more.** A home that
+   * asked for Deep gets it on every typed round nobody chose an effort for —
+   * and still `low` out loud, because the voice is somebody standing in a room
+   * whatever the AI page says about typing. The other agent's word is its own,
+   * and is set here only to prove it does not leak across.
+   *
+   * **Read per turn.** A change on the AI page reaches the very next round of a
+   * conversation already open, the way the effort itself belongs to the turn.
+   */
+  it('types at the home’s own word for the assistant, and still speaks at low', async () => {
+    await settings.setAgentEffort('assistant', 'high');
+    await settings.setAgentEffort('automations', 'low');
+    const { assistant, efforts } = await assistantFor([
+      { kind: 'said', text: 'It is off.' },
+      { kind: 'said', text: 'Both are off.' },
+      { kind: 'said', text: 'You are welcome.' },
+    ]);
+    const sessionId = assistant.beginVoice();
+
+    await assistant.askAloud({ sessionId, memberId, question: 'turn the kitchen light off' });
+    await assistant.reply(sessionId, memberId, 'and the hall one?');
+    await assistant.idle();
+    expect(efforts).toEqual(['low', 'high']);
+
+    await settings.setAgentEffort('assistant', null);
+    await assistant.reply(sessionId, memberId, 'thanks');
+    await assistant.idle();
+    expect(efforts).toEqual(['low', 'high', 'medium']);
   });
 
   /**
@@ -481,7 +516,8 @@ describe('the assistant', () => {
       .orderBy(asc(aiRunsTable.at));
     expect(rows.map((row) => [row.kind, row.effort, row.via])).toEqual([
       ['assist', 'low', 'voice'],
-      // The conversation's own effort, read back rather than re-derived.
+      // The home's own word for the assistant — `medium` on a home that never
+      // chose one — as the turn ran it, not as the setting reads now.
       ['assist', 'medium', 'typed'],
     ]);
   });

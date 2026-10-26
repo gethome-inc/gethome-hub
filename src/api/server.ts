@@ -67,6 +67,7 @@ import {
   CHAT_IMAGE_MAX_COUNT,
   CHAT_IMAGE_MEDIA_TYPES,
   ChatPhotosBusyError,
+  type ChatEffort,
   type ChatTurnRequest,
 } from '../ai/chat/chat-runtime.js';
 import type { AutomationStore } from '../automations/store.js';
@@ -3060,13 +3061,26 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
      * `provider` is derived from the model rather than stored beside it — see
      * `agentProviderOf` — so the two can never disagree, and a picker writes
      * that provider's default model id rather than a second setting.
+     *
+     * `effort` is the home's word for a typed round nobody chose one for, and
+     * `efforts` the words it may be — the list a chat message is validated
+     * against. **Their presence is the capability**: a hub older than them ran
+     * every typed round at `medium` and strips `assistantEffort` from a PATCH
+     * without a word, so an app offers the control only where it finds them.
      */
-    const forAgent = (agent: { model: string; provider: AiProvider | null; choosable: boolean }) => ({
+    const forAgent = (agent: {
+      model: string;
+      provider: AiProvider | null;
+      choosable: boolean;
+      effort: ChatEffort;
+    }) => ({
       model: agent.model,
       provider: agent.provider,
       models: agent.provider === null ? [] : AGENT_MODELS[agent.provider].choices,
       choices: { anthropic: AGENT_MODELS.anthropic.choices, openai: AGENT_MODELS.openai.choices },
       choosable: agent.choosable,
+      effort: agent.effort,
+      efforts: CHAT_EFFORTS,
     });
     const forProvider = (provider: AiProvider) => ({
       hasKey: ai[provider].hasKey,
@@ -3158,6 +3172,18 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     assistantModel: z.string().min(1).max(120).nullable().optional(),
     /** Which model writes the home's rules. Unvalidated for the reason above. */
     automationsModel: z.string().min(1).max(120).nullable().optional(),
+    /**
+     * How hard each agent works on a typed round nobody chose an effort for.
+     *
+     * **Validated, unlike the models beside it**, and the difference is the
+     * point: a model id this build has never heard of is harmless to store
+     * because `getAiSettings` answers with what will run, while an effort is
+     * put on the wire as written and a word one vendor does not take is a 400
+     * in the middle of somebody's conversation. `null` puts it back on
+     * `AGENT_EFFORT`.
+     */
+    assistantEffort: z.enum(CHAT_EFFORTS).nullable().optional(),
+    automationsEffort: z.enum(CHAT_EFFORTS).nullable().optional(),
     anthropicApiKey: apiKeyField('anthropic'),
     openaiApiKey: apiKeyField('openai'),
     mappingProvider: z.enum(AI_PROVIDERS).optional(),
@@ -3238,6 +3264,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     }
     if (body.assistantModel !== undefined) {
       await deps.settings.setAssistantModel(body.assistantModel);
+    }
+    if (body.assistantEffort !== undefined) {
+      await deps.settings.setAgentEffort('assistant', body.assistantEffort);
+    }
+    if (body.automationsEffort !== undefined) {
+      await deps.settings.setAgentEffort('automations', body.automationsEffort);
     }
     if (body.mappingProvider !== undefined) {
       // Asked after the key writes above, so one request can save a key and

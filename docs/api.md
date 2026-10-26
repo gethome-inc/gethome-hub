@@ -280,7 +280,7 @@ than no button.
 | `POST /api-keys` | `hub.apikeys` | `{name, control?, permissions?, expiresInDays?}` → `201 {key, secret}`. The **only** time the secret exists anywhere but in the caller's hands. `expiresInDays` is 1–3650, or `null`/absent for never. **Strict body** — an unknown field is `400 invalid_body`. `400 {error:"not_grantable", permission}` for one no key may hold, `400 {error:"needs_control", permission:"automation.manage"}`, `403 {error:"forbidden", permission}` for one the caller does not hold, `409 {error:"too_many_keys", limit:25}` |
 | `PATCH /api-keys/:id` | `hub.apikeys`, **your own key** | the same fields, every one optional → the key. `null` expiry is never, a number restarts the count from now. `403 not_your_key` for anybody else's, an owner's edit included; only what is being *added* is checked against the caller's role, so renaming a key whose grant has since gone inert is not refused for it |
 | `DELETE /api-keys/:id` | floor (your own) · `member.remove` (anybody's) | revoke → `204`, and its event streams are closed with `4001`. An owner's key needs an owner (`403 not_owner`). None of the four `/api-keys` routes is ever an API key's |
-| `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | `hub.ai` | The home's AI: two credentials, a model per job (recognition, the assistant, the automations agent), which provider recognises devices, and the switch. **PATCH is the write** — every field optional, absence means "leave this alone": `{enabled?, recordExchanges?, anthropicApiKey?, openaiApiKey?, anthropicModel?, openaiModel?, model?, mappingProvider?, assistantModel?, automationsModel?, clear?}`. `model` is `anthropicModel` under the name this route has always used; a model id this hub has **retired** is still taken, and resolved to its successor when it is read — see [below](#the-ai-settings-answer); `assistantModel` / `automationsModel` name the vendor as well as the model, and `null` puts either back on the default; `clear: "anthropic"\|"openai"` forgets one credential and leaves the other; `recordExchanges` starts or stops keeping what each round said, and is off unless asked; `mappingProvider` naming a provider with no key is `400 provider_not_configured`. Keys are told apart by prefix, so one pasted in the other's field is a 400 rather than a 401 an hour later, and a `sk-ant-oat…` subscription token is still refused. **PUT is unchanged** (`{apiKey, model?}`, an Anthropic key, required) for apps that have not moved. See [the answer's shape](#the-ai-settings-answer) |
+| `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | `hub.ai` | The home's AI: two credentials, a model per job (recognition, the assistant, the automations agent), which provider recognises devices, and the switch. **PATCH is the write** — every field optional, absence means "leave this alone": `{enabled?, recordExchanges?, anthropicApiKey?, openaiApiKey?, anthropicModel?, openaiModel?, model?, mappingProvider?, assistantModel?, automationsModel?, assistantEffort?, automationsEffort?, clear?}`. `model` is `anthropicModel` under the name this route has always used; a model id this hub has **retired** is still taken, and resolved to its successor when it is read — see [below](#the-ai-settings-answer); `assistantModel` / `automationsModel` name the vendor as well as the model, and `null` puts either back on the default; `assistantEffort` / `automationsEffort` (`low`/`medium`/`high`, `null` for the default) are how hard that agent works on a typed round nobody chose an effort for, and any other word is a 400; `clear: "anthropic"\|"openai"` forgets one credential and leaves the other; `recordExchanges` starts or stops keeping what each round said, and is off unless asked; `mappingProvider` naming a provider with no key is `400 provider_not_configured`. Keys are told apart by prefix, so one pasted in the other's field is a 400 rather than a 401 an hour later, and a `sk-ant-oat…` subscription token is still refused. **PUT is unchanged** (`{apiKey, model?}`, an Anthropic key, required) for apps that have not moved. See [the answer's shape](#the-ai-settings-answer) |
 | `GET /ai/runs?limit=` | `hub.ai` | what the mapping agent did, newest first: `{id, at, kind, vendor, model, exposesHash, provider, modelId, effort, via, ok, costUsd, turns, durationMs, errorKind, errorMessage, steps, exchanges}`. A summary, never a transcript — see [ai-adaptation.md](ai-adaptation.md). `exchanges` is how many **rounds** this run kept, `0` unless recording was on when it ran. `effort` (`low`/`medium`/`high`) and `via` (`voice`/`typed`) say what that turn ran at and how it was asked — both **null** on a row written before them and on a run the idea does not apply to: a portrait has no effort, a device recognition nobody asked for has no `via`, and the `voice` meter is a line rather than a generation, so it carries `via` and no effort |
 | `GET /ai/runs/:id/exchanges` | `hub.ai` | what that run actually said, round by round, oldest first: `[{seq, at, durationMs, provider, modelId, status, ok, inputTokens, outputTokens, sent, received}]`. `sent`/`received` are `[{kind, label, text?, bytes?}]` — the round's **main data**, not its bodies; `bytes` is present only on a part that was cut, and is what it weighed whole. A run is a *loop*, so one recognition is several rounds and a failed one is followed by the next in the same list. Empty is the ordinary answer — recording is off unless the owner asked, and rounds age out after a week. See [ai-adaptation.md](ai-adaptation.md) |
 | `GET /automations` | floor | every rule in the home, plus `unreadable` — rules a **newer** build wrote that this one cannot parse. They are kept and not run; listing them is what stops a rule silently vanishing after `install.sh` rolls a build back. Each carries `summary` (a whole sentence — the contract) beside `document` (the structure — the convenience), the `activity.message` rule applied to rules, [`outline`](automations.md#a-rule-as-a-storyboard) — the same rule as a **storyboard** so an app can *draw* it rather than print it — `icon` — the mark somebody chose, or `null` for the one the app derives — and `roomId`, [the one room the rule is about](#which-room-a-rule-is-in) or `null` for a rule about the whole house |
@@ -2016,9 +2016,12 @@ to draw: `efforts` (the whole vocabulary, `["low","medium","high"]`) and
   taken, so nothing is written for a turn that would not run. A home with no
   usable key at all gets the conversation's own refusal instead.
 - **`effort`** — `low`, `medium` or `high`: how hard the model works on **this
-  round**. A spoken round keeps its own `low` whatever a typed one last asked
-  for. Anything else is a 400; an older hub ignores it and runs at `medium`.
-  The `ai_runs` row records what the round actually ran at.
+  round**. A message that names none runs at the home's own word for that agent
+  (`GET /settings/ai`'s `effort` on the agent's block, `medium` unless somebody
+  chose another), read when its turn begins — so a later message does not
+  inherit an earlier one's. A spoken round keeps its own `low` whatever a typed
+  one last asked for. Anything else is a 400; an older hub ignores it and runs
+  at `medium`. The `ai_runs` row records what the round actually ran at.
 - **`attachments`** — up to `maxCount` photos, each `{type: "image", mediaType,
   data, ref?, width?, height?}` with `mediaType` one of `mediaTypes` and `data`
   standard base64 of at most `maxBytes` decoded. `message` may then be empty —
@@ -2204,6 +2207,22 @@ GPT-6 Luna). Write them with `PATCH /settings/ai {assistantModel}` and
 `{automationsModel}`; `null` clears either back to the default. As above, both
 `model` fields are what will **run**, and a retired id resolves to its
 successor rather than being refused.
+
+**Each block also carries the home's effort for that agent**: `effort`, how hard
+it works on a typed round nobody chose an effort for, and `efforts`, the words it
+may be (`["low","medium","high"]`, the list a chat message is validated against).
+`effort` is `medium` on a home that never chose one, which is what every typed
+round ran at before the field existed. Write it with `PATCH /settings/ai
+{assistantEffort}` and `{automationsEffort}`; `null` puts it back on `medium`.
+**It is a default and nothing more**: a message that names its own `effort`
+[runs at that](#what-a-chat-message-can-carry-model-effort-attachments), a spoken
+round still answers at `low`, and the home's word is read when each turn begins,
+so a change reaches the next round of a conversation already open. **Unlike the
+model fields it is validated** — a model id is resolved to what will run, while
+an effort goes onto the wire as written, so a word a vendor does not take is
+refused here rather than in somebody's conversation. **Its presence is the
+capability**: an older hub answers without it and strips the two PATCH fields
+without a word, so an app offers the control only where it finds `effort`.
 
 **The two agents are offered the same list and choose separately**, which is the
 point of them being two blocks: answering questions about the house and writing

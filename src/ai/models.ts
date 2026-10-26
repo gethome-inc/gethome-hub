@@ -510,6 +510,74 @@ export function requestedAgentModel(
   return effectiveAgentModel(modelId, usable);
 }
 
+/**
+ * How hard the model works on one round.
+ *
+ * **It belongs to the turn, not to the conversation.** A transport is built
+ * once and holds the message history, so an effort chosen there is chosen for
+ * the life of the chat — and the same conversation is typed in the morning and
+ * talked to in the evening (`spokenSessions`' own reasoning). A spoken round is
+ * answered out loud while somebody stands there waiting, and a typed one is
+ * read when it lands.
+ *
+ * **Three words, because it is one value sent to two vendors.** It goes
+ * straight onto the wire — Anthropic's `output_config.effort` and OpenAI's
+ * `reasoning.effort` — and the vocabularies are only the same where they
+ * overlap, so a wider type here is a value one transport would send and the
+ * other would be refused for, discovered as a 400 in somebody's kitchen rather
+ * than by the checker. It carried `xhigh` and `max` for a while with nothing
+ * setting them, which is the same trap one step from firing. Widening one is
+ * deliberate work: check both vendors take the word, or give the transport
+ * that cannot a mapping of its own.
+ *
+ * **And the words are the hub's.** A typed message may ask for its own round's
+ * effort, and the home keeps one of its own for each agent — both from
+ * `CHAT_EFFORTS`, as the routes validate it and `GET /hub` and
+ * `GET /settings/ai` advertise it — so an app draws a picker for whatever this
+ * hub says and never ships a vocabulary of its own.
+ *
+ * It lives here rather than beside the chat runtime that spends it because the
+ * settings service stores the home's word, and this is the one module it may
+ * import from the AI side.
+ */
+export type ChatEffort = 'low' | 'medium' | 'high';
+
+/**
+ * The hub's whole effort vocabulary, in the order an app draws it.
+ *
+ * Exactly `ChatEffort`, and the `satisfies` is what keeps it so: this is the
+ * list a request is validated against and the list the hub advertises, so a
+ * word added to one and not the other would be a picker offering something the
+ * route refuses.
+ */
+export const CHAT_EFFORTS = ['low', 'medium', 'high'] as const satisfies readonly ChatEffort[];
+
+/**
+ * What a conversation works at when nothing chose otherwise — the default of
+ * the home's own word for each agent, and so what every typed round ran at
+ * before the home had one.
+ *
+ * `medium` against the mapper's `high`: a descriptor is cached against a
+ * device model for ever, while a chat is many small rounds read the moment
+ * they arrive. Named once here because the agents, the settings and the run
+ * log all state it — several places for one number is the drift this avoids.
+ */
+export const AGENT_EFFORT: ChatEffort = 'medium';
+
+/**
+ * A stored word this build can send, or null.
+ *
+ * **Read, never trusted.** The column is written by the route, which validates
+ * against `CHAT_EFFORTS` — but a newer build may have widened the list and
+ * then been rolled back, and a word this build would put on the wire for a
+ * vendor to refuse is worse than the default it falls back to.
+ */
+export function knownEffort(value: unknown): ChatEffort | null {
+  return typeof value === 'string' && (CHAT_EFFORTS as readonly string[]).includes(value)
+    ? (value as ChatEffort)
+    : null;
+}
+
 /** Which provider has ever billed for this id, offered or retired. */
 function knownProviderOf(modelId: string | null | undefined): AiProvider | null {
   if (typeof modelId !== 'string') return null;

@@ -1233,6 +1233,52 @@ describe.skipIf(!handle)('hub API', () => {
     });
   });
 
+  /**
+   * Each agent's effort, end to end — the shape both apps draw their effort
+   * control from, and the write they send. **Presence is the capability**: a
+   * hub older than the field answers without `effort` and strips the write, so
+   * both fields are pinned on a hub that never chose one.
+   */
+  it('answers each agent’s effort with the words it may be, and writes it back', async () => {
+    const fresh = await app.inject({ method: 'GET', url: '/api/v1/settings/ai', headers: auth(memberToken) });
+    expect(fresh.json()).toMatchObject({
+      assistant: { effort: 'medium', efforts: ['low', 'medium', 'high'] },
+      automations: { effort: 'medium', efforts: ['low', 'medium', 'high'] },
+    });
+
+    const saved = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { assistantEffort: 'high', automationsEffort: 'low' },
+    });
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json()).toMatchObject({ assistant: { effort: 'high' }, automations: { effort: 'low' } });
+
+    // A word no vendor is sent is refused rather than stored — it would be a
+    // 400 in the middle of somebody's conversation instead of here — and the
+    // refusal leaves what was there.
+    const refused = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { assistantEffort: 'max' },
+    });
+    expect(refused.statusCode).toBe(400);
+    const kept = await app.inject({ method: 'GET', url: '/api/v1/settings/ai', headers: auth(memberToken) });
+    expect(kept.json()).toMatchObject({ assistant: { effort: 'high' } });
+
+    // `null` puts it back on the default, as the model fields beside it do —
+    // and leaves the hub as the next test expects to find it.
+    const cleared = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { assistantEffort: null, automationsEffort: null },
+    });
+    expect(cleared.json()).toMatchObject({ assistant: { effort: 'medium' }, automations: { effort: 'medium' } });
+  });
+
   it('switches adaptation off without asking for the key again', async () => {
     await app.inject({
       method: 'PUT',

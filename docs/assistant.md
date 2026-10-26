@@ -152,8 +152,13 @@ disagree. A model this home cannot run is refused at the route
 (`409 model_unavailable`) before the message is taken.
 
 **Effort is the round's**, which it always was (`ChatTurnContext.effort`): a
-typed message may ask for `low`, `medium` or `high`, the transport's `medium`
-is what it gets otherwise, and a spoken round's `low` keeps winning.
+typed message may ask for `low`, `medium` or `high`; one that asks for none
+gets **the home's own word for that agent** (`GET /settings/ai`'s
+`assistant.effort` / `automations.effort`, `medium` until somebody picks
+another), read when its turn begins; and a spoken round's `low` keeps winning.
+The home's word is the agent's own setting in the same way its model is — and
+the one an agent works at on a job handed to it, where nobody is there to
+choose.
 
 **A photo reaches the model for one round and is kept nowhere.** It travels
 `ChatTurnContext.images` → the agent's `send`/`answer` →
@@ -462,7 +467,8 @@ none), **the transcript** and **what the line cost**. The phone owns the
 **audio** and the live captions on its page, and it is the phone that sends
 `session.close`, because it is the thing somebody presses stop on.
 
-**A spoken round is answered at `low` effort where a typed one is `medium`**,
+**A spoken round is answered at `low` effort where a typed one runs at the
+home's word for the assistant (`medium` unless somebody chose another)**,
 and the knob is on the turn (`ChatTurnContext.effort`) rather than on the
 conversation, because a transport is built once and holds the history while one
 conversation is both — typed in the morning, talked to in the evening. The

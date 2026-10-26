@@ -1060,6 +1060,12 @@ that has — so a home whose one key is OpenAI's runs on OpenAI, and switching t
 *mapping* provider changes nothing about whether rules can be written, in
 either direction.
 
+**And it thinks at its own word** (`ai.automations.effort`, `low`/`medium`/
+`high`, set on the AI page beside its model and `medium` until somebody picks
+another) — on every round nobody chose an effort for, which includes every job
+the assistant hands it: nobody is in that conversation to pick one. A message
+typed to it directly may still name its own for that round.
+
 **Either vendor runs it, and nothing after that line asks again.** Both loops
 have existed since the assistant got its `ChatTransport`, but a second check
 further down `openConversation` still refused anything but Anthropic with "needs

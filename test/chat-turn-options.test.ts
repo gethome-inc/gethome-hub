@@ -1105,6 +1105,33 @@ describe('a turn’s model, effort and photos, in the runtime', () => {
     expect(rows.map((row) => row.effort)).toContain('high');
   });
 
+  /**
+   * **A message's own word beats the home's**, and each agent keeps its own.
+   * The home's word is a default for the rounds nobody chose one for — a chat
+   * that picked Deep is asking for Deep on that round whatever the AI page
+   * says — and the automations agent reads its own word, never the
+   * assistant's.
+   */
+  it('lets a message’s own effort win over the home’s, and gives each agent its own', async () => {
+    await settings.setAgentEffort('assistant', 'low');
+    await settings.setAgentEffort('automations', 'high');
+    const { assistant, chat: automationChat, fakes } = await runtimes();
+
+    const chosen = await assistant.start({ memberId, message: 'think hard', turn: { effort: 'medium' } });
+    await assistant.idle();
+    expect(fakes.opened[0]?.rounds[0]?.effort).toBe('medium');
+    expect((await ledger(chosen.sessionId)).map((row) => row.effort)).toContain('medium');
+
+    await assistant.reply(chosen.sessionId, memberId, 'and again, nothing chosen');
+    await assistant.idle();
+    expect(fakes.opened[0]?.rounds[1]?.effort).toBe('low');
+
+    const before = fakes.opened.length;
+    await automationChat.start({ memberId, message: 'a rule for the hall' });
+    await automationChat.idle();
+    expect(fakes.opened[before]?.rounds[0]?.effort).toBe('high');
+  });
+
   it('calls a conversation that opened with a picture what it is', async () => {
     const { assistant } = await runtimes();
     const one = await assistant.start({ memberId, message: '', turn: { images: [photo()] } });

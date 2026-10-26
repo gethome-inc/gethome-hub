@@ -6,7 +6,13 @@ import type { AutomationChatEvent, HubEventBus } from '../../core/bus.js';
 import type { SettingsService } from '../../core/settings.js';
 import type { AiRunKind, AiRunLog, SessionSpend } from '../../core/ai-runs.js';
 import type { Logger } from '../../logging.js';
-import { modelLabel, requestedAgentModel } from '../models.js';
+import {
+  AGENT_EFFORT,
+  CHAT_EFFORTS,
+  modelLabel,
+  requestedAgentModel,
+  type ChatEffort,
+} from '../models.js';
 import { AiUnavailableError } from '../errors.js';
 import type { AskUser } from '../automation-tools.js';
 
@@ -33,6 +39,17 @@ import type { AskUser } from '../automation-tools.js';
 
 /** Which agent's conversation a stored row belongs to. */
 export type AgentSurface = 'automation' | 'assistant';
+
+/**
+ * The effort vocabulary — `ChatEffort`, the words a round may ask for
+ * (`CHAT_EFFORTS`) and what both agents work at when nothing chose otherwise
+ * (`AGENT_EFFORT`) — is `models.ts`'s, beside the models it is spent on. It
+ * moved there when the home began keeping its own word per agent: the settings
+ * service stores that word, and `models.ts` is the one module it may import
+ * from here. Re-exported, so everything that spends an effort keeps reading it
+ * from the runtime it is spent in.
+ */
+export { AGENT_EFFORT, CHAT_EFFORTS, type ChatEffort };
 
 /** How long an idle conversation is kept before its history is dropped. */
 export const CHAT_SESSION_TTL_MS = 2 * 60 * 60_000;
@@ -206,45 +223,6 @@ export interface ChatSummaryWire {
   handedFrom?: string;
 }
 
-/** What a running turn reports as it happens, for the socket. */
-/**
- * How hard the model works on one round.
- *
- * **It belongs to the turn, not to the conversation**, which is the whole of
- * why it is here rather than only on `ChatTransportOptions`. A transport is
- * built once and holds the message history, so an effort chosen there is
- * chosen for the life of the chat — and the same conversation is typed in the
- * morning and talked to in the evening (`spokenSessions`' own reasoning). A
- * spoken round is answered out loud while somebody stands there waiting, and a
- * typed one is read when it lands.
- *
- * **Three words, because it is one value sent to two vendors.** It goes
- * straight onto the wire — Anthropic's `output_config.effort` and OpenAI's
- * `reasoning.effort` — and the vocabularies are only the same where they
- * overlap, so a wider type here is a value one transport would send and the
- * other would be refused for, discovered as a 400 in somebody's kitchen rather
- * than by the checker. It carried `xhigh` and `max` for a while with nothing
- * setting them, which is the same trap one step from firing. Widening one is
- * deliberate work: check both vendors take the word, or give the transport
- * that cannot a mapping of its own.
- *
- * **And the words are the hub's.** A typed message may ask for its own round's
- * effort, and what it may ask for is `CHAT_EFFORTS` — this list, as the routes
- * validate it and `GET /hub` advertises it — so an app draws a picker for
- * whatever this hub says and never ships a vocabulary of its own.
- */
-export type ChatEffort = 'low' | 'medium' | 'high';
-
-/**
- * What a conversation works at, for both agents.
- *
- * `medium` against the mapper's `high`: a descriptor is cached against a
- * device model for ever, while a chat is many small rounds read the moment
- * they arrive. Named once here because two agents state it and the run log
- * records it — three places for one number is two too many.
- */
-export const AGENT_EFFORT: ChatEffort = 'medium';
-
 /**
  * How a person reached the agent, for the run log.
  *
@@ -268,16 +246,6 @@ export interface TurnOrigin {
   effort?: ChatEffort;
   via?: ChatVia;
 }
-
-/**
- * The hub's whole effort vocabulary, in the order an app draws it.
- *
- * Exactly `ChatEffort`, and the `satisfies` is what keeps it so: this is the
- * list a request is validated against and the list `GET /hub` advertises, so a
- * word added to one and not the other would be a picker offering something the
- * route refuses.
- */
-export const CHAT_EFFORTS = ['low', 'medium', 'high'] as const satisfies readonly ChatEffort[];
 
 /**
  * Photos one message may carry, and how large each may be once decoded.
@@ -1825,6 +1793,20 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     if (session.steps.length > TURN_STEP_LIMIT) session.steps.shift();
   }
 
+  /**
+   * How hard this agent works on a turn that asked for no effort of its own:
+   * the home's word (`PATCH /settings/ai`), or the conversation's own where
+   * the setting cannot be read — a turn is not worth failing over which of two
+   * defaults it runs at.
+   */
+  private async homeEffort(session: ChatSession<Turn>): Promise<ChatEffort> {
+    try {
+      return await this.base.settings.agentEffort(this.surface === 'assistant' ? 'assistant' : 'automations');
+    } catch {
+      return session.conversation.effort;
+    }
+  }
+
   private async runExchange(
     session: ChatSession<Turn>,
     text: string,
@@ -1838,8 +1820,15 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     // session because `record` runs after the turn and takes only the
     // session; turns are chained per conversation, so the value cannot belong
     // to a different one by the time it is read.
+    //
+    // **The effort is the turn's**: what the message or the voice asked for,
+    // and otherwise the home's own word for this agent — read now rather than
+    // when the conversation opened, because it is a setting that moves while a
+    // conversation stays open, and sent on every round rather than left to the
+    // transport's own, so what the run log records is what was asked for.
+    const effort = origin?.effort ?? (await this.homeEffort(session));
     session.origin = {
-      effort: origin?.effort ?? session.conversation.effort,
+      effort,
       // A chat turn is typed unless something says otherwise, which is the
       // honest default: `askAloud` is the only caller that says otherwise.
       via: origin?.via ?? 'typed',
@@ -1891,7 +1880,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       session.priming = undefined;
 
       turn = await session.conversation[how](primed, {
-        ...(origin?.effort !== undefined ? { effort: origin.effort } : {}),
+        effort,
         // This round's photos and nobody else's: they are in the request the
         // model reads now, and `rebase` lets them go once the round is over.
         ...(request?.images !== undefined && request.images.length > 0
