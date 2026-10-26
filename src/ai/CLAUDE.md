@@ -429,11 +429,13 @@ domains — update them in the same change.
   model has never seen; a revived conversation's recap carries a preview row's
   id for the same reason. One row per rule (so an app draws a card each, with
   `edited` per rule), and the prompt asks for **one line for the lot** rather
-  than a paragraph per card. Bounded at four rules a response
-  (`AUTOMATION_MAX_RULES_PER_TURN`): two is the case this exists for, and past
-  four it is a model that has misread the room writing a page of rules into
-  somebody's home — the accepted ones are saved and the rest refused inside the
-  turn, to be offered once the person has replied.
+  than a paragraph per card. Bounded at four rules a reply
+  (`AUTOMATION_MAX_RULES_PER_TURN`, counting any held for their line, below —
+  a reply is one page of cards however many responses wrote it): two is the
+  case this exists for, and past four it is a model that has misread the room
+  writing a page of rules into somebody's home — the accepted ones are saved
+  and the rest refused inside the turn, to be offered once the person has
+  replied.
   **A submission writes the model's line and then the card, and asking for
   that line one round too late is why it was blank.** The card carries
   `describeAutomation`'s sentence — the *rule*, the same words for everybody —
@@ -453,6 +455,23 @@ domains — update them in the same change.
   watching it). Exactly one, because the rule is already saved and a third round
   spent on a sentence the model will not write is worse than handing the card
   over without one.
+  **And every way out of that round hands the rule over, which only two of them
+  did.** The results had already said "Accepted", so the model's history says
+  the rule exists — and the cost limit and a refusal returned `stopped`, running
+  out of rounds fell through to it, a question was returned in its place, a
+  second submission was returned on its own and a throw took the turn with it,
+  each leaving a conversation that contradicts itself over a card nobody saw.
+  Every exit in `pump` asks `handOver` first. A second submission is merged in
+  order (`withHeld`, which `halted` goes through too, so a stop after one keeps
+  both) and counts against the bound; a question there is refused inside the
+  turn, like one beside a submission. **Only the cost limit is still said**, as a
+  note under the cards (`stopped` on the `submitted` arm) and never as the line
+  above them, which is the model's: it is about every message after this one,
+  which meets the same check. A refusal with a rule held is not `refused`: its
+  sentence, the other model its note offers and the message `rebase` lets go
+  are all for a declined request, and only the line was declined — while "used
+  all its steps without finishing" is not true of an agent that finished; a
+  throw is logged, and if it is about the conversation the next message says so.
   **The prompt says what the prose is written *into*.** A model writes Markdown,
   and both halves of that were missing: the apps drew it as characters and the
   prompt never described the surface, so an answer listing four rules arrived
