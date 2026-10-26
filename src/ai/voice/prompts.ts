@@ -212,6 +212,22 @@ export function liveInstructions(input: {
 }
 
 /**
+ * A row as words, for a session that only has words.
+ *
+ * A photo cannot follow a conversation into the voice — the line carries none,
+ * and the hub never kept it — so a message that came with one says that it
+ * did, the way a revived conversation's recap does, rather than leaving
+ * "what is this?" hanging with nothing beside it.
+ */
+function spokenText(row: ChatMessageWire): string {
+  const attachments = (row.data as { attachments?: unknown } | null | undefined)?.attachments;
+  const count = row.role === 'user' && Array.isArray(attachments) ? attachments.length : 0;
+  if (count === 0) return row.text;
+  const photos = count === 1 ? 'a photo' : `${count} photos`;
+  return row.text.trim().length > 0 ? `${row.text} (sent with ${photos})` : `(sent ${photos})`;
+}
+
+/**
  * What the session opens knowing, out of the conversation it is continuing.
  *
  * **This is what makes pressing the microphone on a page you have been typing
@@ -247,7 +263,11 @@ export function liveHistory(rows: ChatMessageWire[]): LiveHistoryMessage[] {
     if (row === undefined) continue;
     // Clipped before it is measured, so one long answer costs what it is
     // allowed to cost rather than the whole budget.
-    const text = row.text.slice(0, LIVE_HISTORY_MESSAGE_CHARS);
+    const text = spokenText(row).slice(0, LIVE_HISTORY_MESSAGE_CHARS);
+    // A row with nothing to say out loud — a photo sent on its own leaves the
+    // person's row with no words — is left out rather than sent as an empty
+    // message, which is a request the API is entitled to refuse.
+    if (text.trim().length === 0) continue;
     if (text.length > budget) break;
     budget -= text.length;
     kept.push(

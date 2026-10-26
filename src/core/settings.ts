@@ -265,18 +265,7 @@ export class SettingsService {
     const anthropic = await this.providerSettings('anthropic');
     const openai = await this.providerSettings('openai');
     const chosen = await this.get<AiProvider>('ai_mapping_provider');
-    /**
-     * Which providers an *agent* could authenticate as.
-     *
-     * A stored Anthropic subscription token is a key the hub holds and cannot
-     * use — the chat loops authenticate with an API key — so it is not
-     * usability, and treating it as such would point every conversation at a
-     * vendor that answers 401 while a working OpenAI key sat beside it.
-     */
-    const usable: UsableProviders = {
-      anthropic: anthropic.hasKey && authType !== LEGACY_OAUTH_AUTH_TYPE,
-      openai: openai.hasKey,
-    };
+    const usable = agentUsability(anthropic, openai, authType);
     return {
       provider: this.resolveMappingProvider(chosen, anthropic, openai),
       model: anthropic.model,
@@ -290,6 +279,25 @@ export class SettingsService {
       assistant: agentSettings(await this.get<string>('ai_assistant_model'), usable),
       automations: agentSettings(await this.get<string>('ai_automations_model'), usable),
     };
+  }
+
+  /**
+   * Which providers a conversation could authenticate as, right now.
+   *
+   * The same answer `getAiSettings` resolves both agents' models against, for
+   * the one caller that has a model in hand rather than a column to resolve: a
+   * chat that names its own model (`requestedAgentModel`). Read through the one
+   * rule below rather than restated, because "is a subscription token a key"
+   * answered two ways is exactly how a picker offers a model the loop then
+   * refuses.
+   */
+  async agentProviders(): Promise<UsableProviders> {
+    const authType = await this.get<string>('ai_auth_type');
+    return agentUsability(
+      await this.providerSettings('anthropic'),
+      await this.providerSettings('openai'),
+      authType,
+    );
   }
 
   private async providerSettings(provider: AiProvider): Promise<AiProviderSettings> {
@@ -429,6 +437,25 @@ export class SettingsService {
   async setAiStatus(status: AiStatus): Promise<void> {
     await this.set('ai_status', status);
   }
+}
+
+/**
+ * Which providers an *agent* could authenticate as.
+ *
+ * A stored Anthropic subscription token is a key the hub holds and cannot
+ * use — the chat loops authenticate with an API key — so it is not
+ * usability, and treating it as such would point every conversation at a
+ * vendor that answers 401 while a working OpenAI key sat beside it.
+ */
+function agentUsability(
+  anthropic: AiProviderSettings,
+  openai: AiProviderSettings,
+  authType: string | null,
+): UsableProviders {
+  return {
+    anthropic: anthropic.hasKey && authType !== LEGACY_OAUTH_AUTH_TYPE,
+    openai: openai.hasKey,
+  };
 }
 
 /**

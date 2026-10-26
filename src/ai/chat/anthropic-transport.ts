@@ -10,6 +10,7 @@ import {
   type ChatTransport,
   type ChatTransportOptions,
 } from './agent-loop.js';
+import type { ChatImage } from './chat-runtime.js';
 
 /**
  * A conversation on Anthropic's Messages API.
@@ -66,6 +67,24 @@ class RunUsage {
   }
 }
 
+/**
+ * One photo as this vendor takes it: base64 inline, with its media type.
+ *
+ * The media type is the route's own short list (`CHAT_IMAGE_MEDIA_TYPES`), all
+ * of which this API accepts, so the cast is a statement of that rather than a
+ * hope.
+ */
+function imageBlock(image: ChatImage): Anthropic.ImageBlockParam {
+  return {
+    type: 'image',
+    source: {
+      type: 'base64',
+      media_type: image.mediaType as Anthropic.Base64ImageSource['media_type'],
+      data: image.data,
+    },
+  };
+}
+
 /** Anthropic's four stop reasons, in the four words a pump branches on. */
 function stopOf(reason: string | null | undefined): ChatStop {
   switch (reason) {
@@ -96,19 +115,40 @@ export function createAnthropicTransport(options: ChatTransportOptions): ChatTra
     provider: 'anthropic',
     modelId,
 
-    pushUser(text) {
-      messages.push({ role: 'user', content: text });
-    },
-
-    pushToolResults(results: ChatToolResult[]) {
+    pushUser(text, images) {
+      // A plain string when there is nothing but words, so every conversation
+      // that never sends a photo sends exactly the bytes it always did.
+      if (images === undefined || images.length === 0) {
+        messages.push({ role: 'user', content: text });
+        return;
+      }
+      // The pictures first and the words after them, which is the order the
+      // vendor's own guidance gives — and no text block at all for a message
+      // that is only a photo, since an empty one is refused.
       messages.push({
         role: 'user',
-        content: results.map((result) => ({
-          type: 'tool_result' as const,
-          tool_use_id: result.id,
-          content: result.text,
-          ...(result.isError ? { is_error: true } : {}),
-        })),
+        content: [
+          ...images.map(imageBlock),
+          ...(text.trim().length > 0 ? [{ type: 'text' as const, text }] : []),
+        ],
+      });
+    },
+
+    pushToolResults(results: ChatToolResult[], images) {
+      messages.push({
+        role: 'user',
+        content: [
+          ...results.map((result) => ({
+            type: 'tool_result' as const,
+            tool_use_id: result.id,
+            content: result.text,
+            ...(result.isError ? { is_error: true } : {}),
+          })),
+          // After every result, never before: a user turn that answers tool
+          // calls has to open with their results, and anything else it
+          // carries — here, the photos an answer came with — follows them.
+          ...(images ?? []).map(imageBlock),
+        ],
       });
     },
 

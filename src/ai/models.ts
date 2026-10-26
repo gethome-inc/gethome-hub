@@ -118,6 +118,16 @@ export interface ModelChoice {
   readonly note: string;
   /** Exactly one choice per provider carries this. */
   readonly recommended?: boolean;
+  /**
+   * The model reads a photo sent with a chat message.
+   *
+   * **Additive, and a fact about the model rather than a promise about the
+   * route**: an app asks it before offering to attach a picture to a chat on
+   * this model, rather than shipping its own list of which models can see. True
+   * for every model offered to the agents today; a later one that cannot will
+   * simply not carry it, and an app treats absent as "no".
+   */
+  readonly images?: boolean;
 }
 
 /** Everything the hub knows about one model, offered or not. */
@@ -129,6 +139,9 @@ interface KnownModel {
    * the same vendor's, always. Absent on a model that is still current.
    */
   readonly successor?: string;
+  /** It reads images. Written on the row, beside the price, because it is the
+   *  same kind of fact — what the vendor's model is, not what a surface offers. */
+  readonly images?: boolean;
 }
 
 /**
@@ -153,12 +166,14 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
     'claude-fable-5-1': {
       label: 'Fable 5.1',
       price: { inputPerMTok: 10, outputPerMTok: 50, cacheReadMultiplier: 0.025 },
+      images: true,
     },
     'claude-opus-5-5': {
       label: 'Opus 5.5',
       // A twentieth of the input rate for a cached read, where every model
       // before it billed a tenth.
       price: { inputPerMTok: 4, outputPerMTok: 20, cacheReadMultiplier: 0.05 },
+      images: true,
     },
     'claude-opus-5': {
       label: 'Opus 5',
@@ -185,6 +200,7 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
     'claude-sonnet-5-5': {
       label: 'Sonnet 5.5',
       price: { inputPerMTok: 2, outputPerMTok: 10, cacheReadMultiplier: 0.05 },
+      images: true,
     },
     'claude-sonnet-5': {
       label: 'Sonnet 5',
@@ -207,12 +223,14 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
         outputPerMTok: 0.5,
         longPrompt: { aboveTokens: 100_000, inputMultiplier: 5, outputMultiplier: 5 },
       },
+      images: true,
     },
   },
   openai: {
     'gpt-6-astra': {
       label: 'GPT-6 Astra',
       price: { inputPerMTok: 10, outputPerMTok: 50, longPrompt: GPT_6_LONG_PROMPT },
+      images: true,
     },
     // GPT-6 Sol's price, with a cached read at a twentieth ($0.10) where GPT-6
     // Sol reads at the usual tenth. It takes the same requests: the Responses
@@ -222,6 +240,7 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
     'gpt-6.1-sol': {
       label: 'GPT-6.1 Sol',
       price: { inputPerMTok: 2, outputPerMTok: 10, cacheReadMultiplier: 0.05, longPrompt: GPT_6_LONG_PROMPT },
+      images: true,
     },
     // Still served, and replaced in the picker the way Opus 5 was: GPT-6.1 Sol
     // is the same price and stronger, so nothing a home chose is lost by moving.
@@ -233,6 +252,7 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
     'gpt-6-luna': {
       label: 'GPT-6 Luna',
       price: { inputPerMTok: 0.1, outputPerMTok: 0.5, longPrompt: GPT_6_LONG_PROMPT },
+      images: true,
     },
     // GPT-5.6 was Sol, Terra and Luna; GPT-6 is Astra, Sol and Luna. There is
     // no GPT-6 Terra, and GPT-6 Sol is both cheaper than 5.6 Terra ($2/$12) and
@@ -268,7 +288,13 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
 function offer(provider: AiProvider, id: string, note: string, recommended = false): ModelChoice {
   const known = knownModel(provider, id);
   if (known === undefined) throw new Error(`models: ${provider} offers ${id}, which MODELS does not know`);
-  return { id, label: known.label, note, ...(recommended ? { recommended: true } : {}) };
+  return {
+    id,
+    label: known.label,
+    note,
+    ...(recommended ? { recommended: true } : {}),
+    ...(known.images === true ? { images: true } : {}),
+  };
 }
 
 function knownModel(provider: AiProvider, id: string): KnownModel | undefined {
@@ -456,6 +482,32 @@ export function effectiveAgentModel(
     }
   }
   return null;
+}
+
+/**
+ * The model one chat asked for by name, when it can run on it right now —
+ * otherwise `null`.
+ *
+ * **Narrower than `effectiveAgentModel`, on purpose.** That one answers "what
+ * will this home's setting run on", and its answer to an id it cannot use is a
+ * fallback, because a stored column nobody chose must never become a refusal.
+ * A chat's own pick is a different thing: somebody chose it a moment ago from
+ * the list this hub offered, so quietly running something else would be the
+ * picker lying about what answered. So an id no agent is offered, or one whose
+ * vendor has no usable key, is `null` here — the route says so
+ * (`409 model_unavailable`), and a revived conversation falls back to the
+ * home's setting rather than to a vendor guessed by the resolver.
+ *
+ * What it does answer still goes **through** `effectiveAgentModel`, so the
+ * vendor and key rules stay written once.
+ */
+export function requestedAgentModel(
+  modelId: string | null | undefined,
+  usable: UsableProviders,
+): { provider: AiProvider; modelId: string } | null {
+  const provider = agentProviderOf(modelId);
+  if (provider === null || !usable[provider]) return null;
+  return effectiveAgentModel(modelId, usable);
 }
 
 /** Which provider has ever billed for this id, offered or retired. */

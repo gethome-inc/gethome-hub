@@ -1,6 +1,6 @@
 import type { AiProvider } from '../../core/settings.js';
 import type { Logger } from '../../logging.js';
-import type { ChatEffort, ChatTurnContext } from './chat-runtime.js';
+import type { ChatEffort, ChatImage, ChatTurnContext } from './chat-runtime.js';
 
 /**
  * The parts of a conversational agent loop that are neither a vendor's API nor
@@ -79,11 +79,25 @@ export interface ChatTransport {
   readonly provider: AiProvider;
   readonly modelId: string;
 
-  /** The person's message (or a revival's priming) as the next user turn. */
-  pushUser(text: string): void;
+  /**
+   * The person's message (or a revival's priming) as the next user turn.
+   *
+   * **Photos ride in the same turn, and only when there are any**: with none,
+   * the request is byte-for-byte what it always was, which keeps the cached
+   * prefix of every conversation that never sends one exactly as warm. A
+   * message that is only a photo sends no empty text beside it — Anthropic
+   * refuses an empty text block, and a picture is a complete user turn on
+   * both vendors.
+   */
+  pushUser(text: string, images?: readonly ChatImage[]): void;
 
-  /** Results for the calls in the last round, as one user turn. */
-  pushToolResults(results: ChatToolResult[]): void;
+  /**
+   * Results for the calls in the last round, as one user turn — and, when the
+   * answer that closed a question came with photos, those photos after them,
+   * in the same turn where the vendor allows it and as the very next one where
+   * it does not.
+   */
+  pushToolResults(results: ChatToolResult[], images?: readonly ChatImage[]): void;
 
   /**
    * One streamed round, with the model's reply pushed onto the history.
@@ -128,11 +142,12 @@ export interface ChatTransportOptions {
    * How hard the model works, for every round this conversation runs.
    *
    * `high` for a job cached against a device model for ever; `medium` for a
-   * chat, which is many small rounds read the moment they arrive. Not exposed
-   * to anybody: two settings for one decision is one too many, so each agent
-   * states its own and nothing configures it. **One round may ask for
+   * chat, which is many small rounds read the moment they arrive. No setting
+   * configures it — each agent states its own. **One round may ask for
    * something else** — `ChatTurnContext.effort`, which is how a spoken round
-   * gets answered at the speed a person standing in a room expects.
+   * gets answered at the speed a person standing in a room expects, and how a
+   * typed message that asked for its own effort (`ChatTurnRequest.effort`,
+   * from the hub's three words) gets that for its one round.
    */
   effort: ChatEffort;
   signal: AbortSignal;
@@ -221,13 +236,29 @@ export class QuestionGate {
     this.pending = null;
   }
 
-  /** Close the question with the person's answer and send the stash with it. */
-  answer(text: string): void {
+  /**
+   * Close the question with the person's answer and send the stash with it.
+   *
+   * An answer can be a photo and nothing else — "which one?" answered with a
+   * picture of it — and a tool result has to *say* something, so a wordless
+   * one says that a photo follows rather than going out empty.
+   */
+  answer(text: string, images?: readonly ChatImage[]): void {
     if (this.pending === null) return;
-    const results: ChatToolResult[] = [...this.stashed, { id: this.pending, text }];
+    const said =
+      text.trim().length === 0 && images !== undefined && images.length > 0
+        ? images.length === 1
+          ? '(They answered with the photo below.)'
+          : '(They answered with the photos below.)'
+        : text;
+    const results: ChatToolResult[] = [...this.stashed, { id: this.pending, text: said }];
     this.stashed = [];
     this.pending = null;
-    this.transport.pushToolResults(results);
+    if (images !== undefined && images.length > 0) {
+      this.transport.pushToolResults(results, images);
+    } else {
+      this.transport.pushToolResults(results);
+    }
   }
 
   /**

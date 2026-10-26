@@ -869,6 +869,67 @@ describe('the assistant', () => {
     ]);
   });
 
+  /**
+   * A handover with no words before it makes the card the round's first row,
+   * which is where the round's working and its clock go — and `amend`
+   * replaces a row's whole `data`, so moving the card used to wipe both the
+   * first time the other agent did anything.
+   */
+  it('keeps the round’s working on a card with no words before it, as the card moves', async () => {
+    const brief = 'switch the hall lamp on at sunset';
+    const document = {
+      version: 1,
+      name: 'Hall lamp at sunset',
+      mode: 'single',
+      triggers: [{ kind: 'manual' }],
+      actions: [{ kind: 'logActivity', message: 'Sunset' }],
+    };
+    const { assistant, automationChat } = await assistantFor([], {
+      delegated: [
+        {
+          kind: 'question',
+          question: { question: 'Which hall lamp?', options: [{ id: 'a', label: 'The tall one' }] },
+        },
+        { kind: 'submitted', rules: [{ document, replaces: null }], text: 'Written.' },
+      ],
+    });
+    const tools = (
+      assistant as unknown as {
+        toolContext: (
+          id: string,
+          sessionId: string,
+        ) => {
+          delegate: (agent: string, brief: string, fresh?: boolean) => Promise<{ sessionId: string }>;
+        };
+      }
+    ).toolContext(memberId, randomUUID());
+    const handed = await tools.delegate('automations', brief);
+    await automationChat.idle();
+
+    const { assistant: second } = await assistantFor([
+      { kind: 'handed', text: '', handoffs: [{ agent: 'automations', brief, sessionId: handed.sessionId }] },
+    ]);
+    const started = await second.start({ memberId, message: 'sunset lamp please' });
+    await second.idle();
+
+    const card = async () =>
+      (await second.transcript(started.sessionId)).find((row) => row.role === 'handoff')?.data as
+        | { status: string; tookMs?: number }
+        | undefined;
+    expect((await second.transcript(started.sessionId)).map((row) => row.role)).toEqual([
+      'user',
+      'handoff',
+    ]);
+    const took = (await card())?.tookMs;
+    expect(Number.isInteger(took)).toBe(true);
+
+    await automationChat.reply(handed.sessionId, memberId, 'the tall one');
+    await automationChat.idle();
+    const moved = await card();
+    expect(moved?.status).toBe('delivered');
+    expect(moved?.tookMs).toBe(took);
+  });
+
   it('says the card moved on its own conversation, and not as a round ending', async () => {
     const brief = 'switch the hall lamp on at sunset';
     const { assistant, automationChat } = await assistantFor([], {

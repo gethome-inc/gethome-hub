@@ -6,7 +6,7 @@ import type { AutomationChatEvent, HubEventBus } from '../../core/bus.js';
 import type { SettingsService } from '../../core/settings.js';
 import type { AiRunKind, AiRunLog, SessionSpend } from '../../core/ai-runs.js';
 import type { Logger } from '../../logging.js';
-import { modelLabel } from '../models.js';
+import { modelLabel, requestedAgentModel } from '../models.js';
 import { AiUnavailableError } from '../errors.js';
 import type { AskUser } from '../automation-tools.js';
 
@@ -183,6 +183,27 @@ export interface ChatSummaryWire {
   live: boolean;
   /** What it cost and what wrote it. Absent when the ledger no longer has it. */
   spend?: ChatSpendWire;
+  /**
+   * Whether the person asking is the one who had this conversation — the
+   * first thing said in it was theirs, which is `ownerOf`'s rule.
+   *
+   * **Additive, and it fixes a misleading answer rather than hiding a list.**
+   * Every member's chats are listed, by design — reading a transcript is shared
+   * home-wide — but only its owner can carry one on, and typing into somebody
+   * else's answers `410 conversation_ended`, which reads as "this is over"
+   * rather than "this is not yours". An app that wants a person's own list
+   * shows `mine !== false`. Present whenever the route knows who is asking.
+   */
+  mine?: boolean;
+  /**
+   * The **assistant** conversation that handed this one over, when one did.
+   *
+   * Only ever on an automations chat: the assistant's `handoff` row names the
+   * session it started, and this is that link read backwards — the newest
+   * handover wins — so an app can say where a conversation came from and go
+   * back to it. Absent for one somebody started themselves.
+   */
+  handedFrom?: string;
 }
 
 /** What a running turn reports as it happens, for the socket. */
@@ -206,6 +227,11 @@ export interface ChatSummaryWire {
  * setting them, which is the same trap one step from firing. Widening one is
  * deliberate work: check both vendors take the word, or give the transport
  * that cannot a mapping of its own.
+ *
+ * **And the words are the hub's.** A typed message may ask for its own round's
+ * effort, and what it may ask for is `CHAT_EFFORTS` — this list, as the routes
+ * validate it and `GET /hub` advertises it — so an app draws a picker for
+ * whatever this hub says and never ships a vocabulary of its own.
  */
 export type ChatEffort = 'low' | 'medium' | 'high';
 
@@ -243,6 +269,157 @@ export interface TurnOrigin {
   via?: ChatVia;
 }
 
+/**
+ * The hub's whole effort vocabulary, in the order an app draws it.
+ *
+ * Exactly `ChatEffort`, and the `satisfies` is what keeps it so: this is the
+ * list a request is validated against and the list `GET /hub` advertises, so a
+ * word added to one and not the other would be a picker offering something the
+ * route refuses.
+ */
+export const CHAT_EFFORTS = ['low', 'medium', 'high'] as const satisfies readonly ChatEffort[];
+
+/**
+ * Photos one message may carry, and how large each may be once decoded.
+ *
+ * **Bounds on a Raspberry Pi, not on a phone.** A photo is in this process
+ * three times while it is in flight — the request body, the parsed string, and
+ * the provider history every round re-serialises — and the smallest supported
+ * board has about thirty megabytes of headroom — so a message at the ceiling
+ * (four photos, two megabytes of base64 each) is about 24 MB in flight and
+ * fits, where three megabytes a photo would not. The app downscales to well
+ * under this before sending (a 1280-pixel JPEG is a few hundred kilobytes, and
+ * 1568 pixels on the long edge is as large as either vendor reads a photo
+ * before shrinking it itself); these are the ceiling a client that does not is
+ * held to, not the size the hub expects.
+ */
+export const CHAT_IMAGE_MAX_COUNT = 4;
+export const CHAT_IMAGE_MAX_BYTES = 1.5 * 1024 * 1024;
+/** What both vendors accept as an image block, and nothing a phone would not
+ *  produce. GIF is left out on purpose: an animated one is a different thing to
+ *  send a model, and neither app makes one. */
+export const CHAT_IMAGE_MEDIA_TYPES = ['image/jpeg', 'image/png', 'image/webp'] as const;
+
+/**
+ * What `GET /hub` says a chat message can carry besides its words.
+ *
+ * **Presence is the capability**, the `pairing.signInCodes` rule and for its
+ * reason: an older hub's zod strips `model`, `effort` and `attachments` without
+ * a word and answers 201, so a phone that sent a photo to one would draw a
+ * conversation about a picture the model never saw. An app that does not find
+ * this block offers none of the three. Static, because that route is the
+ * installer's health check and must never throw.
+ */
+export const CHAT_CAPABILITY = {
+  /** A message may name the agent model it is answered on. */
+  models: true,
+  /** The words `effort` takes, from least to most. */
+  efforts: CHAT_EFFORTS,
+  images: {
+    maxCount: CHAT_IMAGE_MAX_COUNT,
+    /** Per photo, decoded. */
+    maxBytes: CHAT_IMAGE_MAX_BYTES,
+    mediaTypes: CHAT_IMAGE_MEDIA_TYPES,
+  },
+} as const;
+
+/**
+ * One photo travelling with a message, for one round.
+ *
+ * **It is never written down.** `data` reaches the provider in that round's
+ * request and nowhere else: the transcript row keeps what the photo *was*
+ * (`attachmentsOf`), never its bytes, and the session is rebased after the
+ * round (`ChatRuntime.rebase`) so the provider history stops holding it too.
+ */
+export interface ChatImage {
+  mediaType: string;
+  /** Base64, without a `data:` prefix. */
+  data: string;
+  /** The app's own name for its copy, echoed on the row so it can draw it. */
+  ref?: string | undefined;
+  width?: number | undefined;
+  height?: number | undefined;
+}
+
+/**
+ * What one message asks for besides its words — everything a route can pass
+ * through to a turn.
+ *
+ * Absent fields are the old behaviour, which is what an older app sends: the
+ * conversation's own model, the transport's own effort, no photos.
+ */
+export interface ChatTurnRequest {
+  /** An agent model id, already checked against what this home can run. */
+  model?: string | undefined;
+  effort?: ChatEffort | undefined;
+  images?: readonly ChatImage[] | undefined;
+}
+
+/**
+ * How many bytes a base64 string decodes to, without decoding it.
+ *
+ * Measured from the length rather than by decoding a three-megabyte string to
+ * learn how long it is — the number is exact for well-formed base64, which the
+ * route has already insisted on.
+ */
+export function base64Bytes(data: string): number {
+  const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0;
+  return Math.max(0, Math.floor((data.length * 3) / 4) - padding);
+}
+
+/**
+ * What a user row records about the photos it was sent with: what they were,
+ * never what they looked like.
+ */
+interface StoredAttachment {
+  type: 'image';
+  mediaType: string;
+  ref?: string;
+  width?: number;
+  height?: number;
+  bytes: number;
+}
+
+/**
+ * The person's own row's `data`, for a message that asked for anything
+ * besides its words — `undefined` for one that did not, so an older app's
+ * message is stored exactly as it always was.
+ *
+ * **Only the keys the request named**, so a row says what was *asked* rather
+ * than what the hub filled in; and **never the base64**, which is the rule this
+ * function exists to keep in one place. A row is a few hundred bytes by design,
+ * and a photo in it would be a fortnight of somebody's camera roll on an SD
+ * card.
+ */
+function userRowData(turn: ChatTurnRequest | undefined): Record<string, unknown> | undefined {
+  if (turn === undefined) return undefined;
+  const attachments: StoredAttachment[] = (turn.images ?? []).map((image) => ({
+    type: 'image' as const,
+    mediaType: image.mediaType,
+    ...(image.ref !== undefined ? { ref: image.ref } : {}),
+    ...(image.width !== undefined ? { width: image.width } : {}),
+    ...(image.height !== undefined ? { height: image.height } : {}),
+    bytes: base64Bytes(image.data),
+  }));
+  const data: Record<string, unknown> = {
+    ...(turn.model !== undefined ? { model: turn.model } : {}),
+    ...(turn.effort !== undefined ? { effort: turn.effort } : {}),
+    ...(attachments.length > 0 ? { attachments } : {}),
+  };
+  return Object.keys(data).length > 0 ? data : undefined;
+}
+
+/** How many photos a stored row says it was sent with. */
+function photoCount(row: { data?: unknown }): number {
+  const attachments = (row.data as { attachments?: unknown } | null | undefined)?.attachments;
+  return Array.isArray(attachments) ? attachments.length : 0;
+}
+
+/** "1 photo", "2 photos". */
+function photos(count: number): string {
+  return `${count} photo${count === 1 ? '' : 's'}`;
+}
+
 export interface ChatTurnContext {
   /**
    * What this round works at, when it is not what the conversation works at.
@@ -253,6 +430,14 @@ export interface ChatTurnContext {
    * read when they get to it.
    */
   effort?: ChatEffort;
+  /**
+   * Photos that travel with this message, for this round only.
+   *
+   * Each agent hands them to its transport with the person's words (or with
+   * the answer to its question). Absent is every message before this existed,
+   * and keeps the request byte-identical to what it was.
+   */
+  images?: readonly ChatImage[];
   /** Text as it arrives, so a chat is not minutes of nothing. */
   onDelta?: (text: string) => void;
   /**
@@ -406,6 +591,26 @@ export interface ChatSession<Turn> {
    * between the two cannot hand its working to the next one's answer.
    */
   steps: ChatStepWire[];
+  /**
+   * When the round now running began, until the first row it writes takes it
+   * as `tookMs`.
+   *
+   * Beside `steps` and with the same rule — the round's first non-user row
+   * carries it, whichever kind that row is — so a conversation read back says
+   * how long the working took as well as what it was.
+   */
+  roundStartedAt?: number | undefined;
+  /**
+   * The conversation was put in place by a rebase or a model switch and has
+   * not run a round yet.
+   *
+   * What `record` asks before writing a row with nothing in it: the ledger
+   * writes a conversation's *first* row even at zero, which is right for one
+   * that ran and failed before spending, and wrong for one that never ran at
+   * all — a photo's rebase closed two hours later by the idle sweep would
+   * otherwise leave a `$0` run in a log that keeps 250 of them.
+   */
+  unrun?: boolean | undefined;
   /** The artefact this conversation is about, for the ledger and for a
    *  revived conversation's opening context. */
   topic?: string | undefined;
@@ -440,8 +645,17 @@ function isoFrom(value: number | string | Date | null): string {
 function recapOf(rows: ChatMessageWire[]): string {
   const lines = rows.slice(-RECAP_MAX_ROWS).map((row) => {
     switch (row.role) {
-      case 'user':
-        return `They said: ${row.text}`;
+      case 'user': {
+        // A photo is the one thing a recap cannot carry, so it says one was
+        // there: a model told "what is this?" with nothing beside it would
+        // otherwise answer a question about a picture it has never seen as if
+        // the question were the whole of it.
+        const sent = photoCount(row);
+        if (sent === 0) return `They said: ${row.text}`;
+        return row.text.trim().length > 0
+          ? `They said: ${row.text} (with ${photos(sent)}, no longer available)`
+          : `They sent ${photos(sent)} (no longer available).`;
+      }
       case 'question':
         return `You asked: ${row.text}`;
       case 'preview': {
@@ -463,14 +677,91 @@ function recapOf(rows: ChatMessageWire[]): string {
   });
 
   return [
-    'This conversation is being picked up again. You do not remember it — what',
+    RECAP_OPENING,
     'follows is the record of what was said, so read it as history rather than',
     'as your own memory, and carry on from the end of it.',
     '',
     ...lines,
     '',
-    'That is the whole of it. Their next message follows.',
+    RECAP_CLOSING,
   ].join('\n');
+}
+
+/** The recap's first and last lines, so a pending one can be recognised. */
+const RECAP_OPENING = 'This conversation is being picked up again. You do not remember it — what';
+const RECAP_CLOSING = 'That is the whole of it. Their next message follows.';
+
+/**
+ * What a session's pending priming says besides a recap, for a conversation
+ * about to be primed with a new one.
+ *
+ * **A new conversation is primed with the whole record, so an older recap
+ * waiting to be sent is superseded rather than added to** — two copies of the
+ * same history is a model told everything twice. What is *not* a recap stays:
+ * the ids of rules written this turn (`rememberSaved`) and a spoken turn's
+ * marker are facts about the conversation that no row carries.
+ */
+function withoutRecap(priming: string | undefined): string | undefined {
+  if (priming === undefined || !priming.startsWith(RECAP_OPENING)) return priming;
+  const end = priming.indexOf(RECAP_CLOSING);
+  const rest = end < 0 ? '' : priming.slice(end + RECAP_CLOSING.length).trim();
+  return rest.length > 0 ? rest : undefined;
+}
+
+/** A recap of `rows`, followed by whatever else was waiting to be said. */
+function primingFor(rows: ChatMessageWire[], pending: string | undefined): string | undefined {
+  const kept = withoutRecap(pending);
+  if (rows.length === 0) return kept;
+  const recap = recapOf(rows);
+  return kept === undefined ? recap : `${recap}\n${kept}`;
+}
+
+/**
+ * The model the person last chose for a stored conversation, if they chose one.
+ *
+ * The newest user row **that named a model**, because a message that names
+ * none leaves a conversation on what it was running — so a revived one keeps
+ * the model the live one would have had.
+ */
+function modelFromRows(rows: ChatMessageWire[]): string | undefined {
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index];
+    if (row?.role !== 'user') continue;
+    const model = (row.data as { model?: unknown } | null | undefined)?.model;
+    if (typeof model === 'string' && model.length > 0) return model;
+  }
+  return undefined;
+}
+
+/**
+ * The rows a conversation has already been through by the time the turn for
+ * `messageId` begins (`includeOwn` false) or ends (`includeOwn` true) — the
+ * record a conversation put in its place is primed with.
+ *
+ * **Not "everything before the message", and not "everything".** A message
+ * sent while a round is running is written the moment it is taken (`say`), so
+ * its row lands *ahead* of the answer that round goes on to write: cutting the
+ * transcript at the message would lose an answer the person has already read.
+ * And a message sent after this one is written already too, waiting its turn
+ * in the chain — it is not history yet, and recapping it would hand the model
+ * that message twice, once as the past and once as the next thing said. So
+ * every row is kept but the person's own from this message on, and this
+ * message's own row is history only once its round is over.
+ *
+ * Turns run in the order `say` takes them, so a person's row after this one is
+ * always a turn still to come. A message the hub cannot find (its row was
+ * never written) leaves every row in, which is what a revival does.
+ */
+function settledRows(
+  rows: ChatMessageWire[],
+  messageId: string | undefined,
+  includeOwn: boolean,
+): ChatMessageWire[] {
+  const at = messageId === undefined ? -1 : rows.findIndex((row) => row.id === messageId);
+  if (at < 0) return rows;
+  return rows.filter(
+    (row, index) => index < at || row.role !== 'user' || (includeOwn && index === at),
+  );
 }
 
 export abstract class ChatRuntime<Turn extends { kind: string }> {
@@ -510,6 +801,15 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
      * takes `randomUUID()` inline.
      */
     sessionId: string;
+    /**
+     * The agent model this conversation was asked to run on, when it was.
+     *
+     * Resolved by the subclass through `requestedAgentModel`, so the vendor
+     * and key rules stay where they are written; an id it cannot run right now
+     * falls back to the home's own setting, as an unchosen conversation has
+     * always run on. Absent is that setting.
+     */
+    model?: string | undefined;
   }): Promise<AgentConversation<Turn>>;
 
   /**
@@ -529,6 +829,15 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     return undefined;
   }
 
+  /**
+   * Which conversation on another surface handed each of this surface's over,
+   * by this surface's session id. Most surfaces are never handed anything and
+   * take the default; the automations agent is the one that is.
+   */
+  protected async handedOver(): Promise<Map<string, string>> {
+    return new Map();
+  }
+
   // ── Starting and continuing ────────────────────────────────────────────────
 
   /**
@@ -542,6 +851,9 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     memberId: string;
     message: string;
     topic?: string | undefined;
+    /** What the first message asks for besides its words. A model named here
+     *  is what the conversation *opens* on, rather than a switch after it. */
+    turn?: ChatTurnRequest | undefined;
   }): Promise<ChatReply> {
     this.sweep();
     if (this.sessions.size >= CHAT_MAX_SESSIONS) {
@@ -552,8 +864,8 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
 
     // Minted before the conversation, because a tool context is built with it
     // — see `openConversation`.
-    const session = await this.open(randomUUID(), input.memberId, input.topic);
-    return this.say(session, input.message, 'send');
+    const session = await this.open(randomUUID(), input.memberId, input.topic, input.turn?.model);
+    return this.say(session, input.message, 'send', undefined, input.turn);
   }
 
   /**
@@ -569,8 +881,14 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     sessionId: string,
     memberId: string,
     topic?: string | undefined,
+    model?: string | undefined,
   ): Promise<ChatSession<Turn>> {
-    const conversation = await this.openConversation({ memberId, topic, sessionId });
+    const conversation = await this.openConversation({
+      memberId,
+      topic,
+      sessionId,
+      ...(model !== undefined ? { model } : {}),
+    });
     const session: ChatSession<Turn> = {
       id: sessionId,
       memberId,
@@ -590,10 +908,16 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
   /** Continue one. A typed reply to a question is an answer, not a new
    *  message — the conversation itself decides which, since only it knows
    *  whether a tool call is outstanding. */
-  async reply(sessionId: string, memberId: string, text: string): Promise<ChatReply | null> {
-    const session = this.sessions.get(sessionId) ?? (await this.revive(sessionId, memberId));
+  async reply(
+    sessionId: string,
+    memberId: string,
+    text: string,
+    turn?: ChatTurnRequest,
+  ): Promise<ChatReply | null> {
+    const session =
+      this.sessions.get(sessionId) ?? (await this.revive(sessionId, memberId, turn?.model));
     if (!session || session.memberId !== memberId) return null;
-    return this.say(session, text, 'auto');
+    return this.say(session, text, 'auto', undefined, turn);
   }
 
   /**
@@ -615,7 +939,13 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
    * Returns null only for a conversation with no transcript at all, which is
    * one that never existed or whose rows have aged out — a real `410`.
    */
-  protected async revive(sessionId: string, memberId: string): Promise<ChatSession<Turn> | null> {
+  protected async revive(
+    sessionId: string,
+    memberId: string,
+    /** The model the message that woke it asked for — opened on directly,
+     *  rather than revived on one model and switched straight to another. */
+    model?: string | undefined,
+  ): Promise<ChatSession<Turn> | null> {
     const rows = await this.transcript(sessionId);
     if (rows.length === 0) return null;
 
@@ -633,7 +963,20 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     if (owner === null || owner !== memberId) return null;
 
     const topic = this.topicFromRows(rows);
-    const conversation = await this.openConversation({ memberId, topic, sessionId });
+    /**
+     * **On the model the person last chose for it**, read back off their own
+     * rows — or the one this message asks for. Without this a chat somebody
+     * had moved to Sonnet came back on the home's default after every restart
+     * and idle sweep, which is most of the time a conversation is reopened,
+     * with nothing on screen to say it had changed.
+     */
+    const chosen = model ?? modelFromRows(rows);
+    const conversation = await this.openConversation({
+      memberId,
+      topic,
+      sessionId,
+      ...(chosen !== undefined ? { model: chosen } : {}),
+    });
     const session: ChatSession<Turn> = {
       id: sessionId,
       memberId,
@@ -677,13 +1020,23 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     text: string,
     how: 'send' | 'answer' | 'auto',
     origin?: TurnOrigin,
+    turn?: ChatTurnRequest,
   ): Promise<ChatReply> {
-    const written = await this.write(session, 'user', text, undefined, session.memberId);
+    // What was asked besides the words goes on the person's own row — the
+    // model, the effort, what each photo was — and never a photo itself.
+    const written = await this.write(session, 'user', text, userRowData(turn), session.memberId);
     session.lastAt = Date.now();
-    session.inFlight = session.inFlight.then(async () => {
-      const mode = how === 'auto' ? (session.conversation.awaitingAnswer() ? 'answer' : 'send') : how;
-      await this.exchange(session, text, mode, origin);
-    });
+    /**
+     * **The effort somebody picked is this turn's**, the way a spoken turn's
+     * `low` is — and a spoken turn passes its own origin, which keeps winning:
+     * the voice is answering a person standing in a room, whatever the chat's
+     * picker last said.
+     */
+    const asked: TurnOrigin | undefined =
+      origin ?? (turn?.effort !== undefined ? { effort: turn.effort } : undefined);
+    session.inFlight = session.inFlight.then(() =>
+      this.exchange(session, text, how, asked, turn, written.id),
+    );
     return { sessionId: session.id, messages: [written] };
   }
 
@@ -727,7 +1080,11 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
    * than about what was asked. `live` is whether it can still be *continued*,
    * and is deliberately separate from being readable.
    */
-  async list(): Promise<ChatSummaryWire[]> {
+  async list(
+    /** Who is asking, so each conversation can say whether it is theirs.
+     *  Absent leaves `mine` off rather than guessing. */
+    memberId?: string,
+  ): Promise<ChatSummaryWire[]> {
     // **Counted in SQLite, and the model's prose never leaves it.** Reading
     // the whole table — fourteen days of every conversation, `text` and all —
     // to derive a count and one title was the wrong shape on a board this
@@ -748,17 +1105,34 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       .select({
         sessionId: automationChatMessages.sessionId,
         text: automationChatMessages.text,
+        // Small by construction — a user row's data is the model, the effort
+        // and what each photo *was*, never its bytes — and it is what titles a
+        // conversation that began with a picture.
+        data: automationChatMessages.data,
+        memberId: automationChatMessages.memberId,
       })
       .from(automationChatMessages)
       .where(and(this.surfaceFilter, eq(automationChatMessages.role, 'user')))
       .orderBy(asc(automationChatMessages.at));
 
     const titles = new Map<string, string>();
+    /** Whose each conversation is: the first thing said in it, `ownerOf`'s
+     *  rule, read off the rows this query already has. */
+    const owners = new Map<string, string | null>();
     for (const row of said) {
-      if (!titles.has(row.sessionId)) titles.set(row.sessionId, row.text);
+      if (titles.has(row.sessionId)) continue;
+      const sent = photoCount(row);
+      // A conversation that opened with a picture and no words is called what
+      // it is, rather than "Untitled conversation".
+      titles.set(
+        row.sessionId,
+        row.text.trim().length === 0 && sent > 0 ? (sent === 1 ? 'Photo' : photos(sent)) : row.text,
+      );
+      owners.set(row.sessionId, row.memberId);
     }
 
     const ledger = await this.base.runs.spendBySession();
+    const parents = await this.handedOver();
 
     return totals
       .map((session) => {
@@ -774,6 +1148,12 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
           title: (titles.get(session.sessionId) ?? '').slice(0, 120) || 'Untitled conversation',
           live: this.sessions.has(session.sessionId),
           ...(spend !== undefined ? { spend } : {}),
+          ...(memberId !== undefined
+            ? { mine: (owners.get(session.sessionId) ?? null) === memberId }
+            : {}),
+          ...(parents.has(session.sessionId)
+            ? { handedFrom: parents.get(session.sessionId)! }
+            : {}),
         };
       })
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -884,11 +1264,28 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
   protected async exchange(
     session: ChatSession<Turn>,
     text: string,
-    how: 'send' | 'answer',
+    how: 'send' | 'answer' | 'auto',
     origin?: TurnOrigin,
+    turn?: ChatTurnRequest,
+    /** The person's own row for this message, which a model switch recaps up
+     *  to rather than through. */
+    messageId?: string,
   ): Promise<void> {
+    /**
+     * **A different model is a different conversation, opened when the turn
+     * begins.** Asked here rather than when the message was taken because turns
+     * are chained: a switch queued behind a running turn must not pull the
+     * conversation out from under it.
+     */
+    if (turn?.model !== undefined && turn.model !== session.conversation.modelId) {
+      if (!(await this.switchModel(session, turn.model, messageId))) return;
+    }
     try {
-      await this.runExchange(session, text, how, origin);
+      // Asked when the turn begins, never when it was queued — and after any
+      // switch above, since a fresh conversation has no question outstanding.
+      const mode =
+        how === 'auto' ? (session.conversation.awaitingAnswer() ? 'answer' : 'send') : how;
+      await this.runExchange(session, text, mode, origin, turn);
     } catch (error) {
       /**
        * **The promise `say()` stores must never reject**, and the inner catch
@@ -911,6 +1308,152 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       ).catch(() => undefined);
       this.settle(session, 'stopped');
     }
+    // A round that wrote nothing leaves no clock behind for a later row.
+    session.roundStartedAt = undefined;
+    // A photo is in the provider history now, and it leaves before the next
+    // turn begins — whatever this one ended as. See `rebase`.
+    if ((turn?.images?.length ?? 0) > 0) await this.rebase(session, messageId);
+  }
+
+  /**
+   * Move a conversation onto another model, for the turn about to begin.
+   *
+   * **Recapped, never carried over**: a vendor's history is its own shape —
+   * Anthropic's signed thinking blocks, OpenAI's encrypted reasoning — and
+   * neither is something the other will take, nor a different model of the
+   * same vendor's guaranteed to. So this is `revive()` on purpose: a fresh
+   * conversation on the new model, primed with the record of everything said
+   * *before this message* (the message itself is the turn about to run). What
+   * is lost is what revival loses — the model's reasoning and an outstanding
+   * question, which the person answering is now simply a message.
+   *
+   * **The old conversation's spend is written down first**, which is the half
+   * that is easy to get wrong: `record` writes the delta between what a
+   * conversation has cost and `recordedUsd`, so swapping the conversation
+   * without banking would lose whatever it ran up since its last row, and not
+   * resetting the cursor afterwards would under-record the new one until it
+   * caught up with the old one's total.
+   *
+   * Answers false when the turn should not run — the model can no longer be
+   * used, or the new conversation could not be opened — having said so in a
+   * note and taken the app's spinner down, the provider-failure path's rule.
+   */
+  private async switchModel(
+    session: ChatSession<Turn>,
+    model: string,
+    messageId: string | undefined,
+  ): Promise<boolean> {
+    try {
+      const usable = await this.base.settings.agentProviders();
+      const wanted = requestedAgentModel(model, usable);
+      if (wanted === null) {
+        // The route checked this a moment ago; a key removed in between is
+        // the only way here, and running a model nobody picked would be the
+        // picker lying about what answered.
+        throw new AgentNotConfiguredError(
+          'ai_not_configured',
+          'That model can’t be used on this hub right now. Pick another one and send it again.',
+        );
+      }
+      if (wanted.modelId === session.conversation.modelId) return true;
+
+      const conversation = await this.openConversation({
+        memberId: session.memberId,
+        topic: session.topic,
+        sessionId: session.id,
+        model: wanted.modelId,
+      });
+      // Everything said before this message — including an answer written
+      // after it was taken — and nothing queued behind it.
+      const before = settledRows(await this.transcript(session.id), messageId, false);
+      await this.settleSpend(session);
+      this.replaceConversation(session, conversation, before);
+      this.base.log.info(
+        { sessionId: session.id, surface: this.surface, model: wanted.modelId },
+        'chat: moved onto another model',
+      );
+      return true;
+    } catch (error) {
+      const message =
+        error instanceof AgentNotConfiguredError
+          ? error.message
+          : `That model could not be started: ${(error as Error).message}`;
+      this.base.log.warn({ err: error }, 'chat: could not move onto another model');
+      await this.write(session, 'note', message).catch(() => undefined);
+      this.settle(session, 'stopped');
+      return false;
+    }
+  }
+
+  /**
+   * Let a photo go, once the round it was sent for is over.
+   *
+   * **The provider history is the one place a photo outlives its round**, and
+   * it is the one place this hub cannot edit: Fable 5.1 binds each thinking
+   * block to everything ahead of it, so a conversation may only ever be
+   * appended to — cutting an image block out of the middle of one is a
+   * conversation the API refuses. Left there, every photo somebody sent would
+   * sit in memory for the session's two-hour life and be re-sent, and paid
+   * for, on every round after it, on a board with thirty megabytes to spare.
+   *
+   * So the session is **rebased** the way a model switch is: the spend so far
+   * written down, a fresh conversation on the same model, primed with the
+   * record of everything said — which says a photo was sent and is no longer
+   * available. The old conversation, and the photo with it, is released.
+   *
+   * Never throws, and runs in the turn chain so it is done before the next
+   * queued message begins. A conversation that cannot be reopened (its key
+   * removed a moment ago) is dropped from memory instead; the next message
+   * revives it from the transcript, which is the ordinary path.
+   */
+  private async rebase(session: ChatSession<Turn>, messageId: string | undefined): Promise<void> {
+    // Closed or swept while the round ran: `close` is about to write its spend
+    // and drop it, which lets the photo go with everything else.
+    if (this.sessions.get(session.id) !== session) return;
+    try {
+      const conversation = await this.openConversation({
+        memberId: session.memberId,
+        topic: session.topic,
+        sessionId: session.id,
+        model: session.conversation.modelId,
+      });
+      await this.settleSpend(session);
+      // The round just over is history now; a message queued behind it is not.
+      const settled = settledRows(await this.transcript(session.id), messageId, true);
+      this.replaceConversation(session, conversation, settled);
+    } catch (error) {
+      this.base.log.warn({ err: error }, 'chat: could not rebase after a photo; dropping it');
+      await this.settleSpend(session);
+      if (this.sessions.get(session.id) === session) this.sessions.delete(session.id);
+    }
+  }
+
+  /**
+   * Write down what the conversation about to be replaced has spent since its
+   * last row — and only if it has, so a switch on a conversation that has not
+   * run since adds no empty row to the ledger.
+   */
+  private async settleSpend(session: ChatSession<Turn>): Promise<void> {
+    if (session.conversation.costUsd() > session.recordedUsd) await this.bank(session, true);
+  }
+
+  /**
+   * Put a fresh conversation where the old one was, primed with `rows`.
+   *
+   * The ledger cursor and the clock start again with it, as a revived one's
+   * do: the new conversation has spent nothing, and `durationMs` is about the
+   * conversation that is running.
+   */
+  private replaceConversation(
+    session: ChatSession<Turn>,
+    conversation: AgentConversation<Turn>,
+    rows: ChatMessageWire[],
+  ): void {
+    session.conversation = conversation;
+    session.recordedUsd = 0;
+    session.unrun = true;
+    session.startedAt = Date.now();
+    session.priming = primingFor(rows, session.priming);
   }
 
   /**
@@ -933,6 +1476,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     text: string,
     how: 'send' | 'answer',
     origin?: TurnOrigin,
+    request?: ChatTurnRequest,
   ): Promise<void> {
     // **What this turn was, for the row it is about to write.** Kept on the
     // session because `record` runs after the turn and takes only the
@@ -948,6 +1492,11 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     // the rows are written, so a turn that throws between the two cannot hand
     // its steps to the next answer.
     session.steps = [];
+    // And so does its clock, which the first row it writes takes as `tookMs`.
+    session.roundStartedAt = Date.now();
+    // Whatever this round costs — nothing included, if it fails before the
+    // first request — is a run the ledger should hear about.
+    session.unrun = false;
     let turn: Turn;
     /**
      * The model's reasoning since the last step, waiting for something to
@@ -987,6 +1536,11 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
 
       turn = await session.conversation[how](primed, {
         ...(origin?.effort !== undefined ? { effort: origin.effort } : {}),
+        // This round's photos and nobody else's: they are in the request the
+        // model reads now, and `rebase` lets them go once the round is over.
+        ...(request?.images !== undefined && request.images.length > 0
+          ? { images: request.images }
+          : {}),
         onStep: (summary, kind, detail) => {
           // Whatever was reasoned belongs to the step it was reasoned under,
           // which is the one already there rather than this one.
@@ -1178,9 +1732,23 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
   ): Promise<ChatMessageWire> {
     const steps = role === 'user' ? [] : session.steps;
     if (steps.length > 0) session.steps = [];
+    /**
+     * **How long the round took, on the same row its working goes on.** An
+     * integer of milliseconds from the moment the round began to the moment
+     * it wrote its first answer — which is the wait somebody sat through, and
+     * what an app turns into "worked for 12s" on a conversation read back.
+     * Additive: an app that has never heard of it draws the row as it did.
+     */
+    const startedAt = role === 'user' ? undefined : session.roundStartedAt;
+    if (startedAt !== undefined) session.roundStartedAt = undefined;
+    const tookMs = startedAt === undefined ? undefined : Math.max(0, Math.round(Date.now() - startedAt));
     const payload =
-      steps.length > 0
-        ? { ...(typeof data === 'object' && data !== null ? data : {}), steps }
+      steps.length > 0 || tookMs !== undefined
+        ? {
+            ...(typeof data === 'object' && data !== null ? data : {}),
+            ...(steps.length > 0 ? { steps } : {}),
+            ...(tookMs !== undefined ? { tookMs } : {}),
+          }
         : data;
 
     return this.writeRow(session.id, role, text, payload, memberId);
@@ -1257,8 +1825,10 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
   protected async record(session: ChatSession<Turn>, ok: boolean): Promise<void> {
     const spent = session.conversation.costUsd() - session.recordedUsd;
     // Nothing new to say. A conversation is recorded when it delivers and
-    // again when it ends, and the second of those is usually zero.
-    if (spent <= 0 && session.recordedUsd > 0) return;
+    // again when it ends, and the second of those is usually zero — and one
+    // swapped in by a rebase or a switch that has not run has nothing to say
+    // at all (`unrun`).
+    if (spent <= 0 && (session.recordedUsd > 0 || session.unrun === true)) return;
     session.recordedUsd = session.conversation.costUsd();
 
     const handle = this.base.runs.begin({

@@ -37,8 +37,9 @@ import {
  * **Effort is `medium`.** The mapper runs at `high` because its answer is
  * cached against a device model and shapes every unit of it a home ever meets;
  * a chat is many small rounds, read the moment they arrive, and answered with
- * another message when the reply is poor. It is not exposed — two settings for
- * one decision is one too many, which is the rule the mapper already keeps.
+ * another message when the reply is poor. No setting configures it; what can
+ * move it is one round at a time — a spoken turn's `low`, or a typed message
+ * that asked for its own effort — through `ChatTurnContext.effort`.
  *
  * **No mid-conversation system messages.** They would be the natural way to
  * inject a changing home, and Sonnet 5 rejected them outright while it was on
@@ -320,7 +321,10 @@ export async function createAssistantConversation(
       // than beside the request, which is where it can never fire: mid-loop the
       // last message is always the results of the round before.
       gate.settleDangling();
-      transport.pushUser(opened ? text : `${taskPrompt}\n\n${text}`.trim());
+      // The photos a message came with travel in the same user turn, and only
+      // for this one: the runtime rebases the conversation once the round is
+      // over, so they never ride along with a later message.
+      transport.pushUser(opened ? text : `${taskPrompt}\n\n${text}`.trim(), context?.images);
       opened = true;
       log.debug({ model: modelId, provider }, 'assistant: user message');
       return pump(context);
@@ -330,7 +334,7 @@ export async function createAssistantConversation(
       if (!gate.isOpen) return conversation.send(text, context);
       // The answer **and** every other call the same response made. One
       // message, every call in the assistant turn accounted for.
-      gate.answer(text);
+      gate.answer(text, context?.images);
       return pump(context);
     },
 

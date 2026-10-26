@@ -505,7 +505,9 @@ export async function createAutomationConversation(
        * other call in it.
        */
       gate.settleDangling();
-      transport.pushUser(opened ? text : `${taskPrompt}\n\n${text}`.trim());
+      // A message's photos travel with it, for this round only — see the
+      // runtime's `rebase`.
+      transport.pushUser(opened ? text : `${taskPrompt}\n\n${text}`.trim(), context?.images);
       opened = true;
       log.debug({ model: modelId, provider }, 'automation agent: user message');
       return pump(context);
@@ -517,7 +519,7 @@ export async function createAutomationConversation(
       // message, every `tool_use` in the assistant turn accounted for — which
       // is the API's actual rule, and sending only the answer is what used to
       // refuse the conversation outright.
-      gate.answer(text);
+      gate.answer(text, context?.images);
       return pump(context);
     },
 

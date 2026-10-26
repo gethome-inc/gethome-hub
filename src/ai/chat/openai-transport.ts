@@ -10,6 +10,7 @@ import {
   type ChatTransport,
   type ChatTransportOptions,
 } from './agent-loop.js';
+import type { ChatImage } from './chat-runtime.js';
 
 /**
  * A conversation on OpenAI's Responses API.
@@ -100,6 +101,11 @@ class RunUsage {
   }
 }
 
+/** One photo as this vendor takes it: a data URL inside an input part. */
+function imagePart(image: ChatImage): { type: 'input_image'; image_url: string } {
+  return { type: 'input_image', image_url: `data:${image.mediaType};base64,${image.data}` };
+}
+
 export function createOpenAiTransport(options: ChatTransportOptions): ChatTransport {
   const { secret, modelId, systemPrompt, tools, label, timeoutMs, effort, signal, log } = options;
 
@@ -122,11 +128,24 @@ export function createOpenAiTransport(options: ChatTransportOptions): ChatTransp
     provider: 'openai',
     modelId,
 
-    pushUser(text) {
-      input.push({ role: 'user', content: text });
+    pushUser(text, images) {
+      // The string form when there is nothing but words, so a conversation
+      // that never sends a photo sends exactly the bytes it always did.
+      if (images === undefined || images.length === 0) {
+        input.push({ role: 'user', content: text });
+        return;
+      }
+      input.push({
+        role: 'user',
+        content: [
+          // No empty text part for a message that is only a photo.
+          ...(text.trim().length > 0 ? [{ type: 'input_text', text }] : []),
+          ...images.map(imagePart),
+        ],
+      });
     },
 
-    pushToolResults(results: ChatToolResult[]) {
+    pushToolResults(results: ChatToolResult[], images) {
       for (const result of results) {
         input.push({
           type: 'function_call_output',
@@ -136,6 +155,12 @@ export function createOpenAiTransport(options: ChatTransportOptions): ChatTransp
           // marking a failure in words costs nothing and loses nothing.
           output: result.isError ? `That failed. ${result.text}` : result.text,
         });
+      }
+      // A function's output is text only on this API, so the photos an answer
+      // came with follow the outputs as a user item of their own — the very
+      // next thing in the conversation, which is where the answer was.
+      if (images !== undefined && images.length > 0) {
+        input.push({ role: 'user', content: images.map(imagePart) });
       }
     },
 

@@ -757,8 +757,9 @@ domains — update them in the same change.
   end: it names a model that has already run, and searching the offered lists
   meant a chat on a model offered to one surface only — and, the day it was
   retired, on *any* model — reported a raw id where the chat beside it had a
-  name. Effort is `medium` here against the mapper's `high`, and is exposed by
-  neither.
+  name. Effort is `medium` here against the mapper's `high`; the mapper's is
+  exposed to nobody, while a chat message may ask for its own round's (see *A
+  spoken round thinks less* below).
   **What the provider line resolves is what runs**, and `openConversation` asks
   the vendor exactly once. The automations agent kept a second
   `provider !== 'anthropic'` refusal for a week after both loops existed — the
@@ -941,18 +942,101 @@ domains — update them in the same change.
   (`output_config.effort`, `reasoning.effort`) and a word only one of them
   takes is a 400 in somebody's kitchen rather than a checker error — widening
   it means checking both, or giving the transport that cannot a mapping.
-  `ChatTurnContext.effort` is the override and
-  `AssistantChat.spokenOrigin` (`low`, `voice`) is the only thing that uses it; a typed
-  round stays on the transport's `medium`. The same question genuinely costs
-  differently out loud: a typed answer is read when it lands, so a few seconds
-  more deliberation is free, while a spoken one is somebody standing in a room
-  after the voice has said "one moment" — and the work is usually smaller than
-  it looks, since "switch the kitchen light off" is one tool call against a
-  catalog the agent can already see. It has to be the **turn's** because a
-  transport is built once and holds the history, while one conversation is
-  typed in the morning and talked to in the evening — `spokenSessions`'
-  own reasoning. Still exposed to nobody: two knobs for one decision is one
-  too many.
+  `ChatTurnContext.effort` is the override, and two things set it.
+  `AssistantChat.spokenOrigin` (`low`, `voice`) is the first. The same question
+  genuinely costs differently out loud: a typed answer is read when it lands,
+  so a few seconds more deliberation is free, while a spoken one is somebody
+  standing in a room after the voice has said "one moment" — and the work is
+  usually smaller than it looks, since "switch the kitchen light off" is one
+  tool call against a catalog the agent can already see. It has to be the
+  **turn's** because a transport is built once and holds the history, while one
+  conversation is typed in the morning and talked to in the evening —
+  `spokenSessions`' own reasoning.
+  **The second is the person, per message, from the hub's three words.** This
+  rule used to end "exposed to nobody: two knobs for one decision is one too
+  many", and it was a home-wide knob it was refusing — a setting that would
+  have moved every member's chats at once. What a chat's picker sends is the
+  opposite shape: `effort` on the one message (`ChatTurnRequest`), which `say`
+  turns into that turn's `TurnOrigin`, so it lasts exactly one round and is
+  written into `ai_runs.effort` like any other. Four rules hold it. **The
+  vocabulary is `CHAT_EFFORTS`, the hub's**, `satisfies`-pinned to `ChatEffort`,
+  validated by the routes and advertised on `GET /hub`'s `chat` block — an app
+  draws words for the hub's list and never ships its own, so widening it is
+  still the two-vendor check above and nothing else. **A spoken turn's `low`
+  still wins**: `askAloud` passes its own origin and `say` reads a request's
+  effort only when no origin was given, because the voice is answering
+  somebody standing in a room whatever the chat's picker last said. **Absent is
+  the transport's `medium`**, which is what an older app gets, unchanged.
+  **And `AutomationTurnContext` declares `effort`** (and `images`) beside
+  `ChatTurnContext` — the runtime passes one object to both agents, so leaving
+  a field off one type worked at runtime and hid from the contract that this
+  agent's rounds can be asked to think harder: the `onSaid` lesson.
+  **A conversation's model is the conversation's, and a different one is a
+  different conversation.** `model` on a message (validated at the route
+  against `requestedAgentModel`, `409 model_unavailable` before anything is
+  written) moves this conversation and nobody else's; the home's columns are
+  untouched. `requestedAgentModel` is deliberately narrower than
+  `effectiveAgentModel` and goes *through* it: a stored column nobody chose must
+  never become a refusal, but a pick somebody made a moment ago must never be
+  quietly answered by a different vendor, so an id it cannot run is `null` and
+  the subclass falls back to the home's setting only for a *revived*
+  conversation. Four rules. **A switch happens when the turn begins**, inside
+  the per-session chain (`exchange` → `switchModel`), never when the message is
+  taken — a switch queued behind a running round must not pull the
+  conversation out from under it. **It is `revive()` on purpose**: a fresh
+  provider conversation on the new model, primed with `recapOf` the rows it
+  has been through (the message itself is the turn about to run), because a
+  vendor's history — signed thinking, encrypted reasoning — is not something
+  another model will take. Those rows are `settledRows`, **not "everything
+  before the message"**: a message sent while a round runs is written at once,
+  so its row lands *ahead* of that round's answer, and one queued behind it is
+  written already too — cutting at the message loses an answer somebody has
+  read, and taking everything recaps a waiting message the model is then sent
+  again. **Spend is banked before the swap and the cursor reset after**
+  (`settleSpend`, `replaceConversation`): `record` writes the delta between
+  `costUsd()` and `recordedUsd`, so swapping without banking loses what the
+  old conversation ran up since its last row, and not resetting under-records
+  the new one until it passes the old total — and a swapped-in conversation
+  that is closed before it runs writes no `$0` row (`unrun`). **And a revived
+  conversation reopens on the newest user row's `data.model`** (`modelFromRows`)
+  while it is offered and usable, else the home's setting — a message naming
+  no model leaves a conversation on what it runs, live or revived, so a restart
+  cannot quietly move somebody's chat back to the default. A pending recap is
+  replaced rather than stacked (`primingFor` drops one that was never sent), and
+  what is not a recap — `rememberSaved`'s ids, a spoken turn's marker — stays.
+  **A photo is sent for one round and kept nowhere, and the session is rebased
+  to let it go.** `ChatTurnContext.images` → the agent's `send`/`answer` →
+  `ChatTransport.pushUser(text, images)` / `pushToolResults(results, images)`;
+  the vendor shape lives in the transport (image blocks ahead of the words on
+  Anthropic and after the `tool_result`s an answer closes; `input_image` data
+  URLs on OpenAI, as a `user` item after `function_call_output`s, which are text
+  only). Five rules. **No photo, no array**: a text-only message is pushed as
+  the plain string it always was, so every conversation that never sends one
+  keeps a byte-identical, still-warm cached prefix. **No empty text block** —
+  Anthropic refuses one — so a photo on its own is just the image, and a
+  wordless *answer* to a question says so in its tool result
+  (`QuestionGate.answer`), since a result has to say something. **The row
+  records what a photo was, never its bytes** (`userRowData`: `type`,
+  `mediaType`, `ref`, `width`, `height`, `bytes` from `base64Bytes`), and only
+  the keys the request named, so an older app's message is stored exactly as
+  it was; nothing in this subsystem writes a request body anywhere else —
+  `ai_runs` holds no text and chats record no `ai_run_exchanges`, and a suite
+  searches all three tables for the base64. **The provider history is the one
+  place a photo outlives its round, and it cannot be edited**: Fable 5.1 binds
+  each thinking block to everything ahead of it, so cutting an image block out
+  of the middle is a conversation the API refuses. So once a round that
+  carried a photo ends — success or failure, in the chain, before the next
+  queued turn — `rebase` banks the spend, opens a fresh conversation on the
+  same model and primes it with the record of every settled row; a reopen
+  that fails drops the session from memory instead, and the next message
+  revives it.
+  Left in place, every photo would sit in RAM for the session's two hours on a
+  board with thirty megabytes to spare and be re-sent and paid for on every
+  later round. **The recap says a photo was there** ("They said: … (with 2
+  photos, no longer available)", "They sent 1 photo (no longer available).")
+  — and so does `liveHistory` for the voice — because "what about the colour?"
+  reaching a model with no idea there was a picture is a confident wrong
+  answer. A photo never crosses a handoff: the brief is text.
   **And a turn writes down what it ran at and how it was asked** — `ai_runs`
   gained `effort` and `via` beside `provider`/`modelId`, filled from
   `ChatSession.origin`, which `runExchange` resolves at the moment a round

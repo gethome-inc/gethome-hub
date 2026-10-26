@@ -941,6 +941,13 @@ it was.
 from the frames and the stored one from these, so one shape rather than two that
 would drift; `kind` stays open there too.
 
+**And the same row says how long the round took** — `data.tookMs`, the whole
+milliseconds from the round beginning to that row being written, which is the
+wait somebody sat through and what an app turns into "worked for 12s" on a
+conversation read back. Same position rule, same reason: one account of one
+round, on the first thing it wrote. Additive, so an app that has never heard of
+it draws the row exactly as before.
+
 ### What a round said before it went off to work
 
 **A model narrates as it works, and the narration was being thrown away.** It

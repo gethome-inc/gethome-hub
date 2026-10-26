@@ -120,6 +120,58 @@ it.
 What each agent keeps is its own `pump`, because what ends a turn genuinely
 differs: a rule for one, a handoff for the other.
 
+## A conversation's own model, effort and photos
+
+A message can carry three things besides its words, on all four chat routes —
+`model`, `effort` and `attachments` — and `GET /hub`'s `chat` block is how an
+app knows a hub reads them rather than stripping them (`docs/api.md` has the
+wire). Each is per conversation or per round, never per home: the home's own
+setting is still `PATCH /settings/ai`, and nothing here writes to it.
+
+**A model is a conversation, so a different model is a different
+conversation.** A message naming the model already answering changes nothing;
+one naming another moves the conversation when its turn *begins* (turns are
+chained, so a switch queued behind a running round never pulls the
+conversation out from under it). The new conversation is opened the way
+`revive()` opens one — a fresh provider conversation primed with a recap of
+everything said before this message (an answer written after it was taken
+included, a message still queued behind it not) — because a vendor's history
+is its own shape, signed thinking blocks and encrypted reasoning included, and
+no other model takes it. **The old conversation's spend is banked first and the ledger
+cursor reset after**, or the delta `record` writes would lose what the old one
+ran up since its last row and under-record the new one until it caught up. A
+revived conversation reopens on the model the newest message that named one
+asked for, while it is offered and its key usable; a message naming none leaves
+a conversation on what it is running, live or revived, so the two cannot
+disagree. A model this home cannot run is refused at the route
+(`409 model_unavailable`) before the message is taken.
+
+**Effort is the round's**, which it always was (`ChatTurnContext.effort`): a
+typed message may ask for `low`, `medium` or `high`, the transport's `medium`
+is what it gets otherwise, and a spoken round's `low` keeps winning.
+
+**A photo reaches the model for one round and is kept nowhere.** It travels
+`ChatTurnContext.images` → the agent's `send`/`answer` →
+`ChatTransport.pushUser(text, images)` / `pushToolResults(results, images)`:
+on Anthropic as image blocks ahead of the words (or after the tool results an
+answer closes), on OpenAI as `input_image` data URLs (a user item after the
+function outputs, since those are text only). A message with no photo sends
+exactly the bytes it always did, so the cached prefix stays warm. The
+transcript row says what each photo was — type, size, the app's `ref` — and
+never its bytes. **And the provider history lets it go**: once a round that
+carried a photo is over, the session is *rebased* — spend banked, a fresh
+conversation on the same model, primed with the record of everything said —
+before the next queued turn begins. The history cannot be edited instead,
+because Fable 5.1 binds each thinking block to everything ahead of it and a
+conversation may only be appended to; a photo left in it would sit in memory
+for the session's two hours on a board with thirty megabytes to spare, and be
+re-sent and paid for every round after. The recap says a photo was sent and is
+no longer available, so "what about the colour?" reaches a model that knows
+there was a picture it cannot see. What the rebase costs is what a revival
+costs: the model's reasoning and an outstanding question. A photo never crosses
+a handoff — the brief is text — so the assistant has to describe one in words
+for the automations agent to know about it.
+
 ## One transcript store
 
 `automation_chat_messages` carries both, told apart by a nullable `surface`
@@ -343,8 +395,11 @@ longer is free, and a spoken answer is a person standing in a room with the
 voice having already said "one moment". The work behind most spoken requests is
 also smaller than it looks — one tool call against a catalog the agent can
 already see — so what the extra effort buys is deliberation about a decision
-that was never in doubt. Nothing configures it, and nothing else uses the
-override.
+that was never in doubt. **A typed message may also ask for its own effort**
+(`effort` on the message, from the hub's three words — see *A conversation's
+own model, effort and photos* below), and the spoken `low` still wins for a
+spoken round: the voice is answering somebody standing in a room, whatever the
+chat's picker last said.
 
 **`askAloud` is the whole delegation handler, and it is ten lines** where the
 phone's was sixty — because the wait is the runtime's own. The phone could only

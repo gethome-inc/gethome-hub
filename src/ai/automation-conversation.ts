@@ -1,5 +1,5 @@
 import type { AskUser } from './automation-tools.js';
-import type { ChatEffort } from './chat/chat-runtime.js';
+import type { ChatEffort, ChatImage } from './chat/chat-runtime.js';
 
 /**
  * Everything about an automation conversation that is not one vendor's API.
@@ -114,6 +114,22 @@ export type SubmittedTurn = Extract<AutomationTurn, { kind: 'submitted' }>;
 
 /** What a running turn reports as it happens, for the socket. */
 export interface AutomationTurnContext {
+  /**
+   * What this round works at, when it is not what the conversation works at —
+   * the effort somebody picked in the chat for this message.
+   *
+   * **Declared here and not only on `ChatTurnContext`**, which is the
+   * `onSaid` lesson below: the runtime passes one object across both and the
+   * transport reads it, so leaving it off this type worked at runtime and hid
+   * from anybody reading the contract that this agent's rounds can be asked
+   * to think harder or less.
+   */
+  effort?: ChatEffort;
+  /**
+   * Photos that came with this message, for this round only — handed to the
+   * transport with the words, or with the answer to a question.
+   */
+  images?: readonly ChatImage[];
   /** Text as it arrives, so a chat is not three minutes of nothing. */
   onDelta?: (text: string) => void;
   /**
