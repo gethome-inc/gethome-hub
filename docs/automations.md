@@ -629,7 +629,7 @@ falls through to prose rather than being dropped. `text` is always the sentence;
 | `agent` | what the model said | — |
 | `question` | the question | `{options: [{id, label, hint?}], allowFreeText}` |
 | `preview` | the rule's **summary**, from `describeAutomation` | `{automationId, name, shape, enabled, edited}` |
-| `note` | something the hub is saying on its own behalf — a provider that failed, a rule that could not be saved | — |
+| `note` | something the hub is saying on its own behalf — a provider that failed, a rule that could not be saved, a round somebody stopped | `{stopped: true}` on the note a stopped round ends on (see *Stopping a round* below); otherwise nothing |
 
 Whatever its role — never the person's own — **the first row a round writes**
 also carries `data.steps` and `data.tookMs` (see *What a person sees while it works*
@@ -866,6 +866,25 @@ what tells an app the stored transcript is ready to re-read *and* what takes its
 "thinking" indicator down — the provider-failure path returned without one, so a
 round that failed left three animated dots running for ever over a note
 explaining the failure that nothing had gone back for.
+
+### Stopping a round
+
+`POST /automations/chat/:id/stop` stops the round a conversation is running,
+part-way — acknowledged at once like every other chat route, `{stopped}`, with
+the round winding down on the socket (`docs/api.md` has the wire, and
+`docs/assistant.md` the mechanism both agents share). What matters for this
+agent is the rules. **A rule the model was told is saved is saved**: the
+submission's result already said "Accepted", and a history that says so about a
+rule that does not exist is a conversation that lies to itself from then on —
+so a stop that lands after a submission, including during the extra round that
+asks the model for its sentence, still hands the rule back, and the runtime
+saves it and writes its card. Submissions after the stop in the same response
+are answered *Not done* rather than evaluated. Then a note with
+`data.stopped: true` — `Stopped. What was already done stays done.` when a rule
+was saved, `Stopped.` otherwise — and the words that reached the page before the
+stop are the line above the card, or the answer where there is no card. When the
+assistant handed this conversation over, stopping the *assistant* does not stop
+it: this is where its own stop is.
 
 ### What a person sees while it works
 

@@ -391,6 +391,12 @@ export const CHAT_IMAGE_MEDIA_TYPES = ['image/jpeg', 'image/png', 'image/webp'] 
 export const CHAT_CAPABILITY = {
   /** A message may name the agent model it is answered on. */
   models: true,
+  /**
+   * A running round can be stopped part-way — `POST …/chat/:id/stop` on both
+   * agents. Presence for the usual reason: an older hub answers that route
+   * 404, and a button that can only fail is a dead one.
+   */
+  stop: true,
   /** The words `effort` takes, from least to most. */
   efforts: CHAT_EFFORTS,
   images: {
@@ -553,6 +559,16 @@ export interface ChatTurnContext {
    * and keeps the request byte-identical to what it was.
    */
   images?: readonly ChatImage[];
+  /**
+   * The person's stop for this turn — aborted by `ChatRuntime.stop`.
+   *
+   * Each agent's loop listens to it through a `TurnAbort` beside its watchdog,
+   * and winds the turn down at the next safe point: mid-reply, with what had
+   * reached the page; between tool calls, with the rest answered as not done;
+   * between rounds, with every call answered. The turn it ends with carries
+   * `halted`, which is how the runtime knows to say so.
+   */
+  signal?: AbortSignal;
   /** Text as it arrives, so a chat is not minutes of nothing. */
   onDelta?: (text: string) => void;
   /**
@@ -607,11 +623,46 @@ export interface AgentConversation<Turn> {
   readonly provider: string;
 }
 
+/**
+ * A turn the person stopped part-way, carried on whichever arm it wound down
+ * as — so what it had already produced is written down exactly as it would
+ * have been, and the note saying it stopped follows.
+ */
+export interface Halted {
+  /**
+   * Something had already happened before the stop arrived — a device worked,
+   * a scene pressed, a job handed over, a rule saved — which is what the note
+   * has to say stays done. A stop takes nothing back.
+   */
+  acted: boolean;
+}
+
 /** The three arms every agent has, whatever else it can end a turn with. */
 export type CommonTurn =
   | { kind: 'question'; question: AskUser }
-  | { kind: 'said'; text: string }
+  | { kind: 'said'; text: string; halted?: Halted }
   | { kind: 'stopped'; reason: string };
+
+/** The note a stopped turn ends on — quiet, and true whatever had happened. */
+const HALTED_NOTE = 'Stopped.';
+const HALTED_NOTE_ACTED = 'Stopped. What was already done stays done.';
+
+/**
+ * What the model is told about a turn the person stopped, on the next one —
+ * reaching it and never the transcript, the `revive()` channel. The partial
+ * reply is in its history already; what it cannot see from there is that it
+ * was cut short rather than finished, and it should not pick the old request
+ * back up unasked.
+ */
+const HALTED_PRIMING =
+  '(They stopped your last answer part-way through. What you had written by then is what ' +
+  'they saw, and nothing you had not yet done was done — do not carry on with it unless ' +
+  'they ask.)';
+
+/** The `halted` a turn arm carries, whichever agent's arm it is. */
+function haltOf(turn: { kind: string }): Halted | undefined {
+  return (turn as { halted?: Halted }).halted;
+}
 
 /**
  * The conversation cannot start, for a reason somebody can fix.
@@ -676,6 +727,12 @@ export interface ChatSession<Turn> {
    * process.
    */
   inFlight: Promise<void>;
+  /**
+   * The stop for the turn now running, while one is — set when the turn
+   * begins and cleared when it ends, so `stop()` reaches exactly the round
+   * somebody is watching and never a message still waiting behind it.
+   */
+  halt?: AbortController | undefined;
   /**
    * What the turn now running is — its effort and how it was asked — resolved
    * at the moment it began, for the `ai_runs` row that follows it.
@@ -1460,6 +1517,31 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     return this.sessions.has(sessionId);
   }
 
+  /**
+   * Stop the round this conversation is running, part-way.
+   *
+   * **The round somebody is watching, and nothing else.** A message sent while
+   * it ran is still waiting its turn and still runs — stopping an answer is not
+   * taking back what was said after it — and a job the assistant handed over
+   * goes on in that agent's own conversation, which has its own stop.
+   *
+   * Answered at once, never when the round has wound down: the turn ends at the
+   * next safe point (`TurnAbort`) and says so on the socket like any other, with
+   * what had reached the page kept as the answer and a note that it stopped. So
+   * `stopped` means a round was told to stop, and `idle` that none was running —
+   * a conversation the hub holds no memory of included, since a round runs only
+   * in memory. Only the person whose conversation it is may stop it: the
+   * session's own member, `reply`'s rule.
+   */
+  stop(sessionId: string, memberId: string): 'stopped' | 'idle' | 'not_yours' {
+    const session = this.sessions.get(sessionId);
+    if (session === undefined) return 'idle';
+    if (session.memberId !== memberId) return 'not_yours';
+    if (session.halt === undefined) return 'idle';
+    session.halt.abort();
+    return 'stopped';
+  }
+
   async close(sessionId: string): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) return;
@@ -1493,9 +1575,14 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     /** Gives this message's photos back to the hub's budget. */
     release?: () => void,
   ): Promise<void> {
+    // This turn's stop, from the moment it begins — before a model switch, so
+    // a stop pressed while the conversation is being moved still lands.
+    const halt = new AbortController();
+    session.halt = halt;
     try {
-      await this.exchangeHeld(session, text, how, origin, turn, messageId);
+      await this.exchangeHeld(session, text, how, origin, turn, messageId, halt.signal);
     } finally {
+      if (session.halt === halt) session.halt = undefined;
       // Whatever the turn ended as — answered, refused, dropped, its model
       // unusable — the photos it held are let go with it, the rebase after it
       // included.
@@ -1510,6 +1597,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     origin: TurnOrigin | undefined,
     turn: ChatTurnRequest | undefined,
     messageId: string | undefined,
+    halt: AbortSignal,
   ): Promise<void> {
     /**
      * **A conversation dropped behind this turn's back is not run on.** A
@@ -1541,7 +1629,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       // switch above, since a fresh conversation has no question outstanding.
       const mode =
         how === 'auto' ? (session.conversation.awaitingAnswer() ? 'answer' : 'send') : how;
-      await this.runExchange(session, text, mode, origin, turn);
+      await this.runExchange(session, text, mode, halt, origin, turn);
     } catch (error) {
       /**
        * **The promise `say()` stores must never reject**, and the inner catch
@@ -1741,6 +1829,8 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     session: ChatSession<Turn>,
     text: string,
     how: 'send' | 'answer',
+    /** The person's stop for this turn — see `stop`. */
+    halt: AbortSignal,
     origin?: TurnOrigin,
     request?: ChatTurnRequest,
   ): Promise<void> {
@@ -1807,6 +1897,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
         ...(request?.images !== undefined && request.images.length > 0
           ? { images: request.images }
           : {}),
+        signal: halt,
         onStep: (summary, kind, detail) => {
           // Whatever was reasoned belongs to the step it was reasoned under,
           // which is the one already there rather than this one.
@@ -1860,6 +1951,25 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
         },
       });
     } catch (error) {
+      // What was reasoned before the round ended belongs to its working, the
+      // failed round's included — it is the round with the most to explain.
+      settleReasoning();
+      if (halt.aborted) {
+        /**
+         * **A stop is not a failure, whatever it threw on the way out.** Each
+         * loop turns the person's stop into a turn of its own, so reaching here
+         * with it is a path nobody planned for — and "something went wrong"
+         * over an answer somebody stopped on purpose is the one sentence that
+         * is certainly untrue. Nothing is known about what it had done, so the
+         * note claims nothing about it either.
+         */
+        this.base.log.warn({ err: error }, 'chat turn threw while stopping');
+        session.lastAt = Date.now();
+        await this.noteHalt(session, { acted: false });
+        await this.bank(session, true);
+        this.settle(session, 'stopped');
+        return;
+      }
       /**
        * A provider failure is a *message*, not a 500.
        *
@@ -1887,10 +1997,36 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       return;
     }
 
+    // A turn that ends straight after thinking — a stop mid-thought, above all
+    // — leaves that reasoning with no later step to settle it.
+    settleReasoning();
     session.lastAt = Date.now();
     await this.recordTurn(session, turn);
+    /**
+     * **A stopped turn says so, after whatever it had produced** — the words
+     * that reached the page, the cards for what it did — so the transcript
+     * reads as it happened: the answer as far as it got, then the stop. The
+     * note is the row the round's working goes on when nothing came before it.
+     */
+    const halted = haltOf(turn);
+    if (halted !== undefined) await this.noteHalt(session, halted);
     await this.bank(session, true);
     this.settle(session, turn.kind);
+  }
+
+  /**
+   * Write that a turn was stopped, and tell the model on its next one.
+   *
+   * `data.stopped` is what an app draws it quietly by rather than as a
+   * failure; an app that has never heard of it shows the sentence, which is
+   * true on its own.
+   */
+  private async noteHalt(session: ChatSession<Turn>, halted: Halted): Promise<void> {
+    await this.write(session, 'note', halted.acted ? HALTED_NOTE_ACTED : HALTED_NOTE, {
+      stopped: true,
+    });
+    session.priming =
+      session.priming === undefined ? HALTED_PRIMING : `${session.priming}\n${HALTED_PRIMING}`;
   }
 
   /**
@@ -1948,8 +2084,12 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
   /** The three arms every agent has; everything else is the surface's own. */
   private async recordTurn(session: ChatSession<Turn>, turn: Turn): Promise<ChatMessageWire[]> {
     switch (turn.kind) {
-      case 'said':
-        return [await this.write(session, 'agent', (turn as unknown as CommonTurn & { kind: 'said' }).text)];
+      case 'said': {
+        // Empty only for a turn stopped before it said a word, whose note is
+        // the whole of its answer — every loop hands back words otherwise.
+        const said = (turn as unknown as CommonTurn & { kind: 'said' }).text;
+        return said.trim().length > 0 ? [await this.write(session, 'agent', said)] : [];
+      }
 
       case 'question': {
         const question = (turn as unknown as CommonTurn & { kind: 'question' }).question;

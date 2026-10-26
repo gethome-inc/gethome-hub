@@ -4567,6 +4567,27 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     return true;
   };
 
+  /**
+   * What `POST …/chat/:id/stop` answers, on either agent.
+   *
+   * **An acknowledgement, the rule every chat route keeps**: the round winds
+   * down at its next safe point and says so on the socket like any other turn
+   * — what had reached the page kept as the answer, then a note that it
+   * stopped — so `stopped` is that a round was told to, and `false` that none
+   * was running, which a round that finished a moment earlier is too. Only the
+   * person whose conversation it is may stop it, refused in the words the voice
+   * route already uses for the same situation (`not_your_conversation`).
+   */
+  const stopAnswer = (outcome: 'stopped' | 'idle' | 'not_yours', reply: FastifyReply) => {
+    if (outcome === 'not_yours') {
+      return reply.code(409).send({
+        error: 'not_your_conversation',
+        detail: 'That conversation belongs to somebody else in this home, so only they can stop it.',
+      });
+    }
+    return { stopped: outcome === 'stopped' };
+  };
+
   app.post(
     '/api/v1/automations/chat',
     { ...memberOnlyNeeds('automation.manage'), bodyLimit: CHAT_BODY_LIMIT },
@@ -4625,6 +4646,17 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
        */
       if (!answered) return reply.code(410).send({ error: 'conversation_ended' });
       return answered;
+    },
+  );
+
+  /** Stop the round a conversation is running — see `stopAnswer`. */
+  app.post(
+    '/api/v1/automations/chat/:id/stop',
+    memberOnlyNeeds('automation.manage'),
+    async (request, reply) => {
+      if (await chatGuard(request, reply)) return reply;
+      const { id } = z.object({ id: z.uuid() }).parse(request.params);
+      return stopAnswer(deps.automationChat.stop(id, request.member!.id), reply);
     },
   );
 
@@ -4726,6 +4758,16 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       return answered;
     },
   );
+
+  /**
+   * Stop the round a conversation is running — see `stopAnswer`. A job the
+   * assistant has already handed over goes on: it is the other agent's
+   * conversation now, with its own stop.
+   */
+  app.post('/api/v1/assistant/chat/:id/stop', memberOnlyNeeds('hub.ai'), async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    return stopAnswer(deps.assistantChat.stop(id, request.member!.id), reply);
+  });
 
   /** Listed before the `:id` route below, or Fastify parses `chats` as a uuid. */
   app.get('/api/v1/assistant/chats', memberOnlyNeeds('hub.ai'), async (request) =>

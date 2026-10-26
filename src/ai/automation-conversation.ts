@@ -1,5 +1,5 @@
 import type { AskUser } from './automation-tools.js';
-import type { ChatEffort, ChatImage } from './chat/chat-runtime.js';
+import type { ChatEffort, ChatImage, Halted } from './chat/chat-runtime.js';
 
 /**
  * Everything about an automation conversation that is not one vendor's API.
@@ -70,13 +70,6 @@ export const AUTOMATION_MAX_SESSIONS = 8;
 export const AUTOMATION_MAX_RULES_PER_TURN = 4;
 
 /**
- * What a turn ended with.
- *
- * `said` and `question` are both suspensions and both perfectly ordinary;
- * `submitted` is the answer; `stopped` is a turn that ran out of rounds,
- * budget or time, and carries the sentence a person should read.
- */
-/**
  * One rule the model handed over, already validated.
  *
  * `replaces` is the id of the rule it is a new version of, or `null` for a new
@@ -89,6 +82,17 @@ export interface SubmittedRule {
   replaces: string | null;
 }
 
+/**
+ * What a turn ended with.
+ *
+ * `said` and `question` are both suspensions and both perfectly ordinary;
+ * `submitted` is the answer; `stopped` is a turn that ran out of rounds,
+ * budget or time, and carries the sentence a person should read.
+ *
+ * A turn the person stopped part-way ends as whichever arm it had got to, with
+ * `halted` on it: the rules it had already been told are saved, or the words
+ * that had reached the page — and the runtime adds the note that it stopped.
+ */
 export type AutomationTurn =
   | { kind: 'question'; question: AskUser }
   | {
@@ -104,8 +108,9 @@ export type AutomationTurn =
       rules: SubmittedRule[];
       /** What the model said alongside them, when it said anything. */
       text: string;
+      halted?: Halted;
     }
-  | { kind: 'said'; text: string }
+  | { kind: 'said'; text: string; halted?: Halted }
   | { kind: 'stopped'; reason: string };
 
 /** The accepted-rules arm on its own, for the loop that holds one back while it
@@ -130,6 +135,13 @@ export interface AutomationTurnContext {
    * transport with the words, or with the answer to a question.
    */
   images?: readonly ChatImage[];
+  /**
+   * The person's stop for this turn. Declared here as well as on
+   * `ChatTurnContext`, the `onSaid` lesson: this agent's loop reads it, and a
+   * field that exists at runtime but not on the type it is read through is a
+   * contract nobody can see.
+   */
+  signal?: AbortSignal;
   /** Text as it arrives, so a chat is not three minutes of nothing. */
   onDelta?: (text: string) => void;
   /**

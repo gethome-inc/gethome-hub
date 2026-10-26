@@ -3,7 +3,9 @@ import { AiUnavailableError, classifyApiError } from '../errors.js';
 import { MAX_OUTPUT_TOKENS } from '../agent-core.js';
 import { estimateCostUsd } from '../models.js';
 import {
+  haltedBy,
   refusalSentence,
+  tokensIn,
   type ChatRound,
   type ChatStop,
   type ChatToolResult,
@@ -62,6 +64,27 @@ class RunUsage {
     });
   }
 
+  /**
+   * A round the person stopped part-way, which no usage block will ever arrive
+   * for.
+   *
+   * The prompt is exact — the API counts it, cache reads and writes included,
+   * in the `message_start` that opens the stream, and the SDK keeps that
+   * snapshot through the abort — and the reply is `tokensIn` of what streamed.
+   * Stopped before the stream opened, there is no snapshot and nothing is
+   * added: whether a request cancelled before the model began was billed at
+   * all is not something this side can know.
+   */
+  addHalted(started: Anthropic.Usage | undefined, streamedTokens: number): void {
+    if (!started) return;
+    this.spent += estimateCostUsd(this.model, {
+      input_tokens: started.input_tokens,
+      output_tokens: Math.max(started.output_tokens, streamedTokens),
+      cache_read_input_tokens: started.cache_read_input_tokens,
+      cache_creation_input_tokens: started.cache_creation_input_tokens,
+    });
+  }
+
   costUsd(): number {
     return this.spent;
   }
@@ -100,7 +123,7 @@ function stopOf(reason: string | null | undefined): ChatStop {
 }
 
 export function createAnthropicTransport(options: ChatTransportOptions): ChatTransport {
-  const { secret, modelId, systemPrompt, tools, label, timeoutMs, effort, signal, log } = options;
+  const { secret, modelId, systemPrompt, tools, label, timeoutMs, effort, log } = options;
 
   const client = new Anthropic({ apiKey: secret, maxRetries: 3 });
   const definitions: Anthropic.Tool[] = tools.map((tool) => ({
@@ -176,8 +199,15 @@ export function createAnthropicTransport(options: ChatTransportOptions): ChatTra
       });
     },
 
-    async round(context): Promise<ChatRound> {
+    async round(context, signal): Promise<ChatRound> {
       let response: Anthropic.Message;
+      /** The reply as it stood when a stop landed — the SDK keeps the snapshot
+       *  `message_start` opened, usage and all, through the abort. */
+      let current: () => Anthropic.Message | undefined = () => undefined;
+      /** What reached the page, for the answer a stop leaves behind. */
+      let streamed = '';
+      /** How much reasoning was shown, for what a stopped round is priced at. */
+      let thought = 0;
       try {
         const stream = client.messages.stream(
           {
@@ -194,13 +224,36 @@ export function createAnthropicTransport(options: ChatTransportOptions): ChatTra
           },
           { signal },
         );
-        if (context?.onDelta) stream.on('text', (delta) => context.onDelta?.(delta));
+        current = () => stream.currentMessage;
+        // Kept as well as passed on, whoever is listening: the words are what
+        // a stop leaves behind as the answer.
+        stream.on('text', (delta) => {
+          streamed += delta;
+          context?.onDelta?.(delta);
+        });
         // The reasoning, as it arrives. Only ever non-empty because the request
         // asks for `display: 'summarized'` — which is exactly the silence it
         // exists to fill.
-        if (context?.onThinking) stream.on('thinking', (delta) => context.onThinking?.(delta));
+        stream.on('thinking', (delta) => {
+          thought += delta.length;
+          context?.onThinking?.(delta);
+        });
         response = await stream.finalMessage();
       } catch (error) {
+        if (haltedBy(signal)) {
+          usage.addHalted(current()?.usage, tokensIn(streamed.length + thought));
+          const said = streamed.trim();
+          // **Only the words go onto the history.** A thinking block cut off
+          // has no signature and a tool call cut off has half its input, and
+          // either is a conversation the API refuses; prose is what they read,
+          // so it is what the model is shown it said. Nothing at all, when the
+          // stop came before a word — the next user turn follows the last one,
+          // which the API reads as one turn, as `settleDangling`'s does.
+          if (said.length > 0) {
+            messages.push({ role: 'assistant', content: [{ type: 'text', text: said }] });
+          }
+          return { said, calls: [], stop: 'halted' };
+        }
         if (signal.aborted) {
           throw new AiUnavailableError(
             'aborted',

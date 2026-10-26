@@ -2,10 +2,16 @@ import type { AiProvider } from '../core/settings.js';
 import type { Logger } from '../logging.js';
 import { type AgentAuth } from './agent-core.js';
 import { budgetScale, isSupportedModel, supportedModelIds } from './models.js';
-import { QuestionGate, type ChatToolResult } from './chat/agent-loop.js';
+import {
+  NOT_ASKED,
+  QuestionGate,
+  TurnAbort,
+  notDone,
+  type ChatToolResult,
+} from './chat/agent-loop.js';
 import { createChatTransport } from './chat/transport.js';
 import { AGENT_EFFORT } from './chat/chat-runtime.js';
-import type { AgentConversation, ChatTurnContext } from './chat/chat-runtime.js';
+import type { AgentConversation, ChatTurnContext, Halted } from './chat/chat-runtime.js';
 import { askUserInput, type AskUser } from './automation-tools.js';
 import {
   ASSISTANT_MAX_COMMANDS_PER_DEVICE,
@@ -70,11 +76,17 @@ export interface AssistantHandoff {
   sessionId: string;
 }
 
+/**
+ * What a turn ended with. A turn the person stopped part-way ends as whichever
+ * arm it had got to — prose, or the jobs it had already handed over — with
+ * `halted` on it, so what it did before the stop is written down as it would
+ * have been and the runtime adds the note that it was stopped.
+ */
 export type AssistantTurn =
   | { kind: 'question'; question: AskUser }
-  | { kind: 'said'; text: string }
+  | { kind: 'said'; text: string; halted?: Halted }
   | { kind: 'stopped'; reason: string }
-  | { kind: 'handed'; handoffs: AssistantHandoff[]; text: string };
+  | { kind: 'handed'; handoffs: AssistantHandoff[]; text: string; halted?: Halted };
 
 export interface AssistantAgentOptions {
   auth: AgentAuth;
@@ -98,15 +110,6 @@ export async function createAssistantConversation(
     );
   }
 
-  /**
-   * One controller for the conversation's life rather than one per turn.
-   *
-   * The transport is built once and holds the signal, so the watchdog is armed
-   * around each `round()` and disarmed after it — `AbortSignal.timeout` per
-   * request would need a new transport per turn, which is the history thrown
-   * away every round.
-   */
-  const controller = new AbortController();
   const transport = await createChatTransport(provider, {
     secret: auth.secret,
     modelId,
@@ -116,7 +119,6 @@ export async function createAssistantConversation(
     timeoutMs: ASSISTANT_TIMEOUT_MS,
     // See the note at the top of the file: a chat, not a cached descriptor.
     effort: AGENT_EFFORT,
-    signal: controller.signal,
     log,
   });
 
@@ -130,8 +132,9 @@ export async function createAssistantConversation(
   const budgetUsd = ASSISTANT_MAX_BUDGET_USD * budgetScale(modelId);
 
   async function pump(context: ChatTurnContext | undefined): Promise<AssistantTurn> {
-    const watchdog = setTimeout(() => controller.abort(), ASSISTANT_TIMEOUT_MS);
-    watchdog.unref?.();
+    // The watchdog and the person's stop, for this turn and no other — see
+    // `TurnAbort` on the conversation-wide controller it replaced.
+    const abort = new TurnAbort(context?.signal, ASSISTANT_TIMEOUT_MS);
 
     /**
      * What this whole turn has handed over, and how many commands it has sent
@@ -145,9 +148,27 @@ export async function createAssistantConversation(
      */
     const handoffs: AssistantHandoff[] = [];
     const budget = { perDevice: new Map<string, number>() };
+    /** A device was worked or a scene pressed this turn — what a stop has to
+     *  say stays done. A handover counts too, and says so by being there. */
+    let acted = false;
+
+    /**
+     * **The turn the person stopped, ended with what it had.** The words that
+     * reached the page are the answer, and every job already handed over is
+     * still written down as a card — the other agent has it, and its own stop
+     * is on its own page. What was never started is never started.
+     */
+    const halted = (text: string): AssistantTurn =>
+      handoffs.length > 0
+        ? { kind: 'handed', handoffs, text, halted: { acted: true } }
+        : { kind: 'said', text, halted: { acted } };
 
     try {
       for (let turn = 1; turn <= ASSISTANT_MAX_TURNS; turn += 1) {
+        // Between rounds is the cleanest place a stop can land: every call so
+        // far is answered and the next request has not gone.
+        if (abort.halted) return halted('');
+
         /**
          * **Say something before the request, not after it.** The first thing
          * that happens in a round is tens of seconds of the model reading and
@@ -163,7 +184,11 @@ export async function createAssistantConversation(
           };
         }
 
-        const round = await transport.round(context);
+        const round = await transport.round(context, abort.signal);
+
+        // Stopped while the model was answering: what it had said is the
+        // answer, and nothing it was about to call was called.
+        if (round.stop === 'halted') return halted(round.said);
 
         if (round.stop === 'refusal') {
           return { kind: 'stopped', reason: round.refusal ?? 'The model declined to answer that.' };
@@ -188,6 +213,15 @@ export async function createAssistantConversation(
         let question: AssistantTurn | null = null;
 
         for (const call of calls) {
+          // **A stop is honoured before every call, never inside one.** The
+          // command already on its way to a device finishes; the ones after it
+          // in the same response are answered as not done, since each still
+          // needs a result before the conversation can go on.
+          if (abort.halted) {
+            results.push(notDone(call.id));
+            continue;
+          }
+
           if (call.name === 'ask_user') {
             const parsed = askUserInput.safeParse(call.input);
             if (!parsed.success) {
@@ -258,6 +292,9 @@ export async function createAssistantConversation(
           }
 
           const result = await runAssistantTool(call.name, call.input, tools, budget);
+          if (!result.isError && (call.name === 'control_device' || call.name === 'run_automation')) {
+            acted = true;
+          }
           const step = assistantToolStep(call.name);
           // The tool's own line about what it actually did — which device, how
           // many matched. Absent for a tool with nothing worth reading under
@@ -268,6 +305,14 @@ export async function createAssistantConversation(
             text: result.text,
             ...(result.isError ? { isError: true } : {}),
           });
+        }
+
+        if (abort.halted) {
+          // A question asked in this response is not put to somebody who has
+          // just said stop — retracted, so its call is answered with the rest.
+          gate.retract(results, NOT_ASKED);
+          transport.pushToolResults(results);
+          return halted('');
         }
 
         if (question !== null) {
@@ -293,7 +338,7 @@ export async function createAssistantConversation(
         ? { kind: 'handed', handoffs, text }
         : { kind: 'stopped', reason: text };
     } finally {
-      clearTimeout(watchdog);
+      abort.dispose();
     }
   }
 

@@ -3,7 +3,9 @@ import { AiUnavailableError, classifyApiError } from '../errors.js';
 import { MAX_OUTPUT_TOKENS } from '../agent-core.js';
 import { estimateCostUsd } from '../models.js';
 import {
+  haltedBy,
   refusalSentence,
+  tokensIn,
   type ChatRound,
   type ChatToolCall,
   type ChatToolResult,
@@ -96,9 +98,53 @@ class RunUsage {
     });
   }
 
+  /**
+   * A round the person stopped part-way, which this API reports no usage for
+   * at all: the usage block arrives with `response.completed` and nowhere
+   * else. So all of it is estimated — the prompt by `promptTokens`, as a cache
+   * read where an earlier round had already sent it, and the reply by what
+   * streamed.
+   */
+  addHalted(estimate: { fresh: number; cached: number; output: number }): void {
+    this.spent += estimateCostUsd(this.model, {
+      input_tokens: estimate.fresh,
+      output_tokens: estimate.output,
+      cache_read_input_tokens: estimate.cached,
+    });
+  }
+
   costUsd(): number {
     return this.spent;
   }
+}
+
+/**
+ * What one photo is billed as, in tokens, for a request that was never
+ * counted: about what a picture of the size this hub accepts comes to. The
+ * base64 itself is no measure at all — a megabyte of it is two hundred
+ * thousand characters standing for under a thousand tokens.
+ */
+const PHOTO_TOKENS = 800;
+
+/**
+ * Roughly how many tokens some part of a request was, for a round stopped
+ * before the API said: `tokensIn` of its text, and `PHOTO_TOKENS` a photo.
+ */
+function promptTokens(value: unknown): number {
+  let characters = 0;
+  let photos = 0;
+  const walk = (node: unknown, key: string | undefined): void => {
+    if (typeof node === 'string') {
+      if (key === 'image_url' && node.startsWith('data:')) photos += 1;
+      else characters += node.length;
+    } else if (Array.isArray(node)) {
+      for (const item of node) walk(item, undefined);
+    } else if (typeof node === 'object' && node !== null) {
+      for (const [name, item] of Object.entries(node)) walk(item, name);
+    }
+  };
+  walk(value, undefined);
+  return tokensIn(characters) + photos * PHOTO_TOKENS;
 }
 
 /** One photo as this vendor takes it: a data URL inside an input part. */
@@ -107,7 +153,7 @@ function imagePart(image: ChatImage): { type: 'input_image'; image_url: string }
 }
 
 export function createOpenAiTransport(options: ChatTransportOptions): ChatTransport {
-  const { secret, modelId, systemPrompt, tools, label, timeoutMs, effort, signal, log } = options;
+  const { secret, modelId, systemPrompt, tools, label, timeoutMs, effort, log } = options;
 
   const definitions = tools.map((tool) => ({
     type: 'function' as const,
@@ -123,6 +169,13 @@ export function createOpenAiTransport(options: ChatTransportOptions): ChatTransp
   const usage = new RunUsage(modelId);
   /** The conversation, in the vendor's own shape. */
   const input: unknown[] = [];
+  /**
+   * How much of `input` a finished request has already carried — the prefix
+   * the API caches, and so what a stopped round is priced as a cache read.
+   * Zero until one has finished, when nothing about this conversation is
+   * cached yet, the instructions and the tools included.
+   */
+  let cachedThrough = 0;
 
   return {
     provider: 'openai',
@@ -200,8 +253,14 @@ export function createOpenAiTransport(options: ChatTransportOptions): ChatTransp
       }
     },
 
-    async round(context): Promise<ChatRound> {
+    async round(context, signal): Promise<ChatRound> {
       let body: ResponseBody;
+      /** How much of the conversation this request carries. */
+      const sent = input.length;
+      /** What reached the page, for the answer a stop leaves behind. */
+      let streamed = '';
+      /** How much reasoning was shown, for what a stopped round is priced at. */
+      let thought = 0;
       try {
         body = await streamResponse({
           secret,
@@ -215,10 +274,34 @@ export function createOpenAiTransport(options: ChatTransportOptions): ChatTransp
           signal,
           label,
           log,
-          onDelta: context?.onDelta,
-          onThinking: context?.onThinking,
+          // Kept as well as passed on, whoever is listening: the words are
+          // what a stop leaves behind as the answer.
+          onDelta: (delta) => {
+            streamed += delta;
+            context?.onDelta?.(delta);
+          },
+          onThinking: (delta) => {
+            thought += delta.length;
+            context?.onThinking?.(delta);
+          },
         });
       } catch (error) {
+        if (haltedBy(signal)) {
+          const frame = promptTokens([systemPrompt, definitions]);
+          const earlier = promptTokens(input.slice(0, cachedThrough));
+          const added = promptTokens(input.slice(cachedThrough, sent));
+          usage.addHalted({
+            fresh: added + (cachedThrough === 0 ? frame : 0),
+            cached: earlier + (cachedThrough === 0 ? 0 : frame),
+            output: tokensIn(streamed.length + thought),
+          });
+          const said = streamed.trim();
+          // Only the words, as an assistant message of their own: the round's
+          // reasoning and any call it had begun never arrived as items, and an
+          // item cut off part-way is not something to echo back.
+          if (said.length > 0) input.push({ role: 'assistant', content: said });
+          return { said, calls: [], stop: 'halted' };
+        }
         if (signal.aborted) {
           throw new AiUnavailableError(
             'aborted',
@@ -229,6 +312,7 @@ export function createOpenAiTransport(options: ChatTransportOptions): ChatTransp
       }
 
       usage.add(body.usage);
+      cachedThrough = sent;
       const output = body.output ?? [];
       // Verbatim, reasoning items included: without them the model loses its
       // own chain of thought across the tool call it just made.

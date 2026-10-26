@@ -474,6 +474,13 @@ describe.skipIf(!handle)('roles and permissions', () => {
         'automation.manage',
         undefined,
       ],
+      // Stopping a round sits behind the key that started it, on each agent.
+      [
+        'POST',
+        '/api/v1/automations/chat/44444444-4444-4444-a444-444444444444/stop',
+        'automation.manage',
+        undefined,
+      ],
       ['POST', '/api/v1/automations/templates/away', 'automation.manage', {} as object],
       // **The assistant is `hub.ai` alone**, not `automation.manage`: asking
       // what the kitchen is doing and switching a lamp on is the floor, and a
@@ -492,6 +499,12 @@ describe.skipIf(!handle)('roles and permissions', () => {
       [
         'DELETE',
         '/api/v1/assistant/chat/44444444-4444-4444-a444-444444444444',
+        'hub.ai',
+        undefined,
+      ],
+      [
+        'POST',
+        '/api/v1/assistant/chat/44444444-4444-4444-a444-444444444444/stop',
         'hub.ai',
         undefined,
       ],
@@ -640,6 +653,23 @@ describe.skipIf(!handle)('roles and permissions', () => {
     });
     expect(opened.statusCode).toBe(409);
     expect(opened.json()).toMatchObject({ error: 'openai_not_configured' });
+  });
+
+  /**
+   * The allowed half of the two stop routes. Nothing is running for an id the
+   * hub holds no memory of, so a member gets the plain answer — and a 200 is
+   * proof they got past the guard where the refusal table above holds a guest.
+   */
+  it('lets a member stop a round on either agent, and says when none is running', async () => {
+    for (const surface of ['assistant', 'automations']) {
+      const stop = await app.inject({
+        method: 'POST',
+        url: `/api/v1/${surface}/chat/44444444-4444-4444-a444-444444444444/stop`,
+        headers: auth(memberToken),
+      });
+      expect(stop.statusCode, surface).toBe(200);
+      expect(stop.json(), surface).toEqual({ stopped: false });
+    }
   });
 
   it('does not ask device recognition’s switch before opening a voice line', async () => {

@@ -4,7 +4,13 @@ import { automationDocumentSchema } from '../automations/schema.js';
 import { sanityCheckAutomation } from '../automations/sanity.js';
 import { type AgentAuth } from './agent-core.js';
 import { budgetScale, isSupportedModel, supportedModelIds } from './models.js';
-import { QuestionGate, type ChatToolResult } from './chat/agent-loop.js';
+import {
+  NOT_ASKED,
+  QuestionGate,
+  TurnAbort,
+  notDone,
+  type ChatToolResult,
+} from './chat/agent-loop.js';
 import { createChatTransport } from './chat/transport.js';
 import { AGENT_EFFORT } from './chat/chat-runtime.js';
 import {
@@ -81,12 +87,6 @@ export async function createAutomationConversation(
     );
   }
 
-  /**
-   * One controller for the conversation's life rather than one per turn: the
-   * transport is built once and holds the signal, so the watchdog is armed
-   * around each round and disarmed after it.
-   */
-  const controller = new AbortController();
   const transport = await createChatTransport(provider, {
     secret: auth.secret,
     modelId,
@@ -95,7 +95,6 @@ export async function createAutomationConversation(
     label: 'the automation agent',
     timeoutMs: AUTOMATION_TIMEOUT_MS,
     effort: AGENT_EFFORT,
-    signal: controller.signal,
     log,
   });
 
@@ -123,8 +122,9 @@ export async function createAutomationConversation(
    * or a guardrail.
    */
   async function pump(context: AutomationTurnContext | undefined): Promise<AutomationTurn> {
-    const watchdog = setTimeout(() => controller.abort(), AUTOMATION_TIMEOUT_MS);
-    watchdog.unref?.();
+    // The watchdog and the person's stop, for this turn and no other — see
+    // `TurnAbort` on the conversation-wide controller it replaced.
+    const abort = new TurnAbort(context?.signal, AUTOMATION_TIMEOUT_MS);
 
     /**
      * A rule that was accepted with nothing said about it, held back for one
@@ -151,8 +151,29 @@ export async function createAutomationConversation(
     // read below is exactly there — one round earlier in the same loop.
     const silence: { submission: SubmittedTurn | null } = { submission: null };
 
+    /**
+     * **The turn the person stopped, ended with what it had.** A rule the
+     * model was told is saved is saved — the result said "Accepted", and a
+     * history that says so about a rule that does not exist is a conversation
+     * that lies to itself from then on — with the words it had said above its
+     * card, or what reached the page before the stop where it had said none.
+     */
+    const halted = (text: string, accepted: SubmittedTurn | null = null): AutomationTurn => {
+      const held = accepted ?? silence.submission;
+      if (held === null) return { kind: 'said', text, halted: { acted: false } };
+      return {
+        ...held,
+        text: held.text.trim().length > 0 ? held.text : text,
+        halted: { acted: true },
+      };
+    };
+
     try {
       for (let turn = 1; turn <= AUTOMATION_MAX_TURNS; turn += 1) {
+        // Between rounds is the cleanest place a stop can land: every call so
+        // far is answered and the next request has not gone.
+        if (abort.halted) return halted('');
+
         /**
          * **Say something before the request, not after it.**
          *
@@ -178,7 +199,11 @@ export async function createAutomationConversation(
           };
         }
 
-        const round = await transport.round(context);
+        const round = await transport.round(context, abort.signal);
+
+        // Stopped while the model was answering: what it had said is the
+        // answer, and nothing it was about to call was called.
+        if (round.stop === 'halted') return halted(round.said);
 
         if (round.stop === 'refusal') {
           return {
@@ -224,6 +249,13 @@ export async function createAutomationConversation(
         const submitted: SubmittedRule[] = [];
 
         for (const call of calls) {
+          // A stop is honoured before every call, never inside one: the calls
+          // after it in this response are answered as not done.
+          if (abort.halted) {
+            results.push(notDone(call.id));
+            continue;
+          }
+
           if (call.name === 'ask_user') {
             const parsed = askUserInput.safeParse(call.input);
             if (!parsed.success) {
@@ -349,6 +381,15 @@ export async function createAutomationConversation(
           });
         }
 
+        if (abort.halted) {
+          // A question asked in this response is not put to somebody who has
+          // just said stop — retracted, so its call is answered with the rest
+          // — while a rule accepted before the stop is kept, and saved.
+          gate.retract(results, NOT_ASKED);
+          transport.pushToolResults(results);
+          return halted('', handedBack?.kind === 'submitted' ? handedBack : null);
+        }
+
         if (handedBack?.kind === 'question') {
           // Nothing is appended *yet*: the API wants one user message carrying
           // a result for every call in the assistant turn, and the question's
@@ -389,7 +430,7 @@ export async function createAutomationConversation(
           `you want more directly, or in smaller pieces.`,
       };
     } finally {
-      clearTimeout(watchdog);
+      abort.dispose();
     }
   }
 

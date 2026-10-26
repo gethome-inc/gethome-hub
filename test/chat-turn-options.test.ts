@@ -270,8 +270,10 @@ describe('the four chat routes', () => {
     const body = response.json() as { chat?: unknown };
     // The block is what an app reads before offering any of the three; an
     // older hub strips them and answers 201, so absence must mean "don't".
+    // `stop` is the same rule for a route: an older hub answers it 404.
     expect(body.chat).toEqual({
       models: true,
+      stop: true,
       efforts: ['low', 'medium', 'high'],
       images: {
         maxCount: CHAT_IMAGE_MAX_COUNT,

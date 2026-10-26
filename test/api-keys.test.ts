@@ -361,11 +361,13 @@ describe.skipIf(!handle)('API keys', () => {
     // Every conversation, reading included: what people said is not a key's.
     'POST /api/v1/automations/chat': 'deny',
     'POST /api/v1/automations/chat/:id/messages': 'deny',
+    'POST /api/v1/automations/chat/:id/stop': 'deny',
     'GET /api/v1/automations/chats': 'deny',
     'GET /api/v1/automations/chat/:id': 'deny',
     'DELETE /api/v1/automations/chat/:id': 'deny',
     'POST /api/v1/assistant/chat': 'deny',
     'POST /api/v1/assistant/chat/:id/messages': 'deny',
+    'POST /api/v1/assistant/chat/:id/stop': 'deny',
     'GET /api/v1/assistant/chats': 'deny',
     'GET /api/v1/assistant/chat/:id': 'deny',
     'POST /api/v1/assistant/voice/session': 'deny',
@@ -875,9 +877,11 @@ describe.skipIf(!handle)('API keys', () => {
         ['GET', '/api/v1/automations/chats', undefined, 403, notAllowed],
         ['GET', `/api/v1/automations/chat/${uuid}`, undefined, 403, notAllowed],
         ['POST', '/api/v1/automations/chat', { message: 'hi' }, 403, notAllowed],
+        ['POST', `/api/v1/automations/chat/${uuid}/stop`, undefined, 403, notAllowed],
         ['GET', '/api/v1/assistant/chats', undefined, 403, notAllowed],
         ['GET', `/api/v1/assistant/chat/${uuid}`, undefined, 403, notAllowed],
         ['POST', '/api/v1/assistant/chat', { message: 'hi' }, 403, notAllowed],
+        ['POST', `/api/v1/assistant/chat/${uuid}/stop`, undefined, 403, notAllowed],
         ['POST', '/api/v1/assistant/voice/session', { sdp: 'v=0' }, 403, notAllowed],
         // Permissions no key may hold say which, so the integration knows what
         // it has to do without.

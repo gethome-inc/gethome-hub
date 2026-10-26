@@ -195,6 +195,59 @@ are never refused for it. **And a photo sent with no words stores a caption** �
 person's row from `text` alone; the recap, the voice's history and the list
 read the flag, and the model is sent the empty message the person sent.
 
+## Stopping a round
+
+`POST …/chat/:id/stop` (both agents, `docs/api.md` has the wire) stops the round
+a conversation is running, part-way, and `GET /hub`'s `chat.stop` is how an app
+knows the route is there. It is **acknowledged, never awaited**, like everything
+else about a chat: the round winds down at its next safe point and says so on
+the socket.
+
+**The person's stop is the turn's `ChatTurnContext.signal`, and each loop listens
+to it through a `TurnAbort`** (`chat/agent-loop.ts`), the watchdog and the stop
+behind one signal whose *reason* says which fired (`StopRequested`, `haltedBy`).
+A stop lands at one of three places, and each is a clean end:
+
+- **mid-reply** — the transport answers a `halted` round carrying what had
+  streamed, and pushes only those words onto the history: a thinking block cut
+  off before its signature, or a tool call cut off half way through its input,
+  is a conversation the API refuses, so neither is kept;
+- **between tool calls** — the call already running finishes, the ones after it
+  in the same response are answered *Not done* (every call still needs a result
+  before the next request), and a question not yet put is retracted;
+- **between rounds** — every call is answered and the next request has not gone.
+
+**The turn ends as whatever it had got to, with `halted` on it**, so what it
+did is written down exactly as it would have been: the words that reached the
+page as the `agent` row; a job the assistant had handed over as its `handoff`
+card; a rule the automations agent had been told is saved, saved, with its
+`preview`. Then the runtime writes a note with `data.stopped: true` — `Stopped.`,
+or `Stopped. What was already done stays done.` when the home had changed — and
+puts one line on `ChatSession.priming` so the model learns on its next turn that
+it was cut short rather than finished, and does not pick the old request back
+up unasked. A loop that throws while stopping is still a stop, not "something
+went wrong".
+
+**Only the round somebody is watching.** `ChatSession.halt` is the running
+turn's own controller, set when it begins (before a model switch, so a stop
+pressed during one still lands) and cleared when it ends — a message sent behind
+it is a turn of its own and still runs. And **a stop does not reach across a
+handoff**: the job is the other agent's conversation now, which has its own stop.
+
+**It is paid for like any other round.** Neither vendor sends usage for a reply
+it never finished, so the transport prices what it can: Anthropic counts the
+prompt in the `message_start` that opens the stream and the SDK keeps that
+snapshot through the abort; OpenAI counts nothing until `response.completed`,
+so the prompt is estimated — a photo as `PHOTO_TOKENS`, never as its base64,
+and what an earlier round already sent as a cache read. The reply is `tokensIn`
+of what streamed, reasoning only as its summary, which is the low side of what
+was billed.
+
+**The watchdog is per turn because of this.** It used to be one controller for
+the conversation's life, and a controller aborts once: the first turn to outlive
+the watchdog left every later round refused the instant it was sent, until the
+session was dropped two hours later. `TurnAbort` is new for every turn.
+
 ## One transcript store
 
 `automation_chat_messages` carries both, told apart by a nullable `surface`

@@ -1069,6 +1069,31 @@ domains — update them in the same change.
   — and so does `liveHistory` for the voice — because "what about the colour?"
   reaching a model with no idea there was a picture is a confident wrong
   answer. A photo never crosses a handoff: the brief is text.
+  **A round can be stopped part-way, and a stop keeps what it had**
+  (`POST …/chat/:id/stop`, `chat.stop` on `GET /hub`; `docs/assistant.md` has
+  it whole). Five rules. **The signal is per turn** — `TurnAbort` in
+  `chat/agent-loop.ts`, the watchdog and the person's `ChatTurnContext.signal`
+  behind one signal whose *reason* tells them apart (`StopRequested`,
+  `haltedBy`). It replaced one controller for the conversation's life, which
+  was a bug of its own: a controller aborts once, so the first turn to outlive
+  the watchdog left every later round refused the instant it was sent, until
+  the idle sweep. A test holds a conversation past a timeout and answers it
+  again, against a fetch stub that refuses an aborted signal the way a real one
+  does — the laxer stub passed the old bug. **A stop is a round, never a
+  throw** (`ChatStop` `halted`): what had streamed is the answer, and only its
+  *words* go onto the history — a thinking block without its signature or a
+  tool call without its whole input is a conversation the API refuses for
+  good. **It lands only where the history is whole**: mid-reply, before each
+  tool call (the rest answered *Not done*, a pending question retracted), or
+  between rounds. **The turn ends as whatever it had got to, with `halted` on
+  it**, so the runtime records it exactly as it would have — prose, the
+  handoff cards, a rule the model was told is saved — and then writes the
+  `data.stopped` note and one line of priming. **And it is paid for**: Anthropic's
+  prompt is exact from the `message_start` snapshot the SDK keeps through the
+  abort; OpenAI's is estimated, a photo as `PHOTO_TOKENS` rather than its
+  base64; the reply is `tokensIn` of what streamed. Only the running round
+  stops (`ChatSession.halt`, set when the turn begins and cleared when it ends),
+  and never a job already handed to another agent.
   **And a turn writes down what it ran at and how it was asked** — `ai_runs`
   gained `effort` and `via` beside `provider`/`modelId`, filled from
   `ChatSession.origin`, which `runExchange` resolves at the moment a round

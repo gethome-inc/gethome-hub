@@ -46,6 +46,9 @@ const { createAnthropicTransport } = await import('../src/ai/chat/anthropic-tran
 const { createOpenAiTransport } = await import('../src/ai/chat/openai-transport.js');
 
 const log = pino({ level: 'silent' });
+/** A round's signal that nothing ever aborts — what a round runs on when no
+ *  turn is watching it. */
+const unstopped = new AbortController().signal;
 
 const options = (modelId: string): ChatTransportOptions => ({
   secret: 'test',
@@ -55,7 +58,6 @@ const options = (modelId: string): ChatTransportOptions => ({
   label: 'the assistant',
   timeoutMs: 60_000,
   effort: 'medium',
-  signal: new AbortController().signal,
   log,
 });
 
@@ -72,7 +74,7 @@ describe('photos on Anthropic', () => {
   it('sends a text-only message exactly as it always did', async () => {
     const transport = createAnthropicTransport(options('claude-opus-5-5'));
     transport.pushUser('hello');
-    await transport.round(undefined);
+    await transport.round(undefined, unstopped);
     // A plain string, not a one-block array: the cached prefix of every
     // conversation that never sends a photo stays byte-for-byte what it was.
     expect(anthropicSent()[0]).toEqual({ role: 'user', content: 'hello' });
@@ -81,7 +83,7 @@ describe('photos on Anthropic', () => {
   it('puts the photos first and the words after them, in one user turn', async () => {
     const transport = createAnthropicTransport(options('claude-opus-5-5'));
     transport.pushUser('what is this?', [jpeg, png]);
-    await transport.round(undefined);
+    await transport.round(undefined, unstopped);
     expect(anthropicSent()[0]).toEqual({
       role: 'user',
       content: [
@@ -95,7 +97,7 @@ describe('photos on Anthropic', () => {
   it('sends a photo on its own with no empty text block, which the API refuses', async () => {
     const transport = createAnthropicTransport(options('claude-opus-5-5'));
     transport.pushUser('', [jpeg]);
-    await transport.round(undefined);
+    await transport.round(undefined, unstopped);
     expect(anthropicSent()[0]).toEqual({
       role: 'user',
       content: [{ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'AAAA' } }],
@@ -106,7 +108,7 @@ describe('photos on Anthropic', () => {
     const transport = createAnthropicTransport(options('claude-opus-5-5'));
     transport.pushUser('which lamp?');
     transport.pushToolResults([{ id: 'toolu_1', text: 'this one' }], [jpeg]);
-    await transport.round(undefined);
+    await transport.round(undefined, unstopped);
     expect(anthropicSent()[1]).toEqual({
       role: 'user',
       content: [
@@ -155,14 +157,14 @@ describe('photos on OpenAI', () => {
   it('sends a text-only message exactly as it always did', async () => {
     const transport = openAi();
     transport.pushUser('hello');
-    await transport.round(undefined);
+    await transport.round(undefined, unstopped);
     expect(openAiSent()[0]).toEqual({ role: 'user', content: 'hello' });
   });
 
   it('sends the words and then each photo as a data URL, in one user item', async () => {
     const transport = openAi();
     transport.pushUser('what is this?', [jpeg, png]);
-    await transport.round(undefined);
+    await transport.round(undefined, unstopped);
     expect(openAiSent()[0]).toEqual({
       role: 'user',
       content: [
@@ -176,7 +178,7 @@ describe('photos on OpenAI', () => {
   it('sends a photo on its own with no empty text part', async () => {
     const transport = openAi();
     transport.pushUser('', [jpeg]);
-    await transport.round(undefined);
+    await transport.round(undefined, unstopped);
     expect(openAiSent()[0]).toEqual({
       role: 'user',
       content: [{ type: 'input_image', image_url: 'data:image/jpeg;base64,AAAA' }],
@@ -187,7 +189,7 @@ describe('photos on OpenAI', () => {
     const transport = openAi();
     transport.pushUser('which lamp?');
     transport.pushToolResults([{ id: 'call_1', text: 'this one' }], [jpeg]);
-    await transport.round(undefined);
+    await transport.round(undefined, unstopped);
     const input = openAiSent();
     expect(input.slice(1)).toEqual([
       { type: 'function_call_output', call_id: 'call_1', output: 'this one' },
