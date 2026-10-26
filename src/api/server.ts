@@ -62,9 +62,11 @@ import {
   base64Bytes,
   CHAT_CAPABILITY,
   CHAT_EFFORTS,
+  CHAT_IMAGE_MAX_BASE64,
   CHAT_IMAGE_MAX_BYTES,
   CHAT_IMAGE_MAX_COUNT,
   CHAT_IMAGE_MEDIA_TYPES,
+  ChatPhotosBusyError,
   type ChatTurnRequest,
 } from '../ai/chat/chat-runtime.js';
 import type { AutomationStore } from '../automations/store.js';
@@ -323,34 +325,47 @@ interface CommissionJob {
 const PHOTO_BODY_LIMIT = 12 * 1024 * 1024;
 
 /**
- * The largest a chat message's base64 may be for one photo: exactly
- * `CHAT_IMAGE_MAX_BYTES` once decoded, since well-formed base64 is four
- * characters for every three bytes.
+ * One photo at the ceiling as a JSON encoder writes it: its base64, plus room
+ * for `/` written as `\/`.
+ *
+ * **Apple's encoders escape every slash by default** — `JSONSerialization`
+ * and `JSONEncoder` without `.withoutEscapingSlashes` — and `/` is one base64
+ * character in sixty-four, so four photos at the ceiling came to the door
+ * about 128 KB heavier than their parsed size: past the slack this limit had,
+ * and refused with a bare 413 a request the schema would have taken. The
+ * allowance is twice the expected share, since a photo's bytes are not
+ * perfectly random.
  */
-const CHAT_IMAGE_MAX_BASE64 = Math.ceil(CHAT_IMAGE_MAX_BYTES / 3) * 4;
+const CHAT_IMAGE_MAX_JSON = CHAT_IMAGE_MAX_BASE64 + Math.ceil(CHAT_IMAGE_MAX_BASE64 / 32);
 
 /**
  * A chat message carrying as many photos as it may, each as large as it may
  * be, with room for the words and the JSON around them.
  *
  * **Per route, on the four that take a message, and never on the server** —
- * `PHOTO_BODY_LIMIT`'s rule: nothing else on this API grows a mouth this size.
- * It is the ceiling, not the expectation: the apps downscale a photo to a few
- * hundred kilobytes before sending it, and a message with one is well under
- * the one-megabyte default every other route keeps. Derived rather than
- * written out, so raising the count or the size cannot leave a request the
- * schema accepts refused at the door with a 413.
+ * `PHOTO_BODY_LIMIT`'s rule: nothing else on this API grows a mouth this size
+ * (the two photo routes take 12 MB, every other route Fastify's one-megabyte
+ * default). It is the ceiling, not the expectation: the apps downscale a photo
+ * to a few hundred kilobytes before sending it, and a message with one is well
+ * under the default. Derived rather than written out, so raising the count or
+ * the size cannot leave a request the schema accepts — as an ordinary JSON
+ * encoder writes it, slashes escaped included — refused at the door with a
+ * 413. (No bound covers every encoding JSON allows: `\u002f` is six bytes for
+ * one character.)
  */
-const CHAT_BODY_LIMIT = CHAT_IMAGE_MAX_COUNT * CHAT_IMAGE_MAX_BASE64 + 64 * 1024;
+const CHAT_BODY_LIMIT = CHAT_IMAGE_MAX_COUNT * CHAT_IMAGE_MAX_JSON + 64 * 1024;
 
 /**
  * Whether a string is well-formed base64, checked by walking it.
  *
- * A loop rather than a regular expression, because the string is up to four
- * million characters and a pattern that has to count its way through groups of
- * four is a backtracking stack that size. Well-formed means what both vendors
- * decode: a length that is a multiple of four, the standard alphabet, and at
- * most two `=` at the very end.
+ * A loop rather than a regular expression, because the string can be two
+ * million characters — `CHAT_IMAGE_MAX_BASE64`, and no longer, since the
+ * schema's `.max` before this check aborts on a string past it (zod runs a
+ * refine even after a failed `.max` otherwise, and the body limit would have
+ * let one of eight million through) — and a pattern that has to count its way
+ * through groups of four is a backtracking stack that size. Well-formed means
+ * what both vendors decode: a length that is a multiple of four, the standard
+ * alphabet, and at most two `=` at the very end.
  */
 function isBase64(data: string): boolean {
   if (data.length === 0 || data.length % 4 !== 0) return false;
@@ -4420,6 +4435,11 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (error instanceof AutomationNotConfiguredError) {
       return reply.code(409).send({ error: error.code, detail: error.message });
     }
+    // Photos past what the hub can hold at once, refused before anything was
+    // taken — the `portrait_busy` rule, in bytes (`ChatPhotoBudget`).
+    if (error instanceof ChatPhotosBusyError) {
+      return reply.code(409).send({ error: error.code, detail: error.message });
+    }
     throw error;
   };
 
@@ -4443,6 +4463,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       .string()
       .max(CHAT_IMAGE_MAX_BASE64, {
         message: `Each photo can be at most ${CHAT_IMAGE_MAX_BYTES / (1024 * 1024)} MB.`,
+        // Stop here: walking eight million characters to report the same
+        // thing twice is work for nobody — see `isBase64`.
+        abort: true,
       })
       .refine(isBase64, { message: 'A photo has to be sent as base64.' })
       .refine((data) => base64Bytes(data) <= CHAT_IMAGE_MAX_BYTES, {

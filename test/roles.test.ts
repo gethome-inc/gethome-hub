@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -1486,6 +1487,90 @@ describe.skipIf(!handle)('roles and permissions', () => {
     expect(rows.some((row) => row.memberId !== guestId)).toBe(true);
 
     socket.close();
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/roles/${await roleId('guest')}`,
+      headers: auth(ownerToken),
+      payload: { permissions: [...BUILTIN_ROLES[2].permissions] },
+    });
+  });
+
+  /**
+   * A conversation is what somebody in the home said, and the routes that read
+   * one ask `hub.ai` (and `automation.manage` for the automations agent's). The
+   * socket used to ask nothing of a member: a guest who subscribed to
+   * `automations` heard every member's replies, reasoning and steps live. Both
+   * halves, and the widening without a reconnect — the `activity.read` shape.
+   */
+  it('narrows the conversations on the automations stream per socket, and widens them live', async () => {
+    const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 120));
+    /** Wait for what an assertion is about, by name — never for a fixed time
+     *  alone (`test/CLAUDE.md`). */
+    const until = async (done: () => boolean, label: string) => {
+      const deadline = Date.now() + 3000;
+      while (!done()) {
+        if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    };
+    const open = async (token: string) => {
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/api/v1/ws?token=${token}`);
+      const frames: Array<{ type: string; streams?: string[] }> = [];
+      socket.on('message', (data) => frames.push(JSON.parse(data.toString())));
+      await new Promise<void>((resolve, reject) => {
+        socket.on('open', () => resolve());
+        socket.on('error', reject);
+      });
+      socket.send(JSON.stringify({ type: 'subscribe', streams: ['automations'] }));
+      await until(() => frames.some((frame) => frame.type === 'subscribed'), 'the subscription');
+      // The subscription itself is not what is refused — only what it carries.
+      expect(frames.find((frame) => frame.type === 'subscribed')?.streams).toContain('automations');
+      return { socket, frames };
+    };
+    const said = () => {
+      const at = new Date().toISOString();
+      events.emit('assistantChat', { sessionId: randomUUID(), phase: 'delta', at, text: 'The hall is warm.' });
+      events.emit('automationChat', { sessionId: randomUUID(), phase: 'delta', at, text: 'Saved it.' });
+    };
+    const chats = (frames: Array<{ type: string }>) =>
+      frames.map((frame) => frame.type).filter((type) => type === 'assistantChat' || type === 'automationChat');
+
+    const guest = await open(guestToken);
+    const member = await open(memberToken);
+    said();
+    // Gated on the member's copies arriving, then given time for a guest's to
+    // have arrived too — an absence has no event of its own to wait for.
+    await until(() => chats(member.frames).length === 2, "the member's chat frames");
+    await settle();
+    expect(chats(guest.frames)).toEqual([]);
+    expect(chats(member.frames).sort()).toEqual(['assistantChat', 'automationChat']);
+
+    // `hub.ai` alone is the assistant's; the automations agent's needs both.
+    guest.frames.length = 0;
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/roles/${await roleId('guest')}`,
+      headers: auth(ownerToken),
+      payload: { permissions: ['hub.ai'] },
+    });
+    said();
+    await until(() => chats(guest.frames).length >= 1, "the guest's assistant frame");
+    await settle();
+    expect(chats(guest.frames)).toEqual(['assistantChat']);
+
+    guest.frames.length = 0;
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/roles/${await roleId('guest')}`,
+      headers: auth(ownerToken),
+      payload: { permissions: ['hub.ai', 'automation.manage'] },
+    });
+    said();
+    await until(() => chats(guest.frames).length >= 2, "the guest's chat frames");
+    expect(chats(guest.frames).sort()).toEqual(['assistantChat', 'automationChat']);
+
+    guest.socket.close();
+    member.socket.close();
     await app.inject({
       method: 'PATCH',
       url: `/api/v1/roles/${await roleId('guest')}`,

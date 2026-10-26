@@ -155,7 +155,7 @@ export interface ChatReply {
  * What a conversation cost and what answered it.
  *
  * **Absent, never zero, when the hub cannot say.** `ai_runs` keeps the last
- * sixty runs of every kind and a transcript lives a fortnight, so a home that
+ * 250 runs of every kind and a transcript lives a fortnight, so a home that
  * has recognised a few devices since can open a readable chat whose spend row
  * has been pruned — and "$0.00" about a conversation that plainly cost
  * something is a claim, where nothing at all is the truth.
@@ -295,6 +295,84 @@ export const CHAT_EFFORTS = ['low', 'medium', 'high'] as const satisfies readonl
  */
 export const CHAT_IMAGE_MAX_COUNT = 4;
 export const CHAT_IMAGE_MAX_BYTES = 1.5 * 1024 * 1024;
+/**
+ * The largest one photo's base64 may be: exactly `CHAT_IMAGE_MAX_BYTES` once
+ * decoded, since well-formed base64 is four characters for every three bytes.
+ */
+export const CHAT_IMAGE_MAX_BASE64 = Math.ceil(CHAT_IMAGE_MAX_BYTES / 3) * 4;
+
+/**
+ * The photos this hub is holding for chat rounds, **across every conversation
+ * on both surfaces** — and the bound on them.
+ *
+ * The per-message bounds above are sized for *one* message in flight, and on
+ * their own they bound nothing else: a message is acknowledged the moment it is
+ * taken and its turn waits in its conversation's chain, holding its photos
+ * until that turn has run — so ten messages at the ceiling sent behind one
+ * running round pinned about eighty megabytes, and eight conversations each
+ * running one held as much again, on a board whose whole headroom is thirty.
+ * The portraits and room pictures answer the same constraint by refusing a
+ * second drawing rather than queueing it (`portrait_busy`, `picture_busy`);
+ * this is that rule measured in bytes, so photos the app has downscaled to a
+ * few hundred kilobytes never meet it and a client sending at the ceiling meets
+ * it on its second message.
+ *
+ * **Taken before anything is written and given back when the turn ends** —
+ * whichever way it ends, the rebase after it included — by the handle `take`
+ * returns, which is idempotent so a path that releases twice cannot free bytes
+ * somebody else is holding. Counted in base64 characters, which is what sits in
+ * memory, and set at exactly one message at the ceiling.
+ */
+export class ChatPhotoBudget {
+  private held = 0;
+
+  constructor(readonly limit: number = CHAT_IMAGE_MAX_COUNT * CHAT_IMAGE_MAX_BASE64) {}
+
+  /** Characters of photos held right now. */
+  get inUse(): number {
+    return this.held;
+  }
+
+  /**
+   * Hold `chars` until the returned release is called, or answer null when
+   * that would go past the bound. Nothing is held for a message with no photo.
+   */
+  take(chars: number): (() => void) | null {
+    if (chars <= 0) return () => undefined;
+    if (this.held + chars > this.limit) return null;
+    this.held += chars;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.held -= chars;
+    };
+  }
+}
+
+/**
+ * The one budget a hub has. Shared by default — one process is one hub, and
+ * the two surfaces are two runtimes over the same memory — and injectable
+ * (`ChatRuntimeOptions.photos`) for a suite that wants its own.
+ */
+export const chatPhotoBudget = new ChatPhotoBudget();
+
+/**
+ * A message's photos would take the hub past what it can hold, and nothing was
+ * taken: `409 photos_busy`, **a new code for a new situation** with a sentence
+ * beside it, so an app that has never met the code still shows something true.
+ * Only a message carrying photos can meet it — words alone are queued as they
+ * always were — and an app that downscales never does.
+ */
+export class ChatPhotosBusyError extends Error {
+  readonly code = 'photos_busy' as const;
+  constructor() {
+    super(
+      'Your hub is still working on photos sent a moment ago. Send these again when that answer arrives.',
+    );
+    this.name = 'ChatPhotosBusyError';
+  }
+}
 /** What both vendors accept as an image block, and nothing a phone would not
  *  produce. GIF is left out on purpose: an animated one is a different thing to
  *  send a model, and neither app makes one. */
@@ -328,7 +406,7 @@ export const CHAT_CAPABILITY = {
  *
  * **It is never written down.** `data` reaches the provider in that round's
  * request and nowhere else: the transcript row keeps what the photo *was*
- * (`attachmentsOf`), never its bytes, and the session is rebased after the
+ * (`userRowData`), never its bytes, and the session is rebased after the
  * round (`ChatRuntime.rebase`) so the provider history stops holding it too.
  */
 export interface ChatImage {
@@ -358,7 +436,7 @@ export interface ChatTurnRequest {
 /**
  * How many bytes a base64 string decodes to, without decoding it.
  *
- * Measured from the length rather than by decoding a three-megabyte string to
+ * Measured from the length rather than by decoding a two-megabyte string to
  * learn how long it is — the number is exact for well-formed base64, which the
  * route has already insisted on.
  */
@@ -391,7 +469,11 @@ interface StoredAttachment {
  * and a photo in it would be a fortnight of somebody's camera roll on an SD
  * card.
  */
-function userRowData(turn: ChatTurnRequest | undefined): Record<string, unknown> | undefined {
+function userRowData(
+  turn: ChatTurnRequest | undefined,
+  /** The message was a photo and no words — see `photoCaption`. */
+  wordless = false,
+): Record<string, unknown> | undefined {
   if (turn === undefined) return undefined;
   const attachments: StoredAttachment[] = (turn.images ?? []).map((image) => ({
     type: 'image' as const,
@@ -405,6 +487,7 @@ function userRowData(turn: ChatTurnRequest | undefined): Record<string, unknown>
     ...(turn.model !== undefined ? { model: turn.model } : {}),
     ...(turn.effort !== undefined ? { effort: turn.effort } : {}),
     ...(attachments.length > 0 ? { attachments } : {}),
+    ...(wordless && attachments.length > 0 ? { wordless: true } : {}),
   };
   return Object.keys(data).length > 0 ? data : undefined;
 }
@@ -415,9 +498,41 @@ function photoCount(row: { data?: unknown }): number {
   return Array.isArray(attachments) ? attachments.length : 0;
 }
 
+/**
+ * Whether a stored row is a photo sent with no words — its `text` the hub's
+ * caption rather than anything the person said.
+ *
+ * An empty `text` counts too, which no row this hub writes has: it is the
+ * reading that stays true whichever way a row came to have no words.
+ */
+export function isWordless(row: { text: string; data?: unknown }): boolean {
+  if (photoCount(row) === 0) return false;
+  return (
+    (row.data as { wordless?: unknown } | null | undefined)?.wordless === true ||
+    row.text.trim().length === 0
+  );
+}
+
 /** "1 photo", "2 photos". */
 function photos(count: number): string {
   return `${count} photo${count === 1 ? '' : 's'}`;
+}
+
+/**
+ * The `text` a row stores for a message that was only a photo — the list's
+ * own words for one: "Photo", "2 photos".
+ *
+ * **Because an older app draws a person's row from `text` alone.** `message`
+ * was `min(1)` until a photo could be sent on its own, so no build that has
+ * shipped has ever met an empty one — and drawn from an empty `text`, a
+ * picture somebody sent read on an older phone as an empty bubble with an
+ * answer about nothing beneath it. A caption is the fallback that stays true,
+ * the `activity.message` rule; `data.wordless` says it is the hub's and not
+ * the person's, so an app that draws the photo leaves it off, and the recap,
+ * the voice's history and the list read it as no words at all.
+ */
+export function photoCaption(count: number): string {
+  return count === 1 ? 'Photo' : photos(count);
 }
 
 export interface ChatTurnContext {
@@ -532,6 +647,9 @@ export interface ChatRuntimeOptions {
   events: HubEventBus;
   runs: AiRunLog;
   log: Logger;
+  /** The photos budget — `chatPhotoBudget`, the hub's one, unless a suite
+   *  hands in its own. */
+  photos?: ChatPhotoBudget;
 }
 
 export interface ChatSession<Turn> {
@@ -614,6 +732,34 @@ export interface ChatSession<Turn> {
   /** The artefact this conversation is about, for the ledger and for a
    *  revived conversation's opening context. */
   topic?: string | undefined;
+  /**
+   * What the conversation was **opened** about — the route's `automationId`,
+   * or for a revived one the rule its rows say it was editing — which is what
+   * a conversation put in its place by a switch or a rebase is opened with.
+   *
+   * Not `topic`, which the automations agent fills with the first rule a
+   * conversation *writes* (for the ledger): reopening on that framed a chat
+   * that had written two rules as an edit of the first, told to submit with
+   * `replaces` set to it while the person was talking about the second.
+   */
+  openedTopic?: string | undefined;
+  /**
+   * The first row a *revived* conversation's memory holds — its recap is the
+   * tail of the transcript — so a switch or rebase recaps what the history it
+   * replaces remembered rather than more. Absent for one opened fresh, whose
+   * memory is the whole conversation.
+   */
+  recallFrom?: string | undefined;
+  /**
+   * The conversation could not be rebased after a photo and has been dropped
+   * from memory, while turns queued on this object may still be waiting.
+   *
+   * Those turns must not run: `conversation` still holds the photo, and the
+   * key it was opened with may be the one somebody has just removed. Each is
+   * answered with a note instead; the next message revives the conversation
+   * from its transcript.
+   */
+  dropped?: boolean | undefined;
 }
 
 /**
@@ -642,19 +788,24 @@ function isoFrom(value: number | string | Date | null): string {
  * record of what was said rather than something the model remembers, so it
  * does not claim to recall a decision it is only reading.
  */
-function recapOf(rows: ChatMessageWire[]): string {
-  const lines = rows.slice(-RECAP_MAX_ROWS).map((row) => {
+function recapOf(
+  rows: ChatMessageWire[],
+  /** Older rows of the same conversation left out of this record. */
+  omitted = 0,
+): string {
+  const lines = rows.map((row) => {
     switch (row.role) {
       case 'user': {
         // A photo is the one thing a recap cannot carry, so it says one was
         // there: a model told "what is this?" with nothing beside it would
         // otherwise answer a question about a picture it has never seen as if
-        // the question were the whole of it.
+        // the question were the whole of it. And a photo sent on its own says
+        // only that — its `text` is the hub's caption, not something said.
         const sent = photoCount(row);
         if (sent === 0) return `They said: ${row.text}`;
-        return row.text.trim().length > 0
-          ? `They said: ${row.text} (with ${photos(sent)}, no longer available)`
-          : `They sent ${photos(sent)} (no longer available).`;
+        return isWordless(row)
+          ? `They sent ${photos(sent)} (no longer available).`
+          : `They said: ${row.text} (with ${photos(sent)}, no longer available)`;
       }
       case 'question':
         return `You asked: ${row.text}`;
@@ -680,6 +831,12 @@ function recapOf(rows: ChatMessageWire[]): string {
     RECAP_OPENING,
     'follows is the record of what was said, so read it as history rather than',
     'as your own memory, and carry on from the end of it.',
+    // Said rather than implied when the record is a tail: the closing line
+    // calls it the whole of it, which is true of the record and not of the
+    // conversation.
+    ...(omitted > 0
+      ? [`(The ${omitted} oldest ${omitted === 1 ? 'entry is' : 'entries are'} left out of this record.)`]
+      : []),
     '',
     ...lines,
     '',
@@ -708,11 +865,29 @@ function withoutRecap(priming: string | undefined): string | undefined {
   return rest.length > 0 ? rest : undefined;
 }
 
-/** A recap of `rows`, followed by whatever else was waiting to be said. */
-function primingFor(rows: ChatMessageWire[], pending: string | undefined): string | undefined {
+/**
+ * A recap of `rows` for a conversation put in another's place, followed by
+ * whatever else was waiting to be said.
+ *
+ * **Everything the conversation it replaces remembered — no more, no less.**
+ * A switch or a rebase is not a revival: the provider history being swapped
+ * out held every row since the conversation began, so recapping only the last
+ * `RECAP_MAX_ROWS` cut the original request out of a chat that had never
+ * stopped, the first time somebody sent a photo or picked another model.
+ * `recallFrom` is where a *revived* one's memory begins (its own recap was a
+ * tail), so a rebase after a revival carries exactly what that history held
+ * rather than growing back to rows it had already let go.
+ */
+function primingFor(
+  rows: ChatMessageWire[],
+  pending: string | undefined,
+  recallFrom: string | undefined,
+): string | undefined {
   const kept = withoutRecap(pending);
-  if (rows.length === 0) return kept;
-  const recap = recapOf(rows);
+  const from = recallFrom === undefined ? -1 : rows.findIndex((row) => row.id === recallFrom);
+  const recalled = from > 0 ? rows.slice(from) : rows;
+  if (recalled.length === 0) return kept;
+  const recap = recapOf(recalled, rows.length - recalled.length);
   return kept === undefined ? recap : `${recap}\n${kept}`;
 }
 
@@ -855,17 +1030,38 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
      *  is what the conversation *opens* on, rather than a switch after it. */
     turn?: ChatTurnRequest | undefined;
   }): Promise<ChatReply> {
-    this.sweep();
-    if (this.sessions.size >= CHAT_MAX_SESSIONS) {
-      // Oldest first: a conversation nobody has touched is the one to lose.
-      const oldest = [...this.sessions.values()].sort((a, b) => a.lastAt - b.lastAt)[0];
-      if (oldest) await this.close(oldest.id);
-    }
+    // Before anything else — an eviction, a conversation opened, a row — so a
+    // message refused for its photos has changed nothing.
+    const release = this.holdPhotos(input.turn);
+    try {
+      this.sweep();
+      if (this.sessions.size >= CHAT_MAX_SESSIONS) {
+        // Oldest first: a conversation nobody has touched is the one to lose.
+        const oldest = [...this.sessions.values()].sort((a, b) => a.lastAt - b.lastAt)[0];
+        if (oldest) await this.close(oldest.id);
+      }
 
-    // Minted before the conversation, because a tool context is built with it
-    // — see `openConversation`.
-    const session = await this.open(randomUUID(), input.memberId, input.topic, input.turn?.model);
-    return this.say(session, input.message, 'send', undefined, input.turn);
+      // Minted before the conversation, because a tool context is built with it
+      // — see `openConversation`.
+      const session = await this.open(randomUUID(), input.memberId, input.topic, input.turn?.model);
+      return await this.say(session, input.message, 'send', undefined, input.turn, release);
+    } catch (error) {
+      release();
+      throw error;
+    }
+  }
+
+  /**
+   * Hold a message's photos against the hub's budget, or refuse it
+   * (`ChatPhotosBusyError`) having held nothing. The release is the turn's to
+   * call when it ends — `exchange` does — and the caller's if the message is
+   * never taken.
+   */
+  private holdPhotos(turn: ChatTurnRequest | undefined): () => void {
+    const chars = (turn?.images ?? []).reduce((sum, image) => sum + image.data.length, 0);
+    const release = (this.base.photos ?? chatPhotoBudget).take(chars);
+    if (release === null) throw new ChatPhotosBusyError();
+    return release;
   }
 
   /**
@@ -899,7 +1095,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       recordedUsd: 0,
       steps: [],
       produced: 0,
-      ...(topic !== undefined ? { topic } : {}),
+      ...(topic !== undefined ? { topic, openedTopic: topic } : {}),
     };
     this.sessions.set(session.id, session);
     return session;
@@ -914,10 +1110,20 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     text: string,
     turn?: ChatTurnRequest,
   ): Promise<ChatReply | null> {
-    const session =
-      this.sessions.get(sessionId) ?? (await this.revive(sessionId, memberId, turn?.model));
-    if (!session || session.memberId !== memberId) return null;
-    return this.say(session, text, 'auto', undefined, turn);
+    // Held before a conversation is revived for it, the rule `start` keeps.
+    const release = this.holdPhotos(turn);
+    try {
+      const session =
+        this.sessions.get(sessionId) ?? (await this.revive(sessionId, memberId, turn?.model));
+      if (!session || session.memberId !== memberId) {
+        release();
+        return null;
+      }
+      return await this.say(session, text, 'auto', undefined, turn, release);
+    } catch (error) {
+      release();
+      throw error;
+    }
   }
 
   /**
@@ -971,6 +1177,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
      * with nothing on screen to say it had changed.
      */
     const chosen = model ?? modelFromRows(rows);
+    const recalled = rows.slice(-RECAP_MAX_ROWS);
     const conversation = await this.openConversation({
       memberId,
       topic,
@@ -987,8 +1194,11 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       recordedUsd: 0,
       steps: [],
       produced: 0,
-      priming: recapOf(rows),
-      ...(topic !== undefined ? { topic } : {}),
+      // The tail, because what was being discussed when it stopped is what it
+      // is about — and where that tail begins is where this memory begins.
+      priming: recapOf(recalled, rows.length - recalled.length),
+      ...(rows.length > recalled.length ? { recallFrom: recalled[0]!.id } : {}),
+      ...(topic !== undefined ? { topic, openedTopic: topic } : {}),
     };
     this.sessions.set(sessionId, session);
     this.base.log.info({ sessionId, surface: this.surface }, 'chat: revived from its transcript');
@@ -1021,10 +1231,23 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     how: 'send' | 'answer' | 'auto',
     origin?: TurnOrigin,
     turn?: ChatTurnRequest,
+    /** Gives back the photos `holdPhotos` held for this message, once its turn
+     *  is over — however it ends. */
+    release?: () => void,
   ): Promise<ChatReply> {
     // What was asked besides the words goes on the person's own row — the
-    // model, the effort, what each photo was — and never a photo itself.
-    const written = await this.write(session, 'user', text, userRowData(turn), session.memberId);
+    // model, the effort, what each photo was — and never a photo itself. A
+    // photo sent with no words stores a caption an older app can draw, and
+    // says so; the model is still sent the words the person actually sent.
+    const sent = turn?.images?.length ?? 0;
+    const wordless = sent > 0 && text.trim().length === 0;
+    const written = await this.write(
+      session,
+      'user',
+      wordless ? photoCaption(sent) : text,
+      userRowData(turn, wordless),
+      session.memberId,
+    );
     session.lastAt = Date.now();
     /**
      * **The effort somebody picked is this turn's**, the way a spoken turn's
@@ -1035,7 +1258,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     const asked: TurnOrigin | undefined =
       origin ?? (turn?.effort !== undefined ? { effort: turn.effort } : undefined);
     session.inFlight = session.inFlight.then(() =>
-      this.exchange(session, text, how, asked, turn, written.id),
+      this.exchange(session, text, how, asked, turn, written.id, release),
     );
     return { sessionId: session.id, messages: [written] };
   }
@@ -1121,13 +1344,10 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     const owners = new Map<string, string | null>();
     for (const row of said) {
       if (titles.has(row.sessionId)) continue;
-      const sent = photoCount(row);
       // A conversation that opened with a picture and no words is called what
-      // it is, rather than "Untitled conversation".
-      titles.set(
-        row.sessionId,
-        row.text.trim().length === 0 && sent > 0 ? (sent === 1 ? 'Photo' : photos(sent)) : row.text,
-      );
+      // it is, rather than "Untitled conversation" — the caption its row
+      // stores, re-derived so a row with no words at all reads the same.
+      titles.set(row.sessionId, isWordless(row) ? photoCaption(photoCount(row)) : row.text);
       owners.set(row.sessionId, row.memberId);
     }
 
@@ -1270,7 +1490,43 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     /** The person's own row for this message, which a model switch recaps up
      *  to rather than through. */
     messageId?: string,
+    /** Gives this message's photos back to the hub's budget. */
+    release?: () => void,
   ): Promise<void> {
+    try {
+      await this.exchangeHeld(session, text, how, origin, turn, messageId);
+    } finally {
+      // Whatever the turn ended as — answered, refused, dropped, its model
+      // unusable — the photos it held are let go with it, the rebase after it
+      // included.
+      release?.();
+    }
+  }
+
+  private async exchangeHeld(
+    session: ChatSession<Turn>,
+    text: string,
+    how: 'send' | 'answer' | 'auto',
+    origin: TurnOrigin | undefined,
+    turn: ChatTurnRequest | undefined,
+    messageId: string | undefined,
+  ): Promise<void> {
+    /**
+     * **A conversation dropped behind this turn's back is not run on.** A
+     * rebase that could not reopen it (`rebase`) left the old conversation on
+     * this object, photo and captured key included; a turn queued before that
+     * happened would otherwise run on it and send the photo again. Said in a
+     * note, with the spinner taken down; the next message revives it.
+     */
+    if (session.dropped === true) {
+      await this.write(
+        session,
+        'note',
+        'Your hub couldn’t carry this conversation on. Send that again to pick it back up.',
+      ).catch(() => undefined);
+      this.settle(session, 'stopped');
+      return;
+    }
     /**
      * **A different model is a different conversation, opened when the turn
      * begins.** Asked here rather than when the message was taken because turns
@@ -1322,10 +1578,12 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
    * Anthropic's signed thinking blocks, OpenAI's encrypted reasoning — and
    * neither is something the other will take, nor a different model of the
    * same vendor's guaranteed to. So this is `revive()` on purpose: a fresh
-   * conversation on the new model, primed with the record of everything said
-   * *before this message* (the message itself is the turn about to run). What
-   * is lost is what revival loses — the model's reasoning and an outstanding
-   * question, which the person answering is now simply a message.
+   * conversation on the new model, primed with the record of everything
+   * settled when this turn begins (`settledRows` — an answer written after
+   * this message was taken included, a message still queued behind it not;
+   * the message itself is the turn about to run). What is lost is what revival
+   * loses — the model's reasoning and an outstanding question, which the
+   * person answering is now simply a message.
    *
    * **The old conversation's spend is written down first**, which is the half
    * that is easy to get wrong: `record` writes the delta between what a
@@ -1359,7 +1617,9 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
 
       const conversation = await this.openConversation({
         memberId: session.memberId,
-        topic: session.topic,
+        // What it was opened about, never the first rule it wrote — see
+        // `openedTopic`.
+        topic: session.openedTopic,
         sessionId: session.id,
         model: wanted.modelId,
       });
@@ -1402,18 +1662,23 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
    * available. The old conversation, and the photo with it, is released.
    *
    * Never throws, and runs in the turn chain so it is done before the next
-   * queued message begins. A conversation that cannot be reopened (its key
-   * removed a moment ago) is dropped from memory instead; the next message
-   * revives it from the transcript, which is the ordinary path.
+   * queued message begins. **Whether or not the session is still in the map**:
+   * one closed or evicted while its round ran still has the turns queued on
+   * it to run (`close` lets them finish), and skipping the rebase there sent
+   * the photo again with each of them. The map is never written here, so a
+   * closed session is not brought back by it.
+   *
+   * A conversation that cannot be reopened (its key removed a moment ago) is
+   * dropped from memory instead and marked `dropped`, so a turn already queued
+   * on it is answered with a note rather than run on the history still holding
+   * the photo; the next message revives it from the transcript, which is the
+   * ordinary path.
    */
   private async rebase(session: ChatSession<Turn>, messageId: string | undefined): Promise<void> {
-    // Closed or swept while the round ran: `close` is about to write its spend
-    // and drop it, which lets the photo go with everything else.
-    if (this.sessions.get(session.id) !== session) return;
     try {
       const conversation = await this.openConversation({
         memberId: session.memberId,
-        topic: session.topic,
+        topic: session.openedTopic,
         sessionId: session.id,
         model: session.conversation.modelId,
       });
@@ -1424,6 +1689,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     } catch (error) {
       this.base.log.warn({ err: error }, 'chat: could not rebase after a photo; dropping it');
       await this.settleSpend(session);
+      session.dropped = true;
       if (this.sessions.get(session.id) === session) this.sessions.delete(session.id);
     }
   }
@@ -1453,7 +1719,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     session.recordedUsd = 0;
     session.unrun = true;
     session.startedAt = Date.now();
-    session.priming = primingFor(rows, session.priming);
+    session.priming = primingFor(rows, session.priming, session.recallFrom);
   }
 
   /**

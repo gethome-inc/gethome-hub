@@ -26,8 +26,11 @@ import type { AssistantChat } from '../src/ai/assistant-chat.js';
 import type { AssistantTurn } from '../src/ai/assistant-agent.js';
 import type { AutomationConversation, AutomationTurn } from '../src/ai/automation-conversation.js';
 import {
+  CHAT_IMAGE_MAX_BASE64,
   CHAT_IMAGE_MAX_BYTES,
   CHAT_IMAGE_MAX_COUNT,
+  ChatPhotosBusyError,
+  chatPhotoBudget,
   type AgentConversation,
   type ChatImage,
 } from '../src/ai/chat/chat-runtime.js';
@@ -72,6 +75,8 @@ function photo(bytes = 2048): ChatImage & { type: 'image' } {
 interface Opened {
   provider: string;
   modelId: string;
+  /** The task prompt it was opened with — what says whether it is editing. */
+  taskPrompt: string;
   /** What each round was sent, priming included. */
   sent: string[];
   /** How many photos each round was handed, and at what effort. */
@@ -91,17 +96,25 @@ function standIns(
     /** A round's answer — or a promise of one, to hold a round open while a
      *  test sends the next message behind it. */
     assistant?: () => AssistantTurn | Promise<AssistantTurn>;
-    automation?: () => AutomationTurn;
+    automation?: () => AutomationTurn | Promise<AutomationTurn>;
   } = {},
 ) {
   const opened: Opened[] = [];
-  const record = (provider: string, modelId: string): Opened => {
-    const entry: Opened = { provider, modelId, sent: [], rounds: [], spent: 0 };
+  const record = (provider: string, modelId: string, taskPrompt: string): Opened => {
+    const entry: Opened = { provider, modelId, taskPrompt, sent: [], rounds: [], spent: 0 };
     opened.push(entry);
     return entry;
   };
-  const assistant = ({ provider, modelId }: { provider: string; modelId: string }) => {
-    const entry = record(provider, modelId);
+  const assistant = ({
+    provider,
+    modelId,
+    taskPrompt,
+  }: {
+    provider: string;
+    modelId: string;
+    taskPrompt: string;
+  }) => {
+    const entry = record(provider, modelId, taskPrompt);
     const round = async (
       text: string,
       context?: { images?: readonly ChatImage[]; effort?: string; onStep?: (s: string, k: string) => void },
@@ -123,8 +136,16 @@ function standIns(
     };
     return conversation;
   };
-  const automation = ({ provider, modelId }: { provider: string; modelId: string }) => {
-    const entry = record(provider, modelId);
+  const automation = ({
+    provider,
+    modelId,
+    taskPrompt,
+  }: {
+    provider: string;
+    modelId: string;
+    taskPrompt: string;
+  }) => {
+    const entry = record(provider, modelId, taskPrompt);
     const round = async (
       text: string,
       context?: { images?: readonly ChatImage[]; effort?: string; onStep?: (s: string, k: 'thinking') => void },
@@ -333,6 +354,9 @@ describe('the four chat routes', () => {
     });
     expect(tooLarge.statusCode).toBe(400);
     expect((tooLarge.json() as { detail?: string }).detail).toMatch(/at most/);
+    // Said once: a photo past the bound stops its checks there, rather than
+    // walking millions of characters to report the same thing twice.
+    expect((tooLarge.json() as { issues: unknown[] }).issues).toHaveLength(1);
     // The refusal says what was wrong and never hands the photo back.
     expect(tooLarge.body).not.toContain(oversized.slice(0, 64));
 
@@ -368,6 +392,103 @@ describe('the four chat routes', () => {
       payload: { timezone: 'UTC', padding: big.data },
     });
     expect(elsewhere.statusCode).toBe(413);
+  });
+
+  /**
+   * Apple's JSON encoders write every `/` as `\/` unless told not to, and `/`
+   * is one base64 character in sixty-four — so four photos at the ceiling the
+   * hub advertises arrive about 128 KB heavier than they parse, which the body
+   * limit's slack did not cover: a bare 413 for a message the schema accepts.
+   */
+  it('takes four photos at the ceiling with every slash escaped, as Apple’s encoders write them', async () => {
+    const body = JSON.stringify({
+      message: 'these',
+      attachments: Array.from({ length: CHAT_IMAGE_MAX_COUNT }, () => photo(CHAT_IMAGE_MAX_BYTES)),
+    }).replaceAll('/', '\\/');
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/assistant/chat',
+      headers: { ...auth(), 'content-type': 'application/json' },
+      payload: body,
+    });
+    expect(response.statusCode).toBe(201);
+    await idle();
+  });
+
+  /**
+   * Until photos, `message` was never empty, and an older app draws a person's
+   * row from `text` alone — so a picture sent on its own read there as an empty
+   * bubble with an answer about nothing under it.
+   */
+  it('stores a photo sent with no words under a caption an older app can draw, and marks it the hub’s', async () => {
+    const before = fakes.opened.length;
+    const started = await post('/api/v1/assistant/chat', { message: '', attachments: [photo(), photo()] });
+    expect(started.statusCode).toBe(201);
+    const ack = started.json() as {
+      sessionId: string;
+      messages: { text: string; data?: { wordless?: boolean } }[];
+    };
+    expect(ack.messages[0]?.text).toBe('2 photos');
+    expect(ack.messages[0]?.data?.wordless).toBe(true);
+    await idle();
+    // The model was sent the words the person sent — none — and not the caption.
+    expect(fakes.opened[before]?.sent[0]).toBe('');
+
+    const read = (
+      await app.inject({ method: 'GET', url: `/api/v1/assistant/chat/${ack.sessionId}`, headers: auth() })
+    ).json() as { messages: { role: string; text: string; data?: object }[] };
+    expect(read.messages[0]).toMatchObject({ role: 'user', text: '2 photos', data: { wordless: true } });
+
+    // With words, the words are the text and nothing is marked.
+    const worded = (await post('/api/v1/assistant/chat', { message: 'this?', attachments: [photo()] })).json() as {
+      messages: { text: string; data?: object }[];
+    };
+    expect(worded.messages[0]?.text).toBe('this?');
+    expect(worded.messages[0]?.data).not.toHaveProperty('wordless');
+    await idle();
+  });
+
+  /**
+   * A message is acknowledged at once and its turn waits in its conversation's
+   * chain holding its photos, so the per-message bounds alone bounded nothing:
+   * messages at the ceiling sent behind a running round, or into several
+   * conversations at once, held as many megabytes as anybody sent.
+   */
+  it('refuses photos past what the hub can hold at once, before taking anything, and takes words regardless', async () => {
+    const started = (await post('/api/v1/assistant/chat', { message: 'hi' })).json() as { sessionId: string };
+    await idle();
+    const rowsBefore = (await handle.db.select().from(chatTable)).length;
+    // Somebody else's photos, holding the whole budget.
+    const held = chatPhotoBudget.take(chatPhotoBudget.limit);
+    expect(held).not.toBeNull();
+    try {
+      const refused = await post(`/api/v1/assistant/chat/${started.sessionId}/messages`, {
+        message: 'this?',
+        attachments: [photo()],
+      });
+      expect(refused.statusCode).toBe(409);
+      expect(refused.json()).toMatchObject({ error: 'photos_busy' });
+      expect((refused.json() as { detail?: string }).detail).toBeTruthy();
+      const refusedStart = await post('/api/v1/automations/chat', { message: 'a rule', attachments: [photo()] });
+      expect(refusedStart.statusCode).toBe(409);
+      expect(refusedStart.json()).toMatchObject({ error: 'photos_busy' });
+      // Refused before anything was taken: no row, no conversation.
+      expect((await handle.db.select().from(chatTable)).length).toBe(rowsBefore);
+
+      // Words are not photos, and are queued as they always were.
+      const words = await post(`/api/v1/assistant/chat/${started.sessionId}/messages`, { message: 'and now?' });
+      expect(words.statusCode).toBe(200);
+      await idle();
+    } finally {
+      held?.();
+    }
+    const after = await post(`/api/v1/assistant/chat/${started.sessionId}/messages`, {
+      message: 'this?',
+      attachments: [photo()],
+    });
+    expect(after.statusCode).toBe(200);
+    await idle();
+    expect(chatPhotoBudget.inUse).toBe(0);
   });
 
   it('refuses a model this home cannot run, with a code and a sentence, before taking the message', async () => {
@@ -673,6 +794,202 @@ describe('a turn’s model, effort and photos, in the runtime', () => {
     expect(primed).toMatch(/and the kitchen\?$/);
     // And it runs on the new conversation, as an ordinary next message.
     expect(moved?.sent[1]).toBe('and outside?');
+  });
+
+  /** A round held open until the test lets it go, and the runtimes around it. */
+  async function heldRuntimes(answer: () => AssistantTurn = () => ({ kind: 'said', text: 'Done.' })) {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let rounds = 0;
+    const started = await runtimes({
+      assistant: async () => {
+        rounds += 1;
+        if (rounds === 1) await held;
+        return answer();
+      },
+    });
+    return { ...started, release: () => release() };
+  }
+
+  it('holds a turn’s photos until it ends, refuses past one message at the ceiling, and takes words regardless', async () => {
+    const { assistant, release } = await heldRuntimes();
+    const ceiling = Array.from({ length: CHAT_IMAGE_MAX_COUNT }, () => ({
+      mediaType: 'image/jpeg',
+      data: 'A'.repeat(CHAT_IMAGE_MAX_BASE64),
+    }));
+    const started = await assistant.start({ memberId, message: 'these', turn: { images: ceiling } });
+    expect(chatPhotoBudget.inUse).toBe(CHAT_IMAGE_MAX_COUNT * CHAT_IMAGE_MAX_BASE64);
+    const rows = (await assistant.transcript(started.sessionId)).length;
+
+    // Behind the running round, and in a conversation of its own: both refused,
+    // and neither wrote anything.
+    await expect(
+      assistant.reply(started.sessionId, memberId, 'and this', { images: [photo()] }),
+    ).rejects.toBeInstanceOf(ChatPhotosBusyError);
+    await expect(
+      assistant.start({ memberId, message: 'this', turn: { images: [photo()] } }),
+    ).rejects.toBeInstanceOf(ChatPhotosBusyError);
+    expect((await assistant.transcript(started.sessionId)).length).toBe(rows);
+
+    await assistant.reply(started.sessionId, memberId, 'and the colour?');
+    release();
+    await assistant.idle();
+    expect(chatPhotoBudget.inUse).toBe(0);
+
+    // A turn that never runs — its model unusable by the time it begins —
+    // gives its photos back as well.
+    await assistant.reply(started.sessionId, memberId, 'on luna', { model: 'gpt-6-luna', images: [photo()] });
+    await assistant.idle();
+    expect((await assistant.transcript(started.sessionId)).at(-1)?.role).toBe('note');
+    expect(chatPhotoBudget.inUse).toBe(0);
+  });
+
+  /**
+   * `close` lets the turns queued on a conversation finish, and the rebase that
+   * lets a photo go used to stand down for a conversation no longer in the map
+   * — so a message queued behind a photo ran on the history still holding it,
+   * and the photo was sent and paid for again.
+   */
+  it('lets a photo go when its conversation is closed mid-round, before the message queued behind it', async () => {
+    const { assistant, fakes, release } = await heldRuntimes();
+    const started = await assistant.start({ memberId, message: 'what is this?', turn: { images: [photo()] } });
+    await assistant.reply(started.sessionId, memberId, 'and its colour?');
+    const closing = assistant.close(started.sessionId);
+    release();
+    await closing;
+
+    // The queued message ran on a fresh conversation, never on the photo's.
+    expect(fakes.opened[0]?.sent).toHaveLength(1);
+    expect(fakes.opened[1]?.sent[0]).toContain('(with 1 photo, no longer available)');
+    expect(fakes.opened[1]?.sent[0]).toMatch(/and its colour\?$/);
+    expect(fakes.opened[1]?.rounds[0]?.images).toBe(0);
+    // And closing it did not bring it back.
+    expect(assistant.isLive(started.sessionId)).toBe(false);
+  });
+
+  /**
+   * A rebase that cannot reopen — the key removed while the round ran — drops
+   * the session; a turn already queued on it used to run on the dropped
+   * object anyway, photo and removed key included.
+   */
+  it('answers a turn queued behind a rebase that could not reopen with a note, and revives once', async () => {
+    const { assistant, fakes, live, release } = await heldRuntimes();
+    const started = await assistant.start({ memberId, message: 'what is this?', turn: { images: [photo()] } });
+    await assistant.reply(started.sessionId, memberId, 'and its colour?');
+    const session = live(started.sessionId) as unknown as { inFlight: Promise<void> };
+    await settings.clearAiProvider('anthropic');
+    release();
+    await session.inFlight;
+
+    // Never run on the conversation still holding the photo.
+    expect(fakes.opened).toHaveLength(1);
+    expect(fakes.opened[0]?.sent).toHaveLength(1);
+    const rows = await assistant.transcript(started.sessionId);
+    expect(rows.at(-1)?.role).toBe('note');
+    expect(assistant.isLive(started.sessionId)).toBe(false);
+
+    // The key back, the next message revives it — one conversation, running.
+    await settings.setAiKey('anthropic', 'sk-ant-api03-test');
+    await assistant.reply(started.sessionId, memberId, 'and now?');
+    await assistant.idle();
+    expect(fakes.opened).toHaveLength(2);
+    expect(fakes.opened[1]?.sent).toHaveLength(1);
+    expect(fakes.opened[1]?.sent[0]).toMatch(/and now\?$/);
+    expect(chatPhotoBudget.inUse).toBe(0);
+  });
+
+  /**
+   * A switch or a rebase replaces a provider history that held every row, so
+   * a recap of the last forty cut the original request out of a conversation
+   * that had never stopped. A revived one's memory is the tail its own recap
+   * was, and a rebase after a revival keeps to that.
+   */
+  it('primes a rebased conversation with everything it remembered, not only the last forty rows', async () => {
+    const { assistant, live } = await runtimes();
+    const started = await assistant.start({ memberId, message: 'the very first ask' });
+    await assistant.idle();
+    for (let index = 0; index < 24; index += 1) {
+      await assistant.reply(started.sessionId, memberId, `message ${index}`);
+      await assistant.idle();
+    }
+    await assistant.reply(started.sessionId, memberId, 'and this?', { images: [photo()] });
+    await assistant.idle();
+    const rebased = live(started.sessionId)?.priming ?? '';
+    expect(rebased).toContain('They said: the very first ask');
+    expect(rebased).not.toContain('left out of this record');
+
+    await assistant.close(started.sessionId);
+    await assistant.reply(started.sessionId, memberId, 'back again');
+    await assistant.idle();
+    await assistant.reply(started.sessionId, memberId, 'and this one?', { images: [photo()] });
+    await assistant.idle();
+    const revived = live(started.sessionId)?.priming ?? '';
+    expect(revived).not.toContain('the very first ask');
+    expect(revived).toMatch(/oldest entries are left out of this record/);
+  });
+
+  /**
+   * The automations agent fills `topic` with the first rule a conversation
+   * writes, for the ledger — and a switch or a rebase opened the new
+   * conversation on it, which turns the task prompt into an edit of that rule.
+   */
+  it('reopens a conversation that wrote two rules as the conversation it was, not as an edit of the first', async () => {
+    const rule = (name: string) =>
+      ({
+        version: 1,
+        name,
+        mode: 'single',
+        triggers: [{ kind: 'manual' }],
+        actions: [{ kind: 'logActivity', message: name }],
+      }) as const;
+    let round = 0;
+    const { chat, fakes } = await runtimes({
+      automation: () => {
+        round += 1;
+        if (round <= 2) {
+          return {
+            kind: 'submitted',
+            rules: [{ document: rule(round === 1 ? 'Evening lights' : 'Lock up'), replaces: null }],
+            text: 'Saved it, switched off.',
+          } as unknown as AutomationTurn;
+        }
+        return { kind: 'said', text: 'Done.' };
+      },
+    });
+    const started = await chat.start({ memberId, message: 'evening lights' });
+    await chat.idle();
+    await chat.reply(started.sessionId, memberId, 'and lock the door at 11');
+    await chat.idle();
+    // A photo rebases it; another model switches it.
+    await chat.reply(started.sessionId, memberId, 'make it 11:30', { images: [photo()] });
+    await chat.idle();
+    await chat.reply(started.sessionId, memberId, 'thanks', { model: 'claude-sonnet-5-5' });
+    await chat.idle();
+    expect(fakes.opened).toHaveLength(3);
+    for (const opened of fakes.opened) expect(opened.taskPrompt).not.toContain('YOU ARE EDITING');
+
+    // And one opened about a rule is still about it after a switch.
+    const first = (await chat.transcript(started.sessionId)).find((row) => row.role === 'preview');
+    const automationId = (first?.data as { automationId: string }).automationId;
+    const editing = await chat.start({ memberId, message: 'make it later', automationId });
+    await chat.idle();
+    await chat.reply(editing.sessionId, memberId, 'on sonnet', { model: 'claude-sonnet-5-5' });
+    await chat.idle();
+    expect(fakes.opened.at(-1)?.modelId).toBe('claude-sonnet-5-5');
+    expect(fakes.opened.at(-1)?.taskPrompt).toContain('YOU ARE EDITING');
+  });
+
+  it('recaps and lists a wordless photo by its caption’s count, never as something said', async () => {
+    const { assistant, live } = await runtimes();
+    const started = await assistant.start({ memberId, message: '', turn: { images: [photo()] } });
+    await assistant.idle();
+    const [row] = await assistant.transcript(started.sessionId);
+    expect(row).toMatchObject({ text: 'Photo', data: { wordless: true } });
+    const priming = live(started.sessionId)?.priming ?? '';
+    expect(priming).toContain('They sent 1 photo (no longer available).');
+    expect(priming).not.toContain('They said: Photo');
   });
 
   it('writes no empty run for a rebased conversation that never ran again', async () => {

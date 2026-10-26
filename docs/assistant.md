@@ -135,7 +135,12 @@ chained, so a switch queued behind a running round never pulls the
 conversation out from under it). The new conversation is opened the way
 `revive()` opens one — a fresh provider conversation primed with a recap of
 everything said before this message (an answer written after it was taken
-included, a message still queued behind it not) — because a vendor's history
+included, a message still queued behind it not), **all of what the old one
+remembered rather than the last forty rows** a revival recaps (a revived
+conversation's memory is that tail, and a switch keeps to it) — and opened on
+what the conversation was *about* when it began, never on the first rule it
+went on to write, which would turn an automations chat into an edit of that
+rule — because a vendor's history
 is its own shape, signed thinking blocks and encrypted reasoning included, and
 no other model takes it. **The old conversation's spend is banked first and the ledger
 cursor reset after**, or the delta `record` writes would lose what the old one
@@ -165,12 +170,30 @@ before the next queued turn begins. The history cannot be edited instead,
 because Fable 5.1 binds each thinking block to everything ahead of it and a
 conversation may only be appended to; a photo left in it would sit in memory
 for the session's two hours on a board with thirty megabytes to spare, and be
-re-sent and paid for every round after. The recap says a photo was sent and is
+re-sent and paid for every round after. **It happens whether or not the
+conversation is still in memory** — one closed or evicted mid-round still has
+its queued turns to run, and they must not run on the photo — and a rebase that
+cannot reopen (the key removed while the round ran) drops the conversation and
+answers each turn already queued on it with a note rather than running it on the
+old history; the next message revives it. The recap says a photo was sent and is
 no longer available, so "what about the colour?" reaches a model that knows
 there was a picture it cannot see. What the rebase costs is what a revival
 costs: the model's reasoning and an outstanding question. A photo never crosses
 a handoff — the brief is text — so the assistant has to describe one in words
 for the automations agent to know about it.
+
+**What the hub holds of photos is bounded across every conversation, not only
+per message** (`ChatPhotoBudget`). A message is acknowledged at once and its
+photos wait in its conversation's chain until its turn has run, so the
+per-message bounds alone let messages sent behind a running round, or into
+several conversations at once, hold as many megabytes as anybody sent. The
+budget is one message at the ceiling, held from before anything is written to
+the end of the turn (its rebase included, whichever way it ended), and a message
+past it is `409 photos_busy` — the `portrait_busy` rule, in bytes. Words alone
+are never refused for it. **And a photo sent with no words stores a caption** —
+`Photo`, `2 photos` — with `data.wordless: true`, because an older app draws a
+person's row from `text` alone; the recap, the voice's history and the list
+read the flag, and the model is sent the empty message the person sent.
 
 ## One transcript store
 
@@ -397,7 +420,7 @@ also smaller than it looks — one tool call against a catalog the agent can
 already see — so what the extra effort buys is deliberation about a decision
 that was never in doubt. **A typed message may also ask for its own effort**
 (`effort` on the message, from the hub's three words — see *A conversation's
-own model, effort and photos* below), and the spoken `low` still wins for a
+own model, effort and photos* above), and the spoken `low` still wins for a
 spoken round: the voice is answering somebody standing in a room, whatever the
 chat's picker last said.
 

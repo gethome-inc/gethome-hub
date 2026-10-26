@@ -32,9 +32,10 @@ The only connections the hub itself ever makes outward are:
   provider to read its devices off ([`api.md`](api.md#room-pictures)). A photo
   somebody attaches to a chat message goes to the provider of the model that
   chat runs on, for that one round, and is **never stored on the hub**: the
-  transcript records only that a photo was sent (its type and size), and the
-  hub rebuilds the conversation once the round is over so not even its memory
-  keeps the picture
+  transcript records only what the photo was — its type, its size in bytes and
+  pixels, and the app's own short name for its local copy (`ref`) — never the
+  image itself, and the hub rebuilds the conversation once the round is over so
+  not even its memory keeps the picture
   ([`api.md`](api.md#what-a-chat-message-can-carry-model-effort-attachments)).
   With no key, nothing goes to any AI provider and devices still appear,
   flagged *needs review*.

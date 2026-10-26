@@ -661,8 +661,10 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
    *
    * It is per **turn** rather than per conversation because one conversation
    * is both: typed in the morning, talked to in the evening. Deliberately not
-   * a setting — see `ChatTransportOptions.effort` on why two knobs for one
-   * decision is one too many.
+   * a home setting, which would move every member's chats at once (`src/ai/
+   * CLAUDE.md`'s effort rule). A typed message may ask for its own round's
+   * effort, and a spoken round's `low` outranks it: `say` reads a request's
+   * effort only when no origin was given.
    *
    * `via` rides with it for the same reason and lands in the same place: the
    * `ai_runs` row, where a spoken round would otherwise be indistinguishable

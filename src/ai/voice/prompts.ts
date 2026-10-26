@@ -1,6 +1,6 @@
 import type { AutomationHomeView } from '../../automations/targets.js';
 import { automationShape } from '../../automations/summarize.js';
-import type { ChatMessageWire } from '../chat/chat-runtime.js';
+import { isWordless, type ChatMessageWire } from '../chat/chat-runtime.js';
 import {
   LIVE_HISTORY_CHARS,
   LIVE_HISTORY_MESSAGE_CHARS,
@@ -224,7 +224,9 @@ function spokenText(row: ChatMessageWire): string {
   const count = row.role === 'user' && Array.isArray(attachments) ? attachments.length : 0;
   if (count === 0) return row.text;
   const photos = count === 1 ? 'a photo' : `${count} photos`;
-  return row.text.trim().length > 0 ? `${row.text} (sent with ${photos})` : `(sent ${photos})`;
+  // A photo sent on its own stores the hub's caption as its text, which is
+  // nothing the person said.
+  return isWordless(row) ? `(sent ${photos})` : `${row.text} (sent with ${photos})`;
 }
 
 /**
@@ -264,9 +266,8 @@ export function liveHistory(rows: ChatMessageWire[]): LiveHistoryMessage[] {
     // Clipped before it is measured, so one long answer costs what it is
     // allowed to cost rather than the whole budget.
     const text = spokenText(row).slice(0, LIVE_HISTORY_MESSAGE_CHARS);
-    // A row with nothing to say out loud — a photo sent on its own leaves the
-    // person's row with no words — is left out rather than sent as an empty
-    // message, which is a request the API is entitled to refuse.
+    // A row with nothing to say out loud is left out rather than sent as an
+    // empty message, which is a request the API is entitled to refuse.
     if (text.trim().length === 0) continue;
     if (text.length > budget) break;
     budget -= text.length;

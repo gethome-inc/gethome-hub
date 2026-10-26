@@ -508,7 +508,7 @@ domains — update them in the same change.
   offered list, which is precisely wrong for a record of a run that already
   happened — so `provider`/`modelId` are the columns verbatim and only the
   label goes through `modelLabel`, which falls back to the raw id once a model
-  is retired. Absent rather than zero when the ledger no longer has it: sixty
+  is retired. Absent rather than zero when the ledger no longer has it: 250
   runs against a fortnight of transcript means a readable chat can outlive its
   own spend row, and `$0.00` is a claim where nothing is the truth.
   **The agent picks its own provider, and it is deliberately not the
@@ -992,7 +992,16 @@ domains — update them in the same change.
   so its row lands *ahead* of that round's answer, and one queued behind it is
   written already too — cutting at the message loses an answer somebody has
   read, and taking everything recaps a waiting message the model is then sent
-  again. **Spend is banked before the swap and the cursor reset after**
+  again. **And it is all of what the old conversation remembered**
+  (`primingFor`, `ChatSession.recallFrom`): a live history held every row, so
+  `RECAP_MAX_ROWS` is a revival's bound and not a switch's — capping a switch
+  at forty cut the original request out of a chat that had never stopped —
+  while a *revived* conversation's memory is the tail its own recap was, so a
+  switch after a revival keeps to that rather than growing back. **It is
+  opened on `openedTopic`, never `topic`**: the automations agent fills
+  `topic` with the first rule a conversation *writes*, for the ledger, and
+  opening on that framed a chat that had written two rules as an edit of the
+  first, told to submit with `replaces` set to it. **Spend is banked before the swap and the cursor reset after**
   (`settleSpend`, `replaceConversation`): `record` writes the delta between
   `costUsd()` and `recordedUsd`, so swapping without banking loses what the
   old conversation ran up since its last row, and not resetting under-records
@@ -1019,7 +1028,14 @@ domains — update them in the same change.
   records what a photo was, never its bytes** (`userRowData`: `type`,
   `mediaType`, `ref`, `width`, `height`, `bytes` from `base64Bytes`), and only
   the keys the request named, so an older app's message is stored exactly as
-  it was; nothing in this subsystem writes a request body anywhere else —
+  it was. **A photo with no words stores a caption as `text`** (`Photo`,
+  `2 photos` — `photoCaption`) and `data.wordless: true`: `message` was never
+  empty before photos, an older app draws a person's row from `text` alone, and
+  an empty one read as a blank bubble with an answer about nothing under it.
+  The model is sent the words the person sent, and every reader of a row's
+  words — the recap, `liveHistory`, the list's title — asks `isWordless`
+  rather than taking the caption for something said. Nothing in this
+  subsystem writes a request body anywhere else —
   `ai_runs` holds no text and chats record no `ai_run_exchanges`, and a suite
   searches all three tables for the base64. **The provider history is the one
   place a photo outlives its round, and it cannot be edited**: Fable 5.1 binds
@@ -1027,9 +1043,25 @@ domains — update them in the same change.
   of the middle is a conversation the API refuses. So once a round that
   carried a photo ends — success or failure, in the chain, before the next
   queued turn — `rebase` banks the spend, opens a fresh conversation on the
-  same model and primes it with the record of every settled row; a reopen
-  that fails drops the session from memory instead, and the next message
-  revives it.
+  same model and primes it with the record of every settled row. **Whether or
+  not the session is still in the map**: `close` (a `DELETE`, an eviction)
+  lets the turns queued on a conversation finish, and standing down for a
+  closed one sent the photo again with each of them — the map is never written
+  there, so a closed session is not brought back. A reopen that fails drops
+  the session from memory and marks it **`dropped`**, so a turn already queued
+  on it is answered with a note instead of running on the history still
+  holding the photo (and the key it was opened with, which may be the one just
+  removed); the next *new* message revives it.
+  **What is held is bounded across the hub, not only per message**
+  (`ChatPhotoBudget`, one for both surfaces): a message is acknowledged at once
+  and its photos wait with its turn, so the per-message bounds alone let
+  messages queued behind a round — or sent into eight conversations — hold as
+  many megabytes as anybody sent, on a board sized for one. The budget is one
+  message at the ceiling in base64 characters, taken in `start`/`reply` before
+  an eviction, a conversation or a row, and released in `exchange`'s `finally`
+  — after the rebase, and on the paths that never run (a model gone unusable, a
+  dropped session). Past it is `409 photos_busy`, the `portrait_busy` rule in
+  bytes; words are never refused for it.
   Left in place, every photo would sit in RAM for the session's two hours on a
   board with thirty megabytes to spare and be re-sent and paid for on every
   later round. **The recap says a photo was there** ("They said: … (with 2

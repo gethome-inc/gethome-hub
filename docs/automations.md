@@ -625,11 +625,15 @@ falls through to prose rather than being dropped. `text` is always the sentence;
 
 | `role` | `text` | `data` |
 |---|---|---|
-| `user` | what was typed | — |
+| `user` | what was typed — or, for a photo sent with no words, the hub's caption (`Photo`, `2 photos`), so an app that predates photos draws something true | only when the message asked for something besides its words: `{model?, effort?, attachments?: [{type: "image", mediaType, ref?, width?, height?, bytes}], wordless?}`, the keys the request named — never a photo's bytes. `wordless: true` says `text` is the caption |
 | `agent` | what the model said | — |
 | `question` | the question | `{options: [{id, label, hint?}], allowFreeText}` |
 | `preview` | the rule's **summary**, from `describeAutomation` | `{automationId, name, shape, enabled, edited}` |
 | `note` | something the hub is saying on its own behalf — a provider that failed, a rule that could not be saved | — |
+
+Whatever its role — never the person's own — **the first row a round writes**
+also carries `data.steps` and `data.tookMs` (see *What a person sees while it works*
+below): they follow the row's position in the round, not its kind.
 
 **One conversation, any number of rules — and one reply can carry more than one
 card.** Two things had to change for that. The loop kept a *single*
@@ -783,7 +787,7 @@ dropped.
 — `{usd, provider, modelId, model}` — and three rules hold it up.
 
 *It is absent rather than zero when the hub cannot say.* The ledger keeps the
-last sixty runs of every kind while a transcript lives a fortnight, so a home
+last 250 runs of every kind while a transcript lives a fortnight, so a home
 that has recognised a few devices since can open a perfectly readable
 conversation whose spend row has been pruned. `$0.00` about a chat that plainly
 cost something is a claim; nothing at all is the truth — the rule

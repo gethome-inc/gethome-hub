@@ -681,8 +681,8 @@ earns its keep — see [assistant.md](assistant.md).
 
 It is a **summary, never a transcript.** Model prose is the largest thing a run
 produces and the least useful to read later, so it is not stored. Bounded at
-both ends — 40 steps per run, 60 runs retained, `detail` truncated at 2 KB —
-which is tens of kilobytes on a machine whose disk is an SD card.
+both ends — 40 steps per run, 250 runs retained, `detail` truncated at 2 KB —
+which keeps it small on a machine whose disk is an SD card.
 
 Before it, the hub recorded exactly two facts under one settings key (the last
 run and the last error), so once a second device had been adopted there was no

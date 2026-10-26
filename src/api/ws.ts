@@ -541,10 +541,27 @@ export function attachWebSocket(
    * and names the thing.
    */
   const onAutomationRun = (event: AutomationRunEvent) => send({ type: 'automationRun', run: event });
-  /** The model's text as it arrives, and one line per thing a turn did. On the
-   *  same opt-in stream: it is the highest-rate frame the hub can emit and it
-   *  matters only to the one client with the chat open. */
-  const onAutomationChat = (event: AutomationChatEvent) => send({ type: 'automationChat', chat: event });
+  /**
+   * The model's text as it arrives, and one line per thing a turn did. On the
+   * same opt-in stream: it is the highest-rate frame the hub can emit and it
+   * matters only to the one client with the chat open.
+   *
+   * **Narrowed per socket the way the routes are, asked at send time.** A
+   * conversation is what somebody in the home said, and reading one by REST
+   * takes `automation.manage` and `hub.ai` — while the stream was open to any
+   * member, so a guest who subscribed to `automations` heard every member's
+   * replies, reasoning and steps live, from a role the transcript route turns
+   * away with a 403. Asked when each frame goes out rather than when the
+   * socket subscribed, the `activity.read` rule: a role edit lands on the next
+   * frame, with no reconnect. Nothing a shipped app draws is lost — a member
+   * without these cannot open the conversation the frames are about.
+   */
+  const onAutomationChat = (event: AutomationChatEvent) => {
+    if (memberId === null) return;
+    if (!deps.access.canAs(memberId, 'hub.ai', key)) return;
+    if (!deps.access.canAs(memberId, 'automation.manage', key)) return;
+    send({ type: 'automationChat', chat: event });
+  };
   /**
    * The assistant's own frames, on the **same** opt-in stream.
    *
@@ -552,8 +569,12 @@ export function attachWebSocket(
    * *other* agent's `automationChat` frames: an app watching an assistant
    * conversation has to receive both to draw the card, and asking it to
    * subscribe twice for one screen is a contract that will be got wrong once.
+   * `hub.ai` alone, as `GET /assistant/chat/:id` asks.
    */
-  const onAssistantChat = (event: AutomationChatEvent) => send({ type: 'assistantChat', chat: event });
+  const onAssistantChat = (event: AutomationChatEvent) => {
+    if (memberId === null || !deps.access.canAs(memberId, 'hub.ai', key)) return;
+    send({ type: 'assistantChat', chat: event });
+  };
 
   /**
    * What this socket may subscribe to.
