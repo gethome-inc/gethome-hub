@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -473,6 +474,20 @@ describe.skipIf(!handle)('roles and permissions', () => {
         'automation.manage',
         undefined,
       ],
+      // Stopping a round sits behind the key that started it, on each agent —
+      // and so does asking a failed one again, which spends what it spends.
+      [
+        'POST',
+        '/api/v1/automations/chat/44444444-4444-4444-a444-444444444444/stop',
+        'automation.manage',
+        undefined,
+      ],
+      [
+        'POST',
+        '/api/v1/automations/chat/44444444-4444-4444-a444-444444444444/retry',
+        'automation.manage',
+        { model: 'claude-opus-5-5' } as object,
+      ],
       ['POST', '/api/v1/automations/templates/away', 'automation.manage', {} as object],
       // **The assistant is `hub.ai` alone**, not `automation.manage`: asking
       // what the kitchen is doing and switching a lamp on is the floor, and a
@@ -493,6 +508,18 @@ describe.skipIf(!handle)('roles and permissions', () => {
         '/api/v1/assistant/chat/44444444-4444-4444-a444-444444444444',
         'hub.ai',
         undefined,
+      ],
+      [
+        'POST',
+        '/api/v1/assistant/chat/44444444-4444-4444-a444-444444444444/stop',
+        'hub.ai',
+        undefined,
+      ],
+      [
+        'POST',
+        '/api/v1/assistant/chat/44444444-4444-4444-a444-444444444444/retry',
+        'hub.ai',
+        { model: 'claude-opus-5-5' } as object,
       ],
       // **Talking out loud is the same conversation by another route**, so it
       // takes the same key and nothing more — and there is now exactly one
@@ -639,6 +666,23 @@ describe.skipIf(!handle)('roles and permissions', () => {
     });
     expect(opened.statusCode).toBe(409);
     expect(opened.json()).toMatchObject({ error: 'openai_not_configured' });
+  });
+
+  /**
+   * The allowed half of the two stop routes. Nothing is running for an id the
+   * hub holds no memory of, so a member gets the plain answer — and a 200 is
+   * proof they got past the guard where the refusal table above holds a guest.
+   */
+  it('lets a member stop a round on either agent, and says when none is running', async () => {
+    for (const surface of ['assistant', 'automations']) {
+      const stop = await app.inject({
+        method: 'POST',
+        url: `/api/v1/${surface}/chat/44444444-4444-4444-a444-444444444444/stop`,
+        headers: auth(memberToken),
+      });
+      expect(stop.statusCode, surface).toBe(200);
+      expect(stop.json(), surface).toEqual({ stopped: false });
+    }
   });
 
   it('does not ask device recognition’s switch before opening a voice line', async () => {
@@ -1486,6 +1530,108 @@ describe.skipIf(!handle)('roles and permissions', () => {
     expect(rows.some((row) => row.memberId !== guestId)).toBe(true);
 
     socket.close();
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/roles/${await roleId('guest')}`,
+      headers: auth(ownerToken),
+      payload: { permissions: [...BUILTIN_ROLES[2].permissions] },
+    });
+  });
+
+  /**
+   * A conversation is what somebody in the home said, and the routes that read
+   * one ask `hub.ai` (and `automation.manage` for the automations agent's). The
+   * socket used to ask nothing of a member: a guest who subscribed to
+   * `automations` heard every member's replies, reasoning and steps live. Both
+   * halves, and the widening without a reconnect — the `activity.read` shape.
+   * A conversation's name (`chatTitle`) is narrowed exactly as its agent's own
+   * frames are, since it is made of what somebody said.
+   */
+  it('narrows the conversations on the automations stream per socket, and widens them live', async () => {
+    const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 120));
+    /** Wait for what an assertion is about, by name — never for a fixed time
+     *  alone (`test/CLAUDE.md`). */
+    const until = async (done: () => boolean, label: string) => {
+      const deadline = Date.now() + 3000;
+      while (!done()) {
+        if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    };
+    const open = async (token: string) => {
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/api/v1/ws?token=${token}`);
+      const frames: Array<{ type: string; streams?: string[]; chatTitle?: { surface: string } }> = [];
+      socket.on('message', (data) => frames.push(JSON.parse(data.toString())));
+      await new Promise<void>((resolve, reject) => {
+        socket.on('open', () => resolve());
+        socket.on('error', reject);
+      });
+      socket.send(JSON.stringify({ type: 'subscribe', streams: ['automations'] }));
+      await until(() => frames.some((frame) => frame.type === 'subscribed'), 'the subscription');
+      // The subscription itself is not what is refused — only what it carries.
+      expect(frames.find((frame) => frame.type === 'subscribed')?.streams).toContain('automations');
+      return { socket, frames };
+    };
+    const said = () => {
+      const at = new Date().toISOString();
+      events.emit('assistantChat', { sessionId: randomUUID(), phase: 'delta', at, text: 'The hall is warm.' });
+      events.emit('automationChat', { sessionId: randomUUID(), phase: 'delta', at, text: 'Saved it.' });
+      events.emit('chatTitle', { surface: 'assistant', sessionId: randomUUID(), title: 'Hall temperature', at });
+      events.emit('chatTitle', { surface: 'automations', sessionId: randomUUID(), title: 'Hall lights at dusk', at });
+    };
+    /** Each conversation frame by what it is about: a chat's own phases by
+     *  type, a name by the agent it names a conversation with. */
+    const chats = (frames: Array<{ type: string; chatTitle?: { surface: string } }>) =>
+      frames
+        .map((frame) => (frame.type === 'chatTitle' ? `title:${frame.chatTitle?.surface}` : frame.type))
+        .filter((type) => type === 'assistantChat' || type === 'automationChat' || type.startsWith('title:'));
+
+    const guest = await open(guestToken);
+    const member = await open(memberToken);
+    said();
+    // Gated on the member's copies arriving, then given time for a guest's to
+    // have arrived too — an absence has no event of its own to wait for.
+    await until(() => chats(member.frames).length === 4, "the member's chat frames");
+    await settle();
+    expect(chats(guest.frames)).toEqual([]);
+    expect(chats(member.frames).sort()).toEqual([
+      'assistantChat',
+      'automationChat',
+      'title:assistant',
+      'title:automations',
+    ]);
+
+    // `hub.ai` alone is the assistant's; the automations agent's needs both.
+    guest.frames.length = 0;
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/roles/${await roleId('guest')}`,
+      headers: auth(ownerToken),
+      payload: { permissions: ['hub.ai'] },
+    });
+    said();
+    await until(() => chats(guest.frames).length >= 2, "the guest's assistant frames");
+    await settle();
+    expect(chats(guest.frames).sort()).toEqual(['assistantChat', 'title:assistant']);
+
+    guest.frames.length = 0;
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/roles/${await roleId('guest')}`,
+      headers: auth(ownerToken),
+      payload: { permissions: ['hub.ai', 'automation.manage'] },
+    });
+    said();
+    await until(() => chats(guest.frames).length >= 4, "the guest's chat frames");
+    expect(chats(guest.frames).sort()).toEqual([
+      'assistantChat',
+      'automationChat',
+      'title:assistant',
+      'title:automations',
+    ]);
+
+    guest.socket.close();
+    member.socket.close();
     await app.inject({
       method: 'PATCH',
       url: `/api/v1/roles/${await roleId('guest')}`,

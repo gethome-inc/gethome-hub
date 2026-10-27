@@ -33,8 +33,10 @@ import type { ZigbeeAdapter } from '../adapters/zigbee/adapter.js';
 // it here does not pull the AI stack into the API layer.
 import {
   AGENT_MODELS,
+  agentProviderOf,
   effectiveModel,
   isSupportedModel,
+  modelLabel,
   offeredModelIds,
   PROVIDER_MODELS,
 } from '../ai/models.js';
@@ -43,11 +45,11 @@ import {
 import type { MappingLibrary } from '../ai/library.js';
 import { RoomPictureDrawError } from '../room-pictures/draw.js';
 import {
+  homeLocator,
   MAX_PHOTOS,
   PictureBusyError,
   PictureSpaceError,
   RoomPictureService,
-  type Locator,
 } from '../room-pictures/store.js';
 import type { AiRunLog } from '../core/ai-runs.js';
 import type { AutomationEngine, AutomationPresser } from '../automations/engine.js';
@@ -56,6 +58,18 @@ import {
   type AutomationChat,
 } from '../ai/automation-chat.js';
 import type { AssistantChat } from '../ai/assistant-chat.js';
+import {
+  base64Bytes,
+  CHAT_CAPABILITY,
+  CHAT_EFFORTS,
+  CHAT_IMAGE_MAX_BASE64,
+  CHAT_IMAGE_MAX_BYTES,
+  CHAT_IMAGE_MAX_COUNT,
+  CHAT_IMAGE_MEDIA_TYPES,
+  ChatPhotosBusyError,
+  type ChatEffort,
+  type ChatTurnRequest,
+} from '../ai/chat/chat-runtime.js';
 import type { AutomationStore } from '../automations/store.js';
 import { automationDocumentSchema } from '../automations/schema.js';
 import { sanityCheckAutomation } from '../automations/sanity.js';
@@ -310,6 +324,65 @@ interface CommissionJob {
  * way to hand a Raspberry Pi ten megabytes of anything.
  */
 const PHOTO_BODY_LIMIT = 12 * 1024 * 1024;
+
+/**
+ * One photo at the ceiling as a JSON encoder writes it: its base64, plus room
+ * for `/` written as `\/`.
+ *
+ * **Apple's encoders escape every slash by default** — `JSONSerialization`
+ * and `JSONEncoder` without `.withoutEscapingSlashes` — and `/` is one base64
+ * character in sixty-four, so four photos at the ceiling came to the door
+ * about 128 KB heavier than their parsed size: past the slack this limit had,
+ * and refused with a bare 413 a request the schema would have taken. The
+ * allowance is twice the expected share, since a photo's bytes are not
+ * perfectly random.
+ */
+const CHAT_IMAGE_MAX_JSON = CHAT_IMAGE_MAX_BASE64 + Math.ceil(CHAT_IMAGE_MAX_BASE64 / 32);
+
+/**
+ * A chat message carrying as many photos as it may, each as large as it may
+ * be, with room for the words and the JSON around them.
+ *
+ * **Per route, on the four that take a message, and never on the server** —
+ * `PHOTO_BODY_LIMIT`'s rule: nothing else on this API grows a mouth this size
+ * (the two photo routes take 12 MB, every other route Fastify's one-megabyte
+ * default). It is the ceiling, not the expectation: the apps downscale a photo
+ * to a few hundred kilobytes before sending it, and a message with one is well
+ * under the default. Derived rather than written out, so raising the count or
+ * the size cannot leave a request the schema accepts — as an ordinary JSON
+ * encoder writes it, slashes escaped included — refused at the door with a
+ * 413. (No bound covers every encoding JSON allows: `\u002f` is six bytes for
+ * one character.)
+ */
+const CHAT_BODY_LIMIT = CHAT_IMAGE_MAX_COUNT * CHAT_IMAGE_MAX_JSON + 64 * 1024;
+
+/**
+ * Whether a string is well-formed base64, checked by walking it.
+ *
+ * A loop rather than a regular expression, because the string can be two
+ * million characters — `CHAT_IMAGE_MAX_BASE64`, and no longer, since the
+ * schema's `.max` before this check aborts on a string past it (zod runs a
+ * refine even after a failed `.max` otherwise, and the body limit would have
+ * let one of eight million through) — and a pattern that has to count its way
+ * through groups of four is a backtracking stack that size. Well-formed means
+ * what both vendors decode: a length that is a multiple of four, the standard
+ * alphabet, and at most two `=` at the very end.
+ */
+function isBase64(data: string): boolean {
+  if (data.length === 0 || data.length % 4 !== 0) return false;
+  const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0;
+  for (let index = 0; index < data.length - padding; index += 1) {
+    const code = data.charCodeAt(index);
+    const ok =
+      (code >= 65 && code <= 90) || // A-Z
+      (code >= 97 && code <= 122) || // a-z
+      (code >= 48 && code <= 57) || // 0-9
+      code === 43 || // +
+      code === 47; // /
+    if (!ok) return false;
+  }
+  return true;
+}
 
 const COMMISSION_JOB_TTL_MS = 10 * 60 * 1000;
 /**
@@ -840,6 +913,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // choices this hub will accept rather than a list from its own build.
     // Static, and therefore cannot throw — this route is the health check.
     apiKeys: { grantable: KEY_GRANTABLE },
+    // Additive, and presence is the capability: a hub carrying this block
+    // takes `model`, `effort` and `attachments` on a chat message, with the
+    // words `effort` accepts and how many photos of what size and type. An
+    // older hub's zod strips all three and answers 201 — a photo the model
+    // never saw, a model the chat never moved to — so an app that does not
+    // find this offers none of them. A constant, so it cannot throw either.
+    chat: CHAT_CAPABILITY,
     // Additive: an app that doesn't know about this field ignores it, and one
     // that does can say "plug a coordinator in" instead of showing an empty
     // Zigbee section with no explanation.
@@ -1325,20 +1405,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
 
   // ── Room pictures — `room-pictures/store.ts`, `docs/api.md` → *Room pictures*
 
-  /**
-   * Who reads the devices off a picture: device recognition's provider and
-   * model, on the home's key — and nobody, when the home has no usable key,
-   * which leaves the markers to the apps and to people.
-   */
-  const pictureLocator: Locator = async () => {
-    const ai = await deps.settings.getAiSettings();
-    let provider = ai.provider;
-    if (provider === 'anthropic' && ai.legacySubscriptionToken) provider = ai.openai.hasKey ? 'openai' : null;
-    if (!provider) return null;
-    const apiKey = await deps.settings.aiKey(provider);
-    if (!apiKey) return null;
-    return { provider, modelId: effectiveModel(provider, ai[provider].model), apiKey };
-  };
+  /** Who reads the devices off a picture, in the order they are asked (`homeLocator`). */
+  const pictureLocator = homeLocator(deps.settings);
 
   /** A room's devices as the picture prompts name them. */
   const pictureDevices = (roomId: string) =>
@@ -2981,13 +3049,26 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
      * `provider` is derived from the model rather than stored beside it — see
      * `agentProviderOf` — so the two can never disagree, and a picker writes
      * that provider's default model id rather than a second setting.
+     *
+     * `effort` is the home's word for a typed round nobody chose one for, and
+     * `efforts` the words it may be — the list a chat message is validated
+     * against. **Their presence is the capability**: a hub older than them ran
+     * every typed round at `medium` and strips `assistantEffort` from a PATCH
+     * without a word, so an app offers the control only where it finds them.
      */
-    const forAgent = (agent: { model: string; provider: AiProvider | null; choosable: boolean }) => ({
+    const forAgent = (agent: {
+      model: string;
+      provider: AiProvider | null;
+      choosable: boolean;
+      effort: ChatEffort;
+    }) => ({
       model: agent.model,
       provider: agent.provider,
       models: agent.provider === null ? [] : AGENT_MODELS[agent.provider].choices,
       choices: { anthropic: AGENT_MODELS.anthropic.choices, openai: AGENT_MODELS.openai.choices },
       choosable: agent.choosable,
+      effort: agent.effort,
+      efforts: CHAT_EFFORTS,
     });
     const forProvider = (provider: AiProvider) => ({
       hasKey: ai[provider].hasKey,
@@ -3079,6 +3160,18 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     assistantModel: z.string().min(1).max(120).nullable().optional(),
     /** Which model writes the home's rules. Unvalidated for the reason above. */
     automationsModel: z.string().min(1).max(120).nullable().optional(),
+    /**
+     * How hard each agent works on a typed round nobody chose an effort for.
+     *
+     * **Validated, unlike the models beside it**, and the difference is the
+     * point: a model id this build has never heard of is harmless to store
+     * because `getAiSettings` answers with what will run, while an effort is
+     * put on the wire as written and a word one vendor does not take is a 400
+     * in the middle of somebody's conversation. `null` puts it back on
+     * `AGENT_EFFORT`.
+     */
+    assistantEffort: z.enum(CHAT_EFFORTS).nullable().optional(),
+    automationsEffort: z.enum(CHAT_EFFORTS).nullable().optional(),
     anthropicApiKey: apiKeyField('anthropic'),
     openaiApiKey: apiKeyField('openai'),
     mappingProvider: z.enum(AI_PROVIDERS).optional(),
@@ -3159,6 +3252,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     }
     if (body.assistantModel !== undefined) {
       await deps.settings.setAssistantModel(body.assistantModel);
+    }
+    if (body.assistantEffort !== undefined) {
+      await deps.settings.setAgentEffort('assistant', body.assistantEffort);
+    }
+    if (body.automationsEffort !== undefined) {
+      await deps.settings.setAgentEffort('automations', body.automationsEffort);
     }
     if (body.mappingProvider !== undefined) {
       // Asked after the key writes above, so one request can save a key and
@@ -4325,13 +4424,21 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * recognising a device and drawing a portrait. `needs()` takes one, so the
    * second is checked here and refused in the same shape, since an app turns
    * `{error, permission}` into a sentence and has no way to read a bare 403.
+   *
+   * **It answers whether it refused, never the reply.** It used to hand back
+   * `reply` itself — and a Fastify reply is a *thenable*, so the `await` at
+   * every call site adopted it and resolved to `undefined`: the 403 went out
+   * and the handler carried straight on past `if (refused)`, starting a
+   * conversation on the home's money for a member the guard had just turned
+   * away, then failing to send its own answer over the one already sent. A
+   * boolean cannot be mistaken for a promise.
    */
-  const chatGuard = async (request: FastifyRequest, reply: FastifyReply) => {
+  const chatGuard = async (request: FastifyRequest, reply: FastifyReply): Promise<boolean> => {
     if (!can(deps.access, request, 'hub.ai')) {
       await reply.code(403).send({ error: 'forbidden', permission: 'hub.ai' });
-      return reply;
+      return true;
     }
-    return undefined;
+    return false;
   };
 
   /**
@@ -4348,41 +4455,251 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (error instanceof AutomationNotConfiguredError) {
       return reply.code(409).send({ error: error.code, detail: error.message });
     }
+    // Photos past what the hub can hold at once, refused before anything was
+    // taken — the `portrait_busy` rule, in bytes (`ChatPhotoBudget`).
+    if (error instanceof ChatPhotosBusyError) {
+      return reply.code(409).send({ error: error.code, detail: error.message });
+    }
     throw error;
   };
 
-  app.post('/api/v1/automations/chat', memberOnlyNeeds('automation.manage'), async (request, reply) => {
-    const refused = await chatGuard(request, reply);
-    if (refused) return refused;
-    const body = z
-      .object({ message: z.string().trim().min(1).max(2_000), automationId: z.uuid().optional() })
-      .parse(request.body);
-    if (body.automationId !== undefined && !deps.automations.get(body.automationId)) {
-      return reply.code(404).send({ error: 'not_found' });
-    }
-    try {
-      const reply_ = await deps.automationChat.start({
-        memberId: request.member!.id,
-        message: body.message,
-        ...(body.automationId !== undefined ? { automationId: body.automationId } : {}),
-      });
-      return reply.code(201).send(reply_);
-    } catch (error) {
-      return chatRefusal(error, reply);
-    }
+  /**
+   * One photo sent with a message.
+   *
+   * Everything about it is checked here, before a byte of it reaches a turn:
+   * the type against the short list both vendors take, the size against the
+   * hub's own bound (from the length — `base64Bytes` — never by decoding it),
+   * and the alphabet, so a garbled upload is a 400 the app can say rather than
+   * a provider error read out as the model having failed. `ref`, `width` and
+   * `height` are the app's own, stored beside the row so it can draw its copy;
+   * the hub does nothing else with them.
+   */
+  const chatImageSchema = z.object({
+    type: z.literal('image'),
+    mediaType: z.enum(CHAT_IMAGE_MEDIA_TYPES, {
+      message: 'A photo has to be a JPEG, PNG or WebP image.',
+    }),
+    data: z
+      .string()
+      .max(CHAT_IMAGE_MAX_BASE64, {
+        message: `Each photo can be at most ${CHAT_IMAGE_MAX_BYTES / (1024 * 1024)} MB.`,
+        // Stop here: walking eight million characters to report the same
+        // thing twice is work for nobody — see `isBase64`.
+        abort: true,
+      })
+      .refine(isBase64, { message: 'A photo has to be sent as base64.' })
+      .refine((data) => base64Bytes(data) <= CHAT_IMAGE_MAX_BYTES, {
+        message: `Each photo can be at most ${CHAT_IMAGE_MAX_BYTES / (1024 * 1024)} MB.`,
+      }),
+    ref: z.string().min(1).max(64).optional(),
+    width: z.number().int().min(1).max(20_000).optional(),
+    height: z.number().int().min(1).max(20_000).optional(),
   });
+
+  /**
+   * What a chat message may carry besides its words, on all four routes that
+   * take one. **All optional**: an older app sends none of them and sees
+   * exactly what it always did, and `GET /hub`'s `chat` block is how a newer
+   * one knows they will be read rather than stripped.
+   */
+  const chatTurnFields = {
+    /** An agent model id, checked against what this home can run below. */
+    model: z.string().trim().min(1).max(120).optional(),
+    effort: z.enum(CHAT_EFFORTS).optional(),
+    attachments: z
+      .array(chatImageSchema)
+      .max(CHAT_IMAGE_MAX_COUNT, {
+        message: `At most ${CHAT_IMAGE_MAX_COUNT} photos can go with one message.`,
+      })
+      .optional(),
+  };
+
+  /**
+   * **A message is words, a photo, or both** — never neither. `message` lost
+   * its `min(1)` for a picture sent on its own, and this is what keeps an
+   * empty send a 400, as it always was.
+   */
+  const saysSomething = (body: { message: string; attachments?: unknown[] | undefined }) =>
+    body.message.length > 0 || (body.attachments?.length ?? 0) > 0;
+  const saysSomethingIssue = { message: 'Say something, or attach a photo.', path: ['message'] };
+
+  const chatMessageSchema = z
+    .object({ message: z.string().trim().max(2_000), ...chatTurnFields })
+    .refine(saysSomething, saysSomethingIssue);
+
+  /** The parsed extras, as the turn the runtime runs. */
+  const turnOf = (body: {
+    model?: string | undefined;
+    effort?: (typeof CHAT_EFFORTS)[number] | undefined;
+    attachments?: z.infer<typeof chatImageSchema>[] | undefined;
+  }): ChatTurnRequest | undefined => {
+    const images = (body.attachments ?? []).map((image) => ({
+      mediaType: image.mediaType,
+      data: image.data,
+      ...(image.ref !== undefined ? { ref: image.ref } : {}),
+      ...(image.width !== undefined ? { width: image.width } : {}),
+      ...(image.height !== undefined ? { height: image.height } : {}),
+    }));
+    if (body.model === undefined && body.effort === undefined && images.length === 0) {
+      return undefined;
+    }
+    return {
+      ...(body.model !== undefined ? { model: body.model } : {}),
+      ...(body.effort !== undefined ? { effort: body.effort } : {}),
+      ...(images.length > 0 ? { images } : {}),
+    };
+  };
+
+  /**
+   * Refuse a chat's own model when this home cannot run it — **before** the
+   * message is taken, so nothing is written for a turn that would not run.
+   *
+   * `409 model_unavailable`, a **new code for a new situation** rather than a
+   * reuse of `ai_not_configured`: that one sends an app to add a key, and the
+   * fix here is usually to pick another model from a list the app already has.
+   * `detail` names which, because an older app shows it for a code it has never
+   * met. Two cases. An id no agent is offered — a typo, a model retired since
+   * the app read the list. And an offered model whose vendor has no usable key
+   * here while the other vendor's does, since the picker draws both vendors'
+   * models. A home with no usable key at all is left to the conversation's own
+   * refusal, which is the more useful sentence: there is nothing to pick.
+   *
+   * Never let an unknown id reach the conversation: the agents throw a plain
+   * `Error` for a model they cannot run, which is a 500.
+   */
+  const modelRefusal = async (model: string | undefined, reply: FastifyReply): Promise<boolean> => {
+    if (model === undefined) return false;
+    const provider = agentProviderOf(model);
+    const usable = await deps.settings.agentProviders();
+    if (provider !== null && usable[provider]) return false;
+    if (provider !== null && !usable.anthropic && !usable.openai) return false;
+    const vendor = provider === 'openai' ? 'OpenAI' : 'Anthropic';
+    await reply.code(409).send({
+      error: 'model_unavailable',
+      detail:
+        provider === null
+          ? 'That isn’t a model this hub offers for chats. Pick one from the list.'
+          : `${modelLabel(provider, model)} runs on ${vendor}, and this home has no ${vendor} key ` +
+            'it can use. Pick another model, or add the key in the home’s AI settings.',
+    });
+    // Whether it refused, never the reply — see `chatGuard` on why a reply
+    // handed back through an `await` reads as "carry on".
+    return true;
+  };
+
+  /**
+   * What `POST …/chat/:id/stop` answers, on either agent.
+   *
+   * **An acknowledgement, the rule every chat route keeps**: the round winds
+   * down at its next safe point and says so on the socket like any other turn
+   * — what had reached the page kept as the answer, then a note that it
+   * stopped — so `stopped` is that a round was told to, and `false` that none
+   * was running, which a round that finished a moment earlier is too. Only the
+   * person whose conversation it is may stop it, refused in the words the voice
+   * route already uses for the same situation (`not_your_conversation`).
+   */
+  const stopAnswer = (outcome: 'stopped' | 'idle' | 'not_yours', reply: FastifyReply) => {
+    if (outcome === 'not_yours') {
+      return reply.code(409).send({
+        error: 'not_your_conversation',
+        detail: 'That conversation belongs to somebody else in this home, so only they can stop it.',
+      });
+    }
+    return { stopped: outcome === 'stopped' };
+  };
+
+  /**
+   * A failed round asked again (`POST …/chat/:id/retry`): the model to answer
+   * on, and the photos the message went with — the hub kept none, so they are
+   * the app's to send again — with the thinking word the chat chose, if any.
+   * `model` is required: the offer on the note names one, and asking again on
+   * whatever the conversation happens to be on is the same choice said less
+   * plainly.
+   */
+  const chatRetrySchema = z.object({
+    ...chatTurnFields,
+    model: z.string().trim().min(1).max(120),
+  });
+
+  /**
+   * What a retry answers. **An acknowledgement**, the rule every chat route
+   * keeps — `202`, because the turn runs off the request and says so on the
+   * socket. `nothing_to_retry` is a new code for a new situation: the
+   * conversation has moved on from the failure, or it is already being
+   * answered, and either way pressing again must not run the message twice.
+   */
+  const retryAnswer = (
+    id: string,
+    outcome: 'retrying' | 'nothing_to_retry' | 'not_yours' | 'ended',
+    reply: FastifyReply,
+  ) => {
+    switch (outcome) {
+      case 'retrying':
+        return reply.code(202).send({ sessionId: id, retrying: true });
+      case 'not_yours':
+        return reply.code(409).send({
+          error: 'not_your_conversation',
+          detail: 'That conversation belongs to somebody else in this home, so only they can ask it again.',
+        });
+      case 'nothing_to_retry':
+        return reply.code(409).send({
+          error: 'nothing_to_retry',
+          detail: 'There is nothing to ask again: the conversation has moved on, or it is already being answered.',
+        });
+      case 'ended':
+        return reply.code(410).send({ error: 'conversation_ended' });
+    }
+  };
+
+  app.post(
+    '/api/v1/automations/chat',
+    { ...memberOnlyNeeds('automation.manage'), bodyLimit: CHAT_BODY_LIMIT },
+    async (request, reply) => {
+      if (await chatGuard(request, reply)) return reply;
+      const body = z
+        .object({
+          message: z.string().trim().max(2_000),
+          automationId: z.uuid().optional(),
+          ...chatTurnFields,
+        })
+        .refine(saysSomething, saysSomethingIssue)
+        .parse(request.body);
+      if (body.automationId !== undefined && !deps.automations.get(body.automationId)) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
+      if (await modelRefusal(body.model, reply)) return reply;
+      const turn = turnOf(body);
+      try {
+        const reply_ = await deps.automationChat.start({
+          memberId: request.member!.id,
+          message: body.message,
+          ...(body.automationId !== undefined ? { automationId: body.automationId } : {}),
+          ...(turn !== undefined ? { turn } : {}),
+        });
+        return reply.code(201).send(reply_);
+      } catch (error) {
+        return chatRefusal(error, reply);
+      }
+    },
+  );
 
   app.post(
     '/api/v1/automations/chat/:id/messages',
-    memberOnlyNeeds('automation.manage'),
+    { ...memberOnlyNeeds('automation.manage'), bodyLimit: CHAT_BODY_LIMIT },
     async (request, reply) => {
-      const refused = await chatGuard(request, reply);
-      if (refused) return refused;
+      if (await chatGuard(request, reply)) return reply;
       const { id } = z.object({ id: z.uuid() }).parse(request.params);
-      const { message } = z
-        .object({ message: z.string().trim().min(1).max(2_000) })
-        .parse(request.body);
-      const answered = await deps.automationChat.reply(id, request.member!.id, message);
+      const body = chatMessageSchema.parse(request.body);
+      if (await modelRefusal(body.model, reply)) return reply;
+      let answered;
+      try {
+        // Continuing a conversation the hub has forgotten opens a new one, and
+        // that can be refused like starting one — a 409 with a sentence, not
+        // the 500 it used to fall through as.
+        answered = await deps.automationChat.reply(id, request.member!.id, body.message, turnOf(body));
+      } catch (error) {
+        return chatRefusal(error, reply);
+      }
       /**
        * `410` rather than `404`, and the difference matters: the conversation
        * existed and its transcript is still readable — what is gone is the
@@ -4395,6 +4712,38 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     },
   );
 
+  /** Stop the round a conversation is running — see `stopAnswer`. */
+  app.post(
+    '/api/v1/automations/chat/:id/stop',
+    memberOnlyNeeds('automation.manage'),
+    async (request, reply) => {
+      if (await chatGuard(request, reply)) return reply;
+      const { id } = z.object({ id: z.uuid() }).parse(request.params);
+      return stopAnswer(deps.automationChat.stop(id, request.member!.id), reply);
+    },
+  );
+
+  /** Ask a failed round again, on the model named — see `retryAnswer`. */
+  app.post(
+    '/api/v1/automations/chat/:id/retry',
+    { ...memberOnlyNeeds('automation.manage'), bodyLimit: CHAT_BODY_LIMIT },
+    async (request, reply) => {
+      if (await chatGuard(request, reply)) return reply;
+      const { id } = z.object({ id: z.uuid() }).parse(request.params);
+      const body = chatRetrySchema.parse(request.body);
+      if (await modelRefusal(body.model, reply)) return reply;
+      try {
+        const outcome = await deps.automationChat.retry(id, request.member!.id, {
+          ...turnOf(body),
+          model: body.model,
+        });
+        return retryAnswer(id, outcome, reply);
+      } catch (error) {
+        return chatRefusal(error, reply);
+      }
+    },
+  );
+
   /**
    * Every conversation this home has had.
    *
@@ -4404,29 +4753,31 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * for, which is the same shape of thing the rules themselves are.
    */
   app.get('/api/v1/automations/chats', memberOnlyNeeds('automation.manage'), async (request, reply) => {
-    const refused = await chatGuard(request, reply);
-    if (refused) return refused;
-    return deps.automationChat.list();
+    if (await chatGuard(request, reply)) return reply;
+    // Who is asking, so each row can say whether it is theirs (`mine`).
+    return deps.automationChat.list(request.member!.id);
   });
 
   app.get('/api/v1/automations/chat/:id', memberOnlyNeeds('automation.manage'), async (request, reply) => {
-    const refused = await chatGuard(request, reply);
-    if (refused) return refused;
+    if (await chatGuard(request, reply)) return reply;
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     // The same `spend` block the list carries, so a chat opened straight from
     // a link says what it cost without the list having been read first.
     const spend = await deps.automationChat.spend(id);
+    // Where it came from, when the assistant handed it over — so a chat opened
+    // straight from a card can say so and go back, without the list.
+    const handedFrom = await deps.automationChat.handedFrom(id);
     return {
       sessionId: id,
       live: deps.automationChat.isLive(id),
       ...(spend !== undefined ? { spend } : {}),
+      ...(handedFrom !== undefined ? { handedFrom } : {}),
       messages: await deps.automationChat.transcript(id),
     };
   });
 
   app.delete('/api/v1/automations/chat/:id', memberOnlyNeeds('automation.manage'), async (request, reply) => {
-    const refused = await chatGuard(request, reply);
-    if (refused) return refused;
+    if (await chatGuard(request, reply)) return reply;
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     await deps.automationChat.close(id);
     return reply.code(204).send();
@@ -4450,33 +4801,86 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * guest gets a sentence the model can read out rather than a feature that is
    * silently absent.
    */
-  app.post('/api/v1/assistant/chat', memberOnlyNeeds('hub.ai'), async (request, reply) => {
-    const body = z.object({ message: z.string().trim().min(1).max(2_000) }).parse(request.body);
-    try {
-      const started = await deps.assistantChat.start({
-        memberId: request.member!.id,
-        message: body.message,
-      });
-      return reply.code(201).send(started);
-    } catch (error) {
-      return chatRefusal(error, reply);
-    }
+  app.post(
+    '/api/v1/assistant/chat',
+    { ...memberOnlyNeeds('hub.ai'), bodyLimit: CHAT_BODY_LIMIT },
+    async (request, reply) => {
+      const body = chatMessageSchema.parse(request.body);
+      if (await modelRefusal(body.model, reply)) return reply;
+      const turn = turnOf(body);
+      try {
+        const started = await deps.assistantChat.start({
+          memberId: request.member!.id,
+          message: body.message,
+          ...(turn !== undefined ? { turn } : {}),
+        });
+        return reply.code(201).send(started);
+      } catch (error) {
+        return chatRefusal(error, reply);
+      }
+    },
+  );
+
+  app.post(
+    '/api/v1/assistant/chat/:id/messages',
+    { ...memberOnlyNeeds('hub.ai'), bodyLimit: CHAT_BODY_LIMIT },
+    async (request, reply) => {
+      const { id } = z.object({ id: z.uuid() }).parse(request.params);
+      const body = chatMessageSchema.parse(request.body);
+      if (await modelRefusal(body.model, reply)) return reply;
+      let answered;
+      try {
+        // A forgotten conversation is reopened here, which can be refused the
+        // way starting one is — a 409 with a sentence rather than a 500.
+        answered = await deps.assistantChat.reply(id, request.member!.id, body.message, turnOf(body));
+      } catch (error) {
+        return chatRefusal(error, reply);
+      }
+      // `410` rather than `404`: the conversation existed and its transcript is
+      // still readable — what is gone is the ability to continue it.
+      if (!answered) return reply.code(410).send({ error: 'conversation_ended' });
+      return answered;
+    },
+  );
+
+  /**
+   * Stop the round a conversation is running — see `stopAnswer`. A job the
+   * assistant has already handed over goes on: it is the other agent's
+   * conversation now, with its own stop.
+   */
+  app.post('/api/v1/assistant/chat/:id/stop', memberOnlyNeeds('hub.ai'), async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    return stopAnswer(deps.assistantChat.stop(id, request.member!.id), reply);
   });
 
-  app.post('/api/v1/assistant/chat/:id/messages', memberOnlyNeeds('hub.ai'), async (request, reply) => {
-    const { id } = z.object({ id: z.uuid() }).parse(request.params);
-    const { message } = z
-      .object({ message: z.string().trim().min(1).max(2_000) })
-      .parse(request.body);
-    const answered = await deps.assistantChat.reply(id, request.member!.id, message);
-    // `410` rather than `404`: the conversation existed and its transcript is
-    // still readable — what is gone is the ability to continue it.
-    if (!answered) return reply.code(410).send({ error: 'conversation_ended' });
-    return answered;
-  });
+  /**
+   * Ask a failed round again, on the model named — the other vendor's, when
+   * the note offered it — see `ChatRuntime.retry` and `retryAnswer`.
+   */
+  app.post(
+    '/api/v1/assistant/chat/:id/retry',
+    { ...memberOnlyNeeds('hub.ai'), bodyLimit: CHAT_BODY_LIMIT },
+    async (request, reply) => {
+      const { id } = z.object({ id: z.uuid() }).parse(request.params);
+      const body = chatRetrySchema.parse(request.body);
+      if (await modelRefusal(body.model, reply)) return reply;
+      try {
+        const outcome = await deps.assistantChat.retry(id, request.member!.id, {
+          ...turnOf(body),
+          model: body.model,
+        });
+        return retryAnswer(id, outcome, reply);
+      } catch (error) {
+        return chatRefusal(error, reply);
+      }
+    },
+  );
 
   /** Listed before the `:id` route below, or Fastify parses `chats` as a uuid. */
-  app.get('/api/v1/assistant/chats', memberOnlyNeeds('hub.ai'), async () => deps.assistantChat.list());
+  app.get('/api/v1/assistant/chats', memberOnlyNeeds('hub.ai'), async (request) =>
+    // Who is asking, so each row can say whether it is theirs (`mine`).
+    deps.assistantChat.list(request.member!.id),
+  );
 
   app.get('/api/v1/assistant/chat/:id', memberOnlyNeeds('hub.ai'), async (request) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);

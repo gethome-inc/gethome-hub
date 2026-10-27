@@ -248,7 +248,7 @@ than no button.
 
 | Method & path | Needs | Notes |
 |---|---|---|
-| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `matter: {bluetooth, bluetoothReason?, wifi, commissioning, settlingUntil?}` is present only while Matter is running and says what pairing this hub can actually do — and, in `settlingUntil`, whether it has finished finding the devices it already owns — see [below](#pairing-a-matter-accessory). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid). `wifiNetworks: {available, reason?}` is present on a hub that can be told about another Wi-Fi network before it is moved — `available: false` with `reason` `"no-networkmanager"` or `"not-installed"` when this machine cannot — see [below](#wi-fi-networks-settingswifi). `apiKeys: {grantable}` is present on a hub that takes [API keys](#api-keys), and lists the permissions a key may be given. `roomPictures: {model, maxPerRoom, maxPhotos}` is present on a hub that [draws rooms](#room-pictures) |
+| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `matter: {bluetooth, bluetoothReason?, wifi, commissioning, settlingUntil?}` is present only while Matter is running and says what pairing this hub can actually do — and, in `settlingUntil`, whether it has finished finding the devices it already owns — see [below](#pairing-a-matter-accessory). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid). `wifiNetworks: {available, reason?}` is present on a hub that can be told about another Wi-Fi network before it is moved — `available: false` with `reason` `"no-networkmanager"` or `"not-installed"` when this machine cannot — see [below](#wi-fi-networks-settingswifi). `apiKeys: {grantable}` is present on a hub that takes [API keys](#api-keys), and lists the permissions a key may be given. `roomPictures: {model, maxPerRoom, maxPhotos}` is present on a hub that [draws rooms](#room-pictures). `chat: {models: true, stop: true, retry: true, efforts: ["low","medium","high"], images: {maxCount, maxBytes, mediaTypes}}` is present on a hub whose chat routes take a message's own `model`, `effort` and photos — an app that does not find it must offer none of the three, because an older hub strips them and answers 201; see [below](#what-a-chat-message-can-carry-model-effort-attachments). `chat.stop` says a running round can be [stopped part-way](#stopping-a-round-post-chatidstop) — an older hub answers that route 404, so an app that does not find it offers no stop — and `chat.retry` the same for [asking a failed round again](#asking-a-failed-round-again-post-chatidretry) |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
 | `POST /hub/proof` | — | `{nonce, address, tokenId}` → `{hubId, proof}`: this hub proving it is itself **at the address the app dialled**, to an app holding one of its tokens, without the token being sent. `403 proof_refused` for an address that is not this hub's or a token it does not hold — one answer for both. For an app following a saved hub to a new address — see [below](#following-a-hub-to-a-new-address-post-hubproof) |
 | `GET /home` · `PATCH /home` | floor · `home.rename` | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name) |
@@ -280,7 +280,7 @@ than no button.
 | `POST /api-keys` | `hub.apikeys` | `{name, control?, permissions?, expiresInDays?}` → `201 {key, secret}`. The **only** time the secret exists anywhere but in the caller's hands. `expiresInDays` is 1–3650, or `null`/absent for never. **Strict body** — an unknown field is `400 invalid_body`. `400 {error:"not_grantable", permission}` for one no key may hold, `400 {error:"needs_control", permission:"automation.manage"}`, `403 {error:"forbidden", permission}` for one the caller does not hold, `409 {error:"too_many_keys", limit:25}` |
 | `PATCH /api-keys/:id` | `hub.apikeys`, **your own key** | the same fields, every one optional → the key. `null` expiry is never, a number restarts the count from now. `403 not_your_key` for anybody else's, an owner's edit included; only what is being *added* is checked against the caller's role, so renaming a key whose grant has since gone inert is not refused for it |
 | `DELETE /api-keys/:id` | floor (your own) · `member.remove` (anybody's) | revoke → `204`, and its event streams are closed with `4001`. An owner's key needs an owner (`403 not_owner`). None of the four `/api-keys` routes is ever an API key's |
-| `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | `hub.ai` | The home's AI: two credentials, a model per job (recognition, the assistant, the automations agent), which provider recognises devices, and the switch. **PATCH is the write** — every field optional, absence means "leave this alone": `{enabled?, recordExchanges?, anthropicApiKey?, openaiApiKey?, anthropicModel?, openaiModel?, model?, mappingProvider?, assistantModel?, automationsModel?, clear?}`. `model` is `anthropicModel` under the name this route has always used; a model id this hub has **retired** is still taken, and resolved to its successor when it is read — see [below](#the-ai-settings-answer); `assistantModel` / `automationsModel` name the vendor as well as the model, and `null` puts either back on the default; `clear: "anthropic"\|"openai"` forgets one credential and leaves the other; `recordExchanges` starts or stops keeping what each round said, and is off unless asked; `mappingProvider` naming a provider with no key is `400 provider_not_configured`. Keys are told apart by prefix, so one pasted in the other's field is a 400 rather than a 401 an hour later, and a `sk-ant-oat…` subscription token is still refused. **PUT is unchanged** (`{apiKey, model?}`, an Anthropic key, required) for apps that have not moved. See [the answer's shape](#the-ai-settings-answer) |
+| `GET /settings/ai` · `PUT /settings/ai` · `PATCH /settings/ai` · `DELETE /settings/ai` | `hub.ai` | The home's AI: two credentials, a model per job (recognition, the assistant, the automations agent), which provider recognises devices, and the switch. **PATCH is the write** — every field optional, absence means "leave this alone": `{enabled?, recordExchanges?, anthropicApiKey?, openaiApiKey?, anthropicModel?, openaiModel?, model?, mappingProvider?, assistantModel?, automationsModel?, assistantEffort?, automationsEffort?, clear?}`. `model` is `anthropicModel` under the name this route has always used; a model id this hub has **retired** is still taken, and resolved to its successor when it is read — see [below](#the-ai-settings-answer); `assistantModel` / `automationsModel` name the vendor as well as the model, and `null` puts either back on the default; `assistantEffort` / `automationsEffort` (`low`/`medium`/`high`, `null` for the default) are how hard that agent works on a typed round nobody chose an effort for, and any other word is a 400; `clear: "anthropic"\|"openai"` forgets one credential and leaves the other; `recordExchanges` starts or stops keeping what each round said, and is off unless asked; `mappingProvider` naming a provider with no key is `400 provider_not_configured`. Keys are told apart by prefix, so one pasted in the other's field is a 400 rather than a 401 an hour later, and a `sk-ant-oat…` subscription token is still refused. **PUT is unchanged** (`{apiKey, model?}`, an Anthropic key, required) for apps that have not moved. See [the answer's shape](#the-ai-settings-answer) |
 | `GET /ai/runs?limit=` | `hub.ai` | what the mapping agent did, newest first: `{id, at, kind, vendor, model, exposesHash, provider, modelId, effort, via, ok, costUsd, turns, durationMs, errorKind, errorMessage, steps, exchanges}`. A summary, never a transcript — see [ai-adaptation.md](ai-adaptation.md). `exchanges` is how many **rounds** this run kept, `0` unless recording was on when it ran. `effort` (`low`/`medium`/`high`) and `via` (`voice`/`typed`) say what that turn ran at and how it was asked — both **null** on a row written before them and on a run the idea does not apply to: a portrait has no effort, a device recognition nobody asked for has no `via`, and the `voice` meter is a line rather than a generation, so it carries `via` and no effort |
 | `GET /ai/runs/:id/exchanges` | `hub.ai` | what that run actually said, round by round, oldest first: `[{seq, at, durationMs, provider, modelId, status, ok, inputTokens, outputTokens, sent, received}]`. `sent`/`received` are `[{kind, label, text?, bytes?}]` — the round's **main data**, not its bodies; `bytes` is present only on a part that was cut, and is what it weighed whole. A run is a *loop*, so one recognition is several rounds and a failed one is followed by the next in the same list. Empty is the ordinary answer — recording is off unless the owner asked, and rounds age out after a week. See [ai-adaptation.md](ai-adaptation.md) |
 | `GET /automations` | floor | every rule in the home, plus `unreadable` — rules a **newer** build wrote that this one cannot parse. They are kept and not run; listing them is what stops a rule silently vanishing after `install.sh` rolls a build back. Each carries `summary` (a whole sentence — the contract) beside `document` (the structure — the convenience), the `activity.message` rule applied to rules, [`outline`](automations.md#a-rule-as-a-storyboard) — the same rule as a **storyboard** so an app can *draw* it rather than print it — `icon` — the mark somebody chose, or `null` for the one the app derives — and `roomId`, [the one room the rule is about](#which-room-a-rule-is-in) or `null` for a rule about the whole house |
@@ -295,14 +295,18 @@ than no button.
 | `GET /automations/:id/versions` · `POST /automations/:id/revert` | `automation.manage` | what it used to say, and going back to it. `{versionId}` |
 | `POST /automations/dry-run` | `automation.manage` | check a document without saving: `{problems, warnings, shape, summary, outline}` — the same pair every rule carries, so a preview draws exactly what the saved rule would |
 | `POST /automations/templates/:key` | `automation.manage` | install a preset. A template may install **more than one** rule — "light on movement" is genuinely two — so this answers with a list |
-| `POST /automations/chat` | `automation.manage` **+** `hub.ai` · never a key | start a conversation: `{message, automationId?}` → `201 {sessionId, messages}`. **An acknowledgement, not an outcome**: `messages` is the person's own row and nothing else, and it answers the moment the hub takes the message — a turn is a provider loop with a three-minute watchdog and no client waits that long. What the agent says arrives on the opt-in `automations` stream, and its `turn` frame is what says the transcript is ready to re-read. Two refusals, both `409 {error, detail}` because they lead to two different screens: `ai_not_configured` (no key) and `automation_needs_anthropic` (a key the hub holds and cannot use — a Claude subscription token, with no OpenAI key beside it; the code is kept because both apps branch on it, but it no longer means "only OpenAI's", since either vendor now runs either agent). **Device recognition's switch is not asked** — an older hub answered `ai_disabled` here too, which is why both apps still read that code. `detail` is a sentence, so an app that has never met one of these codes still shows something true. The route names `automation.manage` in a refusal; the second key is checked in the handler and refused in the same `{error, permission}` shape |
-| `POST /automations/chat/:id/messages` | `automation.manage` **+** `hub.ai` · never a key | `{message}` → the same acknowledgement shape, and the same rule: it returns when the message is taken, never when the turn ends. Turns are chained per conversation, so a second message sent while one is running is queued rather than run beside it. A typed reply to a question is treated as the *answer* to it, since only the conversation knows whether a tool call is outstanding. **`410 conversation_ended`** only when there is nothing left to read — a session that never existed, or one past the fortnight transcripts are kept for. A hub that has merely *forgotten how to continue* (a restart, or the two-hour idle sweep) rebuilds the model's memory from the stored transcript and carries on under the same session id, because that state is the ordinary one and refusing it made the whole conversations list read-only |
-| `GET /automations/chats` | `automation.manage` **+** `hub.ai` · never a key | every conversation this home has had, newest first: `[{sessionId, startedAt, updatedAt, messageCount, title, live, spend?}]`. `title` is the **first thing the person said** — the agent's opening line is about the home rather than about what was asked — and `live` is whether it can still be *continued*, which is a different question from whether it can be read. `spend` is `{usd, provider, modelId, model}`: what it cost and what answered, with `model` the label to draw and `modelId` the id as recorded. It is **absent rather than zero** when the hub cannot say — `ai_runs` keeps sixty runs and a transcript a fortnight, so a readable conversation can outlive its own spend row, and `$0.00` about one that plainly cost something is a claim |
-| `GET /automations/chat/:id` | `automation.manage` **+** `hub.ai` · never a key | `{sessionId, live, spend?, messages}` — the transcript, oldest first, with the same `spend` block the list carries so a chat opened from a link says what it cost without the list having been read. `live: false` is history. A message is `{id, at, role, text, data?}` with `role` an **open** vocabulary (`user`/`agent`/`question`/`preview`/`note`); see [`docs/automations.md`](automations.md) for what `data` carries per row. **One turn can write several `preview` rows** — a reply that delivers two rules is one `agent` line followed by a card each, in submission order, so draw a card per row rather than assuming one per turn. The **first** row a round writes also carries `data.steps` — `[{text, kind, detail?}]`, what the agent did to produce it, the same three fields the `step` frame streams — so a conversation read back next week shows the working and not only the answer |
+| `POST /automations/chat` | `automation.manage` **+** `hub.ai` · never a key | start a conversation: `{message, automationId?, model?, effort?, attachments?}` → `201 {sessionId, messages}` — the last three are [below](#what-a-chat-message-can-carry-model-effort-attachments), and `message` may be empty when `attachments` is not. **An acknowledgement, not an outcome**: `messages` is the person's own row and nothing else, and it answers the moment the hub takes the message — a turn is a provider loop with a three-minute watchdog and no client waits that long. What the agent says arrives on the opt-in `automations` stream, and its `turn` frame is what says the transcript is ready to re-read. Two refusals, both `409 {error, detail}` because they lead to two different screens: `ai_not_configured` (no key) and `automation_needs_anthropic` (a key the hub holds and cannot use — a Claude subscription token, with no OpenAI key beside it; the code is kept because both apps branch on it, but it no longer means "only OpenAI's", since either vendor now runs either agent). **Device recognition's switch is not asked** — an older hub answered `ai_disabled` here too, which is why both apps still read that code. `detail` is a sentence, so an app that has never met one of these codes still shows something true. The route names `automation.manage` in a refusal; the second key is checked in the handler and refused in the same `{error, permission}` shape — **before** anything is taken (a build before this one sent the 403 and then started the conversation anyway). A third `409`, `model_unavailable`, is a `model` this home cannot run, and a fourth, `photos_busy`, is a message whose photos would take the hub past what it can hold at once — both refused before anything is taken |
+| `POST /automations/chat/:id/messages` | `automation.manage` **+** `hub.ai` · never a key | `{message, model?, effort?, attachments?}` → the same acknowledgement shape, and the same rule: it returns when the message is taken, never when the turn ends. Turns are chained per conversation, so a second message sent while one is running is queued rather than run beside it. A typed reply to a question is treated as the *answer* to it, since only the conversation knows whether a tool call is outstanding. **`410 conversation_ended`** only when there is nothing left to read — a session that never existed, or one past the fortnight transcripts are kept for. A hub that has merely *forgotten how to continue* (a restart, or the two-hour idle sweep) rebuilds the model's memory from the stored transcript and carries on under the same session id, because that state is the ordinary one and refusing it made the whole conversations list read-only. A conversation that has to be rebuilt can be refused the way starting one can — the same `409`s, never a 500. **`410` also answers a conversation that is not yours**: reading is shared home-wide, continuing is the owner's — `mine` on the list says which before anybody types |
+| `POST /automations/chat/:id/stop` | `automation.manage` **+** `hub.ai` · never a key | stop the round the conversation is running, part-way → `200 {stopped}` at once: `true` when a round was told to stop, `false` when none was running (one that finished a moment earlier, or a conversation the hub holds no memory of). The round winds down on the socket like any other — what had reached the page kept as the answer, then a `note` row with `data.stopped: true` — and only that round: a message sent behind it still runs. `409 not_your_conversation` for somebody else's. See [below](#stopping-a-round-post-chatidstop) |
+| `POST /automations/chat/:id/retry` | `automation.manage` **+** `hub.ai` · never a key | ask the person's last message again after the round it started failed: `{model, effort?, attachments?}` → `202 {sessionId, retrying: true}`, on the model named — usually the other vendor's, which the failure's note offers. No second message is written. `409 nothing_to_retry` when the conversation has moved on from the failure or it is already being answered, `409 not_your_conversation`, `409 model_unavailable`, `410 conversation_ended`. See [below](#asking-a-failed-round-again-post-chatidretry) |
+| `GET /automations/chats` | `automation.manage` **+** `hub.ai` · never a key | every conversation this home has had, newest first: `[{sessionId, startedAt, updatedAt, messageCount, title, live, spend?, mine, handedFrom?}]`. `title` is **the conversation's name**: a few words the hub had the cheapest model of the conversation's own vendor write from what the person said first, a moment after the first message (see [below](#a-conversations-name-the-chattitle-frame)) — and until it has one, or where none could be had, the **first thing the person said**, as it always was, never the agent's opening line, which is about the home rather than about what was asked; a conversation that opened with a photo and no words is `Photo` (or `2 photos`) until words come — and `live` is whether it can still be *continued*, which is a different question from whether it can be read. `spend` is `{usd, provider, modelId, model}`: what it cost and what answered, with `model` the label to draw and `modelId` the id as recorded. It is **absent rather than zero** when the hub cannot say — `ai_runs` keeps the last 250 runs of every kind and a transcript a fortnight, so a readable conversation can outlive its own spend row, and `$0.00` about one that plainly cost something is a claim. **`mine`** is whether the caller had the conversation — the first thing said in it was theirs — because every member's are listed and only the owner can carry one on; an app that wants a person's own list shows `mine !== false` (absent on an older hub). **`handedFrom`** is the *assistant* conversation that handed this one over, read back from its `handoff` row (the newest, when there were several) — absent for a chat somebody started themselves |
+| `GET /automations/chat/:id` | `automation.manage` **+** `hub.ai` · never a key | `{sessionId, live, spend?, handedFrom?, messages}` — the transcript, oldest first, with the same `spend` block the list carries so a chat opened from a link says what it cost without the list having been read. `live: false` is history. A message is `{id, at, role, text, data?}` with `role` an **open** vocabulary (`user`/`agent`/`question`/`preview`/`note`); see [`docs/automations.md`](automations.md) for what `data` carries per row. **One turn can write several `preview` rows** — a reply that delivers two rules is one `agent` line followed by a card each, in submission order, so draw a card per row rather than assuming one per turn; a turn that reached the conversation's cost limit with rules already accepted still writes their cards, with a `note` after them saying so. The **first** row a round writes also carries `data.steps` — `[{text, kind, detail?, done?}]`, what the agent did to produce it: the same three fields the `step` frame streams, and `done: true` on a step whose change to the home took (a device worked, a scene pressed, a job handed over), which only the stored copy carries — so a conversation read back next week shows the working and not only the answer — and **`data.tookMs`**, the whole milliseconds from the round beginning to that row, which is the wait somebody sat through. The person's own row carries `data` only when their message asked for something besides its words or was spoken: `{model?, effort?, attachments?: [{type: "image", mediaType, ref?, width?, height?, bytes}], wordless?, via?}`, only the keys the request named — **never a photo's bytes** — and, on the row the conversation was named from, **`chatTitle`**, the name the list answers with. `via: "voice"` marks a message spoken to the assistant: it names no model and no effort, exactly as a typed one following the home's does, so a client reading the newest typed message for the thinking word a conversation was left on steps past it. **A photo sent with no words stores a caption as `text`** — `Photo`, `2 photos`, the list's own words — with `data.wordless: true`: an app that predates photos draws a person's row from `text` alone, and shows that rather than an empty bubble; an app that draws the photos leaves the caption off when `wordless` is set |
 | `DELETE /automations/chat/:id` | `automation.manage` **+** `hub.ai` · never a key | end it and write down what it spent |
-| `POST /assistant/chat` | `hub.ai` · never a key | start a conversation with the **assistant** — the agent behind the app's assistant button: `{message}` → `201 {sessionId, messages}`. Same acknowledgement shape and same rule as the automations chat above, and the same two `409` refusals. Guarded by `hub.ai` **alone**: asking what the kitchen is doing and switching a lamp on is the floor, and the key is asked because a conversation spends the home's money. Handing a job to another agent is where `automation.manage` is asked, and it is asked *inside the tool* — so a member whose role cannot do it gets a sentence the model reads out rather than a route that 403s |
-| `POST /assistant/chat/:id/messages` | `hub.ai` · never a key | `{message}` → the same acknowledgement. `410 conversation_ended` only when there is nothing left to read |
-| `GET /assistant/chats` | `hub.ai` · never a key | the assistant's own conversations, newest first, in the same shape `GET /automations/chats` answers. The two lists are **disjoint**: rows carry a `surface`, and a row written before that column existed is an automations row |
+| `POST /assistant/chat` | `hub.ai` · never a key | start a conversation with the **assistant** — the agent behind the app's assistant button: `{message, model?, effort?, attachments?}` → `201 {sessionId, messages}`. Same acknowledgement shape and same rule as the automations chat above, and the same `409` refusals, `model_unavailable` and `photos_busy` included. Guarded by `hub.ai` **alone**: asking what the kitchen is doing and switching a lamp on is the floor, and the key is asked because a conversation spends the home's money. Handing a job to another agent is where `automation.manage` is asked, and it is asked *inside the tool* — so a member whose role cannot do it gets a sentence the model reads out rather than a route that 403s |
+| `POST /assistant/chat/:id/messages` | `hub.ai` · never a key | `{message, model?, effort?, attachments?}` → the same acknowledgement. `410 conversation_ended` only when there is nothing left to read — or when the conversation is somebody else's |
+| `POST /assistant/chat/:id/stop` | `hub.ai` · never a key | the same, for the assistant. A job it has already handed to another agent goes on — that is the other agent's conversation now, with its own stop |
+| `POST /assistant/chat/:id/retry` | `hub.ai` · never a key | the same retry, for the assistant |
+| `GET /assistant/chats` | `hub.ai` · never a key | the assistant's own conversations, newest first, in the same shape `GET /automations/chats` answers (`mine` included; `handedFrom` never — nothing hands a conversation to the assistant). The two lists are **disjoint**: rows carry a `surface`, and a row written before that column existed is an automations row |
 | `GET /assistant/chat/:id` | `hub.ai` · never a key | `{sessionId, live, spend?, messages}`, the same shape as an automations transcript with one more `role`: **`handoff`**, a job handed to another agent. Its `data` is `{agent, title, brief, sessionId, status, automationIds}` — `sessionId` is the *other* agent's conversation, which is where the live trail, its questions and the rules it wrote are read from; `status` is `working`/`asked`/`delivered`/`failed` and is an **open** string; `automationIds` fills as that agent saves rules. Nothing about the other conversation is copied into this one |
 | `DELETE /assistant/chat/:id` | `hub.ai` · never a key | end it and write down what it spent |
 | `POST /assistant/voice/session` | `hub.ai` · never a key | open a live **voice** session: `{sdp, sessionId?}` → `201 {answerSdp, audioRate, sessionId}`. `sdp` is the client's own **WebRTC offer** and is required, because that is the only transport a phone can hold: Live authenticates a WebSocket with the *project API key* and has no ephemeral client secret anywhere in the family, so the hub does the offer/answer exchange with the home's key and the client is handed **no credential at all** — a stronger containment than the expiring secret this route was first built around. The hub builds the whole session — model, voice, instructions, history, delegation mode — and never sends it to the app, so a prompt change or a configuration key this API grows next month reaches the microphone with no app release. `delegation.type` is **`client`**, which is the architecture in one field: the voice asks *this hub* for help rather than a model OpenAI hosts, so the home keeps its own agent, its own tools, its own transcript and whichever provider it picked. No `audio.format` is sent — WebRTC negotiates its own and refuses the field — and `audioRate` is the rate the app's graph is pointed at. `sessionId` is the assistant conversation to write into — **sent back** when the app already has one, since stopping and restarting the microphone on a page is one conversation rather than two, and minted fresh when it is absent; when it is sent, that conversation's last few exchanges are seeded into `session.input`, so pressing the microphone on a page you have been typing on continues one conversation. It grants nothing new — a home's transcripts are shared by design. When it is sent, that conversation's history is bounded in **characters as well as messages** — `session.input` is capped at 8,192 tokens as well as at 128 messages, and a transcript row holds up to 4,000 characters, so a count alone had a long conversation refused outright on every attempt. A `sessionId` belonging to **somebody else** in the home is `409 not_your_conversation`: reading a home's transcripts is shared by design and writing into one is not. Refuses `409 openai_not_configured` — a code of its own, and a real one: GPT-Live is OpenAI's and there is no substitute, so a home whose assistant answers perfectly well on Anthropic still cannot *speak* without an OpenAI key. `502 voice_unavailable` when OpenAI itself refuses, with their sentence in `detail` — a different screen from a `409`, which is something in this home's settings. **The hub then attaches its own sideband** to the same session (`wss://api.openai.com/v1/live/sessions/{id}/attach`, the home's key again) and that is where the delegation loop lives: client delegation says "I need help" and nothing else, so somebody has to assemble the request from the transcript and answer it — doing that on the phone added two LAN legs to the one thing on this surface measured in how fast a lamp goes off. The sideband owns three facts outright, on the API's own rule that two connections onto one session need one owner per action: **delegations** (the phone answers none), **the transcript** (`askAloud` writes the person's row and the answer, so a spoken exchange leaves exactly what a typed one does) and **what it cost** (`session.usage.updated` / `session.closed`, the seconds OpenAI will bill). Audio is deliberately not one of them: media stays on the phone's WebRTC connection. `POST /assistant/voice/said` and `POST /assistant/voice/ended` are **gone** with it — the phone wrote the transcript and measured the seconds with a stopwatch only because the hub was not in the session at all |
@@ -1965,6 +1969,220 @@ two minutes earlier. `permitJoin` frames repeat every five seconds while the
 window is open, which is the right rate for a network message and the wrong one
 for a countdown; drive the seconds from a local clock and re-sync on each frame.
 
+### What a chat message can carry (`model`, `effort`, `attachments`)
+
+The four routes that take a message — `POST /assistant/chat`,
+`POST /assistant/chat/:id/messages`, `POST /automations/chat` and
+`POST /automations/chat/:id/messages` — take three more fields beside
+`message`, **all optional**: an app that sends none of them sees exactly what it
+always did.
+
+```json
+{
+  "message": "what is this, and can it be dimmed?",
+  "model": "claude-sonnet-5-5",
+  "effort": "low",
+  "attachments": [
+    { "type": "image", "mediaType": "image/jpeg", "data": "<base64>",
+      "ref": "7F1C…", "width": 1280, "height": 960 }
+  ]
+}
+```
+
+**Ask `GET /hub` for `chat` before sending any of them.** An older hub's schema
+has never heard of them, and zod strips what it does not know — so the request
+*succeeds*, the photo never reaches the model and the conversation never moves
+model, with nothing on the way back to say so. The block also carries the bounds
+to draw: `efforts` (the whole vocabulary, `["low","medium","high"]`) and
+`images: {maxCount, maxBytes, mediaTypes}` — `maxBytes` per photo, decoded.
+
+- **`model`** — an agent model id from `GET /settings/ai`'s `choices`. It
+  applies to **this conversation and nobody else's**: the home's own setting
+  for that agent (`PATCH /settings/ai`'s `assistantModel` on the assistant's
+  two routes, `automationsModel` on the automations agent's) is untouched. A
+  message that names the model already answering changes nothing; one that
+  names another moves the conversation onto it when its turn begins — a fresh
+  provider conversation, primed with the record of everything settled by then
+  (an answer written after this message was taken included, a message still
+  queued behind it not, and all of it rather than a tail — what the
+  conversation it replaces remembered), because a vendor's history is not
+  something another model will take. What that costs is
+  what a [revived conversation](assistant.md#two-agents-one-runtime) loses: the
+  model's reasoning and an outstanding question. **A message that names no model
+  leaves the conversation on what it is running**, live or revived (a revived
+  one reopens on the model the newest message that named one asked for, while it
+  is still offered and its key usable — otherwise on that agent's setting). To
+  go back to the home's choice, send the id that agent's setting resolves to. An id no agent is offered, or
+  a model whose vendor has no usable key while the other vendor's does, is
+  `409 {error: "model_unavailable", detail}` — refused **before** the message is
+  taken, so nothing is written for a turn that would not run. A home with no
+  usable key at all gets the conversation's own refusal instead.
+- **`effort`** — `low`, `medium` or `high`: how hard the model works on **this
+  round**. A message that names none runs at the home's own word for that agent
+  (`GET /settings/ai`'s `effort` on the agent's block, `medium` unless somebody
+  chose another), read when its turn begins — so a later message does not
+  inherit an earlier one's. A spoken round keeps its own `low` whatever a typed
+  one last asked for. Anything else is a 400; an older hub ignores it and runs
+  at `medium`. The `ai_runs` row records what the round actually ran at.
+- **`attachments`** — up to `maxCount` photos, each `{type: "image", mediaType,
+  data, ref?, width?, height?}` with `mediaType` one of `mediaTypes` and `data`
+  standard base64 of at most `maxBytes` decoded. `message` may then be empty —
+  a photo on its own is a message — but a message with neither words nor a
+  photo is still a 400. The four routes take bodies up to about 8 MB (four
+  photos at the ceiling with every `/` escaped as `\/`, the way Apple's JSON
+  encoders write them by default), the two photo routes (`POST /room-pictures`,
+  `POST /devices/:id/portraits`) up to 12 MB, and every other route Fastify's
+  1 MB default. **The hub holds about one message at the ceiling at a time**:
+  a message is acknowledged at once and its photos wait with its turn, so a
+  message whose photos would take what is held across every conversation past
+  `maxCount` × `maxBytes` (as base64) is `409 {error: "photos_busy", detail}`,
+  refused **before** anything is taken — send it again once the answer before
+  it has arrived. Words alone are never refused for it, and a photo the app has
+  downscaled to a few hundred kilobytes never meets it.
+
+**A photo is sent to the model for that one round and kept nowhere on the
+hub.** The person's row records what it *was* —
+`data.attachments: [{type, mediaType, ref?, width?, height?, bytes}]`, `ref`
+echoed so an app can draw its own copy — and never its bytes; once the round is
+over the hub rebuilds the conversation from its transcript so the provider
+history stops holding the picture — closed or not, before any message queued
+behind it runs — and that record says a photo was sent and is no longer
+available. So a conversation read back on another device, or after a
+restart, has the row and not the picture: draw a placeholder when the app has no
+copy of its own under that `ref`.
+
+### Stopping a round (`POST …/chat/:id/stop`)
+
+`POST /assistant/chat/:id/stop` and `POST /automations/chat/:id/stop` stop the
+round a conversation is running, part-way. No body, or an empty JSON object. **Ask `GET /hub` for
+`chat.stop` before offering it** — an older hub answers the route 404.
+
+**It answers at once, `200 {stopped: true}`**, and the round winds down at its
+next safe point, saying so on the socket like any other turn: the `turn` frame
+goes out, and the transcript is what to draw. `{stopped: false}` means no round
+was running — including one that finished a moment before the stop arrived, so
+a stop is never a promise that an answer was cut short. `409
+{error: "not_your_conversation", detail}` is somebody else's conversation:
+reading is shared home-wide, and stopping is the owner's, as continuing is.
+
+What a stopped round leaves behind:
+
+- **What reached the page is the answer.** The words the model had streamed are
+  written as an ordinary `agent` row — and only the words: a thought cut off
+  before its signature, or a tool call cut off half way through its input, is
+  dropped rather than kept where it would break the conversation.
+- **Then a `note` row with `data.stopped: true`**: `Stopped.`, or
+  `Stopped. What was already done stays done.` when something had already
+  happened — a device worked, a scene pressed, a job handed over, a rule saved.
+  A stop takes nothing back. An app that has never heard of `stopped` shows the
+  sentence, which is true on its own; one that has draws it quietly, as a stop
+  rather than a failure. When the stop came before a word, the note is the
+  first row the round wrote, so it carries `data.steps` and `data.tookMs`.
+- **What was done before the stop is written down as it would have been.** A
+  job the assistant had handed over is still a `handoff` card — and goes on,
+  since it is the other agent's conversation now. A rule the automations agent
+  had been told is saved is saved, and its `preview` card written.
+- **What was not started never starts.** A command already on its way to a
+  device finishes; the ones after it in the same reply do not run, and a
+  question not yet put is withdrawn.
+- **The conversation carries on.** The model is told on its next turn that its
+  last answer was stopped, and a message sent while the stopped round ran still
+  runs after it — a stop is about the round on screen, never the next one.
+- **What it had spent is written down**, as a turn's spend always is. Neither
+  vendor reports usage for a reply it never finished, so the share they had not
+  counted is estimated from what had streamed — on the low side.
+
+### When a round fails, and asking it again (`POST …/chat/:id/retry`)
+
+<a id="asking-a-failed-round-again-post-chatidretry"></a>
+
+A round that could not be answered ends in a `note` row, as it always has —
+and the note now says **which model failed and why, in words somebody can act
+on**, where it used to relay the provider's status and JSON. Its `data` says
+what can be done about it:
+
+```json
+{
+  "failure":  { "provider": "openai", "model": "gpt-6.1-sol", "kind": "billing", "messageId": "…" },
+  "switchTo": { "model": "claude-opus-5-5", "label": "Opus 5.5", "provider": "anthropic" }
+}
+```
+
+- **`failure.kind`** is an open word: `billing`, `usage_limit`, `rate_limited`,
+  `auth_failed`, `overloaded`, `network`, `aborted` (the round ran out of
+  time), `refused` (the model declined), `unavailable` (the model asked for
+  cannot be run here right now) and `failed` (anything else, in the provider's
+  own words). An app that meets one it has never seen still has the sentence.
+  `failure.transient: true` says the same model may well answer if simply
+  asked again — a busy vendor, a dropped connection, a round that ran out of
+  time — and is absent where asking again would meet the same answer.
+- **`failure.messageId`** is the person's message the round was answering,
+  which is the one a retry answers. It is not always the row just above the
+  note: a message sent while the round ran is written at once, ahead of the
+  note. Absent on a note written before the field was.
+- **`switchTo`** is the **other vendor's** default agent model, present only
+  when this home has that vendor's key. Always the other vendor, never another
+  model of the same one: credit, a key and capacity are the vendor's, so the
+  same account meets them again, and a refusal is the one case a different
+  vendor's model may genuinely answer differently. A turn that ran into its
+  cost cap or out of rounds writes a note without `failure` — another model is
+  not the answer to either.
+- **A declined message stays in the transcript and leaves the model's
+  memory.** The conversation is rebuilt without it and its note — and so is
+  every record it is rebuilt from later, until the message is answered again —
+  so the next message is not read beside it, and declined for it. The model is
+  told only that a message was declined and what that round had already done.
+
+**`POST /assistant/chat/:id/retry`** and **`POST /automations/chat/:id/retry`**
+answer the failed message again: `{model, effort?, attachments?}`, with
+`model` required — `switchTo.model` for the offer, or `failure.model` to try the
+same one again. Ask `GET /hub` for `chat.retry` before offering it, as well as
+reading the note: a transcript outlives the build that wrote it, and a hub put
+back to an older build keeps the notes and has no route. Then:
+
+- **No second message.** The person's row is already there; the turn runs on
+  it, the note stays as the record of what failed, and
+  `data.retried: {model, effort?}` is written onto the note once the
+  conversation for it is open — where the conversation went next, which is
+  what a conversation revived after a restart reads (the newest of the
+  person's rows naming a model, or of the notes carrying `retried`), and what
+  an app draws the change of model from. An `amend` frame (`text: "retry"`)
+  tells a phone already showing the note. A model that cannot be started
+  writes a note of its own instead (`failure.kind: "unavailable"`, naming the
+  same message), and that newer note is the one to ask again from.
+- **It answers at once, `202 {sessionId, retrying: true}`**, and the turn runs
+  off the request like any other, saying so on the socket.
+- **On a conversation opened for it**, even on the same model: whatever the
+  failed round left in the vendor's history is not something to carry on
+  from. The model is told the message was asked before and the model it went
+  to could not answer it — **and what that round had already done**, when it
+  had worked a device, pressed a scene or handed a job over before failing (a
+  step marked `done`; never one the home refused), with the instruction to
+  check before doing any of it again.
+- **Photos are the app's to send again** in `attachments`, exactly as with the
+  message: the hub never kept them. A message whose photos do not come back is
+  sent with a line telling the model they are no longer available.
+- **Only the newest failure, and only once at a time.** `409
+  {error: "nothing_to_retry", detail}` when the note is not the conversation's
+  last row, or a message of the person's was written between the one it names
+  and the note (it has moved on), or a retry of it is already running — a
+  double tap, or two of somebody's phones, never runs the message twice. A
+  retry accepted while another turn was still to run is asked again when its
+  own turn comes: if that turn answered in between, the retry is let go, and
+  the `turn` frame takes the wait down with nothing written.
+  `409 not_your_conversation` for somebody else's, `409 model_unavailable` for a
+  model this home cannot run, `409 photos_busy` for photos past what the hub
+  can hold at once, `410 conversation_ended` for a conversation with no
+  transcript left.
+
+**Anthropic's own refusals are asked again before any of this.** Every Claude
+request the hub makes opts into server-side fallback (`fallbacks: "default"`):
+a request the model's safety classifiers decline is run again on the Claude
+the API recommends for that kind of refusal, inside the same call. A round
+answered that way says so in its working — a step with `kind: "handover"`,
+*Answered by Opus 4.8* — since the header names the model somebody chose. Only
+a refusal the whole chain declines reaches a note.
+
 ### The AI settings answer
 
 `GET /settings/ai` carries every flat field it always did — an app that predates
@@ -2004,6 +2222,7 @@ the second provider reads exactly what it read before — plus a per-provider ha
                                              { "id": "claude-haiku-5-5", … } ],
                               "openai":    [ { "id": "gpt-6-astra", "label": "GPT-6 Astra", … },
                                              { "id": "gpt-6.1-sol", "label": "GPT-6.1 Sol", … },
+                                             { "id": "gpt-6.1-terra", "label": "GPT-6.1 Terra", … },
                                              { "id": "gpt-6-luna", "label": "GPT-6 Luna", … } ] } },
   "automations": { "model": "gpt-6.1-sol", "provider": "openai", "choosable": true, "models": [ … ], "choices": { … } },
   "portraits": { "model": "gpt-image-2.5-flare", "maxPerDevice": 6, "budgetBytes": 314572800 }
@@ -2017,7 +2236,14 @@ column as it was written, while everything under `providers`, `assistant` and
 A few things an app should not work out for itself.
 
 **The model list is the hub's.** `providers.<name>.models` carries the id, a
-label a person reads, a one-line note and exactly one `recommended`. This is the
+label a person reads, a one-line note and exactly one `recommended`. **Every
+model entry the hub offers** — in `providers.<name>.models` and in each agent
+block's `models` and `choices` alike — carries `images: true` when the model
+reads a photo sent with a chat message (every model offered to the agents
+today); absent means no, so an app never ships its own list of which models
+can see. A chat's photo button reads it from the `assistant`/`automations`
+entry for the model that will answer — not from recognition's list, which
+offers fewer models. This is the
 `GET /permissions` rule applied to models: ids and tiers move, and an app that
 shipped its own list would offer one this hub refuses or miss one it accepts.
 The list the hub *accepts* is deliberately longer than any it *offers* — every
@@ -2053,11 +2279,14 @@ adding a second key later no longer moves recognition to the default vendor.
 
 **`model` is what will run, not what is stored — and a retired model is
 succeeded.** Every model the hub has known carries the model that replaced it
-(Opus 5 → Opus 5.5; Sonnet 5 → Sonnet 5.5; GPT-5.6 Sol, the `gpt-5.6` alias and
-GPT-5.6 Terra → GPT-6 Sol → GPT-6.1 Sol), and a stored choice counts only while
-it is still offered: otherwise the hub runs the first model along that chain
-which is, and only where there is none the vendor's default. A successor is
-always the same vendor's — the vendor was a choice somebody made, the retired id
+(Opus 5 → Opus 5.5; Sonnet 5 → Sonnet 5.5; GPT-5.6 Sol and the `gpt-5.6` alias
+→ GPT-6 Sol → GPT-6.1 Sol; GPT-5.6 Terra → GPT-6.1 Terra — a tier keeps its
+tier), and a stored choice counts only while it is still offered: otherwise the
+hub runs the first model along that chain which is, and only where there is none
+the vendor's default. That is per list: recognition offers no Terra, so a
+recognition setting of GPT-5.6 Terra walks off the end of its chain and runs
+GPT-6.1 Sol, the default. A successor is always the same vendor's — the vendor
+was a choice somebody made, the retired id
 was not. **This is resolved on every read and never written back**, which is
 what makes an update all it takes and a rollback harmless: the previous build,
 which `install.sh` falls back to when a new one fails its health check, reads
@@ -2070,11 +2299,28 @@ they are offered a different list.** Those two answer "which model answers in
 the assistant" and "which model writes the home's rules", and the lists differ
 because the trades do. A conversation is many small rounds, read the moment they
 arrive and answered with another message when the reply is poor — so what a
-round costs is a real choice, and those lists add the cheaper tiers (Sonnet 5.5,
-GPT-6 Luna). Write them with `PATCH /settings/ai {assistantModel}` and
-`{automationsModel}`; `null` clears either back to the default. As above, both
+round costs is a real choice, and those lists add the cheaper tiers (Sonnet 5.5
+and Haiku 5.5, GPT-6.1 Terra and GPT-6 Luna). Write them with
+`PATCH /settings/ai {assistantModel}` and `{automationsModel}`; `null` clears
+either back to the default. As above, both
 `model` fields are what will **run**, and a retired id resolves to its
 successor rather than being refused.
+
+**Each block also carries the home's effort for that agent**: `effort`, how hard
+it works on a typed round nobody chose an effort for, and `efforts`, the words it
+may be (`["low","medium","high"]`, the list a chat message is validated against).
+`effort` is `medium` on a home that never chose one, which is what every typed
+round ran at before the field existed. Write it with `PATCH /settings/ai
+{assistantEffort}` and `{automationsEffort}`; `null` puts it back on `medium`.
+**It is a default and nothing more**: a message that names its own `effort`
+[runs at that](#what-a-chat-message-can-carry-model-effort-attachments), a spoken
+round still answers at `low`, and the home's word is read when each turn begins,
+so a change reaches the next round of a conversation already open. **Unlike the
+model fields it is validated** — a model id is resolved to what will run, while
+an effort goes onto the wire as written, so a word a vendor does not take is
+refused here rather than in somebody's conversation. **Its presence is the
+capability**: an older hub answers without it and strips the two PATCH fields
+without a word, so an app offers the control only where it finds `effort`.
 
 **The two agents are offered the same list and choose separately**, which is the
 point of them being two blocks: answering questions about the house and writing
@@ -2237,16 +2483,27 @@ be invented — painted into the room, somewhere it isn't. A device the photos
 show is drawn because they show it; every device gets its place from the
 reading below.
 
-**Then the devices are read off it.** The day picture is shown to device
-recognition's provider and model (on the home's own key) with the room's
-devices by name, and it answers a point for each — on the device where it is
-drawn (`source: "seen"`), on what it works where it is a plug, and where it
-would plausibly be otherwise (`"guessed"`). `x` and `y` are fractions of the
-picture's width and height from its top-left corner. A point a person moved
-(`PATCH`, `source: "placed"`) is never read over: `POST /room-pictures/:id/locate`
-reads only the devices nobody placed — the way to place a device added since.
-A home with no usable recognition key gets no points, and the apps place
-those devices themselves until somebody moves them.
+**Then the devices are read off it.** The day picture is shown, with the room's
+devices by name, to a model that answers a point for each — on the device where
+it is drawn (`source: "seen"`), on what it works where it is a plug, and where
+it would plausibly be otherwise (`"guessed"`). **OpenAI's GPT-6.1 Terra is
+asked first**, on the home's OpenAI key: OpenAI drew the picture, so its key
+has just answered, and the picture goes back to the vendor that already has the
+photos. **Anthropic's Sonnet 5.5 is asked only when that reading fails** and
+the home has an Anthropic key it can use. Each is its vendor's middle rung,
+whatever recognition runs on: a point in the wrong place is one drag from
+right, and the drawing is answered only once its devices are read, so a quicker
+model shows the room sooner. `x` and `y` are fractions of the picture's width
+and height from its top-left corner. A point a person moved (`PATCH`,
+`source: "placed"`) is never read over: `POST /room-pictures/:id/locate` reads
+only the devices nobody placed — the way to place a device added since. A
+reading nobody could give — neither key usable, or both readings failed —
+places no points, and the apps place those devices themselves until somebody
+moves them. The reading is asked at a
+moderate effort on either vendor, and on Anthropic a busy API is tried again
+before the reading fails, and a reading the model declines is asked again of
+another Claude in the same request; a refusal that stands, or an answer cut off
+part way, places nothing rather than half the devices.
 
 **The answer comes before the night.** `POST /room-pictures` answers once the
 day picture is drawn and its devices read — about a minute — with
@@ -2271,8 +2528,8 @@ and `pictures.json`, five per room (the newest kept, and the chosen one
 whatever its age) and 200 MB in all, with a
 refusal to draw on a nearly full card (`409 no_space`). **The photos are not
 kept.** Deleting a room forgets its pictures. Each drawing writes `ai_runs`
-rows (`kind: "roompicture"` for the day and the night, `"roomlocate"` for the
-reading) priced from the response's usage. Every change broadcasts
+rows (`kind: "roompicture"` for the day and the night, `"roomlocate"` for each
+reader asked) priced from the response's usage. Every change broadcasts
 `{"type":"roomPictures","roomId"}`.
 
 ### The device-mapping library
@@ -2759,6 +3016,7 @@ and then:
 {"type":"automationRun","run":{automationId,name,at,trigger,cause,outcome,commands,refused,detail?}}
 {"type":"automationChat","chat":{sessionId,phase,at,text,kind?,detail?}}  phase: thinking | delta | step | turn | amend
 {"type":"assistantChat","chat":{…the same shape…}}      the assistant, on the same stream
+{"type":"chatTitle","chatTitle":{surface,sessionId,title,at}}  a conversation was named; surface: assistant | automations
 ```
 
 **A socket opened with an [API key](#api-keys) is the key's view of all of
@@ -2767,13 +3025,23 @@ frame is the key's, and the activity it hears is narrowed by the key's
 `activity.read`. `mqtt` and `ai` are never available to a key — the broker's
 traffic is `hub.mqtt`'s and the mapping agent's runs are `hub.ai`'s, neither of
 which a key may hold — and on the `automations` stream a key hears the rules
-firing (`automationRun`) and **never a conversation**: `automationChat` and
-`assistantChat` are what people in the home said. A key that is revoked, or
+firing (`automationRun`) and **never a conversation**: `automationChat`,
+`assistantChat` and a conversation's name (`chatTitle`) are what people in the
+home said. A key that is revoked, or
 whose member is removed, is closed with `4001` at once; one that expires or is
 paused by a role edit is closed with `4001` on the next frame the hub would have
 sent it. A key holds at most five streams — a sixth is closed with `1008` — and
 one opened faster than the key's rate allows is closed with `1013`, "try again
 later".
+
+**A conversation's frames are narrowed per socket, the way the routes are.**
+`assistantChat` reaches a member whose role holds `hub.ai`, and
+`automationChat` one holding `hub.ai` and `automation.manage` — what reading
+each transcript takes. A `chatTitle` is narrowed by its `surface` the same way,
+since a name is made of what somebody said. Asked when each frame goes out, so
+a role edit lands on the next frame with no reconnect; the subscription itself
+still succeeds, and `automationRun` is unaffected. A hub before this one sent
+both to any member subscribed.
 
 **The assistant rides the `automations` stream too, deliberately.** A job the
 assistant hands over is an *automations* conversation, so an app drawing a
@@ -2806,8 +3074,9 @@ sentence. See [`docs/automations.md`](automations.md) for the vocabulary.
 
 **`amend` is not a round.** The other four are one exchange happening; `amend`
 says a row already *in* this transcript has changed and should be re-read,
-while whatever round is on screen carries on untouched. One thing sends it
-today: a handoff card's status, which is written when the **other** agent
+while whatever round is on screen carries on untouched. Two things send it
+today. A failure note being asked again (`text: "retry"`), whose
+`data.retried` was just written. And a handoff card's status, which is written when the **other** agent
 finishes a turn and can therefore land at any moment, including in the middle
 of a round of this conversation. It goes out on the conversation the *card* is
 in, which is the assistant's — sent under the delegated session's id an app
@@ -2877,13 +3146,49 @@ goes. An [API key](#api-keys) that is revoked, expired or paused is the same cas
 and gets the same code. Treat it as a stop, and say so; every other close is
 worth retrying — `1013` after a pause.
 
+### A conversation's name: the `chatTitle` frame
+
+A conversation is listed under a name the hub works out from what the person
+said first — **beside** the first round, never in front of it: the person's row
+is written, the round is queued, and the name is asked for at the same moment,
+of the cheapest model of the vendor the conversation runs on (Haiku 5.5 or
+GPT-6 Luna) at the lowest effort, so it is usually back before the round has
+finished reading the home and nothing ever waits for it. A failure there —
+an error, a refusal, an answer with no name in it — asks the other vendor's
+cheapest model, where the home holds that key. Two to six words, in the
+language the person wrote in.
+
+Once the name is kept — on the person's row, as `data.chatTitle` — it goes out
+as `{"type":"chatTitle","chatTitle":{surface,sessionId,title,at}}`, and the
+lists (`GET /assistant/chats`, `GET /automations/chats`) answer it as the
+conversation's `title` from then on. Until then, and for good where none could
+be had, `title` is the first thing said. A greeting names nothing, so the next
+message is asked about too — up to three, after which the conversation keeps
+its first words. A photo alone is not named from; the words that come with it
+are.
+
+**It is a frame of its own rather than a phase on `assistantChat` or
+`automationChat`,** and that is the whole reason it is safe to add: every
+shipped iOS build reads a chat phase it has never met as `turn`, which ends
+the round on screen — trail and all — and a name arriving in the middle of the
+first round would have done exactly that on every phone not yet updated. A
+frame `type` a client has never met is dropped instead, which is the fallback a
+name wants: an older app shows the first thing said until it next reads the
+list, and then shows the name. Its payload has its own key, the rule above.
+
 ## Errors
 
 `400 {error:"invalid_body", issues:[…]}` (zod), `401 unauthorized`,
 `403 {error:"forbidden", permission:"<key>"}`, `404 not_found`, `409` for
 protocol-level refusals (unsupported command, adapter disabled,
 `cannot_remove_owner`, `cannot_change_owner`, `not_owner`, `role_is_owner`,
-`role_is_builtin`, `role_in_use`).
+`role_is_builtin`, `role_in_use`). The chat routes add
+`409 {error:"model_unavailable", detail}` for a message whose own `model` this
+home cannot run, `409 {error:"photos_busy", detail}` for photos past what the
+hub can hold at once, `409 {error:"nothing_to_retry", detail}` for a
+[retry](#asking-a-failed-round-again-post-chatidretry) of a failure the
+conversation has moved on from or that is already being answered, and `413`
+for a body past their own limit.
 
 Through an [API key](#api-keys) there are a few more, each for a different fix:
 `401 {error:"unauthorized", reason}` with `reason` one of `key_expired`,

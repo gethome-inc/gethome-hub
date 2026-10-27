@@ -105,7 +105,11 @@ rules follow from that.
   because that is what an older app shows for a `kind` it has never met; a new
   refusal code is for a new situation and never a rename of an old one, since
   an older app already has its own words for the old one and only a generic
-  failure for the new.
+  failure for the new. **And the fallback is not the same in every field**:
+  every shipped iOS build reads a chat `phase` it has never met as `turn`,
+  which ends the round on screen, while a socket frame `type` it has never met
+  is dropped — so anything new on the chat stream is a frame of its own
+  (`chatTitle` is), never another phase.
 - **A capability is advertised, never inferred.** An app learns what a hub can
   do from presence — `history`, `portraits` and `pairing.signInCodes` on
   `GET /hub`, `streams` on `hello` — never from a version number, because a hub

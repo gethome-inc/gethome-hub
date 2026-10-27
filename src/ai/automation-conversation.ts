@@ -1,5 +1,5 @@
 import type { AskUser } from './automation-tools.js';
-import type { ChatEffort } from './chat/chat-runtime.js';
+import type { ChatEffort, ChatImage, Halted } from './chat/chat-runtime.js';
 
 /**
  * Everything about an automation conversation that is not one vendor's API.
@@ -57,7 +57,8 @@ export const AUTOMATION_SESSION_TTL_MS = 2 * 60 * 60_000;
 export const AUTOMATION_MAX_SESSIONS = 8;
 
 /**
- * Rules one response may deliver.
+ * Rules one reply may deliver, counting any held back for the line that goes
+ * above them: a reply is one page of cards however many responses wrote it.
  *
  * A reply carrying two is the case this exists for — "lights on when I come in
  * and off when I leave" — and three or four is a large ask answered in one go.
@@ -69,13 +70,6 @@ export const AUTOMATION_MAX_SESSIONS = 8;
  */
 export const AUTOMATION_MAX_RULES_PER_TURN = 4;
 
-/**
- * What a turn ended with.
- *
- * `said` and `question` are both suspensions and both perfectly ordinary;
- * `submitted` is the answer; `stopped` is a turn that ran out of rounds,
- * budget or time, and carries the sentence a person should read.
- */
 /**
  * One rule the model handed over, already validated.
  *
@@ -89,6 +83,17 @@ export interface SubmittedRule {
   replaces: string | null;
 }
 
+/**
+ * What a turn ended with.
+ *
+ * `said` and `question` are both suspensions and both perfectly ordinary;
+ * `submitted` is the answer; `stopped` is a turn that ran out of rounds,
+ * budget or time, and carries the sentence a person should read.
+ *
+ * A turn the person stopped part-way ends as whichever arm it had got to, with
+ * `halted` on it: the rules it had already been told are saved, or the words
+ * that had reached the page — and the runtime adds the note that it stopped.
+ */
 export type AutomationTurn =
   | { kind: 'question'; question: AskUser }
   | {
@@ -104,9 +109,22 @@ export type AutomationTurn =
       rules: SubmittedRule[];
       /** What the model said alongside them, when it said anything. */
       text: string;
+      halted?: Halted;
+      /**
+       * The hub's own sentence, when the turn stopped once these were already
+       * accepted — written as a note under the cards, never as the line above
+       * them, which is the model's words and nobody else's.
+       *
+       * **A rule the model was told is saved is delivered however the turn
+       * ends**, so a turn that would have been `stopped` is this arm instead,
+       * and this carries what `stopped` would have said where it is still
+       * worth saying. Only the cost limit is: it is about every message after
+       * this one. See `pump` on the exits that end without a sentence.
+       */
+      stopped?: string;
     }
-  | { kind: 'said'; text: string }
-  | { kind: 'stopped'; reason: string };
+  | { kind: 'said'; text: string; halted?: Halted }
+  | { kind: 'stopped'; reason: string; refused?: true };
 
 /** The accepted-rules arm on its own, for the loop that holds one back while it
  *  asks the model for the sentence that goes above the cards. */
@@ -114,6 +132,29 @@ export type SubmittedTurn = Extract<AutomationTurn, { kind: 'submitted' }>;
 
 /** What a running turn reports as it happens, for the socket. */
 export interface AutomationTurnContext {
+  /**
+   * What this round works at, when it is not what the conversation works at —
+   * the effort somebody picked in the chat for this message.
+   *
+   * **Declared here and not only on `ChatTurnContext`**, which is the
+   * `onSaid` lesson below: the runtime passes one object across both and the
+   * transport reads it, so leaving it off this type worked at runtime and hid
+   * from anybody reading the contract that this agent's rounds can be asked
+   * to think harder or less.
+   */
+  effort?: ChatEffort;
+  /**
+   * Photos that came with this message, for this round only — handed to the
+   * transport with the words, or with the answer to a question.
+   */
+  images?: readonly ChatImage[];
+  /**
+   * The person's stop for this turn. Declared here as well as on
+   * `ChatTurnContext`, the `onSaid` lesson: this agent's loop reads it, and a
+   * field that exists at runtime but not on the type it is read through is a
+   * contract nobody can see.
+   */
+  signal?: AbortSignal;
   /** Text as it arrives, so a chat is not three minutes of nothing. */
   onDelta?: (text: string) => void;
   /**
@@ -136,7 +177,8 @@ export interface AutomationTurnContext {
    * is an open string: a client that meets a new one falls back and still
    * shows the words.
    */
-  onStep?: (summary: string, kind: AutomationStepKind, detail?: string) => void;
+  /** One line per notable thing the turn did — see `ChatTurnContext.onStep`. */
+  onStep?: (summary: string, kind: AutomationStepKind, detail?: string, done?: boolean) => void;
   /**
    * What the model said in a round that then went on to call a tool.
    *
@@ -151,6 +193,11 @@ export interface AutomationTurnContext {
    * See `ChatTurnContext.onSaid` for why it is kept rather than sent.
    */
   onSaid?: (text: string) => void;
+  /**
+   * Another model answered a round in place of the one asked — declared here
+   * as well, the `onSaid` lesson. See `ChatTurnContext.onHandOver`.
+   */
+  onHandOver?: (from: string, to: string, earlier: boolean) => void;
 }
 
 /**

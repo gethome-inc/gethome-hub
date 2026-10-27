@@ -4,7 +4,13 @@ import { automationDocumentSchema } from '../automations/schema.js';
 import { sanityCheckAutomation } from '../automations/sanity.js';
 import { type AgentAuth } from './agent-core.js';
 import { budgetScale, isSupportedModel, supportedModelIds } from './models.js';
-import { QuestionGate, type ChatToolResult } from './chat/agent-loop.js';
+import {
+  NOT_ASKED,
+  QuestionGate,
+  TurnAbort,
+  notDone,
+  type ChatToolResult,
+} from './chat/agent-loop.js';
 import { createChatTransport } from './chat/transport.js';
 import { AGENT_EFFORT } from './chat/chat-runtime.js';
 import {
@@ -81,12 +87,6 @@ export async function createAutomationConversation(
     );
   }
 
-  /**
-   * One controller for the conversation's life rather than one per turn: the
-   * transport is built once and holds the signal, so the watchdog is armed
-   * around each round and disarmed after it.
-   */
-  const controller = new AbortController();
   const transport = await createChatTransport(provider, {
     secret: auth.secret,
     modelId,
@@ -95,7 +95,6 @@ export async function createAutomationConversation(
     label: 'the automation agent',
     timeoutMs: AUTOMATION_TIMEOUT_MS,
     effort: AGENT_EFFORT,
-    signal: controller.signal,
     log,
   });
 
@@ -123,8 +122,9 @@ export async function createAutomationConversation(
    * or a guardrail.
    */
   async function pump(context: AutomationTurnContext | undefined): Promise<AutomationTurn> {
-    const watchdog = setTimeout(() => controller.abort(), AUTOMATION_TIMEOUT_MS);
-    watchdog.unref?.();
+    // The watchdog and the person's stop, for this turn and no other — see
+    // `TurnAbort` on the conversation-wide controller it replaced.
+    const abort = new TurnAbort(context?.signal, AUTOMATION_TIMEOUT_MS);
 
     /**
      * A rule that was accepted with nothing said about it, held back for one
@@ -151,8 +151,69 @@ export async function createAutomationConversation(
     // read below is exactly there — one round earlier in the same loop.
     const silence: { submission: SubmittedTurn | null } = { submission: null };
 
+    /**
+     * What a response submitted, after what is held: one turn, one list, in the
+     * order they came. The round for a silent rule's line can submit another —
+     * "and one for the night" — with words or without, and handing the new
+     * submission back on its own dropped the held one, which the model had been
+     * told was saved a round earlier.
+     */
+    const withHeld = (submission: SubmittedTurn): SubmittedTurn => {
+      const earlier = silence.submission;
+      return earlier === null
+        ? submission
+        : { ...submission, rules: [...earlier.rules, ...submission.rules] };
+    };
+
+    /**
+     * **The turn the person stopped, ended with what it had.** A rule the
+     * model was told is saved is saved — the result said "Accepted", and a
+     * history that says so about a rule that does not exist is a conversation
+     * that lies to itself from then on — with the words it had said above its
+     * card, or what reached the page before the stop where it had said none.
+     * A rule accepted before the stop goes after one held for its line, never
+     * in place of it.
+     */
+    const halted = (text: string, accepted: SubmittedTurn | null = null): AutomationTurn => {
+      const held = accepted !== null ? withHeld(accepted) : silence.submission;
+      if (held === null) return { kind: 'said', text, halted: { acted: false } };
+      return {
+        ...held,
+        text: held.text.trim().length > 0 ? held.text : text,
+        halted: { acted: true },
+      };
+    };
+
+    /**
+     * **Whatever ends the turn, a held rule is handed over.** Its results went
+     * back saying "Accepted" — the model's own history says the rule is saved
+     * and that they have been shown a card for it — so every way out of the
+     * round spent on its line has to deliver it, and only the two that round
+     * was written for did: the line, and more tool calls. The cost limit and a
+     * refusal returned `stopped`, running out of rounds fell through to it, a
+     * question was returned instead, a second submission was returned on its
+     * own and a throw took the turn with it — each one a conversation whose
+     * history says a rule exists that was never saved, contradicting itself
+     * from then on over a card nobody saw.
+     *
+     * So every exit asks this first, and answers what it always answered only
+     * when nothing is held (`handOver(…) ?? …`). `said` is whatever the round
+     * got out before it ended; `stopped` is a sentence of the hub's own for
+     * the note under the cards, which only the cost limit has. A person's stop
+     * keeps the same promise through `halted`, above.
+     */
+    const handOver = (said: string, stopped?: string): SubmittedTurn | null => {
+      const held = silence.submission;
+      if (held === null) return null;
+      return { ...held, text: said, ...(stopped !== undefined ? { stopped } : {}) };
+    };
+
     try {
       for (let turn = 1; turn <= AUTOMATION_MAX_TURNS; turn += 1) {
+        // Between rounds is the cleanest place a stop can land: every call so
+        // far is answered and the next request has not gone.
+        if (abort.halted) return halted('');
+
         /**
          * **Say something before the request, not after it.**
          *
@@ -170,20 +231,63 @@ export async function createAutomationConversation(
         );
 
         if (transport.costUsd() >= budgetUsd) {
-          return {
-            kind: 'stopped',
-            reason:
-              'This conversation has reached its cost limit. Start a new one, or write the rule ' +
-              'by hand.',
-          };
+          /**
+           * **The cap holds for the round a held rule's line would cost too**,
+           * so nothing is spent past it and the rule goes over without its
+           * line — and the limit is still said, under the cards rather than
+           * instead of them. It is the one exit whose sentence is about what
+           * comes next: every later message here meets this same check, and
+           * somebody looking at a card with nothing above it should learn why
+           * now rather than by being refused on the next thing they say.
+           * Worded for what is on the page, since "write the rule by hand" is
+           * advice for a turn that produced none.
+           */
+          return (
+            handOver(
+              '',
+              'This conversation has reached its cost limit. Start a new one to carry on.',
+            ) ?? {
+              kind: 'stopped',
+              reason:
+                'This conversation has reached its cost limit. Start a new one, or write the rule ' +
+                'by hand.',
+            }
+          );
         }
 
-        const round = await transport.round(context);
+        const round = await transport.round(context, abort.signal);
+
+        // Stopped while the model was answering: what it had said is the
+        // answer, and nothing it was about to call was called.
+        if (round.stop === 'halted') return halted(round.said);
 
         if (round.stop === 'refusal') {
+          /**
+           * **A refusal of the line is not a refusal of the request**, so with
+           * a rule held the turn is not `refused`. Every refusal sentence is
+           * written for a request that was declined — "try asking for it
+           * differently" — and so is what the runtime does with one: offer
+           * another model, and let the message go from the model's memory.
+           * Here the rule that was asked for is saved and its card says what it
+           * does; what the model declined was the line above it, which leaves
+           * the card where more tool calls would have, handed over with
+           * whatever the round kept. A refusal that is about the conversation
+           * meets the next message, where all of that is true.
+           */
+          const held = handOver(round.said);
+          if (held !== null) {
+            log.info(
+              { model: modelId, provider },
+              'automation agent: the line for a saved rule was declined',
+            );
+            return held;
+          }
+          // Marked, because a refusal is the one stop another model may
+          // answer — its note offers one, and the cost cap's does not.
           return {
             kind: 'stopped',
             reason: round.refusal ?? 'The model declined to answer that.',
+            refused: true,
           };
         }
 
@@ -205,9 +309,7 @@ export async function createAutomationConversation(
         if (calls.length === 0) {
           // The words a silent submission was sent back for. The rule is
           // already saved; this is the sentence that goes above its card.
-          const submitted = silence.submission;
-          if (submitted !== null) return { ...submitted, text: said };
-          return { kind: 'said', text: said || 'Ready when you are.' };
+          return handOver(said) ?? { kind: 'said', text: said || 'Ready when you are.' };
         }
 
         const results: ChatToolResult[] = [];
@@ -224,6 +326,13 @@ export async function createAutomationConversation(
         const submitted: SubmittedRule[] = [];
 
         for (const call of calls) {
+          // A stop is honoured before every call, never inside one: the calls
+          // after it in this response are answered as not done.
+          if (abort.halted) {
+            results.push(notDone(call.id));
+            continue;
+          }
+
           if (call.name === 'ask_user') {
             const parsed = askUserInput.safeParse(call.input);
             if (!parsed.success) {
@@ -249,8 +358,9 @@ export async function createAutomationConversation(
               });
               continue;
             }
-            if (handedBack?.kind === 'submitted') {
-              // A rule was accepted earlier in this same response, and that
+            if (handedBack?.kind === 'submitted' || silence.submission !== null) {
+              // A rule was accepted earlier in this turn — in this same
+              // response, or held from the one before for its line — and that
               // ends the turn: the person is handed a preview to look at. A
               // question asked beside it has nothing to attach to — the turn
               // is over before it could be answered — and the loop can only
@@ -259,7 +369,7 @@ export async function createAutomationConversation(
               // model can act on, rather than after it, which nobody can.
               results.push({                id: call.id,
                 text:
-                  'A rule has already been submitted in this response, which ends the turn. ' +
+                  'A rule has already been submitted, which ends the turn. ' +
                   'Ask this once they have replied.',
                 isError: true,
               });
@@ -279,7 +389,10 @@ export async function createAutomationConversation(
           }
 
           if (call.name === 'submit_automation') {
-            if (submitted.length >= AUTOMATION_MAX_RULES_PER_TURN) {
+            // The rules held for their line count too: a reply is one page of
+            // cards however many responses it took to write.
+            const accepted = submitted.length + (silence.submission?.rules.length ?? 0);
+            if (accepted >= AUTOMATION_MAX_RULES_PER_TURN) {
               // Bounded rather than refused outright: what is already accepted
               // is saved and shown, and the rest are asked for again once the
               // person has seen these — a reply that writes a page of rules
@@ -349,6 +462,15 @@ export async function createAutomationConversation(
           });
         }
 
+        if (abort.halted) {
+          // A question asked in this response is not put to somebody who has
+          // just said stop — retracted, so its call is answered with the rest
+          // — while a rule accepted before the stop is kept, and saved.
+          gate.retract(results, NOT_ASKED);
+          transport.pushToolResults(results);
+          return halted('', handedBack?.kind === 'submitted' ? handedBack : null);
+        }
+
         if (handedBack?.kind === 'question') {
           // Nothing is appended *yet*: the API wants one user message carrying
           // a result for every call in the assistant turn, and the question's
@@ -361,35 +483,61 @@ export async function createAutomationConversation(
 
         transport.pushToolResults(results);
 
-        // A rule accepted with nothing said about it: keep it, and give the
-        // model one round to say what it did. Anything it says next comes back
-        // through the no-calls branch above, carrying this submission with it.
-        if (handedBack?.kind === 'submitted' && handedBack.text.trim().length === 0) {
-          if (silence.submission !== null) return handedBack;
-          silence.submission = handedBack;
-          context?.onStep?.('Writing it up for you', 'thinking');
-          continue;
-        }
+        if (handedBack?.kind === 'submitted') {
+          // After whatever is held, in the order they came — see `withHeld`.
+          const delivered = withHeld(handedBack);
 
-        if (handedBack) return handedBack;
+          // A rule accepted with nothing said about it: keep it, and give the
+          // model one round to say what it did. Anything it says next comes
+          // back through the no-calls branch above, carrying this submission
+          // with it — and nothing is held twice, so the line is asked for once
+          // however many rules arrive without one.
+          if (silence.submission === null && delivered.text.trim().length === 0) {
+            silence.submission = delivered;
+            // Announced only when there is a round left to spend on it. On the
+            // last there is not, and running out hands the rule over below.
+            if (turn < AUTOMATION_MAX_TURNS) {
+              context?.onStep?.('Writing it up for you', 'thinking');
+            }
+            continue;
+          }
+          return delivered;
+        }
 
         // **Exactly one round, whatever that round turns out to be.** The rule
         // is already saved and the person is waiting in front of it, so a model
         // that answered the ask with more tool calls does not get to spend a
         // third round on a sentence: it is handed over with whatever it did
         // say, which is usually nothing and is no worse than before.
-        const held = silence.submission;
-        if (held !== null) return { ...held, text: said };
+        const held = handOver(said);
+        if (held !== null) return held;
       }
 
-      return {
-        kind: 'stopped',
-        reason:
-          `The agent used all ${AUTOMATION_MAX_TURNS} steps without finishing. Try saying what ` +
-          `you want more directly, or in smaller pieces.`,
-      };
+      // Out of rounds. A rule held for its line goes over without one, and
+      // with nothing said under it: the agent did finish, so "without
+      // finishing" is not true of this turn.
+      return (
+        handOver('') ?? {
+          kind: 'stopped',
+          reason:
+            `The agent used all ${AUTOMATION_MAX_TURNS} steps without finishing. Try saying what ` +
+            `you want more directly, or in smaller pieces.`,
+        }
+      );
+    } catch (error) {
+      // A provider that fails in the round for a held rule's line — or
+      // anything else that throws there — is one more way out of that round,
+      // and the rule was saved before it. With nothing held the throw is the
+      // runtime's, as it always was: a note, and the conversation left open.
+      const held = handOver('');
+      if (held === null) throw error;
+      log.warn(
+        { err: error, model: modelId, provider },
+        'automation agent: the line for a saved rule could not be written',
+      );
+      return held;
     } finally {
-      clearTimeout(watchdog);
+      abort.dispose();
     }
   }
 
@@ -505,7 +653,9 @@ export async function createAutomationConversation(
        * other call in it.
        */
       gate.settleDangling();
-      transport.pushUser(opened ? text : `${taskPrompt}\n\n${text}`.trim());
+      // A message's photos travel with it, for this round only — see the
+      // runtime's `rebase`.
+      transport.pushUser(opened ? text : `${taskPrompt}\n\n${text}`.trim(), context?.images);
       opened = true;
       log.debug({ model: modelId, provider }, 'automation agent: user message');
       return pump(context);
@@ -517,7 +667,7 @@ export async function createAutomationConversation(
       // message, every `tool_use` in the assistant turn accounted for — which
       // is the API's actual rule, and sending only the answer is what used to
       // refuse the conversation outright.
-      gate.answer(text);
+      gate.answer(text, context?.images);
       return pump(context);
     },
 

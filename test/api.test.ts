@@ -1038,8 +1038,9 @@ describe.skipIf(!handle)('hub API', () => {
       // Terra is retired and still known, so the write is taken rather than
       // 400-ing an app that has not shipped an update — the same stance
       // `authType` takes one field over. What it must not do is come back as
-      // the model this hub runs, because it isn't: it comes back as the model
-      // that replaced it.
+      // the model this hub runs, because it isn't: it comes back as what runs
+      // in its place — recognition's default here, since the Terra that
+      // replaced it is not on recognition's list.
       payload: { openaiApiKey: 'sk-proj-1234567890', openaiModel: 'gpt-5.6-terra' },
     });
     expect(saved.statusCode).toBe(200);
@@ -1166,7 +1167,8 @@ describe.skipIf(!handle)('hub API', () => {
     expect(saved.statusCode).toBe(200);
     const body = saved.json() as Record<string, unknown>;
     expect(body).toMatchObject({
-      assistant: { model: 'gpt-6.1-sol', provider: 'openai', choosable: true },
+      // GPT-5.6 Terra's successor is the Terra after it: a tier keeps its tier.
+      assistant: { model: 'gpt-6.1-terra', provider: 'openai', choosable: true },
       automations: { model: 'claude-opus-5-5', provider: 'anthropic', choosable: true },
     });
     const assistant = body.assistant as {
@@ -1175,7 +1177,12 @@ describe.skipIf(!handle)('hub API', () => {
     };
     // `models` is the answering vendor's list — what an app a version behind
     // draws its pills from — and `choices` the whole table.
-    expect(assistant.models.map((model) => model.id)).toEqual(['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-luna']);
+    expect(assistant.models.map((model) => model.id)).toEqual([
+      'gpt-6-astra',
+      'gpt-6.1-sol',
+      'gpt-6.1-terra',
+      'gpt-6-luna',
+    ]);
     expect(assistant.choices.anthropic?.map((model) => model.id)).toEqual([
       'claude-fable-5-1',
       'claude-opus-5-5',
@@ -1185,6 +1192,7 @@ describe.skipIf(!handle)('hub API', () => {
     expect(assistant.choices.openai?.map((model) => model.label)).toEqual([
       'GPT-6 Astra',
       'GPT-6.1 Sol',
+      'GPT-6.1 Terra',
       'GPT-6 Luna',
     ]);
 
@@ -1231,6 +1239,52 @@ describe.skipIf(!handle)('hub API', () => {
       headers: auth(ownerToken),
       payload: { apiKey: 'sk-ant-api-1234567890' },
     });
+  });
+
+  /**
+   * Each agent's effort, end to end — the shape both apps draw their effort
+   * control from, and the write they send. **Presence is the capability**: a
+   * hub older than the field answers without `effort` and strips the write, so
+   * both fields are pinned on a hub that never chose one.
+   */
+  it('answers each agent’s effort with the words it may be, and writes it back', async () => {
+    const fresh = await app.inject({ method: 'GET', url: '/api/v1/settings/ai', headers: auth(memberToken) });
+    expect(fresh.json()).toMatchObject({
+      assistant: { effort: 'medium', efforts: ['low', 'medium', 'high'] },
+      automations: { effort: 'medium', efforts: ['low', 'medium', 'high'] },
+    });
+
+    const saved = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { assistantEffort: 'high', automationsEffort: 'low' },
+    });
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json()).toMatchObject({ assistant: { effort: 'high' }, automations: { effort: 'low' } });
+
+    // A word no vendor is sent is refused rather than stored — it would be a
+    // 400 in the middle of somebody's conversation instead of here — and the
+    // refusal leaves what was there.
+    const refused = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { assistantEffort: 'max' },
+    });
+    expect(refused.statusCode).toBe(400);
+    const kept = await app.inject({ method: 'GET', url: '/api/v1/settings/ai', headers: auth(memberToken) });
+    expect(kept.json()).toMatchObject({ assistant: { effort: 'high' } });
+
+    // `null` puts it back on the default, as the model fields beside it do —
+    // and leaves the hub as the next test expects to find it.
+    const cleared = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { assistantEffort: null, automationsEffort: null },
+    });
+    expect(cleared.json()).toMatchObject({ assistant: { effort: 'medium' }, automations: { effort: 'medium' } });
   });
 
   it('switches adaptation off without asking for the key again', async () => {

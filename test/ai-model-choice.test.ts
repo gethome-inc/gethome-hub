@@ -135,8 +135,10 @@ describe.skipIf(!handle)('which model a run is given', () => {
   /**
    * **What updating a hub does to a home that chose a model this build
    * retired**: it runs the model that replaced it — Opus 5 → Opus 5.5, GPT-6
-   * Sol → GPT-6.1 Sol, and both GPT-5.6 tiers on down that chain — and nobody
-   * has to do anything.
+   * Sol → GPT-6.1 Sol — and nobody has to do anything. GPT-5.6 Terra lands on
+   * GPT-6.1 Sol here as well, for a different reason: its successor is GPT-6.1
+   * Terra, which recognition does not offer, so the walk runs off the end of
+   * the chain and recognition's default is what runs.
    */
   it('hands a run the successor of a retired model, on either provider', async () => {
     await settings.setAiSettings({ model: 'claude-opus-5', apiKey: 'sk-ant-api-key-0000' });
@@ -181,7 +183,7 @@ describe.skipIf(!handle)('which model a run is given', () => {
 
     const ai = await settings.getAiSettings();
     expect(effectiveModel('openai', ai.openai.model)).toBe('gpt-6.1-sol');
-    expect(ai.assistant).toMatchObject({ provider: 'openai', model: 'gpt-6.1-sol' });
+    expect(ai.assistant).toMatchObject({ provider: 'openai', model: 'gpt-6.1-terra' });
     expect(ai.automations).toMatchObject({ provider: 'anthropic', model: 'claude-opus-5-5' });
 
     // And straight from the rows: exactly what was written, every one.
@@ -212,11 +214,13 @@ describe('which model an agent is given once its own is retired', () => {
       modelId: 'claude-sonnet-5-5',
     });
     expect(effectiveAgentModel('gpt-6-sol', both)).toEqual({ provider: 'openai', modelId: 'gpt-6.1-sol' });
-    // Down a chain again: GPT-5.6 was replaced by GPT-6 Sol, which GPT-6.1
+    // Down a chain again: GPT-5.6 Sol was replaced by GPT-6 Sol, which GPT-6.1
     // Sol has replaced in turn.
     expect(effectiveAgentModel('gpt-5.6-sol', both)).toEqual({ provider: 'openai', modelId: 'gpt-6.1-sol' });
-    expect(effectiveAgentModel('gpt-5.6-terra', both)).toEqual({ provider: 'openai', modelId: 'gpt-6.1-sol' });
     expect(effectiveAgentModel('gpt-5.6', both)).toEqual({ provider: 'openai', modelId: 'gpt-6.1-sol' });
+    // And a tier keeps its tier: GPT-5.6 Terra went to Sol only while GPT-6
+    // had no Terra, and is GPT-6.1 Terra's now there is one.
+    expect(effectiveAgentModel('gpt-5.6-terra', both)).toEqual({ provider: 'openai', modelId: 'gpt-6.1-terra' });
     // Down a chain: every Opus before 5 walks to 5.5 rather than stopping.
     expect(effectiveAgentModel('claude-opus-4-6', both)).toEqual({
       provider: 'anthropic',
@@ -271,7 +275,16 @@ describe('the model table', () => {
       'claude-sonnet-5',
       'claude-sonnet-4-6',
     ],
-    openai: ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6', 'gpt-5.6-terra'],
+    openai: [
+      'gpt-6-astra',
+      'gpt-6.1-sol',
+      'gpt-6.1-terra',
+      'gpt-6-sol',
+      'gpt-6-luna',
+      'gpt-5.6-sol',
+      'gpt-5.6',
+      'gpt-5.6-terra',
+    ],
   } as const;
 
   it('still knows, and names, every model a hub may have stored', () => {

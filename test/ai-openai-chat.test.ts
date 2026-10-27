@@ -19,6 +19,9 @@ import { QuestionGate, type ChatTransportOptions } from '../src/ai/chat/agent-lo
  */
 
 const log = pino({ level: 'silent' });
+/** A round's signal that nothing ever aborts — what a round runs on when no
+ *  turn is watching it. */
+const unstopped = new AbortController().signal;
 
 /** One SSE frame, exactly as the Responses stream writes it. */
 function frame(type: string, data: unknown): string {
@@ -64,7 +67,6 @@ function transportFor(): ReturnType<typeof createOpenAiTransport> {
     label: 'the assistant',
     timeoutMs: 60_000,
     effort: 'medium',
-    signal: new AbortController().signal,
     log,
   };
   return createOpenAiTransport(options);
@@ -98,10 +100,13 @@ describe('the OpenAI chat transport', () => {
     const deltas: string[] = [];
     const thinking: string[] = [];
     transport.pushUser('is the kitchen lamp on?');
-    const round = await transport.round({
-      onDelta: (delta) => deltas.push(delta),
-      onThinking: (delta) => thinking.push(delta),
-    });
+    const round = await transport.round(
+      {
+        onDelta: (delta) => deltas.push(delta),
+        onThinking: (delta) => thinking.push(delta),
+      },
+      unstopped,
+    );
 
     expect(deltas.join('')).toBe('The lamp is on.');
     expect(thinking.join('')).toBe('Checking the kitchen');
@@ -132,7 +137,7 @@ describe('the OpenAI chat transport', () => {
     const transport = transportFor();
     const thinking: string[] = [];
     transport.pushUser('turn the light on');
-    await transport.round({ onThinking: (delta) => thinking.push(delta) });
+    await transport.round({ onThinking: (delta) => thinking.push(delta) }, unstopped);
 
     expect(thinking.join('')).toBe(
       '**Clarifying the light**\n\nTwo lamps match. The TV one is on.' +
@@ -149,7 +154,7 @@ describe('the OpenAI chat transport', () => {
     );
     const transport = transportFor();
     transport.pushUser('hello');
-    await transport.round(undefined);
+    await transport.round(undefined, unstopped);
 
     const body = sentBody();
     // Without `stream` there are no deltas and the page shows three dots for
@@ -191,7 +196,7 @@ describe('the OpenAI chat transport', () => {
 
     const transport = transportFor();
     transport.pushUser('what is in the kitchen?');
-    const round = await transport.round(undefined);
+    const round = await transport.round(undefined, unstopped);
 
     // Arguments arrive as a JSON *string* on this API. A caller handed the
     // string would `safeParse` it and refuse every call it ever made.
@@ -201,7 +206,7 @@ describe('the OpenAI chat transport', () => {
     expect(round.stop).toBe('tools');
 
     transport.pushToolResults([{ id: 'call_1', text: 'one lamp' }]);
-    await transport.round(undefined);
+    await transport.round(undefined, unstopped);
     const input = sentBody()['input'] as Record<string, unknown>[];
     expect(input.at(-1)).toEqual({
       type: 'function_call_output',
@@ -219,7 +224,7 @@ describe('the OpenAI chat transport', () => {
     );
     const transport = transportFor();
     transport.pushToolResults([{ id: 'call_1', text: 'no such device.', isError: true }]);
-    await transport.round(undefined);
+    await transport.round(undefined, unstopped);
 
     const input = sentBody()['input'] as Record<string, unknown>[];
     expect(input.at(-1)).toMatchObject({ output: 'That failed. no such device.' });
@@ -253,7 +258,7 @@ describe('the OpenAI chat transport', () => {
     const transport = transportFor();
     const gate = new QuestionGate(transport);
     transport.pushUser('something');
-    await transport.round(undefined);
+    await transport.round(undefined, unstopped);
     gate.open('asked');
 
     // The round threw before its results were written — the case that refuses
@@ -261,7 +266,7 @@ describe('the OpenAI chat transport', () => {
     // find.
     gate.settleDangling();
 
-    await transport.round(undefined);
+    await transport.round(undefined, unstopped);
     const input = sentBody()['input'] as Record<string, unknown>[];
     const answered = input
       .filter((item) => item['type'] === 'function_call_output')
@@ -289,7 +294,7 @@ describe('the OpenAI chat transport', () => {
     );
     const transport = transportFor();
     transport.pushUser('something');
-    const round = await transport.round(undefined);
+    const round = await transport.round(undefined, unstopped);
 
     expect(round.stop).toBe('refusal');
     expect(round.refusal).toBe('I can’t help with that.');
@@ -327,7 +332,7 @@ describe('the OpenAI chat transport', () => {
     );
     const transport = transportFor();
     transport.pushUser('what is on?');
-    const round = await transport.round({ onDelta: (delta) => said.push(delta) });
+    const round = await transport.round({ onDelta: (delta) => said.push(delta) }, unstopped);
 
     expect(round.stop).toBe('end');
     expect(round.said).toBe('The kitchen light is on, and the');
@@ -347,12 +352,12 @@ describe('the OpenAI chat transport', () => {
     );
     const transport = transportFor();
     transport.pushUser('something');
-    await expect(transport.round(undefined)).rejects.toThrow(/overloaded/);
+    await expect(transport.round(undefined, unstopped)).rejects.toThrow(/overloaded/);
 
     // A stream that simply stops is the other half: continuing from it would
     // push a half-round onto the history and refuse the conversation later.
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(streamOf([])));
-    await expect(transport.round(undefined)).rejects.toThrow(/without completing/);
+    await expect(transport.round(undefined, unstopped)).rejects.toThrow(/without completing/);
 
     // And an `incomplete` for any reason but the output ceiling is still a
     // failure, because there what was produced is not an answer at all.
@@ -366,7 +371,7 @@ describe('the OpenAI chat transport', () => {
         ]),
       ),
     );
-    await expect(transport.round(undefined)).rejects.toThrow(/content_filter/);
+    await expect(transport.round(undefined, unstopped)).rejects.toThrow(/content_filter/);
   });
 
   it('reports the vendor’s own sentence when the request itself is refused', async () => {
@@ -380,6 +385,6 @@ describe('the OpenAI chat transport', () => {
     );
     const transport = transportFor();
     transport.pushUser('something');
-    await expect(transport.round(undefined)).rejects.toThrow(/Incorrect API key/);
+    await expect(transport.round(undefined, unstopped)).rejects.toThrow(/Incorrect API key/);
   });
 });

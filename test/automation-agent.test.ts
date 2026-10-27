@@ -11,10 +11,13 @@ import {
   settings as settingsTable,
 } from '../src/db/schema.js';
 import { openTestDb, resetDb, startedAutomations, type TestDb } from './helpers/db.js';
-import type {
-  AutomationConversation,
-  AutomationTurn,
-  AutomationTurnContext,
+import {
+  AUTOMATION_MAX_RULES_PER_TURN,
+  AUTOMATION_MAX_TURNS,
+  type AutomationConversation,
+  type AutomationTurn,
+  type AutomationTurnContext,
+  type SubmittedTurn,
 } from '../src/ai/automation-conversation.js';
 import { automationSystemPrompt } from '../src/ai/automation-prompts.js';
 import { AUTOMATION_TOOLS } from '../src/ai/automation-tools.js';
@@ -71,6 +74,9 @@ vi.mock('@anthropic-ai/sdk', () => ({
         };
       },
     };
+    // The loops talk to `client.beta.messages` (server-side fallbacks), which
+    // is the same endpoint; the mock answers there with the same functions.
+    beta = { messages: this.messages };
   },
 }));
 
@@ -469,6 +475,205 @@ describe('the automation conversation', () => {
     expect(turn.kind).toBe('submitted');
     expect((turn as { text: string }).text).toBe('Saved it.');
     expect(streamMock).toHaveBeenCalledTimes(2);
+  });
+
+  /**
+   * **Every way out of the round a silent rule is held for hands the rule
+   * over.** Its results went back saying "Accepted", so the model's own history
+   * says the rule is saved and that a card was shown for it — and a turn that
+   * ends without it leaves a conversation contradicting itself from then on,
+   * over a card nobody ever sees. The two endings that round was written for,
+   * the line and more tool calls, are the tests above; these are the rest.
+   */
+  const silentSubmission = (name: string = goodDocument.name, id?: string) =>
+    assistant([toolUse('submit_automation', { document: { ...goodDocument, name }, replaces: null }, id)]);
+  const ruleNames = (turn: AutomationTurn) =>
+    turn.kind === 'submitted'
+      ? turn.rules.map((rule) => (rule.document as { name: string }).name)
+      : [];
+
+  it('hands a held rule over when the conversation reaches its cost limit first', async () => {
+    // The cap is checked before every round, the one for the line included, and
+    // it still holds — nothing is spent past it. What arrives is the rule the
+    // model was told is saved, with the limit said under it: every later
+    // message in this conversation meets the same check.
+    streamMock.mockReturnValueOnce({
+      ...silentSubmission(),
+      // One round dear enough to spend the conversation's whole budget.
+      usage: { input_tokens: 300_000, output_tokens: 50 },
+    });
+
+    const turn = await (await conversationFor()).send('make me a rule');
+
+    expect(turn.kind).toBe('submitted');
+    expect(ruleNames(turn)).toEqual(['Evening lights']);
+    expect((turn as SubmittedTurn).text).toBe('');
+    expect((turn as SubmittedTurn).stopped).toContain('cost limit');
+    expect(streamMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('hands a held rule over when the round for its line is declined', async () => {
+    // Declined is about the line, not the request: the rule they asked for is
+    // saved and its card says what it does. So the turn is not a refusal —
+    // no sentence telling somebody to ask for it differently, no other model
+    // offered — and the words that had streamed go with the declined reply,
+    // which the vendor's rule is to discard whole.
+    streamMock
+      .mockReturnValueOnce(silentSubmission())
+      .mockReturnValueOnce(assistant([text('Done — the lights will')], 'refusal'));
+
+    const turn = await (await conversationFor()).send('make me a rule');
+
+    expect(turn.kind).toBe('submitted');
+    expect(ruleNames(turn)).toEqual(['Evening lights']);
+    expect((turn as SubmittedTurn).text).toBe('');
+    expect((turn as SubmittedTurn).stopped).toBeUndefined();
+  });
+
+  it('hands a rule over when it is accepted on the last round the turn may spend', async () => {
+    // There is no round left to ask for the line, so none is announced, and
+    // "used all its steps without finishing" is not said about an agent that
+    // finished.
+    let rounds = 0;
+    streamMock.mockImplementation(() => {
+      rounds += 1;
+      return rounds < AUTOMATION_MAX_TURNS
+        ? assistant([toolUse('list_rooms_zones', {})])
+        : silentSubmission();
+    });
+
+    const steps: string[] = [];
+    const turn = await (await conversationFor()).send('make me a rule', {
+      onStep: (summary) => steps.push(summary),
+    });
+
+    expect(turn.kind).toBe('submitted');
+    expect(ruleNames(turn)).toEqual(['Evening lights']);
+    expect(rounds).toBe(AUTOMATION_MAX_TURNS);
+    expect(steps).not.toContain('Writing it up for you');
+  });
+
+  it('hands a held rule over when the rounds run out while its line is paused', async () => {
+    // The other way to run out with a rule in hand: held a round before the
+    // last, and that round paused rather than answering.
+    let rounds = 0;
+    streamMock.mockImplementation(() => {
+      rounds += 1;
+      if (rounds < AUTOMATION_MAX_TURNS - 1) return assistant([toolUse('list_rooms_zones', {})]);
+      if (rounds === AUTOMATION_MAX_TURNS - 1) return silentSubmission();
+      return assistant([], 'pause_turn');
+    });
+
+    const turn = await (await conversationFor()).send('make me a rule');
+
+    expect(turn.kind).toBe('submitted');
+    expect(ruleNames(turn)).toEqual(['Evening lights']);
+    expect(rounds).toBe(AUTOMATION_MAX_TURNS);
+  });
+
+  it('keeps both rules when the round for the line submits a second, silently', async () => {
+    streamMock
+      .mockReturnValueOnce(silentSubmission('Evening lights'))
+      .mockReturnValueOnce(silentSubmission('Night lights'))
+      .mockReturnValueOnce(assistant([text('never reached')], 'end_turn'));
+
+    const turn = await (await conversationFor()).send('lights for the evening and the night');
+
+    expect(turn.kind).toBe('submitted');
+    // Both were told "Accepted", so both are handed over, in the order they came.
+    expect(ruleNames(turn)).toEqual(['Evening lights', 'Night lights']);
+    // And the line is asked for once, however many rules arrived without one.
+    expect(streamMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps both rules when the round for the line submits a second with words', async () => {
+    streamMock
+      .mockReturnValueOnce(silentSubmission('Evening lights'))
+      .mockReturnValueOnce(
+        assistant([
+          text('Both are set — one for the evening, one for the night.'),
+          toolUse('submit_automation', {
+            document: { ...goodDocument, name: 'Night lights' },
+            replaces: null,
+          }),
+        ]),
+      );
+
+    const turn = await (await conversationFor()).send('lights for the evening and the night');
+
+    expect(ruleNames(turn)).toEqual(['Evening lights', 'Night lights']);
+    expect((turn as SubmittedTurn).text).toBe(
+      'Both are set — one for the evening, one for the night.',
+    );
+  });
+
+  it('counts the rules held for their line against the bound on one reply', async () => {
+    // A reply is one page of cards however many responses it took, so the
+    // bound counts what is held: the round for the line gets the rest of it,
+    // and the rule past it is refused inside the turn.
+    const held = Array.from({ length: AUTOMATION_MAX_RULES_PER_TURN - 1 }, (_, index) => `Held ${index + 1}`);
+    streamMock
+      .mockReturnValueOnce(
+        assistant(
+          held.map((name) =>
+            toolUse('submit_automation', { document: { ...goodDocument, name }, replaces: null }),
+          ),
+        ),
+      )
+      .mockReturnValueOnce(
+        assistant([
+          text('That is the lot.'),
+          toolUse('submit_automation', { document: { ...goodDocument, name: 'Last' }, replaces: null }),
+          toolUse('submit_automation', {
+            document: { ...goodDocument, name: 'One too many' },
+            replaces: null,
+          }),
+        ]),
+      );
+
+    const turn = await (await conversationFor()).send('a rule for everything');
+
+    expect(ruleNames(turn)).toEqual([...held, 'Last']);
+  });
+
+  it('hands a held rule over rather than ask a question in the round for its line', async () => {
+    // The rule ended the turn a response ago, so a question here has nothing
+    // to attach to: it is answered as not asked, inside the turn, and the rule
+    // goes over with what was said.
+    streamMock
+      .mockReturnValueOnce(silentSubmission())
+      .mockReturnValueOnce(
+        assistant([
+          text('Saved it.'),
+          toolUse('ask_user', { question: 'Switch it on now?', options: [{ id: 'a', label: 'Yes' }] }, 'toolu_ask'),
+        ]),
+      )
+      .mockReturnValueOnce(assistant([text('Right you are.')], 'end_turn'));
+
+    const conversation = await conversationFor();
+    const turn = await conversation.send('make me a rule');
+
+    expect(turn.kind).toBe('submitted');
+    expect(ruleNames(turn)).toEqual(['Evening lights']);
+    expect((turn as SubmittedTurn).text).toBe('Saved it.');
+    // Not left waiting on an answer nobody was asked for, and the call closed,
+    // so the next message is a conversation the API accepts.
+    expect(conversation.awaitingAnswer()).toBe(false);
+    await conversation.send('thanks');
+    expect(closedToolIds(2)).toContain('toolu_ask');
+  });
+
+  it('hands a held rule over when the round for its line fails', async () => {
+    // A provider that falls over is one more way out of that round, and the
+    // rule was saved before it.
+    streamMock.mockReturnValueOnce(silentSubmission()).mockImplementationOnce(() => {
+      throw new Error('Overloaded');
+    });
+
+    const turn = await (await conversationFor()).send('make me a rule');
+
+    expect(turn.kind).toBe('submitted');
+    expect(ruleNames(turn)).toEqual(['Evening lights']);
   });
 
   it('takes two rules from one response, and stops at the bound', async () => {
@@ -1166,6 +1371,31 @@ describe('the chat service', () => {
     expect(engine.list()).toHaveLength(2);
     // Both switched off: two rules is not a reason to start doing either.
     expect(engine.list().every((rule) => !rule.enabled)).toBe(true);
+  });
+
+  it('saves the rules a stopped turn had accepted, and says why it stopped under them', async () => {
+    // The conversation reached its cost limit while a rule was held for its
+    // line. The rule is saved and drawn like any other, and the limit is the
+    // hub's own note after it — never the line above the card, which is the
+    // model's words and nobody else's.
+    const { chat, engine } = await chatFor([
+      {
+        kind: 'submitted',
+        rules: [{ document: goodDocument, replaces: null }],
+        text: '',
+        stopped: 'This conversation has reached its cost limit. Start a new one to carry on.',
+      },
+    ]);
+
+    const started = await chat.start({ memberId: memberId, message: 'evening lights' });
+    await chat.idle();
+
+    const transcript = await chat.transcript(started.sessionId);
+    expect(transcript.map((message) => message.role)).toEqual(['user', 'preview', 'note']);
+    expect(transcript[2]?.text).toBe(
+      'This conversation has reached its cost limit. Start a new one to carry on.',
+    );
+    expect(engine.list().map((rule) => rule.name)).toEqual(['Evening lights']);
   });
 
   it('writes the transcript, and it outlives the conversation', async () => {
@@ -1867,8 +2097,8 @@ describe('AutomationChat provider selection', () => {
   /**
    * **What an update does to a conversation's model, on the path that runs
    * one.** A home that chose GPT-5.6 Terra before this build retired it is
-   * handed GPT-6.1 Sol — the end of the chain of models that replaced it, on
-   * the vendor they chose — rather than the retired id, and rather than
+   * handed GPT-6.1 Terra — the model that replaced it, on the vendor they chose
+   * and the tier they chose — rather than the retired id, and rather than
    * Anthropic's default.
    */
   it('hands a conversation the successor of a retired model, on the vendor it chose', async () => {
@@ -1882,7 +2112,7 @@ describe('AutomationChat provider selection', () => {
 
     expect(handed.provider).toBe('openai');
     expect(handed.secret).toBe('sk-proj-this-one');
-    expect(handed.modelId).toBe('gpt-6.1-sol');
+    expect(handed.modelId).toBe('gpt-6.1-terra');
   });
 
   /** A Claude subscription token, stored the way an upgraded hub carries it. */

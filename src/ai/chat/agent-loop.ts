@@ -1,6 +1,6 @@
 import type { AiProvider } from '../../core/settings.js';
 import type { Logger } from '../../logging.js';
-import type { ChatEffort, ChatTurnContext } from './chat-runtime.js';
+import type { ChatEffort, ChatImage, ChatTurnContext } from './chat-runtime.js';
 
 /**
  * The parts of a conversational agent loop that are neither a vendor's API nor
@@ -41,15 +41,20 @@ export interface ChatToolResult {
 }
 
 /**
- * Why a round stopped, in the four words a pump branches on.
+ * Why a round stopped, in the five words a pump branches on.
  *
  * Deliberately not each vendor's own vocabulary. Anthropic says
  * `end_turn`/`tool_use`/`refusal`/`pause_turn`; OpenAI answers a `status` with
  * a refusal content block inside the output. Both collapse to the same four
  * questions — did it finish, does it want tools, did it decline, should we ask
  * again — and a pump that branched on the raw value would be a pump per vendor.
+ *
+ * The fifth is neither vendor's: **`halted`** is the person stopping the round
+ * part-way (`StopRequested`). It is a round rather than a throw because what
+ * reached the page before the stop is the answer they will read, and a throw
+ * would lose it on the way to the note saying something failed.
  */
-export type ChatStop = 'end' | 'tools' | 'refusal' | 'pause';
+export type ChatStop = 'end' | 'tools' | 'refusal' | 'pause' | 'halted';
 
 /** One streamed round of a conversation. */
 export interface ChatRound {
@@ -79,11 +84,25 @@ export interface ChatTransport {
   readonly provider: AiProvider;
   readonly modelId: string;
 
-  /** The person's message (or a revival's priming) as the next user turn. */
-  pushUser(text: string): void;
+  /**
+   * The person's message (or a revival's priming) as the next user turn.
+   *
+   * **Photos ride in the same turn, and only when there are any**: with none,
+   * the request is byte-for-byte what it always was, which keeps the cached
+   * prefix of every conversation that never sends one exactly as warm. A
+   * message that is only a photo sends no empty text beside it — Anthropic
+   * refuses an empty text block, and a picture is a complete user turn on
+   * both vendors.
+   */
+  pushUser(text: string, images?: readonly ChatImage[]): void;
 
-  /** Results for the calls in the last round, as one user turn. */
-  pushToolResults(results: ChatToolResult[]): void;
+  /**
+   * Results for the calls in the last round, as one user turn — and, when the
+   * answer that closed a question came with photos, those photos after them,
+   * in the same turn where the vendor allows it and as the very next one where
+   * it does not.
+   */
+  pushToolResults(results: ChatToolResult[], images?: readonly ChatImage[]): void;
 
   /**
    * One streamed round, with the model's reply pushed onto the history.
@@ -93,9 +112,20 @@ export interface ChatTransport {
    * and a callback taking one agent's step kinds cannot stand in for one taking
    * `string` — contravariance rather than a nuisance, since it would accept a
    * word the caller cannot handle.
+   *
+   * **`signal` is the round's own** — a `TurnAbort`'s, which is the watchdog
+   * and the person's stop behind one signal. Aborted by the watchdog it is the
+   * sentence it always was, thrown; aborted by a stop it is a `halted` round
+   * carrying what had streamed, with only the words of it — never a thinking
+   * block cut off before its signature or a tool call cut off halfway through
+   * its input — pushed onto the history, and what the round had cost by then
+   * added to `costUsd()`.
    */
   round(
-    context: Pick<ChatTurnContext, 'onDelta' | 'onThinking' | 'onSaid' | 'effort'> | undefined,
+    context:
+      | Pick<ChatTurnContext, 'onDelta' | 'onThinking' | 'onSaid' | 'onHandOver' | 'effort'>
+      | undefined,
+    signal: AbortSignal,
   ): Promise<ChatRound>;
 
   /**
@@ -128,16 +158,108 @@ export interface ChatTransportOptions {
    * How hard the model works, for every round this conversation runs.
    *
    * `high` for a job cached against a device model for ever; `medium` for a
-   * chat, which is many small rounds read the moment they arrive. Not exposed
-   * to anybody: two settings for one decision is one too many, so each agent
-   * states its own and nothing configures it. **One round may ask for
+   * chat, which is many small rounds read the moment they arrive. No setting
+   * configures it — each agent states its own. **One round may ask for
    * something else** — `ChatTurnContext.effort`, which is how a spoken round
-   * gets answered at the speed a person standing in a room expects.
+   * gets answered at the speed a person standing in a room expects, and how a
+   * typed message that asked for its own effort (`ChatTurnRequest.effort`,
+   * from the hub's three words) gets that for its one round.
    */
   effort: ChatEffort;
-  signal: AbortSignal;
   log: Logger;
 }
+
+/**
+ * What a turn's signal is aborted with when the person asked for the stop —
+ * the one thing that tells it from the watchdog, which aborts with nothing.
+ */
+export class StopRequested extends Error {
+  constructor() {
+    super('they stopped this answer');
+    this.name = 'StopRequested';
+  }
+}
+
+/** Whether a signal was aborted by the person's stop, never by the watchdog. */
+export function haltedBy(signal: AbortSignal): boolean {
+  return signal.aborted && signal.reason instanceof StopRequested;
+}
+
+/**
+ * Four characters to a token: the estimate a round stopped part-way is priced
+ * at, for the share of it no vendor had counted yet.
+ *
+ * Neither vendor reports usage for a reply it never finished, while both bill
+ * for what was generated before the connection closed — so what streamed is
+ * measured, and the reasoning only as its summary, which is shorter than what
+ * the model actually thought. An estimate on the low side, which is the side
+ * to be wrong on in a ledger somebody reads as what they paid.
+ */
+export function tokensIn(characters: number): number {
+  return Math.ceil(characters / 4);
+}
+
+/**
+ * One turn's abort: the watchdog and the person's stop, behind one signal.
+ *
+ * **Per turn, never per conversation**, and the conversation-wide controller
+ * this replaced was a bug of its own: an `AbortController` aborts once, so the
+ * first turn to outlive its watchdog left the conversation's signal aborted for
+ * good, and every round after it was refused the instant it was sent — a chat
+ * that had timed out once answered "stopped answering after 120s" to every
+ * later message, a millisecond after it was sent, until the session was
+ * dropped two hours later.
+ *
+ * The person's stop is the turn's `ChatTurnContext.signal`, and it is listened
+ * to rather than handed to the round directly, so that the round's own signal
+ * says *which* of the two fired (`haltedBy`) — a stop ends the turn with what
+ * it had, where the watchdog is a failure with a sentence.
+ */
+export class TurnAbort {
+  private readonly controller = new AbortController();
+  private readonly watchdog: ReturnType<typeof setTimeout>;
+  private readonly stop: AbortSignal | undefined;
+  private readonly onStop = (): void => this.controller.abort(new StopRequested());
+
+  constructor(stop: AbortSignal | undefined, timeoutMs: number) {
+    this.stop = stop;
+    this.watchdog = setTimeout(() => this.controller.abort(), timeoutMs);
+    this.watchdog.unref?.();
+    if (stop?.aborted === true) this.onStop();
+    else stop?.addEventListener('abort', this.onStop, { once: true });
+  }
+
+  /** What each round of this turn is sent with. */
+  get signal(): AbortSignal {
+    return this.controller.signal;
+  }
+
+  /** The person asked for this turn to stop — as against the watchdog firing,
+   *  or nothing at all. */
+  get halted(): boolean {
+    return haltedBy(this.controller.signal);
+  }
+
+  /** Disarm the watchdog and stop listening, however the turn ended. */
+  dispose(): void {
+    clearTimeout(this.watchdog);
+    this.stop?.removeEventListener('abort', this.onStop);
+  }
+}
+
+/**
+ * The result a tool call gets when the person stopped the turn before it ran.
+ *
+ * Every call in a response still needs a result in the very next message, so
+ * the ones a stop skipped are answered rather than abandoned — in words the
+ * model reads on the next turn as what was not done.
+ */
+export function notDone(id: string): ChatToolResult {
+  return { id, text: 'Not done: they stopped this answer before it ran.', isError: true };
+}
+
+/** What a question gets in its place when a stop arrives before it is asked. */
+export const NOT_ASKED = 'Not asked: they stopped this answer before it reached them.';
 
 /**
  * Why a round was declined, in the words the person who asked it can use.
@@ -221,13 +343,29 @@ export class QuestionGate {
     this.pending = null;
   }
 
-  /** Close the question with the person's answer and send the stash with it. */
-  answer(text: string): void {
+  /**
+   * Close the question with the person's answer and send the stash with it.
+   *
+   * An answer can be a photo and nothing else — "which one?" answered with a
+   * picture of it — and a tool result has to *say* something, so a wordless
+   * one says that a photo follows rather than going out empty.
+   */
+  answer(text: string, images?: readonly ChatImage[]): void {
     if (this.pending === null) return;
-    const results: ChatToolResult[] = [...this.stashed, { id: this.pending, text }];
+    const said =
+      text.trim().length === 0 && images !== undefined && images.length > 0
+        ? images.length === 1
+          ? '(They answered with the photo below.)'
+          : '(They answered with the photos below.)'
+        : text;
+    const results: ChatToolResult[] = [...this.stashed, { id: this.pending, text: said }];
     this.stashed = [];
     this.pending = null;
-    this.transport.pushToolResults(results);
+    if (images !== undefined && images.length > 0) {
+      this.transport.pushToolResults(results, images);
+    } else {
+      this.transport.pushToolResults(results);
+    }
   }
 
   /**

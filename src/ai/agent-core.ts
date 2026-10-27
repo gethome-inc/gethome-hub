@@ -267,7 +267,7 @@ export interface AgentStep {
   detail?: string;
 }
 
-/** Keep one step small enough that sixty runs of them stay in the tens of KB. */
+/** Keep one step small enough that the 250 runs `ai_runs` keeps stay small on an SD card. */
 export const MAX_STEP_DETAIL = 2000;
 
 export function agentStep(type: AgentStep['type'], summary: string, detail?: string): AgentStep {

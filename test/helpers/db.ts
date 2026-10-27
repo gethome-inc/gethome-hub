@@ -225,6 +225,9 @@ export async function startedAutomations(
     createConversation?: AutomationChatOptions['createConversation'];
     /** The same, for the assistant. */
     createAssistantConversation?: AssistantChatOptions['createConversation'];
+    /** Stands in for the vendor that names a conversation, for both agents.
+     *  Absent, a runtime whose conversations are stand-ins names nothing. */
+    askTitle?: AutomationChatOptions['askTitle'];
     /** The suite's own, when it has one — the assistant asks it whether a
      *  member may hand a job to another agent. */
     access?: AccessService;
@@ -269,6 +272,7 @@ export async function startedAutomations(
     ...(options.createConversation !== undefined
       ? { createConversation: options.createConversation }
       : {}),
+    ...(options.askTitle !== undefined ? { askTitle: options.askTitle } : {}),
   });
   const access = options.access ?? new AccessService(db, events);
   if (options.access === undefined) await access.load();
@@ -286,6 +290,7 @@ export async function startedAutomations(
     ...(options.createAssistantConversation !== undefined
       ? { createConversation: options.createAssistantConversation }
       : {}),
+    ...(options.askTitle !== undefined ? { askTitle: options.askTitle } : {}),
   });
   return { engine, store, chat, assistant };
 }

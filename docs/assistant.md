@@ -13,16 +13,17 @@ another agent over to it.
 
 It runs on **either vendor**, on a model the home chooses: **Fable 5.1**, **Opus
 5.5**, **Sonnet 5.5** or **Haiku 5.5** on Anthropic, **GPT-6 Astra**, **GPT-6.1
-Sol** or **GPT-6 Luna** on OpenAI. That list is its own rather than the
-mapper's, and the difference is the trade: a mapping descriptor is cached
-against a device *model* and shapes every unit of it the home ever meets, so a
-cheaper tier that is wrong once is wrong for ever and the mapper never offers
-one. A conversation is many small rounds, read the moment they arrive and
-answered with another message when the reply is poor — so what a round costs is
-a real choice somebody can make, and both halves of it are visible. **A home
-that chose a model this build has retired is moved to the one that replaced it**
-— Opus 5 → Opus 5.5, Sonnet 5 → Sonnet 5.5, GPT-5.6 Sol and Terra → GPT-6 Sol →
-GPT-6.1 Sol — on the vendor it chose, resolved whenever the settings are read
+Sol**, **GPT-6.1 Terra** or **GPT-6 Luna** on OpenAI — the same four rungs on
+both. That list is its own rather than the mapper's, and the difference is the
+trade: a mapping descriptor is cached against a device *model* and shapes every
+unit of it the home ever meets, so a cheaper tier that is wrong once is wrong
+for ever and the mapper never offers one. A conversation is many small rounds,
+read the moment they arrive and answered with another message when the reply is
+poor — so what a round costs is a real choice somebody can make, and both halves
+of it are visible. **A home that chose a model this build has retired is moved
+to the one that replaced it** — Opus 5 → Opus 5.5, Sonnet 5 → Sonnet 5.5,
+GPT-5.6 Sol → GPT-6 Sol → GPT-6.1 Sol, GPT-5.6 Terra → GPT-6.1 Terra, each on
+its own tier — on the vendor it chose, resolved whenever the settings are read
 and never written back (`src/ai/models.ts` says why that is the rollback-safe
 half). **Its $0.50 cap is in the model's own dollars**: it was sized against
 Opus 5, so `budgetScale` stretches it for GPT-6 Astra and Fable 5.1, at twice
@@ -97,7 +98,14 @@ request may ever carry a tool call with no result after it. Each vendor's own
 shape sits behind `ChatTransport`: `chat/anthropic-transport.ts` keeps the two
 cache breakpoints, `display: 'summarized'` (the default is `omitted`, which
 streams empty thinking blocks and reads as a silent minute) and the streamed
-`messages.stream` that a non-streaming `create` would refuse outright;
+`messages.stream` that a non-streaming `create` would refuse outright. It keeps
+nothing of a refusal on the history — declined before a word, that is an empty
+assistant turn the API refuses anywhere but last, so every later message in the
+conversation used to answer a 400 — and of a reply cut off at `max_tokens` only
+its words, with none of its tool calls run, since a call cut off part way
+through its input can still parse. It talks to `client.beta.messages`, because
+every request opts into server-side fallback (*Refusals* below), and reads a
+reply another Claude finished through `anthropic-fallback.ts`.
 `chat/openai-transport.ts` is the Responses API over plain `fetch` — no second
 SDK for a Pi to download — with `summary: 'auto'` as that vendor's spelling of
 the same lesson and `store: false` with the encrypted reasoning replayed by hand.
@@ -119,6 +127,159 @@ it.
 
 What each agent keeps is its own `pump`, because what ends a turn genuinely
 differs: a rule for one, a handoff for the other.
+
+## A conversation's own model, effort and photos
+
+A message can carry three things besides its words, on all four chat routes —
+`model`, `effort` and `attachments` — and `GET /hub`'s `chat` block is how an
+app knows a hub reads them rather than stripping them (`docs/api.md` has the
+wire). Each is per conversation or per round, never per home: the home's own
+setting is still `PATCH /settings/ai`, and nothing here writes to it.
+
+**A model is a conversation, so a different model is a different
+conversation.** A message naming the model already answering changes nothing;
+one naming another moves the conversation when its turn *begins* (turns are
+chained, so a switch queued behind a running round never pulls the
+conversation out from under it). The new conversation is opened the way
+`revive()` opens one — a fresh provider conversation primed with a recap of
+everything said before this message (an answer written after it was taken
+included, a message still queued behind it not), **all of what the old one
+remembered rather than the last forty rows** a revival recaps (a revived
+conversation's memory is that tail, and a switch keeps to it) — and opened on
+what the conversation was *about* when it began, never on the first rule it
+went on to write, which would turn an automations chat into an edit of that
+rule — because a vendor's history
+is its own shape, signed thinking blocks and encrypted reasoning included, and
+no other model takes it. **The old conversation's spend is banked first and the ledger
+cursor reset after**, or the delta `record` writes would lose what the old one
+ran up since its last row and under-record the new one until it caught up. A
+revived conversation reopens on the model the newest message that named one
+asked for, while it is offered and its key usable; a message naming none leaves
+a conversation on what it is running, live or revived, so the two cannot
+disagree. A model this home cannot run is refused at the route
+(`409 model_unavailable`) before the message is taken.
+
+**Effort is the round's**, which it always was (`ChatTurnContext.effort`): a
+typed message may ask for `low`, `medium` or `high`; one that asks for none
+gets **the home's own word for that agent** (`GET /settings/ai`'s
+`assistant.effort` / `automations.effort`, `medium` until somebody picks
+another), read when its turn begins; and a spoken round's `low` keeps winning.
+The home's word is the agent's own setting in the same way its model is — and
+the one an agent works at on a job handed to it, where nobody is there to
+choose.
+
+**A change of effort mid-conversation re-reads it at full price, once.** The
+effort goes on every request as the top-level `output_config.effort`, and on
+Anthropic a different value from the request before it misses the cached
+conversation: the tools and the system prompt stay cached, and the
+conversation's tail is written again at the cache-write rate rather than read
+at the cache-read one. Talking after typing (`low` against the home's word)
+does it, and so does a chat picking another word; the round after is cached
+again. Anthropic's **per-message effort** — an effort-only `role: "system"`
+message under the `mid-conversation-output-config-2026-07-01` beta, which keeps
+the cache — is **deliberately not used yet**. It already answers to three beta
+names; raising effort through it (a spoken `low` back to a typed `medium`) is
+the direction its own documentation calls less reliable; how it meets the
+server-side fallback, whose targets (Opus 4.8) do not take it, is not
+documented; and it is the kind of request-shaping change a harness in the wild
+shipped and then had to take back off a platform that refused it — while a hub
+is a board in somebody's house that updates when somebody asks it to. The cost
+it would save is one cache rewrite per change of effort. Worth revisiting when
+it leaves beta, or if the run log shows long conversations paying for it
+often.
+
+**A photo reaches the model for one round and is kept nowhere.** It travels
+`ChatTurnContext.images` → the agent's `send`/`answer` →
+`ChatTransport.pushUser(text, images)` / `pushToolResults(results, images)`:
+on Anthropic as image blocks ahead of the words (or after the tool results an
+answer closes), on OpenAI as `input_image` data URLs (a user item after the
+function outputs, since those are text only). A message with no photo sends
+exactly the bytes it always did, so the cached prefix stays warm. The
+transcript row says what each photo was — type, size, the app's `ref` — and
+never its bytes. **And the provider history lets it go**: once a round that
+carried a photo is over, the session is *rebased* — spend banked, a fresh
+conversation on the same model, primed with the record of everything said —
+before the next queued turn begins. The history cannot be edited instead,
+because Fable 5.1 binds each thinking block to everything ahead of it and a
+conversation may only be appended to; a photo left in it would sit in memory
+for the session's two hours on a board with thirty megabytes to spare, and be
+re-sent and paid for every round after. **It happens whether or not the
+conversation is still in memory** — one closed or evicted mid-round still has
+its queued turns to run, and they must not run on the photo — and a rebase that
+cannot reopen (the key removed while the round ran) drops the conversation and
+answers each turn already queued on it with a note rather than running it on the
+old history; the next message revives it. The recap says a photo was sent and is
+no longer available, so "what about the colour?" reaches a model that knows
+there was a picture it cannot see. What the rebase costs is what a revival
+costs: the model's reasoning and an outstanding question. A photo never crosses
+a handoff — the brief is text — so the assistant has to describe one in words
+for the automations agent to know about it.
+
+**What the hub holds of photos is bounded across every conversation, not only
+per message** (`ChatPhotoBudget`). A message is acknowledged at once and its
+photos wait in its conversation's chain until its turn has run, so the
+per-message bounds alone let messages sent behind a running round, or into
+several conversations at once, hold as many megabytes as anybody sent. The
+budget is one message at the ceiling, held from before anything is written to
+the end of the turn (its rebase included, whichever way it ended), and a message
+past it is `409 photos_busy` — the `portrait_busy` rule, in bytes. Words alone
+are never refused for it. **And a photo sent with no words stores a caption** —
+`Photo`, `2 photos` — with `data.wordless: true`, because an older app draws a
+person's row from `text` alone; the recap, the voice's history and the list
+read the flag, and the model is sent the empty message the person sent.
+
+## Stopping a round
+
+`POST …/chat/:id/stop` (both agents, `docs/api.md` has the wire) stops the round
+a conversation is running, part-way, and `GET /hub`'s `chat.stop` is how an app
+knows the route is there. It is **acknowledged, never awaited**, like everything
+else about a chat: the round winds down at its next safe point and says so on
+the socket.
+
+**The person's stop is the turn's `ChatTurnContext.signal`, and each loop listens
+to it through a `TurnAbort`** (`chat/agent-loop.ts`), the watchdog and the stop
+behind one signal whose *reason* says which fired (`StopRequested`, `haltedBy`).
+A stop lands at one of three places, and each is a clean end:
+
+- **mid-reply** — the transport answers a `halted` round carrying what had
+  streamed, and pushes only those words onto the history: a thinking block cut
+  off before its signature, or a tool call cut off half way through its input,
+  is a conversation the API refuses, so neither is kept;
+- **between tool calls** — the call already running finishes, the ones after it
+  in the same response are answered *Not done* (every call still needs a result
+  before the next request), and a question not yet put is retracted;
+- **between rounds** — every call is answered and the next request has not gone.
+
+**The turn ends as whatever it had got to, with `halted` on it**, so what it
+did is written down exactly as it would have been: the words that reached the
+page as the `agent` row; a job the assistant had handed over as its `handoff`
+card; a rule the automations agent had been told is saved, saved, with its
+`preview`. Then the runtime writes a note with `data.stopped: true` — `Stopped.`,
+or `Stopped. What was already done stays done.` when the home had changed — and
+puts one line on `ChatSession.priming` so the model learns on its next turn that
+it was cut short rather than finished, and does not pick the old request back
+up unasked. A loop that throws while stopping is still a stop, not "something
+went wrong".
+
+**Only the round somebody is watching.** `ChatSession.halt` is the running
+turn's own controller, set when it begins (before a model switch, so a stop
+pressed during one still lands) and cleared when it ends — a message sent behind
+it is a turn of its own and still runs. And **a stop does not reach across a
+handoff**: the job is the other agent's conversation now, which has its own stop.
+
+**It is paid for like any other round.** Neither vendor sends usage for a reply
+it never finished, so the transport prices what it can: Anthropic counts the
+prompt in the `message_start` that opens the stream and the SDK keeps that
+snapshot through the abort; OpenAI counts nothing until `response.completed`,
+so the prompt is estimated — a photo as `PHOTO_TOKENS`, never as its base64,
+and what an earlier round already sent as a cache read. The reply is `tokensIn`
+of what streamed, reasoning only as its summary, which is the low side of what
+was billed.
+
+**The watchdog is per turn because of this.** It used to be one controller for
+the conversation's life, and a controller aborts once: the first turn to outlive
+the watchdog left every later round refused the instant it was sent, until the
+session was dropped two hours later. `TurnAbort` is new for every turn.
 
 ## One transcript store
 
@@ -153,6 +314,71 @@ anything. They are two narrow columns rather than a `meta` blob because both
 are closed vocabularies a screen groups and sums by; `ai_run_exchanges` is
 where *content* goes, and its rule that request bodies are recorded and headers
 never are is what keeps a run log safe to read.
+
+## A conversation's name
+
+The lists used to call a conversation by its first message, cut at 120
+characters — always recognisable, and the reason a drawer of chats read as a
+column of half-sentences. Now the hub names it: a few words saying what it is
+about, in the language the person wrote in (`src/ai/chat/chat-title.ts`, asked
+from `ChatRuntime.nameIfUntitled`). Six rules.
+
+**Beside the round, never in front of it.** The person's row is written, the
+round is queued, and the name is asked for in the same breath — off the turn
+chain, which is where a follow-up message waits, and never awaited. It is a few
+words from the cheapest model there is, so it is usually back before the round
+has finished reading the home; nothing waits for it either way, and nothing it
+does can fail a turn.
+
+**The cheapest model of the conversation's own vendor, at the lowest effort,
+then the other vendor's.** `TITLE_MODELS` — Haiku 5.5 and GPT-6 Luna — at
+`low`, with Anthropic's thinking left adaptive rather than switched off (the
+setting that vendor's guidance steers away from, for hundredths of a cent).
+Every model on either list writes "Porch light at sunset" equally well, so the
+choice is cost and speed, and it is not a setting. The vendor is the one this
+message is answered on: the person's words go where they were already going.
+Only a failure there — an error, a refusal, an answer with no name in it —
+takes them to the other vendor, on a key the home holds; "nothing to name yet"
+is an answer about the message, not a failure, and the other vendor is not
+asked to overrule it.
+
+**What was said is data.** It is quoted in tags it cannot close, and the
+instructions say plainly that the model names it and does nothing it asks — the
+worst a message can do is choose its own name. The instructions follow what the
+chat apps that do this ask for (a few words, the conversation's language,
+accuracy over flourish) and what this list is: one line in a quiet typeface, so
+no quotation marks, no emoji, no full stop. What comes back is cleaned rather
+than trusted — the first line, the dressing taken off, cut at a word past
+60 characters — and a line past 80 is the model answering rather than naming,
+which counts as a failure.
+
+**A greeting is not a subject.** The model may answer `NONE`, and the next
+message with words is asked about too, with everything said so far — up to
+three, after which the conversation keeps its first words. A photo alone is not
+named from (the words that come with it are, with a line saying photos were
+sent; the photo itself is never sent again for a name), and one name is worked
+out at a time. A message that arrives while a name is out waits for it, and is
+offered the moment it comes back without one: that attempt read the rows before
+the message was written, so "hi!" and the question a second behind it would
+otherwise stay listed as "hi!".
+
+**Kept on the person's row, then announced.** `data.chatTitle` on the newest row
+it was named from: the store the conversation already has, so retention takes
+it with the rows, a revival reads it back with them (a restart neither names a
+conversation twice nor forgets one is still owed a name), and `list` finds it in
+the query it already makes. Only once it is written does it go out on the bus
+and the socket as `chatTitle`, a frame of its own — never a phase on the chat
+frames, which every shipped iOS build would read as `turn` and end the round on
+screen with ([`api.md`](api.md#a-conversations-name-the-chattitle-frame)).
+
+**What it costs is the conversation's.** About four thousandths of a cent,
+added to the conversation's next ledger row (`sideUsd`, banked by `record`)
+rather than written as a row of its own, which would spend the ledger's 250
+rows on figures that round to nothing — or banked at once where the
+conversation has gone by the time the name lands. A runtime whose conversations
+are a suite's stand-ins names nothing unless the suite hands it a stand-in for
+the vendor too (`askTitle`), so no test reaches a vendor through the name, or
+takes the response a stubbed `fetch` had queued for the round.
 
 ## The tools
 
@@ -334,7 +560,8 @@ none), **the transcript** and **what the line cost**. The phone owns the
 **audio** and the live captions on its page, and it is the phone that sends
 `session.close`, because it is the thing somebody presses stop on.
 
-**A spoken round is answered at `low` effort where a typed one is `medium`**,
+**A spoken round is answered at `low` effort where a typed one runs at the
+home's word for the assistant (`medium` unless somebody chose another)**,
 and the knob is on the turn (`ChatTurnContext.effort`) rather than on the
 conversation, because a transport is built once and holds the history while one
 conversation is both — typed in the morning, talked to in the evening. The
@@ -343,8 +570,11 @@ longer is free, and a spoken answer is a person standing in a room with the
 voice having already said "one moment". The work behind most spoken requests is
 also smaller than it looks — one tool call against a catalog the agent can
 already see — so what the extra effort buys is deliberation about a decision
-that was never in doubt. Nothing configures it, and nothing else uses the
-override.
+that was never in doubt. **A typed message may also ask for its own effort**
+(`effort` on the message, from the hub's three words — see *A conversation's
+own model, effort and photos* above), and the spoken `low` still wins for a
+spoken round: the voice is answering somebody standing in a room, whatever the
+chat's picker last said.
 
 **`askAloud` is the whole delegation handler, and it is ten lines** where the
 phone's was sixty — because the wait is the runtime's own. The phone could only
@@ -352,7 +582,10 @@ acknowledge a message, subscribe to a socket, and resume a continuation when a
 `turn` frame came back with the rows re-read; here the conversation's
 `inFlight` is the answer. It runs the **ordinary** path, so a spoken exchange
 leaves exactly the two rows a typed one does, with the same trail on the socket
-and the same conversation to carry on by typing. That also fixed a real bug:
+and the same conversation to carry on by typing. The person's row says it was
+spoken (`data.via: "voice"`): it names no model and no effort, exactly as a
+typed message following the home's does, so an app picking a conversation back
+up reads the thinking word off the newest *typed* message and steps past it. That also fixed a real bug:
 the phone wrote the person's sentence itself *and* sent it as a message, so
 every spoken request landed in the transcript twice. Nothing writes rows now
 but the round.
@@ -742,19 +975,61 @@ reason decides *that* it was refused and the category decides only the
 sentence**: `stop_details` is informational, is `null` on plenty of real
 refusals, and its `explanation` is not guaranteed present.
 
-Server-side `fallbacks` — where the API re-runs a declined request on another
-model inside the same call — is **deliberately not enabled.** It would recover
-a refusal rather than relabel it, and Anthropic's guidance is to opt in by
-default on Opus-5-class models. Two things argue the other way here. The
-workload is domestic: this agent answers "is the kitchen light on" and writes
-schedules, so the classifiers it could trip are close to never. And the
-parameter is beta with a churn record — `fallback: {model, on_partial}` →
-`fallbacks: [...]` → `fallbacks: "default"`, across three superseded beta
-headers — while this is firmware on a board in somebody's house that updates on
-its own schedule. Enabling it is a two-line change (`client.beta.messages.stream`,
-`betas: ['server-side-fallback-2026-07-01']`, `fallbacks: 'default'`, and the
-`Beta*` request types) and worth revisiting if refusals ever show up in the run
-log.
+**A declined request is asked again of another Claude, inside the same call**
+(`fallbacks: "default"`, beta `server-side-fallback-2026-07-01`, in
+`anthropic-fallback.ts`, on every Claude request the hub makes — both agents,
+device recognition and reading a room picture). It was deliberately off for a
+while, on two arguments that turned out weaker than the cost of a refusal: that
+a domestic workload would almost never trip a classifier — but a home is full
+of locks, alarms, cameras and its own network, which is exactly what `cyber`
+fires on, and Opus 5.5 adds a `bio` classifier — and that the parameter is a
+beta with a history of renames under firmware that updates on its own
+schedule. The second is answered rather than accepted: **a request the API
+refuses because of the field is sent again without it, once, and when that one
+is answered the process stops sending it** and says so in its log
+(`withFallbacks`), so a retired beta costs a home its fallback and never its
+assistant. Only a refusal about the beta's header or the `fallbacks` parameter
+counts: one about a `fallback` block somewhere in a conversation's history is
+that conversation's, and its note is the answer to it, never switching the
+fallback off for every request the hub makes. Haiku has no server-side fallback and is sent
+nothing. What a reply answered that way changes is all in that one module:
+what the declined model began before the hand-over is not sent back (its
+thinking and any tool call it started), only the answering model's calls run,
+its words continue the declined model's sentence rather than starting a new
+one, and each attempt is priced at its own model's rates from
+`usage.iterations`. And **the round says so** — a step in its working,
+*Answered by Opus 4.8* (`kind: "handover"`), since the chat's header names the
+model somebody chose. Only a refusal the whole chain declines reaches a note.
+
+**A declined message is left out of the model's memory and kept on the page.**
+Left in the vendor's history it is part of every request after it — the
+person's next message joins it as the same user turn — so the classifier that
+declined it reads it again and declines what follows, and somebody rephrasing
+is refused for what they already took back. So after a refused turn the
+conversation is rebuilt (`ChatRuntime.rebase`, the way a photo is let go) from
+the record *without* the message and its refusal — and so is every record it is
+rebuilt from afterwards, on another model, after a photo, on a revival, until
+the message is answered again. Where it was, the record says only that a
+message was declined; and when that round had already done something, the
+model is told what, which stays done. The transcript keeps both, and a retry on
+another model still finds them.
+
+**A note that ends a failed round says which model failed and why, and offers
+the other vendor's** (`chat/failure.ts`): *GPT-6.1 Sol couldn't answer: this
+home's OpenAI account is out of credit.*, with `data.failure` naming the model
+and the kind, and `data.switchTo` the other vendor's default model where this
+home has that key. It used to be the provider's status and JSON relayed, in a
+home with a perfectly good key from the other vendor beside it. An app can
+offer the switch as a doorway on the note, and pressing it is
+`POST …/chat/:id/retry`:
+the message the note names (`failure.messageId`) answered again on that model,
+with no second message written, on a conversation opened for it and told what
+the failed round had already done — a change that took, never one it only
+tried; `data.retried` on the note says where the conversation went once it is
+open, and is what a revival reads. A message sent while that round ran is the
+conversation moving on, and nothing is asked again past it. A refusal is a failure in this sense too — another
+vendor's model may genuinely answer differently — while a turn that ran into
+its cost cap or out of rounds is not. `docs/api.md` has the wire.
 
 The other two refusals are the automations agent's, carrying the same codes
 because both apps already branch on them: `ai_not_configured` and

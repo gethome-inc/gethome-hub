@@ -625,11 +625,15 @@ falls through to prose rather than being dropped. `text` is always the sentence;
 
 | `role` | `text` | `data` |
 |---|---|---|
-| `user` | what was typed | — |
+| `user` | what was typed — or, for a photo sent with no words, the hub's caption (`Photo`, `2 photos`), so an app that predates photos draws something true | only when the message asked for something besides its words: `{model?, effort?, attachments?: [{type: "image", mediaType, ref?, width?, height?, bytes}], wordless?}`, the keys the request named — never a photo's bytes. `wordless: true` says `text` is the caption |
 | `agent` | what the model said | — |
 | `question` | the question | `{options: [{id, label, hint?}], allowFreeText}` |
 | `preview` | the rule's **summary**, from `describeAutomation` | `{automationId, name, shape, enabled, edited}` |
-| `note` | something the hub is saying on its own behalf — a provider that failed, a rule that could not be saved | — |
+| `note` | something the hub is saying on its own behalf — a provider that failed, a rule that could not be saved, a round somebody stopped, a limit the conversation reached | `{stopped: true}` on the note a stopped round ends on (see *Stopping a round* below); otherwise nothing |
+
+Whatever its role — never the person's own — **the first row a round writes**
+also carries `data.steps` and `data.tookMs` (see *What a person sees while it works*
+below): they follow the row's position in the round, not its kind.
 
 **One conversation, any number of rules — and one reply can carry more than one
 card.** Two things had to change for that. The loop kept a *single*
@@ -662,8 +666,9 @@ reply can change one rule and add another.
 **And the sentence covers the lot**: the prompt asks for one line above the
 cards rather than a paragraph per card.
 
-The number of rules one response may deliver is bounded
-(`AUTOMATION_MAX_RULES_PER_TURN`, four). Two is the case this exists for and
+The number of rules one reply may deliver is bounded
+(`AUTOMATION_MAX_RULES_PER_TURN`, four, counting any held back for the line
+above them — see below). Two is the case this exists for and
 four is a large ask answered in one go; past that it is a model that has
 misread the room, and the cost lands in somebody's home as a page of rules
 nobody asked for. The ones already accepted are saved and shown, and the rest
@@ -706,6 +711,33 @@ line — reported as its own step, because it is a round the person is watching.
 with whatever it did say, since spending a third round on a sentence it will not
 write is worse than handing over without one.
 
+**And however that round ends, the rule is handed over.** Its results have
+already told the model "Accepted", so a turn that ended without it left a
+conversation whose own history said a rule existed that had never been saved —
+and somebody who never saw its card. The line and more tool calls were the only
+endings that delivered it; every other way out of the round now does too:
+
+- **the cost limit**, checked before that round as before every other, so
+  nothing is spent past it. The card arrives without a line and the limit is a
+  `note` under it ("Start a new one to carry on"), because every later message
+  in the conversation meets the same check;
+- **a refusal**, with whatever the round kept — on Claude nothing, since a
+  declined reply is discarded whole — and not as a refusal: its sentence, the
+  other model its note offers and the message let go from the model's memory
+  are all for a request that was declined, and here only the line about it was;
+- **running out of rounds**: a rule accepted on the last round goes over at
+  once, since there is no round left to ask in, and nothing says the agent ran
+  out of steps without finishing, which it did not;
+- **another submission**, with words or without: both rules, in the order they
+  came, as one reply — and the held ones count against the four a reply may
+  carry;
+- **a question**, refused inside the turn as a question beside a submission
+  always was, with the rule going over with what was said;
+- **a failure talking to the model**: the rule goes over without its line.
+
+A person's stop keeps the same promise: a rule accepted before the stop goes
+after one held for its line, never in place of it.
+
 Two fields on `preview` are there because leaving them out was wrong in a way
 only a real app finds. **`name`**, because `text` is the summary rather than a
 title, and a client without it would have to look the id up in a list it may not
@@ -746,9 +778,11 @@ with no rows at all, never having existed or past the fortnight.
 transcript kept for a fortnight that nothing can find again is a transcript
 thrown away: closing the page lost the conversation as surely as never having
 stored it, because the only way back was a session id nobody writes down. The
-list carries the first thing the *person* said as its title, and `live` beside
-it — readable and continuable are two different states, and an app has to say
-which one it is offering rather than discovering it on the next message.
+list carries a title — the name the hub gives a conversation from what the
+*person* said first, and that first message itself until the name lands
+([`assistant.md`](assistant.md#a-conversations-name)) — and `live` beside it:
+readable and continuable are two different states, and an app has to say which
+one it is offering rather than discovering it on the next message.
 
 **One question is outstanding at a time, and every other call in its response
 is still closed.** `ask_user` hands control back mid-response, and the API's
@@ -783,7 +817,7 @@ dropped.
 — `{usd, provider, modelId, model}` — and three rules hold it up.
 
 *It is absent rather than zero when the hub cannot say.* The ledger keeps the
-last sixty runs of every kind while a transcript lives a fortnight, so a home
+last 250 runs of every kind while a transcript lives a fortnight, so a home
 that has recognised a few devices since can open a perfectly readable
 conversation whose spend row has been pruned. `$0.00` about a chat that plainly
 cost something is a claim; nothing at all is the truth — the rule
@@ -863,6 +897,25 @@ what tells an app the stored transcript is ready to re-read *and* what takes its
 round that failed left three animated dots running for ever over a note
 explaining the failure that nothing had gone back for.
 
+### Stopping a round
+
+`POST /automations/chat/:id/stop` stops the round a conversation is running,
+part-way — acknowledged at once like every other chat route, `{stopped}`, with
+the round winding down on the socket (`docs/api.md` has the wire, and
+`docs/assistant.md` the mechanism both agents share). What matters for this
+agent is the rules. **A rule the model was told is saved is saved**: the
+submission's result already said "Accepted", and a history that says so about a
+rule that does not exist is a conversation that lies to itself from then on —
+so a stop that lands after a submission, including during the extra round that
+asks the model for its sentence, still hands the rule back, and the runtime
+saves it and writes its card. Submissions after the stop in the same response
+are answered *Not done* rather than evaluated. Then a note with
+`data.stopped: true` — `Stopped. What was already done stays done.` when a rule
+was saved, `Stopped.` otherwise — and the words that reached the page before the
+stop are the line above the card, or the answer where there is no card. When the
+assistant handed this conversation over, stopping the *assistant* does not stop
+it: this is where its own stop is.
+
 ### What a person sees while it works
 
 A round is tens of seconds of the model reading the home and deciding before a
@@ -909,8 +962,11 @@ and it does not hold for the *fact* that there were a dozen — a rule arrives o
 of a handful of tool calls, and discarding all of them leaves the one page whose
 job is explaining a house to somebody who does not write software with nothing
 but the conclusion. So the round's steps are written into the **first row that
-round records** (`data.steps`, `[{text, kind, detail?}]`), whichever kind of row
-it is, and an app draws them folded above the answer.
+round records** (`data.steps`, `[{text, kind, detail?, done?}]`), whichever kind
+of row it is, and an app draws them folded above the answer. `done: true` marks
+a step whose change to the home took — a device worked, a scene pressed, a job
+handed over — and is what a model asked a failed round again is told stays done
+(`docs/api.md`); a step that only read, or tried and was refused, has none.
 
 Five rules hold that to the size of a transcript row.
 
@@ -940,6 +996,13 @@ it was.
 **And it is the `step` frame's own three fields.** An app draws the live trail
 from the frames and the stored one from these, so one shape rather than two that
 would drift; `kind` stays open there too.
+
+**And the same row says how long the round took** — `data.tookMs`, the whole
+milliseconds from the round beginning to that row being written, which is the
+wait somebody sat through and what an app turns into "worked for 12s" on a
+conversation read back. Same position rule, same reason: one account of one
+round, on the first thing it wrote. Additive, so an app that has never heard of
+it draws the row exactly as before.
 
 ### What a round said before it went off to work
 
@@ -1029,6 +1092,12 @@ counts only while its vendor has a usable key, and otherwise falls to the one
 that has — so a home whose one key is OpenAI's runs on OpenAI, and switching the
 *mapping* provider changes nothing about whether rules can be written, in
 either direction.
+
+**And it thinks at its own word** (`ai.automations.effort`, `low`/`medium`/
+`high`, set on the AI page beside its model and `medium` until somebody picks
+another) — on every round nobody chose an effort for, which includes every job
+the assistant hands it: nobody is in that conversation to pick one. A message
+typed to it directly may still name its own for that round.
 
 **Either vendor runs it, and nothing after that line asks again.** Both loops
 have existed since the assistant got its `ChatTransport`, but a second check
