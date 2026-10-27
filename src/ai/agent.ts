@@ -412,6 +412,12 @@ export function createMappingAgent(
           if (response.stop_reason === 'max_tokens') {
             throw new Error(`mapping agent turn hit max_tokens (${MAX_OUTPUT_TOKENS}) before answering`);
           }
+          // The same cut from the other side: the conversation filled the
+          // model's context window mid-reply, so a submission in it may be cut
+          // off part way and the next request could not fit either.
+          if (response.stop_reason === 'model_context_window_exceeded') {
+            throw new Error('mapping agent run filled the model’s context window before answering');
+          }
 
           const toolUses = response.content.filter(
             (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use',

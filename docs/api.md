@@ -2394,7 +2394,10 @@ picture's width and height from its top-left corner. A point a person moved
 (`PATCH`, `source: "placed"`) is never read over: `POST /room-pictures/:id/locate`
 reads only the devices nobody placed — the way to place a device added since.
 A home with no usable recognition key gets no points, and the apps place
-those devices themselves until somebody moves them.
+those devices themselves until somebody moves them. The reading is asked at a
+moderate effort on either vendor, and on Anthropic a busy API is tried again
+before the reading fails; a refusal, or an answer cut off part way, places
+nothing rather than half the devices.
 
 **The answer comes before the night.** `POST /room-pictures` answers once the
 day picture is drawn and its devices read — about a minute — with

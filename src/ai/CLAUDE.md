@@ -665,7 +665,14 @@ domains — update them in the same change.
   OpenAI an item array with encrypted reasoning echoed back, and a neutral
   history converted at the boundary would be a third representation to keep
   correct. `chat/anthropic-transport.ts` keeps the two cache breakpoints,
-  `display: 'summarized'` and the streamed `messages.stream`;
+  `display: 'summarized'` and the streamed `messages.stream` — and **nothing of
+  a refusal on the history**, the vendor's rule, since before a word it is an
+  empty assistant turn the API refuses anywhere but last (every later message
+  in that conversation answered a 400) and part way through it can be a
+  thinking block with no signature; and of a reply cut off at `max_tokens` or
+  by the context window, **only the words, and none of its calls run**, since
+  a call cut off half way through its input can still parse
+  (`test/chat-anthropic-stops.test.ts`);
   `chat/openai-transport.ts` is the Responses API over plain `fetch` — **no
   second SDK for a Pi to download**, the same decision `openai-agent.ts` made —
   with `summary: 'auto'` as that vendor's spelling of the summarized-thinking

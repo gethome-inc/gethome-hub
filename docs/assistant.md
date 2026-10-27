@@ -97,7 +97,12 @@ request may ever carry a tool call with no result after it. Each vendor's own
 shape sits behind `ChatTransport`: `chat/anthropic-transport.ts` keeps the two
 cache breakpoints, `display: 'summarized'` (the default is `omitted`, which
 streams empty thinking blocks and reads as a silent minute) and the streamed
-`messages.stream` that a non-streaming `create` would refuse outright;
+`messages.stream` that a non-streaming `create` would refuse outright. It keeps
+nothing of a refusal on the history — declined before a word, that is an empty
+assistant turn the API refuses anywhere but last, so every later message in the
+conversation used to answer a 400 — and of a reply cut off at `max_tokens` only
+its words, with none of its tool calls run, since a call cut off part way
+through its input can still parse.
 `chat/openai-transport.ts` is the Responses API over plain `fetch` — no second
 SDK for a Pi to download — with `summary: 'auto'` as that vendor's spelling of
 the same lesson and `store: false` with the encrypted reasoning replayed by hand.

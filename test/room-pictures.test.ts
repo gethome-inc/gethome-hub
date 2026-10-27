@@ -253,7 +253,88 @@ describe('reading the devices off a picture', () => {
     ) as unknown as typeof fetch;
     await expect(
       locateDevices({ provider: 'anthropic', modelId: 'claude-opus-5-5', apiKey: 'bad', picture: png(1), devices, fetchImpl }),
-    ).rejects.toMatchObject({ kind: 'auth_failed' });
+    ).rejects.toMatchObject({ kind: 'auth_failed', message: 'invalid x-api-key' });
+  });
+
+  /**
+   * Anthropic's half goes through the SDK, so the stub answers the way the API
+   * does — JSON with its content type — and what is pinned is the request the
+   * SDK was handed and what it does with a busy API.
+   */
+  const anthropicReply = (body: Record<string, unknown>, status = 200, headers: Record<string, string> = {}) =>
+    new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
+  const pointsMessage = (stopReason = 'tool_use') => ({
+    id: 'msg_1',
+    type: 'message',
+    role: 'assistant',
+    model: 'claude-opus-5-5',
+    content: [
+      { type: 'tool_use', id: 'toolu_1', name: 'submit_points', input: { devices: [{ id: 'tv', x: 0.2, y: 0.3, seen: true }] } },
+    ],
+    stop_reason: stopReason,
+    stop_details: null,
+    usage: { input_tokens: 1800, output_tokens: 300 },
+  });
+
+  it('asks Anthropic with the picture, thinking at medium and no forced tool', async () => {
+    const calls: RequestInit[] = [];
+    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      calls.push(init ?? {});
+      return anthropicReply(pointsMessage());
+    }) as unknown as typeof fetch;
+    const result = await locateDevices({
+      provider: 'anthropic',
+      modelId: 'claude-opus-5-5',
+      apiKey: 'sk-ant',
+      picture: png(1),
+      devices,
+      fetchImpl,
+    });
+    expect(result.located).toEqual([{ deviceId: 'tv', x: 0.2, y: 0.3, seen: true }]);
+    expect(result.usage).toMatchObject({ input_tokens: 1800, output_tokens: 300 });
+    const sent = JSON.parse(String(calls[0]!.body));
+    expect(sent.thinking).toEqual({ type: 'adaptive' });
+    expect(sent.output_config).toEqual({ effort: 'medium' });
+    // A forced tool is a 400 on the models this runs on.
+    expect(sent.tool_choice).toBeUndefined();
+    expect(sent.messages[0].content[0]).toMatchObject({ type: 'image', source: { media_type: 'image/png' } });
+  });
+
+  it('tries again when Anthropic is busy, rather than leaving the room unplaced', async () => {
+    let attempts = 0;
+    const fetchImpl = vi.fn(async () => {
+      attempts += 1;
+      return attempts === 1
+        ? anthropicReply({ type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } }, 529, {
+            'retry-after-ms': '1',
+          })
+        : anthropicReply(pointsMessage());
+    }) as unknown as typeof fetch;
+    const result = await locateDevices({
+      provider: 'anthropic',
+      modelId: 'claude-opus-5-5',
+      apiKey: 'sk-ant',
+      picture: png(1),
+      devices,
+      fetchImpl,
+    });
+    expect(attempts).toBe(2);
+    expect(result.located).toHaveLength(1);
+  });
+
+  it('reads no answer out of a refusal or a reply cut off part way through', async () => {
+    for (const [stopReason, kind] of [
+      ['refusal', 'refused'],
+      ['max_tokens', 'unreadable'],
+    ] as const) {
+      const fetchImpl = vi.fn(async () => anthropicReply(pointsMessage(stopReason))) as unknown as typeof fetch;
+      await expect(
+        locateDevices({ provider: 'anthropic', modelId: 'claude-opus-5-5', apiKey: 'sk-ant', picture: png(1), devices, fetchImpl }),
+      ).rejects.toBeInstanceOf(LocateError);
+      await expect(
+        locateDevices({ provider: 'anthropic', modelId: 'claude-opus-5-5', apiKey: 'sk-ant', picture: png(1), devices, fetchImpl }),
+      ).rejects.toMatchObject({ kind });
+    }
   });
 });
 

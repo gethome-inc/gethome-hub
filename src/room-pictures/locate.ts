@@ -1,6 +1,7 @@
+import type Anthropic from '@anthropic-ai/sdk';
 import { z } from 'zod';
 import type { AiProvider } from '../core/settings.js';
-import { classifyApiError } from '../ai/errors.js';
+import { classifyApiError, readableFailure } from '../ai/errors.js';
 import type { TokenUsage } from '../ai/models.js';
 import { locatePrompt, type PictureDevice } from './prompts.js';
 
@@ -17,16 +18,24 @@ import { locatePrompt, type PictureDevice } from './prompts.js';
  *
  * It runs on the provider and model the home chose for **device
  * recognition** — reading what is in a picture is recognition — on the home's
- * own key, one request, plain `fetch`. The answer is model output: parsed,
- * clamped to the picture and filtered to the devices asked about.
+ * own key, one request: OpenAI's over plain `fetch`, as everything of that
+ * vendor's here is, and Anthropic's through its SDK (`askAnthropic`). The
+ * answer is model output: parsed, clamped to the picture and filtered to the
+ * devices asked about.
  */
 
-const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const OPENAI_URL = 'https://api.openai.com/v1/responses';
 
 /** Two minutes — a reading is one image and a few lines of answer. */
 const TIMEOUT_MS = 2 * 60 * 1000;
 const MAX_OUTPUT_TOKENS = 8_000;
+/**
+ * How hard the model looks, the same word on both vendors. Said rather than
+ * left to each model's default, which is not the same everywhere — Fable 5.1
+ * defaults higher than Opus 5.5 — and a reading has an eight-thousand-token
+ * reply and a two-minute deadline to fit its thinking into.
+ */
+const EFFORT = 'medium';
 
 export class LocateError extends Error {
   constructor(
@@ -102,67 +111,47 @@ export function normaliseAnswer(raw: unknown, devices: PictureDevice[]): Located
 
 export async function locateDevices(input: LocateInput): Promise<{ located: LocatedDevice[]; usage: TokenUsage }> {
   if (input.devices.length === 0) return { located: [], usage: {} };
-  const doFetch = input.fetchImpl ?? fetch;
   const prompt = locatePrompt(input.devices);
   const base64 = input.picture.toString('base64');
+  const { answer, usage } =
+    input.provider === 'openai'
+      ? await askOpenAi(input, prompt, base64)
+      : await askAnthropic(input, prompt, base64);
+  if (answer === undefined) throw new LocateError('The model answered without the devices.', 'unreadable');
+  return { located: normaliseAnswer(answer, input.devices), usage };
+}
 
+/** What either vendor answered: the points, unparsed, and what they cost. */
+interface Asked {
+  answer: unknown;
+  usage: TokenUsage;
+}
+
+async function askOpenAi(input: LocateInput, prompt: string, base64: string): Promise<Asked> {
+  const doFetch = input.fetchImpl ?? fetch;
   let response: Response;
   try {
-    response =
-      input.provider === 'openai'
-        ? await doFetch(OPENAI_URL, {
-            method: 'POST',
-            signal: AbortSignal.timeout(TIMEOUT_MS),
-            headers: { authorization: `Bearer ${input.apiKey}`, 'content-type': 'application/json' },
-            body: JSON.stringify({
-              model: input.modelId,
-              reasoning: { effort: 'medium' },
-              max_output_tokens: MAX_OUTPUT_TOKENS,
-              store: false,
-              input: [
-                {
-                  role: 'user',
-                  content: [
-                    { type: 'input_image', image_url: `data:image/png;base64,${base64}` },
-                    { type: 'input_text', text: prompt },
-                  ],
-                },
-              ],
-              text: { format: { type: 'json_schema', name: 'device_points', schema: ANSWER_SCHEMA, strict: true } },
-            }),
-          })
-        : await doFetch(ANTHROPIC_URL, {
-            method: 'POST',
-            signal: AbortSignal.timeout(TIMEOUT_MS),
-            headers: {
-              'x-api-key': input.apiKey,
-              'anthropic-version': '2023-06-01',
-              'content-type': 'application/json',
-            },
-            body: JSON.stringify({
-              model: input.modelId,
-              max_tokens: MAX_OUTPUT_TOKENS,
-              thinking: { type: 'adaptive' },
-              // One answer channel, the mapper's way; `auto`, because a
-              // forced tool turns thinking off.
-              tools: [
-                {
-                  name: 'submit_points',
-                  description: 'Answer with a point for every device. Call this exactly once.',
-                  input_schema: ANSWER_SCHEMA,
-                },
-              ],
-              messages: [
-                {
-                  role: 'user',
-                  content: [
-                    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: base64 } },
-                    { type: 'text', text: `${prompt}\n\nAnswer by calling submit_points.` },
-                  ],
-                },
-              ],
-            }),
-          });
+    response = await doFetch(OPENAI_URL, {
+      method: 'POST',
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+      headers: { authorization: `Bearer ${input.apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: input.modelId,
+        reasoning: { effort: EFFORT },
+        max_output_tokens: MAX_OUTPUT_TOKENS,
+        store: false,
+        input: [
+          {
+            role: 'user',
+            content: [
+              { type: 'input_image', image_url: `data:image/png;base64,${base64}` },
+              { type: 'input_text', text: prompt },
+            ],
+          },
+        ],
+        text: { format: { type: 'json_schema', name: 'device_points', schema: ANSWER_SCHEMA, strict: true } },
+      }),
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new LocateError(message, classifyApiError(error)?.kind ?? 'network');
@@ -174,14 +163,92 @@ export async function locateDevices(input: LocateInput): Promise<{ located: Loca
     const detail = typeof error?.message === 'string' ? error.message : `The provider answered ${response.status}.`;
     throw new LocateError(detail, classifyApiError({ status: response.status, message: detail })?.kind ?? 'refused');
   }
-  const answer = input.provider === 'openai' ? openAiAnswer(body) : anthropicAnswer(body);
-  if (answer === undefined) throw new LocateError('The model answered without the devices.', 'unreadable');
-  return { located: normaliseAnswer(answer, input.devices), usage: usageOf(input.provider, body) };
+  return { answer: openAiAnswer(body), usage: openAiUsage(body) };
 }
 
-function anthropicAnswer(body: Record<string, unknown> | null): unknown {
-  const content = Array.isArray(body?.['content']) ? (body['content'] as Record<string, unknown>[]) : [];
-  return content.find((block) => block['type'] === 'tool_use' && block['name'] === 'submit_points')?.['input'];
+/**
+ * Anthropic's half, through the SDK — loaded here and only here, so a home
+ * whose recognition runs on OpenAI never brings it into memory, the rule
+ * `chat/transport.ts` keeps for the conversations.
+ *
+ * **The SDK rather than a hand-built request, for what it does that one
+ * `fetch` did not**: it retries a 429, a 529 and a dropped connection with
+ * backoff, waiting as long as `retry-after` asks. A single attempt left a room
+ * drawn and paid for with no device on it the first time the API was busy,
+ * and nothing tries again until somebody draws the room again.
+ */
+async function askAnthropic(input: LocateInput, prompt: string, base64: string): Promise<Asked> {
+  const { default: AnthropicClient } = await import('@anthropic-ai/sdk');
+  const client = new AnthropicClient({
+    apiKey: input.apiKey,
+    maxRetries: 2,
+    ...(input.fetchImpl !== undefined ? { fetch: input.fetchImpl } : {}),
+  });
+
+  let message: Anthropic.Message;
+  try {
+    message = await client.messages.create(
+      {
+        model: input.modelId,
+        max_tokens: MAX_OUTPUT_TOKENS,
+        thinking: { type: 'adaptive' },
+        output_config: { effort: EFFORT },
+        // One answer channel, the mapper's way; `auto`, because the models
+        // this runs on refuse a forced tool outright.
+        tools: [
+          {
+            name: 'submit_points',
+            description: 'Answer with a point for every device. Call this exactly once.',
+            input_schema: ANSWER_SCHEMA as unknown as Anthropic.Tool['input_schema'],
+          },
+        ],
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'image', source: { type: 'base64', media_type: 'image/png', data: base64 } },
+              { type: 'text', text: `${prompt}\n\nAnswer by calling submit_points.` },
+            ],
+          },
+        ],
+      },
+      // One deadline for the whole reading, the retries included.
+      { signal: AbortSignal.timeout(TIMEOUT_MS) },
+    );
+  } catch (error) {
+    // The SDK's message is the status with the whole response body glued to
+    // it; the run log wants the sentence inside.
+    const status = (error as { status?: unknown }).status;
+    throw new LocateError(
+      readableFailure(error),
+      classifyApiError(error)?.kind ?? (typeof status === 'number' ? 'refused' : 'network'),
+    );
+  }
+
+  // **Both stops that leave an answer untrustworthy are asked about before the
+  // answer is read.** A refusal can arrive part way through, and its output is
+  // to be discarded; a reply cut off at `max_tokens` can carry a call cut off
+  // half way through its input, which still parses — as fewer devices, or a
+  // number with digits missing — and would be drawn as if it were the reading.
+  if (message.stop_reason === 'refusal') {
+    throw new LocateError('The model declined to read the picture.', 'refused');
+  }
+  if (message.stop_reason === 'max_tokens') {
+    throw new LocateError('The answer was cut off before every device was placed.', 'unreadable');
+  }
+
+  const call = message.content.find(
+    (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use' && block.name === 'submit_points',
+  );
+  return {
+    answer: call?.input,
+    usage: {
+      input_tokens: message.usage.input_tokens,
+      output_tokens: message.usage.output_tokens,
+      cache_read_input_tokens: message.usage.cache_read_input_tokens,
+      cache_creation_input_tokens: message.usage.cache_creation_input_tokens,
+    },
+  };
 }
 
 function openAiAnswer(body: Record<string, unknown> | null): unknown {
@@ -201,22 +268,14 @@ function openAiAnswer(body: Record<string, unknown> | null): unknown {
   return undefined;
 }
 
-function usageOf(provider: AiProvider, body: Record<string, unknown> | null): TokenUsage {
+function openAiUsage(body: Record<string, unknown> | null): TokenUsage {
   const usage = (body?.['usage'] ?? {}) as Record<string, unknown>;
   const number = (value: unknown) => (typeof value === 'number' ? value : 0);
-  if (provider === 'openai') {
-    const details = (usage['input_tokens_details'] ?? {}) as Record<string, unknown>;
-    const cached = number(details['cached_tokens']);
-    return {
-      input_tokens: Math.max(number(usage['input_tokens']) - cached, 0),
-      output_tokens: number(usage['output_tokens']),
-      cache_read_input_tokens: cached,
-    };
-  }
+  const details = (usage['input_tokens_details'] ?? {}) as Record<string, unknown>;
+  const cached = number(details['cached_tokens']);
   return {
-    input_tokens: number(usage['input_tokens']),
+    input_tokens: Math.max(number(usage['input_tokens']) - cached, 0),
     output_tokens: number(usage['output_tokens']),
-    cache_read_input_tokens: number(usage['cache_read_input_tokens']),
-    cache_creation_input_tokens: number(usage['cache_creation_input_tokens']),
+    cache_read_input_tokens: cached,
   };
 }

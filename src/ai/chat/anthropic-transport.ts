@@ -264,15 +264,53 @@ export function createAnthropicTransport(options: ChatTransportOptions): ChatTra
       }
 
       usage.add(response.usage);
-      // Verbatim, thinking blocks included — the API requires it when a
-      // thinking conversation continues.
-      messages.push({ role: 'assistant', content: response.content });
 
       const said = response.content
         .filter((block): block is Anthropic.TextBlock => block.type === 'text')
         .map((block) => block.text)
         .join('\n')
         .trim();
+
+      /**
+       * **A refusal leaves nothing on the history, not even an empty turn.**
+       * The classifier can decline before a word (an empty `content`) or part
+       * way through (whatever had streamed), and the vendor's rule for both is
+       * to discard what came back. Kept, the first is an assistant message with
+       * no content, which the API refuses anywhere but last — so after one
+       * refusal every later message in the conversation answered a 400 — and
+       * the second can carry a thinking block cut off before its signature, or
+       * a tool call cut off half way through its input. The person's message
+       * stays where it was, and the next one joins it as the same user turn.
+       */
+      if (response.stop_reason === 'refusal') {
+        return {
+          said: '',
+          calls: [],
+          stop: 'refusal',
+          refusal: refusalSentence(response.stop_details?.category),
+        };
+      }
+
+      /**
+       * **A reply cut off by the output ceiling is an answer, and only its
+       * words go onto the history** — a stop's rule, for a stop the model did
+       * not choose. What reached the page is what the person reads, as on the
+       * other vendor. But a tool call in it may have been cut off half way
+       * through its input, which can still parse as a smaller valid object —
+       * a command to a device with half its argument missing — so no call from
+       * a cut-off reply is ever run, and none goes onto the history to be
+       * answered; a thinking block cut off before its signature stays off it
+       * too. The context window running out mid-reply is the same cut.
+       */
+      if (response.stop_reason === 'max_tokens' || response.stop_reason === 'model_context_window_exceeded') {
+        log.warn(`${label}: the model ran out of room, so its reply is cut short`);
+        if (said.length > 0) messages.push({ role: 'assistant', content: [{ type: 'text', text: said }] });
+        return { said, calls: [], stop: 'end' };
+      }
+
+      // Verbatim, thinking blocks included — the API requires it when a
+      // thinking conversation continues.
+      messages.push({ role: 'assistant', content: response.content });
 
       const calls = response.content
         .filter((block): block is Anthropic.ToolUseBlock => block.type === 'tool_use')
@@ -299,15 +337,7 @@ export function createAnthropicTransport(options: ChatTransportOptions): ChatTra
        */
       if (said.length > 0 && calls.length > 0) context?.onSaid?.(said);
 
-      const stop = stopOf(response.stop_reason);
-      return {
-        said,
-        calls,
-        stop,
-        ...(stop === 'refusal'
-          ? { refusal: refusalSentence(response.stop_details?.category) }
-          : {}),
-      };
+      return { said, calls, stop: stopOf(response.stop_reason) };
     },
 
     costUsd() {

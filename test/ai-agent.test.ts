@@ -722,6 +722,25 @@ describe('the mapping agent loop', () => {
   });
 
   /**
+   * A reply the model did not finish is never read for a submission, even one
+   * that would validate: cut off at `max_tokens` or by the context window, the
+   * call in it may be missing half its input, and a descriptor is cached
+   * against a device model for good.
+   */
+  it('reads no submission out of a reply that was cut off', async () => {
+    for (const [stopReason, said] of [
+      ['max_tokens', /max_tokens/],
+      ['model_context_window_exceeded', /context window/],
+    ] as const) {
+      sent.length = 0;
+      replies.length = 0;
+      queue(reply({ stop_reason: stopReason, content: [submitCall(validDescriptor)] }));
+      await expect(agent().generate('system', 'user')).rejects.toThrow(said);
+      expect(sent).toHaveLength(1);
+    }
+  });
+
+  /**
    * Recording is a convenience; recognising the device is the job. So the
    * proof that matters is not that a round was written down — it is that
    * writing it down changed *nothing*: the same requests on the wire, byte
