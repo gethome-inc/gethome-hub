@@ -828,6 +828,19 @@ export interface ChatSession<Turn> {
    */
   roundStartedAt?: number | undefined;
   /**
+   * When the words that ended the round now running began to arrive — the
+   * first delta after the last thing the round did — until the first row it
+   * writes takes the span since `roundStartedAt` as `workedMs`.
+   *
+   * **Every step and every interim sentence sets it back**, because words a
+   * round wrote and then went off to call something with were narration rather
+   * than the reply (`onSaid`): the reply is what comes after the last thing the
+   * round did. A hand-over does not, since it is reported once the words it is
+   * about have already streamed. Undefined on a round that ended without words
+   * of its own — a question, a card, a note — which writes no `workedMs`.
+   */
+  repliedAt?: number | undefined;
+  /**
    * The conversation was put in place by a rebase or a model switch and has
    * not run a round yet.
    *
@@ -2269,6 +2282,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     }
     // A round that wrote nothing leaves no clock behind for a later row.
     session.roundStartedAt = undefined;
+    session.repliedAt = undefined;
     // A declined message leaves the model's memory before the next turn
     // begins, and so does a photo, whatever this turn ended as — one rebase
     // does both. See `rebase`.
@@ -2543,8 +2557,10 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     // the rows are written, so a turn that throws between the two cannot hand
     // its steps to the next answer.
     session.steps = [];
-    // And so does its clock, which the first row it writes takes as `tookMs`.
+    // And so does its clock, which the first row it writes takes as `tookMs`
+    // — and, where words ended it, as `workedMs` up to the first of them.
     session.roundStartedAt = Date.now();
+    session.repliedAt = undefined;
     // Whatever this round costs — nothing included, if it fails before the
     // first request — is a run the ledger should hear about.
     session.unrun = false;
@@ -2600,6 +2616,9 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
           // Whatever was reasoned belongs to the step it was reasoned under,
           // which is the one already there rather than this one.
           settleReasoning();
+          // Back at work, so whatever was said before this was not the reply
+          // that ends the round — see `ChatSession.repliedAt`.
+          session.repliedAt = undefined;
           // Kept as well as sent. The frame fills the wait; the copy is what
           // the row the round is about to write carries, so re-reading the
           // conversation next week shows the working rather than only the
@@ -2625,6 +2644,9 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
         // twice.
         onSaid: (text) => {
           settleReasoning();
+          // Narration, and the round is going back to work: its reply has not
+          // begun yet.
+          session.repliedAt = undefined;
           this.keep(session, { text: clip(text, STEP_TEXT_LIMIT), kind: 'said' });
         },
         onThinking: (delta) => {
@@ -2641,10 +2663,16 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
           // — and this is a round that may end without another step, which
           // would leave the buffer with nowhere to go.
           settleReasoning();
+          // One clock reading for the record and the frame, so the first
+          // delta's `at` is the very instant this round's `workedMs` counts
+          // to — a client timing the wait off the frames gets the number the
+          // row will say, not one a millisecond either side of a second.
+          const now = Date.now();
+          session.repliedAt ??= now;
           this.emit({
             sessionId: session.id,
             phase: 'delta',
-            at: new Date().toISOString(),
+            at: new Date(now).toISOString(),
             text: delta,
           });
         },
@@ -2678,6 +2706,10 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       // What was reasoned before the round ended belongs to its working, the
       // failed round's included — it is the round with the most to explain.
       settleReasoning();
+      // **And no words ended it**, whatever had streamed before it failed: the
+      // note this path writes carries the whole round (`tookMs`) and no reply
+      // time, the shape of a round that ended without words of its own.
+      session.repliedAt = undefined;
       if (halt.aborted) {
         /**
          * **A stop is not a failure, whatever it threw on the way out.** Each
@@ -2883,19 +2915,38 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     /**
      * **How long the round took, on the same row its working goes on.** An
      * integer of milliseconds from the moment the round began to the moment
-     * it wrote its first answer — which is the wait somebody sat through, and
-     * what an app turns into "worked for 12s" on a conversation read back.
-     * Additive: an app that has never heard of it draws the row as it did.
+     * it wrote its first answer — the whole round, and what an app turns into
+     * "worked for 12s" on a conversation read back where `workedMs` below is
+     * missing. Additive: an app that has never heard of it draws the row as it
+     * did.
      */
     const startedAt = role === 'user' ? undefined : session.roundStartedAt;
-    if (startedAt !== undefined) session.roundStartedAt = undefined;
+    /**
+     * **And how much of that was work rather than writing** — `workedMs`, from
+     * the round beginning to the first word of the reply that ended it
+     * (`ChatSession.repliedAt`). `tookMs` runs on to the row, so it also counts
+     * the seconds the answer spent arriving word by word, which somebody spent
+     * reading rather than waiting; this is the part before anything was there
+     * to read. Absent where the round ended without words of its own, and on
+     * every row but the first, exactly as `tookMs` is. Additive, like it.
+     */
+    const repliedAt = startedAt === undefined ? undefined : session.repliedAt;
+    if (startedAt !== undefined) {
+      session.roundStartedAt = undefined;
+      session.repliedAt = undefined;
+    }
     const tookMs = startedAt === undefined ? undefined : Math.max(0, Math.round(Date.now() - startedAt));
+    const workedMs =
+      startedAt === undefined || repliedAt === undefined
+        ? undefined
+        : Math.max(0, Math.round(repliedAt - startedAt));
     const payload =
       steps.length > 0 || tookMs !== undefined
         ? {
             ...(typeof data === 'object' && data !== null ? data : {}),
             ...(steps.length > 0 ? { steps } : {}),
             ...(tookMs !== undefined ? { tookMs } : {}),
+            ...(workedMs !== undefined ? { workedMs } : {}),
           }
         : data;
 

@@ -539,7 +539,12 @@ domains — update them in the same change.
   transcript is ready. Steps used to be reported only once something had
   *happened* — and the first thing that happens in a round is none of it, so the
   longest wait in every round was three animated dots. A step now goes up
-  **before** the request, and the reasoning is streamed, which only works
+  **before** the request — `ROUND_STEP`, "Thinking", the same on every round of
+  both agents (it was "Reading your home" and then "Working it out", which
+  opened every answer the assistant gave on a claim to have read the house,
+  whatever it had been asked), except the automations agent's write-up round,
+  which "Writing it up for you" has already announced — and the reasoning is
+  streamed, which only works
   because the loop asks for `display: 'summarized'` (this model's default
   streams thinking blocks empty). `kind` is what an app draws a mark from and is
   about the *shape of the act* rather than the tool — three tools all mean
@@ -564,6 +569,14 @@ domains — update them in the same change.
   `automation-tools.ts` beside the tools: `Looked up list_rooms_zones.` is a
   function signature read out loud, on the one screen whose whole job is telling
   somebody who does not write software what their house is doing.
+  **The same row carries two clocks**: `tookMs`, the whole round, and
+  `workedMs`, the round up to the first word of the reply that ended it
+  (`ChatSession.repliedAt`) — the wait before there was anything to read, where
+  `tookMs` also counts the answer arriving. Every step and every `said` sets
+  `repliedAt` back, since words a round goes back to work after were narration;
+  a hand-over does not, being reported after the words it is about. The first
+  `delta` frame is stamped with the same clock reading, so a client timing the
+  wait off the frames lands on the stored number.
   **And two things a round produced were streamed and then dropped, so the trail
   somebody read back was a thinner thing than the one they watched.** The model's
   **reasoning** arrives between one step and the next, which makes it the working

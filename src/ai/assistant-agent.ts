@@ -5,6 +5,7 @@ import { budgetScale, isSupportedModel, supportedModelIds } from './models.js';
 import {
   NOT_ASKED,
   QuestionGate,
+  ROUND_STEP,
   TurnAbort,
   notDone,
   type ChatToolResult,
@@ -173,9 +174,9 @@ export async function createAssistantConversation(
          * **Say something before the request, not after it.** The first thing
          * that happens in a round is tens of seconds of the model reading and
          * deciding — no tool called, no word written — and that was the whole
-         * of what somebody saw.
+         * of what somebody saw. The same word on every round: see `ROUND_STEP`.
          */
-        context?.onStep?.(turn === 1 ? 'Reading your home' : 'Working it out', 'thinking');
+        context?.onStep?.(ROUND_STEP, 'thinking');
 
         if (transport.costUsd() >= budgetUsd) {
           return {

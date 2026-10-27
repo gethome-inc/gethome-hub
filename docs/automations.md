@@ -904,10 +904,23 @@ word of the reply exists, so the socket carries **four phases**, not one:
 only once something had *happened*, and the first thing that happens in a round
 is none of it — no tool called, no word written — so the whole of the longest
 wait was three animated dots. Two things fill it now: a step goes up **before**
-the request ("Reading your home", and "Working it out" on later rounds), and the
-reasoning is streamed as it arrives. That second one exists only because the
+the request — "Thinking", `kind: 'thinking'`, on every round of both agents
+(`ROUND_STEP`) — and the reasoning is streamed as it arrives, which is what then
+hangs under that step as its `detail`. That second one exists only because the
 loop asks for `display: 'summarized'`; with this model's default the thinking
 blocks stream empty and there is nothing to show.
+
+**The word is the one that is true whatever was asked.** It was "Reading your
+home" on the first round and "Working it out" after, which described a request
+for a rule and nothing else — asked how something works, or sent a photo, the
+round still opened on a line saying it had read the house. What happens in that
+silence is the model thinking, so that is what it says. It follows that a
+`thinking` step with no `detail` says only that the model was asked, which is
+true of every round: it is the wait, not part of the account of what was done.
+The one round that opens on something else is the write-up a silent submission
+is sent back for: it says "Writing it up for you" (also `thinking`) and not
+"Thinking" after it, which would only write over the line that says what the
+wait is for.
 
 **`kind` is what an app draws a mark from** — `reading` · `checking` · `writing`
 · `asking` · `thinking` — and it is about the *shape of the act* rather than the
@@ -970,11 +983,26 @@ from the frames and the stored one from these, so one shape rather than two that
 would drift; `kind` stays open there too.
 
 **And the same row says how long the round took** — `data.tookMs`, the whole
-milliseconds from the round beginning to that row being written, which is the
-wait somebody sat through and what an app turns into "worked for 12s" on a
-conversation read back. Same position rule, same reason: one account of one
-round, on the first thing it wrote. Additive, so an app that has never heard of
-it draws the row exactly as before.
+milliseconds from the round beginning to that row being written. Same position
+rule, same reason: one account of one round, on the first thing it wrote.
+Additive, so an app that has never heard of it draws the row exactly as before.
+
+**And how much of that was work rather than writing** — `data.workedMs`, from
+the round beginning to the first word of the reply that ended it, which is what
+"worked for 9s" means on a conversation read back. `tookMs` runs on to the row,
+so it also counts the reply arriving word by word: seconds somebody spent
+reading the answer rather than waiting for one. Three rules. **The reply is what
+comes after the last thing the round did** — a sentence a round writes and then
+goes off to call something with is narration (`said`, below), so every step and
+every interim sentence sets the clock back, and only the words after the last of
+them stop it. **A hand-over does not**: it is reported once the words it is
+about have already streamed. **And the first `delta` frame's `at` is the very
+instant it counts to** — one clock reading for the record and the frame — so a
+client timing the wait off the frames arrives at the number the row will say.
+Absent on a round that ended without words of its own (a question, a card, a
+note alone — the note a failure writes included, whatever had streamed before
+the round broke off, since a reply that never finished did not end it), and
+additive like `tookMs`.
 
 ### What a round said before it went off to work
 

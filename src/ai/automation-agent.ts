@@ -7,6 +7,7 @@ import { budgetScale, isSupportedModel, supportedModelIds } from './models.js';
 import {
   NOT_ASKED,
   QuestionGate,
+  ROUND_STEP,
   TurnAbort,
   notDone,
   type ChatToolResult,
@@ -181,14 +182,18 @@ export async function createAutomationConversation(
          * the first thing that happens in a round is tens of seconds of the
          * model reading the home and deciding — no tool called, no word of the
          * reply written. That was the whole of what somebody saw: a spinner.
-         * The wording splits on the round because it is a different wait: the
-         * first is reading a home it has just been handed, and every one after
-         * is working with what the tools came back with.
+         * The wording used to split on the round ("Reading your home", then
+         * "Working it out"), which was true of a request for a rule and of
+         * nothing else this agent is asked — "how does this work?" is not read
+         * off the house. Every round is the model thinking, so every round
+         * says so: see `ROUND_STEP`.
+         *
+         * **Except the round a silent submission was sent back for**, which
+         * has said what it is for already ("Writing it up for you", below).
+         * The one word every other round opens on would only write over it,
+         * on the one line somebody is watching while the sentence is written.
          */
-        context?.onStep?.(
-          turn === 1 ? 'Reading your home' : 'Working it out',
-          'thinking',
-        );
+        if (silence.submission === null) context?.onStep?.(ROUND_STEP, 'thinking');
 
         if (transport.costUsd() >= budgetUsd) {
           return {
