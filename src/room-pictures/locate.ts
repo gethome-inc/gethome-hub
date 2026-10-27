@@ -18,12 +18,14 @@ import { locatePrompt, type PictureDevice } from './prompts.js';
  * gets wrong by dragging (`PATCH /room-pictures/:id`), and a point somebody
  * placed is never read over.
  *
- * It runs on the provider and model the home chose for **device
- * recognition** — reading what is in a picture is recognition — on the home's
- * own key, one request: OpenAI's over plain `fetch`, as everything of that
- * vendor's here is, and Anthropic's through its SDK (`askAnthropic`). The
- * answer is model output: parsed, clamped to the picture and filtered to the
- * devices asked about.
+ * It runs on each vendor's middle rung (`LOCATOR_MODELS`: GPT-6.1 Terra,
+ * Sonnet 5.5) on the home's own key — OpenAI's first, the vendor that drew the
+ * picture, and Anthropic's only when that fails (`store.ts`'s `homeLocator` and
+ * `readMarkers`) — and never on recognition's own model, which is strong-only
+ * for a mapping's sake. One request per reader: OpenAI's over plain `fetch`,
+ * as everything of that vendor's here is, and Anthropic's through its SDK
+ * (`askAnthropic`). The answer is model output: parsed, clamped to the picture
+ * and filtered to the devices asked about.
  */
 
 const OPENAI_URL = 'https://api.openai.com/v1/responses';
@@ -33,9 +35,10 @@ const TIMEOUT_MS = 2 * 60 * 1000;
 const MAX_OUTPUT_TOKENS = 8_000;
 /**
  * How hard the model looks, the same word on both vendors. Said rather than
- * left to each model's default, which is not the same everywhere — Fable 5.1
- * defaults higher than Opus 5.5 — and a reading has an eight-thousand-token
- * reply and a two-minute deadline to fit its thinking into.
+ * left to each model's default, which is not the same everywhere — Sonnet 5.5
+ * defaults higher than GPT-6.1 Terra — and a reading has an
+ * eight-thousand-token reply and a two-minute deadline to fit its thinking
+ * into.
  */
 const EFFORT = 'medium';
 /** Bytes of picture per piece of base64: a multiple of three, so the pieces join without padding. */
@@ -121,7 +124,7 @@ export interface Located {
    * What the reading cost, where `usage` alone cannot say it: a reading
    * another Claude answered after the one asked declined it bills each attempt
    * at its own model's rates (`replyCostUsd`). Absent means `usage` at the
-   * recognition model's price is the whole of it.
+   * reading model's price is the whole of it.
    */
   costUsd?: number;
 }
@@ -186,9 +189,10 @@ async function askOpenAi(input: LocateInput, prompt: string): Promise<Asked> {
 }
 
 /**
- * Anthropic's half, through the SDK — loaded here and only here, so a home
- * whose recognition runs on OpenAI never brings it into memory, the rule
- * `chat/transport.ts` keeps for the conversations.
+ * Anthropic's half, through the SDK — loaded here and only here, so a reading
+ * OpenAI answers never brings it into memory, which is nearly every reading
+ * now that OpenAI is asked first: the rule `chat/transport.ts` keeps for the
+ * conversations.
  *
  * **The SDK rather than a hand-built request, for what it does that one
  * `fetch` did not**: it retries a 429, a 529 and a dropped connection with

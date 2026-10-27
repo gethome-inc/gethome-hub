@@ -254,10 +254,14 @@ describe('supported models', () => {
       estimateCostUsd('gpt-5.6-sol', { input_tokens: 1_000_000 }),
     );
 
-    // Luna is known — the agents offer it — and recognition does not: this job
-    // is reasoning-heavy and runs a handful of times in a hub's life.
+    // Luna and Terra are known — the agents offer them — and recognition does
+    // not: this job is reasoning-heavy and runs a handful of times in a hub's
+    // life, so it never offers a tier cheaper than its default.
     expect(isSupportedModel('gpt-6-luna', 'openai')).toBe(true);
     expect(PROVIDER_MODELS.openai.choices.some((choice) => choice.id === 'gpt-6-luna')).toBe(false);
+    expect(isSupportedModel('gpt-6.1-terra', 'openai')).toBe(true);
+    expect(PROVIDER_MODELS.openai.choices.some((choice) => choice.id === 'gpt-6.1-terra')).toBe(false);
+    expect(effectiveModel('openai', 'gpt-6.1-terra')).toBe('gpt-6.1-sol');
     // A model this hub has never run is not accepted at all.
     expect(isSupportedModel('gpt-5.6-luna', 'openai')).toBe(false);
   });
@@ -272,8 +276,10 @@ describe('supported models', () => {
   it('runs a stored model only while it is still offered, and succeeds a retired one', () => {
     expect(effectiveModel('anthropic', 'claude-opus-5')).toBe('claude-opus-5-5');
     expect(effectiveModel('anthropic', 'claude-opus-4-6')).toBe('claude-opus-5-5');
-    // GPT-6 Sol is replaced by GPT-6.1 Sol, and the GPT-5.6 tiers it had
-    // replaced walk on down the same chain.
+    // GPT-6 Sol is replaced by GPT-6.1 Sol, and GPT-5.6 Sol, which it had
+    // replaced, walks on down the same chain. GPT-5.6 Terra's successor is
+    // GPT-6.1 Terra, which this list does not offer, so it runs the default —
+    // the same answer for a different reason.
     expect(effectiveModel('openai', 'gpt-6-sol')).toBe('gpt-6.1-sol');
     expect(effectiveModel('openai', 'gpt-5.6-sol')).toBe('gpt-6.1-sol');
     expect(effectiveModel('openai', 'gpt-5.6-terra')).toBe('gpt-6.1-sol');
@@ -337,8 +343,9 @@ describe('supported models', () => {
     const short = { input_tokens: 100_000, output_tokens: 100_000 };
     expect(estimateCostUsd('gpt-6-astra', short)).toBeCloseTo(6, 5);
     expect(estimateCostUsd('gpt-6-sol', short)).toBeCloseTo(1.2, 5);
-    // GPT-6.1 Sol kept GPT-6 Sol's $2/$10.
+    // GPT-6.1 Sol kept GPT-6 Sol's $2/$10, and GPT-6.1 Terra is half of it.
     expect(estimateCostUsd('gpt-6.1-sol', short)).toBeCloseTo(1.2, 5);
+    expect(estimateCostUsd('gpt-6.1-terra', short)).toBeCloseTo(0.6, 5);
     expect(estimateCostUsd('gpt-6-luna', short)).toBeCloseTo(0.06, 5);
     expect(estimateCostUsd('claude-haiku-5-5', short)).toBeCloseTo(0.06, 5);
   });
@@ -399,6 +406,9 @@ describe('supported models', () => {
     expect(estimateCostUsd('claude-sonnet-5-5', { cache_creation_input_tokens: 1_000_000 })).toBeCloseTo(2.5, 5);
     expect(estimateCostUsd('gpt-6.1-sol', { cache_read_input_tokens: 100_000 })).toBeCloseTo(0.01, 5);
     expect(estimateCostUsd('gpt-6.1-sol', { cache_creation_input_tokens: 100_000 })).toBeCloseTo(0.25, 5);
+    // GPT-6.1 Terra reads at the same twentieth, of $1: $0.05 a million —
+    // asked of a prompt short of GPT-6's long-prompt line, as Sol's is.
+    expect(estimateCostUsd('gpt-6.1-terra', { cache_read_input_tokens: 100_000 })).toBeCloseTo(0.005, 6);
     // Fable 5.1 reads at a fortieth of $10, a quarter of what Opus 5 charged.
     expect(estimateCostUsd('claude-fable-5-1', { cache_read_input_tokens: 1_000_000 })).toBeCloseTo(0.25, 5);
     expect(estimateCostUsd('claude-fable-5-1', { cache_creation_input_tokens: 1_000_000 })).toBeCloseTo(12.5, 5);
@@ -417,6 +427,7 @@ describe('supported models', () => {
     expect(budgetScale('claude-opus-5')).toBe(1);
     expect(budgetScale('claude-opus-5-5')).toBe(1);
     expect(budgetScale('claude-sonnet-5-5')).toBe(1);
+    expect(budgetScale('gpt-6.1-terra')).toBe(1);
     expect(budgetScale('gpt-6-sol')).toBe(1);
     expect(budgetScale('gpt-6-luna')).toBe(1);
     // An unknown model is priced at the most expensive known tier, so its cap

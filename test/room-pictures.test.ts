@@ -2,13 +2,15 @@ import { randomBytes } from 'node:crypto';
 import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { HubEventBus } from '../src/core/bus.js';
+import { SettingsService } from '../src/core/settings.js';
 import { drawRoomPicture, pictureCostUsd, RoomPictureDrawError } from '../src/room-pictures/draw.js';
 import { LocateError, locateDevices, normaliseAnswer } from '../src/room-pictures/locate.js';
 import { dayPrompt, describeKind, locatePrompt } from '../src/room-pictures/prompts.js';
-import { PictureBusyError, RoomPictureService, type Locator } from '../src/room-pictures/store.js';
-import { estimateCostUsd } from '../src/ai/models.js';
+import { homeLocator, PictureBusyError, RoomPictureService, type Locator } from '../src/room-pictures/store.js';
+import { AGENT_MODELS, estimateCostUsd, LOCATOR_MODELS, PROVIDER_MODELS } from '../src/ai/models.js';
+import { openTestDb, resetDb } from './helpers/db.js';
 
 /**
  * Room pictures, minus the network: the image model and the reader are stubs,
@@ -22,7 +24,7 @@ const devices = [
   { id: 'tv', name: 'Light TV', kind: 'outlet' },
   { id: 'sensor', name: 'Climate sensor', kind: 'sensor' },
 ];
-const locator: Locator = async () => ({ provider: 'openai', modelId: 'gpt-6.1-sol', apiKey: 'sk-reader' });
+const locator: Locator = async () => [{ provider: 'openai', modelId: 'gpt-6.1-terra', apiKey: 'sk-reader' }];
 
 type Fn = ReturnType<typeof vi.fn>;
 
@@ -154,10 +156,52 @@ describe('RoomPictureService', () => {
 
   it('reads nothing when the home has no key to read with', async () => {
     const { pictures, locate } = service();
-    const record = await pictures.draw({ ...input, locator: async () => null });
+    const record = await pictures.draw({ ...input, locator: async () => [] });
     expect(locate).not.toHaveBeenCalled();
     expect(record.markers).toEqual([]);
     await pictures.settled();
+  });
+
+  it('asks the next reader when one cannot read the picture, and keeps the first answer', async () => {
+    const locate = vi
+      .fn()
+      .mockRejectedValueOnce(new LocateError('This home’s OpenAI account is out of credit.', 'billing'))
+      .mockResolvedValueOnce({
+        located: [{ deviceId: 'tv', x: 0.2, y: 0.6, seen: true }],
+        usage: { input_tokens: 2000, output_tokens: 500 },
+      });
+    const { pictures } = service({ locate });
+    const readers: Locator = async () => [
+      { provider: 'openai', modelId: 'gpt-6.1-terra', apiKey: 'sk-openai' },
+      { provider: 'anthropic', modelId: 'claude-sonnet-5-5', apiKey: 'sk-ant' },
+    ];
+    const record = await pictures.draw({ ...input, locator: readers });
+
+    const asked = locate.mock.calls.map((call) => (call as [{ provider: string; modelId: string; apiKey: string }])[0]);
+    expect(asked.map(({ provider, modelId, apiKey }) => ({ provider, modelId, apiKey }))).toEqual([
+      { provider: 'openai', modelId: 'gpt-6.1-terra', apiKey: 'sk-openai' },
+      { provider: 'anthropic', modelId: 'claude-sonnet-5-5', apiKey: 'sk-ant' },
+    ]);
+    expect(record.markers).toEqual([{ deviceId: 'tv', x: 0.2, y: 0.6, source: 'seen' }]);
+    await pictures.settled();
+  });
+
+  it('asks nobody after the first answer, and keeps the drawing when every reader fails', async () => {
+    const readers: Locator = async () => [
+      { provider: 'openai', modelId: 'gpt-6.1-terra', apiKey: 'sk-openai' },
+      { provider: 'anthropic', modelId: 'claude-sonnet-5-5', apiKey: 'sk-ant' },
+    ];
+    const answered = service();
+    await answered.pictures.draw({ ...input, locator: readers });
+    expect(answered.locate).toHaveBeenCalledTimes(1);
+    await answered.pictures.settled();
+
+    const locate = vi.fn().mockRejectedValue(new LocateError('nope', 'refused'));
+    const failing = service({ locate });
+    const record = await failing.pictures.draw({ ...input, locator: readers });
+    expect(locate).toHaveBeenCalledTimes(2);
+    expect(record.markers).toEqual([]);
+    await failing.pictures.settled();
   });
 
   it('refuses a second drawing until the first one’s night has landed', async () => {
@@ -467,6 +511,78 @@ describe('reading the devices off a picture', () => {
         locateDevices({ provider: 'anthropic', modelId: 'claude-opus-5-5', apiKey: 'sk-ant', picture: png(1), devices, fetchImpl }),
       ).rejects.toMatchObject({ kind });
     }
+  });
+});
+
+const handle = await openTestDb();
+
+/**
+ * Who reads, and on which model: each vendor's middle rung, OpenAI's first —
+ * it drew the picture — and Anthropic's after, whatever recognition runs on.
+ */
+describe('the reader', () => {
+  it('is each vendor’s middle rung: still offered, sees a picture, and costs less than anything recognition offers', () => {
+    const price = (model: string) => estimateCostUsd(model, { input_tokens: 1_000_000, output_tokens: 1_000_000 });
+    for (const provider of ['anthropic', 'openai'] as const) {
+      const reader = LOCATOR_MODELS[provider];
+      // Offered to the agents means current: a retired model leaves that list,
+      // and this fails until the constant names its successor.
+      const offered = AGENT_MODELS[provider].choices.find((choice) => choice.id === reader);
+      expect(offered?.images).toBe(true);
+      for (const choice of PROVIDER_MODELS[provider].choices) {
+        expect(price(reader)).toBeLessThan(price(choice.id));
+      }
+    }
+  });
+
+  describe.skipIf(!handle)('on the home’s own settings', () => {
+    const db = handle?.db!;
+    let settings: SettingsService;
+
+    beforeEach(async () => {
+      await resetDb(db);
+      settings = new SettingsService(db, Buffer.alloc(32).toString('base64'));
+    });
+
+    afterAll(async () => {
+      await handle?.close();
+    });
+
+    it('asks OpenAI first and Anthropic second, whatever recognition runs on', async () => {
+      await settings.setAiKey('anthropic', 'sk-ant-api-key-0000');
+      await settings.setAiModel('claude-fable-5-1', 'anthropic');
+      expect(await homeLocator(settings)()).toEqual([
+        { provider: 'anthropic', modelId: 'claude-sonnet-5-5', apiKey: 'sk-ant-api-key-0000' },
+      ]);
+
+      // Recognition still runs on Anthropic; the picture goes to OpenAI first,
+      // which drew it.
+      await settings.setAiKey('openai', 'sk-openai-key-0000');
+      expect((await settings.getAiSettings()).provider).toBe('anthropic');
+      const both = [
+        { provider: 'openai', modelId: 'gpt-6.1-terra', apiKey: 'sk-openai-key-0000' },
+        { provider: 'anthropic', modelId: 'claude-sonnet-5-5', apiKey: 'sk-ant-api-key-0000' },
+      ];
+      expect(await homeLocator(settings)()).toEqual(both);
+
+      await settings.setMappingProvider('openai');
+      await settings.setAiModel('gpt-6-astra', 'openai');
+      expect(await homeLocator(settings)()).toEqual(both);
+    });
+
+    it('never asks Anthropic on a Claude subscription token, and nobody with no key', async () => {
+      expect(await homeLocator(settings)()).toEqual([]);
+
+      await settings.setAiKey('anthropic', 'legacy-subscription-token');
+      await settings.set('ai_auth_type', 'oauth_token');
+      expect((await settings.getAiSettings()).legacySubscriptionToken).toBe(true);
+      expect(await homeLocator(settings)()).toEqual([]);
+
+      await settings.setAiKey('openai', 'sk-openai-key-0000');
+      expect(await homeLocator(settings)()).toEqual([
+        { provider: 'openai', modelId: 'gpt-6.1-terra', apiKey: 'sk-openai-key-0000' },
+      ]);
+    });
   });
 });
 

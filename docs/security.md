@@ -28,8 +28,9 @@ The only connections the hub itself ever makes outward are:
   the [privacy policy](https://gethome.me/privacy#ai); the engineering side is
   in [`ai-adaptation.md`](ai-adaptation.md), [`assistant.md`](assistant.md) and
   [`portraits.md`](portraits.md). Photos of a room somebody has drawn go to
-  OpenAI and are not kept; the picture is, and is shown to the recognition
-  provider to read its devices off ([`api.md`](api.md#room-pictures)). A photo
+  OpenAI and are not kept; the picture is, and is shown to OpenAI to read its
+  devices off — to Anthropic only when OpenAI cannot read it and the home holds
+  an Anthropic key ([`api.md`](api.md#room-pictures)). A photo
   somebody attaches to a chat message goes to the provider of the model that
   chat runs on, for that one round, and is **never stored on the hub**: the
   transcript records only what the photo was — its type, its size in bytes and

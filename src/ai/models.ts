@@ -39,9 +39,9 @@
  *
  * **Succession.** A stored choice counts only while the model it names is still
  * *offered*; otherwise the hub runs the first model along its successor chain
- * that is — Opus 5 → Opus 5.5, Sonnet 5 → Sonnet 5.5, GPT-5.6 Sol and Terra →
- * GPT-6 Sol → GPT-6.1 Sol — and only where there is no such model, the
- * vendor's default. Three rules.
+ * that is — Opus 5 → Opus 5.5, Sonnet 5 → Sonnet 5.5, GPT-5.6 Sol → GPT-6 Sol
+ * → GPT-6.1 Sol, GPT-5.6 Terra → GPT-6.1 Terra — and only where there is no
+ * such model, the vendor's default. Four rules.
  *  - **It is resolved when settings are read, never written back.** Updating a
  *    hub is therefore all it takes to move every home on a retired model, with
  *    no migration and nothing for its owner to do — and it is also the only
@@ -58,6 +58,12 @@
  *    points at Opus 5, which points at Opus 5.5; the walk follows the chain. So
  *    retiring a model is an edit to its own row only, and nothing already
  *    written has to be revisited.
+ *  - **A tier keeps its tier.** The model that replaced a Sonnet is the next
+ *    Sonnet, and a Terra's the next Terra, because somebody who chose the
+ *    quicker, cheaper rung chose the rung. Only while a vendor has nothing on
+ *    that rung does its row point at the nearest one — GPT-5.6 Terra went to
+ *    GPT-6 Sol while GPT-6 had no Terra — and the row moves back the day the
+ *    rung does.
  *
  * Prices are list prices in USD per million tokens, from each vendor's model
  * pages (checked 9 October 2026). They move rarely, and the caps they feed are
@@ -74,9 +80,9 @@ export interface ModelPricing {
   readonly outputPerMTok: number;
   /**
    * What a cached read costs, as a fraction of the input rate, where this model
-   * is billed differently from the usual tenth. Opus 5.5, Sonnet 5.5 and
-   * GPT-6.1 Sol read at a twentieth and Fable 5.1 at a fortieth, and pricing
-   * them at a tenth would overstate every long conversation on them.
+   * is billed differently from the usual tenth. Opus 5.5, Sonnet 5.5, GPT-6.1
+   * Sol and GPT-6.1 Terra read at a twentieth and Fable 5.1 at a fortieth, and
+   * pricing them at a tenth would overstate every long conversation on them.
    */
   readonly cacheReadMultiplier?: number;
   /** The same for a cache write, where it differs from the usual 1.25×. */
@@ -242,6 +248,18 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
       price: { inputPerMTok: 2, outputPerMTok: 10, cacheReadMultiplier: 0.05, longPrompt: GPT_6_LONG_PROMPT },
       images: true,
     },
+    // Half GPT-6.1 Sol's price, with the same twentieth for a cached read
+    // ($0.05), and OpenAI's quicker tier — about three times Sol's speed, by
+    // OpenAI's own figures. It takes what Sol takes: the Responses API with
+    // function tools, images, and `reasoning.effort` low, medium and high (it
+    // accepts `none` as well, which nothing here sends). Offered to the agents
+    // only, as Sonnet 5.5 is: recognition never offers a tier cheaper than its
+    // default.
+    'gpt-6.1-terra': {
+      label: 'GPT-6.1 Terra',
+      price: { inputPerMTok: 1, outputPerMTok: 5, cacheReadMultiplier: 0.05, longPrompt: GPT_6_LONG_PROMPT },
+      images: true,
+    },
     // Still served, and replaced in the picker the way Opus 5 was: GPT-6.1 Sol
     // is the same price and stronger, so nothing a home chose is lost by moving.
     'gpt-6-sol': {
@@ -254,11 +272,11 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
       price: { inputPerMTok: 0.1, outputPerMTok: 0.5, longPrompt: GPT_6_LONG_PROMPT },
       images: true,
     },
-    // GPT-5.6 was Sol, Terra and Luna; GPT-6 is Astra, Sol and Luna. There is
-    // no GPT-6 Terra, and GPT-6 Sol is both cheaper than 5.6 Terra ($2/$12) and
-    // stronger than 5.6 Sol — so both of the tiers this hub offered move to it.
-    // Sol's $4/$20 was a promotional rate (standard $5/$30); it is kept as the
-    // price the rows recorded on it were estimated at.
+    // GPT-5.6 was Sol, Terra and Luna; GPT-6 was Astra, Sol and Luna, with no
+    // Terra, and GPT-6 Sol was both cheaper than 5.6 Terra ($2/$12) and
+    // stronger than 5.6 Sol — so both of the tiers this hub offered moved to
+    // it. Sol's $4/$20 was a promotional rate (standard $5/$30); it is kept as
+    // the price the rows recorded on it were estimated at.
     'gpt-5.6-sol': {
       label: 'GPT-5.6 Sol',
       price: { inputPerMTok: 4, outputPerMTok: 20 },
@@ -272,10 +290,15 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
       price: { inputPerMTok: 4, outputPerMTok: 20 },
       successor: 'gpt-6-sol',
     },
+    // Back on its own tier now that the tier is back: GPT-6.1 Terra is the
+    // Terra after it, the way Sonnet 4.6 walks to Sonnet 5.5 and never to Opus.
+    // It went to GPT-6 Sol while GPT-6 had no Terra. Recognition offers no
+    // Terra, so a recognition setting naming it walks off the end of the chain
+    // and runs that list's default, GPT-6.1 Sol — where it already ran.
     'gpt-5.6-terra': {
       label: 'GPT-5.6 Terra',
       price: { inputPerMTok: 2, outputPerMTok: 12 },
-      successor: 'gpt-6-sol',
+      successor: 'gpt-6.1-terra',
     },
   },
 };
@@ -350,8 +373,9 @@ export const PROVIDER_MODELS: Readonly<
  * rounds, it is read the moment it is written, and a reply somebody does not
  * like is answered with another message — so what a model costs per round is a
  * real trade a home can make, and both halves of it are visible. So the cheaper
- * tiers are offered here: Sonnet 5.5 at half Opus 5.5's price, Haiku 5.5 at a
- * fortieth of it, and GPT-6 Luna at a twentieth of Sol's — with the dearest of
+ * tiers are offered here: Sonnet 5.5 at half Opus 5.5's price and Haiku 5.5 at
+ * a fortieth of it, GPT-6.1 Terra at half Sol's and GPT-6 Luna at a twentieth
+ * of it — four rungs a vendor, the same ladder on both — with the dearest of
  * each vendor's above the default, Fable 5.1 and GPT-6 Astra, as recognition
  * offers them.
  *
@@ -381,6 +405,7 @@ export const AGENT_MODELS: Readonly<
     choices: [
       offer('openai', 'gpt-6-astra', 'OpenAI’s most capable, at five times Sol’s price.'),
       offer('openai', 'gpt-6.1-sol', 'Nearly as capable as Astra, at a fifth of the price.', true),
+      offer('openai', 'gpt-6.1-terra', 'Quicker, and half the price of Sol.'),
       offer('openai', 'gpt-6-luna', 'The quickest and cheapest. Fine for simple requests.'),
     ],
   },
@@ -406,6 +431,35 @@ export const AGENT_MODELS: Readonly<
 export const TITLE_MODELS: Readonly<Record<AiProvider, string>> = {
   anthropic: known('anthropic', 'claude-haiku-5-5'),
   openai: known('openai', 'gpt-6-luna'),
+};
+
+/**
+ * What reads where a room picture's devices stand, per vendor: the middle rung
+ * of each (`room-pictures/locate.ts`) — OpenAI's asked first, since OpenAI drew
+ * the picture, and Anthropic's only when that fails
+ * (`room-pictures/store.ts`'s `homeLocator`).
+ *
+ * **Never recognition's model.** It read on whatever recognition ran on, which
+ * made a home that chose Fable 5.1 or GPT-6 Astra for its mappings pay their
+ * price for a few points on a picture — and that list is strong-only for a
+ * reason that is not this job's: a mapping is cached against a device model
+ * for good, while a point in the wrong place is one drag from right and is
+ * never read over once a person has placed it. A reading is one picture and
+ * one short answer. **And it is part of the wait**: a drawing goes back to the
+ * app only once its devices are read (`room-pictures/store.ts`), so a quicker
+ * model shows the room sooner.
+ *
+ * **Not the cheapest rung.** A device the picture does not show is put where it
+ * would plausibly be, which takes reading the room, and the saving over this
+ * rung is about a cent a reading.
+ *
+ * Named from the table rather than written out, as `TITLE_MODELS` is, and
+ * `test/room-pictures.test.ts` pins what matters: each is still offered, takes
+ * a picture, and costs less than anything recognition offers.
+ */
+export const LOCATOR_MODELS: Readonly<Record<AiProvider, string>> = {
+  anthropic: known('anthropic', 'claude-sonnet-5-5'),
+  openai: known('openai', 'gpt-6.1-terra'),
 };
 
 function known(provider: AiProvider, id: string): string {

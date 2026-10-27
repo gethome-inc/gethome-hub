@@ -2222,6 +2222,7 @@ the second provider reads exactly what it read before — plus a per-provider ha
                                              { "id": "claude-haiku-5-5", … } ],
                               "openai":    [ { "id": "gpt-6-astra", "label": "GPT-6 Astra", … },
                                              { "id": "gpt-6.1-sol", "label": "GPT-6.1 Sol", … },
+                                             { "id": "gpt-6.1-terra", "label": "GPT-6.1 Terra", … },
                                              { "id": "gpt-6-luna", "label": "GPT-6 Luna", … } ] } },
   "automations": { "model": "gpt-6.1-sol", "provider": "openai", "choosable": true, "models": [ … ], "choices": { … } },
   "portraits": { "model": "gpt-image-2.5-flare", "maxPerDevice": 6, "budgetBytes": 314572800 }
@@ -2278,11 +2279,14 @@ adding a second key later no longer moves recognition to the default vendor.
 
 **`model` is what will run, not what is stored — and a retired model is
 succeeded.** Every model the hub has known carries the model that replaced it
-(Opus 5 → Opus 5.5; Sonnet 5 → Sonnet 5.5; GPT-5.6 Sol, the `gpt-5.6` alias and
-GPT-5.6 Terra → GPT-6 Sol → GPT-6.1 Sol), and a stored choice counts only while
-it is still offered: otherwise the hub runs the first model along that chain
-which is, and only where there is none the vendor's default. A successor is
-always the same vendor's — the vendor was a choice somebody made, the retired id
+(Opus 5 → Opus 5.5; Sonnet 5 → Sonnet 5.5; GPT-5.6 Sol and the `gpt-5.6` alias
+→ GPT-6 Sol → GPT-6.1 Sol; GPT-5.6 Terra → GPT-6.1 Terra — a tier keeps its
+tier), and a stored choice counts only while it is still offered: otherwise the
+hub runs the first model along that chain which is, and only where there is none
+the vendor's default. That is per list: recognition offers no Terra, so a
+recognition setting of GPT-5.6 Terra walks off the end of its chain and runs
+GPT-6.1 Sol, the default. A successor is always the same vendor's — the vendor
+was a choice somebody made, the retired id
 was not. **This is resolved on every read and never written back**, which is
 what makes an update all it takes and a rollback harmless: the previous build,
 which `install.sh` falls back to when a new one fails its health check, reads
@@ -2295,9 +2299,10 @@ they are offered a different list.** Those two answer "which model answers in
 the assistant" and "which model writes the home's rules", and the lists differ
 because the trades do. A conversation is many small rounds, read the moment they
 arrive and answered with another message when the reply is poor — so what a
-round costs is a real choice, and those lists add the cheaper tiers (Sonnet 5.5,
-GPT-6 Luna). Write them with `PATCH /settings/ai {assistantModel}` and
-`{automationsModel}`; `null` clears either back to the default. As above, both
+round costs is a real choice, and those lists add the cheaper tiers (Sonnet 5.5
+and Haiku 5.5, GPT-6.1 Terra and GPT-6 Luna). Write them with
+`PATCH /settings/ai {assistantModel}` and `{automationsModel}`; `null` clears
+either back to the default. As above, both
 `model` fields are what will **run**, and a retired id resolves to its
 successor rather than being refused.
 
@@ -2478,16 +2483,23 @@ be invented — painted into the room, somewhere it isn't. A device the photos
 show is drawn because they show it; every device gets its place from the
 reading below.
 
-**Then the devices are read off it.** The day picture is shown to device
-recognition's provider and model (on the home's own key) with the room's
-devices by name, and it answers a point for each — on the device where it is
-drawn (`source: "seen"`), on what it works where it is a plug, and where it
-would plausibly be otherwise (`"guessed"`). `x` and `y` are fractions of the
-picture's width and height from its top-left corner. A point a person moved
-(`PATCH`, `source: "placed"`) is never read over: `POST /room-pictures/:id/locate`
-reads only the devices nobody placed — the way to place a device added since.
-A home with no usable recognition key gets no points, and the apps place
-those devices themselves until somebody moves them. The reading is asked at a
+**Then the devices are read off it.** The day picture is shown, with the room's
+devices by name, to a model that answers a point for each — on the device where
+it is drawn (`source: "seen"`), on what it works where it is a plug, and where
+it would plausibly be otherwise (`"guessed"`). **OpenAI's GPT-6.1 Terra is
+asked first**, on the home's OpenAI key: OpenAI drew the picture, so its key
+has just answered, and the picture goes back to the vendor that already has the
+photos. **Anthropic's Sonnet 5.5 is asked only when that reading fails** and
+the home has an Anthropic key it can use. Each is its vendor's middle rung,
+whatever recognition runs on: a point in the wrong place is one drag from
+right, and the drawing is answered only once its devices are read, so a quicker
+model shows the room sooner. `x` and `y` are fractions of the picture's width
+and height from its top-left corner. A point a person moved (`PATCH`,
+`source: "placed"`) is never read over: `POST /room-pictures/:id/locate` reads
+only the devices nobody placed — the way to place a device added since. A
+reading nobody could give — neither key usable, or both readings failed —
+places no points, and the apps place those devices themselves until somebody
+moves them. The reading is asked at a
 moderate effort on either vendor, and on Anthropic a busy API is tried again
 before the reading fails, and a reading the model declines is asked again of
 another Claude in the same request; a refusal that stands, or an answer cut off
@@ -2516,8 +2528,8 @@ and `pictures.json`, five per room (the newest kept, and the chosen one
 whatever its age) and 200 MB in all, with a
 refusal to draw on a nearly full card (`409 no_space`). **The photos are not
 kept.** Deleting a room forgets its pictures. Each drawing writes `ai_runs`
-rows (`kind: "roompicture"` for the day and the night, `"roomlocate"` for the
-reading) priced from the response's usage. Every change broadcasts
+rows (`kind: "roompicture"` for the day and the night, `"roomlocate"` for each
+reader asked) priced from the response's usage. Every change broadcasts
 `{"type":"roomPictures","roomId"}`.
 
 ### The device-mapping library

@@ -76,8 +76,12 @@ domains — update them in the same change.
   **What runs instead is the retired model's successor**, and that is one table
   rather than three (`MODELS` in `models.ts`: a row per model the hub has ever
   run, carrying its price, its name and the model that replaced it — Opus 5 →
-  Opus 5.5, Sonnet 5 → Sonnet 5.5, GPT-5.6 Sol/Terra → GPT-6 Sol → GPT-6.1 Sol).
-  Three rules.
+  Opus 5.5, Sonnet 5 → Sonnet 5.5, GPT-5.6 Sol → GPT-6 Sol → GPT-6.1 Sol,
+  GPT-5.6 Terra → GPT-6.1 Terra). Three rules, and **a tier keeps its tier**
+  beside them: a Sonnet's successor is the next Sonnet and a Terra's the next
+  Terra, pointing at the nearest rung only while the vendor has nothing on its
+  own — GPT-5.6 Terra went to GPT-6 Sol while GPT-6 had no Terra, and came back
+  to GPT-6.1 Terra the day there was one.
   **Resolved on read, never written back**: that is what makes updating the hub
   the whole migration, and it is the only version that survives `install.sh`'s
   rollback — the previous build has never heard of the successor, and an agent
@@ -770,11 +774,19 @@ domains — update them in the same change.
   runs, so a member whose role cannot hand a job over gets a sentence the model
   reads out rather than a capability silently absent.
   **The agents' model list is its own** (`AGENT_MODELS` — Fable 5.1, Opus 5.5,
-  Sonnet 5.5 and Haiku 5.5 on Anthropic, GPT-6 Astra, GPT-6.1 Sol and GPT-6
-  Luna on OpenAI), and the mapper's list stays strong-only: a descriptor is
+  Sonnet 5.5 and Haiku 5.5 on Anthropic, GPT-6 Astra, GPT-6.1 Sol, GPT-6.1
+  Terra and GPT-6 Luna on OpenAI: the same four rungs on both), and the
+  mapper's list stays strong-only: a descriptor is
   cached against a device model and shapes every unit of it for ever, while a
   chat is many small rounds answered with another message when the reply is
-  poor. **The provider follows the model id and there is no second column**
+  poor. **Reading where a room picture's devices stand is on neither list**
+  (`LOCATOR_MODELS`, `room-pictures/store.ts`'s `homeLocator`): each vendor's
+  middle rung on the home's key, GPT-6.1 Terra first — OpenAI drew the picture,
+  so its key has just answered — and Sonnet 5.5 only when that reading fails,
+  whatever recognition runs on, since a misplaced point is one drag from right
+  and is never read over once a person has placed it, and the drawing is
+  answered only once its devices are read.
+  **The provider follows the model id and there is no second column**
   (`agentProviderOf`): ids do not collide across
   vendors — `priceOf` has relied on that since the mapper had two — so one
   setting says both things and they cannot disagree, and an app's picker writes
