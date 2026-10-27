@@ -44,6 +44,16 @@ export interface ChatFailureWire {
    * declined question.
    */
   transient?: true;
+  /**
+   * The person's message the failed round was answering, by row id.
+   *
+   * **Said rather than inferred.** A message sent while a round is running is
+   * written the moment it is taken, so it lands *ahead* of that round's note:
+   * "the newest message before the note" is then the message queued behind,
+   * not the one that failed, and asking it again answered the wrong one twice.
+   * It is also what a recap leaves out when the round was declined.
+   */
+  messageId?: string;
 }
 
 /** `data.switchTo` on a note: the other vendor's model, offered by name. */
@@ -136,12 +146,20 @@ export function failureNote(
   kind: ChatFailureKind,
   text: string,
   usable: UsableProviders | undefined,
+  /** The person's message the failed round was answering — see `messageId`. */
+  messageId?: string,
 ): ChatFailureNote {
   const offer = usable === undefined ? undefined : switchOffer(provider, usable);
   return {
     text,
     data: {
-      failure: { provider, model, kind, ...(TRANSIENT.has(kind) ? { transient: true as const } : {}) },
+      failure: {
+        provider,
+        model,
+        kind,
+        ...(TRANSIENT.has(kind) ? { transient: true as const } : {}),
+        ...(messageId !== undefined ? { messageId } : {}),
+      },
       ...(offer !== undefined ? { switchTo: offer } : {}),
     },
   };
@@ -152,4 +170,36 @@ export function isRetryableNote(row: { role: string; data?: unknown }): boolean 
   if (row.role !== 'note') return false;
   const failure = (row.data as { failure?: unknown } | null | undefined)?.failure;
   return typeof failure === 'object' && failure !== null;
+}
+
+/** The message a stored failure note says its round was answering, if it says. */
+export function failedMessageId(row: { data?: unknown }): string | undefined {
+  const id = (row.data as { failure?: { messageId?: unknown } } | null | undefined)?.failure?.messageId;
+  return typeof id === 'string' && id.length > 0 ? id : undefined;
+}
+
+/**
+ * The ids a recap leaves out because a model declined them: each declined
+ * message, and the note its refusal was written as.
+ *
+ * **Every recap, not only the one straight after the refusal.** A message a
+ * Claude declined is read again by the next one it is put in front of — the
+ * classifier that declined it declines what follows it — and a conversation is
+ * rebuilt from its record whenever it moves model, lets a photo go or wakes
+ * after a restart. A refusal somebody has since asked again (`retried`) is
+ * left in: that message has been answered, and leaving it out would leave its
+ * answer replying to nothing.
+ */
+export function declinedRows(rows: readonly { id: string; role: string; data?: unknown }[]): Set<string> {
+  const left = new Set<string>();
+  for (const row of rows) {
+    if (row.role !== 'note' || !isRetryableNote(row)) continue;
+    const data = row.data as { failure?: { kind?: unknown }; retried?: unknown } | null | undefined;
+    if (data?.failure?.kind !== 'refused' || data.retried !== undefined) continue;
+    const message = failedMessageId(row);
+    if (message === undefined) continue;
+    left.add(message);
+    left.add(row.id);
+  }
+  return left;
 }

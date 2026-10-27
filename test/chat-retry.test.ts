@@ -15,11 +15,17 @@ import { PermitJoinService } from '../src/core/permit-join.js';
 import { AiRunLog } from '../src/core/ai-runs.js';
 import { MappingLibrary } from '../src/ai/library.js';
 import { AiUnavailableError } from '../src/ai/errors.js';
-import { failureNote, failureSentence, switchOffer } from '../src/ai/chat/failure.js';
+import { declinedRows, failureNote, failureSentence, switchOffer } from '../src/ai/chat/failure.js';
 import type { AutomationEngine } from '../src/automations/engine.js';
 import type { AssistantTurn } from '../src/ai/assistant-agent.js';
 import type { AutomationConversation, AutomationTurn } from '../src/ai/automation-conversation.js';
-import type { AgentConversation, ChatTurnContext } from '../src/ai/chat/chat-runtime.js';
+import {
+  retryTarget,
+  stillAskable,
+  type AgentConversation,
+  type ChatMessageWire,
+  type ChatTurnContext,
+} from '../src/ai/chat/chat-runtime.js';
 import {
   bootedHome,
   loadedAccess,
@@ -53,12 +59,22 @@ const log = pino({ level: 'silent' });
 /** What failed, by model id — a stand-in throws it, or declines. */
 const failures = new Map<string, unknown>();
 const refusals = new Set<string>();
-/** Steps a stand-in reports before it fails, by model id. */
-const before = new Map<string, [string, string, string][]>();
+/**
+ * Steps a stand-in reports before it fails, by model id — the fourth value is
+ * whether the step's change took (`ChatStepWire.done`).
+ */
+const before = new Map<string, [string, string, string, boolean?][]>();
+/** Models a conversation cannot be opened on, for a switch that fails. */
+const unopenable = new Set<string>();
 /** Hand-overs a stand-in reports, as Anthropic's server-side fallback would. */
 const handOvers = new Map<string, [string, string, boolean][]>();
 /** A stand-in that waits on this before answering, for the double-press. */
 let gate: Promise<void> | null = null;
+/**
+ * One wait per round, in the order rounds begin — for holding the second of
+ * two queued rounds while the first one fails.
+ */
+const holds: Promise<void>[] = [];
 
 /** Everything a stand-in was asked, and with what. */
 const asked: { model: string; text: string; images: number }[] = [];
@@ -66,9 +82,13 @@ const asked: { model: string; text: string; images: number }[] = [];
 function standIn<Turn>(provider: string, modelId: string) {
   const round = async (text: string, context?: ChatTurnContext): Promise<Turn> => {
     asked.push({ model: modelId, text, images: context?.images?.length ?? 0 });
-    for (const [summary, kind, detail] of before.get(modelId) ?? []) context?.onStep?.(summary, kind, detail);
+    for (const [summary, kind, detail, done] of before.get(modelId) ?? []) {
+      context?.onStep?.(summary, kind, detail, done);
+    }
     for (const [from, to, earlier] of handOvers.get(modelId) ?? []) context?.onHandOver?.(from, to, earlier);
     if (gate !== null) await gate;
+    const hold = holds.shift();
+    if (hold !== undefined) await hold;
     const failure = failures.get(modelId);
     if (failure !== undefined) throw failure;
     if (refusals.has(modelId)) {
@@ -150,10 +170,14 @@ describe('a round that could not be answered', () => {
     const started = await startedAutomations(db, events, registry, activity, {
       settings,
       access,
-      createConversation: ({ provider, modelId }) =>
-        standIn<AutomationTurn>(provider, modelId) as AutomationConversation,
-      createAssistantConversation: ({ provider, modelId }) =>
-        standIn<AssistantTurn>(provider, modelId) as AgentConversation<AssistantTurn>,
+      createConversation: ({ provider, modelId }) => {
+        if (unopenable.has(modelId)) throw new Error(`${modelId} would not open`);
+        return standIn<AutomationTurn>(provider, modelId) as AutomationConversation;
+      },
+      createAssistantConversation: ({ provider, modelId }) => {
+        if (unopenable.has(modelId)) throw new Error(`${modelId} would not open`);
+        return standIn<AssistantTurn>(provider, modelId) as AgentConversation<AssistantTurn>;
+      },
     });
     engine = started.engine;
     idle = async () => {
@@ -210,8 +234,10 @@ describe('a round that could not be answered', () => {
     failures.clear();
     refusals.clear();
     before.clear();
+    unopenable.clear();
     handOvers.clear();
     gate = null;
+    holds.length = 0;
     asked.length = 0;
     frames.length = 0;
     await settings.setAiKey('anthropic', 'sk-ant-api03-test');
@@ -364,7 +390,7 @@ describe('a round that could not be answered', () => {
 
   it('leaves a declined message out of the model’s memory, and on the page', async () => {
     refusals.add('gpt-6.1-sol');
-    before.set('gpt-6.1-sol', [['Working a device', 'writing', 'Porch light → on']]);
+    before.set('gpt-6.1-sol', [['Working a device', 'writing', 'Porch light → on', true]]);
     const started = await post('/api/v1/assistant/chat', {
       message: 'porch light on, then tell me how to get past my alarm',
       model: 'gpt-6.1-sol',
@@ -381,8 +407,10 @@ describe('a round that could not be answered', () => {
     // what was declined, so it is not declined for it — and the model is told
     // there was one, and what had already been done.
     expect(next.text).not.toContain('get past my alarm');
-    expect(next.text).toContain('Their last message was declined, so it is left out of this record.');
-    expect(next.text).toContain('- Working a device: Porch light → on');
+    expect(next.text).toContain('(They sent a message here that was declined, so it is left out of this record.)');
+    expect(next.text).toContain(
+      'Before declining their message, the model had already done this, and it stays done:\n- Working a device: Porch light → on',
+    );
     expect(next.text.endsWith('just the porch light, then')).toBe(true);
 
     // The person still sees what they asked and what came back.
@@ -420,7 +448,10 @@ describe('a round that could not be answered', () => {
   it('tells the model asked again what the failed round had already done', async () => {
     before.set('gpt-6.1-sol', [
       ['Looking at your home', 'reading', 'Hall light'],
-      ['Working a device', 'writing', 'Hall light → on'],
+      ['Working a device', 'writing', 'Hall light → on', true],
+      // Tried, and it did not take — never told as done.
+      ['Working a device', 'writing', 'Vacuum didn’t answer'],
+      ['Could not hand that over', 'writing', 'That agent is not available.'],
     ]);
     failures.set('gpt-6.1-sol', new AiUnavailableError('network', 'fetch failed'));
     const started = await post('/api/v1/assistant/chat', {
@@ -435,8 +466,11 @@ describe('a round that could not be answered', () => {
     const told = asked.at(-1)!.text;
     expect(told).toContain('Before that model failed, it had already done this:\n- Working a device: Hall light → on');
     expect(told).toContain('Check what is already done before doing any of it again.');
-    // Reading is not doing, so it is not in the list.
+    // Reading is not doing, so it is not in the list — and neither is a
+    // change that did not take.
     expect(told).not.toContain('Looking at your home');
+    expect(told).not.toContain('Vacuum');
+    expect(told).not.toContain('Could not hand that over');
   });
 
   it('says in the round’s working when another Claude answered, once a turn', async () => {
@@ -478,6 +512,117 @@ describe('a round that could not be answered', () => {
     await idle();
     expect(asked.at(-1)).toMatchObject({ model: 'claude-opus-5-5', images: 1 });
     expect(asked.at(-1)!.text.endsWith('Photo')).toBe(false);
+  });
+
+  /**
+   * A message sent while a round runs is written at once, so it lands *ahead*
+   * of that round's failure note: `[FIRST, SECOND, note]`. "The newest
+   * message before the note" was then SECOND — still queued behind — which was
+   * answered twice while FIRST never was. The note names its message now, and
+   * one with another message of the person's after it has been moved on from.
+   */
+  it('asks again the message a failure names, and nothing once another is queued behind it', async () => {
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    holds.push(
+      new Promise<void>((resolve) => (releaseFirst = resolve)),
+      new Promise<void>((resolve) => (releaseSecond = resolve)),
+    );
+    failures.set('gpt-6.1-sol', new AiUnavailableError('overloaded', '529 overloaded'));
+    const started = await post('/api/v1/assistant/chat', { message: 'FIRST', model: 'gpt-6.1-sol' });
+    const { sessionId } = started.json() as { sessionId: string };
+    await until(() => asked.length === 1, 'the first round');
+    await post(`/api/v1/assistant/chat/${sessionId}/messages`, { message: 'SECOND' });
+
+    releaseFirst();
+    await until(() => asked.length === 2, 'the second round, queued behind the first');
+    const rows = await read('assistant', sessionId);
+    expect(rows.map((row) => [row.role, row.text.slice(0, 6)])).toEqual([
+      ['user', 'FIRST'],
+      ['user', 'SECOND'],
+      ['note', 'GPT-6.'],
+    ]);
+    expect(rows[2]!.data).toMatchObject({ failure: { messageId: rows[0]!.id } });
+    const moved = await post(`/api/v1/assistant/chat/${sessionId}/retry`, { model: 'claude-opus-5-5' });
+    expect(moved.statusCode).toBe(409);
+    expect((moved.json() as { error: string }).error).toBe('nothing_to_retry');
+
+    // SECOND fails as well, and is the one its own note asks again.
+    releaseSecond();
+    await idle();
+    failures.clear();
+    const asking = await post(`/api/v1/assistant/chat/${sessionId}/retry`, { model: 'claude-opus-5-5' });
+    expect(asking.statusCode).toBe(202);
+    await idle();
+    expect(asked.map((entry) => [entry.model, entry.text.split('\n').at(-1)])).toEqual([
+      ['gpt-6.1-sol', 'FIRST'],
+      ['gpt-6.1-sol', 'SECOND'],
+      ['claude-opus-5-5', 'SECOND'],
+    ]);
+  });
+
+  /**
+   * A declined message was left out of the rebase straight after it and read
+   * again by every record after that — a switch of model, a photo let go, a
+   * conversation woken after a restart — so the classifier that declined it
+   * met it again and declined what followed.
+   */
+  it('leaves a declined message out of every record the conversation is rebuilt from', async () => {
+    refusals.add('claude-opus-5-5');
+    const started = await post('/api/v1/assistant/chat', { message: 'DECLINED REQUEST' });
+    await idle();
+    const { sessionId } = started.json() as { sessionId: string };
+    refusals.clear();
+    const placeholder = '(They sent a message here that was declined, so it is left out of this record.)';
+
+    // A switch of model.
+    await post(`/api/v1/assistant/chat/${sessionId}/messages`, { message: 'on sonnet', model: 'claude-sonnet-5-5' });
+    await idle();
+    expect(asked.at(-1)!.model).toBe('claude-sonnet-5-5');
+    expect(asked.at(-1)!.text).not.toContain('DECLINED REQUEST');
+    expect(asked.at(-1)!.text).toContain(placeholder);
+
+    // A photo let go after its round, and the message after it.
+    const photo = { type: 'image', mediaType: 'image/jpeg', data: Buffer.from('jpeg').toString('base64'), ref: 'p2' };
+    await post(`/api/v1/assistant/chat/${sessionId}/messages`, { message: 'what is this', attachments: [photo] });
+    await idle();
+    await post(`/api/v1/assistant/chat/${sessionId}/messages`, { message: 'after the photo' });
+    await idle();
+    expect(asked.at(-1)!.text).not.toContain('DECLINED REQUEST');
+    expect(asked.at(-1)!.text).toContain(placeholder);
+
+    // A conversation woken from its transcript.
+    await app.inject({ method: 'DELETE', url: `/api/v1/assistant/chat/${sessionId}`, headers: auth(token) });
+    await post(`/api/v1/assistant/chat/${sessionId}/messages`, { message: 'after a restart' });
+    await idle();
+    expect(asked.at(-1)!.text).not.toContain('DECLINED REQUEST');
+    expect(asked.at(-1)!.text).toContain(placeholder);
+
+    // Still on the page, every time.
+    expect((await read('assistant', sessionId))[0]).toMatchObject({ role: 'user', text: 'DECLINED REQUEST' });
+  });
+
+  /**
+   * The note was marked asked-again before the turn ran, so a model that could
+   * not be started — or a conversation dropped behind the turn's back — left a
+   * note claiming a retry that never happened, and a revival reopened the
+   * conversation on that model.
+   */
+  it('marks a failure asked again only once the turn has really begun', async () => {
+    const sessionId = await failedOnOpenAi('assistant');
+    unopenable.add('claude-opus-5-5');
+    const accepted = await post(`/api/v1/assistant/chat/${sessionId}/retry`, { model: 'claude-opus-5-5' });
+    expect(accepted.statusCode).toBe(202);
+    await idle();
+    const rows = await read('assistant', sessionId);
+    // The first note never claims it was asked again; the failure to start is
+    // a note of its own, naming the same message and askable in its turn.
+    expect(rows[1]!.data).not.toHaveProperty('retried');
+    expect(rows.at(-1)).toMatchObject({
+      role: 'note',
+      data: { failure: { model: 'claude-opus-5-5', kind: 'unavailable', messageId: rows[0]!.id } },
+    });
+    expect(frames.some((frame) => frame.sessionId === sessionId && frame.phase === 'amend')).toBe(false);
   });
 });
 
@@ -522,5 +667,57 @@ describe('the words on a failure', () => {
     }
     // Settings that could not be read are no offer, never a second failure.
     expect(failureNote('openai', 'gpt-6.1-sol', 'billing', 'x', undefined).data).not.toHaveProperty('switchTo');
+  });
+});
+
+describe('which failure is asked again', () => {
+  const row = (id: string, role: ChatMessageWire['role'], data?: unknown): ChatMessageWire => ({
+    id,
+    at: '2026-10-27T00:00:00.000Z',
+    role,
+    text: id,
+    ...(data !== undefined ? { data } : {}),
+  });
+  const failed = (id: string, messageId?: string) =>
+    row(id, 'note', { failure: { provider: 'openai', model: 'gpt-6.1-sol', kind: 'overloaded', ...(messageId ? { messageId } : {}) } });
+
+  it('answers the message the note names, and only while nothing of the person’s follows it', () => {
+    expect(retryTarget([row('m1', 'user'), failed('n1', 'm1')])?.message.id).toBe('m1');
+    expect(retryTarget([row('m1', 'user'), row('m2', 'user'), failed('n1', 'm1')])).toBeNull();
+    // A note between them is not the person moving on.
+    expect(
+      retryTarget([row('m1', 'user'), row('m2', 'user'), failed('n1', 'm1'), failed('n2', 'm2')])?.message.id,
+    ).toBe('m2');
+    // A note naming something that is not a message of theirs asks nothing.
+    expect(retryTarget([row('a1', 'agent'), failed('n1', 'a1')])).toBeNull();
+    // Only the newest row.
+    expect(retryTarget([row('m1', 'user'), failed('n1', 'm1'), row('a1', 'agent')])).toBeNull();
+  });
+
+  it('reads a note from before notes named their message only where that is unambiguous', () => {
+    expect(retryTarget([row('a0', 'agent'), row('m1', 'user'), failed('n1')])?.message.id).toBe('m1');
+    expect(retryTarget([row('m1', 'user'), row('m2', 'user'), failed('n1')])).toBeNull();
+  });
+
+  it('lets a retry run only while nothing but the person’s messages followed its note', () => {
+    const rows = [row('m1', 'user'), failed('n1', 'm1')];
+    expect(stillAskable(rows, 'n1')?.id).toBe('n1');
+    // A message queued behind the retry is answered after it.
+    expect(stillAskable([...rows, row('m2', 'user')], 'n1')?.id).toBe('n1');
+    // Anything answered in the meantime is the conversation moving on.
+    expect(stillAskable([...rows, row('m2', 'user'), row('a2', 'agent')], 'n1')).toBeNull();
+    expect(stillAskable(rows, 'gone')).toBeNull();
+  });
+
+  it('leaves out a declined message and its refusal, until somebody has asked it again', () => {
+    const refused = (id: string, messageId: string, retried?: boolean) =>
+      row(id, 'note', {
+        failure: { provider: 'anthropic', model: 'claude-opus-5-5', kind: 'refused', messageId },
+        ...(retried ? { retried: { model: 'gpt-6.1-sol' } } : {}),
+      });
+    expect([...declinedRows([row('m1', 'user'), refused('n1', 'm1')])].sort()).toEqual(['m1', 'n1']);
+    expect([...declinedRows([row('m1', 'user'), refused('n1', 'm1', true)])]).toEqual([]);
+    // Any other failure is history the record reads.
+    expect([...declinedRows([row('m1', 'user'), failed('n1', 'm1')])]).toEqual([]);
   });
 });

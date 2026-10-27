@@ -164,7 +164,8 @@ export interface AutomationTurnContext {
    * is an open string: a client that meets a new one falls back and still
    * shows the words.
    */
-  onStep?: (summary: string, kind: AutomationStepKind, detail?: string) => void;
+  /** One line per notable thing the turn did — see `ChatTurnContext.onStep`. */
+  onStep?: (summary: string, kind: AutomationStepKind, detail?: string, done?: boolean) => void;
   /**
    * What the model said in a round that then went on to call a tool.
    *

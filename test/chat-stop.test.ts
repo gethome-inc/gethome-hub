@@ -139,6 +139,32 @@ function heldAnthropicReply(thinking: string, words: string, signal: AbortSignal
   };
 }
 
+/**
+ * The same held reply after a hand-over: the declined model began, the API's
+ * fallback took over within the request, and the SDK relabelled the snapshot
+ * with the model that took over — while `message_start` still counted the
+ * declined attempt's prompt.
+ */
+function heldHandOver(words: string, signal: AbortSignal | undefined) {
+  const held = heldAnthropicReply('', words, signal);
+  const snapshot = {
+    model: 'claude-opus-4-8',
+    content: [
+      { type: 'text', text: 'The front door' },
+      {
+        type: 'fallback',
+        from: { model: 'claude-opus-5-5' },
+        to: { model: 'claude-opus-4-8' },
+        trigger: { type: 'refusal', category: 'cyber' },
+      },
+      { type: 'text', text: words },
+    ],
+    stop_reason: null,
+    usage: STARTED_USAGE,
+  };
+  return Object.defineProperty(held, 'currentMessage', { get: () => snapshot });
+}
+
 /** A reply that finishes, recording what the request carried at that moment. */
 function finishedAnthropicReply(text: string, seen: unknown[][]) {
   return (params: unknown) => {
@@ -319,6 +345,36 @@ afterEach(() => {
 describe('a round stopped part-way, on each vendor', () => {
   beforeEach(() => {
     anthropicStream.mockReset();
+  });
+
+  it('prices a round stopped after a hand-over as the two attempts it was', async () => {
+    const transport = createAnthropicTransport(options('claude-opus-5-5'));
+    const stop = new AbortController();
+    const abort = new TurnAbort(stop.signal, 60_000);
+    anthropicStream.mockImplementationOnce((_params, { signal }) => heldHandOver(' is locked', signal));
+    transport.pushUser('is the front door locked?');
+
+    const round = await transport.round({ onDelta: () => stop.abort() }, abort.signal);
+    abort.dispose();
+    expect(round.stop).toBe('halted');
+
+    // The declined attempt's prompt at the model asked for, and the prompt
+    // read again — uncached, a cache being per model — with what streamed, at
+    // the model that took over: never the declined prompt at the other's rates
+    // and the second read left out.
+    const prompt = STARTED_USAGE.input_tokens + STARTED_USAGE.cache_read_input_tokens;
+    expect(transport.costUsd()).toBeCloseTo(
+      estimateCostUsd('claude-opus-5-5', {
+        input_tokens: STARTED_USAGE.input_tokens,
+        cache_read_input_tokens: STARTED_USAGE.cache_read_input_tokens,
+        cache_creation_input_tokens: STARTED_USAGE.cache_creation_input_tokens,
+      }) +
+        estimateCostUsd('claude-opus-4-8', {
+          input_tokens: prompt,
+          output_tokens: Math.max(STARTED_USAGE.output_tokens, tokensIn(' is locked'.length)),
+        }),
+      10,
+    );
   });
 
   it('keeps what reached the page on Anthropic, and only the words of it', async () => {

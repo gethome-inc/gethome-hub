@@ -679,14 +679,21 @@ domains — update them in the same change.
   `anthropic-fallback.ts`, which is therefore the one place a reply another
   Claude finished is read: `echoed` (what the declined model began before the
   last `fallback` block — thinking, a client call, a server call without its
-  result — never goes back), `saidIn` (words join with nothing across a
-  hand-over, since the next model continues the sentence), `callsIn` (only the
-  answering model's calls run), `replyCostUsd` (each attempt at its own model's
-  rates off `usage.iterations`, while the top-level `usage` covers only the
-  answering one) and `withFallbacks` (**a request refused because of the field
-  is sent again without it and the process stops sending it** — the beta has
-  been renamed twice, and a hub nobody updates must lose its fallback rather
-  than its assistant). Haiku has no fallback and is sent nothing. A round
+  result or made from inside one that has none, a text block with nothing in
+  it — never goes back, while a search goes back with the code execution that
+  ran it, since every server call is answered by `tool_use_id`), `saidIn`
+  (words join with nothing across a hand-over, since the next model continues
+  the sentence), `callsIn` (only the answering model's calls run),
+  `replyCostUsd` (each attempt at its own model's rates off
+  `usage.iterations`, while the top-level `usage` covers only the answering
+  one) and `withFallbacks` (**a request refused because of the field is sent
+  again without it, and once that one is answered the process stops sending
+  it and logs so, once** — the beta has been renamed twice, and a hub nobody
+  updates must lose its fallback rather than its assistant. The match is
+  narrow because the switch is process-wide: the beta's header or the plural
+  `fallbacks` parameter, never a `fallback` *block* one conversation's history
+  carries, which is that conversation's problem and its note's to answer).
+  Haiku has no fallback and is sent nothing. A round
   answered that way says so (`ChatTurnContext.onHandOver` → a `handover` step,
   once per turn per pair), because the header names the model somebody chose.
   **Per-message effort (`mid-conversation-output-config-2026-07-01`) is
@@ -1122,29 +1129,46 @@ domains — update them in the same change.
   **A declined message is rebased away the same way**, and kept in the
   transcript (`rebase(…, declined)`): left in the vendor's history it rides
   along with every later request — the next message joins it as one user
-  turn — so the classifier that declined it declines what follows. The record
-  the fresh conversation is primed with leaves out the message and its note,
-  and `declinedPriming` tells the model one was declined and what that round
-  had already done. One rebase covers a declined turn that also carried a
-  photo. Vendor-agnostic: it is the runtime's, off the pump's `stopped` arm
-  with `refused: true`.
+  turn — so the classifier that declined it declines what follows. **Every
+  record a conversation is rebuilt from leaves it out**, not only the first
+  (`declinedRows`, read by `recapOf`): a switch of model, a photo let go and a
+  revival all recap the transcript again, and a recap that put the message
+  back would put the refusal back with it. A line stands where it was ("They
+  sent a message here that was declined…"), and goes once the message is
+  answered again (`retried` on its note). `declinedPriming` adds what that
+  round had already done, and only when it had done something. One rebase
+  covers a declined turn that also carried a photo. Vendor-agnostic: it is the
+  runtime's, off the pump's `stopped` arm with `refused: true`.
   **A failed round's note says which model failed and why, and offers the
   other vendor's** (`chat/failure.ts`: `failure` — provider, model, an open
   `kind`, `transient` where asking the same model again may work — and
   `switchTo`, the other vendor's default where this home holds its key; the
   sentence is written for somebody whose account ran out of credit, never the
   provider's status and JSON). A refusal is one of these and a cost cap or the
-  round limit is not. **`retry()` answers the person's last message again**
-  (`POST …/chat/:id/retry`, `chat.retry` on `GET /hub`) with no second row:
-  only from the newest row, only once at a time (`retrying`, claimed in the
-  same tick as the check and held until the turn has written its answer), on
-  a conversation reopened even on the same model (`switchModel(…, retry)`),
-  primed without the note and told what the failed round had already done
-  (`retryPriming`, the `writing` steps on the note). `data.retried` on the
-  note records the model, and `modelFromRows` reads it, so a revived
-  conversation comes back on the model it was answered on. Photos are the
-  app's to send again; one whose photos do not come back is sent with a line
-  saying they are gone (`retryText`).
+  round limit is not. **`retry()` answers a failed message again**
+  (`POST …/chat/:id/retry`, `chat.retry` on `GET /hub`) with no second row.
+  **The message is the one the note names** (`failure.messageId`, from
+  `ChatSession.answering`), never merely the newest before it: a message sent
+  while a round runs lands *ahead* of that round's note, so "the newest" was
+  the one still queued, answered twice while the failed one never was. Only
+  from the newest row, and not when a message of the person's lies between the
+  one named and its note — the conversation has moved on (`retryTarget`; a
+  note older than the field is read the old way only where one message
+  trails). Only once at a time (`retrying`, claimed in the same tick as the
+  check and held until the turn has written its answer). **Asked again when
+  its turn comes** (`stillAskable`): a turn queued ahead may have answered in
+  between, and then the retry is let go without a word. On a conversation
+  reopened even on the same model (`switchModel(…, retry)`), primed without
+  the note and told what the failed round had already done (`retryPriming`):
+  **only the steps marked `done`**, a change that took — never one a model
+  tried and the home refused, nor a rule accepted and never saved, since
+  telling a model those stay done is telling it something exists that does
+  not. **`data.retried` is written only once the conversation is open**: a
+  model that cannot be started writes its own `unavailable` note naming the
+  same message instead, and a revival — `modelFromRows` reads `retried` — must
+  never come back on a model nothing answered on. Photos are the app's to send
+  again; one whose photos do not come back is sent with a line saying they are
+  gone (`retryText`).
   **A round can be stopped part-way, and a stop keeps what it had**
   (`POST …/chat/:id/stop`, `chat.stop` on `GET /hub`; `docs/assistant.md` has
   it whole). Five rules. **The signal is per turn** — `TurnAbort` in
@@ -1167,7 +1191,12 @@ domains — update them in the same change.
   `data.stopped` note and one line of priming. **And it is paid for**: Anthropic's
   prompt is exact from the `message_start` snapshot the SDK keeps through the
   abort; OpenAI's is estimated, a photo as `PHOTO_TOKENS` rather than its
-  base64; the reply is `tokensIn` of what streamed. Only the running round
+  base64; the reply is `tokensIn` of what streamed. **A stop after a
+  hand-over is two attempts** (`addHalted`, told by a `fallback` block in the
+  snapshot): the snapshot's prompt is the declined attempt's and bills at the
+  model asked for, not the one the SDK relabels it with, and the model that
+  took over read the prompt again — counted as the same prompt, uncached,
+  since a cache is per model — and wrote what streamed. Only the running round
   stops (`ChatSession.halt`, set when the turn begins and cleared when it ends),
   and never a job already handed to another agent.
   **And a turn writes down what it ran at and how it was asked** — `ai_runs`

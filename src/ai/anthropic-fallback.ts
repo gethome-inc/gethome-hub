@@ -1,4 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
+import type { Logger } from '../logging.js';
 import { readableFailure } from './errors.js';
 import { estimateCostUsd, modelLabel } from './models.js';
 
@@ -38,9 +39,9 @@ import { estimateCostUsd, modelLabel } from './models.js';
  * parameter is a beta with a history of renames — `fallback`, then a list,
  * then `'default'`, across three headers — and a hub is a board in somebody's
  * house that updates when somebody asks it to. So a request the API refuses
- * *because of the field* is sent again without it, once, and the hub stops
- * sending it until it restarts: a retired beta costs a home its fallback, never
- * its assistant.
+ * *because of the field* is sent again without it, once, and — only if that
+ * one is answered — the hub stops sending it until it restarts, and says so in
+ * its log: a retired beta costs a home its fallback, never its assistant.
  *
  * It imports the SDK's types and nothing else, so a home on OpenAI never loads
  * the SDK to satisfy an import of this file — `agent-loop.ts`'s rule.
@@ -77,10 +78,21 @@ export function forgetRefusedFallbacks(): void {
  * A `400` about the fallback field itself — its beta header retired or
  * renamed, or the parameter no longer taken — as against any other refusal,
  * which is the request's own problem and must reach the caller unchanged.
+ *
+ * **Narrow on purpose**, because what it answers is process-wide. A complaint
+ * about the `anthropic-beta` header is about this beta — it is the only one the
+ * hub sends — and a complaint about the `fallbacks` parameter names it in the
+ * plural. A complaint about a `fallback` *block* a conversation's history
+ * carries (singular, under `messages.N.content`) is neither: it is that
+ * conversation's problem, its note offers the round again on a conversation
+ * opened fresh, and switching the fallback off for every request the hub makes
+ * would be the wrong answer to it.
  */
 function refusesFallbacks(error: unknown): boolean {
   if ((error as { status?: unknown } | null)?.status !== 400) return false;
-  return /fallback|anthropic-beta/i.test(readableFailure(error));
+  const said = readableFailure(error);
+  if (said.includes(FALLBACK_BETA) || /\banthropic-beta\b/i.test(said)) return true;
+  return /\bfallbacks\b[^.]*\b(extra inputs|not permitted|unexpected|unknown|unsupported|not supported)/i.test(said);
 }
 
 /**
@@ -91,10 +103,18 @@ function refusesFallbacks(error: unknown): boolean {
  * from scratch on the second try: a refusal arrives before anything has
  * streamed, so a caller that subscribes to a stream inside `send` subscribes
  * afresh rather than twice.
+ *
+ * **The fallback is switched off only once the request without it has been
+ * answered.** A refusal that names the field but was really about something
+ * else would fail the second time too, and then it reaches the caller and
+ * nothing is switched off. When it is, the log says so, once, with the API's
+ * own sentence — a hub that has quietly stopped asking another Claude is a
+ * hub somebody should hear about.
  */
 export async function withFallbacks<T>(
   modelId: string,
   send: (fields: ReturnType<typeof fallbackFields>) => Promise<T>,
+  log?: Pick<Logger, 'warn'>,
 ): Promise<T> {
   const fields = fallbackFields(modelId);
   if (fields.fallbacks === undefined) return send(fields);
@@ -102,8 +122,15 @@ export async function withFallbacks<T>(
     return await send(fields);
   } catch (error) {
     if (!refusesFallbacks(error)) throw error;
-    refusedByApi = true;
-    return send({});
+    const answered = await send({});
+    if (!refusedByApi) {
+      refusedByApi = true;
+      log?.warn(
+        { reason: readableFailure(error) },
+        'Claude refused the server-side fallback, so this hub stops asking for it until it restarts',
+      );
+    }
+    return answered;
   }
 }
 
@@ -117,17 +144,27 @@ function lastBoundary(content: readonly Block[]): number {
   return -1;
 }
 
-/** The server-tool call ids whose result is also in `blocks` — a pair. */
-function pairedServerCalls(blocks: readonly Block[]): Set<string> {
-  const called = new Set<string>();
+/**
+ * The server-tool calls in `blocks` that may go back: each has its result
+ * beside it — **any** result, since a search, a fetch and the code execution
+ * the `_20260209` tools filter their results with all answer by
+ * `tool_use_id` — and, for a call made from inside another (a search code
+ * execution ran), the call that made it goes back too. In order, so a caller
+ * is decided before the calls it makes.
+ */
+function keptServerCalls(blocks: readonly Block[]): Set<string> {
   const answered = new Set<string>();
   for (const block of blocks) {
-    if (block.type === 'server_tool_use') called.add(block.id);
-    if (block.type === 'web_search_tool_result' || block.type === 'web_fetch_tool_result') {
-      answered.add(block.tool_use_id);
-    }
+    if ('tool_use_id' in block && typeof block.tool_use_id === 'string') answered.add(block.tool_use_id);
   }
-  return new Set([...called].filter((id) => answered.has(id)));
+  const kept = new Set<string>();
+  for (const block of blocks) {
+    if (block.type !== 'server_tool_use' || !answered.has(block.id)) continue;
+    const caller = block.caller;
+    if (caller !== undefined && caller.type !== 'direct' && !kept.has(caller.tool_id)) continue;
+    kept.add(block.id);
+  }
+  return kept;
 }
 
 /**
@@ -138,11 +175,13 @@ function pairedServerCalls(blocks: readonly Block[]): Set<string> {
  * rare one this function exists for.
  *
  * After a hand-over, **what the declined model wrote before the last
- * `fallback` block is only partly valid to send back**: its text stays (the
- * model that took over continued from it, and it is what reached the page),
- * and so does a server-side search or fetch that has its result beside it;
- * its thinking, a client tool call it began, a server call left without its
- * result, and anything else of its own the API has no use for are left out.
+ * `fallback` block is only partly valid to send back**: its words stay (the
+ * model that took over continued from them, and they are what reached the
+ * page), and so does a server-side call — a search, a fetch, the code
+ * execution that filters them — that has its result beside it; its thinking,
+ * a client tool call it began, a server call left without its result (and any
+ * made from inside one), a text block with nothing in it (which the API
+ * refuses), and anything else of its own the API has no use for are left out.
  * The `fallback` blocks stay where they were — the server reads the boundary
  * to validate the turn — and everything after the last one goes back exactly
  * as it came, being the answering model's own.
@@ -150,21 +189,14 @@ function pairedServerCalls(blocks: readonly Block[]): Set<string> {
 export function echoed(content: readonly Block[]): Anthropic.Beta.BetaContentBlockParam[] {
   const boundary = lastBoundary(content);
   if (boundary < 0) return [...content];
-  const paired = pairedServerCalls(content.slice(0, boundary));
+  const kept = keptServerCalls(content.slice(0, boundary));
   return content.filter((block, index) => {
     if (index >= boundary) return true;
-    switch (block.type) {
-      case 'text':
-      case 'fallback':
-        return true;
-      case 'server_tool_use':
-        return paired.has(block.id);
-      case 'web_search_tool_result':
-      case 'web_fetch_tool_result':
-        return paired.has(block.tool_use_id);
-      default:
-        return false;
-    }
+    if (block.type === 'text') return block.text.trim().length > 0;
+    if (block.type === 'fallback') return true;
+    if (block.type === 'server_tool_use') return kept.has(block.id);
+    if ('tool_use_id' in block && typeof block.tool_use_id === 'string') return kept.has(block.tool_use_id);
+    return false;
   });
 }
 

@@ -300,7 +300,7 @@ than no button.
 | `POST /automations/chat/:id/stop` | `automation.manage` **+** `hub.ai` · never a key | stop the round the conversation is running, part-way → `200 {stopped}` at once: `true` when a round was told to stop, `false` when none was running (one that finished a moment earlier, or a conversation the hub holds no memory of). The round winds down on the socket like any other — what had reached the page kept as the answer, then a `note` row with `data.stopped: true` — and only that round: a message sent behind it still runs. `409 not_your_conversation` for somebody else's. See [below](#stopping-a-round-post-chatidstop) |
 | `POST /automations/chat/:id/retry` | `automation.manage` **+** `hub.ai` · never a key | ask the person's last message again after the round it started failed: `{model, effort?, attachments?}` → `202 {sessionId, retrying: true}`, on the model named — usually the other vendor's, which the failure's note offers. No second message is written. `409 nothing_to_retry` when the conversation has moved on from the failure or it is already being answered, `409 not_your_conversation`, `409 model_unavailable`, `410 conversation_ended`. See [below](#asking-a-failed-round-again-post-chatidretry) |
 | `GET /automations/chats` | `automation.manage` **+** `hub.ai` · never a key | every conversation this home has had, newest first: `[{sessionId, startedAt, updatedAt, messageCount, title, live, spend?, mine, handedFrom?}]`. `title` is the **first thing the person said** — the agent's opening line is about the home rather than about what was asked; a conversation that opened with a photo and no words is `Photo` (or `2 photos`) — and `live` is whether it can still be *continued*, which is a different question from whether it can be read. `spend` is `{usd, provider, modelId, model}`: what it cost and what answered, with `model` the label to draw and `modelId` the id as recorded. It is **absent rather than zero** when the hub cannot say — `ai_runs` keeps the last 250 runs of every kind and a transcript a fortnight, so a readable conversation can outlive its own spend row, and `$0.00` about one that plainly cost something is a claim. **`mine`** is whether the caller had the conversation — the first thing said in it was theirs — because every member's are listed and only the owner can carry one on; an app that wants a person's own list shows `mine !== false` (absent on an older hub). **`handedFrom`** is the *assistant* conversation that handed this one over, read back from its `handoff` row (the newest, when there were several) — absent for a chat somebody started themselves |
-| `GET /automations/chat/:id` | `automation.manage` **+** `hub.ai` · never a key | `{sessionId, live, spend?, handedFrom?, messages}` — the transcript, oldest first, with the same `spend` block the list carries so a chat opened from a link says what it cost without the list having been read. `live: false` is history. A message is `{id, at, role, text, data?}` with `role` an **open** vocabulary (`user`/`agent`/`question`/`preview`/`note`); see [`docs/automations.md`](automations.md) for what `data` carries per row. **One turn can write several `preview` rows** — a reply that delivers two rules is one `agent` line followed by a card each, in submission order, so draw a card per row rather than assuming one per turn. The **first** row a round writes also carries `data.steps` — `[{text, kind, detail?}]`, what the agent did to produce it, the same three fields the `step` frame streams — so a conversation read back next week shows the working and not only the answer — and **`data.tookMs`**, the whole milliseconds from the round beginning to that row, which is the wait somebody sat through. The person's own row carries `data` only when their message asked for something besides its words: `{model?, effort?, attachments?: [{type: "image", mediaType, ref?, width?, height?, bytes}], wordless?}`, only the keys the request named — **never a photo's bytes**. **A photo sent with no words stores a caption as `text`** — `Photo`, `2 photos`, the list's own words — with `data.wordless: true`: an app that predates photos draws a person's row from `text` alone, and shows that rather than an empty bubble; an app that draws the photos leaves the caption off when `wordless` is set |
+| `GET /automations/chat/:id` | `automation.manage` **+** `hub.ai` · never a key | `{sessionId, live, spend?, handedFrom?, messages}` — the transcript, oldest first, with the same `spend` block the list carries so a chat opened from a link says what it cost without the list having been read. `live: false` is history. A message is `{id, at, role, text, data?}` with `role` an **open** vocabulary (`user`/`agent`/`question`/`preview`/`note`); see [`docs/automations.md`](automations.md) for what `data` carries per row. **One turn can write several `preview` rows** — a reply that delivers two rules is one `agent` line followed by a card each, in submission order, so draw a card per row rather than assuming one per turn. The **first** row a round writes also carries `data.steps` — `[{text, kind, detail?, done?}]`, what the agent did to produce it: the same three fields the `step` frame streams, and `done: true` on a step whose change to the home took (a device worked, a scene pressed, a job handed over), which only the stored copy carries — so a conversation read back next week shows the working and not only the answer — and **`data.tookMs`**, the whole milliseconds from the round beginning to that row, which is the wait somebody sat through. The person's own row carries `data` only when their message asked for something besides its words: `{model?, effort?, attachments?: [{type: "image", mediaType, ref?, width?, height?, bytes}], wordless?}`, only the keys the request named — **never a photo's bytes**. **A photo sent with no words stores a caption as `text`** — `Photo`, `2 photos`, the list's own words — with `data.wordless: true`: an app that predates photos draws a person's row from `text` alone, and shows that rather than an empty bubble; an app that draws the photos leaves the caption off when `wordless` is set |
 | `DELETE /automations/chat/:id` | `automation.manage` **+** `hub.ai` · never a key | end it and write down what it spent |
 | `POST /assistant/chat` | `hub.ai` · never a key | start a conversation with the **assistant** — the agent behind the app's assistant button: `{message, model?, effort?, attachments?}` → `201 {sessionId, messages}`. Same acknowledgement shape and same rule as the automations chat above, and the same `409` refusals, `model_unavailable` and `photos_busy` included. Guarded by `hub.ai` **alone**: asking what the kitchen is doing and switching a lamp on is the floor, and the key is asked because a conversation spends the home's money. Handing a job to another agent is where `automation.manage` is asked, and it is asked *inside the tool* — so a member whose role cannot do it gets a sentence the model reads out rather than a route that 403s |
 | `POST /assistant/chat/:id/messages` | `hub.ai` · never a key | `{message, model?, effort?, attachments?}` → the same acknowledgement. `410 conversation_ended` only when there is nothing left to read — or when the conversation is somebody else's |
@@ -2103,7 +2103,7 @@ what can be done about it:
 
 ```json
 {
-  "failure":  { "provider": "openai", "model": "gpt-6.1-sol", "kind": "billing" },
+  "failure":  { "provider": "openai", "model": "gpt-6.1-sol", "kind": "billing", "messageId": "…" },
   "switchTo": { "model": "claude-opus-5-5", "label": "Opus 5.5", "provider": "anthropic" }
 }
 ```
@@ -2116,6 +2116,10 @@ what can be done about it:
   `failure.transient: true` says the same model may well answer if simply
   asked again — a busy vendor, a dropped connection, a round that ran out of
   time — and is absent where asking again would meet the same answer.
+- **`failure.messageId`** is the person's message the round was answering,
+  which is the one a retry answers. It is not always the row just above the
+  note: a message sent while the round ran is written at once, ahead of the
+  note. Absent on a note written before the field was.
 - **`switchTo`** is the **other vendor's** default agent model, present only
   when this home has that vendor's key. Always the other vendor, never another
   model of the same one: credit, a key and capacity are the vendor's, so the
@@ -2124,12 +2128,13 @@ what can be done about it:
   cost cap or out of rounds writes a note without `failure` — another model is
   not the answer to either.
 - **A declined message stays in the transcript and leaves the model's
-  memory.** The conversation is rebuilt without it and its note, so the next
-  message is not read beside it — and declined for it — and the model is told
-  only that a message was declined and what that round had already done.
+  memory.** The conversation is rebuilt without it and its note — and so is
+  every record it is rebuilt from later, until the message is answered again —
+  so the next message is not read beside it, and declined for it. The model is
+  told only that a message was declined and what that round had already done.
 
 **`POST /assistant/chat/:id/retry`** and **`POST /automations/chat/:id/retry`**
-answer the person's last message again: `{model, effort?, attachments?}`, with
+answer the failed message again: `{model, effort?, attachments?}`, with
 `model` required — `switchTo.model` for the offer, or `failure.model` to try the
 same one again. Ask `GET /hub` for `chat.retry` before offering it, as well as
 reading the note: a transcript outlives the build that wrote it, and a hub put
@@ -2137,26 +2142,34 @@ back to an older build keeps the notes and has no route. Then:
 
 - **No second message.** The person's row is already there; the turn runs on
   it, the note stays as the record of what failed, and
-  `data.retried: {model, effort?}` is written onto the note — where the
-  conversation went next, which is what a conversation revived after a restart
-  reads (the newest of the person's rows naming a model, or of the notes
-  carrying `retried`), and what an app draws the change of model from. An
-  `amend` frame (`text: "retry"`) tells a phone already showing the note.
+  `data.retried: {model, effort?}` is written onto the note once the
+  conversation for it is open — where the conversation went next, which is
+  what a conversation revived after a restart reads (the newest of the
+  person's rows naming a model, or of the notes carrying `retried`), and what
+  an app draws the change of model from. An `amend` frame (`text: "retry"`)
+  tells a phone already showing the note. A model that cannot be started
+  writes a note of its own instead (`failure.kind: "unavailable"`, naming the
+  same message), and that newer note is the one to ask again from.
 - **It answers at once, `202 {sessionId, retrying: true}`**, and the turn runs
   off the request like any other, saying so on the socket.
 - **On a conversation opened for it**, even on the same model: whatever the
   failed round left in the vendor's history is not something to carry on
   from. The model is told the message was asked before and the model it went
   to could not answer it — **and what that round had already done**, when it
-  had worked a device, handed a job over or saved a rule before failing, with
-  the instruction to check before doing any of it again.
+  had worked a device, pressed a scene or handed a job over before failing (a
+  step marked `done`; never one the home refused), with the instruction to
+  check before doing any of it again.
 - **Photos are the app's to send again** in `attachments`, exactly as with the
   message: the hub never kept them. A message whose photos do not come back is
   sent with a line telling the model they are no longer available.
 - **Only the newest failure, and only once at a time.** `409
   {error: "nothing_to_retry", detail}` when the note is not the conversation's
-  last row (it has moved on) or a retry of it is already running — a double
-  tap, or two of somebody's phones, never runs the message twice.
+  last row, or a message of the person's was written between the one it names
+  and the note (it has moved on), or a retry of it is already running — a
+  double tap, or two of somebody's phones, never runs the message twice. A
+  retry accepted while another turn was still to run is asked again when its
+  own turn comes: if that turn answered in between, the retry is let go, and
+  the `turn` frame takes the wait down with nothing written.
   `409 not_your_conversation` for somebody else's, `409 model_unavailable` for a
   model this home cannot run, `409 photos_busy` for photos past what the hub
   can hold at once, `410 conversation_ended` for a conversation with no
@@ -3046,8 +3059,9 @@ sentence. See [`docs/automations.md`](automations.md) for the vocabulary.
 
 **`amend` is not a round.** The other four are one exchange happening; `amend`
 says a row already *in* this transcript has changed and should be re-read,
-while whatever round is on screen carries on untouched. One thing sends it
-today: a handoff card's status, which is written when the **other** agent
+while whatever round is on screen carries on untouched. Two things send it
+today. A failure note being asked again (`text: "retry"`), whose
+`data.retried` was just written. And a handoff card's status, which is written when the **other** agent
 finishes a turn and can therefore land at any moment, including in the middle
 of a round of this conversation. It goes out on the conversation the *card* is
 in, which is the assistant's — sent under the delegated session's id an app

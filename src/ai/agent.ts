@@ -371,6 +371,7 @@ export function createMappingAgent(
                   { signal: controller.signal },
                 )
                 .finalMessage(),
+              log,
             );
           } catch (error) {
             // Recorded before it is classified: the whole point of keeping

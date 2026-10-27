@@ -288,20 +288,21 @@ export async function createAssistantConversation(
               brief: parsed.data.brief,
               sessionId: outcome.sessionId,
             });
-            context?.onStep?.('Handed this to another agent', 'writing', parsed.data.brief);
+            context?.onStep?.('Handed this to another agent', 'writing', parsed.data.brief, true);
             results.push({ id: call.id, text: outcome.text });
             continue;
           }
 
           const result = await runAssistantTool(call.name, call.input, tools, budget);
-          if (!result.isError && (call.name === 'control_device' || call.name === 'run_automation')) {
-            acted = true;
-          }
+          // A device worked or a scene pressed, and it took — what a round
+          // asked again is told stays done (`ChatStepWire.done`).
+          const changed = !result.isError && (call.name === 'control_device' || call.name === 'run_automation');
+          if (changed) acted = true;
           const step = assistantToolStep(call.name);
           // The tool's own line about what it actually did — which device, how
           // many matched. Absent for a tool with nothing worth reading under
           // its name.
-          context?.onStep?.(step.summary, step.kind, result.detail);
+          context?.onStep?.(step.summary, step.kind, result.detail, changed);
           results.push({
             id: call.id,
             text: result.text,

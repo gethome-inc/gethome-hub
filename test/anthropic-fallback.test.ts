@@ -157,6 +157,45 @@ describe('a reply another Claude finished', () => {
     expect(handOvers(content)).toEqual([{ from: 'Opus 5.5', to: 'Opus 4.8' }]);
   });
 
+  it('sends back the code execution a search ran in, and nothing a call left unfinished', () => {
+    const content = blocks(
+      { type: 'text', text: '  ' },
+      { type: 'server_tool_use', id: 'srv_code', name: 'code_execution', input: { code: 'search()' } },
+      {
+        type: 'server_tool_use',
+        id: 'srv_search',
+        name: 'web_search',
+        input: { query: 'lock' },
+        caller: { type: 'code_execution_20260120', tool_id: 'srv_code' },
+      },
+      { type: 'web_search_tool_result', tool_use_id: 'srv_search', content: [] },
+      { type: 'code_execution_tool_result', tool_use_id: 'srv_code', content: { type: 'code_execution_result' } },
+      { type: 'server_tool_use', id: 'srv_open', name: 'code_execution', input: { code: 'more()' } },
+      {
+        type: 'server_tool_use',
+        id: 'srv_orphan',
+        name: 'web_search',
+        input: { query: 'alarm' },
+        caller: { type: 'code_execution_20260120', tool_id: 'srv_open' },
+      },
+      { type: 'web_search_tool_result', tool_use_id: 'srv_orphan', content: [] },
+      { type: 'text', text: 'Checking' },
+      handOver('claude-opus-5-5', 'claude-opus-4-8'),
+      { type: 'text', text: ' it is locked.' },
+    );
+    expect(echoed(content)).toEqual([
+      // A code execution and the search it ran, each with its result.
+      content[1],
+      content[2],
+      content[3],
+      content[4],
+      // Words, but never an empty block, which the API refuses.
+      content[8],
+      content[9],
+      content[10],
+    ]);
+  });
+
   it('keeps an earlier hand-over in place and cuts at the last one', () => {
     const twice = blocks(
       { type: 'text', text: 'One' },
@@ -253,6 +292,57 @@ describe('a hub that outlives the beta', () => {
       return 'answered';
     });
     expect(calls).toBe(2);
+  });
+
+  it('switches nothing off for a refusal about a fallback block a conversation carries', async () => {
+    // Singular, under `messages`: one conversation's problem, which its note
+    // answers by opening it fresh — never a reason to stop asking for every
+    // request the hub makes.
+    const block = refused('messages.3.content.1: unexpected `fallback` block for this request');
+    let calls = 0;
+    await expect(
+      withFallbacks('claude-opus-5-5', async () => {
+        calls += 1;
+        throw block;
+      }),
+    ).rejects.toBe(block);
+    expect(calls).toBe(1);
+    expect(fallbackFields('claude-opus-5-5')).toEqual({ betas: [FALLBACK_BETA], fallbacks: 'default' });
+  });
+
+  it('switches it off only once the request without it was answered, and says so once', async () => {
+    const warned: unknown[] = [];
+    const log = { warn: (...args: unknown[]) => warned.push(args) };
+    const retired = refused('Unexpected value(s) `server-side-fallback-2026-07-01` for the `anthropic-beta` header.');
+    // The resend fails too: what it failed with reaches the caller, and the
+    // fallback stays on, since the field was not what was wrong.
+    const other = Object.assign(new Error('529 overloaded'), { status: 529 });
+    await expect(
+      withFallbacks(
+        'claude-opus-5-5',
+        async (fields) => {
+          if ('fallbacks' in fields) throw retired;
+          throw other;
+        },
+        log,
+      ),
+    ).rejects.toBe(other);
+    expect(fallbackFields('claude-opus-5-5')).toEqual({ betas: [FALLBACK_BETA], fallbacks: 'default' });
+    expect(warned).toHaveLength(0);
+
+    // Answered without it: off, and the log hears it — once.
+    for (let index = 0; index < 2; index += 1) {
+      await withFallbacks(
+        'claude-opus-5-5',
+        async (fields) => {
+          if ('fallbacks' in fields) throw retired;
+          return 'answered';
+        },
+        log,
+      );
+    }
+    expect(fallbackFields('claude-opus-5-5')).toEqual({});
+    expect(warned).toHaveLength(1);
   });
 
   it('leaves every other refusal alone', async () => {

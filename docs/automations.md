@@ -932,8 +932,11 @@ and it does not hold for the *fact* that there were a dozen — a rule arrives o
 of a handful of tool calls, and discarding all of them leaves the one page whose
 job is explaining a house to somebody who does not write software with nothing
 but the conclusion. So the round's steps are written into the **first row that
-round records** (`data.steps`, `[{text, kind, detail?}]`), whichever kind of row
-it is, and an app draws them folded above the answer.
+round records** (`data.steps`, `[{text, kind, detail?, done?}]`), whichever kind
+of row it is, and an app draws them folded above the answer. `done: true` marks
+a step whose change to the home took — a device worked, a scene pressed, a job
+handed over — and is what a model asked a failed round again is told stays done
+(`docs/api.md`); a step that only read, or tried and was refused, has none.
 
 Five rules hold that to the size of a transcript row.
 

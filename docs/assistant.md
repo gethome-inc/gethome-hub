@@ -916,9 +916,13 @@ of locks, alarms, cameras and its own network, which is exactly what `cyber`
 fires on, and Opus 5.5 adds a `bio` classifier — and that the parameter is a
 beta with a history of renames under firmware that updates on its own
 schedule. The second is answered rather than accepted: **a request the API
-refuses because of the field is sent again without it, once, and the process
-stops sending it** (`withFallbacks`), so a retired beta costs a home its
-fallback and never its assistant. Haiku has no server-side fallback and is sent
+refuses because of the field is sent again without it, once, and when that one
+is answered the process stops sending it** and says so in its log
+(`withFallbacks`), so a retired beta costs a home its fallback and never its
+assistant. Only a refusal about the beta's header or the `fallbacks` parameter
+counts: one about a `fallback` block somewhere in a conversation's history is
+that conversation's, and its note is the answer to it, never switching the
+fallback off for every request the hub makes. Haiku has no server-side fallback and is sent
 nothing. What a reply answered that way changes is all in that one module:
 what the declined model began before the hand-over is not sent back (its
 thinking and any tool call it started), only the answering model's calls run,
@@ -934,10 +938,12 @@ person's next message joins it as the same user turn — so the classifier that
 declined it reads it again and declines what follows, and somebody rephrasing
 is refused for what they already took back. So after a refused turn the
 conversation is rebuilt (`ChatRuntime.rebase`, the way a photo is let go) from
-the record *without* the message and its refusal, and the model is told in one
-line that a message was declined, and what that round had already done, which
-stays done. The transcript keeps both, and a retry on another model still finds
-them.
+the record *without* the message and its refusal — and so is every record it is
+rebuilt from afterwards, on another model, after a photo, on a revival, until
+the message is answered again. Where it was, the record says only that a
+message was declined; and when that round had already done something, the
+model is told what, which stays done. The transcript keeps both, and a retry on
+another model still finds them.
 
 **A note that ends a failed round says which model failed and why, and offers
 the other vendor's** (`chat/failure.ts`): *GPT-6.1 Sol couldn't answer: this
@@ -947,10 +953,12 @@ home has that key. It used to be the provider's status and JSON relayed, in a
 home with a perfectly good key from the other vendor beside it. An app can
 offer the switch as a doorway on the note, and pressing it is
 `POST …/chat/:id/retry`:
-the person's message answered again on that model, with no second message
-written, on a conversation opened for it and told what the failed round had
-already done; `data.retried` on the note says where the conversation went, and
-is what a revival reads. A refusal is a failure in this sense too — another
+the message the note names (`failure.messageId`) answered again on that model,
+with no second message written, on a conversation opened for it and told what
+the failed round had already done — a change that took, never one it only
+tried; `data.retried` on the note says where the conversation went once it is
+open, and is what a revival reads. A message sent while that round ran is the
+conversation moving on, and nothing is asked again past it. A refusal is a failure in this sense too — another
 vendor's model may genuinely answer differently — while a turn that ran into
 its cost cap or out of rounds is not. `docs/api.md` has the wire.
 

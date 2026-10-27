@@ -88,20 +88,41 @@ class RunUsage {
    * Stopped before the stream opened, there is no snapshot and nothing is
    * added: whether a request cancelled before the model began was billed at
    * all is not something this side can know. Priced as the model the stream
-   * says was answering, which after a hand-over is the one that took over.
+   * says was answering.
+   *
+   * **Stopped after a hand-over it is two attempts, and the stream counted
+   * one.** `message_start` is the declined attempt's prompt, which bills at
+   * the model asked for, not at the one the SDK relabels the snapshot with;
+   * the model that took over read the prompt again at its own rates, and that
+   * read is reported only at the stream's end, which a stop never reaches — so
+   * it is counted as the same prompt, uncached (a cache is per model), and the
+   * words that streamed are priced as the answering model's.
    */
   addHalted(
     started: Anthropic.Beta.BetaUsage | undefined,
     streamedTokens: number,
     model: string = this.model,
+    handedOver = false,
   ): void {
     if (!started) return;
-    this.spent += estimateCostUsd(model, {
+    const output = Math.max(started.output_tokens, streamedTokens);
+    if (!handedOver) {
+      this.spent += estimateCostUsd(model, {
+        input_tokens: started.input_tokens,
+        output_tokens: output,
+        cache_read_input_tokens: started.cache_read_input_tokens,
+        cache_creation_input_tokens: started.cache_creation_input_tokens,
+      });
+      return;
+    }
+    this.spent += estimateCostUsd(this.model, {
       input_tokens: started.input_tokens,
-      output_tokens: Math.max(started.output_tokens, streamedTokens),
       cache_read_input_tokens: started.cache_read_input_tokens,
       cache_creation_input_tokens: started.cache_creation_input_tokens,
     });
+    const prompt =
+      started.input_tokens + (started.cache_read_input_tokens ?? 0) + (started.cache_creation_input_tokens ?? 0);
+    this.spent += estimateCostUsd(model, { input_tokens: prompt, output_tokens: output });
   }
 
   costUsd(): number {
@@ -262,10 +283,16 @@ export function createAnthropicTransport(options: ChatTransportOptions): ChatTra
             context?.onThinking?.(delta);
           });
           return stream.finalMessage();
-        });
+        }, log);
       } catch (error) {
         if (haltedBy(signal)) {
-          usage.addHalted(current()?.usage, tokensIn(streamed.length + thought), current()?.model);
+          const snapshot = current();
+          usage.addHalted(
+            snapshot?.usage,
+            tokensIn(streamed.length + thought),
+            snapshot?.model,
+            (snapshot?.content ?? []).some((block) => block.type === 'fallback'),
+          );
           const said = streamed.trim();
           // **Only the words go onto the history.** A thinking block cut off
           // has no signature and a tool call cut off has half its input, and
