@@ -769,8 +769,9 @@ domains — update them in the same change.
   cached against a device model and shapes every unit of it for ever, while a
   chat is many small rounds answered with another message when the reply is
   poor. **Reading where a room picture's devices stand is on neither list**
-  (`LOCATOR_MODELS`, `room-pictures/store.ts`'s `homeLocator`): recognition's
-  vendor and key, at that vendor's middle rung — Sonnet 5.5, GPT-6.1 Terra —
+  (`LOCATOR_MODELS`, `room-pictures/store.ts`'s `homeLocator`): each vendor's
+  middle rung on the home's key, GPT-6.1 Terra first — OpenAI drew the picture,
+  so its key has just answered — and Sonnet 5.5 only when that reading fails,
   whatever recognition runs on, since a misplaced point is one drag from right
   and is never read over once a person has placed it, and the drawing is
   answered only once its devices are read.

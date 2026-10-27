@@ -1405,7 +1405,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
 
   // ── Room pictures — `room-pictures/store.ts`, `docs/api.md` → *Room pictures*
 
-  /** Who reads the devices off a picture, and on which model (`homeLocator`). */
+  /** Who reads the devices off a picture, in the order they are asked (`homeLocator`). */
   const pictureLocator = homeLocator(deps.settings);
 
   /** A room's devices as the picture prompts name them. */

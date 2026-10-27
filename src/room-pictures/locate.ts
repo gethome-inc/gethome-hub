@@ -18,14 +18,14 @@ import { locatePrompt, type PictureDevice } from './prompts.js';
  * gets wrong by dragging (`PATCH /room-pictures/:id`), and a point somebody
  * placed is never read over.
  *
- * It runs on the provider the home chose for **device recognition**, on the
- * home's own key — reading what is in a picture is recognition — but at that
- * provider's middle rung (`LOCATOR_MODELS`: Sonnet 5.5, GPT-6.1 Terra) rather
- * than on recognition's own model, which is strong-only for a mapping's sake;
- * `store.ts`'s `homeLocator` makes the choice. One request: OpenAI's over plain
- * `fetch`, as everything of that vendor's here is, and Anthropic's through its
- * SDK (`askAnthropic`). The answer is model output: parsed, clamped to the
- * picture and filtered to the devices asked about.
+ * It runs on each vendor's middle rung (`LOCATOR_MODELS`: GPT-6.1 Terra,
+ * Sonnet 5.5) on the home's own key — OpenAI's first, the vendor that drew the
+ * picture, and Anthropic's only when that fails (`store.ts`'s `homeLocator` and
+ * `readMarkers`) — and never on recognition's own model, which is strong-only
+ * for a mapping's sake. One request per reader: OpenAI's over plain `fetch`,
+ * as everything of that vendor's here is, and Anthropic's through its SDK
+ * (`askAnthropic`). The answer is model output: parsed, clamped to the picture
+ * and filtered to the devices asked about.
  */
 
 const OPENAI_URL = 'https://api.openai.com/v1/responses';
@@ -189,9 +189,10 @@ async function askOpenAi(input: LocateInput, prompt: string): Promise<Asked> {
 }
 
 /**
- * Anthropic's half, through the SDK — loaded here and only here, so a home
- * whose recognition runs on OpenAI never brings it into memory, the rule
- * `chat/transport.ts` keeps for the conversations.
+ * Anthropic's half, through the SDK — loaded here and only here, so a reading
+ * OpenAI answers never brings it into memory, which is nearly every reading
+ * now that OpenAI is asked first: the rule `chat/transport.ts` keeps for the
+ * conversations.
  *
  * **The SDK rather than a hand-built request, for what it does that one
  * `fetch` did not**: it retries a 429, a 529 and a dropped connection with

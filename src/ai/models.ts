@@ -435,17 +435,19 @@ export const TITLE_MODELS: Readonly<Record<AiProvider, string>> = {
 
 /**
  * What reads where a room picture's devices stand, per vendor: the middle rung
- * of each (`room-pictures/locate.ts`).
+ * of each (`room-pictures/locate.ts`) — OpenAI's asked first, since OpenAI drew
+ * the picture, and Anthropic's only when that fails
+ * (`room-pictures/store.ts`'s `homeLocator`).
  *
- * **Recognition's vendor and key, never recognition's model.** It read on
- * whatever recognition ran on, which made a home that chose Fable 5.1 or GPT-6
- * Astra for its mappings pay their price for a few points on a picture — and
- * that list is strong-only for a reason that is not this job's: a mapping is
- * cached against a device model for good, while a point in the wrong place is
- * one drag from right and is never read over once a person has placed it. A
- * reading is one picture and one short answer. **And it is part of the wait**:
- * a drawing goes back to the app only once its devices are read
- * (`room-pictures/store.ts`), so a quicker model shows the room sooner.
+ * **Never recognition's model.** It read on whatever recognition ran on, which
+ * made a home that chose Fable 5.1 or GPT-6 Astra for its mappings pay their
+ * price for a few points on a picture — and that list is strong-only for a
+ * reason that is not this job's: a mapping is cached against a device model
+ * for good, while a point in the wrong place is one drag from right and is
+ * never read over once a person has placed it. A reading is one picture and
+ * one short answer. **And it is part of the wait**: a drawing goes back to the
+ * app only once its devices are read (`room-pictures/store.ts`), so a quicker
+ * model shows the room sooner.
  *
  * **Not the cheapest rung.** A device the picture does not show is put where it
  * would plausibly be, which takes reading the room, and the saving over this

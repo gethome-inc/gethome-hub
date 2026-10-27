@@ -2484,18 +2484,22 @@ show is drawn because they show it; every device gets its place from the
 reading below.
 
 **Then the devices are read off it.** The day picture is shown, with the room's
-devices by name, to device recognition's provider on the home's own key, and it
-answers a point for each — on the device where it is drawn (`source: "seen"`),
-on what it works where it is a plug, and where it would plausibly be otherwise
-(`"guessed"`). The model is that provider's middle rung, Sonnet 5.5 or GPT-6.1
-Terra, whatever recognition itself runs on: a point in the wrong place is one
-drag from right, and the drawing is answered only once its devices are read, so
-a quicker model shows the room sooner. `x` and `y` are fractions of the
-picture's width and height from its top-left corner. A point a person moved
-(`PATCH`, `source: "placed"`) is never read over: `POST /room-pictures/:id/locate`
-reads only the devices nobody placed — the way to place a device added since.
-A home with no usable recognition key gets no points, and the apps place
-those devices themselves until somebody moves them. The reading is asked at a
+devices by name, to a model that answers a point for each — on the device where
+it is drawn (`source: "seen"`), on what it works where it is a plug, and where
+it would plausibly be otherwise (`"guessed"`). **OpenAI's GPT-6.1 Terra is
+asked first**, on the home's OpenAI key: OpenAI drew the picture, so its key
+has just answered, and the picture goes back to the vendor that already has the
+photos. **Anthropic's Sonnet 5.5 is asked only when that reading fails** and
+the home has an Anthropic key it can use. Each is its vendor's middle rung,
+whatever recognition runs on: a point in the wrong place is one drag from
+right, and the drawing is answered only once its devices are read, so a quicker
+model shows the room sooner. `x` and `y` are fractions of the picture's width
+and height from its top-left corner. A point a person moved (`PATCH`,
+`source: "placed"`) is never read over: `POST /room-pictures/:id/locate` reads
+only the devices nobody placed — the way to place a device added since. A
+reading nobody could give — neither key usable, or both readings failed —
+places no points, and the apps place those devices themselves until somebody
+moves them. The reading is asked at a
 moderate effort on either vendor, and on Anthropic a busy API is tried again
 before the reading fails, and a reading the model declines is asked again of
 another Claude in the same request; a refusal that stands, or an answer cut off
@@ -2524,8 +2528,8 @@ and `pictures.json`, five per room (the newest kept, and the chosen one
 whatever its age) and 200 MB in all, with a
 refusal to draw on a nearly full card (`409 no_space`). **The photos are not
 kept.** Deleting a room forgets its pictures. Each drawing writes `ai_runs`
-rows (`kind: "roompicture"` for the day and the night, `"roomlocate"` for the
-reading) priced from the response's usage. Every change broadcasts
+rows (`kind: "roompicture"` for the day and the night, `"roomlocate"` for each
+reader asked) priced from the response's usage. Every change broadcasts
 `{"type":"roomPictures","roomId"}`.
 
 ### The device-mapping library
