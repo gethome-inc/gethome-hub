@@ -433,6 +433,33 @@ export const TITLE_MODELS: Readonly<Record<AiProvider, string>> = {
   openai: known('openai', 'gpt-6-luna'),
 };
 
+/**
+ * What reads where a room picture's devices stand, per vendor: the middle rung
+ * of each (`room-pictures/locate.ts`).
+ *
+ * **Recognition's vendor and key, never recognition's model.** It read on
+ * whatever recognition ran on, which made a home that chose Fable 5.1 or GPT-6
+ * Astra for its mappings pay their price for a few points on a picture — and
+ * that list is strong-only for a reason that is not this job's: a mapping is
+ * cached against a device model for good, while a point in the wrong place is
+ * one drag from right and is never read over once a person has placed it. A
+ * reading is one picture and one short answer. **And it is part of the wait**:
+ * a drawing goes back to the app only once its devices are read
+ * (`room-pictures/store.ts`), so a quicker model shows the room sooner.
+ *
+ * **Not the cheapest rung.** A device the picture does not show is put where it
+ * would plausibly be, which takes reading the room, and the saving over this
+ * rung is about a cent a reading.
+ *
+ * Named from the table rather than written out, as `TITLE_MODELS` is, and
+ * `test/room-pictures.test.ts` pins what matters: each is still offered, takes
+ * a picture, and costs less than anything recognition offers.
+ */
+export const LOCATOR_MODELS: Readonly<Record<AiProvider, string>> = {
+  anthropic: known('anthropic', 'claude-sonnet-5-5'),
+  openai: known('openai', 'gpt-6.1-terra'),
+};
+
 function known(provider: AiProvider, id: string): string {
   if (knownModel(provider, id) === undefined) throw new Error(`models: ${provider} has no ${id}`);
   return id;

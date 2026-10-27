@@ -2,10 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { readFile, rm, statfs, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { estimateCostUsd } from '../ai/models.js';
+import { estimateCostUsd, LOCATOR_MODELS } from '../ai/models.js';
 import type { AiRunLog } from '../core/ai-runs.js';
 import type { HubEventBus } from '../core/bus.js';
-import type { AiProvider } from '../core/settings.js';
+import type { AiProvider, SettingsService } from '../core/settings.js';
 import type { Logger } from '../logging.js';
 import { drawRoomPicture, pictureCostUsd, RoomPictureDrawError, ROOM_PICTURE_MODEL, type PictureUsage } from './draw.js';
 import { LocateError, locateDevices } from './locate.js';
@@ -94,8 +94,27 @@ export interface PictureCapability {
   maxPhotos: number;
 }
 
-/** Who reads the devices off a picture — device recognition's provider and key. */
+/** Who reads the devices off a picture, on which model, and with which key — or nobody. */
 export type Locator = () => Promise<{ provider: AiProvider; modelId: string; apiKey: string } | null>;
+
+/**
+ * The home's reader: device recognition's provider, on the home's key for it,
+ * at that provider's middle rung (`LOCATOR_MODELS`) whatever recognition itself
+ * runs on. Nobody when the home has no usable key, which leaves the markers to
+ * the apps and to people; and a stored Claude subscription token reads
+ * nothing, so a home holding one reads on its OpenAI key where it has one.
+ */
+export function homeLocator(settings: Pick<SettingsService, 'getAiSettings' | 'aiKey'>): Locator {
+  return async () => {
+    const ai = await settings.getAiSettings();
+    let provider = ai.provider;
+    if (provider === 'anthropic' && ai.legacySubscriptionToken) provider = ai.openai.hasKey ? 'openai' : null;
+    if (!provider) return null;
+    const apiKey = await settings.aiKey(provider);
+    if (!apiKey) return null;
+    return { provider, modelId: LOCATOR_MODELS[provider], apiKey };
+  };
+}
 
 export interface DrawInput {
   roomId: string;

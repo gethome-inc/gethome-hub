@@ -45,11 +45,11 @@ import {
 import type { MappingLibrary } from '../ai/library.js';
 import { RoomPictureDrawError } from '../room-pictures/draw.js';
 import {
+  homeLocator,
   MAX_PHOTOS,
   PictureBusyError,
   PictureSpaceError,
   RoomPictureService,
-  type Locator,
 } from '../room-pictures/store.js';
 import type { AiRunLog } from '../core/ai-runs.js';
 import type { AutomationEngine, AutomationPresser } from '../automations/engine.js';
@@ -1405,20 +1405,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
 
   // ── Room pictures — `room-pictures/store.ts`, `docs/api.md` → *Room pictures*
 
-  /**
-   * Who reads the devices off a picture: device recognition's provider and
-   * model, on the home's key — and nobody, when the home has no usable key,
-   * which leaves the markers to the apps and to people.
-   */
-  const pictureLocator: Locator = async () => {
-    const ai = await deps.settings.getAiSettings();
-    let provider = ai.provider;
-    if (provider === 'anthropic' && ai.legacySubscriptionToken) provider = ai.openai.hasKey ? 'openai' : null;
-    if (!provider) return null;
-    const apiKey = await deps.settings.aiKey(provider);
-    if (!apiKey) return null;
-    return { provider, modelId: effectiveModel(provider, ai[provider].model), apiKey };
-  };
+  /** Who reads the devices off a picture, and on which model (`homeLocator`). */
+  const pictureLocator = homeLocator(deps.settings);
 
   /** A room's devices as the picture prompts name them. */
   const pictureDevices = (roomId: string) =>

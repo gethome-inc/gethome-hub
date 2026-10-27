@@ -768,7 +768,13 @@ domains — update them in the same change.
   mapper's list stays strong-only: a descriptor is
   cached against a device model and shapes every unit of it for ever, while a
   chat is many small rounds answered with another message when the reply is
-  poor. **The provider follows the model id and there is no second column**
+  poor. **Reading where a room picture's devices stand is on neither list**
+  (`LOCATOR_MODELS`, `room-pictures/store.ts`'s `homeLocator`): recognition's
+  vendor and key, at that vendor's middle rung — Sonnet 5.5, GPT-6.1 Terra —
+  whatever recognition runs on, since a misplaced point is one drag from right
+  and is never read over once a person has placed it, and the drawing is
+  answered only once its devices are read.
+  **The provider follows the model id and there is no second column**
   (`agentProviderOf`): ids do not collide across
   vendors — `priceOf` has relied on that since the mapper had two — so one
   setting says both things and they cannot disagree, and an app's picker writes

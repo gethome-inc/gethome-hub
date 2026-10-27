@@ -2483,11 +2483,14 @@ be invented — painted into the room, somewhere it isn't. A device the photos
 show is drawn because they show it; every device gets its place from the
 reading below.
 
-**Then the devices are read off it.** The day picture is shown to device
-recognition's provider and model (on the home's own key) with the room's
-devices by name, and it answers a point for each — on the device where it is
-drawn (`source: "seen"`), on what it works where it is a plug, and where it
-would plausibly be otherwise (`"guessed"`). `x` and `y` are fractions of the
+**Then the devices are read off it.** The day picture is shown, with the room's
+devices by name, to device recognition's provider on the home's own key, and it
+answers a point for each — on the device where it is drawn (`source: "seen"`),
+on what it works where it is a plug, and where it would plausibly be otherwise
+(`"guessed"`). The model is that provider's middle rung, Sonnet 5.5 or GPT-6.1
+Terra, whatever recognition itself runs on: a point in the wrong place is one
+drag from right, and the drawing is answered only once its devices are read, so
+a quicker model shows the room sooner. `x` and `y` are fractions of the
 picture's width and height from its top-left corner. A point a person moved
 (`PATCH`, `source: "placed"`) is never read over: `POST /room-pictures/:id/locate`
 reads only the devices nobody placed — the way to place a device added since.
