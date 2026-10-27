@@ -102,7 +102,9 @@ nothing of a refusal on the history — declined before a word, that is an empty
 assistant turn the API refuses anywhere but last, so every later message in the
 conversation used to answer a 400 — and of a reply cut off at `max_tokens` only
 its words, with none of its tool calls run, since a call cut off part way
-through its input can still parse.
+through its input can still parse. It talks to `client.beta.messages`, because
+every request opts into server-side fallback (*Refusals* below), and reads a
+reply another Claude finished through `anthropic-fallback.ts`.
 `chat/openai-transport.ts` is the Responses API over plain `fetch` — no second
 SDK for a Pi to download — with `summary: 'auto'` as that vendor's spelling of
 the same lesson and `store: false` with the encrypted reasoning replayed by hand.
@@ -164,6 +166,26 @@ another), read when its turn begins; and a spoken round's `low` keeps winning.
 The home's word is the agent's own setting in the same way its model is — and
 the one an agent works at on a job handed to it, where nobody is there to
 choose.
+
+**A change of effort mid-conversation re-reads it at full price, once.** The
+effort goes on every request as the top-level `output_config.effort`, and on
+Anthropic a different value from the request before it misses the cached
+conversation: the tools and the system prompt stay cached, and the
+conversation's tail is written again at the cache-write rate rather than read
+at the cache-read one. Talking after typing (`low` against the home's word)
+does it, and so does a chat picking another word; the round after is cached
+again. Anthropic's **per-message effort** — an effort-only `role: "system"`
+message under the `mid-conversation-output-config-2026-07-01` beta, which keeps
+the cache — is **deliberately not used yet**. It already answers to three beta
+names; raising effort through it (a spoken `low` back to a typed `medium`) is
+the direction its own documentation calls less reliable; how it meets the
+server-side fallback, whose targets (Opus 4.8) do not take it, is not
+documented; and it is the kind of request-shaping change a harness in the wild
+shipped and then had to take back off a platform that refused it — while a hub
+is a board in somebody's house that updates when somebody asks it to. The cost
+it would save is one cache rewrite per change of effort. Worth revisiting when
+it leaves beta, or if the run log shows long conversations paying for it
+often.
 
 **A photo reaches the model for one round and is kept nowhere.** It travels
 `ChatTurnContext.images` → the agent's `send`/`answer` →
@@ -884,19 +906,53 @@ reason decides *that* it was refused and the category decides only the
 sentence**: `stop_details` is informational, is `null` on plenty of real
 refusals, and its `explanation` is not guaranteed present.
 
-Server-side `fallbacks` — where the API re-runs a declined request on another
-model inside the same call — is **deliberately not enabled.** It would recover
-a refusal rather than relabel it, and Anthropic's guidance is to opt in by
-default on Opus-5-class models. Two things argue the other way here. The
-workload is domestic: this agent answers "is the kitchen light on" and writes
-schedules, so the classifiers it could trip are close to never. And the
-parameter is beta with a churn record — `fallback: {model, on_partial}` →
-`fallbacks: [...]` → `fallbacks: "default"`, across three superseded beta
-headers — while this is firmware on a board in somebody's house that updates on
-its own schedule. Enabling it is a two-line change (`client.beta.messages.stream`,
-`betas: ['server-side-fallback-2026-07-01']`, `fallbacks: 'default'`, and the
-`Beta*` request types) and worth revisiting if refusals ever show up in the run
-log.
+**A declined request is asked again of another Claude, inside the same call**
+(`fallbacks: "default"`, beta `server-side-fallback-2026-07-01`, in
+`anthropic-fallback.ts`, on every Claude request the hub makes — both agents,
+device recognition and reading a room picture). It was deliberately off for a
+while, on two arguments that turned out weaker than the cost of a refusal: that
+a domestic workload would almost never trip a classifier — but a home is full
+of locks, alarms, cameras and its own network, which is exactly what `cyber`
+fires on, and Opus 5.5 adds a `bio` classifier — and that the parameter is a
+beta with a history of renames under firmware that updates on its own
+schedule. The second is answered rather than accepted: **a request the API
+refuses because of the field is sent again without it, once, and the process
+stops sending it** (`withFallbacks`), so a retired beta costs a home its
+fallback and never its assistant. Haiku has no server-side fallback and is sent
+nothing. What a reply answered that way changes is all in that one module:
+what the declined model began before the hand-over is not sent back (its
+thinking and any tool call it started), only the answering model's calls run,
+its words continue the declined model's sentence rather than starting a new
+one, and each attempt is priced at its own model's rates from
+`usage.iterations`. And **the round says so** — a step in its working,
+*Answered by Opus 4.8* (`kind: "handover"`), since the chat's header names the
+model somebody chose. Only a refusal the whole chain declines reaches a note.
+
+**A declined message is left out of the model's memory and kept on the page.**
+Left in the vendor's history it is part of every request after it — the
+person's next message joins it as the same user turn — so the classifier that
+declined it reads it again and declines what follows, and somebody rephrasing
+is refused for what they already took back. So after a refused turn the
+conversation is rebuilt (`ChatRuntime.rebase`, the way a photo is let go) from
+the record *without* the message and its refusal, and the model is told in one
+line that a message was declined, and what that round had already done, which
+stays done. The transcript keeps both, and a retry on another model still finds
+them.
+
+**A note that ends a failed round says which model failed and why, and offers
+the other vendor's** (`chat/failure.ts`): *GPT-6.1 Sol couldn't answer: this
+home's OpenAI account is out of credit.*, with `data.failure` naming the model
+and the kind, and `data.switchTo` the other vendor's default model where this
+home has that key. It used to be the provider's status and JSON relayed, in a
+home with a perfectly good key from the other vendor beside it. An app can
+offer the switch as a doorway on the note, and pressing it is
+`POST …/chat/:id/retry`:
+the person's message answered again on that model, with no second message
+written, on a conversation opened for it and told what the failed round had
+already done; `data.retried` on the note says where the conversation went, and
+is what a revival reads. A refusal is a failure in this sense too — another
+vendor's model may genuinely answer differently — while a turn that ran into
+its cost cap or out of rounds is not. `docs/api.md` has the wire.
 
 The other two refusals are the automations agent's, carrying the same codes
 because both apps already branch on them: `ai_not_configured` and

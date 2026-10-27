@@ -37,6 +37,13 @@ The only connections the hub itself ever makes outward are:
   image itself, and the hub rebuilds the conversation once the round is over so
   not even its memory keeps the picture
   ([`api.md`](api.md#what-a-chat-message-can-carry-model-effort-attachments)).
+  A conversation moves to the other provider only when somebody moves it — by
+  choosing that provider's model for it, or by asking a failed answer again on
+  the model its note offers ([`api.md`](api.md#asking-a-failed-round-again-post-chatidretry))
+  — and then that provider is sent a written record of the conversation so
+  far, as it is for any change of model. A request one Claude model declines
+  may be answered by another Claude model inside the same request: still
+  Anthropic, on the same key.
   With no key, nothing goes to any AI provider and devices still appear,
   flagged *needs review*.
 - **To GitHub**, when it checks whether a newer build exists: when an app asks,

@@ -325,8 +325,8 @@ export class RoomPictureService {
       modelId: who.modelId,
     });
     try {
-      const { located, usage } = await this.locate_({ ...who, picture, devices: wanted });
-      await run?.finish({ ok: true, costUsd: estimateCostUsd(who.modelId, usage) });
+      const { located, usage, costUsd } = await this.locate_({ ...who, picture, devices: wanted });
+      await run?.finish({ ok: true, costUsd: costUsd ?? estimateCostUsd(who.modelId, usage) });
       return [
         ...placed,
         ...located.map((point) => ({

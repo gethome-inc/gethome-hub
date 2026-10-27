@@ -474,12 +474,19 @@ describe.skipIf(!handle)('roles and permissions', () => {
         'automation.manage',
         undefined,
       ],
-      // Stopping a round sits behind the key that started it, on each agent.
+      // Stopping a round sits behind the key that started it, on each agent —
+      // and so does asking a failed one again, which spends what it spends.
       [
         'POST',
         '/api/v1/automations/chat/44444444-4444-4444-a444-444444444444/stop',
         'automation.manage',
         undefined,
+      ],
+      [
+        'POST',
+        '/api/v1/automations/chat/44444444-4444-4444-a444-444444444444/retry',
+        'automation.manage',
+        { model: 'claude-opus-5-5' } as object,
       ],
       ['POST', '/api/v1/automations/templates/away', 'automation.manage', {} as object],
       // **The assistant is `hub.ai` alone**, not `automation.manage`: asking
@@ -507,6 +514,12 @@ describe.skipIf(!handle)('roles and permissions', () => {
         '/api/v1/assistant/chat/44444444-4444-4444-a444-444444444444/stop',
         'hub.ai',
         undefined,
+      ],
+      [
+        'POST',
+        '/api/v1/assistant/chat/44444444-4444-4444-a444-444444444444/retry',
+        'hub.ai',
+        { model: 'claude-opus-5-5' } as object,
       ],
       // **Talking out loud is the same conversation by another route**, so it
       // takes the same key and nothing more — and there is now exactly one

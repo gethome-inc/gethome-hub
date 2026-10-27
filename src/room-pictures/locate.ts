@@ -1,6 +1,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { z } from 'zod';
 import type { AiProvider } from '../core/settings.js';
+import { callsIn, replyCostUsd, withFallbacks } from '../ai/anthropic-fallback.js';
 import { classifyApiError, readableFailure } from '../ai/errors.js';
 import type { TokenUsage } from '../ai/models.js';
 import { locatePrompt, type PictureDevice } from './prompts.js';
@@ -109,22 +110,40 @@ export function normaliseAnswer(raw: unknown, devices: PictureDevice[]): Located
   return [...found.values()];
 }
 
-export async function locateDevices(input: LocateInput): Promise<{ located: LocatedDevice[]; usage: TokenUsage }> {
+/** A reading, and what it cost. */
+export interface Located {
+  located: LocatedDevice[];
+  usage: TokenUsage;
+  /**
+   * What the reading cost, where `usage` alone cannot say it: a reading
+   * another Claude answered after the one asked declined it bills each attempt
+   * at its own model's rates (`replyCostUsd`). Absent means `usage` at the
+   * recognition model's price is the whole of it.
+   */
+  costUsd?: number;
+}
+
+export async function locateDevices(input: LocateInput): Promise<Located> {
   if (input.devices.length === 0) return { located: [], usage: {} };
   const prompt = locatePrompt(input.devices);
   const base64 = input.picture.toString('base64');
-  const { answer, usage } =
+  const { answer, usage, costUsd } =
     input.provider === 'openai'
       ? await askOpenAi(input, prompt, base64)
       : await askAnthropic(input, prompt, base64);
   if (answer === undefined) throw new LocateError('The model answered without the devices.', 'unreadable');
-  return { located: normaliseAnswer(answer, input.devices), usage };
+  return {
+    located: normaliseAnswer(answer, input.devices),
+    usage,
+    ...(costUsd !== undefined ? { costUsd } : {}),
+  };
 }
 
 /** What either vendor answered: the points, unparsed, and what they cost. */
 interface Asked {
   answer: unknown;
   usage: TokenUsage;
+  costUsd?: number;
 }
 
 async function askOpenAi(input: LocateInput, prompt: string, base64: string): Promise<Asked> {
@@ -176,6 +195,13 @@ async function askOpenAi(input: LocateInput, prompt: string, base64: string): Pr
  * backoff, waiting as long as `retry-after` asks. A single attempt left a room
  * drawn and paid for with no device on it the first time the API was busy,
  * and nothing tries again until somebody draws the room again.
+ *
+ * **And a reading the model declines is asked again of another Claude in the
+ * same request** (`fallbacks: 'default'`, `anthropic-fallback.ts`): a picture
+ * of a room with a camera, a lock and an alarm panel in it is the kind the
+ * classifiers can read as security work. Not streamed, so a decline part way
+ * through comes back without its partial at all — only the answering model's
+ * call is read, and each attempt is priced at its own model's rates.
  */
 async function askAnthropic(input: LocateInput, prompt: string, base64: string): Promise<Asked> {
   const { default: AnthropicClient } = await import('@anthropic-ai/sdk');
@@ -185,35 +211,39 @@ async function askAnthropic(input: LocateInput, prompt: string, base64: string):
     ...(input.fetchImpl !== undefined ? { fetch: input.fetchImpl } : {}),
   });
 
-  let message: Anthropic.Message;
+  let message: Anthropic.Beta.BetaMessage;
   try {
-    message = await client.messages.create(
-      {
-        model: input.modelId,
-        max_tokens: MAX_OUTPUT_TOKENS,
-        thinking: { type: 'adaptive' },
-        output_config: { effort: EFFORT },
-        // One answer channel, the mapper's way; `auto`, because the models
-        // this runs on refuse a forced tool outright.
-        tools: [
-          {
-            name: 'submit_points',
-            description: 'Answer with a point for every device. Call this exactly once.',
-            input_schema: ANSWER_SCHEMA as unknown as Anthropic.Tool['input_schema'],
-          },
-        ],
-        messages: [
-          {
-            role: 'user',
-            content: [
-              { type: 'image', source: { type: 'base64', media_type: 'image/png', data: base64 } },
-              { type: 'text', text: `${prompt}\n\nAnswer by calling submit_points.` },
-            ],
-          },
-        ],
-      },
-      // One deadline for the whole reading, the retries included.
-      { signal: AbortSignal.timeout(TIMEOUT_MS) },
+    // Sent once more without the fallback, should the API stop taking it.
+    message = await withFallbacks(input.modelId, (fallbacks) =>
+      client.beta.messages.create(
+        {
+          model: input.modelId,
+          max_tokens: MAX_OUTPUT_TOKENS,
+          thinking: { type: 'adaptive' },
+          output_config: { effort: EFFORT },
+          // One answer channel, the mapper's way; `auto`, because the models
+          // this runs on refuse a forced tool outright.
+          tools: [
+            {
+              name: 'submit_points',
+              description: 'Answer with a point for every device. Call this exactly once.',
+              input_schema: ANSWER_SCHEMA as unknown as Anthropic.Beta.BetaTool['input_schema'],
+            },
+          ],
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'image', source: { type: 'base64', media_type: 'image/png', data: base64 } },
+                { type: 'text', text: `${prompt}\n\nAnswer by calling submit_points.` },
+              ],
+            },
+          ],
+          ...fallbacks,
+        },
+        // One deadline for the whole reading, the retries included.
+        { signal: AbortSignal.timeout(TIMEOUT_MS) },
+      ),
     );
   } catch (error) {
     // The SDK's message is the status with the whole response body glued to
@@ -237,9 +267,8 @@ async function askAnthropic(input: LocateInput, prompt: string, base64: string):
     throw new LocateError('The answer was cut off before every device was placed.', 'unreadable');
   }
 
-  const call = message.content.find(
-    (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use' && block.name === 'submit_points',
-  );
+  // The answering model's call — after a hand-over, never the declined one's.
+  const call = callsIn(message.content).find((block) => block.name === 'submit_points');
   return {
     answer: call?.input,
     usage: {
@@ -248,6 +277,7 @@ async function askAnthropic(input: LocateInput, prompt: string, base64: string):
       cache_read_input_tokens: message.usage.cache_read_input_tokens,
       cache_creation_input_tokens: message.usage.cache_creation_input_tokens,
     },
+    costUsd: replyCostUsd(input.modelId, message.usage),
   };
 }
 

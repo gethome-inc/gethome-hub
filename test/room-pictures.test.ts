@@ -7,6 +7,7 @@ import { pictureCostUsd, RoomPictureDrawError } from '../src/room-pictures/draw.
 import { LocateError, locateDevices, normaliseAnswer } from '../src/room-pictures/locate.js';
 import { dayPrompt, describeKind, locatePrompt } from '../src/room-pictures/prompts.js';
 import { PictureBusyError, RoomPictureService, type Locator } from '../src/room-pictures/store.js';
+import { estimateCostUsd } from '../src/ai/models.js';
 
 /**
  * Room pictures, minus the network: the image model and the reader are stubs,
@@ -320,6 +321,66 @@ describe('reading the devices off a picture', () => {
     });
     expect(attempts).toBe(2);
     expect(result.located).toHaveLength(1);
+  });
+
+  /**
+   * A room with a camera, a lock and an alarm panel in it can read as security
+   * work, so a reading the model declines is asked again of another Claude in
+   * the same request — and the answer read is the answering model's call,
+   * priced per attempt.
+   */
+  it('asks another Claude when the reading is declined, and reads its answer', async () => {
+    const calls: { url: string; init: RequestInit }[] = [];
+    const iteration = (type: string, model: string, input: number, output: number) => ({
+      type,
+      model,
+      input_tokens: input,
+      output_tokens: output,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+      cache_creation: null,
+    });
+    const fetchImpl = vi.fn(async (url: unknown, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return anthropicReply({
+        ...pointsMessage(),
+        model: 'claude-opus-4-8',
+        content: [
+          {
+            type: 'fallback',
+            from: { model: 'claude-opus-5-5' },
+            to: { model: 'claude-opus-4-8' },
+            trigger: { type: 'refusal', category: 'cyber' },
+          },
+          { type: 'tool_use', id: 'toolu_2', name: 'submit_points', input: { devices: [{ id: 'tv', x: 0.6, y: 0.4, seen: true }] } },
+        ],
+        usage: {
+          input_tokens: 1900,
+          output_tokens: 320,
+          iterations: [
+            iteration('message', 'claude-opus-5-5', 1800, 0),
+            iteration('fallback_message', 'claude-opus-4-8', 1900, 320),
+          ],
+        },
+      });
+    }) as unknown as typeof fetch;
+    const result = await locateDevices({
+      provider: 'anthropic',
+      modelId: 'claude-opus-5-5',
+      apiKey: 'sk-ant',
+      picture: png(1),
+      devices,
+      fetchImpl,
+    });
+    expect(result.located).toEqual([{ deviceId: 'tv', x: 0.6, y: 0.4, seen: true }]);
+    expect(result.costUsd).toBeCloseTo(
+      estimateCostUsd('claude-opus-5-5', { input_tokens: 1800, output_tokens: 0 }) +
+        estimateCostUsd('claude-opus-4-8', { input_tokens: 1900, output_tokens: 320 }),
+      12,
+    );
+    const sent = JSON.parse(String(calls[0]!.init.body));
+    expect(sent.fallbacks).toBe('default');
+    expect(new Headers(calls[0]!.init.headers).get('anthropic-beta')).toBe('server-side-fallback-2026-07-01');
   });
 
   it('reads no answer out of a refusal or a reply cut off part way through', async () => {

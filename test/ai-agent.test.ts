@@ -45,6 +45,9 @@ vi.mock('@anthropic-ai/sdk', () => ({
       },
       stream: (params: unknown) => ({ finalMessage: async () => createMock(params) }),
     };
+    // The loops talk to `client.beta.messages` (server-side fallbacks), which
+    // is the same endpoint; the mock answers there with the same functions.
+    beta = { messages: this.messages };
   },
 }));
 
@@ -853,6 +856,76 @@ describe('the mapping agent loop', () => {
 
     queue(reply({ stop_reason: 'tool_use', content: [submitCall(validDescriptor)] }));
     await expect(agent().generate('system', 'user')).resolves.toMatchObject({ version: 1 });
+  });
+
+  /**
+   * A lock, an alarm or a camera is the device whose research reads like
+   * security work, so a turn the model's classifiers decline is asked again of
+   * another Claude in the same request — and only what that model did is read:
+   * its call is the one answered, the declined model's half-made one is never
+   * run nor sent back, and each attempt is priced at its own model's rates.
+   */
+  it('reads a turn another Claude answered after the one asked declined it', async () => {
+    const iteration = (type: string, model: string, input: number, output: number) => ({
+      type,
+      model,
+      input_tokens: input,
+      output_tokens: output,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+      cache_creation: null,
+    });
+    queue(
+      reply({
+        stop_reason: 'tool_use',
+        content: [
+          { type: 'thinking', thinking: 'A door lock.', signature: 'sig-a' },
+          submitCall(validDescriptor, 'toolu_declined'),
+          {
+            type: 'fallback',
+            from: { model: DEFAULT_MODEL },
+            to: { model: 'claude-opus-4-8' },
+            trigger: { type: 'refusal', category: 'cyber' },
+          },
+          submitCall({ version: 1, endpoints: [] }, 'toolu_answering'),
+        ],
+        usage: {
+          input_tokens: 120,
+          output_tokens: 90,
+          iterations: [
+            iteration('message', DEFAULT_MODEL, 100, 10),
+            iteration('fallback_message', 'claude-opus-4-8', 120, 90),
+          ],
+        },
+      }),
+      reply({ stop_reason: 'tool_use', content: [submitCall(validDescriptor, 'toolu_again')] }),
+    );
+    const steps: { type: string; summary: string }[] = [];
+    const stats: { costUsd: number }[] = [];
+    const result = await agent().generate('system', 'user', {
+      onStep: (step) => steps.push(step),
+      onStats: (s) => stats.push(s),
+    });
+    expect(result).toMatchObject({ version: 1 });
+
+    expect(sent[0]).toMatchObject({ betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' });
+    // Only the answering model's call was evaluated and answered, and the
+    // turn went back without the declined model's thinking or call.
+    const results = sent[1]!.messages.at(-1).content as { tool_use_id: string }[];
+    expect(results.map((result) => result.tool_use_id)).toEqual(['toolu_answering']);
+    const echoed = sent[1]!.messages.at(-2).content as { type: string; id?: string }[];
+    expect(echoed.map((block) => block.type)).toEqual(['fallback', 'tool_use']);
+    expect(echoed[1]!.id).toBe('toolu_answering');
+
+    expect(steps).toContainEqual(
+      expect.objectContaining({ type: 'note', summary: 'Opus 5.5 declined this turn; Opus 4.8 answered it.' }),
+    );
+    expect(stats[0]!.costUsd).toBeCloseTo(
+      estimateCostUsd(DEFAULT_MODEL, { input_tokens: 100, output_tokens: 10 }) +
+        estimateCostUsd('claude-opus-4-8', { input_tokens: 120, output_tokens: 90 }) +
+        estimateCostUsd(DEFAULT_MODEL, { input_tokens: 100, output_tokens: 100 }),
+      12,
+    );
   });
 
   it('resumes a paused turn without inserting a user message', async () => {

@@ -88,6 +88,9 @@ vi.mock('@anthropic-ai/sdk', () => ({
       stream: (params: unknown, options: { signal?: AbortSignal } = {}) =>
         anthropicStream(params, options),
     };
+    // The loops talk to `client.beta.messages` (server-side fallbacks), which
+    // is the same endpoint; the mock answers there with the same functions.
+    beta = { messages: this.messages };
   },
 }));
 

@@ -9,12 +9,14 @@ import type { Logger } from '../../logging.js';
 import {
   AGENT_EFFORT,
   CHAT_EFFORTS,
+  agentProviderOf,
   modelLabel,
   requestedAgentModel,
   type ChatEffort,
+  type UsableProviders,
 } from '../models.js';
-import { AiUnavailableError } from '../errors.js';
 import type { AskUser } from '../automation-tools.js';
+import { failureNote, failureSentence, isRetryableNote } from './failure.js';
 
 /**
  * Everything a conversation with an agent needs that is not about *which*
@@ -365,6 +367,14 @@ export const CHAT_CAPABILITY = {
    * 404, and a button that can only fail is a dead one.
    */
   stop: true,
+  /**
+   * A round that could not be answered can be asked again, on the model a
+   * note offers or any other this home can run — `POST …/chat/:id/retry` on
+   * both agents, from a note carrying `data.failure`. Asked here as well as
+   * read off the note, because a transcript outlives the build that wrote it:
+   * a hub put back to an older build keeps those notes and has no route.
+   */
+  retry: true,
   /** The words `effort` takes, from least to most. */
   efforts: CHAT_EFFORTS,
   images: {
@@ -564,6 +574,21 @@ export interface ChatTurnContext {
    * twice.
    */
   onSaid?: (text: string) => void;
+  /**
+   * Another model answered this round in place of the one asked.
+   *
+   * Only ever Anthropic's: a request a Claude declines is asked again of the
+   * Claude the API recommends for that kind of refusal, in the same call
+   * (`anthropic-fallback.ts`). The answer is still the answer, so this is a
+   * step in the round's working rather than a note — but the chat's header
+   * names the model somebody chose, and an answer from another one with
+   * nothing saying so would be the picker claiming what answered.
+   *
+   * `earlier` is the API carrying on with the model that took over after an
+   * earlier message was declined, which it does for a while with no hand-over
+   * in the reply itself. Labels, never ids: they are said to a person.
+   */
+  onHandOver?: (from: string, to: string, earlier: boolean) => void;
 }
 
 /**
@@ -609,7 +634,16 @@ export interface Halted {
 export type CommonTurn =
   | { kind: 'question'; question: AskUser }
   | { kind: 'said'; text: string; halted?: Halted }
-  | { kind: 'stopped'; reason: string };
+  | {
+      kind: 'stopped';
+      reason: string;
+      /**
+       * The model declined, as against the turn running out of rounds or into
+       * its cost cap. Only a refusal is something another model may answer, so
+       * only its note offers one (`failure.ts`).
+       */
+      refused?: true;
+    };
 
 /** The note a stopped turn ends on — quiet, and true whatever had happened. */
 const HALTED_NOTE = 'Stopped.';
@@ -922,15 +956,147 @@ function primingFor(
  * The newest user row **that named a model**, because a message that names
  * none leaves a conversation on what it was running — so a revived one keeps
  * the model the live one would have had.
+ *
+ * **Or the newest failure somebody had answered again**, which is the one other
+ * place a model is chosen: asking a failure again (`retry`) moves the
+ * conversation onto the model it names, and writes that onto the note
+ * (`retried`) rather than onto the person's message, which went to the model
+ * that failed.
  */
 function modelFromRows(rows: ChatMessageWire[]): string | undefined {
   for (let index = rows.length - 1; index >= 0; index -= 1) {
     const row = rows[index];
-    if (row?.role !== 'user') continue;
-    const model = (row.data as { model?: unknown } | null | undefined)?.model;
-    if (typeof model === 'string' && model.length > 0) return model;
+    if (row?.role === 'user') {
+      const model = (row.data as { model?: unknown } | null | undefined)?.model;
+      if (typeof model === 'string' && model.length > 0) return model;
+    } else if (row?.role === 'note') {
+      const model = (row.data as { retried?: { model?: unknown } } | null | undefined)?.retried?.model;
+      if (typeof model === 'string' && model.length > 0) return model;
+    }
   }
   return undefined;
+}
+
+/**
+ * A failure being answered again, as the turn that answers it carries it.
+ *
+ * `noteId` is left out of the record the new conversation is primed with — the
+ * model is told about the failure in `priming`, in words written for it, rather
+ * than reading the note the person read — and `priming` is that telling.
+ */
+interface RetryOf {
+  noteId: string;
+  priming: string;
+  /**
+   * What the model was told when this note's message was declined and let go
+   * (`declinedPriming`), taken back out: the message is about to be sent after
+   * all, and "it is left out of this record" above it would be a contradiction.
+   */
+  forget: string;
+}
+
+/** `priming` without one line that was added to it, or nothing if that was all. */
+function withoutLine(priming: string | undefined, line: string): string | undefined {
+  if (priming === undefined) return undefined;
+  const rest = priming
+    .split(line)
+    .map((part) => part.replace(/^\n|\n$/g, ''))
+    .filter((part) => part.length > 0)
+    .join('\n');
+  return rest.length > 0 ? rest : undefined;
+}
+
+/**
+ * The failure a conversation can be asked again from, and the message it was
+ * the answer to — or null.
+ *
+ * **Only the newest thing in the conversation.** A failure somebody has
+ * written past is history: the conversation has moved on from it, and running
+ * an old message again in the middle of a newer exchange would answer
+ * something nobody is asking any more. So the note has to be the last row, and
+ * the message is the person's newest before it.
+ */
+function retryTarget(rows: ChatMessageWire[]): { note: ChatMessageWire; message: ChatMessageWire } | null {
+  const note = rows.at(-1);
+  if (note === undefined || !isRetryableNote(note)) return null;
+  for (let index = rows.length - 2; index >= 0; index -= 1) {
+    const row = rows[index];
+    if (row?.role === 'user') return { note, message: row };
+  }
+  return null;
+}
+
+/**
+ * What the model answering a failure again is told about it.
+ *
+ * **What the failed round had already done goes with it.** A round can work a
+ * lamp, hand a job over or save a rule and *then* fail — the vendor busy on
+ * its next request — and the steps that did so are on the note, as every
+ * round's first row carries its working. The model asked again cannot see
+ * them otherwise, and "lights on and start the vacuum" answered from the top
+ * would put the lights on twice; so it is told, and told to check before it
+ * does any of it again. A step that only read or thought is left out.
+ */
+function retryPriming(note: ChatMessageWire): string {
+  const done = actedSteps(note);
+  const lines = [
+    `(Their next message was sent before, and the model it went to could not answer it. The hub noted: ${note.text}`,
+    'It is yours to answer now.',
+  ];
+  if (done.length > 0) {
+    lines.push(
+      'Before that model failed, it had already done this:',
+      ...done,
+      'Check what is already done before doing any of it again.',
+    );
+  }
+  return `${lines.join('\n')})`;
+}
+
+/**
+ * What a round that ended in `note` had done to the home before it ended — the
+ * steps that worked a device, pressed a scene, handed a job over or saved a
+ * rule, one line each. A step that only read or thought is left out.
+ */
+function actedSteps(note: ChatMessageWire): string[] {
+  const steps = (note.data as { steps?: ChatStepWire[] } | null | undefined)?.steps ?? [];
+  return steps
+    .filter((step) => step.kind === 'writing')
+    .map((step) => `- ${step.text}${step.detail !== undefined ? `: ${step.detail}` : ''}`);
+}
+
+/**
+ * What the model is told about a message that was declined, once it is left
+ * out of the record its conversation is rebuilt from (`rebase`): that there
+ * was one — so a person rephrasing it is understood as rephrasing — and what
+ * the round had done before it was declined, which stays done.
+ */
+function declinedPriming(note: ChatMessageWire): string {
+  const done = actedSteps(note);
+  if (done.length === 0) return '(Their last message was declined, so it is left out of this record.)';
+  return [
+    '(Their last message was declined, so it is left out of this record. Before it was declined, this had',
+    'already been done, and it stays done:',
+    ...done,
+  ].join('\n') + ')';
+}
+
+/**
+ * The words a message answered again is sent with.
+ *
+ * Its own words, unless they were the hub's caption for a photo sent alone —
+ * then nothing, when the photos came back with the request, or a line saying
+ * what is missing, when they did not: the hub keeps no photo, so asking again
+ * sends only the ones the app still had, and a model handed "Photo" and no
+ * picture would answer a question about the word.
+ */
+function retryText(message: ChatMessageWire, images: number): string {
+  const sent = photoCount(message);
+  if (sent === 0 || images > 0) return isWordless(message) ? '' : message.text;
+  const missing = `${photos(sent)}, no longer available`;
+  return isWordless(message)
+    ? `(They sent ${missing}.)`
+    : `${message.text}\n\n(They sent this with ${missing}.)`;
 }
 
 /**
@@ -1146,6 +1312,100 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       }
       return await this.say(session, text, 'auto', undefined, turn, release);
     } catch (error) {
+      release();
+      throw error;
+    }
+  }
+
+  /** Failures being answered again right now, by note id — see `retry`. */
+  private readonly retrying = new Set<string>();
+
+  /**
+   * Ask the person's last message again, after the round it started failed —
+   * on the model its note offers, or any other this home can run.
+   *
+   * **No second message.** The person's row is already there and already says
+   * what they asked; writing it again would put the same question in the
+   * conversation twice, once over a failure and once over its answer. So the
+   * turn runs on that row, the note stays as the record of what failed, and
+   * `retried` on it says where the conversation went next — which is what a
+   * revival reads (`modelFromRows`) and what an app draws the change from. The
+   * `amend` frame tells a phone already showing the note that it has been
+   * answered, so the doorway on it can go before the answer arrives.
+   *
+   * **Only the newest failure, and only once at a time** (`retryTarget`, the
+   * `retrying` claim, held until the turn has written its answer and the note
+   * is no longer the last row): a double tap, or two of somebody's phones, must
+   * not run the same message twice — and the message may well have worked a
+   * device already.
+   *
+   * **Acknowledged, never awaited**, the rule every chat route keeps: the turn
+   * runs on the chain like any other and says so on the socket. Photos are the
+   * app's to send again — the hub never kept them — and a message whose photos
+   * did not come back is sent with a line saying they are gone (`retryText`).
+   */
+  async retry(
+    sessionId: string,
+    memberId: string,
+    turn: ChatTurnRequest & { model: string },
+  ): Promise<'retrying' | 'nothing_to_retry' | 'not_yours' | 'ended'> {
+    // Before anything else, the rule `start` keeps: refused for its photos, a
+    // retry has changed nothing.
+    const release = this.holdPhotos(turn);
+    let claimed: string | undefined;
+    try {
+      const rows = await this.transcript(sessionId);
+      if (rows.length === 0) {
+        release();
+        return 'ended';
+      }
+      const owner = this.sessions.get(sessionId)?.memberId ?? (await this.ownerOf(sessionId));
+      if (owner !== memberId) {
+        release();
+        return 'not_yours';
+      }
+      const target = retryTarget(rows);
+      if (target === null || this.retrying.has(target.note.id)) {
+        release();
+        return 'nothing_to_retry';
+      }
+      // Claimed in the same tick as the check, so a second request that read
+      // the same transcript finds it taken.
+      claimed = target.note.id;
+      this.retrying.add(claimed);
+
+      const session = this.sessions.get(sessionId) ?? (await this.revive(sessionId, memberId, turn.model));
+      if (session === null || session.memberId !== memberId) {
+        this.retrying.delete(claimed);
+        release();
+        return 'ended';
+      }
+
+      await this.amend(target.note.id, {
+        ...(target.note.data as Record<string, unknown>),
+        retried: { model: turn.model, ...(turn.effort !== undefined ? { effort: turn.effort } : {}) },
+      });
+      this.emit({ sessionId, phase: 'amend', at: new Date().toISOString(), text: 'retry' });
+
+      session.lastAt = Date.now();
+      const noteId = claimed;
+      const finished = (): void => {
+        this.retrying.delete(noteId);
+        release();
+      };
+      const asked: TurnOrigin | undefined = turn.effort !== undefined ? { effort: turn.effort } : undefined;
+      const text = retryText(target.message, turn.images?.length ?? 0);
+      const retry: RetryOf = {
+        noteId,
+        priming: retryPriming(target.note),
+        forget: declinedPriming(target.note),
+      };
+      session.inFlight = session.inFlight.then(() =>
+        this.exchange(session, text, 'send', asked, turn, target.message.id, finished, retry),
+      );
+      return 'retrying';
+    } catch (error) {
+      if (claimed !== undefined) this.retrying.delete(claimed);
       release();
       throw error;
     }
@@ -1542,13 +1802,15 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     messageId?: string,
     /** Gives this message's photos back to the hub's budget. */
     release?: () => void,
+    /** The failure this turn answers again, when it is one — see `retry`. */
+    retry?: RetryOf,
   ): Promise<void> {
     // This turn's stop, from the moment it begins — before a model switch, so
     // a stop pressed while the conversation is being moved still lands.
     const halt = new AbortController();
     session.halt = halt;
     try {
-      await this.exchangeHeld(session, text, how, origin, turn, messageId, halt.signal);
+      await this.exchangeHeld(session, text, how, origin, turn, messageId, halt.signal, retry);
     } finally {
       if (session.halt === halt) session.halt = undefined;
       // Whatever the turn ended as — answered, refused, dropped, its model
@@ -1566,6 +1828,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     turn: ChatTurnRequest | undefined,
     messageId: string | undefined,
     halt: AbortSignal,
+    retry: RetryOf | undefined,
   ): Promise<void> {
     /**
      * **A conversation dropped behind this turn's back is not run on.** A
@@ -1589,15 +1852,25 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
      * are chained: a switch queued behind a running turn must not pull the
      * conversation out from under it.
      */
-    if (turn?.model !== undefined && turn.model !== session.conversation.modelId) {
+    if (retry !== undefined) {
+      // **A failure is answered on a conversation opened for the purpose**,
+      // even on the same model: whatever the failed round left in the vendor's
+      // history — a message with no answer after it, a call half-made — is not
+      // something to carry on from.
+      if (!(await this.switchModel(session, turn?.model ?? session.conversation.modelId, messageId, retry))) {
+        return;
+      }
+    } else if (turn?.model !== undefined && turn.model !== session.conversation.modelId) {
       if (!(await this.switchModel(session, turn.model, messageId))) return;
     }
+    /** The note a declined turn was written as, which `rebase` leaves out. */
+    let declined: ChatMessageWire | undefined;
     try {
       // Asked when the turn begins, never when it was queued — and after any
       // switch above, since a fresh conversation has no question outstanding.
       const mode =
         how === 'auto' ? (session.conversation.awaitingAnswer() ? 'answer' : 'send') : how;
-      await this.runExchange(session, text, mode, halt, origin, turn);
+      declined = await this.runExchange(session, text, mode, halt, origin, turn);
     } catch (error) {
       /**
        * **The promise `say()` stores must never reject**, and the inner catch
@@ -1622,9 +1895,11 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     }
     // A round that wrote nothing leaves no clock behind for a later row.
     session.roundStartedAt = undefined;
-    // A photo is in the provider history now, and it leaves before the next
-    // turn begins — whatever this one ended as. See `rebase`.
-    if ((turn?.images?.length ?? 0) > 0) await this.rebase(session, messageId);
+    // A declined message leaves the model's memory before the next turn
+    // begins, and so does a photo, whatever this turn ended as — one rebase
+    // does both. See `rebase`.
+    if (declined !== undefined) await this.rebase(session, messageId, declined);
+    else if ((turn?.images?.length ?? 0) > 0) await this.rebase(session, messageId);
   }
 
   /**
@@ -1656,6 +1931,9 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     session: ChatSession<Turn>,
     model: string,
     messageId: string | undefined,
+    /** A failure being answered again: the conversation is reopened even on
+     *  the model it is already on, primed without the note and told why. */
+    retry?: RetryOf,
   ): Promise<boolean> {
     try {
       const usable = await this.base.settings.agentProviders();
@@ -1669,7 +1947,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
           'That model can’t be used on this hub right now. Pick another one and send it again.',
         );
       }
-      if (wanted.modelId === session.conversation.modelId) return true;
+      if (retry === undefined && wanted.modelId === session.conversation.modelId) return true;
 
       const conversation = await this.openConversation({
         memberId: session.memberId,
@@ -1680,12 +1958,19 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
         model: wanted.modelId,
       });
       // Everything said before this message — including an answer written
-      // after it was taken — and nothing queued behind it.
-      const before = settledRows(await this.transcript(session.id), messageId, false);
+      // after it was taken — and nothing queued behind it. A failure being
+      // answered again is told to the model in words of its own, not recapped.
+      const before = settledRows(await this.transcript(session.id), messageId, false).filter(
+        (row) => row.id !== retry?.noteId,
+      );
       await this.settleSpend(session);
       this.replaceConversation(session, conversation, before);
+      if (retry !== undefined) {
+        const kept = withoutLine(session.priming, retry.forget);
+        session.priming = kept === undefined ? retry.priming : `${kept}\n${retry.priming}`;
+      }
       this.base.log.info(
-        { sessionId: session.id, surface: this.surface, model: wanted.modelId },
+        { sessionId: session.id, surface: this.surface, model: wanted.modelId, retry: retry !== undefined },
         'chat: moved onto another model',
       );
       return true;
@@ -1695,9 +1980,27 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
           ? error.message
           : `That model could not be started: ${(error as Error).message}`;
       this.base.log.warn({ err: error }, 'chat: could not move onto another model');
-      await this.write(session, 'note', message).catch(() => undefined);
+      // A model that could not be started is a failure like any other, so its
+      // note can be answered again — on the other vendor's model, where this
+      // home has one.
+      const provider = agentProviderOf(model) ?? session.conversation.provider;
+      const note = failureNote(provider, model, 'unavailable', message, await this.usableProviders());
+      await this.write(session, 'note', note.text, note.data).catch(() => undefined);
       this.settle(session, 'stopped');
       return false;
+    }
+  }
+
+  /**
+   * Which vendors this home can run right now, for the model a failure note
+   * offers — or nothing, where the settings cannot be read: a note without an
+   * offer is still the note, and a failure is not worth a second one.
+   */
+  private async usableProviders(): Promise<UsableProviders | undefined> {
+    try {
+      return await this.base.settings.agentProviders();
+    } catch {
+      return undefined;
     }
   }
 
@@ -1729,8 +2032,23 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
    * on it is answered with a note rather than run on the history still holding
    * the photo; the next message revives it from the transcript, which is the
    * ordinary path.
+   *
+   * **A declined message is let go the same way** (`declined`, the note its
+   * refusal was written as). Left in the vendor's history it is part of every
+   * request after it — the person's next message joins it as the same user
+   * turn — so the classifier that declined it reads it again and declines what
+   * follows, and somebody rephrasing is refused for what they already took
+   * back. So the conversation is rebuilt from the record *without* the message
+   * and its refusal, and the model is told one was declined (`declinedPriming`)
+   * and what that round had already done. The transcript keeps both: the
+   * person sees what they asked and what came back, and a retry on another
+   * model (`retry`) still finds them there.
    */
-  private async rebase(session: ChatSession<Turn>, messageId: string | undefined): Promise<void> {
+  private async rebase(
+    session: ChatSession<Turn>,
+    messageId: string | undefined,
+    declined?: ChatMessageWire,
+  ): Promise<void> {
     try {
       const conversation = await this.openConversation({
         memberId: session.memberId,
@@ -1739,11 +2057,20 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
         model: session.conversation.modelId,
       });
       await this.settleSpend(session);
-      // The round just over is history now; a message queued behind it is not.
-      const settled = settledRows(await this.transcript(session.id), messageId, true);
+      const rows = await this.transcript(session.id);
+      // The round just over is history now; a message queued behind it is not
+      // — and a declined one is neither, nor is its refusal.
+      const settled =
+        declined === undefined
+          ? settledRows(rows, messageId, true)
+          : settledRows(rows, messageId, false).filter((row) => row.id !== declined.id);
       this.replaceConversation(session, conversation, settled);
+      if (declined !== undefined) {
+        const line = declinedPriming(declined);
+        session.priming = session.priming === undefined ? line : `${session.priming}\n${line}`;
+      }
     } catch (error) {
-      this.base.log.warn({ err: error }, 'chat: could not rebase after a photo; dropping it');
+      this.base.log.warn({ err: error }, 'chat: could not rebase; dropping the conversation from memory');
       await this.settleSpend(session);
       session.dropped = true;
       if (this.sessions.get(session.id) === session) this.sessions.delete(session.id);
@@ -1815,7 +2142,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     halt: AbortSignal,
     origin?: TurnOrigin,
     request?: ChatTurnRequest,
-  ): Promise<void> {
+  ): Promise<ChatMessageWire | undefined> {
     // **What this turn was, for the row it is about to write.** Kept on the
     // session because `record` runs after the turn and takes only the
     // session; turns are chained per conversation, so the value cannot belong
@@ -1871,6 +2198,9 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       if (last === undefined || last.detail !== undefined) return;
       last.detail = clip(said, STEP_DETAIL_LIMIT);
     };
+    /** The hand-over this turn has already said, so a conversation the API
+     *  keeps routing to another model says it once rather than every round. */
+    let handedOver: string | undefined;
     try {
       // **Consumed once, and it goes to the model rather than to the row.**
       // `say` has already written what the person typed; this is the recap of
@@ -1938,6 +2268,31 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
             text: delta,
           });
         },
+        /**
+         * **Another model answered, and the working says so** — a step, kept
+         * and sent like any other, because the answer is still the answer and
+         * the header still names the model somebody chose. Its own `kind`,
+         * which an app that has never met it draws with its fallback mark.
+         */
+        onHandOver: (from, to, earlier) => {
+          const pair = `${from}|${to}`;
+          if (handedOver === pair) return;
+          handedOver = pair;
+          settleReasoning();
+          const text = `Answered by ${to}`;
+          const detail = earlier
+            ? `${from} declined an earlier message in this chat, so Anthropic is answering with ${to} for now.`
+            : `${from} declined this, so Anthropic passed it to ${to}.`;
+          this.keep(session, { text, kind: 'handover', detail });
+          this.emit({
+            sessionId: session.id,
+            phase: 'step',
+            at: new Date().toISOString(),
+            text,
+            kind: 'handover',
+            detail,
+          });
+        },
       });
     } catch (error) {
       // What was reasoned before the round ended belongs to its working, the
@@ -1965,14 +2320,15 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
        * `describeRunFailure`'s rule one module over: somebody is sitting in
        * front of this, and an HTTP error code with a JSON body glued to it
        * tells them nothing they can act on. The conversation stays open, so
-       * fixing a key and saying "try again" works.
+       * fixing a key and saying "try again" works — and the note says which
+       * model failed and why, and offers the other vendor's where this home
+       * can run it (`failure.ts`), answered by `retry()`.
        */
-      const message =
-        error instanceof AiUnavailableError
-          ? error.message
-          : `Something went wrong talking to the model: ${(error as Error).message}`;
+      const { provider, modelId } = session.conversation;
+      const failed = failureSentence(provider, modelId, error);
+      const note = failureNote(provider, modelId, failed.kind, failed.text, await this.usableProviders());
       this.base.log.warn({ err: error }, 'chat turn failed');
-      await this.write(session, 'note', message);
+      await this.write(session, 'note', note.text, note.data);
       session.lastAt = Date.now();
       // A round that failed still spent money, so it is written down like
       // any other — see the note beside the call on the ordinary path.
@@ -1990,7 +2346,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     // — leaves that reasoning with no later step to settle it.
     settleReasoning();
     session.lastAt = Date.now();
-    await this.recordTurn(session, turn);
+    const written = await this.recordTurn(session, turn);
     /**
      * **A stopped turn says so, after whatever it had produced** — the words
      * that reached the page, the cards for what it did — so the transcript
@@ -2001,6 +2357,8 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     if (halted !== undefined) await this.noteHalt(session, halted);
     await this.bank(session, true);
     this.settle(session, turn.kind);
+    // The refusal's note, for the caller to leave out of the model's memory.
+    return (turn as { refused?: true }).refused === true ? written[0] : undefined;
   }
 
   /**
@@ -2090,14 +2448,15 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
         ];
       }
 
-      case 'stopped':
-        return [
-          await this.write(
-            session,
-            'note',
-            (turn as unknown as CommonTurn & { kind: 'stopped' }).reason,
-          ),
-        ];
+      case 'stopped': {
+        const stopped = turn as unknown as CommonTurn & { kind: 'stopped' };
+        if (stopped.refused !== true) return [await this.write(session, 'note', stopped.reason)];
+        // A refusal is a failure another model may answer, so its note is one
+        // the round can be asked again from — the other vendor's offered.
+        const { provider, modelId } = session.conversation;
+        const note = failureNote(provider, modelId, 'refused', stopped.reason, await this.usableProviders());
+        return [await this.write(session, 'note', note.text, note.data)];
+      }
 
       default:
         return this.recordAgentTurn(session, turn);

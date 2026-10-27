@@ -85,7 +85,7 @@ export interface AssistantHandoff {
 export type AssistantTurn =
   | { kind: 'question'; question: AskUser }
   | { kind: 'said'; text: string; halted?: Halted }
-  | { kind: 'stopped'; reason: string }
+  | { kind: 'stopped'; reason: string; refused?: true }
   | { kind: 'handed'; handoffs: AssistantHandoff[]; text: string; halted?: Halted };
 
 export interface AssistantAgentOptions {
@@ -191,7 +191,9 @@ export async function createAssistantConversation(
         if (round.stop === 'halted') return halted(round.said);
 
         if (round.stop === 'refusal') {
-          return { kind: 'stopped', reason: round.refusal ?? 'The model declined to answer that.' };
+          // Marked, because a refusal is the one stop another model may
+          // answer — its note offers one, and the cost cap's does not.
+          return { kind: 'stopped', reason: round.refusal ?? 'The model declined to answer that.', refused: true };
         }
 
         const { said, calls } = round;

@@ -111,7 +111,7 @@ export type AutomationTurn =
       halted?: Halted;
     }
   | { kind: 'said'; text: string; halted?: Halted }
-  | { kind: 'stopped'; reason: string };
+  | { kind: 'stopped'; reason: string; refused?: true };
 
 /** The accepted-rules arm on its own, for the loop that holds one back while it
  *  asks the model for the sentence that goes above the cards. */
@@ -179,6 +179,11 @@ export interface AutomationTurnContext {
    * See `ChatTurnContext.onSaid` for why it is kept rather than sent.
    */
   onSaid?: (text: string) => void;
+  /**
+   * Another model answered a round in place of the one asked — declared here
+   * as well, the `onSaid` lesson. See `ChatTurnContext.onHandOver`.
+   */
+  onHandOver?: (from: string, to: string, earlier: boolean) => void;
 }
 
 /**

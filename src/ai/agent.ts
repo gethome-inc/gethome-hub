@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { Logger } from '../logging.js';
+import { callsIn, echoed, fellBack, handOvers, replyCostUsd, withFallbacks } from './anthropic-fallback.js';
 import { AiUnavailableError, classifyApiError } from './errors.js';
 import {
   AGENT_MAX_BUDGET_USD,
@@ -24,7 +25,7 @@ import {
   type MappingProvider,
   type SubmitCapture,
 } from './agent-core.js';
-import { budgetScale, DEFAULT_MODEL, estimateCostUsd, isSupportedModel, supportedModelIds } from './models.js';
+import { budgetScale, DEFAULT_MODEL, isSupportedModel, modelLabel, supportedModelIds } from './models.js';
 
 /**
  * The mapping agent: a tool-use loop on the Anthropic Messages API that
@@ -58,7 +59,13 @@ import { budgetScale, DEFAULT_MODEL, estimateCostUsd, isSupportedModel, supporte
  *    and whose handler re-validates and hands errors back so the model can
  *    fix and resubmit within the same run;
  *  - guardrails: a turn cap, a cost cap computed from token usage, and a
- *    wall-clock watchdog.
+ *    wall-clock watchdog;
+ *  - a turn the model's safety classifiers decline is asked again of another
+ *    Claude in the same request (`fallbacks: 'default'`, through
+ *    `client.beta.messages`) — a lock, an alarm or a camera is exactly the
+ *    kind of device whose research reads like security work — and read
+ *    through `anthropic-fallback.ts`, so its history, its calls and its price
+ *    are the answering model's.
  *
  * The descriptor remains data, not code — it is re-validated by the mapper
  * and interpreted exactly as before. Model output is never executed.
@@ -103,11 +110,11 @@ const WEB_FETCH_MAX_USES = 8;
  * schema uses. The validate-and-resubmit loop below covers both, so the
  * model gets a real error message instead of a silently narrowed schema.
  */
-export function submitMappingTool(): Anthropic.Tool {
+export function submitMappingTool(): Anthropic.Beta.BetaTool {
   return {
     name: 'submit_mapping',
     description: SUBMIT_MAPPING_DESCRIPTION,
-    input_schema: submitMappingSchema() as Anthropic.Tool['input_schema'],
+    input_schema: submitMappingSchema() as Anthropic.Beta.BetaTool['input_schema'],
   };
 }
 
@@ -136,8 +143,8 @@ function sentParts(
   firstRound: boolean,
   modelId: string,
   systemPrompt: string,
-  tools: Anthropic.ToolUnion[],
-  added: Anthropic.MessageParam[],
+  tools: Anthropic.Beta.BetaToolUnion[],
+  added: Anthropic.Beta.BetaMessageParam[],
 ): ExchangePart[] {
   const parts: ExchangePart[] = [];
   if (firstRound) {
@@ -184,12 +191,20 @@ function sentParts(
  * said twice on purpose, because a step is the run's story and this is the
  * round's.
  */
-function receivedParts(response: Anthropic.Message): ExchangePart[] {
+function receivedParts(response: Anthropic.Beta.BetaMessage): ExchangePart[] {
   const parts: ExchangePart[] = [
     exchangePart('outcome', `Stopped: ${response.stop_reason ?? 'end_turn'}`),
   ];
   for (const block of response.content) {
     switch (block.type) {
+      case 'fallback':
+        parts.push(
+          exchangePart(
+            'fallback',
+            `${modelLabel('anthropic', block.from.model)} declined; ${modelLabel('anthropic', block.to.model)} carried on`,
+          ),
+        );
+        break;
       case 'thinking':
         parts.push(exchangePart('thinking', 'Thinking', block.thinking));
         break;
@@ -214,7 +229,7 @@ function receivedParts(response: Anthropic.Message): ExchangePart[] {
   return parts;
 }
 
-function reportResearch(content: Anthropic.ContentBlock[], run: AgentRunContext | undefined): void {
+function reportResearch(content: Anthropic.Beta.BetaContentBlock[], run: AgentRunContext | undefined): void {
   if (!run?.onStep) return;
   for (const block of content) {
     if (block.type !== 'server_tool_use') continue;
@@ -228,7 +243,7 @@ function reportResearch(content: Anthropic.ContentBlock[], run: AgentRunContext 
 }
 
 /** The research tools, plus the one client-side tool the model answers with. */
-function buildTools(): Anthropic.Messages.ToolUnion[] {
+function buildTools(): Anthropic.Beta.BetaToolUnion[] {
   return [
     { type: 'web_search_20260209', name: 'web_search', max_uses: WEB_SEARCH_MAX_USES },
     { type: 'web_fetch_20260209', name: 'web_fetch', max_uses: WEB_FETCH_MAX_USES },
@@ -240,21 +255,15 @@ function buildTools(): Anthropic.Messages.ToolUnion[] {
  * Running total across every turn of one run, priced turn by turn: a long
  * prompt is billed at dearer rates for the whole of that one request
  * (`ModelPricing.longPrompt`), and forty turns added up are not one prompt.
+ * A turn another model answered is priced per attempt (`replyCostUsd`).
  */
 class RunUsage {
   private spent = 0;
 
   constructor(private readonly model: string) {}
 
-  add(usage: Anthropic.Usage | undefined): void {
-    if (!usage) return;
-    this.spent += estimateCostUsd(this.model, {
-      input_tokens: usage.input_tokens,
-      output_tokens: usage.output_tokens,
-      cache_read_input_tokens: usage.cache_read_input_tokens,
-      cache_creation_input_tokens: usage.cache_creation_input_tokens,
-      webSearchRequests: usage.server_tool_use?.web_search_requests ?? 0,
-    });
+  add(usage: Anthropic.Beta.BetaUsage | undefined): void {
+    this.spent += replyCostUsd(this.model, usage);
   }
 
   costUsd(): number {
@@ -292,7 +301,7 @@ export function createMappingAgent(
       const budgetUsd = AGENT_MAX_BUDGET_USD * budgetScale(modelId);
       const startedAt = Date.now();
       const tools = buildTools();
-      const messages: Anthropic.MessageParam[] = [{ role: 'user', content: userPrompt }];
+      const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: 'user', content: userPrompt }];
       // How much of `messages` the exchange log has already seen. An agent
       // loop resends the whole conversation every turn, so recording each
       // request whole would write the first prompt once per turn and make the
@@ -311,7 +320,7 @@ export function createMappingAgent(
             break;
           }
 
-          let response: Anthropic.Message;
+          let response: Anthropic.Beta.BetaMessage;
           const roundStartedAt = Date.now();
           // Captured before the request because `messages` grows during it —
           // but only sliced, never walked: turning these into parts is work,
@@ -329,32 +338,40 @@ export function createMappingAgent(
             // network. Nothing here is displayed as it arrives, so
             // `finalMessage()` collects the whole `Message` and the loop
             // below is unchanged.
-            const stream = client.messages.stream(
-              {
-                model: modelId,
-                max_tokens: MAX_OUTPUT_TOKENS,
-                // Two breakpoints, which is what the Messages API asks of an
-                // agent loop. The explicit one covers the tool definitions
-                // and the system prompt — the large, byte-identical prefix
-                // every turn of every run shares, and tools sort ahead of
-                // system in the cached prefix. The top-level field then
-                // places a second one on the last block of `messages`, which
-                // is the half that was missing: this conversation carries the
-                // whole of the model's research and grows for up to
-                // AGENT_MAX_TURNS turns, and without it every turn re-sent
-                // all of it at full input price.
-                system: [
-                  { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } },
-                ],
-                cache_control: { type: 'ephemeral' },
-                messages,
-                tools,
-                thinking: { type: 'adaptive' },
-                output_config: { effort: EFFORT },
-              },
-              { signal: controller.signal },
+            //
+            // A declined turn is asked again of another Claude in this same
+            // request — see the note at the top of the file — and sent once
+            // more without that, should the API stop taking it.
+            response = await withFallbacks(modelId, (fallbacks) =>
+              client.beta.messages
+                .stream(
+                  {
+                    model: modelId,
+                    max_tokens: MAX_OUTPUT_TOKENS,
+                    // Two breakpoints, which is what the Messages API asks of an
+                    // agent loop. The explicit one covers the tool definitions
+                    // and the system prompt — the large, byte-identical prefix
+                    // every turn of every run shares, and tools sort ahead of
+                    // system in the cached prefix. The top-level field then
+                    // places a second one on the last block of `messages`, which
+                    // is the half that was missing: this conversation carries the
+                    // whole of the model's research and grows for up to
+                    // AGENT_MAX_TURNS turns, and without it every turn re-sent
+                    // all of it at full input price.
+                    system: [
+                      { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } },
+                    ],
+                    cache_control: { type: 'ephemeral' },
+                    messages,
+                    tools,
+                    thinking: { type: 'adaptive' },
+                    output_config: { effort: EFFORT },
+                    ...fallbacks,
+                  },
+                  { signal: controller.signal },
+                )
+                .finalMessage(),
             );
-            response = await stream.finalMessage();
           } catch (error) {
             // Recorded before it is classified: the whole point of keeping
             // this is the refusal nobody could read, and by the time the
@@ -396,9 +413,18 @@ export function createMappingAgent(
 
           usage.add(response.usage);
           reportResearch(response.content, run);
+          // Said in the run's own story when another model answered, because
+          // the run log names the model the home chose for recognition.
+          if (response.stop_reason !== 'refusal' && fellBack(response.usage)) {
+            const last = handOvers(response.content).at(-1);
+            const from = last?.from ?? modelLabel('anthropic', modelId);
+            const to = last?.to ?? modelLabel('anthropic', response.model);
+            run?.onStep?.(agentStep('note', `${from} declined this turn; ${to} answered it.`));
+          }
           // The whole content goes back verbatim — thinking blocks included,
-          // which the API requires when continuing a thinking conversation.
-          messages.push({ role: 'assistant', content: response.content });
+          // which the API requires when continuing a thinking conversation —
+          // except what a model that declined part way through had begun.
+          messages.push({ role: 'assistant', content: echoed(response.content) });
 
           if (response.stop_reason === 'pause_turn') {
             // The server-side tool loop hit its own iteration limit. Re-send
@@ -419,9 +445,8 @@ export function createMappingAgent(
             throw new Error('mapping agent run filled the model’s context window before answering');
           }
 
-          const toolUses = response.content.filter(
-            (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use',
-          );
+          // The answering model's calls, never one a declined model began.
+          const toolUses = callsIn(response.content);
 
           if (toolUses.length === 0) {
             // Answered in prose. Worth one or two reminders — the run has
@@ -438,7 +463,7 @@ export function createMappingAgent(
             continue;
           }
 
-          const results: Anthropic.ToolResultBlockParam[] = [];
+          const results: Anthropic.Beta.BetaToolResultBlockParam[] = [];
           for (const call of toolUses) {
             if (call.name !== 'submit_mapping') {
               results.push({

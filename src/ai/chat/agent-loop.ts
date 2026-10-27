@@ -122,7 +122,9 @@ export interface ChatTransport {
    * added to `costUsd()`.
    */
   round(
-    context: Pick<ChatTurnContext, 'onDelta' | 'onThinking' | 'onSaid' | 'effort'> | undefined,
+    context:
+      | Pick<ChatTurnContext, 'onDelta' | 'onThinking' | 'onSaid' | 'onHandOver' | 'effort'>
+      | undefined,
     signal: AbortSignal,
   ): Promise<ChatRound>;
 

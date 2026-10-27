@@ -206,9 +206,12 @@ export async function createAutomationConversation(
         if (round.stop === 'halted') return halted(round.said);
 
         if (round.stop === 'refusal') {
+          // Marked, because a refusal is the one stop another model may
+          // answer — its note offers one, and the cost cap's does not.
           return {
             kind: 'stopped',
             reason: round.refusal ?? 'The model declined to answer that.',
+            refused: true,
           };
         }
 

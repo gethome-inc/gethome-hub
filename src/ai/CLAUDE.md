@@ -672,7 +672,29 @@ domains — update them in the same change.
   thinking block with no signature; and of a reply cut off at `max_tokens` or
   by the context window, **only the words, and none of its calls run**, since
   a call cut off half way through its input can still parse
-  (`test/chat-anthropic-stops.test.ts`);
+  (`test/chat-anthropic-stops.test.ts`).
+  **Every Claude request opts into server-side fallback** (`fallbacks:
+  "default"`, beta `server-side-fallback-2026-07-01`) — the transport, the
+  recognition agent and the room-picture locator alike, all through
+  `anthropic-fallback.ts`, which is therefore the one place a reply another
+  Claude finished is read: `echoed` (what the declined model began before the
+  last `fallback` block — thinking, a client call, a server call without its
+  result — never goes back), `saidIn` (words join with nothing across a
+  hand-over, since the next model continues the sentence), `callsIn` (only the
+  answering model's calls run), `replyCostUsd` (each attempt at its own model's
+  rates off `usage.iterations`, while the top-level `usage` covers only the
+  answering one) and `withFallbacks` (**a request refused because of the field
+  is sent again without it and the process stops sending it** — the beta has
+  been renamed twice, and a hub nobody updates must lose its fallback rather
+  than its assistant). Haiku has no fallback and is sent nothing. A round
+  answered that way says so (`ChatTurnContext.onHandOver` → a `handover` step,
+  once per turn per pair), because the header names the model somebody chose.
+  **Per-message effort (`mid-conversation-output-config-2026-07-01`) is
+  deliberately not used yet** — three beta names already, raising effort
+  through it is the less reliable direction (a spoken `low` back to a typed
+  `medium`), and its meeting with the fallback, whose targets do not take it,
+  is undocumented; a top-level change of effort costs one cache rewrite, which
+  `docs/assistant.md` weighs;
   `chat/openai-transport.ts` is the Responses API over plain `fetch` — **no
   second SDK for a Pi to download**, the same decision `openai-agent.ts` made —
   with `summary: 'auto'` as that vendor's spelling of the summarized-thinking
@@ -1097,6 +1119,32 @@ domains — update them in the same change.
   — and so does `liveHistory` for the voice — because "what about the colour?"
   reaching a model with no idea there was a picture is a confident wrong
   answer. A photo never crosses a handoff: the brief is text.
+  **A declined message is rebased away the same way**, and kept in the
+  transcript (`rebase(…, declined)`): left in the vendor's history it rides
+  along with every later request — the next message joins it as one user
+  turn — so the classifier that declined it declines what follows. The record
+  the fresh conversation is primed with leaves out the message and its note,
+  and `declinedPriming` tells the model one was declined and what that round
+  had already done. One rebase covers a declined turn that also carried a
+  photo. Vendor-agnostic: it is the runtime's, off the pump's `stopped` arm
+  with `refused: true`.
+  **A failed round's note says which model failed and why, and offers the
+  other vendor's** (`chat/failure.ts`: `failure` — provider, model, an open
+  `kind`, `transient` where asking the same model again may work — and
+  `switchTo`, the other vendor's default where this home holds its key; the
+  sentence is written for somebody whose account ran out of credit, never the
+  provider's status and JSON). A refusal is one of these and a cost cap or the
+  round limit is not. **`retry()` answers the person's last message again**
+  (`POST …/chat/:id/retry`, `chat.retry` on `GET /hub`) with no second row:
+  only from the newest row, only once at a time (`retrying`, claimed in the
+  same tick as the check and held until the turn has written its answer), on
+  a conversation reopened even on the same model (`switchModel(…, retry)`),
+  primed without the note and told what the failed round had already done
+  (`retryPriming`, the `writing` steps on the note). `data.retried` on the
+  note records the model, and `modelFromRows` reads it, so a revived
+  conversation comes back on the model it was answered on. Photos are the
+  app's to send again; one whose photos do not come back is sent with a line
+  saying they are gone (`retryText`).
   **A round can be stopped part-way, and a stop keeps what it had**
   (`POST …/chat/:id/stop`, `chat.stop` on `GET /hub`; `docs/assistant.md` has
   it whole). Five rules. **The signal is per turn** — `TurnAbort` in

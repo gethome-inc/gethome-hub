@@ -4620,6 +4620,49 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     return { stopped: outcome === 'stopped' };
   };
 
+  /**
+   * A failed round asked again (`POST …/chat/:id/retry`): the model to answer
+   * on, and the photos the message went with — the hub kept none, so they are
+   * the app's to send again — with the thinking word the chat chose, if any.
+   * `model` is required: the offer on the note names one, and asking again on
+   * whatever the conversation happens to be on is the same choice said less
+   * plainly.
+   */
+  const chatRetrySchema = z.object({
+    ...chatTurnFields,
+    model: z.string().trim().min(1).max(120),
+  });
+
+  /**
+   * What a retry answers. **An acknowledgement**, the rule every chat route
+   * keeps — `202`, because the turn runs off the request and says so on the
+   * socket. `nothing_to_retry` is a new code for a new situation: the
+   * conversation has moved on from the failure, or it is already being
+   * answered, and either way pressing again must not run the message twice.
+   */
+  const retryAnswer = (
+    id: string,
+    outcome: 'retrying' | 'nothing_to_retry' | 'not_yours' | 'ended',
+    reply: FastifyReply,
+  ) => {
+    switch (outcome) {
+      case 'retrying':
+        return reply.code(202).send({ sessionId: id, retrying: true });
+      case 'not_yours':
+        return reply.code(409).send({
+          error: 'not_your_conversation',
+          detail: 'That conversation belongs to somebody else in this home, so only they can ask it again.',
+        });
+      case 'nothing_to_retry':
+        return reply.code(409).send({
+          error: 'nothing_to_retry',
+          detail: 'There is nothing to ask again: the conversation has moved on, or it is already being answered.',
+        });
+      case 'ended':
+        return reply.code(410).send({ error: 'conversation_ended' });
+    }
+  };
+
   app.post(
     '/api/v1/automations/chat',
     { ...memberOnlyNeeds('automation.manage'), bodyLimit: CHAT_BODY_LIMIT },
@@ -4689,6 +4732,27 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       if (await chatGuard(request, reply)) return reply;
       const { id } = z.object({ id: z.uuid() }).parse(request.params);
       return stopAnswer(deps.automationChat.stop(id, request.member!.id), reply);
+    },
+  );
+
+  /** Ask a failed round again, on the model named — see `retryAnswer`. */
+  app.post(
+    '/api/v1/automations/chat/:id/retry',
+    { ...memberOnlyNeeds('automation.manage'), bodyLimit: CHAT_BODY_LIMIT },
+    async (request, reply) => {
+      if (await chatGuard(request, reply)) return reply;
+      const { id } = z.object({ id: z.uuid() }).parse(request.params);
+      const body = chatRetrySchema.parse(request.body);
+      if (await modelRefusal(body.model, reply)) return reply;
+      try {
+        const outcome = await deps.automationChat.retry(id, request.member!.id, {
+          ...turnOf(body),
+          model: body.model,
+        });
+        return retryAnswer(id, outcome, reply);
+      } catch (error) {
+        return chatRefusal(error, reply);
+      }
     },
   );
 
@@ -4800,6 +4864,29 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     return stopAnswer(deps.assistantChat.stop(id, request.member!.id), reply);
   });
+
+  /**
+   * Ask a failed round again, on the model named — the other vendor's, when
+   * the note offered it — see `ChatRuntime.retry` and `retryAnswer`.
+   */
+  app.post(
+    '/api/v1/assistant/chat/:id/retry',
+    { ...memberOnlyNeeds('hub.ai'), bodyLimit: CHAT_BODY_LIMIT },
+    async (request, reply) => {
+      const { id } = z.object({ id: z.uuid() }).parse(request.params);
+      const body = chatRetrySchema.parse(request.body);
+      if (await modelRefusal(body.model, reply)) return reply;
+      try {
+        const outcome = await deps.assistantChat.retry(id, request.member!.id, {
+          ...turnOf(body),
+          model: body.model,
+        });
+        return retryAnswer(id, outcome, reply);
+      } catch (error) {
+        return chatRefusal(error, reply);
+      }
+    },
+  );
 
   /** Listed before the `:id` route below, or Fastify parses `chats` as a uuid. */
   app.get('/api/v1/assistant/chats', memberOnlyNeeds('hub.ai'), async (request) =>

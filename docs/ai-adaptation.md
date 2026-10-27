@@ -180,6 +180,21 @@ reproduces the guard: the old mock stubbed `create` with a bare `vi.fn()`, which
 is more permissive than the real client, which is why a whole suite passed over
 an agent that could not make a request.
 
+**A turn the model's safety classifiers decline is asked again of another
+Claude, in the same request** (`fallbacks: "default"`, through
+`client.beta.messages`; `src/ai/anthropic-fallback.ts`). Researching a door
+lock, an alarm panel or a camera reads like security work often enough that the
+`cyber` classifier is a real cost here, and the rescue happens server-side: the
+API runs the declined turn on the Claude it recommends for that kind of refusal
+and returns that model's answer. What the declined model began before the
+hand-over — its thinking, a call it started — is neither run nor sent back,
+each attempt is priced at its own model's rates (`usage.iterations`), and the
+run's steps say which model answered, since the run log names the model the
+home chose. A request the API refuses *because of the field* is sent once more
+without it and the field is not sent again by that process, so a retired beta
+costs a hub its fallback rather than device recognition. Only a refusal the
+whole chain declines ends the run.
+
 **Two cache breakpoints, which is what an agent loop asks for.** The explicit
 one sits on the system prompt and covers the tool definitions with it (tools
 sort ahead of system in the cached prefix) — the large, byte-identical prefix
