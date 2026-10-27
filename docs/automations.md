@@ -629,7 +629,7 @@ falls through to prose rather than being dropped. `text` is always the sentence;
 | `agent` | what the model said | — |
 | `question` | the question | `{options: [{id, label, hint?}], allowFreeText}` |
 | `preview` | the rule's **summary**, from `describeAutomation` | `{automationId, name, shape, enabled, edited}` |
-| `note` | something the hub is saying on its own behalf — a provider that failed, a rule that could not be saved, a round somebody stopped | `{stopped: true}` on the note a stopped round ends on (see *Stopping a round* below); otherwise nothing |
+| `note` | something the hub is saying on its own behalf — a provider that failed, a rule that could not be saved, a round somebody stopped, a limit the conversation reached | `{stopped: true}` on the note a stopped round ends on (see *Stopping a round* below); otherwise nothing |
 
 Whatever its role — never the person's own — **the first row a round writes**
 also carries `data.steps` and `data.tookMs` (see *What a person sees while it works*
@@ -666,8 +666,9 @@ reply can change one rule and add another.
 **And the sentence covers the lot**: the prompt asks for one line above the
 cards rather than a paragraph per card.
 
-The number of rules one response may deliver is bounded
-(`AUTOMATION_MAX_RULES_PER_TURN`, four). Two is the case this exists for and
+The number of rules one reply may deliver is bounded
+(`AUTOMATION_MAX_RULES_PER_TURN`, four, counting any held back for the line
+above them — see below). Two is the case this exists for and
 four is a large ask answered in one go; past that it is a model that has
 misread the room, and the cost lands in somebody's home as a page of rules
 nobody asked for. The ones already accepted are saved and shown, and the rest
@@ -709,6 +710,33 @@ line — reported as its own step, because it is a round the person is watching.
 **Exactly one**: a model that answers with more tool calls hands the card over
 with whatever it did say, since spending a third round on a sentence it will not
 write is worse than handing over without one.
+
+**And however that round ends, the rule is handed over.** Its results have
+already told the model "Accepted", so a turn that ended without it left a
+conversation whose own history said a rule existed that had never been saved —
+and somebody who never saw its card. The line and more tool calls were the only
+endings that delivered it; every other way out of the round now does too:
+
+- **the cost limit**, checked before that round as before every other, so
+  nothing is spent past it. The card arrives without a line and the limit is a
+  `note` under it ("Start a new one to carry on"), because every later message
+  in the conversation meets the same check;
+- **a refusal**, with whatever the round kept — on Claude nothing, since a
+  declined reply is discarded whole — and not as a refusal: its sentence, the
+  other model its note offers and the message let go from the model's memory
+  are all for a request that was declined, and here only the line about it was;
+- **running out of rounds**: a rule accepted on the last round goes over at
+  once, since there is no round left to ask in, and nothing says the agent ran
+  out of steps without finishing, which it did not;
+- **another submission**, with words or without: both rules, in the order they
+  came, as one reply — and the held ones count against the four a reply may
+  carry;
+- **a question**, refused inside the turn as a question beside a submission
+  always was, with the rule going over with what was said;
+- **a failure talking to the model**: the rule goes over without its line.
+
+A person's stop keeps the same promise: a rule accepted before the stop goes
+after one held for its line, never in place of it.
 
 Two fields on `preview` are there because leaving them out was wrong in a way
 only a real app finds. **`name`**, because `text` is the summary rather than a
