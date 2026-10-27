@@ -274,7 +274,9 @@ export const NOT_ASKED = 'Not asked: they stopped this answer before it reached 
  * streams one, is what then hangs under it as the step's `detail`.
  *
  * One constant for both loops, so the two agents cannot come to word the same
- * wait differently.
+ * wait differently. The one round that does not say it is the automations
+ * agent's write-up — the round a silent submission is sent back for, which
+ * opens on "Writing it up for you" instead, since that says what the wait is.
  */
 export const ROUND_STEP = 'Thinking';
 

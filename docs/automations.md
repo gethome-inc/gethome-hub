@@ -917,6 +917,10 @@ round still opened on a line saying it had read the house. What happens in that
 silence is the model thinking, so that is what it says. It follows that a
 `thinking` step with no `detail` says only that the model was asked, which is
 true of every round: it is the wait, not part of the account of what was done.
+The one round that opens on something else is the write-up a silent submission
+is sent back for: it says "Writing it up for you" (also `thinking`) and not
+"Thinking" after it, which would only write over the line that says what the
+wait is for.
 
 **`kind` is what an app draws a mark from** — `reading` · `checking` · `writing`
 · `asking` · `thinking` — and it is about the *shape of the act* rather than the

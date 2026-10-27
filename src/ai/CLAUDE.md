@@ -542,7 +542,9 @@ domains — update them in the same change.
   **before** the request — `ROUND_STEP`, "Thinking", the same on every round of
   both agents (it was "Reading your home" and then "Working it out", which
   opened every answer the assistant gave on a claim to have read the house,
-  whatever it had been asked) — and the reasoning is streamed, which only works
+  whatever it had been asked), except the automations agent's write-up round,
+  which "Writing it up for you" has already announced — and the reasoning is
+  streamed, which only works
   because the loop asks for `display: 'summarized'` (this model's default
   streams thinking blocks empty). `kind` is what an app draws a mark from and is
   about the *shape of the act* rather than the tool — three tools all mean

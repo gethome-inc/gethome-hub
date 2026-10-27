@@ -453,8 +453,10 @@ describe('the automation conversation', () => {
       name: 'Evening lights',
     });
     // The wait is accounted for rather than silent — the round it costs is one
-    // the person is watching.
+    // the person is watching. And it is that round's own line: the word every
+    // other round opens on (`ROUND_STEP`) would only write over it.
     expect(steps).toContain('Writing it up for you');
+    expect(steps.at(-1)).toBe('Writing it up for you');
   });
 
   it('asks only once, and hands the rule over with whatever was said', async () => {

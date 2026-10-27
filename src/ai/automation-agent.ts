@@ -187,8 +187,13 @@ export async function createAutomationConversation(
          * nothing else this agent is asked — "how does this work?" is not read
          * off the house. Every round is the model thinking, so every round
          * says so: see `ROUND_STEP`.
+         *
+         * **Except the round a silent submission was sent back for**, which
+         * has said what it is for already ("Writing it up for you", below).
+         * The one word every other round opens on would only write over it,
+         * on the one line somebody is watching while the sentence is written.
          */
-        context?.onStep?.(ROUND_STEP, 'thinking');
+        if (silence.submission === null) context?.onStep?.(ROUND_STEP, 'thinking');
 
         if (transport.costUsd() >= budgetUsd) {
           return {
