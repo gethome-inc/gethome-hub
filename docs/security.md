@@ -43,7 +43,13 @@ The only connections the hub itself ever makes outward are:
   — and then that provider is sent a written record of the conversation so
   far, as it is for any change of model. A request one Claude model declines
   may be answered by another Claude model inside the same request: still
-  Anthropic, on the same key.
+  Anthropic, on the same key. To name a conversation for the list, the first
+  thing said in it — and, where that was only a greeting, the next one or two —
+  also goes to the cheapest model of the same provider, with nothing else from
+  the home; only if that provider cannot name it does it go to the other one,
+  and only where the home holds a key for that one
+  ([`assistant.md`](assistant.md#a-conversations-name)). The name is kept with
+  the transcript and goes when it does.
   With no key, nothing goes to any AI provider and devices still appear,
   flagged *needs review*.
 - **To GitHub**, when it checks whether a newer build exists: when an app asks,

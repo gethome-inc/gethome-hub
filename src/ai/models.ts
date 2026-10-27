@@ -387,6 +387,33 @@ export const AGENT_MODELS: Readonly<
 };
 
 /**
+ * What names a conversation, per vendor: the cheapest model each offers.
+ *
+ * **Not a setting, and not the conversation's own model.** A name is a few
+ * words worked out once per conversation, beside its first round
+ * (`chat/chat-title.ts`), and every model on either list writes "Porch light at
+ * sunset" equally well — so what is chosen is the one that costs least and
+ * answers fastest, at the lowest effort either vendor takes. A home that runs
+ * its chats on Fable 5.1 pays Haiku's price for the name, about four
+ * thousandths of a cent. The vendor is still the conversation's, first: the
+ * person's words go where they were already going, and only a failure there
+ * takes them to the other vendor — on a key this home holds for exactly that.
+ *
+ * Named from the table rather than written out, so an id `MODELS` has never
+ * heard of fails at module load, and `test/chat-title.test.ts` pins the
+ * invariant that matters: nothing either agent is offered is cheaper.
+ */
+export const TITLE_MODELS: Readonly<Record<AiProvider, string>> = {
+  anthropic: known('anthropic', 'claude-haiku-5-5'),
+  openai: known('openai', 'gpt-6-luna'),
+};
+
+function known(provider: AiProvider, id: string): string {
+  if (knownModel(provider, id) === undefined) throw new Error(`models: ${provider} has no ${id}`);
+  return id;
+}
+
+/**
  * The first model along `stored`'s succession chain that `choices` offers, or
  * `null` when the chain runs out first — an id this vendor never had, or one
  * whose successors are all off this list (Sonnet 4.6 → Sonnet 5 → Sonnet 5.5,

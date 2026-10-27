@@ -750,9 +750,11 @@ with no rows at all, never having existed or past the fortnight.
 transcript kept for a fortnight that nothing can find again is a transcript
 thrown away: closing the page lost the conversation as surely as never having
 stored it, because the only way back was a session id nobody writes down. The
-list carries the first thing the *person* said as its title, and `live` beside
-it — readable and continuable are two different states, and an app has to say
-which one it is offering rather than discovering it on the next message.
+list carries a title — the name the hub gives a conversation from what the
+*person* said first, and that first message itself until the name lands
+([`assistant.md`](assistant.md#a-conversations-name)) — and `live` beside it:
+readable and continuable are two different states, and an app has to say which
+one it is offering rather than discovering it on the next message.
 
 **One question is outstanding at a time, and every other call in its response
 is still closed.** `ask_user` hands control back mid-response, and the API's

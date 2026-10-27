@@ -3,7 +3,7 @@ import { and, asc, count, eq, isNull, lt, max, min, or, type SQL } from 'drizzle
 import type { Db } from '../../db/client.js';
 import { automationChatMessages } from '../../db/schema.js';
 import type { AutomationChatEvent, HubEventBus } from '../../core/bus.js';
-import type { SettingsService } from '../../core/settings.js';
+import type { AiProvider, SettingsService } from '../../core/settings.js';
 import type { AiRunKind, AiRunLog, SessionSpend } from '../../core/ai-runs.js';
 import type { Logger } from '../../logging.js';
 import {
@@ -17,6 +17,7 @@ import {
 } from '../models.js';
 import type { AskUser } from '../automation-tools.js';
 import { declinedRows, failedMessageId, failureNote, failureSentence, isRetryableNote } from './failure.js';
+import { askForTitle, nameConversation, TITLE_MAX_MESSAGES, type TitleAsker } from './chat-title.js';
 
 /**
  * Everything a conversation with an agent needs that is not about *which*
@@ -205,7 +206,17 @@ export interface ChatSummaryWire {
   startedAt: string;
   updatedAt: string;
   messageCount: number;
-  /** The first thing the person said — what they will recognise it by. */
+  /**
+   * What the conversation is called: the name the hub gave it from what the
+   * person said first (`nameConversation`), and until it has one — a moment
+   * after the first message, or for good where none could be had — the first
+   * thing the person said, which is all this ever was before.
+   *
+   * **The same field rather than a second one**, because what an app does
+   * with it does not change: it is the line a list draws for the conversation.
+   * An app that has never heard of names draws the better line, and one that
+   * has hears the name arrive on the socket (`chatTitle`) and swaps it in.
+   */
   title: string;
   /** Whether it can still be *continued*, as against merely read. */
   live: boolean;
@@ -722,6 +733,18 @@ export interface ChatRuntimeOptions {
   /** The photos budget — `chatPhotoBudget`, the hub's one, unless a suite
    *  hands in its own. */
   photos?: ChatPhotoBudget;
+  /**
+   * What names a conversation: the vendors themselves (`askForTitle`) unless a
+   * suite hands in a stand-in, and `null` to name nothing.
+   *
+   * **A runtime whose conversations are a suite's stand-ins names nothing
+   * unless it is handed one of these as well** (`standsIn`). A name is asked
+   * for beside the round, where a suite about something else would never think
+   * to look: left to the default it would reach a vendor with a test key from
+   * every suite that opens a conversation, and take the response a suite that
+   * stubs `fetch` had queued for the round.
+   */
+  askTitle?: TitleAsker | null;
 }
 
 export interface ChatSession<Turn> {
@@ -846,6 +869,62 @@ export interface ChatSession<Turn> {
    * from its transcript.
    */
   dropped?: boolean | undefined;
+  /**
+   * The conversation's name, once it has one (`nameConversation`) — read back
+   * off its rows for a revived conversation, so a name is asked for once.
+   */
+  title?: string | undefined;
+  /**
+   * How many of the person's messages have been offered to name it, bounded by
+   * `TITLE_MAX_MESSAGES` — a greeting names nothing, so the next message is
+   * asked about too, but not for ever. Read back off the rows as well.
+   */
+  titleTries?: number | undefined;
+  /** A name is being worked out right now, so another is not asked for. */
+  naming?: boolean | undefined;
+  /**
+   * A message with words in it arrived while that name was being worked out,
+   * and is owed its own chance if it comes back without one — with the model
+   * the newest such message asked for, which is where it is answered.
+   */
+  nameAgain?: { model: string | undefined } | undefined;
+  /**
+   * What this conversation spent outside its provider conversation that no
+   * ledger row has yet — naming it. `record` banks it with the next row, so a
+   * conversation's price includes its name without a row of its own for a
+   * figure that rounds to nothing.
+   */
+  sideUsd?: number | undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** A conversation's vendor in the settings' two words — `AgentConversation`
+ *  carries it as a plain string, since a recorded one may be anything. */
+function asProvider(provider: string): AiProvider {
+  return provider === 'openai' ? 'openai' : 'anthropic';
+}
+
+/** The name a person's row carries, where the conversation was named from it. */
+function storedTitle(data: unknown): string | undefined {
+  const title = (data as { chatTitle?: unknown } | null | undefined)?.chatTitle;
+  return typeof title === 'string' && title.trim().length > 0 ? title : undefined;
+}
+
+/**
+ * What a revived conversation already knows about its name: the name, if it was
+ * given one, and how many of the person's messages have had their chance —
+ * every one with words in it, since each was offered as it arrived.
+ */
+function namingFromRows(rows: ChatMessageWire[]): { title?: string; titleTries: number } {
+  const own = rows.filter((row) => row.role === 'user');
+  const title = own.map((row) => storedTitle(row.data)).find((named) => named !== undefined);
+  return {
+    ...(title !== undefined ? { title } : {}),
+    titleTries: Math.min(own.filter((row) => !isWordless(row)).length, TITLE_MAX_MESSAGES),
+  };
 }
 
 /**
@@ -1293,6 +1372,16 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     return new Map();
   }
 
+  /**
+   * Whether this runtime's conversations are a suite's stand-ins — which is
+   * what decides that it names nothing unless it was handed a stand-in for
+   * that as well (`ChatRuntimeOptions.askTitle`). Each agent answers from its
+   * own `createConversation`, which is the only place a stand-in is visible.
+   */
+  protected standsIn(): boolean {
+    return false;
+  }
+
   // ── Starting and continuing ────────────────────────────────────────────────
 
   /**
@@ -1571,6 +1660,9 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       priming: recapOf(recalled, rows.length - recalled.length),
       ...(rows.length > recalled.length ? { recallFrom: recalled[0]!.id } : {}),
       ...(topic !== undefined ? { topic, openedTopic: topic } : {}),
+      // Named already, or how many chances it has had — off the rows, so a
+      // restart neither asks for a name twice nor forgets one is owed.
+      ...namingFromRows(rows),
     };
     this.sessions.set(sessionId, session);
     this.base.log.info({ sessionId, surface: this.surface }, 'chat: revived from its transcript');
@@ -1632,7 +1724,156 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     session.inFlight = session.inFlight.then(() =>
       this.exchange(session, text, how, asked, turn, written.id, release),
     );
+    // After the turn is queued, never in front of it — and never awaited.
+    this.nameIfUntitled(session, text, turn?.model);
     return { sessionId: session.id, messages: [written] };
+  }
+
+  /**
+   * Give a conversation its name, beside its round rather than in front of it.
+   *
+   * **It never holds anything up.** The name is asked for the moment the
+   * person's row is written, off the turn chain — which is where a follow-up
+   * message waits — so the round and the name are two requests in flight at
+   * once, and the name, a few words from the cheapest model, is usually back
+   * before the round has finished reading the home. Nothing waits on it and
+   * nothing it does can fail a turn.
+   *
+   * Asked of a message with words in it, while the conversation has no name
+   * and it has had fewer than `TITLE_MAX_MESSAGES` chances: a photo alone is
+   * not something to name from, and a greeting comes back as nothing to name
+   * yet, so the next message has its turn.
+   *
+   * **A message that arrives while a name is out waits for it rather than
+   * losing its turn.** One name is worked out at a time, but nobody stops
+   * typing for it — "hi!" and the question a second later is the ordinary
+   * case — and the attempt in flight read the rows before the question was
+   * written, so all it can say is that there is nothing to name yet. The guard
+   * used to drop the question there, and the conversation stayed listed as
+   * "hi!" until a third message came, or for good. It is held instead
+   * (`nameAgain`) and offered the moment that attempt comes back without a
+   * name, in the same tick the flag comes down, so no message can fall between
+   * the two.
+   */
+  private nameIfUntitled(session: ChatSession<Turn>, words: string, model: string | undefined): void {
+    if (words.trim().length === 0) return;
+    this.askForName(session, model);
+  }
+
+  /** One attempt at a name, or a place in line behind the one already out. */
+  private askForName(session: ChatSession<Turn>, model: string | undefined): void {
+    if (session.title !== undefined || (session.titleTries ?? 0) >= TITLE_MAX_MESSAGES) return;
+    if (session.naming === true) {
+      session.nameAgain = { model };
+      return;
+    }
+    const ask = this.base.askTitle !== undefined ? this.base.askTitle : this.standsIn() ? null : askForTitle;
+    if (ask === null) return;
+
+    session.titleTries = (session.titleTries ?? 0) + 1;
+    session.naming = true;
+    const naming = this.nameConversation(session, model, ask)
+      .catch((error: unknown) => this.base.log.warn({ err: error }, 'chat: naming a conversation failed'))
+      .finally(() => {
+        session.naming = false;
+        this.namings.delete(naming);
+        const again = session.nameAgain;
+        session.nameAgain = undefined;
+        if (again !== undefined) this.askForName(session, again.model);
+      });
+    this.namings.add(naming);
+  }
+
+  /** Names being worked out right now, hub-wide — what `names()` waits on. */
+  private readonly namings = new Set<Promise<void>>();
+
+  /**
+   * Wait for every name being worked out to settle — `idle()`'s twin, and for
+   * the same reason: a name is asked for off the request and off the turn
+   * chain, so nothing else a suite can await says it has landed.
+   */
+  async names(): Promise<void> {
+    // An attempt that comes back without a name can start the one a message
+    // was waiting for (`nameAgain`), so wait until nothing is left out.
+    while (this.namings.size > 0) await Promise.all([...this.namings]);
+  }
+
+  /**
+   * Ask for the name, keep it, and say so.
+   *
+   * **What it is named from is read off the rows**: the person's first few
+   * messages with words in them, which is the first message alone unless that
+   * one was a greeting — or somebody typed the next before the first had a
+   * name. The vendor is the one this message is answered on, which is the
+   * conversation's own unless the message moves it (`model`).
+   *
+   * **The name goes on the person's own row** (`data.chatTitle`, the newest of
+   * the messages it came from), because that is the store this conversation
+   * already has: the fortnight's retention takes it with the rows, a revival
+   * reads it back with them, and `list` finds it in the query it already makes.
+   * Only once it is written is it announced: a name the list would not repeat
+   * is a name the app would lose on its next read.
+   */
+  private async nameConversation(
+    session: ChatSession<Turn>,
+    model: string | undefined,
+    ask: TitleAsker,
+  ): Promise<void> {
+    const rows = (await this.transcript(session.id)).filter((row) => row.role === 'user');
+    const worded = rows.filter((row) => !isWordless(row)).slice(0, TITLE_MAX_MESSAGES);
+    const last = worded.at(-1);
+    if (last === undefined) return;
+    // Photos sent up to the last message it is named from, said and not sent.
+    const photos = rows
+      .slice(0, rows.indexOf(last) + 1)
+      .reduce((sum, row) => sum + photoCount(row), 0);
+
+    const provider = asProvider(
+      (model !== undefined ? agentProviderOf(model) : null) ?? session.conversation.provider,
+    );
+    const outcome = await nameConversation({
+      said: worded.map((row) => row.text),
+      photos,
+      agent: this.surface === 'automation' ? 'automations' : 'assistant',
+      provider,
+      usable: await this.base.settings.agentProviders(),
+      secretFor: (vendor) => this.base.settings.aiKey(vendor),
+      ask,
+      log: this.base.log,
+    });
+    if (outcome.costUsd > 0) await this.spendBeside(session, outcome.costUsd);
+    if (outcome.kind !== 'named') return;
+
+    const kept = await this.base.db
+      .update(automationChatMessages)
+      .set({ data: { ...(isRecord(last.data) ? last.data : {}), chatTitle: outcome.title } })
+      .where(eq(automationChatMessages.id, last.id))
+      .returning({ id: automationChatMessages.id })
+      .catch(() => []);
+    if (kept.length === 0) return;
+
+    session.title = outcome.title;
+    this.base.events.emit('chatTitle', {
+      surface: this.surface === 'automation' ? 'automations' : 'assistant',
+      sessionId: session.id,
+      title: outcome.title,
+      at: new Date().toISOString(),
+    });
+    this.base.log.info(
+      { sessionId: session.id, surface: this.surface, provider: outcome.provider, model: outcome.modelId },
+      'chat: named a conversation',
+    );
+  }
+
+  /**
+   * Spend a conversation ran up outside its provider conversation — naming it —
+   * onto the next row the ledger writes for it, or onto a row now where the
+   * conversation is no longer here to write another: closed, evicted, dropped
+   * or revived under a new session object while the name was being asked for.
+   */
+  private async spendBeside(session: ChatSession<Turn>, usd: number): Promise<void> {
+    session.sideUsd = (session.sideUsd ?? 0) + usd;
+    if (this.sessions.get(session.id) !== session) await this.bank(session, true);
   }
 
   /**
@@ -1670,10 +1911,12 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
    * whole reason keeping one is affordable — and without a list of them the
    * only way back was a session id nobody has written down.
    *
-   * `title` is the **first thing the person said**, which is what they will
-   * recognise it by; the agent's own opening line is about the home rather
-   * than about what was asked. `live` is whether it can still be *continued*,
-   * and is deliberately separate from being readable.
+   * `title` is the **name the hub gave it** from what the person said first
+   * (`nameConversation`), and until there is one the first thing they said,
+   * which is what they will recognise it by — never the agent's own opening
+   * line, which is about the home rather than about what was asked. `live` is
+   * whether it can still be *continued*, and is deliberately separate from
+   * being readable.
    */
   async list(
     /** Who is asking, so each conversation can say whether it is theirs.
@@ -1711,10 +1954,15 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       .orderBy(asc(automationChatMessages.at));
 
     const titles = new Map<string, string>();
+    /** The names the hub gave conversations, which win over what was said —
+     *  on whichever of the person's rows it was named from. */
+    const named = new Map<string, string>();
     /** Whose each conversation is: the first thing said in it, `ownerOf`'s
      *  rule, read off the rows this query already has. */
     const owners = new Map<string, string | null>();
     for (const row of said) {
+      const name = storedTitle(row.data);
+      if (name !== undefined && !named.has(row.sessionId)) named.set(row.sessionId, name);
       if (titles.has(row.sessionId)) continue;
       // A conversation that opened with a picture and no words is called what
       // it is, rather than "Untitled conversation" — the caption its row
@@ -1737,7 +1985,9 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
           // A conversation with no message from the person at all still gets a
           // title rather than an empty one: the transcript is written row by
           // row and a crash between two of them is possible.
-          title: (titles.get(session.sessionId) ?? '').slice(0, 120) || 'Untitled conversation',
+          title:
+            (named.get(session.sessionId) ?? titles.get(session.sessionId) ?? '').slice(0, 120) ||
+            'Untitled conversation',
           live: this.sessions.has(session.sessionId),
           ...(spend !== undefined ? { spend } : {}),
           ...(memberId !== undefined
@@ -1789,7 +2039,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     // `Math.max` because the two halves are read at different moments: a turn
     // that lands between the ledger read and this one records its delta and
     // moves `recordedUsd` past the total we are subtracting from.
-    const pending = Math.max(0, live.conversation.costUsd() - live.recordedUsd);
+    const pending = Math.max(0, live.conversation.costUsd() - live.recordedUsd) + (live.sideUsd ?? 0);
     return {
       usd: (recorded?.usd ?? 0) + pending,
       provider: live.conversation.provider,
@@ -2210,7 +2460,9 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
    * run since adds no empty row to the ledger.
    */
   private async settleSpend(session: ChatSession<Turn>): Promise<void> {
-    if (session.conversation.costUsd() > session.recordedUsd) await this.bank(session, true);
+    if (session.conversation.costUsd() > session.recordedUsd || (session.sideUsd ?? 0) > 0) {
+      await this.bank(session, true);
+    }
   }
 
   /**
@@ -2719,13 +2971,18 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
   /** One `ai_runs` row per delivery, so the home's AI spend stays one list
    *  rather than several screens answering one question. */
   protected async record(session: ChatSession<Turn>, ok: boolean): Promise<void> {
-    const spent = session.conversation.costUsd() - session.recordedUsd;
+    // What naming the conversation cost rides with whatever this row is for.
+    const spent = session.conversation.costUsd() - session.recordedUsd + (session.sideUsd ?? 0);
     // Nothing new to say. A conversation is recorded when it delivers and
     // again when it ends, and the second of those is usually zero — and one
     // swapped in by a rebase or a switch that has not run has nothing to say
     // at all (`unrun`).
     if (spent <= 0 && (session.recordedUsd > 0 || session.unrun === true)) return;
+    // Both cursors move before anything is awaited, so a second `record` on
+    // the same session — the name landing as the conversation closes — can
+    // never count the same cent twice.
     session.recordedUsd = session.conversation.costUsd();
+    session.sideUsd = 0;
 
     const handle = this.base.runs.begin({
       kind: this.runKind,

@@ -1544,6 +1544,8 @@ describe.skipIf(!handle)('roles and permissions', () => {
    * socket used to ask nothing of a member: a guest who subscribed to
    * `automations` heard every member's replies, reasoning and steps live. Both
    * halves, and the widening without a reconnect — the `activity.read` shape.
+   * A conversation's name (`chatTitle`) is narrowed exactly as its agent's own
+   * frames are, since it is made of what somebody said.
    */
   it('narrows the conversations on the automations stream per socket, and widens them live', async () => {
     const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 120));
@@ -1558,7 +1560,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
     };
     const open = async (token: string) => {
       const socket = new WebSocket(`ws://127.0.0.1:${port}/api/v1/ws?token=${token}`);
-      const frames: Array<{ type: string; streams?: string[] }> = [];
+      const frames: Array<{ type: string; streams?: string[]; chatTitle?: { surface: string } }> = [];
       socket.on('message', (data) => frames.push(JSON.parse(data.toString())));
       await new Promise<void>((resolve, reject) => {
         socket.on('open', () => resolve());
@@ -1574,19 +1576,30 @@ describe.skipIf(!handle)('roles and permissions', () => {
       const at = new Date().toISOString();
       events.emit('assistantChat', { sessionId: randomUUID(), phase: 'delta', at, text: 'The hall is warm.' });
       events.emit('automationChat', { sessionId: randomUUID(), phase: 'delta', at, text: 'Saved it.' });
+      events.emit('chatTitle', { surface: 'assistant', sessionId: randomUUID(), title: 'Hall temperature', at });
+      events.emit('chatTitle', { surface: 'automations', sessionId: randomUUID(), title: 'Hall lights at dusk', at });
     };
-    const chats = (frames: Array<{ type: string }>) =>
-      frames.map((frame) => frame.type).filter((type) => type === 'assistantChat' || type === 'automationChat');
+    /** Each conversation frame by what it is about: a chat's own phases by
+     *  type, a name by the agent it names a conversation with. */
+    const chats = (frames: Array<{ type: string; chatTitle?: { surface: string } }>) =>
+      frames
+        .map((frame) => (frame.type === 'chatTitle' ? `title:${frame.chatTitle?.surface}` : frame.type))
+        .filter((type) => type === 'assistantChat' || type === 'automationChat' || type.startsWith('title:'));
 
     const guest = await open(guestToken);
     const member = await open(memberToken);
     said();
     // Gated on the member's copies arriving, then given time for a guest's to
     // have arrived too — an absence has no event of its own to wait for.
-    await until(() => chats(member.frames).length === 2, "the member's chat frames");
+    await until(() => chats(member.frames).length === 4, "the member's chat frames");
     await settle();
     expect(chats(guest.frames)).toEqual([]);
-    expect(chats(member.frames).sort()).toEqual(['assistantChat', 'automationChat']);
+    expect(chats(member.frames).sort()).toEqual([
+      'assistantChat',
+      'automationChat',
+      'title:assistant',
+      'title:automations',
+    ]);
 
     // `hub.ai` alone is the assistant's; the automations agent's needs both.
     guest.frames.length = 0;
@@ -1597,9 +1610,9 @@ describe.skipIf(!handle)('roles and permissions', () => {
       payload: { permissions: ['hub.ai'] },
     });
     said();
-    await until(() => chats(guest.frames).length >= 1, "the guest's assistant frame");
+    await until(() => chats(guest.frames).length >= 2, "the guest's assistant frames");
     await settle();
-    expect(chats(guest.frames)).toEqual(['assistantChat']);
+    expect(chats(guest.frames).sort()).toEqual(['assistantChat', 'title:assistant']);
 
     guest.frames.length = 0;
     await app.inject({
@@ -1609,8 +1622,13 @@ describe.skipIf(!handle)('roles and permissions', () => {
       payload: { permissions: ['hub.ai', 'automation.manage'] },
     });
     said();
-    await until(() => chats(guest.frames).length >= 2, "the guest's chat frames");
-    expect(chats(guest.frames).sort()).toEqual(['assistantChat', 'automationChat']);
+    await until(() => chats(guest.frames).length >= 4, "the guest's chat frames");
+    expect(chats(guest.frames).sort()).toEqual([
+      'assistantChat',
+      'automationChat',
+      'title:assistant',
+      'title:automations',
+    ]);
 
     guest.socket.close();
     member.socket.close();

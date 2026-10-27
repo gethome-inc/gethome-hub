@@ -162,6 +162,11 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
     });
   }
 
+  /** A suite's conversations name nothing unless it says otherwise. */
+  protected override standsIn(): boolean {
+    return this.options.createConversation !== undefined;
+  }
+
   // ── The handoff ────────────────────────────────────────────────────────────
 
   /**

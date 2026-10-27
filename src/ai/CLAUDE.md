@@ -609,8 +609,10 @@ domains — update them in the same change.
   **A transcript nothing can find again is a transcript thrown away**, which is
   what `GET /automations/chats` exists for: the fourteen-day record was
   unreachable the moment a page closed, because the only way back was a session
-  id nobody writes down. Its `title` is the first thing the *person* said (the
-  agent's opening line is about the home, not about the ask) and `live` says
+  id nobody writes down. Its `title` is the name the hub gave the conversation
+  from what the *person* said first, and that first message until the name
+  lands (never the agent's opening line, which is about the home, not about
+  the ask — see the last bullet here) and `live` says
   whether it can be *continued* as against merely read — two different states,
   and an app has to offer the right one rather than find out on the next
   message.
@@ -1255,3 +1257,28 @@ domains — update them in the same change.
   so a model pacing itself a device a round would run out of them at about
   nine devices — the prompt and the tool's description both ask for all of
   them in the same response, and a suite drives twenty through one round.
+- **A conversation names itself beside its first round, and the name is a
+  frame of its own.** `chat/chat-title.ts` asks the cheapest model of the
+  conversation's own vendor (`TITLE_MODELS`: Haiku 5.5, GPT-6 Luna) at `low`
+  for two to six words in the person's language, and only on a failure the
+  other vendor's; `ChatRuntime.nameIfUntitled` asks the moment the person's row
+  is written, **off the turn chain and never awaited**, so a name can never hold
+  an answer up. `docs/assistant.md` (*A conversation's name*) is canonical. Four
+  rules that bite. **Never a new chat phase**: every shipped iOS build reads a
+  phase it has never met as `turn` and ends the round on screen, so the name
+  goes out as `{type: 'chatTitle', chatTitle: …}`, which every client drops
+  when it does not know it — and anything else new for the chat stream takes
+  the same road. **Stored on the person's row** (`data.chatTitle`) and announced
+  only once written, so `list()` repeats what the socket said and a revival
+  reads it back rather than asking twice. **`NONE` is an answer, not a
+  failure**: the next message is asked about (up to `TITLE_MAX_MESSAGES`) and
+  the other vendor is not asked to overrule it — and a message that arrived
+  while that attempt was out is the next one, held in `nameAgain` and offered
+  as the attempt comes back rather than dropped by the one-at-a-time guard,
+  since the attempt read the rows before it was written. And **the cost is the
+  conversation's** — `sideUsd`, banked by `record` with the next row, so the
+  ledger's 250 rows are not spent on fractions of a cent; both cursors move
+  before `record` awaits anything, or a name landing as a conversation closes
+  is counted twice. A runtime whose conversations are stand-ins names nothing
+  unless a suite hands it `askTitle` (`standsIn`): left to the default, every
+  suite that opens a conversation would reach a vendor through the name.

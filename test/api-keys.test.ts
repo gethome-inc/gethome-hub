@@ -1149,6 +1149,9 @@ describe.skipIf(!handle)('API keys', () => {
       const chat = { sessionId: '55555555-5555-4555-a555-555555555555', phase: 'delta' as const, at: new Date().toISOString(), text: 'private' };
       events.emit('automationChat', chat);
       events.emit('assistantChat', chat);
+      // A conversation's name is made of what somebody said, so it is a
+      // conversation too.
+      events.emit('chatTitle', { surface: 'assistant', sessionId: chat.sessionId, title: 'Private', at: chat.at });
       events.emit('automationRun', {
         automationId: 'a',
         name: 'Night',
@@ -1160,7 +1163,11 @@ describe.skipIf(!handle)('API keys', () => {
         refused: 0,
       });
       await waitFor('automationRun');
-      expect(frames.some((frame) => frame.type === 'automationChat' || frame.type === 'assistantChat')).toBe(false);
+      expect(
+        frames.some(
+          (frame) => frame.type === 'automationChat' || frame.type === 'assistantChat' || frame.type === 'chatTitle',
+        ),
+      ).toBe(false);
       socket.close();
     });
 
