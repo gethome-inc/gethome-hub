@@ -634,10 +634,11 @@ describe('the assistant', () => {
       provider: 'openai',
       modelId: 'gpt-6-luna',
     });
-    // A retired one of that vendor's moves to what replaced it, on that vendor.
+    // A retired one of that vendor's moves to what replaced it, on that vendor
+    // and on its own tier.
     expect(effectiveAgentModel('gpt-5.6-terra', onlyOpenAi)).toEqual({
       provider: 'openai',
-      modelId: 'gpt-6.1-sol',
+      modelId: 'gpt-6.1-terra',
     });
     // Neither key is the only case with no answer — the caller refuses on it.
     expect(effectiveAgentModel('claude-opus-5-5', { anthropic: false, openai: false })).toBeNull();

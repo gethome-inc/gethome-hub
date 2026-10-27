@@ -286,9 +286,9 @@ string (`src/ai/models.ts`), because the research tools have model floors —
 Anthropic's `_20260209` tools only exist on Opus 4.6+ and Sonnet 4.6+, so
 pointing the hub at Haiku 4.5 or a 4.5-era model would not degrade the run, it
 would 400 it. The allowlist is every model this hub has ever run: Fable 5.1,
-Opus 5.5, 5, 4.8, 4.7 and 4.6, Sonnet 5.5, 5 and 4.6, Haiku 5.5, GPT-6.1 Sol,
-GPT-6 Astra, Sol and Luna, GPT-5.6 Sol and Terra, and `gpt-5.6` — the bare
-OpenAI alias, accepted because a hub that stored it must not be told its setting
+Opus 5.5, 5, 4.8, 4.7 and 4.6, Sonnet 5.5, 5 and 4.6, Haiku 5.5, GPT-6.1 Sol
+and Terra, GPT-6 Astra, Sol and Luna, GPT-5.6 Sol and Terra, and `gpt-5.6` —
+the bare OpenAI alias, accepted because a hub that stored it must not be told its setting
 is invalid, but never offered as a choice.
 
 **The apps do not ship that list.** `GET /settings/ai` carries
@@ -309,8 +309,8 @@ somebody notices and remaps. Saving a few cents on a job that runs a handful of
 times in a hub's life is the wrong trade for that. That argument is about
 *cheaper* models and says nothing against a more thorough one, so Anthropic's
 list is Opus 5.5 with Fable 5.1 above it and OpenAI's is GPT-6.1 Sol with Astra
-above it, while Sonnet, Haiku and Luna — all offered to the agents — are on
-neither vendor's recognition list.
+above it, while Sonnet, Haiku, Terra and Luna — all offered to the agents — are
+on neither vendor's recognition list.
 
 **A stored model counts only while it is still offered, and a retired one is
 succeeded** (`effectiveModel`). Retiring a model otherwise leaves the homes

@@ -1038,8 +1038,9 @@ describe.skipIf(!handle)('hub API', () => {
       // Terra is retired and still known, so the write is taken rather than
       // 400-ing an app that has not shipped an update — the same stance
       // `authType` takes one field over. What it must not do is come back as
-      // the model this hub runs, because it isn't: it comes back as the model
-      // that replaced it.
+      // the model this hub runs, because it isn't: it comes back as what runs
+      // in its place — recognition's default here, since the Terra that
+      // replaced it is not on recognition's list.
       payload: { openaiApiKey: 'sk-proj-1234567890', openaiModel: 'gpt-5.6-terra' },
     });
     expect(saved.statusCode).toBe(200);
@@ -1166,7 +1167,8 @@ describe.skipIf(!handle)('hub API', () => {
     expect(saved.statusCode).toBe(200);
     const body = saved.json() as Record<string, unknown>;
     expect(body).toMatchObject({
-      assistant: { model: 'gpt-6.1-sol', provider: 'openai', choosable: true },
+      // GPT-5.6 Terra's successor is the Terra after it: a tier keeps its tier.
+      assistant: { model: 'gpt-6.1-terra', provider: 'openai', choosable: true },
       automations: { model: 'claude-opus-5-5', provider: 'anthropic', choosable: true },
     });
     const assistant = body.assistant as {
@@ -1175,7 +1177,12 @@ describe.skipIf(!handle)('hub API', () => {
     };
     // `models` is the answering vendor's list — what an app a version behind
     // draws its pills from — and `choices` the whole table.
-    expect(assistant.models.map((model) => model.id)).toEqual(['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-luna']);
+    expect(assistant.models.map((model) => model.id)).toEqual([
+      'gpt-6-astra',
+      'gpt-6.1-sol',
+      'gpt-6.1-terra',
+      'gpt-6-luna',
+    ]);
     expect(assistant.choices.anthropic?.map((model) => model.id)).toEqual([
       'claude-fable-5-1',
       'claude-opus-5-5',
@@ -1185,6 +1192,7 @@ describe.skipIf(!handle)('hub API', () => {
     expect(assistant.choices.openai?.map((model) => model.label)).toEqual([
       'GPT-6 Astra',
       'GPT-6.1 Sol',
+      'GPT-6.1 Terra',
       'GPT-6 Luna',
     ]);
 
