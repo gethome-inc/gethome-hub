@@ -47,7 +47,7 @@ The only connections the hub itself ever makes outward are:
   thing said in it — and, where that was only a greeting, the next one or two —
   also goes to the cheapest model of the same provider, with nothing else from
   the home; only if that provider cannot name it does it go to the other one,
-  and only where the home holds a key for both
+  and only where the home holds a key for that one
   ([`assistant.md`](assistant.md#a-conversations-name)). The name is kept with
   the transcript and goes when it does.
   With no key, nothing goes to any AI provider and devices still appear,
