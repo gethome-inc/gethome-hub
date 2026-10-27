@@ -405,9 +405,9 @@ describe('the automation conversation', () => {
     // read out loud, on the one screen whose whole job is telling somebody who
     // does not write software what their house is doing.
     expect(steps.map((step) => step.summary)).toEqual([
-      'Reading your home',
+      'Thinking',
       'Looking at your devices',
-      'Working it out',
+      'Thinking',
       'Wrote the rule',
     ]);
     // And a mark comes off `kind` rather than off the sentence, so an app does
@@ -681,7 +681,9 @@ describe('the automation conversation', () => {
       },
     });
 
-    expect(steps[0]).toBe('Reading your home');
+    // And it says what is actually happening, which is the model thinking:
+    // "Reading your home" opened every answer, whatever had been asked.
+    expect(steps[0]).toBe('Thinking');
     // And the reasoning is streamed as it arrives, which is what fills that
     // wait with words rather than with a dot.
     expect(thought).toBe('Weighing it up.');

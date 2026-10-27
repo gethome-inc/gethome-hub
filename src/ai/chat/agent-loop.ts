@@ -262,6 +262,23 @@ export function notDone(id: string): ChatToolResult {
 export const NOT_ASKED = 'Not asked: they stopped this answer before it reached them.';
 
 /**
+ * The step every round of both agents says before its request goes — kind
+ * `thinking` — while the model is being asked and nothing has happened yet.
+ *
+ * **One word, and the true one.** It was "Reading your home" on the first
+ * round and "Working it out" on every round after, which described a request
+ * for a rule and nothing else: asked "hello", or sent a photo of a sofa, the
+ * assistant opened every single answer on a line saying it had read the house.
+ * What is happening in that silence is the model thinking, whatever it was
+ * asked, so that is what it says — and the model's own reasoning, where it
+ * streams one, is what then hangs under it as the step's `detail`.
+ *
+ * One constant for both loops, so the two agents cannot come to word the same
+ * wait differently.
+ */
+export const ROUND_STEP = 'Thinking';
+
+/**
  * Why a round was declined, in the words the person who asked it can use.
  *
  * **Branch on the stop, never on this.** A category is informational, is
