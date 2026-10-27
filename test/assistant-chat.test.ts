@@ -1060,6 +1060,29 @@ describe('the assistant', () => {
       expect(Number.isInteger(data?.tookMs)).toBe(true);
       expect(data).not.toHaveProperty('workedMs');
     });
+
+    /**
+     * A reply that began and never finished did not end the round: the round
+     * ended in the note saying it failed, which keeps the whole round's time
+     * and no reply time, like any other ending without words of its own.
+     */
+    it('is absent where the round failed after its words began', async () => {
+      const { assistant } = await assistantFor([], {
+        script: async (context) => {
+          context?.onDelta?.('It is ');
+          await pause(20);
+          throw new Error('connection reset');
+        },
+      });
+      const started = await assistant.start({ memberId, message: 'how warm is it?' });
+      await assistant.idle();
+
+      const rows = await assistant.transcript(started.sessionId);
+      expect(rows.map((row) => row.role)).toEqual(['user', 'note']);
+      const data = rows[1]?.data as { tookMs?: number; workedMs?: number } | undefined;
+      expect(Number.isInteger(data?.tookMs)).toBe(true);
+      expect(data).not.toHaveProperty('workedMs');
+    });
   });
 
   it('says the card moved on its own conversation, and not as a round ending', async () => {

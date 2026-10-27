@@ -1000,7 +1000,9 @@ about have already streamed. **And the first `delta` frame's `at` is the very
 instant it counts to** — one clock reading for the record and the frame — so a
 client timing the wait off the frames arrives at the number the row will say.
 Absent on a round that ended without words of its own (a question, a card, a
-note alone), and additive like `tookMs`.
+note alone — the note a failure writes included, whatever had streamed before
+the round broke off, since a reply that never finished did not end it), and
+additive like `tookMs`.
 
 ### What a round said before it went off to work
 

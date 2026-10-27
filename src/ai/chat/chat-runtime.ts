@@ -2706,6 +2706,10 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       // What was reasoned before the round ended belongs to its working, the
       // failed round's included — it is the round with the most to explain.
       settleReasoning();
+      // **And no words ended it**, whatever had streamed before it failed: the
+      // note this path writes carries the whole round (`tookMs`) and no reply
+      // time, the shape of a round that ended without words of its own.
+      session.repliedAt = undefined;
       if (halt.aborted) {
         /**
          * **A stop is not a failure, whatever it threw on the way out.** Each
