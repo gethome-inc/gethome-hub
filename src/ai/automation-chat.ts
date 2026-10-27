@@ -69,6 +69,11 @@ export class AutomationChat extends ChatRuntime<AutomationTurn> {
     super(options);
   }
 
+  /** A suite's conversations name nothing unless it says otherwise. */
+  protected override standsIn(): boolean {
+    return this.options.createConversation !== undefined;
+  }
+
   /** Start a conversation, optionally about a rule that already exists. */
   override async start(input: {
     memberId: string;

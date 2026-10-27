@@ -314,6 +314,68 @@ are closed vocabularies a screen groups and sums by; `ai_run_exchanges` is
 where *content* goes, and its rule that request bodies are recorded and headers
 never are is what keeps a run log safe to read.
 
+## A conversation's name
+
+The lists used to call a conversation by its first message, cut at 120
+characters — always recognisable, and the reason a drawer of chats read as a
+column of half-sentences. Now the hub names it: a few words saying what it is
+about, in the language the person wrote in (`src/ai/chat/chat-title.ts`, asked
+from `ChatRuntime.nameIfUntitled`). Six rules.
+
+**Beside the round, never in front of it.** The person's row is written, the
+round is queued, and the name is asked for in the same breath — off the turn
+chain, which is where a follow-up message waits, and never awaited. It is a few
+words from the cheapest model there is, so it is usually back before the round
+has finished reading the home; nothing waits for it either way, and nothing it
+does can fail a turn.
+
+**The cheapest model of the conversation's own vendor, at the lowest effort,
+then the other vendor's.** `TITLE_MODELS` — Haiku 5.5 and GPT-6 Luna — at
+`low`, with Anthropic's thinking left adaptive rather than switched off (the
+setting that vendor's guidance steers away from, for hundredths of a cent).
+Every model on either list writes "Porch light at sunset" equally well, so the
+choice is cost and speed, and it is not a setting. The vendor is the one this
+message is answered on: the person's words go where they were already going.
+Only a failure there — an error, a refusal, an answer with no name in it —
+takes them to the other vendor, on a key the home holds; "nothing to name yet"
+is an answer about the message, not a failure, and the other vendor is not
+asked to overrule it.
+
+**What was said is data.** It is quoted in tags it cannot close, and the
+instructions say plainly that the model names it and does nothing it asks — the
+worst a message can do is choose its own name. The instructions follow what the
+chat apps that do this ask for (a few words, the conversation's language,
+accuracy over flourish) and what this list is: one line in a quiet typeface, so
+no quotation marks, no emoji, no full stop. What comes back is cleaned rather
+than trusted — the first line, the dressing taken off, cut at a word past
+60 characters — and a line past 80 is the model answering rather than naming,
+which counts as a failure.
+
+**A greeting is not a subject.** The model may answer `NONE`, and the next
+message with words is asked about too, with everything said so far — up to
+three, after which the conversation keeps its first words. A photo alone is not
+named from (the words that come with it are, with a line saying photos were
+sent; the photo itself is never sent again for a name), and one name is worked
+out at a time.
+
+**Kept on the person's row, then announced.** `data.chatTitle` on the newest row
+it was named from: the store the conversation already has, so retention takes
+it with the rows, a revival reads it back with them (a restart neither names a
+conversation twice nor forgets one is still owed a name), and `list` finds it in
+the query it already makes. Only once it is written does it go out on the bus
+and the socket as `chatTitle`, a frame of its own — never a phase on the chat
+frames, which every shipped iOS build would read as `turn` and end the round on
+screen with ([`api.md`](api.md#a-conversations-name-the-chattitle-frame)).
+
+**What it costs is the conversation's.** About four thousandths of a cent,
+added to the conversation's next ledger row (`sideUsd`, banked by `record`)
+rather than written as a row of its own, which would spend the ledger's 250
+rows on figures that round to nothing — or banked at once where the
+conversation has gone by the time the name lands. A runtime whose conversations
+are a suite's stand-ins names nothing unless the suite hands it a stand-in for
+the vendor too (`askTitle`), so no test reaches a vendor through the name, or
+takes the response a stubbed `fetch` had queued for the round.
+
 ## The tools
 
 Seven, and short on purpose. Three of them — `list_devices`, `get_device`,

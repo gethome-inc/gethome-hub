@@ -8,7 +8,7 @@ import type {
   ZigbeeLifecycleEvent,
 } from '../core/bus.js';
 import type { AiRunEvent } from '../core/ai-runs.js';
-import type { AutomationChatEvent, AutomationRunEvent, CommissioningUpdate } from '../core/bus.js';
+import type { AutomationChatEvent, AutomationRunEvent, ChatTitleEvent, CommissioningUpdate } from '../core/bus.js';
 import { deviceWire, deviceWireView } from './dto.js';
 import type { HubStatusReader } from '../core/hub-status.js';
 import { apiKeyState, type ApiKeyRecord } from '../core/api-keys.js';
@@ -575,6 +575,23 @@ export function attachWebSocket(
     if (memberId === null || !deps.access.canAs(memberId, 'hub.ai', key)) return;
     send({ type: 'assistantChat', chat: event });
   };
+  /**
+   * A conversation's name, as it is settled — either agent's, narrowed the way
+   * that agent's own frames are, since a name is made of what somebody said.
+   *
+   * **A frame `type` of its own** (`chatTitle`), never a phase on the two
+   * above: every shipped iOS build reads a phase it has never met as `turn`,
+   * so a name arriving mid-round would end that round on every phone not yet
+   * updated, while an unknown `type` is dropped by every client. Its own key
+   * (`chatTitle`) for the reason `run` has one: one struct decodes every frame
+   * on the iOS side, and a second shape under a key it already knows would
+   * take the whole frame with it.
+   */
+  const onChatTitle = (event: ChatTitleEvent) => {
+    if (memberId === null || !deps.access.canAs(memberId, 'hub.ai', key)) return;
+    if (event.surface === 'automations' && !deps.access.canAs(memberId, 'automation.manage', key)) return;
+    send({ type: 'chatTitle', chatTitle: event });
+  };
 
   /**
    * What this socket may subscribe to.
@@ -617,6 +634,7 @@ export function attachWebSocket(
         if (key === null) {
           deps.events.on('automationChat', onAutomationChat);
           deps.events.on('assistantChat', onAssistantChat);
+          deps.events.on('chatTitle', onChatTitle);
         }
       }
     }
@@ -640,6 +658,7 @@ export function attachWebSocket(
         deps.events.off('automationRun', onAutomationRun);
         deps.events.off('automationChat', onAutomationChat);
         deps.events.off('assistantChat', onAssistantChat);
+        deps.events.off('chatTitle', onChatTitle);
       }
     }
     send({ type: 'subscribed', streams: [...subscribed] });
@@ -738,6 +757,7 @@ export function attachWebSocket(
       deps.events.off('automationRun', onAutomationRun);
       deps.events.off('automationChat', onAutomationChat);
       deps.events.off('assistantChat', onAssistantChat);
+      deps.events.off('chatTitle', onChatTitle);
     }
     subscribed.clear();
   };

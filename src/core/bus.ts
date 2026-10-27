@@ -164,6 +164,32 @@ export interface HubEvents {
    * `automationChat` frames, arriving on a socket that already has them.
    */
   assistantChat: [event: AutomationChatEvent];
+  /**
+   * A conversation was given its name — either agent's.
+   *
+   * **An event of its own rather than a fifth phase on the two above**, and
+   * that is not tidiness: every shipped iOS build reads a chat phase it has
+   * never met as `turn`, so a name landing in the middle of the first round
+   * would end that round on every phone that has not updated — the trail taken
+   * down, the transcript re-read, a "round over" haptic over a round that was
+   * not. A frame `type` an app has never met is dropped by every client
+   * instead, which is the fallback a name wants: the list says the first thing
+   * said until it is next read, and then says the name.
+   *
+   * On the same opt-in stream as the conversations, and narrowed per socket
+   * the same way, since a name is made of what somebody said.
+   */
+  chatTitle: [event: ChatTitleEvent];
+}
+
+/** A conversation's name, as it is settled. */
+export interface ChatTitleEvent {
+  /** Which agent — the routes' own word, `assistant` · `automations`. */
+  surface: 'assistant' | 'automations';
+  sessionId: string;
+  /** The name, which `GET /…/chats` now answers as the conversation's `title`. */
+  title: string;
+  at: string;
 }
 
 /**
