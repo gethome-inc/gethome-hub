@@ -1157,7 +1157,10 @@ domains — update them in the same change.
   trails). Only once at a time (`retrying`, claimed in the same tick as the
   check and held until the turn has written its answer). **Asked again when
   its turn comes** (`stillAskable`): a turn queued ahead may have answered in
-  between, and then the retry is let go without a word. On a conversation
+  between, and then the retry is let go without a word — and so it is when
+  the transcript cannot be read at that moment, since the recheck runs before
+  the turn's own `try` and a rejected `inFlight` takes the hub down; a mark
+  that cannot be written (`retried`) costs the mark, never the answer. On a conversation
   reopened even on the same model (`switchModel(…, retry)`), primed without
   the note and told what the failed round had already done (`retryPriming`):
   **only the steps marked `done`**, a change that took — never one a model

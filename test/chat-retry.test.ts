@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { pino } from 'pino';
 import type { FastifyInstance } from 'fastify';
 import { buildServer } from '../src/api/server.js';
@@ -122,6 +122,7 @@ describe('a round that could not be answered', () => {
   let engine: AutomationEngine;
   let settings: SettingsService;
   let idle: () => Promise<void>;
+  let assistantChat: Awaited<ReturnType<typeof startedAutomations>>['assistant'];
   let token: string;
   let otherToken: string;
   const frames: AutomationChatEvent[] = [];
@@ -180,6 +181,7 @@ describe('a round that could not be answered', () => {
       },
     });
     engine = started.engine;
+    assistantChat = started.assistant;
     idle = async () => {
       await started.assistant.idle();
       await started.chat.idle();
@@ -608,6 +610,40 @@ describe('a round that could not be answered', () => {
    * note claiming a retry that never happened, and a revival reopened the
    * conversation on that model.
    */
+  /**
+   * The recheck runs before the turn's own `try`, so a transcript that could
+   * not be read there rejected the conversation's `inFlight` — which the
+   * route, having answered 202, never listens to, and which takes a hub down.
+   */
+  it('lets a retry go when its conversation cannot be read back, and the note still offers it', async () => {
+    const sessionId = await failedOnOpenAi('assistant');
+    const original = assistantChat.transcript.bind(assistantChat);
+    let reads = 0;
+    // The first read is the route's own check; the second is the recheck when
+    // the retry's turn comes round.
+    const spy = vi.spyOn(assistantChat, 'transcript').mockImplementation(async (id: string) => {
+      reads += 1;
+      if (reads === 2) throw new Error('SQLITE_BUSY: database is locked');
+      return original(id);
+    });
+    try {
+      const accepted = await post(`/api/v1/assistant/chat/${sessionId}/retry`, { model: 'claude-opus-5-5' });
+      expect(accepted.statusCode).toBe(202);
+      await idle();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(asked.some((entry) => entry.model === 'claude-opus-5-5')).toBe(false);
+    expect(frames.some((frame) => frame.sessionId === sessionId && frame.phase === 'turn')).toBe(true);
+    const rows = await read('assistant', sessionId);
+    expect(rows.at(-1)!.data).not.toHaveProperty('retried');
+
+    const again = await post(`/api/v1/assistant/chat/${sessionId}/retry`, { model: 'claude-opus-5-5' });
+    expect(again.statusCode).toBe(202);
+    await idle();
+    expect(asked.at(-1)!.model).toBe('claude-opus-5-5');
+  });
+
   it('marks a failure asked again only once the turn has really begun', async () => {
     const sessionId = await failedOnOpenAi('assistant');
     unopenable.add('claude-opus-5-5');

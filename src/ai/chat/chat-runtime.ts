@@ -1947,7 +1947,21 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       // the conversation has moved on from the failure and there is nothing
       // left to ask. Let go without a word — the `turn` frame takes the wait
       // down, and the transcript shows what answered instead.
-      const note = await this.askable(session, retry.noteId);
+      //
+      // **And a transcript that cannot be read lets it go the same way**,
+      // rather than rejecting the turn chain: this runs before the `try`
+      // below, and a rejected `inFlight` with nothing listening takes the
+      // whole hub down (the catch below says how that was learnt). The note
+      // keeps its offer, since nothing was written onto it, so the retry can
+      // simply be asked for again.
+      let note: ChatMessageWire | null;
+      try {
+        note = await this.askable(session, retry.noteId);
+      } catch (error) {
+        this.base.log.error({ err: error, sessionId: session.id }, 'chat: a retry could not read its conversation back');
+        this.settle(session, 'stopped');
+        return;
+      }
       if (note === null) {
         this.base.log.info({ sessionId: session.id }, 'chat: a retry found the conversation had moved on');
         this.settle(session, 'stopped');
@@ -1962,8 +1976,14 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       }
       // Only now is it true that the note is being answered again — and the
       // model it names is the one a revival of this conversation reopens on.
-      await this.amend(note.id, { ...(note.data as Record<string, unknown>), retried: retry.retried });
-      this.emit({ sessionId: session.id, phase: 'amend', at: new Date().toISOString(), text: 'retry' });
+      // A mark that cannot be written costs the mark and never the answer,
+      // which is already on its way.
+      try {
+        await this.amend(note.id, { ...(note.data as Record<string, unknown>), retried: retry.retried });
+        this.emit({ sessionId: session.id, phase: 'amend', at: new Date().toISOString(), text: 'retry' });
+      } catch (error) {
+        this.base.log.warn({ err: error, sessionId: session.id }, 'chat: could not mark a failure as asked again');
+      }
     } else if (turn?.model !== undefined && turn.model !== session.conversation.modelId) {
       if (!(await this.switchModel(session, turn.model, messageId))) return;
     }
