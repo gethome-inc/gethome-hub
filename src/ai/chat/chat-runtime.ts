@@ -453,8 +453,8 @@ interface StoredAttachment {
 
 /**
  * The person's own row's `data`, for a message that asked for anything
- * besides its words — `undefined` for one that did not, so an older app's
- * message is stored exactly as it always was.
+ * besides its words or was spoken — `undefined` for a typed one that asked for
+ * nothing, so an older app's message is stored exactly as it always was.
  *
  * **Only the keys the request named**, so a row says what was *asked* rather
  * than what the hub filled in; and **never the base64**, which is the rule this
@@ -466,9 +466,15 @@ function userRowData(
   turn: ChatTurnRequest | undefined,
   /** The message was a photo and no words — see `photoCaption`. */
   wordless = false,
+  /**
+   * How the message arrived. Only `voice` is written: a spoken message names
+   * no model and no effort, exactly as a typed one following the home's does,
+   * and a client that reads the newest typed message for the thinking word a
+   * conversation was left on has to be able to step past it.
+   */
+  via?: ChatVia,
 ): Record<string, unknown> | undefined {
-  if (turn === undefined) return undefined;
-  const attachments: StoredAttachment[] = (turn.images ?? []).map((image) => ({
+  const attachments: StoredAttachment[] = (turn?.images ?? []).map((image) => ({
     type: 'image' as const,
     mediaType: image.mediaType,
     ...(image.ref !== undefined ? { ref: image.ref } : {}),
@@ -477,10 +483,11 @@ function userRowData(
     bytes: base64Bytes(image.data),
   }));
   const data: Record<string, unknown> = {
-    ...(turn.model !== undefined ? { model: turn.model } : {}),
-    ...(turn.effort !== undefined ? { effort: turn.effort } : {}),
+    ...(turn?.model !== undefined ? { model: turn.model } : {}),
+    ...(turn?.effort !== undefined ? { effort: turn.effort } : {}),
     ...(attachments.length > 0 ? { attachments } : {}),
     ...(wordless && attachments.length > 0 ? { wordless: true } : {}),
+    ...(via === 'voice' ? { via } : {}),
   };
   return Object.keys(data).length > 0 ? data : undefined;
 }
@@ -1610,7 +1617,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       session,
       'user',
       wordless ? photoCaption(sent) : text,
-      userRowData(turn, wordless),
+      userRowData(turn, wordless, origin?.via),
       session.memberId,
     );
     session.lastAt = Date.now();

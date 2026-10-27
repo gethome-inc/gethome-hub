@@ -209,6 +209,10 @@ describe('the assistant', () => {
     const rows = await assistant.transcript(sessionId);
     expect(rows.map((row) => row.role)).toEqual(['user', 'agent']);
     expect(rows[0]?.text).toBe('turn the kitchen light off');
+    // Marked as spoken: it names no model and no effort, exactly as a typed
+    // message following the home's does, and an app reading the newest typed
+    // message for a conversation's thinking word has to step past it.
+    expect(rows[0]?.data).toEqual({ via: 'voice' });
   });
 
   /**

@@ -516,7 +516,10 @@ acknowledge a message, subscribe to a socket, and resume a continuation when a
 `turn` frame came back with the rows re-read; here the conversation's
 `inFlight` is the answer. It runs the **ordinary** path, so a spoken exchange
 leaves exactly the two rows a typed one does, with the same trail on the socket
-and the same conversation to carry on by typing. That also fixed a real bug:
+and the same conversation to carry on by typing. The person's row says it was
+spoken (`data.via: "voice"`): it names no model and no effort, exactly as a
+typed message following the home's does, so an app picking a conversation back
+up reads the thinking word off the newest *typed* message and steps past it. That also fixed a real bug:
 the phone wrote the person's sentence itself *and* sent it as a message, so
 every spoken request landed in the transcript twice. Nothing writes rows now
 but the round.
