@@ -594,6 +594,57 @@ describe('naming a conversation', () => {
     expect(quiet.asked).toHaveLength(TITLE_MAX_MESSAGES);
   });
 
+  /** A stand-in vendor whose first answer waits to be settled by the test. */
+  const heldFirst = (later: Array<string | Error | null>) => {
+    const asked: TitleAsk[] = [];
+    let settle: (answer: string | Error) => void = () => undefined;
+    const first = new Promise<string | Error>((resolve) => {
+      settle = resolve;
+    });
+    const ask = async (request: TitleAsk): Promise<TitleAnswer> => {
+      asked.push(request);
+      const answer = asked.length === 1 ? await first : later.shift();
+      if (answer instanceof Error) throw answer;
+      return { text: answer ?? null, costUsd: 0.0001 };
+    };
+    return { asked, ask, settle: (answer: string | Error) => settle(answer) };
+  };
+
+  it.each([
+    ['nothing to name yet', 'NONE'],
+    ['a failure', new Error('timed out')],
+  ])('offers a message sent while a name was out once that one comes back with %s', async (_, first) => {
+    const vendor = heldFirst(['Kitchen lights off']);
+    const { assistant } = await started({ askTitle: vendor.ask });
+    const reply = await assistant.start({ memberId, message: 'hi!' });
+    // The question arrives while the greeting is still being named…
+    await assistant.reply(reply.sessionId, memberId, 'turn the kitchen lights off');
+    vendor.settle(first);
+    await assistant.idle();
+    await assistant.names();
+
+    // …and is asked about the moment that comes back, with everything said so far.
+    expect(vendor.asked).toHaveLength(2);
+    expect(vendor.asked[0]!.prompt).not.toContain('kitchen');
+    expect(vendor.asked[1]!.prompt).toContain('hi!');
+    expect(vendor.asked[1]!.prompt).toContain('turn the kitchen lights off');
+    expect(titled.map((event) => event.title)).toEqual(['Kitchen lights off']);
+    expect((await assistant.list(memberId))[0]?.title).toBe('Kitchen lights off');
+  });
+
+  it('asks nothing more for a message sent while the name was out, once that one names it', async () => {
+    const vendor = heldFirst(['Porch light at midnight']);
+    const { assistant } = await started({ askTitle: vendor.ask });
+    const reply = await assistant.start({ memberId, message: 'can the porch light come on at sunset?' });
+    await assistant.reply(reply.sessionId, memberId, 'and off at midnight');
+    vendor.settle('Porch light at sunset');
+    await assistant.idle();
+    await assistant.names();
+
+    expect(vendor.asked).toHaveLength(1);
+    expect(titled.map((event) => event.title)).toEqual(['Porch light at sunset']);
+  });
+
   it('asks the other vendor when the conversation’s own cannot name it', async () => {
     await settings.setAiKey('openai', 'sk-openai-test');
     const asked: TitleAsk[] = [];

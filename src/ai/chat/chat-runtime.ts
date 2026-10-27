@@ -883,6 +883,12 @@ export interface ChatSession<Turn> {
   /** A name is being worked out right now, so another is not asked for. */
   naming?: boolean | undefined;
   /**
+   * A message with words in it arrived while that name was being worked out,
+   * and is owed its own chance if it comes back without one — with the model
+   * the newest such message asked for, which is where it is answered.
+   */
+  nameAgain?: { model: string | undefined } | undefined;
+  /**
    * What this conversation spent outside its provider conversation that no
    * ledger row has yet — naming it. `record` banks it with the next row, so a
    * conversation's price includes its name without a row of its own for a
@@ -1733,14 +1739,34 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
    * before the round has finished reading the home. Nothing waits on it and
    * nothing it does can fail a turn.
    *
-   * Asked of a message with words in it, while the conversation has no name,
-   * none is being worked out, and it has had fewer than `TITLE_MAX_MESSAGES`
-   * chances: a photo alone is not something to name from, and a greeting comes
-   * back as nothing to name yet, so the next message has its turn.
+   * Asked of a message with words in it, while the conversation has no name
+   * and it has had fewer than `TITLE_MAX_MESSAGES` chances: a photo alone is
+   * not something to name from, and a greeting comes back as nothing to name
+   * yet, so the next message has its turn.
+   *
+   * **A message that arrives while a name is out waits for it rather than
+   * losing its turn.** One name is worked out at a time, but nobody stops
+   * typing for it — "hi!" and the question a second later is the ordinary
+   * case — and the attempt in flight read the rows before the question was
+   * written, so all it can say is that there is nothing to name yet. The guard
+   * used to drop the question there, and the conversation stayed listed as
+   * "hi!" until a third message came, or for good. It is held instead
+   * (`nameAgain`) and offered the moment that attempt comes back without a
+   * name, in the same tick the flag comes down, so no message can fall between
+   * the two.
    */
   private nameIfUntitled(session: ChatSession<Turn>, words: string, model: string | undefined): void {
-    if (session.title !== undefined || session.naming === true) return;
-    if (words.trim().length === 0 || (session.titleTries ?? 0) >= TITLE_MAX_MESSAGES) return;
+    if (words.trim().length === 0) return;
+    this.askForName(session, model);
+  }
+
+  /** One attempt at a name, or a place in line behind the one already out. */
+  private askForName(session: ChatSession<Turn>, model: string | undefined): void {
+    if (session.title !== undefined || (session.titleTries ?? 0) >= TITLE_MAX_MESSAGES) return;
+    if (session.naming === true) {
+      session.nameAgain = { model };
+      return;
+    }
     const ask = this.base.askTitle !== undefined ? this.base.askTitle : this.standsIn() ? null : askForTitle;
     if (ask === null) return;
 
@@ -1751,6 +1777,9 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       .finally(() => {
         session.naming = false;
         this.namings.delete(naming);
+        const again = session.nameAgain;
+        session.nameAgain = undefined;
+        if (again !== undefined) this.askForName(session, again.model);
       });
     this.namings.add(naming);
   }
@@ -1764,7 +1793,9 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
    * chain, so nothing else a suite can await says it has landed.
    */
   async names(): Promise<void> {
-    await Promise.all([...this.namings]);
+    // An attempt that comes back without a name can start the one a message
+    // was waiting for (`nameAgain`), so wait until nothing is left out.
+    while (this.namings.size > 0) await Promise.all([...this.namings]);
   }
 
   /**

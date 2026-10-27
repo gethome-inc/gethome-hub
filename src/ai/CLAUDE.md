@@ -1272,7 +1272,10 @@ domains — update them in the same change.
   only once written, so `list()` repeats what the socket said and a revival
   reads it back rather than asking twice. **`NONE` is an answer, not a
   failure**: the next message is asked about (up to `TITLE_MAX_MESSAGES`) and
-  the other vendor is not asked to overrule it. And **the cost is the
+  the other vendor is not asked to overrule it — and a message that arrived
+  while that attempt was out is the next one, held in `nameAgain` and offered
+  as the attempt comes back rather than dropped by the one-at-a-time guard,
+  since the attempt read the rows before it was written. And **the cost is the
   conversation's** — `sideUsd`, banked by `record` with the next row, so the
   ledger's 250 rows are not spent on fractions of a cent; both cursors move
   before `record` awaits anything, or a name landing as a conversation closes

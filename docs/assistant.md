@@ -356,7 +356,10 @@ message with words is asked about too, with everything said so far — up to
 three, after which the conversation keeps its first words. A photo alone is not
 named from (the words that come with it are, with a line saying photos were
 sent; the photo itself is never sent again for a name), and one name is worked
-out at a time.
+out at a time. A message that arrives while a name is out waits for it, and is
+offered the moment it comes back without one: that attempt read the rows before
+the message was written, so "hi!" and the question a second behind it would
+otherwise stay listed as "hi!".
 
 **Kept on the person's row, then announced.** `data.chatTitle` on the newest row
 it was named from: the store the conversation already has, so retention takes
