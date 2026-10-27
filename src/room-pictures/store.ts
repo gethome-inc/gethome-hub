@@ -39,6 +39,16 @@ import { dayPrompt, NIGHT_PROMPT, type PictureDevice } from './prompts.js';
  * person, and a placed one is never read over. **Files and a manifest**: one
  * deliberate write per drawing, bounded by bulk — a few per room, a budget for
  * all, a refusal to draw on a nearly full card. The photos are not kept.
+ *
+ * **A drawing gives its memory back when it is done** (`collectGarbage`), and
+ * that is not tidiness. One drawing moves ~40 MB through the hub — photos,
+ * three answers of base64, the picture read twice — almost all of it in
+ * objects too big for V8's young generation, so it is freed only by a full
+ * collection, and an idle hub can go many minutes without one. On a 512 MB
+ * board the hub runs ~15 MB under its `MemoryHigh`; on 2026-10-23 one drawing
+ * held it at that limit for four minutes after the night had landed, and the
+ * memory-pressure watch stood Matter down for it. `scripts/replay-room-picture.mjs`
+ * replays a drawing without spending anything and prints what it costs.
  */
 
 /** Drawings a room keeps — enough to choose between. */
@@ -91,7 +101,7 @@ export interface DrawInput {
   roomId: string;
   roomName: string;
   orientation: PictureOrientation;
-  photos: { bytes: Buffer; contentType: string }[];
+  photos: { bytes: Buffer<ArrayBuffer>; contentType: string }[];
   /** Read off the finished picture — never named to the drawing (`prompts.ts`). */
   devices: PictureDevice[];
   apiKey: string;
@@ -135,6 +145,7 @@ export class RoomPictureService {
     limits: Partial<PictureLimits> = {},
     private readonly draw_ = drawRoomPicture,
     private readonly locate_ = locateDevices,
+    private readonly collect_ = collectGarbage,
   ) {
     this.root = path.join(dataDir, 'room-pictures');
     this.manifest = path.join(this.root, 'pictures.json');
@@ -175,7 +186,7 @@ export class RoomPictureService {
     return this.read().find((record) => record.id === id);
   }
 
-  async bytes(id: string, variant: 'day' | 'night'): Promise<Buffer | null> {
+  async bytes(id: string, variant: 'day' | 'night'): Promise<Buffer<ArrayBuffer> | null> {
     const record = this.get(id);
     if (!record || (variant === 'night' && !record.hasNight)) return null;
     try {
@@ -195,10 +206,14 @@ export class RoomPictureService {
       this.night = this.drawNight(record, input.apiKey).finally(() => {
         this.drawing = false;
         this.night = null;
+        this.collect_();
       });
       return record;
     } finally {
-      if (!handedOn) this.drawing = false;
+      if (!handedOn) {
+        this.drawing = false;
+        this.collect_();
+      }
     }
   }
 
@@ -267,6 +282,9 @@ export class RoomPictureService {
   private async drawNight(record: RoomPictureRecord, apiKey: string): Promise<void> {
     const day = await this.bytes(record.id, 'day');
     if (!day) return;
+    // The day has been answered. What it left — the photos, the day's answer,
+    // the reading — goes now, before the night piles its own on top.
+    this.collect_();
     const run = this.runs?.begin({
       kind: 'roompicture',
       adapter: 'room-pictures',
@@ -484,4 +502,18 @@ export class RoomPictureService {
     renameSync(temporary, this.manifest);
     this.records = records;
   }
+}
+
+/**
+ * A full garbage collection, where the hub was started with `--expose-gc` —
+ * on a 512 MB board (`deploy/install.sh`) — and nothing anywhere else, where
+ * there is room enough to wait for V8's own.
+ *
+ * Measured by replaying a drawing on a Zero 2 W (`scripts/replay-room-picture.mjs`),
+ * with glibc tuned beside it as `install.sh` does: three minutes after the
+ * night ~44 MB of anonymous memory instead of ~64, and a second drawing added
+ * nothing where it had added 8.9 MB. Each collection is a 0.3–0.5 s pause there.
+ */
+export function collectGarbage(): void {
+  (globalThis as { gc?: () => void }).gc?.();
 }

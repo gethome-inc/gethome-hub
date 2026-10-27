@@ -2487,7 +2487,9 @@ lamps on and the window dark, is drawn after the answer and announced when it
 lands. It comes back on an opaque ground, and the apps cut it out with the day
 picture's own outline. A night that fails keeps the day. The hub draws **one
 room at a time**, day to night, and refuses a second asker (`409
-picture_busy`) rather than queueing a second bill.
+picture_busy`) rather than queueing a second bill. On a 512 MB board a drawing
+is also the most memory the hub ever holds at once, and it hands it back when
+the night lands ([zigbee.md](zigbee.md#running-both-on-a-board-measured-for-one)).
 
 **It is the house's**, the portraits' argument: drawn once, every member sees
 it, markers included. **A room shows one picture** (`selected: true`): a new

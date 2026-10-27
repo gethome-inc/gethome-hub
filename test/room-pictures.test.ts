@@ -1,9 +1,10 @@
+import { randomBytes } from 'node:crypto';
 import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { HubEventBus } from '../src/core/bus.js';
-import { pictureCostUsd, RoomPictureDrawError } from '../src/room-pictures/draw.js';
+import { drawRoomPicture, pictureCostUsd, RoomPictureDrawError } from '../src/room-pictures/draw.js';
 import { LocateError, locateDevices, normaliseAnswer } from '../src/room-pictures/locate.js';
 import { dayPrompt, describeKind, locatePrompt } from '../src/room-pictures/prompts.js';
 import { PictureBusyError, RoomPictureService, type Locator } from '../src/room-pictures/store.js';
@@ -25,7 +26,7 @@ const locator: Locator = async () => ({ provider: 'openai', modelId: 'gpt-6.1-so
 
 type Fn = ReturnType<typeof vi.fn>;
 
-function service(options: { draw?: Fn; locate?: Fn; limits?: object } = {}) {
+function service(options: { draw?: Fn; locate?: Fn; collect?: Fn; limits?: object } = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), 'gethome-room-pictures-'));
   const events = new HubEventBus();
   const heard: string[] = [];
@@ -40,8 +41,18 @@ function service(options: { draw?: Fn; locate?: Fn; limits?: object } = {}) {
       ],
       usage: { input_tokens: 2000, output_tokens: 500 },
     }));
-  const pictures = new RoomPictureService(dir, events, undefined, undefined, options.limits ?? {}, draw as never, locate as never);
-  return { dir, heard, draw, locate, pictures };
+  const collect = options.collect ?? vi.fn();
+  const pictures = new RoomPictureService(
+    dir,
+    events,
+    undefined,
+    undefined,
+    options.limits ?? {},
+    draw as never,
+    locate as never,
+    collect as never,
+  );
+  return { dir, heard, draw, locate, collect, pictures };
 }
 
 const input = {
@@ -110,6 +121,27 @@ describe('RoomPictureService', () => {
     await expect(pictures.draw(input)).rejects.toMatchObject({ kind: 'auth_failed' });
     expect(pictures.list()).toEqual([]);
     expect(pictures.isDrawing).toBe(false);
+  });
+
+  // On a 512 MB board a drawing's garbage held the hub at its memory limit
+  // long enough for the pressure watch to stand Matter down (store.ts). What
+  // is pinned is *when*: once the day has been answered and before the night
+  // is asked for, and once the drawing is over, however it ended.
+  it('gives its memory back once the day is answered and once it is over', async () => {
+    const steps: string[] = [];
+    const draw = vi.fn(async (edit: { background: string }) => {
+      steps.push(edit.background === 'transparent' ? 'day' : 'night');
+      return { png: png(1), usage };
+    });
+    const { pictures } = service({ draw, collect: vi.fn(() => steps.push('collect')) });
+    await pictures.draw(input);
+    steps.push('answered');
+    await pictures.settled();
+    expect(steps).toEqual(['day', 'answered', 'collect', 'night', 'collect']);
+
+    const failed = service({ draw: vi.fn().mockRejectedValue(new RoomPictureDrawError('no', 'auth_failed')) });
+    await expect(failed.pictures.draw(input)).rejects.toBeInstanceOf(RoomPictureDrawError);
+    expect(failed.collect).toHaveBeenCalledTimes(1);
   });
 
   it('keeps a drawing whose devices could not be read, with no markers', async () => {
@@ -243,9 +275,47 @@ describe('reading the devices off a picture', () => {
     }) as unknown as typeof fetch;
     const result = await locateDevices({ provider: 'openai', modelId: 'gpt-6.1-sol', apiKey: 'k', picture: png(1), devices, fetchImpl });
     expect(result.located).toEqual([{ deviceId: 'tv', x: 0.2, y: 0.3, seen: true }]);
-    const sent = JSON.parse(String(calls[0]!.body));
+    const sent = JSON.parse(await (calls[0]!.body as Blob).text());
     expect(sent.text.format.strict).toBe(true);
     expect(sent.input[0].content[1].text).toContain('tv: “Light TV”');
+  });
+
+  // The body is a Blob with the base64 spliced in, in pieces, so the picture
+  // is never one string on the heap (`withPicture`). What has to hold is that
+  // the pieces join into exactly the base64 of the picture — for a picture of
+  // several pieces whose length is not a multiple of three.
+  it.each(['openai', 'anthropic'] as const)('sends the whole picture to %s, exactly', async (provider) => {
+    const picture = randomBytes(3 * 48 * 1024 + 1001);
+    let sent: Record<string, unknown> = {};
+    let contentType: string | null = null;
+    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      sent = JSON.parse(await (init!.body as Blob).text());
+      contentType = new Headers(init!.headers).get('content-type');
+      // Anthropic's half is read by its SDK, so its answer is the API's own
+      // shape and content type.
+      return new Response(
+        JSON.stringify(
+          provider === 'openai'
+            ? { output: [{ type: 'message', content: [{ type: 'output_text', text: '{"devices":[]}' }] }] }
+            : {
+                type: 'message',
+                role: 'assistant',
+                model: 'm',
+                content: [{ type: 'tool_use', id: 'toolu_1', name: 'submit_points', input: { devices: [] } }],
+                stop_reason: 'tool_use',
+                usage: { input_tokens: 1, output_tokens: 1 },
+              },
+        ),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as unknown as typeof fetch;
+    await locateDevices({ provider, modelId: 'm', apiKey: 'k', picture, devices, fetchImpl });
+    expect(contentType).toBe('application/json');
+    const content = (provider === 'openai' ? (sent['input'] as { content: unknown[] }[]) : (sent['messages'] as { content: unknown[] }[]))[0]!
+      .content[0] as { image_url?: string; source?: { data: string } };
+    const base64 = provider === 'openai' ? content.image_url!.replace('data:image/png;base64,', '') : content.source!.data;
+    expect(base64).toBe(picture.toString('base64'));
+    expect(JSON.stringify(sent)).not.toContain('picture-');
   });
 
   it('says why the provider refused', async () => {
@@ -260,7 +330,8 @@ describe('reading the devices off a picture', () => {
   /**
    * Anthropic's half goes through the SDK, so the stub answers the way the API
    * does — JSON with its content type — and what is pinned is the request the
-   * SDK was handed and what it does with a busy API.
+   * SDK was handed and what it does with a busy API. The body is the same Blob
+   * the OpenAI half sends, so it is read as one.
    */
   const anthropicReply = (body: Record<string, unknown>, status = 200, headers: Record<string, string> = {}) =>
     new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
@@ -293,7 +364,7 @@ describe('reading the devices off a picture', () => {
     });
     expect(result.located).toEqual([{ deviceId: 'tv', x: 0.2, y: 0.3, seen: true }]);
     expect(result.usage).toMatchObject({ input_tokens: 1800, output_tokens: 300 });
-    const sent = JSON.parse(String(calls[0]!.body));
+    const sent = JSON.parse(await (calls[0]!.body as Blob).text());
     expect(sent.thinking).toEqual({ type: 'adaptive' });
     expect(sent.output_config).toEqual({ effort: 'medium' });
     // A forced tool is a 400 on the models this runs on.
@@ -378,7 +449,7 @@ describe('reading the devices off a picture', () => {
         estimateCostUsd('claude-opus-4-8', { input_tokens: 1900, output_tokens: 320 }),
       12,
     );
-    const sent = JSON.parse(String(calls[0]!.init.body));
+    const sent = JSON.parse(await (calls[0]!.init.body as Blob).text());
     expect(sent.fallbacks).toBe('default');
     expect(new Headers(calls[0]!.init.headers).get('anthropic-beta')).toBe('server-side-fallback-2026-07-01');
   });
@@ -396,6 +467,35 @@ describe('reading the devices off a picture', () => {
         locateDevices({ provider: 'anthropic', modelId: 'claude-opus-5-5', apiKey: 'sk-ant', picture: png(1), devices, fetchImpl }),
       ).rejects.toMatchObject({ kind });
     }
+  });
+});
+
+describe('drawing', () => {
+  it('sends every photo as it is, in order', async () => {
+    const photos = [randomBytes(70_001), randomBytes(1_234)];
+    let form: FormData | undefined;
+    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      form = init!.body as FormData;
+      return new Response(JSON.stringify({ data: [{ b64_json: png(7).toString('base64') }] }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const drawing = await drawRoomPicture({
+      apiKey: 'k',
+      prompt: 'p',
+      images: [
+        { bytes: photos[0]!, contentType: 'image/jpeg' },
+        { bytes: photos[1]!, contentType: 'image/png' },
+      ],
+      size: '1024x1536',
+      background: 'transparent',
+      fetchImpl,
+    });
+    expect(drawing.png.equals(png(7))).toBe(true);
+    const sent = form!.getAll('image[]') as File[];
+    expect(sent.map((file) => [file.name, file.type])).toEqual([
+      ['image0.jpg', 'image/jpeg'],
+      ['image1.png', 'image/png'],
+    ]);
+    for (const [index, file] of sent.entries()) expect(Buffer.from(await file.arrayBuffer()).equals(photos[index]!)).toBe(true);
   });
 });
 

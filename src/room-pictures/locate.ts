@@ -1,4 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { AiProvider } from '../core/settings.js';
 import { callsIn, replyCostUsd, withFallbacks } from '../ai/anthropic-fallback.js';
@@ -37,6 +38,8 @@ const MAX_OUTPUT_TOKENS = 8_000;
  * reply and a two-minute deadline to fit its thinking into.
  */
 const EFFORT = 'medium';
+/** Bytes of picture per piece of base64: a multiple of three, so the pieces join without padding. */
+const PIECE = 48 * 1024;
 
 export class LocateError extends Error {
   constructor(
@@ -126,11 +129,8 @@ export interface Located {
 export async function locateDevices(input: LocateInput): Promise<Located> {
   if (input.devices.length === 0) return { located: [], usage: {} };
   const prompt = locatePrompt(input.devices);
-  const base64 = input.picture.toString('base64');
   const { answer, usage, costUsd } =
-    input.provider === 'openai'
-      ? await askOpenAi(input, prompt, base64)
-      : await askAnthropic(input, prompt, base64);
+    input.provider === 'openai' ? await askOpenAi(input, prompt) : await askAnthropic(input, prompt);
   if (answer === undefined) throw new LocateError('The model answered without the devices.', 'unreadable');
   return {
     located: normaliseAnswer(answer, input.devices),
@@ -146,7 +146,7 @@ interface Asked {
   costUsd?: number;
 }
 
-async function askOpenAi(input: LocateInput, prompt: string, base64: string): Promise<Asked> {
+async function askOpenAi(input: LocateInput, prompt: string): Promise<Asked> {
   const doFetch = input.fetchImpl ?? fetch;
   let response: Response;
   try {
@@ -154,7 +154,7 @@ async function askOpenAi(input: LocateInput, prompt: string, base64: string): Pr
       method: 'POST',
       signal: AbortSignal.timeout(TIMEOUT_MS),
       headers: { authorization: `Bearer ${input.apiKey}`, 'content-type': 'application/json' },
-      body: JSON.stringify({
+      body: withPicture(input.picture, (picture) => ({
         model: input.modelId,
         reasoning: { effort: EFFORT },
         max_output_tokens: MAX_OUTPUT_TOKENS,
@@ -163,13 +163,13 @@ async function askOpenAi(input: LocateInput, prompt: string, base64: string): Pr
           {
             role: 'user',
             content: [
-              { type: 'input_image', image_url: `data:image/png;base64,${base64}` },
+              { type: 'input_image', image_url: `data:image/png;base64,${picture}` },
               { type: 'input_text', text: prompt },
             ],
           },
         ],
         text: { format: { type: 'json_schema', name: 'device_points', schema: ANSWER_SCHEMA, strict: true } },
-      }),
+      })),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -202,8 +202,17 @@ async function askOpenAi(input: LocateInput, prompt: string, base64: string): Pr
  * classifiers can read as security work. Not streamed, so a decline part way
  * through comes back without its partial at all — only the answering model's
  * call is read, and each attempt is priced at its own model's rates.
+ *
+ * **The body is the same Blob the OpenAI half sends** (`withPicture`), handed
+ * to the client's own `post` rather than to `messages.create`, which would
+ * build the request out of one base64 string and serialise it into a second.
+ * The client sends a `Blob` as it is and retries with it — a Blob reads again
+ * — so the reading keeps the SDK's retries and the 512 MB board keeps its one
+ * copy of the picture. What the typed method would have said by itself is
+ * said here instead: the beta goes as the `anthropic-beta` header the SDK
+ * builds from `betas`, and the answer is the same `BetaMessage`.
  */
-async function askAnthropic(input: LocateInput, prompt: string, base64: string): Promise<Asked> {
+async function askAnthropic(input: LocateInput, prompt: string): Promise<Asked> {
   const { default: AnthropicClient } = await import('@anthropic-ai/sdk');
   const client = new AnthropicClient({
     apiKey: input.apiKey,
@@ -214,9 +223,9 @@ async function askAnthropic(input: LocateInput, prompt: string, base64: string):
   let message: Anthropic.Beta.BetaMessage;
   try {
     // Sent once more without the fallback, should the API stop taking it.
-    message = await withFallbacks(input.modelId, (fallbacks) =>
-      client.beta.messages.create(
-        {
+    message = await withFallbacks(input.modelId, ({ betas, ...fallbacks }) =>
+      client.post<Anthropic.Beta.BetaMessage>('/v1/messages', {
+        body: withPicture(input.picture, (picture) => ({
           model: input.modelId,
           max_tokens: MAX_OUTPUT_TOKENS,
           thinking: { type: 'adaptive' },
@@ -227,23 +236,27 @@ async function askAnthropic(input: LocateInput, prompt: string, base64: string):
             {
               name: 'submit_points',
               description: 'Answer with a point for every device. Call this exactly once.',
-              input_schema: ANSWER_SCHEMA as unknown as Anthropic.Beta.BetaTool['input_schema'],
+              input_schema: ANSWER_SCHEMA,
             },
           ],
           messages: [
             {
               role: 'user',
               content: [
-                { type: 'image', source: { type: 'base64', media_type: 'image/png', data: base64 } },
+                { type: 'image', source: { type: 'base64', media_type: 'image/png', data: picture } },
                 { type: 'text', text: `${prompt}\n\nAnswer by calling submit_points.` },
               ],
             },
           ],
           ...fallbacks,
+        })),
+        headers: {
+          'content-type': 'application/json',
+          ...(betas !== undefined ? { 'anthropic-beta': betas.join(',') } : {}),
         },
         // One deadline for the whole reading, the retries included.
-        { signal: AbortSignal.timeout(TIMEOUT_MS) },
-      ),
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+      }),
     );
   } catch (error) {
     // The SDK's message is the status with the whole response body glued to
@@ -260,25 +273,52 @@ async function askAnthropic(input: LocateInput, prompt: string, base64: string):
   // to be discarded; a reply cut off at `max_tokens` can carry a call cut off
   // half way through its input, which still parses — as fewer devices, or a
   // number with digits missing — and would be drawn as if it were the reading.
-  if (message.stop_reason === 'refusal') {
+  if (message?.stop_reason === 'refusal') {
     throw new LocateError('The model declined to read the picture.', 'refused');
   }
-  if (message.stop_reason === 'max_tokens') {
+  if (message?.stop_reason === 'max_tokens') {
     throw new LocateError('The answer was cut off before every device was placed.', 'unreadable');
   }
 
   // The answering model's call — after a hand-over, never the declined one's.
-  const call = callsIn(message.content).find((block) => block.name === 'submit_points');
+  // Read defensively: the client's own `post` hands back whatever parsed, and a
+  // body that is not a message is an answer with no devices in it, not a crash.
+  const content = Array.isArray(message?.content) ? message.content : [];
+  const call = callsIn(content).find((block) => block.name === 'submit_points');
+  const usage = message?.usage;
   return {
     answer: call?.input,
     usage: {
-      input_tokens: message.usage.input_tokens,
-      output_tokens: message.usage.output_tokens,
-      cache_read_input_tokens: message.usage.cache_read_input_tokens,
-      cache_creation_input_tokens: message.usage.cache_creation_input_tokens,
+      input_tokens: usage?.input_tokens ?? 0,
+      output_tokens: usage?.output_tokens ?? 0,
+      cache_read_input_tokens: usage?.cache_read_input_tokens ?? null,
+      cache_creation_input_tokens: usage?.cache_creation_input_tokens ?? null,
     },
-    costUsd: replyCostUsd(input.modelId, message.usage),
+    costUsd: replyCostUsd(input.modelId, usage),
   };
+}
+
+/**
+ * A JSON request body with the picture in it as base64, built as a Blob.
+ *
+ * **The picture is never one string.** A day picture is ~2.3 MB of PNG and
+ * ~3 MB of base64, and written the obvious way — `toString('base64')`, into a
+ * data URL, into `JSON.stringify`, into the bytes `fetch` sends — that was four
+ * 3 MB copies at once, the strings among them too big for V8's young
+ * generation and so kept until the next full collection: on a 512 MB board,
+ * where the hub runs ~15 MB under its `MemoryHigh`, most of the margin. So the
+ * JSON is written around a placeholder and the picture goes in between as
+ * base64 in pieces: the Blob holds the one copy `fetch` streams, and no string
+ * is bigger than a piece. `payload` is handed the placeholder where the base64
+ * belongs.
+ */
+function withPicture(picture: Buffer, payload: (slot: string) => unknown): Blob {
+  const slot = `picture-${randomUUID()}`;
+  const [head = '', tail = ''] = JSON.stringify(payload(slot)).split(slot);
+  const parts = [head];
+  for (let at = 0; at < picture.length; at += PIECE) parts.push(picture.subarray(at, at + PIECE).toString('base64'));
+  parts.push(tail);
+  return new Blob(parts, { type: 'application/json' });
 }
 
 function openAiAnswer(body: Record<string, unknown> | null): unknown {
