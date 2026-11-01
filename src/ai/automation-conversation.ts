@@ -57,7 +57,8 @@ export const AUTOMATION_SESSION_TTL_MS = 2 * 60 * 60_000;
 export const AUTOMATION_MAX_SESSIONS = 8;
 
 /**
- * Rules one response may deliver.
+ * Rules one reply may deliver, counting any held back for the line that goes
+ * above them: a reply is one page of cards however many responses wrote it.
  *
  * A reply carrying two is the case this exists for — "lights on when I come in
  * and off when I leave" — and three or four is a large ask answered in one go.
@@ -109,6 +110,18 @@ export type AutomationTurn =
       /** What the model said alongside them, when it said anything. */
       text: string;
       halted?: Halted;
+      /**
+       * The hub's own sentence, when the turn stopped once these were already
+       * accepted — written as a note under the cards, never as the line above
+       * them, which is the model's words and nobody else's.
+       *
+       * **A rule the model was told is saved is delivered however the turn
+       * ends**, so a turn that would have been `stopped` is this arm instead,
+       * and this carries what `stopped` would have said where it is still
+       * worth saying. Only the cost limit is: it is about every message after
+       * this one. See `pump` on the exits that end without a sentence.
+       */
+      stopped?: string;
     }
   | { kind: 'said'; text: string; halted?: Halted }
   | { kind: 'stopped'; reason: string; refused?: true };

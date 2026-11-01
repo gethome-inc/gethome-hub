@@ -170,12 +170,13 @@ export class AutomationChat extends ChatRuntime<AutomationTurn> {
       saved.push(await this.save(session, parsed.data, rule.replaces));
       session.produced += 1;
     }
-    if (saved.length === 0) return messages;
-    // A conversation that produced a rule has done its job; recording the
-    // spend now means an abandoned tab does not delay the row for hours.
-    await this.record(session, true);
-    if (turn.text.trim().length > 0) {
-      messages.push(await this.write(session, 'agent', turn.text));
+    if (saved.length > 0) {
+      // A conversation that produced a rule has done its job; recording the
+      // spend now means an abandoned tab does not delay the row for hours.
+      await this.record(session, true);
+      if (turn.text.trim().length > 0) {
+        messages.push(await this.write(session, 'agent', turn.text));
+      }
     }
     /**
      * The card an app draws, and it carries the rule's **name** and its
@@ -206,6 +207,16 @@ export class AutomationChat extends ChatRuntime<AutomationTurn> {
           },
         ),
       );
+    }
+    /**
+     * **Why the turn stopped, after the cards it stopped with.** A turn that
+     * ran into the cost limit with a rule already accepted delivers the rule
+     * rather than dropping it, and the limit is the hub's own note — the row a
+     * `stopped` turn writes, in the place a person reads last, since it is
+     * about what they can do next.
+     */
+    if (turn.stopped !== undefined) {
+      messages.push(await this.write(session, 'note', turn.stopped));
     }
     return messages;
   }

@@ -666,6 +666,38 @@ describe('the automations agent’s loop, stopped', () => {
     expect(outputs.map((item) => item.call_id)).toEqual(['call_0', 'call_1']);
     expect(outputs[1]?.output).toContain('Not done');
   });
+
+  it('keeps a rule held for its line when the stop lands after a second one', async () => {
+    // Held for its sentence, and the round spent on that submits another —
+    // then the person stops. Both were told "Accepted", so both are saved: the
+    // one accepted before the stop goes after the held one, never in its place.
+    script(
+      answering([call('call_0', 'submit_automation', { document: goodDocument, replaces: null })]),
+      answering([
+        call('call_1', 'submit_automation', {
+          document: { ...goodDocument, name: 'Night lights' },
+          replaces: null,
+        }),
+      ]),
+    );
+    const conversation = await automationOn();
+    const stop = new AbortController();
+    let written = 0;
+
+    const turn = await conversation.send('evening and night lights', {
+      signal: stop.signal,
+      onStep: (summary) => {
+        if (summary === 'Wrote the rule' && ++written === 2) stop.abort();
+      },
+    });
+
+    expect(turn).toMatchObject({ kind: 'submitted', halted: { acted: true } });
+    const rules = (turn as Extract<AutomationTurn, { kind: 'submitted' }>).rules;
+    expect(rules.map((rule) => (rule.document as { name: string }).name)).toEqual([
+      'Evening lights',
+      'Night lights',
+    ]);
+  });
 });
 
 // ── The runtime ──────────────────────────────────────────────────────────────
