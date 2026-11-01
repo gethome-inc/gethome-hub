@@ -158,6 +158,9 @@ function sentParts(
     );
   }
   for (const message of added) {
+    // Only a `role: "system"` message may come without content, and the
+    // mapper sends none — the SDK's type allows one since API 2026-10-21.
+    if (message.content === undefined) continue;
     if (typeof message.content === 'string') {
       parts.push(exchangePart('message', message.role, message.content));
       continue;
