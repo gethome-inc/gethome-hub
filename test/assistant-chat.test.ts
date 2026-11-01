@@ -1083,6 +1083,35 @@ describe('the assistant', () => {
       expect(Number.isInteger(data?.tookMs)).toBe(true);
       expect(data).not.toHaveProperty('workedMs');
     });
+
+    /**
+     * The same ending by the other road: a refusal, the cost limit and the
+     * rounds running out come back as a turn rather than a throw, so the
+     * failure path's reset never sees them — and the words they had begun
+     * with are not the reply either.
+     */
+    const stoppedEndings: Array<[string, AssistantTurn]> = [
+      ['declined', { kind: 'stopped', reason: 'Claude declined to answer this.', refused: true }],
+      ['stopped at its limit', { kind: 'stopped', reason: 'This conversation reached its cost limit.' }],
+    ];
+    for (const [ending, turn] of stoppedEndings) {
+      it(`is absent where the round was ${ending} after its words began`, async () => {
+        const { assistant } = await assistantFor([turn], {
+          script: async (context) => {
+            context?.onDelta?.('It is ');
+            await pause(20);
+          },
+        });
+        const started = await assistant.start({ memberId, message: 'how warm is it?' });
+        await assistant.idle();
+
+        const rows = await assistant.transcript(started.sessionId);
+        expect(rows.map((row) => row.role)).toEqual(['user', 'note']);
+        const data = rows[1]?.data as { tookMs?: number; workedMs?: number } | undefined;
+        expect(Number.isInteger(data?.tookMs)).toBe(true);
+        expect(data).not.toHaveProperty('workedMs');
+      });
+    }
   });
 
   it('says the card moved on its own conversation, and not as a round ending', async () => {

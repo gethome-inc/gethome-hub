@@ -2869,6 +2869,11 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
 
       case 'stopped': {
         const stopped = turn as unknown as CommonTurn & { kind: 'stopped' };
+        // **No words of its own ended it**, whatever had streamed first — the
+        // failure path's rule, for the endings that come back as a turn rather
+        // than a throw: a refusal, the cost limit, the rounds running out. Its
+        // note carries the whole round (`tookMs`) and no reply time.
+        session.repliedAt = undefined;
         if (stopped.refused !== true) return [await this.write(session, 'note', stopped.reason)];
         // A refusal is a failure another model may answer, so its note is one
         // the round can be asked again from — the other vendor's offered.
