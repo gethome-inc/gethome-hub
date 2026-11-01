@@ -33,8 +33,17 @@ vi.mock('../src/ai/openai-agent.js', () => ({ createOpenAiMappingAgent }));
 
 const { SettingsService } = await import('../src/core/settings.js');
 const { AiDeviceMapper } = await import('../src/ai/mapper.js');
-const { AGENT_MODELS, PROVIDER_MODELS, defaultModelFor, effectiveAgentModel, effectiveModel, modelLabel } =
-  await import('../src/ai/models.js');
+const {
+  AGENT_MODELS,
+  AGENT_RUNGS,
+  PROVIDER_MODELS,
+  agentCounterpart,
+  defaultModelFor,
+  effectiveAgentModel,
+  effectiveModel,
+  estimateCostUsd,
+  modelLabel,
+} = await import('../src/ai/models.js');
 const { openTestDb, resetDb } = await import('./helpers/db.js');
 const { settings: settingsTable } = await import('../src/db/schema.js');
 const { mapExposes } = await import('../src/adapters/zigbee/exposes-mapper.js');
@@ -317,6 +326,51 @@ describe('the model table', () => {
         const { default: fallback, choices } = table[provider];
         expect(choices.filter((choice) => choice.recommended).map((choice) => choice.id)).toEqual([fallback]);
       }
+    }
+  });
+});
+
+/**
+ * The ladder read across the vendors, which is what a failed round is offered
+ * on the other one (`chat/failure.ts`). A model an agent is offered with no
+ * rung would be answered again on the other vendor's default whatever it was,
+ * and a rung pairing models far apart in price would send somebody who chose
+ * the cheap end to the dear one in a tap.
+ */
+describe('the agents’ rungs', () => {
+  const providers = ['anthropic', 'openai'] as const;
+
+  it('puts every model an agent is offered on exactly one rung, and nothing else', () => {
+    for (const provider of providers) {
+      const onRungs = AGENT_RUNGS.map((rung) => rung[provider]);
+      expect([...onRungs].sort()).toEqual(AGENT_MODELS[provider].choices.map((choice) => choice.id).sort());
+    }
+  });
+
+  it('keeps the ladder in order, dearest first, on both vendors', () => {
+    const price = (model: string) => estimateCostUsd(model, { input_tokens: 1000, output_tokens: 1000 });
+    for (const provider of providers) {
+      const prices = AGENT_RUNGS.map((rung) => price(rung[provider]));
+      expect(prices).toEqual([...prices].sort((a, b) => b - a));
+    }
+  });
+
+  it('never pairs two models more than twice apart on either rate', () => {
+    // Short enough to stay under every long-prompt line.
+    const input = (model: string) => estimateCostUsd(model, { input_tokens: 1000 });
+    const output = (model: string) => estimateCostUsd(model, { output_tokens: 1000 });
+    for (const rung of AGENT_RUNGS) {
+      for (const rate of [input, output]) {
+        const [a, b] = [rate(rung.anthropic), rate(rung.openai)];
+        expect(Math.max(a, b) / Math.min(a, b)).toBeLessThanOrEqual(2);
+      }
+    }
+  });
+
+  it('answers each model with the other vendor’s on its rung, and both ways round', () => {
+    for (const rung of AGENT_RUNGS) {
+      expect(agentCounterpart(rung.anthropic, 'openai')).toBe(rung.openai);
+      expect(agentCounterpart(rung.openai, 'anthropic')).toBe(rung.anthropic);
     }
   });
 });

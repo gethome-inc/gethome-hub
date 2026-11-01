@@ -375,9 +375,9 @@ export const PROVIDER_MODELS: Readonly<
  * real trade a home can make, and both halves of it are visible. So the cheaper
  * tiers are offered here: Sonnet 5.5 at half Opus 5.5's price and Haiku 5.5 at
  * a fortieth of it, GPT-6.1 Terra at half Sol's and GPT-6 Luna at a twentieth
- * of it — four rungs a vendor, the same ladder on both — with the dearest of
- * each vendor's above the default, Fable 5.1 and GPT-6 Astra, as recognition
- * offers them.
+ * of it — four rungs a vendor, the same ladder on both (`AGENT_RUNGS` reads it
+ * across) — with the dearest of each vendor's above the default, Fable 5.1 and
+ * GPT-6 Astra, as recognition offers them.
  *
  * **One table for both agents, and two stored columns.** It was
  * `ASSISTANT_MODELS`, and the automations agent read `ai_model` — the
@@ -410,6 +410,49 @@ export const AGENT_MODELS: Readonly<
     ],
   },
 };
+
+/**
+ * The agents' ladder read across the vendors: which model on one vendor's list
+ * stands where a model stands on the other's.
+ *
+ * **One row per rung, dearest first, and every row names every vendor.** The
+ * rung is the level somebody chose a model at — the most capable, the
+ * recommended one, the quicker one at half its price, the quickest — and it is
+ * what a failed round is offered on the other vendor (`chat/failure.ts`): a
+ * chat somebody put on GPT-6.1 Terra is answered again by Sonnet 5.5, never by
+ * Opus 5.5 a rung above it at four times Terra's price, and a question sent to
+ * Fable 5.1 is not answered again by the other vendor's everyday model.
+ *
+ * **The prices line up with the rungs, and that is checked, not hoped.** Fable
+ * and Astra, and Haiku and Luna, are the same price; Opus is twice Sol, and
+ * Sonnet twice Terra. `test/ai-model-choice.test.ts` pins that no rung pairs
+ * two models further apart than twice on either rate, and that every model an
+ * agent is offered stands on exactly one rung — so a model added to
+ * `AGENT_MODELS` is not finished until it has a row here, and a row that would
+ * send somebody to a model several times dearer fails before it ships.
+ */
+export const AGENT_RUNGS: readonly Readonly<Record<AiProvider, string>>[] = [
+  { anthropic: 'claude-fable-5-1', openai: 'gpt-6-astra' },
+  { anthropic: 'claude-opus-5-5', openai: 'gpt-6.1-sol' },
+  { anthropic: 'claude-sonnet-5-5', openai: 'gpt-6.1-terra' },
+  { anthropic: 'claude-haiku-5-5', openai: 'gpt-6-luna' },
+];
+
+/**
+ * The model on `to`'s agent list that stands on the rung `model` stands on.
+ *
+ * A model no longer offered is read as the one that succeeded it — the rung is
+ * a fact about where somebody chose to be, and succession keeps a tier its
+ * tier — and an id that walks to nothing on offer (one this build never knew)
+ * answers `to`'s default, which is what was offered before there were rungs.
+ */
+export function agentCounterpart(model: string, to: AiProvider): string {
+  const from = knownProviderOf(model);
+  if (from === null) return AGENT_MODELS[to].default;
+  const offered = onOffer(from, model, AGENT_MODELS[from].choices);
+  const rung = AGENT_RUNGS.find((row) => row[from] === offered);
+  return rung?.[to] ?? AGENT_MODELS[to].default;
+}
 
 /**
  * What names a conversation, per vendor: the cheapest model each offers.
