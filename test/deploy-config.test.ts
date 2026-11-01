@@ -148,6 +148,50 @@ describe('deploy/install.sh', () => {
   });
 
   /**
+   * **A hub's broker has to start where AppArmor confines mosquitto.**
+   *
+   * AppArmor's own profile for `/usr/sbin/mosquitto`, which Ubuntu 26.04's
+   * `apparmor` package ships as `/etc/apparmor.d/mosquitto`, lets the broker
+   * read its configuration only under `/etc/mosquitto`: a file directly in it,
+   * or anything in `conf.d/`, `certs/` or `ca_certificates/`. On a machine
+   * that loads the profile, a password file or an ACL anywhere else is a broker
+   * that will not start — port 1883 closed, Zigbee and every MQTT device gone,
+   * on a hub that installed perfectly. Running a broker cannot catch that here,
+   * because CI unloads the profile so that `deploy-mqtt-acl.test.ts` can start
+   * one from a temporary directory, so the paths are read off the installer.
+   */
+  it('keeps every file the broker reads where AppArmor lets mosquitto read it', () => {
+    const variables = new Map(
+      [...installer.matchAll(/^(MQTT_\w+_FILE)="([^"$]+)"$/gm)].map(([, name, value]) => [name!, value!]),
+    );
+    const resolve = (raw: string): string =>
+      raw.replace(/^"|"$/g, '').replace(/\$\{?(\w+)\}?/g, (whole, name: string) => variables.get(name) ?? whole);
+
+    // What the installer writes for the broker, and what the broker is told to open.
+    const written = [...installer.matchAll(/tee\s+(\S+)\s+>\/dev\/null\s+<<'?MOSQ\w*'?$/gm)].map(([, target]) =>
+      resolve(target!),
+    );
+    const directives = /^\s*(password_file|acl_file|psk_file|include_dir|cafile|capath|certfile|keyfile|crlfile)\s+(\S+)/gm;
+    const opened = ['MOSQ', 'MOSQ_OPEN'].flatMap((delimiter) =>
+      [...heredoc(delimiter).matchAll(directives)].map(([, directive, file]) => ({
+        directive: directive!,
+        file: resolve(file!),
+      })),
+    );
+    // Found at all, or this would pass on an installer it can no longer read.
+    expect(written.length, 'no broker file written from a <<MOSQ… heredoc').toBeGreaterThanOrEqual(3);
+    expect(opened.map((entry) => entry.directive)).toEqual(expect.arrayContaining(['password_file', 'acl_file']));
+
+    const readable = (file: string): boolean =>
+      /^\/etc\/mosquitto\/[^/]+$/.test(file) || /^\/etc\/mosquitto\/(conf\.d|certs|ca_certificates)(\/|$)/.test(file);
+    for (const file of [...written, ...opened.map((entry) => entry.file)]) {
+      expect(readable(file), `mosquitto confined by AppArmor cannot read ${file}: keep it under /etc/mosquitto`).toBe(
+        true,
+      );
+    }
+  });
+
+  /**
    * **Never lock the hub out of its own broker.**
    *
    * Turning authentication on is three files that all have to land: the
