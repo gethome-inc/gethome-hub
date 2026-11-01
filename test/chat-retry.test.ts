@@ -295,7 +295,7 @@ describe('a round that could not be answered', () => {
     });
   }
 
-  it('offers a chat on the cheaper rung the other vendor’s cheaper rung, and answers on it', async () => {
+  it('offers a chat on the cheaper tier the other vendor’s cheaper tier, and answers on it', async () => {
     failures.set('gpt-6.1-terra', new AiUnavailableError('billing', '402 {"error":{"message":"No credits remaining."}}'));
     const started = await post('/api/v1/assistant/chat', { message: 'do we have other lights?', model: 'gpt-6.1-terra' });
     await idle();
@@ -711,7 +711,7 @@ describe('the words on a failure', () => {
     });
   });
 
-  it('offers the other vendor’s model on the failed one’s rung, and only when it can run', () => {
+  it('offers the other vendor’s model on the failed one’s tier, and only when it can run', () => {
     expect(switchOffer('openai', 'gpt-6.1-sol', usable)).toEqual({
       model: 'claude-opus-5-5',
       label: 'Opus 5.5',
@@ -722,7 +722,7 @@ describe('the words on a failure', () => {
       label: 'GPT-6.1 Sol',
       provider: 'openai',
     });
-    // The quicker, cheaper rung is answered on the quicker, cheaper rung —
+    // The quicker, cheaper tier is answered on the quicker, cheaper tier —
     // never by the other vendor's default at four times the price.
     expect(switchOffer('openai', 'gpt-6.1-terra', usable)).toEqual({
       model: 'claude-sonnet-5-5',
@@ -737,7 +737,7 @@ describe('the words on a failure', () => {
     // A retired model is read as the one that replaced it, which keeps its tier.
     expect(switchOffer('openai', 'gpt-5.6-terra', usable)).toMatchObject({ model: 'claude-sonnet-5-5' });
     expect(switchOffer('anthropic', 'claude-sonnet-4-6', usable)).toMatchObject({ model: 'gpt-6.1-terra' });
-    // One this build never knew has no rung: the other vendor's default.
+    // One this build never knew has no tier: the other vendor's default.
     expect(switchOffer('openai', 'gpt-7-nova', usable)).toMatchObject({ model: 'claude-opus-5-5' });
     // Nothing the home cannot run, and nothing for a vendor this build has no other for.
     expect(switchOffer('anthropic', 'claude-sonnet-5-5', { anthropic: true, openai: false })).toBeUndefined();

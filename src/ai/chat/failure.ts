@@ -56,7 +56,7 @@ export interface ChatFailureWire {
   messageId?: string;
 }
 
-/** `data.switchTo` on a note: the other vendor's model on the failed one's rung, offered by name. */
+/** `data.switchTo` on a note: the other vendor's model on the failed one's tier, offered by name. */
 export interface ChatSwitchWire {
   model: string;
   /** What a person sees — the hub's own label, as the model lists carry it. */
@@ -122,7 +122,7 @@ export function failureSentence(
 }
 
 /**
- * The other vendor's model on the rung the failed one was on, when this home
+ * The other vendor's model on the tier the failed one was on, when this home
  * can run it.
  *
  * **Always the other vendor**, never another model of the same one: a billing,
@@ -130,8 +130,8 @@ export function failureSentence(
  * account meets it too — and a refusal is the one case a different vendor's
  * model may genuinely answer differently.
  *
- * **And the same rung** (`agentCounterpart`), because somebody who put a chat
- * on the quicker, cheaper model chose the rung as much as the vendor, and the
+ * **And the same tier** (`agentCounterpart`), because somebody who put a chat
+ * on the quicker, cheaper model chose the tier as much as the vendor, and the
  * button that answers for it must not quietly spend four times as much — nor
  * answer a question sent to the most capable model with the other vendor's
  * everyday one. GPT-6.1 Terra is answered again by
@@ -147,7 +147,7 @@ export function switchOffer(provider: string, model: string, usable: UsableProvi
   return { model: offered, label: modelLabel(other, offered), provider: other };
 }
 
-/** A failure note's payload: what failed, and the other vendor's model on its rung if it can answer. */
+/** A failure note's payload: what failed, and the other vendor's model on its tier if it can answer. */
 export function failureNote(
   provider: string,
   model: string,
