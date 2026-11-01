@@ -148,7 +148,28 @@ interface KnownModel {
   /** It reads images. Written on the row, beside the price, because it is the
    *  same kind of fact — what the vendor's model is, not what a surface offers. */
   readonly images?: boolean;
+  /**
+   * Where it stands in its vendor's line-up (`AgentTier`). Written on the row
+   * for the reason `images` is, and required of every model an agent is
+   * offered (`test/ai-model-choice.test.ts`), because it is what a failed
+   * round is offered on the other vendor (`agentCounterpart`).
+   */
+  readonly tier?: AgentTier;
 }
+
+/**
+ * The level a model stands at in its vendor's line-up, dearest first: the most
+ * capable, the everyday one each vendor recommends, the quicker one at about
+ * half that price, and the quickest and cheapest. One vocabulary for every
+ * vendor, so a model on one vendor's list can be read across to the other's.
+ *
+ * **A tier is the vendor's rung, not a price band**: Opus 5.5 and GPT-6.1 Sol
+ * are both `main` though Opus costs twice as much, because each is the model
+ * its vendor recommends for this kind of work. The price is the tie-break
+ * within a tier, never the other way round.
+ */
+export const AGENT_TIERS = ['top', 'main', 'quick', 'lite'] as const;
+export type AgentTier = (typeof AGENT_TIERS)[number];
 
 /**
  * Every model the hub has ever run or accepted, per vendor.
@@ -173,6 +194,7 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
       label: 'Fable 5.1',
       price: { inputPerMTok: 10, outputPerMTok: 50, cacheReadMultiplier: 0.025 },
       images: true,
+      tier: 'top',
     },
     'claude-opus-5-5': {
       label: 'Opus 5.5',
@@ -180,6 +202,7 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
       // before it billed a tenth.
       price: { inputPerMTok: 4, outputPerMTok: 20, cacheReadMultiplier: 0.05 },
       images: true,
+      tier: 'main',
     },
     'claude-opus-5': {
       label: 'Opus 5',
@@ -207,6 +230,7 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
       label: 'Sonnet 5.5',
       price: { inputPerMTok: 2, outputPerMTok: 10, cacheReadMultiplier: 0.05 },
       images: true,
+      tier: 'quick',
     },
     'claude-sonnet-5': {
       label: 'Sonnet 5',
@@ -230,6 +254,7 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
         longPrompt: { aboveTokens: 100_000, inputMultiplier: 5, outputMultiplier: 5 },
       },
       images: true,
+      tier: 'lite',
     },
   },
   openai: {
@@ -237,6 +262,7 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
       label: 'GPT-6 Astra',
       price: { inputPerMTok: 10, outputPerMTok: 50, longPrompt: GPT_6_LONG_PROMPT },
       images: true,
+      tier: 'top',
     },
     // GPT-6 Sol's price, with a cached read at a twentieth ($0.10) where GPT-6
     // Sol reads at the usual tenth. It takes the same requests: the Responses
@@ -247,6 +273,7 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
       label: 'GPT-6.1 Sol',
       price: { inputPerMTok: 2, outputPerMTok: 10, cacheReadMultiplier: 0.05, longPrompt: GPT_6_LONG_PROMPT },
       images: true,
+      tier: 'main',
     },
     // Half GPT-6.1 Sol's price, with the same twentieth for a cached read
     // ($0.05), and OpenAI's quicker tier — about three times Sol's speed, by
@@ -259,6 +286,7 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
       label: 'GPT-6.1 Terra',
       price: { inputPerMTok: 1, outputPerMTok: 5, cacheReadMultiplier: 0.05, longPrompt: GPT_6_LONG_PROMPT },
       images: true,
+      tier: 'quick',
     },
     // Still served, and replaced in the picker the way Opus 5 was: GPT-6.1 Sol
     // is the same price and stronger, so nothing a home chose is lost by moving.
@@ -271,6 +299,7 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
       label: 'GPT-6 Luna',
       price: { inputPerMTok: 0.1, outputPerMTok: 0.5, longPrompt: GPT_6_LONG_PROMPT },
       images: true,
+      tier: 'lite',
     },
     // GPT-5.6 was Sol, Terra and Luna; GPT-6 was Astra, Sol and Luna, with no
     // Terra, and GPT-6 Sol was both cheaper than 5.6 Terra ($2/$12) and
@@ -375,9 +404,9 @@ export const PROVIDER_MODELS: Readonly<
  * real trade a home can make, and both halves of it are visible. So the cheaper
  * tiers are offered here: Sonnet 5.5 at half Opus 5.5's price and Haiku 5.5 at
  * a fortieth of it, GPT-6.1 Terra at half Sol's and GPT-6 Luna at a twentieth
- * of it — four rungs a vendor, the same ladder on both — with the dearest of
- * each vendor's above the default, Fable 5.1 and GPT-6 Astra, as recognition
- * offers them.
+ * of it — four rungs a vendor, the same ladder on both (`AgentTier`, which
+ * `agentCounterpart` reads across) — with the dearest of each vendor's above
+ * the default, Fable 5.1 and GPT-6 Astra, as recognition offers them.
  *
  * **One table for both agents, and two stored columns.** It was
  * `ASSISTANT_MODELS`, and the automations agent read `ai_model` — the
@@ -410,6 +439,103 @@ export const AGENT_MODELS: Readonly<
     ],
   },
 };
+
+/**
+ * The model on `to`'s agent list that stands where `model` stands in its own
+ * vendor's: the same tier, and among several there the nearest in price.
+ *
+ * It is what a failed round is offered on the other vendor (`chat/failure.ts`):
+ * a chat somebody put on GPT-6.1 Terra is answered again by Sonnet 5.5, never
+ * by Opus 5.5 a tier above it at four times Terra's price, and a question sent
+ * to Fable 5.1 is not answered again by the other vendor's everyday model.
+ *
+ * **Written so that a new model needs nothing here.** The tier is on the
+ * model's own row in `MODELS`, so adding Opus 6 is its row and its line in
+ * `AGENT_MODELS`, as it always was, and retiring Opus 5.5 is its `successor`
+ * — a model no longer offered is read as the one that replaced it, which keeps
+ * its tier. Two models offered on one tier while a vendor moves between them
+ * are both candidates, and the nearer in price is chosen; a tier one vendor has
+ * and the other does not is answered from the nearest tier the other has. The
+ * vendor's default is the answer only for a model that cannot be placed at all
+ * — an id this build never knew — which is what was offered before tiers.
+ */
+export function agentCounterpart(model: string, to: AiProvider): string {
+  const from = knownProviderOf(model);
+  const offered = from === null ? null : onOffer(from, model, AGENT_MODELS[from].choices);
+  const tier = offered === null ? undefined : agentTier(offered);
+  if (offered === null || tier === undefined) return AGENT_MODELS[to].default;
+  const candidates = AGENT_MODELS[to].choices.map((choice) => ({
+    id: choice.id,
+    tier: agentTier(choice.id),
+    rate: blendedRate(choice.id),
+    recommended: choice.recommended === true,
+  }));
+  return closestOnLadder({ tier, rate: blendedRate(offered) }, candidates) ?? AGENT_MODELS[to].default;
+}
+
+/** The tier a model's row places it on, or nothing for a model with none. */
+export function agentTier(model: string): AgentTier | undefined {
+  const provider = knownProviderOf(model);
+  return provider === null ? undefined : knownModel(provider, model)?.tier;
+}
+
+/** One model on the other vendor's list, as `closestOnLadder` weighs it. */
+export interface LadderCandidate {
+  readonly id: string;
+  /** Absent for a model nobody has placed — it is never chosen. */
+  readonly tier: AgentTier | undefined;
+  /** What it costs, as one number (`blendedRate`); only ratios are compared. */
+  readonly rate: number;
+  readonly recommended: boolean;
+}
+
+/**
+ * The candidate nearest to a model at `tier` costing `rate`: the nearest tier
+ * first, then the nearest price (as a ratio, either way), then the one its
+ * vendor recommends, then the order its list gives.
+ *
+ * Exported apart from `agentCounterpart` so the suites can hand it the
+ * line-ups that do not exist yet — two models on one tier, a tier one vendor
+ * lacks — which the real table cannot be made to hold.
+ */
+export function closestOnLadder(
+  failed: { readonly tier: AgentTier; readonly rate: number },
+  candidates: readonly LadderCandidate[],
+): string | undefined {
+  const at = AGENT_TIERS.indexOf(failed.tier);
+  let best: { id: string; key: readonly number[] } | undefined;
+  for (const [order, candidate] of candidates.entries()) {
+    if (candidate.tier === undefined) continue;
+    const key = [
+      Math.abs(AGENT_TIERS.indexOf(candidate.tier) - at),
+      Math.abs(Math.log(candidate.rate / failed.rate)),
+      candidate.recommended ? 0 : 1,
+      order,
+    ];
+    if (best === undefined || before(key, best.key)) best = { id: candidate.id, key };
+  }
+  return best?.id;
+}
+
+/** Whether one sort key comes before another, field by field. */
+function before(a: readonly number[], b: readonly number[]): boolean {
+  for (const [index, value] of a.entries()) {
+    const other = b[index]!;
+    // A rounding hair is not a difference in price.
+    if (Math.abs(value - other) > 1e-9) return value < other;
+  }
+  return false;
+}
+
+/**
+ * A model's price as one number, for comparing two models with: a million
+ * tokens in and a million out at list rates. Input and output move together
+ * across both vendors' line-ups, so one sum orders them as either rate would.
+ */
+function blendedRate(model: string): number {
+  const price = priceOf(model);
+  return price.inputPerMTok + price.outputPerMTok;
+}
 
 /**
  * What names a conversation, per vendor: the cheapest model each offers.

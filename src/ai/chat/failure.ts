@@ -1,6 +1,6 @@
 import type { AiProvider } from '../../core/settings.js';
 import { AiUnavailableError, readableFailure, type AiFailureKind } from '../errors.js';
-import { AGENT_MODELS, modelLabel, type UsableProviders } from '../models.js';
+import { agentCounterpart, modelLabel, type UsableProviders } from '../models.js';
 
 /**
  * A round that could not be answered, said in words somebody can act on — and,
@@ -56,7 +56,7 @@ export interface ChatFailureWire {
   messageId?: string;
 }
 
-/** `data.switchTo` on a note: the other vendor's model, offered by name. */
+/** `data.switchTo` on a note: the other vendor's model on the failed one's tier, offered by name. */
 export interface ChatSwitchWire {
   model: string;
   /** What a person sees — the hub's own label, as the model lists carry it. */
@@ -122,24 +122,32 @@ export function failureSentence(
 }
 
 /**
- * The other vendor's model, when this home can run it.
+ * The other vendor's model on the tier the failed one was on, when this home
+ * can run it.
  *
  * **Always the other vendor**, never another model of the same one: a billing,
  * key or capacity problem is the vendor's, so a cheaper model on the same
  * account meets it too — and a refusal is the one case a different vendor's
- * model may genuinely answer differently. Its default, because the offer is
- * one button rather than a list, and that vendor's recommended model is the
- * one this hub would have chosen for a home that had only that key.
+ * model may genuinely answer differently.
+ *
+ * **And the same tier** (`agentCounterpart`), because somebody who put a chat
+ * on the quicker, cheaper model chose the tier as much as the vendor, and the
+ * button that answers for it must not quietly spend four times as much — nor
+ * answer a question sent to the most capable model with the other vendor's
+ * everyday one. GPT-6.1 Terra is answered again by
+ * Sonnet 5.5, Haiku 5.5 by GPT-6 Luna, Opus 5.5 by GPT-6.1 Sol. It was the
+ * other vendor's default whatever had failed, which offered Opus 5.5 to a chat
+ * on Terra.
  */
-export function switchOffer(provider: string, usable: UsableProviders): ChatSwitchWire | undefined {
+export function switchOffer(provider: string, model: string, usable: UsableProviders): ChatSwitchWire | undefined {
   const other: AiProvider | undefined =
     provider === 'anthropic' ? 'openai' : provider === 'openai' ? 'anthropic' : undefined;
   if (other === undefined || !usable[other]) return undefined;
-  const model = AGENT_MODELS[other].default;
-  return { model, label: modelLabel(other, model), provider: other };
+  const offered = agentCounterpart(model, other);
+  return { model: offered, label: modelLabel(other, offered), provider: other };
 }
 
-/** A failure note's payload: what failed, and the other vendor if it can answer. */
+/** A failure note's payload: what failed, and the other vendor's model on its tier if it can answer. */
 export function failureNote(
   provider: string,
   model: string,
@@ -149,7 +157,7 @@ export function failureNote(
   /** The person's message the failed round was answering — see `messageId`. */
   messageId?: string,
 ): ChatFailureNote {
-  const offer = usable === undefined ? undefined : switchOffer(provider, usable);
+  const offer = usable === undefined ? undefined : switchOffer(provider, model, usable);
   return {
     text,
     data: {

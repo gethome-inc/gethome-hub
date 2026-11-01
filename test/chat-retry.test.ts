@@ -295,6 +295,30 @@ describe('a round that could not be answered', () => {
     });
   }
 
+  it('offers a chat on the cheaper tier the other vendor’s cheaper tier, and answers on it', async () => {
+    failures.set('gpt-6.1-terra', new AiUnavailableError('billing', '402 {"error":{"message":"No credits remaining."}}'));
+    const started = await post('/api/v1/assistant/chat', { message: 'do we have other lights?', model: 'gpt-6.1-terra' });
+    await idle();
+    const { sessionId } = started.json() as { sessionId: string };
+    const rows = await read('assistant', sessionId);
+    expect(rows[1]).toMatchObject({
+      role: 'note',
+      text: 'GPT-6.1 Terra couldn’t answer: this home’s OpenAI account is out of credit.',
+      data: {
+        failure: { provider: 'openai', model: 'gpt-6.1-terra', kind: 'billing' },
+        switchTo: { model: 'claude-sonnet-5-5', label: 'Sonnet 5.5', provider: 'anthropic' },
+      },
+    });
+
+    const retried = await post(`/api/v1/assistant/chat/${sessionId}/retry`, { model: 'claude-sonnet-5-5' });
+    expect(retried.statusCode).toBe(202);
+    await idle();
+    expect((await read('assistant', sessionId)).at(-1)).toMatchObject({
+      role: 'agent',
+      text: 'claude-sonnet-5-5 answered.',
+    });
+  });
+
   it('carries on on the model it was answered on, after the hub has forgotten the conversation', async () => {
     const sessionId = await failedOnOpenAi('assistant');
     await post(`/api/v1/assistant/chat/${sessionId}/retry`, { model: 'claude-opus-5-5' });
@@ -687,11 +711,37 @@ describe('the words on a failure', () => {
     });
   });
 
-  it('offers the other vendor’s default, and only when it can run', () => {
-    expect(switchOffer('openai', usable)).toEqual({ model: 'claude-opus-5-5', label: 'Opus 5.5', provider: 'anthropic' });
-    expect(switchOffer('anthropic', usable)).toEqual({ model: 'gpt-6.1-sol', label: 'GPT-6.1 Sol', provider: 'openai' });
-    expect(switchOffer('anthropic', { anthropic: true, openai: false })).toBeUndefined();
-    expect(switchOffer('someone-else', usable)).toBeUndefined();
+  it('offers the other vendor’s model on the failed one’s tier, and only when it can run', () => {
+    expect(switchOffer('openai', 'gpt-6.1-sol', usable)).toEqual({
+      model: 'claude-opus-5-5',
+      label: 'Opus 5.5',
+      provider: 'anthropic',
+    });
+    expect(switchOffer('anthropic', 'claude-opus-5-5', usable)).toEqual({
+      model: 'gpt-6.1-sol',
+      label: 'GPT-6.1 Sol',
+      provider: 'openai',
+    });
+    // The quicker, cheaper tier is answered on the quicker, cheaper tier —
+    // never by the other vendor's default at four times the price.
+    expect(switchOffer('openai', 'gpt-6.1-terra', usable)).toEqual({
+      model: 'claude-sonnet-5-5',
+      label: 'Sonnet 5.5',
+      provider: 'anthropic',
+    });
+    expect(switchOffer('anthropic', 'claude-sonnet-5-5', usable)).toMatchObject({ model: 'gpt-6.1-terra' });
+    expect(switchOffer('openai', 'gpt-6-luna', usable)).toMatchObject({ model: 'claude-haiku-5-5' });
+    expect(switchOffer('anthropic', 'claude-haiku-5-5', usable)).toMatchObject({ model: 'gpt-6-luna' });
+    expect(switchOffer('openai', 'gpt-6-astra', usable)).toMatchObject({ model: 'claude-fable-5-1' });
+    expect(switchOffer('anthropic', 'claude-fable-5-1', usable)).toMatchObject({ model: 'gpt-6-astra' });
+    // A retired model is read as the one that replaced it, which keeps its tier.
+    expect(switchOffer('openai', 'gpt-5.6-terra', usable)).toMatchObject({ model: 'claude-sonnet-5-5' });
+    expect(switchOffer('anthropic', 'claude-sonnet-4-6', usable)).toMatchObject({ model: 'gpt-6.1-terra' });
+    // One this build never knew has no tier: the other vendor's default.
+    expect(switchOffer('openai', 'gpt-7-nova', usable)).toMatchObject({ model: 'claude-opus-5-5' });
+    // Nothing the home cannot run, and nothing for a vendor this build has no other for.
+    expect(switchOffer('anthropic', 'claude-sonnet-5-5', { anthropic: true, openai: false })).toBeUndefined();
+    expect(switchOffer('someone-else', 'gpt-6.1-sol', usable)).toBeUndefined();
   });
 
   it('says asking again may work only where it may', () => {

@@ -1175,7 +1175,13 @@ domains — update them in the same change.
   **A failed round's note says which model failed and why, and offers the
   other vendor's** (`chat/failure.ts`: `failure` — provider, model, an open
   `kind`, `transient` where asking the same model again may work — and
-  `switchTo`, the other vendor's default where this home holds its key; the
+  `switchTo`, the other vendor's model **on the failed one's tier** where this
+  home holds its key (`agentCounterpart` in `models.ts`: Terra is answered by
+  Sonnet, never by Opus at four times its price). The tier is a field on the
+  model's own `MODELS` row, so a new model needs only its row and its offer;
+  two on one tier go to the nearer price, a tier the other vendor lacks to the
+  nearest one, and the suite refuses an agent model with no tier or an offer
+  more than three times dearer or cheaper than the model that failed; the
   sentence is written for somebody whose account ran out of credit, never the
   provider's status and JSON). A refusal is one of these and a cost cap or the
   round limit is not. **`retry()` answers a failed message again**
