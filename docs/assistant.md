@@ -1017,9 +1017,11 @@ another model still finds them.
 **A note that ends a failed round says which model failed and why, and offers
 the other vendor's** (`chat/failure.ts`): *GPT-6.1 Sol couldn't answer: this
 home's OpenAI account is out of credit.*, with `data.failure` naming the model
-and the kind, and `data.switchTo` the other vendor's default model where this
-home has that key. It used to be the provider's status and JSON relayed, in a
-home with a perfectly good key from the other vendor beside it. An app can
+and the kind, and `data.switchTo` the other vendor's model on the same tier
+where this home has that key — a chat on GPT-6.1 Terra is offered Sonnet 5.5,
+not Opus 5.5 at four times the price (`agentCounterpart`). It used to be the
+provider's status and JSON relayed, in a home with a perfectly good key from
+the other vendor beside it. An app can
 offer the switch as a doorway on the note, and pressing it is
 `POST …/chat/:id/retry`:
 the message the note names (`failure.messageId`) answered again on that model,

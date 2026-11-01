@@ -2120,11 +2120,21 @@ what can be done about it:
   which is the one a retry answers. It is not always the row just above the
   note: a message sent while the round ran is written at once, ahead of the
   note. Absent on a note written before the field was.
-- **`switchTo`** is the **other vendor's** default agent model, present only
-  when this home has that vendor's key. Always the other vendor, never another
-  model of the same one: credit, a key and capacity are the vendor's, so the
-  same account meets them again, and a refusal is the one case a different
-  vendor's model may genuinely answer differently. A turn that ran into its
+- **`switchTo`** is the **other vendor's** agent model **on the tier the
+  failed one was on** — the most capable, the recommended, the quicker one at
+  half its price, the quickest: GPT-6 Astra and Fable 5.1, GPT-6.1 Sol and
+  Opus 5.5, GPT-6.1 Terra and Sonnet 5.5, GPT-6 Luna and Haiku 5.5, each
+  offered for the other — so a chat put on the cheaper model is not answered
+  again at four times its price. Where the other vendor offers two models on
+  that tier the nearer in price is offered, and where it offers none the
+  nearest tier's; a retired model is read as the one that replaced it, and an
+  id this hub never knew gets the other vendor's default. Which model it is
+  may change with any hub build, as models come and go: read it, never infer
+  it.
+  Present only when this home has that vendor's key. Always the other vendor,
+  never another model of the same one: credit, a key and capacity are the
+  vendor's, so the same account meets them again, and a refusal is the one
+  case a different vendor's model may genuinely answer differently. A turn that ran into its
   cost cap or out of rounds writes a note without `failure` — another model is
   not the answer to either.
 - **A declined message stays in the transcript and leaves the model's

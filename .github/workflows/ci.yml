@@ -49,6 +49,21 @@ jobs:
             -exec mv -t /etc/apt/sources.list.d.off {} +
           sudo apt-get update -qq "${apt_opts[@]}"
           sudo apt-get install -y -qq "${apt_opts[@]}" mosquitto
+          # Ubuntu 26.04's `apparmor` package confines /usr/sbin/mosquitto to
+          # configuration under /etc/mosquitto (/etc/apparmor.d/mosquitto).
+          # `test/deploy-mqtt-acl.test.ts` starts a broker of its own on the
+          # files `install.sh` writes, from a temporary directory, so under
+          # that profile its broker exits before it listens — which is how
+          # every run went red when the runner image moved to 26.04. The
+          # profile is unloaded here rather than worked around in the suite:
+          # a hub already meets it (`install.sh` keeps every mosquitto file
+          # under /etc/mosquitto), and a runner is not a hub. `|| true`
+          # because an image with no such profile loaded has nothing to
+          # unload, and the suite says so plainly if its broker still cannot
+          # start.
+          if [ -e /etc/apparmor.d/mosquitto ]; then
+            sudo apparmor_parser -R /etc/apparmor.d/mosquitto || true
+          fi
           printf 'listener 1883\nallow_anonymous true\n' | sudo tee /etc/mosquitto/conf.d/ci.conf >/dev/null
           sudo systemctl restart mosquitto
       - uses: actions/setup-node@v7
