@@ -217,6 +217,23 @@ export function assistantTools(
 // ── Running them ─────────────────────────────────────────────────────────────
 
 /**
+ * Whether a device runs on a battery — the one kind a command can wait on,
+ * queued by the protocol until the device next wakes. Asked of what the device
+ * declares or reports on any endpoint, never guessed from its kind: a battery
+ * capability, or a battery reading.
+ */
+function runsOnBattery(
+  device: AutomationHomeView['devices'][number],
+  stateOf: AssistantToolContext['stateOf'],
+): boolean {
+  return device.endpoints.some(
+    (endpoint) =>
+      endpoint.capabilities.includes('battery') ||
+      stateOf(device.id, endpoint.endpointId)?.battery !== undefined,
+  );
+}
+
+/**
  * Answer a tool call.
  *
  * Never throws, for the reason `runAutomationTool` never does: a tool that
@@ -294,7 +311,13 @@ export async function runAssistantTool(
         budget.perDevice.set(device.id, sent + 1);
         return {
           detail: `${device.name}: ${parsed.data.command.type}`,
-          text: `Sent. Note that reaching a battery device can take until it next wakes.`,
+          // **The wait is said only of a device that has one.** On every
+          // command it was passed on about whatever had just switched — "a
+          // mains outlet, not a battery device" after a plug came on — and the
+          // system prompt already says what a sleeping device means.
+          text: runsOnBattery(device, context.stateOf)
+            ? 'Sent. It runs on a battery, so it may not act on this until it next wakes.'
+            : 'Sent.',
         };
       }
 

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import pino from 'pino';
 import { createOpenAiTransport } from '../src/ai/chat/openai-transport.js';
 import { QuestionGate, type ChatTransportOptions } from '../src/ai/chat/agent-loop.js';
+import { AiUnavailableError } from '../src/ai/errors.js';
 
 /**
  * The OpenAI half of a conversation.
@@ -19,6 +20,9 @@ import { QuestionGate, type ChatTransportOptions } from '../src/ai/chat/agent-lo
  */
 
 const log = pino({ level: 'silent' });
+/** A round's signal that nothing ever aborts — what a round runs on when no
+ *  turn is watching it. */
+const unstopped = new AbortController().signal;
 
 /** One SSE frame, exactly as the Responses stream writes it. */
 function frame(type: string, data: unknown): string {
@@ -64,7 +68,6 @@ function transportFor(): ReturnType<typeof createOpenAiTransport> {
     label: 'the assistant',
     timeoutMs: 60_000,
     effort: 'medium',
-    signal: new AbortController().signal,
     log,
   };
   return createOpenAiTransport(options);
@@ -98,10 +101,13 @@ describe('the OpenAI chat transport', () => {
     const deltas: string[] = [];
     const thinking: string[] = [];
     transport.pushUser('is the kitchen lamp on?');
-    const round = await transport.round({
-      onDelta: (delta) => deltas.push(delta),
-      onThinking: (delta) => thinking.push(delta),
-    });
+    const round = await transport.round(
+      {
+        onDelta: (delta) => deltas.push(delta),
+        onThinking: (delta) => thinking.push(delta),
+      },
+      unstopped,
+    );
 
     expect(deltas.join('')).toBe('The lamp is on.');
     expect(thinking.join('')).toBe('Checking the kitchen');
@@ -132,7 +138,7 @@ describe('the OpenAI chat transport', () => {
     const transport = transportFor();
     const thinking: string[] = [];
     transport.pushUser('turn the light on');
-    await transport.round({ onThinking: (delta) => thinking.push(delta) });
+    await transport.round({ onThinking: (delta) => thinking.push(delta) }, unstopped);
 
     expect(thinking.join('')).toBe(
       '**Clarifying the light**\n\nTwo lamps match. The TV one is on.' +
@@ -149,7 +155,7 @@ describe('the OpenAI chat transport', () => {
     );
     const transport = transportFor();
     transport.pushUser('hello');
-    await transport.round(undefined);
+    await transport.round(undefined, unstopped);
 
     const body = sentBody();
     // Without `stream` there are no deltas and the page shows three dots for
@@ -191,7 +197,7 @@ describe('the OpenAI chat transport', () => {
 
     const transport = transportFor();
     transport.pushUser('what is in the kitchen?');
-    const round = await transport.round(undefined);
+    const round = await transport.round(undefined, unstopped);
 
     // Arguments arrive as a JSON *string* on this API. A caller handed the
     // string would `safeParse` it and refuse every call it ever made.
@@ -201,7 +207,7 @@ describe('the OpenAI chat transport', () => {
     expect(round.stop).toBe('tools');
 
     transport.pushToolResults([{ id: 'call_1', text: 'one lamp' }]);
-    await transport.round(undefined);
+    await transport.round(undefined, unstopped);
     const input = sentBody()['input'] as Record<string, unknown>[];
     expect(input.at(-1)).toEqual({
       type: 'function_call_output',
@@ -219,7 +225,7 @@ describe('the OpenAI chat transport', () => {
     );
     const transport = transportFor();
     transport.pushToolResults([{ id: 'call_1', text: 'no such device.', isError: true }]);
-    await transport.round(undefined);
+    await transport.round(undefined, unstopped);
 
     const input = sentBody()['input'] as Record<string, unknown>[];
     expect(input.at(-1)).toMatchObject({ output: 'That failed. no such device.' });
@@ -253,7 +259,7 @@ describe('the OpenAI chat transport', () => {
     const transport = transportFor();
     const gate = new QuestionGate(transport);
     transport.pushUser('something');
-    await transport.round(undefined);
+    await transport.round(undefined, unstopped);
     gate.open('asked');
 
     // The round threw before its results were written — the case that refuses
@@ -261,7 +267,7 @@ describe('the OpenAI chat transport', () => {
     // find.
     gate.settleDangling();
 
-    await transport.round(undefined);
+    await transport.round(undefined, unstopped);
     const input = sentBody()['input'] as Record<string, unknown>[];
     const answered = input
       .filter((item) => item['type'] === 'function_call_output')
@@ -289,7 +295,7 @@ describe('the OpenAI chat transport', () => {
     );
     const transport = transportFor();
     transport.pushUser('something');
-    const round = await transport.round(undefined);
+    const round = await transport.round(undefined, unstopped);
 
     expect(round.stop).toBe('refusal');
     expect(round.refusal).toBe('I can’t help with that.');
@@ -327,13 +333,72 @@ describe('the OpenAI chat transport', () => {
     );
     const transport = transportFor();
     transport.pushUser('what is on?');
-    const round = await transport.round({ onDelta: (delta) => said.push(delta) });
+    const round = await transport.round({ onDelta: (delta) => said.push(delta) }, unstopped);
 
     expect(round.stop).toBe('end');
     expect(round.said).toBe('The kitchen light is on, and the');
     expect(said.join('')).toBe(round.said);
     // And it is still billed for: the body carries the usage either way.
     expect(transport.costUsd()).toBeGreaterThan(0);
+  });
+
+  /**
+   * **And none of its calls run.** A function call in a reply cut off by the
+   * ceiling may have been cut off half way through its arguments, and half of
+   * a JSON object can still parse — a command with its endpoint missing — so
+   * the words are the answer, as on the other vendor
+   * (`test/chat-anthropic-stops.test.ts`), and nothing of the call reaches the
+   * history to be answered: a call with no output after it, or a reasoning item
+   * without the item it led to, is a conversation the API refuses.
+   */
+  it('runs no call from a reply the model ran out of room for', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          streamOf([
+            frame('response.output_text.delta', { delta: 'Switching the kitchen on.' }),
+            frame('response.incomplete', {
+              response: {
+                status: 'incomplete',
+                incomplete_details: { reason: 'max_output_tokens' },
+                output: [
+                  { type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'opaque' },
+                  {
+                    type: 'message',
+                    content: [{ type: 'output_text', text: 'Switching the kitchen on.' }],
+                  },
+                  {
+                    type: 'function_call',
+                    status: 'incomplete',
+                    call_id: 'call_cut',
+                    name: 'list_devices',
+                    // Whole JSON, as a cut can leave it: the optional half of
+                    // the object is what went missing.
+                    arguments: '{"roomId":"kitchen"}',
+                  },
+                ],
+                usage: { input_tokens: 40, output_tokens: 32_000 },
+              },
+            }),
+          ]),
+        ),
+      ),
+    );
+    const transport = transportFor();
+    transport.pushUser('switch the kitchen on');
+    const round = await transport.round(undefined, unstopped);
+
+    expect(round.calls).toEqual([]);
+    expect(round.stop).toBe('end');
+    expect(round.said).toBe('Switching the kitchen on.');
+
+    transport.pushUser('thanks');
+    await transport.round(undefined, unstopped);
+    const input = sentBody()['input'] as Record<string, unknown>[];
+    expect(input.filter((item) => item['type'] === 'function_call')).toEqual([]);
+    expect(input.filter((item) => item['type'] === 'reasoning')).toEqual([]);
+    expect(input).toContainEqual({ role: 'assistant', content: 'Switching the kitchen on.' });
   });
 
   it('does not read a failed or unfinished stream as an answer', async () => {
@@ -347,12 +412,12 @@ describe('the OpenAI chat transport', () => {
     );
     const transport = transportFor();
     transport.pushUser('something');
-    await expect(transport.round(undefined)).rejects.toThrow(/overloaded/);
+    await expect(transport.round(undefined, unstopped)).rejects.toThrow(/overloaded/);
 
     // A stream that simply stops is the other half: continuing from it would
     // push a half-round onto the history and refuse the conversation later.
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(streamOf([])));
-    await expect(transport.round(undefined)).rejects.toThrow(/without completing/);
+    await expect(transport.round(undefined, unstopped)).rejects.toThrow(/without completing/);
 
     // And an `incomplete` for any reason but the output ceiling is still a
     // failure, because there what was produced is not an answer at all.
@@ -366,7 +431,61 @@ describe('the OpenAI chat transport', () => {
         ]),
       ),
     );
-    await expect(transport.round(undefined)).rejects.toThrow(/content_filter/);
+    await expect(transport.round(undefined, unstopped)).rejects.toThrow(/content_filter/);
+  });
+
+  /**
+   * A refusal inside a stream that had already answered 200 has no status for
+   * `classifyApiError` to read, so it used to reach a failure note as a plain
+   * error — "OpenAI response You have no credits remaining. Add credits to…" —
+   * where the same refusal before the stream reads "out of credit".
+   */
+  it('classifies a failure inside the stream, so an empty account reads as one', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        streamOf([
+          frame('error', {
+            code: 'insufficient_quota',
+            message:
+              'You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.',
+          }),
+        ]),
+      ),
+    );
+    const transport = transportFor();
+    transport.pushUser('something');
+    const failed = await transport.round(undefined, unstopped).catch((error: unknown) => error);
+    expect(failed).toBeInstanceOf(AiUnavailableError);
+    expect((failed as AiUnavailableError).kind).toBe('billing');
+
+    // Something the classifier does not recognise is still the vendor's words.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(streamOf([frame('error', { message: 'something unexpected' })])),
+    );
+    const other = await transport.round(undefined, unstopped).catch((error: unknown) => error);
+    expect(other).not.toBeInstanceOf(AiUnavailableError);
+    expect((other as Error).message).toBe('OpenAI response something unexpected');
+  });
+
+  /**
+   * The same empty account refused before the stream, with a code and no
+   * sentence about credit: the code is what says so, and the classifier is
+   * handed it beside the message rather than the message alone.
+   */
+  it('reads an empty account from the code on a refused request', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ error: { code: 'insufficient_quota' } }), { status: 429 }),
+      ),
+    );
+    const transport = transportFor();
+    transport.pushUser('something');
+    const failed = await transport.round(undefined, unstopped).catch((error: unknown) => error);
+    expect(failed).toBeInstanceOf(AiUnavailableError);
+    expect((failed as AiUnavailableError).kind).toBe('billing');
   });
 
   it('reports the vendor’s own sentence when the request itself is refused', async () => {
@@ -380,6 +499,6 @@ describe('the OpenAI chat transport', () => {
     );
     const transport = transportFor();
     transport.pushUser('something');
-    await expect(transport.round(undefined)).rejects.toThrow(/Incorrect API key/);
+    await expect(transport.round(undefined, unstopped)).rejects.toThrow(/Incorrect API key/);
   });
 });

@@ -2,10 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { readFile, rm, statfs, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { estimateCostUsd } from '../ai/models.js';
+import { estimateCostUsd, LOCATOR_MODELS } from '../ai/models.js';
 import type { AiRunLog } from '../core/ai-runs.js';
 import type { HubEventBus } from '../core/bus.js';
-import type { AiProvider } from '../core/settings.js';
+import type { AiProvider, SettingsService } from '../core/settings.js';
 import type { Logger } from '../logging.js';
 import { drawRoomPicture, pictureCostUsd, RoomPictureDrawError, ROOM_PICTURE_MODEL, type PictureUsage } from './draw.js';
 import { LocateError, locateDevices } from './locate.js';
@@ -94,8 +94,42 @@ export interface PictureCapability {
   maxPhotos: number;
 }
 
-/** Who reads the devices off a picture — device recognition's provider and key. */
-export type Locator = () => Promise<{ provider: AiProvider; modelId: string; apiKey: string } | null>;
+/** One reader of a picture: which vendor, on which model, with which key. */
+export interface PictureReader {
+  provider: AiProvider;
+  modelId: string;
+  apiKey: string;
+}
+
+/** Who reads the devices off a picture, in the order to ask them — none when nobody can. */
+export type Locator = () => Promise<PictureReader[]>;
+
+/**
+ * The home's readers, in the order they are asked: OpenAI's middle rung, then
+ * Anthropic's (`LOCATOR_MODELS`), each on the home's own key for it.
+ *
+ * **OpenAI first, because OpenAI drew the picture.** Its key has just answered
+ * for the drawing, so it is the one most likely to answer the reading too, and
+ * the picture goes back to the vendor that already has the photos it was drawn
+ * from rather than to a second one. **Anthropic only when that fails** — no
+ * credit left, a key that may not use the model, a refusal, an answer that
+ * would not parse — and only where the home holds an Anthropic key it can use:
+ * a stored Claude subscription token reads nothing. Recognition's choice of
+ * vendor plays no part, since it is a choice about mappings. No reader at all
+ * leaves the markers to the apps and to people.
+ */
+export function homeLocator(settings: Pick<SettingsService, 'getAiSettings' | 'aiKey'>): Locator {
+  return async () => {
+    const ai = await settings.getAiSettings();
+    const readers: PictureReader[] = [];
+    for (const provider of ['openai', 'anthropic'] as const) {
+      if (provider === 'anthropic' && ai.legacySubscriptionToken) continue;
+      const apiKey = await settings.aiKey(provider);
+      if (apiKey) readers.push({ provider, modelId: LOCATOR_MODELS[provider], apiKey });
+    }
+    return readers;
+  };
+}
 
 export interface DrawInput {
   roomId: string;
@@ -321,8 +355,10 @@ export class RoomPictureService {
 
   /**
    * Reads the devices off a picture, keeping every marker a person placed.
-   * A failed reading is no reason to lose a drawing: the devices it could not
-   * place are left for the apps to put somewhere and people to move.
+   * Each reader is asked in turn until one answers (`homeLocator`), every
+   * attempt its own `ai_runs` row. A reading nobody could give is no reason to
+   * lose a drawing: the devices it could not place are left for the apps to
+   * put somewhere and people to move.
    */
   private async readMarkers(
     picture: Buffer,
@@ -333,36 +369,36 @@ export class RoomPictureService {
     const placed = keep.filter((marker) => marker.source === 'placed');
     const wanted = devices.filter((device) => !placed.some((marker) => marker.deviceId === device.id));
     if (wanted.length === 0) return placed;
-    const who = await locator();
-    if (!who) return [...placed, ...keep.filter((marker) => marker.source !== 'placed')];
-    const run = this.runs?.begin({
-      kind: 'roomlocate',
-      adapter: 'room-pictures',
-      exposesHash: '',
-      provider: who.provider,
-      modelId: who.modelId,
-    });
-    try {
-      const { located, usage } = await this.locate_({ ...who, picture, devices: wanted });
-      await run?.finish({ ok: true, costUsd: estimateCostUsd(who.modelId, usage) });
-      return [
-        ...placed,
-        ...located.map((point) => ({
-          deviceId: point.deviceId,
-          x: point.x,
-          y: point.y,
-          source: point.seen ? 'seen' : 'guessed',
-        })),
-      ];
-    } catch (error) {
-      this.log?.warn({ err: error }, 'The devices could not be read off the picture.');
-      await run?.finish({
-        ok: false,
-        ...(error instanceof LocateError ? { errorKind: error.kind } : {}),
-        ...(error instanceof Error ? { errorMessage: error.message } : {}),
+    for (const who of await locator()) {
+      const run = this.runs?.begin({
+        kind: 'roomlocate',
+        adapter: 'room-pictures',
+        exposesHash: '',
+        provider: who.provider,
+        modelId: who.modelId,
       });
-      return [...placed, ...keep.filter((marker) => marker.source !== 'placed')];
+      try {
+        const { located, usage, costUsd } = await this.locate_({ ...who, picture, devices: wanted });
+        await run?.finish({ ok: true, costUsd: costUsd ?? estimateCostUsd(who.modelId, usage) });
+        return [
+          ...placed,
+          ...located.map((point) => ({
+            deviceId: point.deviceId,
+            x: point.x,
+            y: point.y,
+            source: point.seen ? 'seen' : 'guessed',
+          })),
+        ];
+      } catch (error) {
+        this.log?.warn({ err: error, provider: who.provider }, 'The devices could not be read off the picture.');
+        await run?.finish({
+          ok: false,
+          ...(error instanceof LocateError ? { errorKind: error.kind } : {}),
+          ...(error instanceof Error ? { errorMessage: error.message } : {}),
+        });
+      }
     }
+    return [...placed, ...keep.filter((marker) => marker.source !== 'placed')];
   }
 
   /** Reads the devices off a picture again — for devices added since. */

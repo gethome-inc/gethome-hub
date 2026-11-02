@@ -164,6 +164,32 @@ export interface HubEvents {
    * `automationChat` frames, arriving on a socket that already has them.
    */
   assistantChat: [event: AutomationChatEvent];
+  /**
+   * A conversation was given its name — either agent's.
+   *
+   * **An event of its own rather than a fifth phase on the two above**, and
+   * that is not tidiness: every shipped iOS build reads a chat phase it has
+   * never met as `turn`, so a name landing in the middle of the first round
+   * would end that round on every phone that has not updated — the trail taken
+   * down, the transcript re-read, a "round over" haptic over a round that was
+   * not. A frame `type` an app has never met is dropped by every client
+   * instead, which is the fallback a name wants: the list says the first thing
+   * said until it is next read, and then says the name.
+   *
+   * On the same opt-in stream as the conversations, and narrowed per socket
+   * the same way, since a name is made of what somebody said.
+   */
+  chatTitle: [event: ChatTitleEvent];
+}
+
+/** A conversation's name, as it is settled. */
+export interface ChatTitleEvent {
+  /** Which agent — the routes' own word, `assistant` · `automations`. */
+  surface: 'assistant' | 'automations';
+  sessionId: string;
+  /** The name, which `GET /…/chats` now answers as the conversation's `title`. */
+  title: string;
+  at: string;
 }
 
 /**
@@ -211,6 +237,20 @@ export interface AutomationChatEvent {
    */
   kind?: string;
   detail?: string;
+  /**
+   * On the `delta` that begins a round's reply — the first after the last
+   * thing the round did — how long the round worked before it: the same
+   * number the round's first row will store as `data.workedMs`, worked out
+   * here at the same instant.
+   *
+   * **It is sent because the frames cannot say it.** The round's clock starts
+   * when its turn begins, and its first frame goes out only once the agent is
+   * ready to ask the model — seconds later on a first message, on a small
+   * board — so a client timing the wait between frames counted short of the
+   * stored number and changed its mind when the row landed. Absent on every
+   * other frame, and from a hub older than it.
+   */
+  workedMs?: number;
 }
 
 /** One firing, as it happens. The stored trace is `automation_runs`. */

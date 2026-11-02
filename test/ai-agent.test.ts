@@ -3,7 +3,7 @@ import type { Logger } from '../src/logging.js';
 import type { MappingDescriptor } from '../src/ai/descriptor.js';
 import type { Z2mDevice } from '../src/adapters/zigbee/exposes-mapper.js';
 import { mapExposes } from '../src/adapters/zigbee/exposes-mapper.js';
-import { classifyAgentFailure, classifyApiError, parseResetHint } from '../src/ai/errors.js';
+import { classifyAgentFailure, classifyApiError, errorCodeIn, parseResetHint } from '../src/ai/errors.js';
 import { buildMappingUserPrompt, zigbee2mqttDevicePage } from '../src/ai/prompts.js';
 import {
   DEFAULT_MODEL,
@@ -45,6 +45,9 @@ vi.mock('@anthropic-ai/sdk', () => ({
       },
       stream: (params: unknown) => ({ finalMessage: async () => createMock(params) }),
     };
+    // The loops talk to `client.beta.messages` (server-side fallbacks), which
+    // is the same endpoint; the mock answers there with the same functions.
+    beta = { messages: this.messages };
   },
 }));
 
@@ -76,6 +79,28 @@ describe('classifyAgentFailure', () => {
     expect(classifyAgentFailure('fetch failed: getaddrinfo ENOTFOUND api.anthropic.com')?.kind).toBe('network');
   });
 
+  it('reads OpenAI’s ways of saying an account is out of credit as billing, not a rate limit', () => {
+    // The prepaid wording, the older quota wording and the code both carry —
+    // each arrives as a 429 or inside a stream, and "try again in a minute"
+    // is a button that can only fail again on an empty account.
+    expect(
+      classifyAgentFailure(
+        'You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.',
+      )?.kind,
+    ).toBe('billing');
+    expect(
+      classifyAgentFailure('429 You exceeded your current quota, please check your plan and billing details.')?.kind,
+    ).toBe('billing');
+    expect(classifyAgentFailure('insufficient_quota: the account is out of funds')?.kind).toBe('billing');
+    // A free-tier rate limit names the billing page too, and it really is a
+    // speed bump — saying "rate limit" is what keeps it one.
+    expect(
+      classifyAgentFailure(
+        'Rate limit reached for gpt-6.1-terra on requests per min. Visit https://platform.openai.com/account/billing to add a payment method.',
+      )?.kind,
+    ).toBe('rate_limited');
+  });
+
   it('returns null for text that is not an availability problem', () => {
     expect(classifyAgentFailure('the descriptor was missing an endpoint')).toBeNull();
     expect(classifyAgentFailure('error_max_turns')).toBeNull();
@@ -93,6 +118,66 @@ describe('classifyApiError', () => {
     expect(classifyApiError({ status: 402, message: 'request failed' }, now)?.kind).toBe('billing');
     expect(classifyApiError({ status: 529, message: 'request failed' }, now)?.kind).toBe('overloaded');
     expect(classifyApiError({ status: 503, message: 'request failed' }, now)?.kind).toBe('overloaded');
+  });
+
+  it('reads a 429 that says the account is out of credit as billing', () => {
+    const noCredit = classifyApiError(
+      {
+        status: 429,
+        message:
+          'You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.',
+        headers: { 'retry-after': '20' },
+      },
+      now,
+    );
+    expect(noCredit?.kind).toBe('billing');
+    // Waiting does not fix an empty account, so nothing says when to come back.
+    expect(noCredit?.resetAt).toBeUndefined();
+    expect(
+      classifyApiError(
+        { status: 429, message: 'You exceeded your current quota, please check your plan and billing details.' },
+        now,
+      )?.kind,
+    ).toBe('billing');
+    expect(
+      classifyApiError(
+        {
+          status: 429,
+          message:
+            'Rate limit reached for gpt-6.1-terra on requests per min. Visit https://platform.openai.com/account/billing to add a payment method.',
+        },
+        now,
+      )?.kind,
+    ).toBe('rate_limited');
+  });
+
+  it('reads the vendor’s code beside a sentence that says nothing of credit', () => {
+    // A 429 whose body carries `insufficient_quota` under a generic sentence —
+    // or none, where the caller falls back to "OpenAI answered 429." — is an
+    // empty account, not a speed bump. Without the code it is a rate limit.
+    expect(classifyApiError({ status: 429, message: 'OpenAI answered 429.', code: 'insufficient_quota' }, now)?.kind).toBe(
+      'billing',
+    );
+    expect(classifyApiError({ status: 429, message: 'OpenAI answered 429.' }, now)?.kind).toBe('rate_limited');
+    // The code is read, never written into the error's message.
+    expect(
+      classifyApiError({ status: 429, message: 'Request failed.', code: 'insufficient_quota' }, now)?.message,
+    ).toBe('Request failed.');
+    // An ordinary rate limit's own code changes nothing.
+    expect(
+      classifyApiError({ status: 429, message: 'Rate limit reached for gpt-6.1-terra.', code: 'rate_limit_exceeded' }, now)
+        ?.kind,
+    ).toBe('rate_limited');
+  });
+
+  it('finds the vendor’s code in a body, as text or parsed', () => {
+    expect(errorCodeIn('{"error":{"code":"insufficient_quota","message":"x"}}')).toBe('insufficient_quota');
+    expect(errorCodeIn({ error: { code: 'insufficient_quota' } })).toBe('insufficient_quota');
+    // Anthropic's body names a type and no code; neither is a code.
+    expect(errorCodeIn('{"type":"error","error":{"type":"rate_limit_error","message":"x"}}')).toBeUndefined();
+    expect(errorCodeIn('not json')).toBeUndefined();
+    expect(errorCodeIn(null)).toBeUndefined();
+    expect(errorCodeIn({ error: { code: '' } })).toBeUndefined();
   });
 
   it('prefers the provider retry-after header over any heuristic', () => {
@@ -251,10 +336,14 @@ describe('supported models', () => {
       estimateCostUsd('gpt-5.6-sol', { input_tokens: 1_000_000 }),
     );
 
-    // Luna is known — the agents offer it — and recognition does not: this job
-    // is reasoning-heavy and runs a handful of times in a hub's life.
+    // Luna and Terra are known — the agents offer them — and recognition does
+    // not: this job is reasoning-heavy and runs a handful of times in a hub's
+    // life, so it never offers a tier cheaper than its default.
     expect(isSupportedModel('gpt-6-luna', 'openai')).toBe(true);
     expect(PROVIDER_MODELS.openai.choices.some((choice) => choice.id === 'gpt-6-luna')).toBe(false);
+    expect(isSupportedModel('gpt-6.1-terra', 'openai')).toBe(true);
+    expect(PROVIDER_MODELS.openai.choices.some((choice) => choice.id === 'gpt-6.1-terra')).toBe(false);
+    expect(effectiveModel('openai', 'gpt-6.1-terra')).toBe('gpt-6.1-sol');
     // A model this hub has never run is not accepted at all.
     expect(isSupportedModel('gpt-5.6-luna', 'openai')).toBe(false);
   });
@@ -269,8 +358,10 @@ describe('supported models', () => {
   it('runs a stored model only while it is still offered, and succeeds a retired one', () => {
     expect(effectiveModel('anthropic', 'claude-opus-5')).toBe('claude-opus-5-5');
     expect(effectiveModel('anthropic', 'claude-opus-4-6')).toBe('claude-opus-5-5');
-    // GPT-6 Sol is replaced by GPT-6.1 Sol, and the GPT-5.6 tiers it had
-    // replaced walk on down the same chain.
+    // GPT-6 Sol is replaced by GPT-6.1 Sol, and GPT-5.6 Sol, which it had
+    // replaced, walks on down the same chain. GPT-5.6 Terra's successor is
+    // GPT-6.1 Terra, which this list does not offer, so it runs the default —
+    // the same answer for a different reason.
     expect(effectiveModel('openai', 'gpt-6-sol')).toBe('gpt-6.1-sol');
     expect(effectiveModel('openai', 'gpt-5.6-sol')).toBe('gpt-6.1-sol');
     expect(effectiveModel('openai', 'gpt-5.6-terra')).toBe('gpt-6.1-sol');
@@ -334,8 +425,9 @@ describe('supported models', () => {
     const short = { input_tokens: 100_000, output_tokens: 100_000 };
     expect(estimateCostUsd('gpt-6-astra', short)).toBeCloseTo(6, 5);
     expect(estimateCostUsd('gpt-6-sol', short)).toBeCloseTo(1.2, 5);
-    // GPT-6.1 Sol kept GPT-6 Sol's $2/$10.
+    // GPT-6.1 Sol kept GPT-6 Sol's $2/$10, and GPT-6.1 Terra is half of it.
     expect(estimateCostUsd('gpt-6.1-sol', short)).toBeCloseTo(1.2, 5);
+    expect(estimateCostUsd('gpt-6.1-terra', short)).toBeCloseTo(0.6, 5);
     expect(estimateCostUsd('gpt-6-luna', short)).toBeCloseTo(0.06, 5);
     expect(estimateCostUsd('claude-haiku-5-5', short)).toBeCloseTo(0.06, 5);
   });
@@ -396,6 +488,9 @@ describe('supported models', () => {
     expect(estimateCostUsd('claude-sonnet-5-5', { cache_creation_input_tokens: 1_000_000 })).toBeCloseTo(2.5, 5);
     expect(estimateCostUsd('gpt-6.1-sol', { cache_read_input_tokens: 100_000 })).toBeCloseTo(0.01, 5);
     expect(estimateCostUsd('gpt-6.1-sol', { cache_creation_input_tokens: 100_000 })).toBeCloseTo(0.25, 5);
+    // GPT-6.1 Terra reads at the same twentieth, of $1: $0.05 a million —
+    // asked of a prompt short of GPT-6's long-prompt line, as Sol's is.
+    expect(estimateCostUsd('gpt-6.1-terra', { cache_read_input_tokens: 100_000 })).toBeCloseTo(0.005, 6);
     // Fable 5.1 reads at a fortieth of $10, a quarter of what Opus 5 charged.
     expect(estimateCostUsd('claude-fable-5-1', { cache_read_input_tokens: 1_000_000 })).toBeCloseTo(0.25, 5);
     expect(estimateCostUsd('claude-fable-5-1', { cache_creation_input_tokens: 1_000_000 })).toBeCloseTo(12.5, 5);
@@ -414,6 +509,7 @@ describe('supported models', () => {
     expect(budgetScale('claude-opus-5')).toBe(1);
     expect(budgetScale('claude-opus-5-5')).toBe(1);
     expect(budgetScale('claude-sonnet-5-5')).toBe(1);
+    expect(budgetScale('gpt-6.1-terra')).toBe(1);
     expect(budgetScale('gpt-6-sol')).toBe(1);
     expect(budgetScale('gpt-6-luna')).toBe(1);
     // An unknown model is priced at the most expensive known tier, so its cap
@@ -722,6 +818,25 @@ describe('the mapping agent loop', () => {
   });
 
   /**
+   * A reply the model did not finish is never read for a submission, even one
+   * that would validate: cut off at `max_tokens` or by the context window, the
+   * call in it may be missing half its input, and a descriptor is cached
+   * against a device model for good.
+   */
+  it('reads no submission out of a reply that was cut off', async () => {
+    for (const [stopReason, said] of [
+      ['max_tokens', /max_tokens/],
+      ['model_context_window_exceeded', /context window/],
+    ] as const) {
+      sent.length = 0;
+      replies.length = 0;
+      queue(reply({ stop_reason: stopReason, content: [submitCall(validDescriptor)] }));
+      await expect(agent().generate('system', 'user')).rejects.toThrow(said);
+      expect(sent).toHaveLength(1);
+    }
+  });
+
+  /**
    * Recording is a convenience; recognising the device is the job. So the
    * proof that matters is not that a round was written down — it is that
    * writing it down changed *nothing*: the same requests on the wire, byte
@@ -834,6 +949,76 @@ describe('the mapping agent loop', () => {
 
     queue(reply({ stop_reason: 'tool_use', content: [submitCall(validDescriptor)] }));
     await expect(agent().generate('system', 'user')).resolves.toMatchObject({ version: 1 });
+  });
+
+  /**
+   * A lock, an alarm or a camera is the device whose research reads like
+   * security work, so a turn the model's classifiers decline is asked again of
+   * another Claude in the same request — and only what that model did is read:
+   * its call is the one answered, the declined model's half-made one is never
+   * run nor sent back, and each attempt is priced at its own model's rates.
+   */
+  it('reads a turn another Claude answered after the one asked declined it', async () => {
+    const iteration = (type: string, model: string, input: number, output: number) => ({
+      type,
+      model,
+      input_tokens: input,
+      output_tokens: output,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+      cache_creation: null,
+    });
+    queue(
+      reply({
+        stop_reason: 'tool_use',
+        content: [
+          { type: 'thinking', thinking: 'A door lock.', signature: 'sig-a' },
+          submitCall(validDescriptor, 'toolu_declined'),
+          {
+            type: 'fallback',
+            from: { model: DEFAULT_MODEL },
+            to: { model: 'claude-opus-4-8' },
+            trigger: { type: 'refusal', category: 'cyber' },
+          },
+          submitCall({ version: 1, endpoints: [] }, 'toolu_answering'),
+        ],
+        usage: {
+          input_tokens: 120,
+          output_tokens: 90,
+          iterations: [
+            iteration('message', DEFAULT_MODEL, 100, 10),
+            iteration('fallback_message', 'claude-opus-4-8', 120, 90),
+          ],
+        },
+      }),
+      reply({ stop_reason: 'tool_use', content: [submitCall(validDescriptor, 'toolu_again')] }),
+    );
+    const steps: { type: string; summary: string }[] = [];
+    const stats: { costUsd: number }[] = [];
+    const result = await agent().generate('system', 'user', {
+      onStep: (step) => steps.push(step),
+      onStats: (s) => stats.push(s),
+    });
+    expect(result).toMatchObject({ version: 1 });
+
+    expect(sent[0]).toMatchObject({ betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' });
+    // Only the answering model's call was evaluated and answered, and the
+    // turn went back without the declined model's thinking or call.
+    const results = sent[1]!.messages.at(-1).content as { tool_use_id: string }[];
+    expect(results.map((result) => result.tool_use_id)).toEqual(['toolu_answering']);
+    const echoed = sent[1]!.messages.at(-2).content as { type: string; id?: string }[];
+    expect(echoed.map((block) => block.type)).toEqual(['fallback', 'tool_use']);
+    expect(echoed[1]!.id).toBe('toolu_answering');
+
+    expect(steps).toContainEqual(
+      expect.objectContaining({ type: 'note', summary: 'Opus 5.5 declined this turn; Opus 4.8 answered it.' }),
+    );
+    expect(stats[0]!.costUsd).toBeCloseTo(
+      estimateCostUsd(DEFAULT_MODEL, { input_tokens: 100, output_tokens: 10 }) +
+        estimateCostUsd('claude-opus-4-8', { input_tokens: 120, output_tokens: 90 }) +
+        estimateCostUsd(DEFAULT_MODEL, { input_tokens: 100, output_tokens: 100 }),
+      12,
+    );
   });
 
   it('resumes a paused turn without inserting a user message', async () => {

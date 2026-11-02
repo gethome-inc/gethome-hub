@@ -361,11 +361,15 @@ describe.skipIf(!handle)('API keys', () => {
     // Every conversation, reading included: what people said is not a key's.
     'POST /api/v1/automations/chat': 'deny',
     'POST /api/v1/automations/chat/:id/messages': 'deny',
+    'POST /api/v1/automations/chat/:id/stop': 'deny',
+    'POST /api/v1/automations/chat/:id/retry': 'deny',
     'GET /api/v1/automations/chats': 'deny',
     'GET /api/v1/automations/chat/:id': 'deny',
     'DELETE /api/v1/automations/chat/:id': 'deny',
     'POST /api/v1/assistant/chat': 'deny',
     'POST /api/v1/assistant/chat/:id/messages': 'deny',
+    'POST /api/v1/assistant/chat/:id/stop': 'deny',
+    'POST /api/v1/assistant/chat/:id/retry': 'deny',
     'GET /api/v1/assistant/chats': 'deny',
     'GET /api/v1/assistant/chat/:id': 'deny',
     'POST /api/v1/assistant/voice/session': 'deny',
@@ -875,9 +879,11 @@ describe.skipIf(!handle)('API keys', () => {
         ['GET', '/api/v1/automations/chats', undefined, 403, notAllowed],
         ['GET', `/api/v1/automations/chat/${uuid}`, undefined, 403, notAllowed],
         ['POST', '/api/v1/automations/chat', { message: 'hi' }, 403, notAllowed],
+        ['POST', `/api/v1/automations/chat/${uuid}/stop`, undefined, 403, notAllowed],
         ['GET', '/api/v1/assistant/chats', undefined, 403, notAllowed],
         ['GET', `/api/v1/assistant/chat/${uuid}`, undefined, 403, notAllowed],
         ['POST', '/api/v1/assistant/chat', { message: 'hi' }, 403, notAllowed],
+        ['POST', `/api/v1/assistant/chat/${uuid}/stop`, undefined, 403, notAllowed],
         ['POST', '/api/v1/assistant/voice/session', { sdp: 'v=0' }, 403, notAllowed],
         // Permissions no key may hold say which, so the integration knows what
         // it has to do without.
@@ -1143,6 +1149,9 @@ describe.skipIf(!handle)('API keys', () => {
       const chat = { sessionId: '55555555-5555-4555-a555-555555555555', phase: 'delta' as const, at: new Date().toISOString(), text: 'private' };
       events.emit('automationChat', chat);
       events.emit('assistantChat', chat);
+      // A conversation's name is made of what somebody said, so it is a
+      // conversation too.
+      events.emit('chatTitle', { surface: 'assistant', sessionId: chat.sessionId, title: 'Private', at: chat.at });
       events.emit('automationRun', {
         automationId: 'a',
         name: 'Night',
@@ -1154,7 +1163,11 @@ describe.skipIf(!handle)('API keys', () => {
         refused: 0,
       });
       await waitFor('automationRun');
-      expect(frames.some((frame) => frame.type === 'automationChat' || frame.type === 'assistantChat')).toBe(false);
+      expect(
+        frames.some(
+          (frame) => frame.type === 'automationChat' || frame.type === 'assistantChat' || frame.type === 'chatTitle',
+        ),
+      ).toBe(false);
       socket.close();
     });
 

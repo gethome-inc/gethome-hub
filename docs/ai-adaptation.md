@@ -180,6 +180,21 @@ reproduces the guard: the old mock stubbed `create` with a bare `vi.fn()`, which
 is more permissive than the real client, which is why a whole suite passed over
 an agent that could not make a request.
 
+**A turn the model's safety classifiers decline is asked again of another
+Claude, in the same request** (`fallbacks: "default"`, through
+`client.beta.messages`; `src/ai/anthropic-fallback.ts`). Researching a door
+lock, an alarm panel or a camera reads like security work often enough that the
+`cyber` classifier is a real cost here, and the rescue happens server-side: the
+API runs the declined turn on the Claude it recommends for that kind of refusal
+and returns that model's answer. What the declined model began before the
+hand-over — its thinking, a call it started — is neither run nor sent back,
+each attempt is priced at its own model's rates (`usage.iterations`), and the
+run's steps say which model answered, since the run log names the model the
+home chose. A request the API refuses *because of the field* is sent once more
+without it and the field is not sent again by that process, so a retired beta
+costs a hub its fallback rather than device recognition. Only a refusal the
+whole chain declines ends the run.
+
 **Two cache breakpoints, which is what an agent loop asks for.** The explicit
 one sits on the system prompt and covers the tool definitions with it (tools
 sort ahead of system in the cached prefix) — the large, byte-identical prefix
@@ -271,9 +286,9 @@ string (`src/ai/models.ts`), because the research tools have model floors —
 Anthropic's `_20260209` tools only exist on Opus 4.6+ and Sonnet 4.6+, so
 pointing the hub at Haiku 4.5 or a 4.5-era model would not degrade the run, it
 would 400 it. The allowlist is every model this hub has ever run: Fable 5.1,
-Opus 5.5, 5, 4.8, 4.7 and 4.6, Sonnet 5.5, 5 and 4.6, Haiku 5.5, GPT-6.1 Sol,
-GPT-6 Astra, Sol and Luna, GPT-5.6 Sol and Terra, and `gpt-5.6` — the bare
-OpenAI alias, accepted because a hub that stored it must not be told its setting
+Opus 5.5, 5, 4.8, 4.7 and 4.6, Sonnet 5.5, 5 and 4.6, Haiku 5.5, GPT-6.1 Sol
+and Terra, GPT-6 Astra, Sol and Luna, GPT-5.6 Sol and Terra, and `gpt-5.6` —
+the bare OpenAI alias, accepted because a hub that stored it must not be told its setting
 is invalid, but never offered as a choice.
 
 **The apps do not ship that list.** `GET /settings/ai` carries
@@ -294,8 +309,8 @@ somebody notices and remaps. Saving a few cents on a job that runs a handful of
 times in a hub's life is the wrong trade for that. That argument is about
 *cheaper* models and says nothing against a more thorough one, so Anthropic's
 list is Opus 5.5 with Fable 5.1 above it and OpenAI's is GPT-6.1 Sol with Astra
-above it, while Sonnet, Haiku and Luna — all offered to the agents — are on
-neither vendor's recognition list.
+above it, while Sonnet, Haiku, Terra and Luna — all offered to the agents — are
+on neither vendor's recognition list.
 
 **A stored model counts only while it is still offered, and a retired one is
 succeeded** (`effectiveModel`). Retiring a model otherwise leaves the homes
@@ -681,8 +696,8 @@ earns its keep — see [assistant.md](assistant.md).
 
 It is a **summary, never a transcript.** Model prose is the largest thing a run
 produces and the least useful to read later, so it is not stored. Bounded at
-both ends — 40 steps per run, 60 runs retained, `detail` truncated at 2 KB —
-which is tens of kilobytes on a machine whose disk is an SD card.
+both ends — 40 steps per run, 250 runs retained, `detail` truncated at 2 KB —
+which keeps it small on a machine whose disk is an SD card.
 
 Before it, the hub recorded exactly two facts under one settings key (the last
 run and the last error), so once a second device had been adopted there was no

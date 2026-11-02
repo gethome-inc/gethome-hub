@@ -55,7 +55,14 @@ const LIMIT_REACHED = /limit reached/i;
 const SAYS_RATE_LIMIT = /rate.?limit/i;
 const RATE_LIMIT = /rate.?limit|\b429\b|too many requests|number of request/i;
 const AUTH = /\b401\b|\b403\b|authentication|unauthorized|forbidden|invalid (?:api.?key|bearer|token)|api.?key.*invalid|token.*(?:expired|revoked)|expired.*token/i;
-const BILLING = /\b402\b|billing|credit balance|insufficient credit|payment required|purchase credits/i;
+// OpenAI says an account has run dry in three ways, none of them a 402: the
+// prepaid wording ("You have no credits remaining. Add credits to continue…"),
+// the older one ("You exceeded your current quota, please check your plan and
+// billing details"), and the code both carry (`insufficient_quota`). Each
+// arrives as a 429 or inside a stream that had already answered 200, so the
+// status says "slow down" about an account that will not answer at all.
+const BILLING =
+  /\b402\b|billing|credit balance|insufficient credit|payment required|purchase credits|no credits? remaining|add credits|insufficient[_ ]quota|exceeded your current quota/i;
 const OVERLOADED = /\b529\b|overloaded|capacity constraints/i;
 const NETWORK = /\benotfound\b|\beconnrefused\b|\betimedout\b|\beconnreset\b|fetch failed|network error|socket hang up|connection error/i;
 
@@ -69,6 +76,22 @@ function isUsageCap(text: string): boolean {
 }
 
 /**
+ * An account with nothing left to spend, rather than a speed bump.
+ *
+ * **Ahead of the rate-limit patterns, and only where the text does not say
+ * "rate limit" itself.** OpenAI's out-of-credit refusal is a 429 and its code
+ * is `insufficient_quota`, so read loosely it is a rate limit — and the two
+ * are answered very differently: a rate limit is "try again in a minute",
+ * which on an empty account is a button that can only fail again. The guard
+ * is for the opposite mistake: a free-tier rate limit names the billing page
+ * ("add a payment method … at platform.openai.com/account/billing"), and that
+ * one really is a speed bump.
+ */
+function isOutOfCredit(text: string): boolean {
+  return BILLING.test(text) && !SAYS_RATE_LIMIT.test(text);
+}
+
+/**
  * Classify an error/result text from an agent run into a transient
  * availability failure, or `null` when the text does not look like an
  * account/service problem (i.e. the run failed on its own merits).
@@ -77,6 +100,7 @@ export function classifyAgentFailure(text: string): AiUnavailableError | null {
   if (isUsageCap(text)) {
     return new AiUnavailableError('usage_limit', text, parseResetHint(text));
   }
+  if (isOutOfCredit(text)) return new AiUnavailableError('billing', text);
   if (RATE_LIMIT.test(text)) {
     return new AiUnavailableError('rate_limited', text, parseResetHint(text));
   }
@@ -96,6 +120,39 @@ interface ApiErrorLike {
   status?: unknown;
   headers?: unknown;
   message?: unknown;
+  /**
+   * The vendor's own code for the refusal, where its body carried one
+   * (`insufficient_quota`) — read beside the message, since a refusal can
+   * carry the code that says what happened under a sentence that does not.
+   * `errorCodeIn` digs it out of a body.
+   */
+  code?: unknown;
+}
+
+/**
+ * The vendor's code for a refusal, from its response body as text or already
+ * parsed: OpenAI's `{error: {code}}`. Undefined for a body that carries none,
+ * which is every Anthropic refusal — its body names a `type`, and its message
+ * is what says a balance has run out.
+ *
+ * **Passed to `classifyApiError` beside the message, never into it.** A 429
+ * whose body is `{error: {code: 'insufficient_quota'}}` and a sentence that
+ * says nothing of credit — or no sentence at all — was read as a rate limit,
+ * because every caller handed the classifier the message alone; and a rate
+ * limit is a "try again in a minute" that can only fail again on an empty
+ * account.
+ */
+export function errorCodeIn(body: unknown): string | undefined {
+  let parsed: unknown = body;
+  if (typeof body === 'string') {
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return undefined;
+    }
+  }
+  const code = (parsed as { error?: { code?: unknown } } | null | undefined)?.error?.code;
+  return typeof code === 'string' && code.length > 0 ? code : undefined;
 }
 
 /**
@@ -121,12 +178,22 @@ export function classifyApiError(error: unknown, now: Date = new Date()): AiUnav
   const message = typeof candidate.message === 'string' ? candidate.message : String(error);
   const status = typeof candidate.status === 'number' ? candidate.status : undefined;
   const retryAfter = readRetryAfter(candidate.headers, now);
+  // What the patterns read: the vendor's code beside its sentence, so a
+  // refusal whose code says what happened is read by it even when the
+  // sentence does not. The error carries the sentence alone.
+  const code = typeof candidate.code === 'string' && candidate.code.length > 0 ? candidate.code : undefined;
+  const said = code !== undefined ? `${code}: ${message}` : message;
 
   if (status === 429) {
     // A 429 is a rate limit unless the body says an account cap is exhausted
-    // — those want the provider's own reset time, not a short retry.
-    const kind: AiFailureKind = isUsageCap(message) ? 'usage_limit' : 'rate_limited';
-    return new AiUnavailableError(kind, message, retryAfter ?? parseResetHint(message, now));
+    // — those want the provider's own reset time, not a short retry — or that
+    // the account is out of credit, which OpenAI also answers with a 429 and
+    // which no amount of waiting fixes, so it gets no reset time at all.
+    if (isUsageCap(said)) {
+      return new AiUnavailableError('usage_limit', message, retryAfter ?? parseResetHint(message, now));
+    }
+    if (isOutOfCredit(said)) return new AiUnavailableError('billing', message);
+    return new AiUnavailableError('rate_limited', message, retryAfter ?? parseResetHint(message, now));
   }
   if (status === 401 || status === 403) return new AiUnavailableError('auth_failed', message);
   if (status === 402) return new AiUnavailableError('billing', message);
@@ -135,7 +202,7 @@ export function classifyApiError(error: unknown, now: Date = new Date()): AiUnav
   if (status === 400) {
     // Only a 400 that is really a billing problem is transient. Every other
     // 400 means the hub sent something the API rejected — surface it.
-    return BILLING.test(message) ? new AiUnavailableError('billing', message) : null;
+    return BILLING.test(said) ? new AiUnavailableError('billing', message) : null;
   }
   if (status !== undefined) return null;
 

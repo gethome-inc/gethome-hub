@@ -34,7 +34,7 @@
   </picture>
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screens/assistant-dark.webp">
-    <img src="docs/assets/screens/assistant-light.webp" width="31%" alt="The gethome app's assistant: a glass orb asking “How can I help?”, with a box to type in and a microphone.">
+    <img src="docs/assets/screens/assistant-light.webp" width="31%" alt="The gethome app's assistant: its round face over “What can I do for your home?”, four things to ask, and a box to type in with a button to talk.">
   </picture>
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screens/device-dark.webp">

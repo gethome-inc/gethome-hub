@@ -1,5 +1,5 @@
 import type { Logger } from '../logging.js';
-import { AiUnavailableError, classifyApiError } from './errors.js';
+import { AiUnavailableError, classifyApiError, errorCodeIn } from './errors.js';
 import {
   AGENT_MAX_BUDGET_USD,
   AGENT_MAX_TURNS,
@@ -407,7 +407,7 @@ async function askOpenAi(
     const message = messageIn(text) ?? `OpenAI answered ${response.status}.`;
     // The classifier branches on HTTP status rather than on any vendor's error
     // vocabulary, which is exactly why it is structural.
-    throw classifyApiError({ status: response.status, headers: response.headers, message }) ??
+    throw classifyApiError({ status: response.status, headers: response.headers, message, code: errorCodeIn(text) }) ??
       new Error(message);
   }
   try {

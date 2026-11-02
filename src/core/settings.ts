@@ -7,7 +7,13 @@ import { decryptSecret, encryptSecret, type EncryptedValue } from './crypto.js';
 // no runtime cycle. It is worth it to make `getAiSettings` answer with the
 // model that will *run* rather than the column — the mapper's one expensive
 // bug was exactly that gap between the two.
-import { effectiveAgentModel, type UsableProviders } from '../ai/models.js';
+import {
+  AGENT_EFFORT,
+  effectiveAgentModel,
+  knownEffort,
+  type ChatEffort,
+  type UsableProviders,
+} from '../ai/models.js';
 
 /**
  * The providers the hub can hold a credential for.
@@ -85,7 +91,27 @@ export interface AiAgentSettings {
    * never disagree about which vendors are real.
    */
   choosable: boolean;
+  /**
+   * How hard this agent works on a typed round nobody chose an effort for —
+   * the home's own word, or `AGENT_EFFORT` where it has none.
+   *
+   * **A default, not a ceiling.** A message may still name its own effort for
+   * its round, and a spoken round still answers at `low`: the voice is a
+   * person standing in a room, whatever the home said about typing. What this
+   * replaces is the constant every typed round ran at, so a home that never
+   * sets it runs exactly as it always did.
+   */
+  effort: ChatEffort;
 }
+
+/** The two agents that keep a model and an effort of their own. */
+export type AiAgent = 'assistant' | 'automations';
+
+/** Where each agent's effort is stored. Absent means `AGENT_EFFORT`. */
+const EFFORT_KEYS: Record<AiAgent, string> = {
+  assistant: 'ai_assistant_effort',
+  automations: 'ai_automations_effort',
+};
 
 export interface AiSettings {
   /**
@@ -265,18 +291,7 @@ export class SettingsService {
     const anthropic = await this.providerSettings('anthropic');
     const openai = await this.providerSettings('openai');
     const chosen = await this.get<AiProvider>('ai_mapping_provider');
-    /**
-     * Which providers an *agent* could authenticate as.
-     *
-     * A stored Anthropic subscription token is a key the hub holds and cannot
-     * use — the chat loops authenticate with an API key — so it is not
-     * usability, and treating it as such would point every conversation at a
-     * vendor that answers 401 while a working OpenAI key sat beside it.
-     */
-    const usable: UsableProviders = {
-      anthropic: anthropic.hasKey && authType !== LEGACY_OAUTH_AUTH_TYPE,
-      openai: openai.hasKey,
-    };
+    const usable = agentUsability(anthropic, openai, authType);
     return {
       provider: this.resolveMappingProvider(chosen, anthropic, openai),
       model: anthropic.model,
@@ -287,9 +302,56 @@ export class SettingsService {
       anthropic,
       openai,
       mappingChoosable: anthropic.hasKey && openai.hasKey,
-      assistant: agentSettings(await this.get<string>('ai_assistant_model'), usable),
-      automations: agentSettings(await this.get<string>('ai_automations_model'), usable),
+      assistant: agentSettings(
+        await this.get<string>('ai_assistant_model'),
+        usable,
+        await this.agentEffort('assistant'),
+      ),
+      automations: agentSettings(
+        await this.get<string>('ai_automations_model'),
+        usable,
+        await this.agentEffort('automations'),
+      ),
     };
+  }
+
+  /**
+   * How hard one agent works on a typed round nobody chose an effort for.
+   *
+   * One read, for the runtime, which asks at the start of every turn rather
+   * than once per conversation: the home's word is a setting that moves while
+   * a conversation is open, and a turn is the unit an effort belongs to.
+   */
+  async agentEffort(agent: AiAgent): Promise<ChatEffort> {
+    return knownEffort(await this.get<string>(EFFORT_KEYS[agent])) ?? AGENT_EFFORT;
+  }
+
+  /**
+   * Set one agent's word, or put it back on the default with `null` — by
+   * removing the row, never by writing `null` into a `NOT NULL` json column.
+   */
+  async setAgentEffort(agent: AiAgent, effort: ChatEffort | null): Promise<void> {
+    if (effort === null) await this.unset(EFFORT_KEYS[agent]);
+    else await this.set(EFFORT_KEYS[agent], effort);
+  }
+
+  /**
+   * Which providers a conversation could authenticate as, right now.
+   *
+   * The same answer `getAiSettings` resolves both agents' models against, for
+   * the one caller that has a model in hand rather than a column to resolve: a
+   * chat that names its own model (`requestedAgentModel`). Read through the one
+   * rule below rather than restated, because "is a subscription token a key"
+   * answered two ways is exactly how a picker offers a model the loop then
+   * refuses.
+   */
+  async agentProviders(): Promise<UsableProviders> {
+    const authType = await this.get<string>('ai_auth_type');
+    return agentUsability(
+      await this.providerSettings('anthropic'),
+      await this.providerSettings('openai'),
+      authType,
+    );
   }
 
   private async providerSettings(provider: AiProvider): Promise<AiProviderSettings> {
@@ -432,16 +494,35 @@ export class SettingsService {
 }
 
 /**
+ * Which providers an *agent* could authenticate as.
+ *
+ * A stored Anthropic subscription token is a key the hub holds and cannot
+ * use — the chat loops authenticate with an API key — so it is not
+ * usability, and treating it as such would point every conversation at a
+ * vendor that answers 401 while a working OpenAI key sat beside it.
+ */
+function agentUsability(
+  anthropic: AiProviderSettings,
+  openai: AiProviderSettings,
+  authType: string | null,
+): UsableProviders {
+  return {
+    anthropic: anthropic.hasKey && authType !== LEGACY_OAUTH_AUTH_TYPE,
+    openai: openai.hasKey,
+  };
+}
+
+/**
  * One stored column, as the pair of facts every caller needs.
  *
  * Written once and used for both agents: the assistant and the automations
  * agent ask the identical question of two different columns, and two copies of
  * the "what is null" reasoning is exactly where the two would drift.
  */
-function agentSettings(stored: string | null, usable: UsableProviders): AiAgentSettings {
+function agentSettings(stored: string | null, usable: UsableProviders, effort: ChatEffort): AiAgentSettings {
   const resolved = effectiveAgentModel(stored, usable);
   const choosable = usable.anthropic && usable.openai;
   return resolved === null
-    ? { model: '', provider: null, choosable }
-    : { model: resolved.modelId, provider: resolved.provider, choosable };
+    ? { model: '', provider: null, choosable, effort }
+    : { model: resolved.modelId, provider: resolved.provider, choosable, effort };
 }

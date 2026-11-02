@@ -67,12 +67,18 @@ describe('the assistant', () => {
        *  and `capabilities` are closed vocabularies and a widened `string`
        *  makes this the only stub in the file that does not typecheck. */
       devices?: ReturnType<EngineRegistry['listDevices']>;
+      /** What each round does between its opening step and its answer — the
+       *  deltas, steps and narration a real loop reports, on a clock the test
+       *  controls. */
+      script?: (context: ChatTurnContext | undefined, round: number) => Promise<void>;
     },
   ) => Promise<{
     assistant: AssistantChat;
     automationChat: Awaited<ReturnType<typeof startedAutomations>>['chat'];
-    /** What each round was asked to work at — `undefined` is the
-     *  conversation's own setting. See the spoken-effort test. */
+    /** What each round was asked to work at. The runtime names one on every
+     *  round — the turn's own, or the home's word for this agent — so
+     *  `undefined` here would be a round left to the transport's own default.
+     *  See the spoken-effort tests. */
     efforts: (string | undefined)[];
     /** What each round was actually *sent*, priming included. The transcript
      *  is what was said; this is what the model read. */
@@ -135,6 +141,7 @@ describe('the assistant', () => {
         sent.push(text);
         context?.onStep?.('Reading your home', 'thinking');
         await options?.gate;
+        await options?.script?.(context, at);
         return turns[at] ?? { kind: 'said', text: 'nothing left to say' };
       };
       const scripted: AgentConversation<AssistantTurn> = {
@@ -207,6 +214,10 @@ describe('the assistant', () => {
     const rows = await assistant.transcript(sessionId);
     expect(rows.map((row) => row.role)).toEqual(['user', 'agent']);
     expect(rows[0]?.text).toBe('turn the kitchen light off');
+    // Marked as spoken: it names no model and no effort, exactly as a typed
+    // message following the home's does, and an app reading the newest typed
+    // message for a conversation's thinking word has to step past it.
+    expect(rows[0]?.data).toEqual({ via: 'voice' });
   });
 
   /**
@@ -427,10 +438,11 @@ describe('the assistant', () => {
   /**
    * **The same conversation, two speeds.** A spoken round is a person standing
    * in a room waiting for an answer, and a typed one is a message they read
-   * when it lands — so the turn asks for `low` out loud and leaves a typed
-   * round on the conversation's own `medium`. Per *turn* is the whole point:
-   * this asserts both against one session, because a transport is built once
-   * and a conversation typed in the morning is talked to in the evening.
+   * when it lands — so the turn asks for `low` out loud and puts a typed round
+   * on the home's own word for this agent, `medium` until somebody picks
+   * another. Per *turn* is the whole point: this asserts both against one
+   * session, because a transport is built once and a conversation typed in the
+   * morning is talked to in the evening.
    */
   it('thinks less when the answer is spoken, and only then', async () => {
     const { assistant, efforts } = await assistantFor([
@@ -442,10 +454,42 @@ describe('the assistant', () => {
     await assistant.askAloud({ sessionId, memberId, question: 'turn the kitchen light off' });
     expect(efforts).toEqual(['low']);
 
-    // The same conversation, carried on by typing.
+    // The same conversation, carried on by typing — named on the round rather
+    // than left to the transport, so the run log records what was asked for.
     await assistant.reply(sessionId, memberId, 'and the hall one?');
     await assistant.idle();
-    expect(efforts).toEqual(['low', undefined]);
+    expect(efforts).toEqual(['low', 'medium']);
+  });
+
+  /**
+   * **The home's word is a default for typing, and nothing more.** A home that
+   * asked for Deep gets it on every typed round nobody chose an effort for —
+   * and still `low` out loud, because the voice is somebody standing in a room
+   * whatever the AI page says about typing. The other agent's word is its own,
+   * and is set here only to prove it does not leak across.
+   *
+   * **Read per turn.** A change on the AI page reaches the very next round of a
+   * conversation already open, the way the effort itself belongs to the turn.
+   */
+  it('types at the home’s own word for the assistant, and still speaks at low', async () => {
+    await settings.setAgentEffort('assistant', 'high');
+    await settings.setAgentEffort('automations', 'low');
+    const { assistant, efforts } = await assistantFor([
+      { kind: 'said', text: 'It is off.' },
+      { kind: 'said', text: 'Both are off.' },
+      { kind: 'said', text: 'You are welcome.' },
+    ]);
+    const sessionId = assistant.beginVoice();
+
+    await assistant.askAloud({ sessionId, memberId, question: 'turn the kitchen light off' });
+    await assistant.reply(sessionId, memberId, 'and the hall one?');
+    await assistant.idle();
+    expect(efforts).toEqual(['low', 'high']);
+
+    await settings.setAgentEffort('assistant', null);
+    await assistant.reply(sessionId, memberId, 'thanks');
+    await assistant.idle();
+    expect(efforts).toEqual(['low', 'high', 'medium']);
   });
 
   /**
@@ -481,7 +525,8 @@ describe('the assistant', () => {
       .orderBy(asc(aiRunsTable.at));
     expect(rows.map((row) => [row.kind, row.effort, row.via])).toEqual([
       ['assist', 'low', 'voice'],
-      // The conversation's own effort, read back rather than re-derived.
+      // The home's own word for the assistant — `medium` on a home that never
+      // chose one — as the turn ran it, not as the setting reads now.
       ['assist', 'medium', 'typed'],
     ]);
   });
@@ -594,10 +639,11 @@ describe('the assistant', () => {
       provider: 'openai',
       modelId: 'gpt-6-luna',
     });
-    // A retired one of that vendor's moves to what replaced it, on that vendor.
+    // A retired one of that vendor's moves to what replaced it, on that vendor
+    // and on its own tier.
     expect(effectiveAgentModel('gpt-5.6-terra', onlyOpenAi)).toEqual({
       provider: 'openai',
-      modelId: 'gpt-6.1-sol',
+      modelId: 'gpt-6.1-terra',
     });
     // Neither key is the only case with no answer — the caller refuses on it.
     expect(effectiveAgentModel('claude-opus-5-5', { anthropic: false, openai: false })).toBeNull();
@@ -867,6 +913,258 @@ describe('the assistant', () => {
       'agent',
       'handoff',
     ]);
+  });
+
+  /**
+   * A handover with no words before it makes the card the round's first row,
+   * which is where the round's working and its clock go — and `amend`
+   * replaces a row's whole `data`, so moving the card used to wipe both the
+   * first time the other agent did anything.
+   */
+  it('keeps the round’s working on a card with no words before it, as the card moves', async () => {
+    const brief = 'switch the hall lamp on at sunset';
+    const document = {
+      version: 1,
+      name: 'Hall lamp at sunset',
+      mode: 'single',
+      triggers: [{ kind: 'manual' }],
+      actions: [{ kind: 'logActivity', message: 'Sunset' }],
+    };
+    const { assistant, automationChat } = await assistantFor([], {
+      delegated: [
+        {
+          kind: 'question',
+          question: { question: 'Which hall lamp?', options: [{ id: 'a', label: 'The tall one' }] },
+        },
+        { kind: 'submitted', rules: [{ document, replaces: null }], text: 'Written.' },
+      ],
+    });
+    const tools = (
+      assistant as unknown as {
+        toolContext: (
+          id: string,
+          sessionId: string,
+        ) => {
+          delegate: (agent: string, brief: string, fresh?: boolean) => Promise<{ sessionId: string }>;
+        };
+      }
+    ).toolContext(memberId, randomUUID());
+    const handed = await tools.delegate('automations', brief);
+    await automationChat.idle();
+
+    const { assistant: second } = await assistantFor([
+      { kind: 'handed', text: '', handoffs: [{ agent: 'automations', brief, sessionId: handed.sessionId }] },
+    ]);
+    const started = await second.start({ memberId, message: 'sunset lamp please' });
+    await second.idle();
+
+    const card = async () =>
+      (await second.transcript(started.sessionId)).find((row) => row.role === 'handoff')?.data as
+        | { status: string; tookMs?: number }
+        | undefined;
+    expect((await second.transcript(started.sessionId)).map((row) => row.role)).toEqual([
+      'user',
+      'handoff',
+    ]);
+    const took = (await card())?.tookMs;
+    expect(Number.isInteger(took)).toBe(true);
+
+    await automationChat.reply(handed.sessionId, memberId, 'the tall one');
+    await automationChat.idle();
+    const moved = await card();
+    expect(moved?.status).toBe('delivered');
+    expect(moved?.tookMs).toBe(took);
+  });
+
+  describe('how long a round worked before its reply began', () => {
+    const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+    const firstAgentRow = async (assistant: AssistantChat, sessionId: string) =>
+      (await assistant.transcript(sessionId)).find((row) => row.role !== 'user')?.data as
+        | { tookMs?: number; workedMs?: number }
+        | undefined;
+
+    /**
+     * `tookMs` runs on to the row, so it counts the answer arriving word by
+     * word as well — seconds somebody spent reading, not waiting. `workedMs`
+     * is the part before there was anything to read.
+     */
+    it('counts up to the first word of the reply, beside the whole round', async () => {
+      const { assistant } = await assistantFor([{ kind: 'said', text: 'It is 21 degrees.' }], {
+        script: async (context) => {
+          await pause(40);
+          context?.onDelta?.('It is ');
+          await pause(80);
+          context?.onDelta?.('21 degrees.');
+        },
+      });
+      const started = await assistant.start({ memberId, message: 'how warm is it?' });
+      await assistant.idle();
+
+      const data = await firstAgentRow(assistant, started.sessionId);
+      expect(Number.isInteger(data?.workedMs)).toBe(true);
+      expect(data?.workedMs).toBeGreaterThanOrEqual(35);
+      // The reply's own eighty milliseconds are in the round and not in the work.
+      expect((data?.tookMs ?? 0) - (data?.workedMs ?? 0)).toBeGreaterThanOrEqual(70);
+    });
+
+    /**
+     * Words a round writes and then goes off to call something with are
+     * narration, not the reply — so the clock that ends at the reply has not
+     * stopped yet.
+     */
+    it('starts again when the round goes back to work after saying something', async () => {
+      const { assistant } = await assistantFor([{ kind: 'said', text: 'It is 21 degrees.' }], {
+        script: async (context) => {
+          context?.onDelta?.('I will check the sensor.');
+          context?.onSaid?.('I will check the sensor.');
+          await pause(40);
+          context?.onStep?.('Looking at one device closely', 'reading', 'Hall sensor');
+          await pause(40);
+          context?.onDelta?.('It is 21 degrees.');
+        },
+      });
+      const started = await assistant.start({ memberId, message: 'how warm is it?' });
+      await assistant.idle();
+
+      expect((await firstAgentRow(assistant, started.sessionId))?.workedMs).toBeGreaterThanOrEqual(70);
+    });
+
+    /**
+     * The frames cannot say it: the round's clock starts when its turn begins
+     * and its first frame goes out later, so the number travels on the
+     * reply's first word itself — the very number the row stores.
+     */
+    it('is carried on the delta that begins the reply, and on no other', async () => {
+      const worked: (number | undefined)[] = [];
+      events.on('assistantChat', (event) => {
+        if (event.phase === 'delta') worked.push(event.workedMs);
+      });
+      const { assistant } = await assistantFor([{ kind: 'said', text: 'It is 21 degrees.' }], {
+        script: async (context) => {
+          await pause(40);
+          context?.onDelta?.('It is ');
+          await pause(20);
+          context?.onDelta?.('21 degrees.');
+        },
+      });
+      const started = await assistant.start({ memberId, message: 'how warm is it?' });
+      await assistant.idle();
+
+      const data = await firstAgentRow(assistant, started.sessionId);
+      expect(worked).toHaveLength(2);
+      expect(Number.isInteger(worked[0])).toBe(true);
+      expect(worked[0]).toBe(data?.workedMs);
+      expect(worked[1]).toBeUndefined();
+    });
+
+    /** Narration began a reply that was not the reply; the one after it is. */
+    it('is carried again on the words that follow the round going back to work', async () => {
+      const worked: (number | undefined)[] = [];
+      events.on('assistantChat', (event) => {
+        if (event.phase === 'delta') worked.push(event.workedMs);
+      });
+      const { assistant } = await assistantFor([{ kind: 'said', text: 'It is 21 degrees.' }], {
+        script: async (context) => {
+          context?.onDelta?.('I will check the sensor.');
+          context?.onSaid?.('I will check the sensor.');
+          await pause(40);
+          context?.onStep?.('Looking at one device closely', 'reading', 'Hall sensor');
+          await pause(40);
+          context?.onDelta?.('It is 21 degrees.');
+        },
+      });
+      const started = await assistant.start({ memberId, message: 'how warm is it?' });
+      await assistant.idle();
+
+      const data = await firstAgentRow(assistant, started.sessionId);
+      expect(worked).toHaveLength(2);
+      expect(worked[1]).toBe(data?.workedMs);
+      expect(worked[1]).toBeGreaterThan(worked[0] ?? Infinity);
+    });
+
+    /** A hand-over is said once the words it is about have streamed. */
+    it('is not set back by another model answering the same reply', async () => {
+      const { assistant } = await assistantFor([{ kind: 'said', text: 'Sure.' }], {
+        script: async (context) => {
+          context?.onDelta?.('Sure.');
+          await pause(60);
+          context?.onHandOver?.('Claude Sonnet 5.5', 'Claude Opus 5.5', false);
+        },
+      });
+      const started = await assistant.start({ memberId, message: 'hello' });
+      await assistant.idle();
+
+      const data = await firstAgentRow(assistant, started.sessionId);
+      expect(data?.workedMs).toBeLessThan(40);
+      expect(data?.tookMs).toBeGreaterThanOrEqual(55);
+    });
+
+    it('is absent where the round ended without words of its own', async () => {
+      const { assistant } = await assistantFor([
+        {
+          kind: 'question',
+          question: { question: 'Which lamp?', options: [{ id: 'a', label: 'The tall one' }] },
+        },
+      ]);
+      const started = await assistant.start({ memberId, message: 'the lamp' });
+      await assistant.idle();
+
+      const data = await firstAgentRow(assistant, started.sessionId);
+      expect(Number.isInteger(data?.tookMs)).toBe(true);
+      expect(data).not.toHaveProperty('workedMs');
+    });
+
+    /**
+     * A reply that began and never finished did not end the round: the round
+     * ended in the note saying it failed, which keeps the whole round's time
+     * and no reply time, like any other ending without words of its own.
+     */
+    it('is absent where the round failed after its words began', async () => {
+      const { assistant } = await assistantFor([], {
+        script: async (context) => {
+          context?.onDelta?.('It is ');
+          await pause(20);
+          throw new Error('connection reset');
+        },
+      });
+      const started = await assistant.start({ memberId, message: 'how warm is it?' });
+      await assistant.idle();
+
+      const rows = await assistant.transcript(started.sessionId);
+      expect(rows.map((row) => row.role)).toEqual(['user', 'note']);
+      const data = rows[1]?.data as { tookMs?: number; workedMs?: number } | undefined;
+      expect(Number.isInteger(data?.tookMs)).toBe(true);
+      expect(data).not.toHaveProperty('workedMs');
+    });
+
+    /**
+     * The same ending by the other road: a refusal, the cost limit and the
+     * rounds running out come back as a turn rather than a throw, so the
+     * failure path's reset never sees them — and the words they had begun
+     * with are not the reply either.
+     */
+    const stoppedEndings: Array<[string, AssistantTurn]> = [
+      ['declined', { kind: 'stopped', reason: 'Claude declined to answer this.', refused: true }],
+      ['stopped at its limit', { kind: 'stopped', reason: 'This conversation reached its cost limit.' }],
+    ];
+    for (const [ending, turn] of stoppedEndings) {
+      it(`is absent where the round was ${ending} after its words began`, async () => {
+        const { assistant } = await assistantFor([turn], {
+          script: async (context) => {
+            context?.onDelta?.('It is ');
+            await pause(20);
+          },
+        });
+        const started = await assistant.start({ memberId, message: 'how warm is it?' });
+        await assistant.idle();
+
+        const rows = await assistant.transcript(started.sessionId);
+        expect(rows.map((row) => row.role)).toEqual(['user', 'note']);
+        const data = rows[1]?.data as { tookMs?: number; workedMs?: number } | undefined;
+        expect(Number.isInteger(data?.tookMs)).toBe(true);
+        expect(data).not.toHaveProperty('workedMs');
+      });
+    }
   });
 
   it('says the card moved on its own conversation, and not as a round ending', async () => {

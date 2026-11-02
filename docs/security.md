@@ -28,10 +28,31 @@ The only connections the hub itself ever makes outward are:
   the [privacy policy](https://gethome.me/privacy#ai); the engineering side is
   in [`ai-adaptation.md`](ai-adaptation.md), [`assistant.md`](assistant.md) and
   [`portraits.md`](portraits.md). Photos of a room somebody has drawn go to
-  OpenAI and are not kept; the picture is, and is shown to the recognition
-  provider to read its devices off ([`api.md`](api.md#room-pictures)). With
-  no key, nothing goes to any AI provider and devices still appear, flagged
-  *needs review*.
+  OpenAI and are not kept; the picture is, and is shown to OpenAI to read its
+  devices off — to Anthropic only when OpenAI cannot read it and the home holds
+  an Anthropic key ([`api.md`](api.md#room-pictures)). A photo
+  somebody attaches to a chat message goes to the provider of the model that
+  chat runs on, for that one round, and is **never stored on the hub**: the
+  transcript records only what the photo was — its type, its size in bytes and
+  pixels, and the app's own short name for its local copy (`ref`) — never the
+  image itself, and the hub rebuilds the conversation once the round is over so
+  not even its memory keeps the picture
+  ([`api.md`](api.md#what-a-chat-message-can-carry-model-effort-attachments)).
+  A conversation moves to the other provider only when somebody moves it — by
+  choosing that provider's model for it, or by asking a failed answer again on
+  the model its note offers ([`api.md`](api.md#asking-a-failed-round-again-post-chatidretry))
+  — and then that provider is sent a written record of the conversation so
+  far, as it is for any change of model. A request one Claude model declines
+  may be answered by another Claude model inside the same request: still
+  Anthropic, on the same key. To name a conversation for the list, the first
+  thing said in it — and, where that was only a greeting, the next one or two —
+  also goes to the cheapest model of the same provider, with nothing else from
+  the home; only if that provider cannot name it does it go to the other one,
+  and only where the home holds a key for that one
+  ([`assistant.md`](assistant.md#a-conversations-name)). The name is kept with
+  the transcript and goes when it does.
+  With no key, nothing goes to any AI provider and devices still appear,
+  flagged *needs review*.
 - **To GitHub**, when it checks whether a newer build exists: when an app asks,
   and — only where somebody has switched on automatic updates — once a night, at
   the hour the hub has chosen to update in (asked again that night only if
