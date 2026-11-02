@@ -1,4 +1,4 @@
-import { classifyApiError } from '../ai/errors.js';
+import { classifyApiError, errorCodeIn } from '../ai/errors.js';
 
 /**
  * The one call that draws a room: OpenAI’s Image API, over plain HTTP, with
@@ -95,7 +95,8 @@ export async function drawRoomPicture(input: EditInput): Promise<Drawing> {
   if (!response.ok) {
     const error = body?.['error'] as { message?: unknown } | undefined;
     const detail = typeof error?.message === 'string' ? error.message : `OpenAI answered ${response.status}.`;
-    const kind = classifyApiError({ status: response.status, message: detail })?.kind ?? 'refused';
+    const kind =
+      classifyApiError({ status: response.status, message: detail, code: errorCodeIn(body) })?.kind ?? 'refused';
     throw new RoomPictureDrawError(detail, kind);
   }
   const data = Array.isArray(body?.['data']) ? (body['data'] as Record<string, unknown>[]) : [];

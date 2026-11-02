@@ -15,7 +15,7 @@ import { PermitJoinService } from '../src/core/permit-join.js';
 import { AiRunLog } from '../src/core/ai-runs.js';
 import { MappingLibrary } from '../src/ai/library.js';
 import { AiUnavailableError } from '../src/ai/errors.js';
-import { declinedRows, failureNote, failureSentence, switchOffer } from '../src/ai/chat/failure.js';
+import { declinedRows, failureNote, failureSentence, switchOffer, voiceFailure } from '../src/ai/chat/failure.js';
 import type { AutomationEngine } from '../src/automations/engine.js';
 import type { AssistantTurn } from '../src/ai/assistant-agent.js';
 import type { AutomationConversation, AutomationTurn } from '../src/ai/automation-conversation.js';
@@ -701,6 +701,31 @@ describe('the words on a failure', () => {
     expect(said('overloaded')).toBe('Opus 5.5 couldn’t answer: Anthropic is overloaded right now.');
     expect(said('network')).toBe('Opus 5.5 couldn’t answer: your hub couldn’t reach Anthropic.');
     expect(said('aborted')).toBe('Opus 5.5 took too long to answer, so your hub stopped waiting.');
+  });
+
+  it('says a voice OpenAI would not open in the same words, with the kind beside them', () => {
+    const said = (kind: ConstructorParameters<typeof AiUnavailableError>[0]) =>
+      voiceFailure(new AiUnavailableError(kind, 'raw'));
+    expect(said('billing')).toEqual({
+      text: 'The voice couldn’t start: this home’s OpenAI account is out of credit.',
+      failure: { provider: 'openai', kind: 'billing' },
+    });
+    expect(said('auth_failed').text).toBe('The voice couldn’t start: OpenAI didn’t accept this home’s key.');
+    expect(said('usage_limit').failure).toEqual({ provider: 'openai', kind: 'usage_limit' });
+    // What may pass says so, so an app can tell a wait from a dead end.
+    expect(said('rate_limited')).toEqual({
+      text: 'The voice couldn’t start: OpenAI is limiting how fast this home’s key can be used. Try again in a minute.',
+      failure: { provider: 'openai', kind: 'rate_limited', transient: true },
+    });
+    expect(said('network')).toEqual({
+      text: 'The voice couldn’t start: your hub couldn’t reach OpenAI.',
+      failure: { provider: 'openai', kind: 'network', transient: true },
+    });
+    // A refusal nothing here recognises keeps OpenAI's own sentence.
+    expect(voiceFailure(new Error('The offer could not be parsed'))).toEqual({
+      text: 'The voice couldn’t start: The offer could not be parsed.',
+      failure: { provider: 'openai', kind: 'failed' },
+    });
   });
 
   it('gives anything else in the provider’s own words, without the envelope', () => {

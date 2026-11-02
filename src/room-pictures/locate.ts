@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { AiProvider } from '../core/settings.js';
 import { callsIn, replyCostUsd, withFallbacks } from '../ai/anthropic-fallback.js';
-import { classifyApiError, readableFailure } from '../ai/errors.js';
+import { classifyApiError, errorCodeIn, readableFailure } from '../ai/errors.js';
 import type { TokenUsage } from '../ai/models.js';
 import { locatePrompt, type PictureDevice } from './prompts.js';
 
@@ -183,7 +183,10 @@ async function askOpenAi(input: LocateInput, prompt: string): Promise<Asked> {
   if (!response.ok) {
     const error = body?.['error'] as { message?: unknown } | undefined;
     const detail = typeof error?.message === 'string' ? error.message : `The provider answered ${response.status}.`;
-    throw new LocateError(detail, classifyApiError({ status: response.status, message: detail })?.kind ?? 'refused');
+    throw new LocateError(
+      detail,
+      classifyApiError({ status: response.status, message: detail, code: errorCodeIn(body) })?.kind ?? 'refused',
+    );
   }
   return { answer: openAiAnswer(body), usage: openAiUsage(body) };
 }

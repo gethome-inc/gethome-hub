@@ -1,5 +1,5 @@
 import type { Logger } from '../../logging.js';
-import { AiUnavailableError, classifyApiError } from '../errors.js';
+import { AiUnavailableError, classifyAgentFailure, classifyApiError, errorCodeIn } from '../errors.js';
 import { MAX_OUTPUT_TOKENS } from '../agent-core.js';
 import { estimateCostUsd } from '../models.js';
 import {
@@ -420,7 +420,7 @@ async function streamResponse(request: {
     // The classifier branches on HTTP status rather than on any vendor's error
     // vocabulary, which is exactly why it is structural.
     throw (
-      classifyApiError({ status: response.status, headers: response.headers, message }) ??
+      classifyApiError({ status: response.status, headers: response.headers, message, code: errorCodeIn(text) }) ??
       new Error(message)
     );
   }
@@ -428,6 +428,8 @@ async function streamResponse(request: {
 
   let completed: ResponseBody | null = null;
   let failure: string | null = null;
+  /** The vendor's own code for `failure`, where it sent one (`insufficient_quota`). */
+  let failureCode: string | undefined;
   /**
    * Which part of the reasoning summary the deltas are in.
    *
@@ -486,16 +488,20 @@ async function streamResponse(request: {
           break;
         }
         failure = body?.error?.message ?? reason ?? 'incomplete';
+        failureCode = body?.error?.code;
         break;
       }
       case 'response.failed': {
         const body = event.data['response'] as ResponseBody | undefined;
         failure = body?.error?.message ?? body?.incomplete_details?.reason ?? 'failed';
+        failureCode = body?.error?.code;
         break;
       }
       case 'error': {
         const message = event.data['message'];
+        const code = event.data['code'];
         failure = typeof message === 'string' ? message : 'the stream reported an error';
+        failureCode = typeof code === 'string' ? code : undefined;
         break;
       }
       default:
@@ -503,7 +509,21 @@ async function streamResponse(request: {
     }
   }
 
-  if (failure !== null) throw new Error(`OpenAI response ${failure}`);
+  /**
+   * **A failure inside the stream is classified like one before it.** The
+   * request answered 200, so the status that `classifyApiError` reads is gone,
+   * and an account out of credit arrived here as a plain error — which a
+   * failure note can only relay: "GPT-6.1 Terra couldn’t answer: OpenAI
+   * response You have no credits remaining. Add credits to continue using the
+   * API at https://platform.openai.com/settings/…", where the same refusal
+   * before the stream reads "this home’s OpenAI account is out of credit." The
+   * vendor's code rides along to the classifier (`insufficient_quota` says it
+   * plainly) and stays out of the message.
+   */
+  if (failure !== null) {
+    const said = failureCode !== undefined ? `${failureCode}: ${failure}` : failure;
+    throw classifyAgentFailure(said) ?? new Error(`OpenAI response ${failure}`);
+  }
   if (completed === null) throw new Error('OpenAI stream ended without completing the response');
   return completed;
 }

@@ -5017,8 +5017,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
      * `502` rather than `409`, because the two are different screens: a `409`
      * is something in this home's settings, and the way out is on a page
      * somebody can open. This is OpenAI saying no — a key that has been
-     * revoked, a balance that has run out, a rate limit — so the detail is
-     * *their* sentence, which is always better than one invented here.
+     * revoked, a balance that has run out, a rate limit — so the detail names
+     * *their* reason, in the words a failed chat round already uses for it,
+     * and keeps their own sentence for a refusal nothing here recognises.
      */
     let opened: Awaited<ReturnType<typeof openLiveSession>>;
     try {
@@ -5034,9 +5035,18 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         log: deps.log,
       });
     } catch (error) {
+      // **Said the way a failed chat round is** (`voiceFailure`): the same
+      // taxonomy and the same words, so "this home’s OpenAI account is out of
+      // credit" is one sentence on both, rather than OpenAI's own with a
+      // billing URL cut off mid-word on a phone. `failure` is additive — the
+      // kind an app can pick a way out by — and `detail` stands on its own for
+      // every app that has never heard of it.
+      const { voiceFailure } = await import('../ai/chat/failure.js');
+      const said = voiceFailure(error);
       return reply.code(502).send({
         error: 'voice_unavailable',
-        detail: error instanceof Error ? error.message : 'OpenAI would not open a voice session.',
+        detail: said.text,
+        failure: said.failure,
       });
     }
 

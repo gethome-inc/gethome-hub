@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import pino from 'pino';
 import { createOpenAiTransport } from '../src/ai/chat/openai-transport.js';
 import { QuestionGate, type ChatTransportOptions } from '../src/ai/chat/agent-loop.js';
+import { AiUnavailableError } from '../src/ai/errors.js';
 
 /**
  * The OpenAI half of a conversation.
@@ -372,6 +373,60 @@ describe('the OpenAI chat transport', () => {
       ),
     );
     await expect(transport.round(undefined, unstopped)).rejects.toThrow(/content_filter/);
+  });
+
+  /**
+   * A refusal inside a stream that had already answered 200 has no status for
+   * `classifyApiError` to read, so it used to reach a failure note as a plain
+   * error — "OpenAI response You have no credits remaining. Add credits to…" —
+   * where the same refusal before the stream reads "out of credit".
+   */
+  it('classifies a failure inside the stream, so an empty account reads as one', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        streamOf([
+          frame('error', {
+            code: 'insufficient_quota',
+            message:
+              'You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.',
+          }),
+        ]),
+      ),
+    );
+    const transport = transportFor();
+    transport.pushUser('something');
+    const failed = await transport.round(undefined, unstopped).catch((error: unknown) => error);
+    expect(failed).toBeInstanceOf(AiUnavailableError);
+    expect((failed as AiUnavailableError).kind).toBe('billing');
+
+    // Something the classifier does not recognise is still the vendor's words.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(streamOf([frame('error', { message: 'something unexpected' })])),
+    );
+    const other = await transport.round(undefined, unstopped).catch((error: unknown) => error);
+    expect(other).not.toBeInstanceOf(AiUnavailableError);
+    expect((other as Error).message).toBe('OpenAI response something unexpected');
+  });
+
+  /**
+   * The same empty account refused before the stream, with a code and no
+   * sentence about credit: the code is what says so, and the classifier is
+   * handed it beside the message rather than the message alone.
+   */
+  it('reads an empty account from the code on a refused request', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ error: { code: 'insufficient_quota' } }), { status: 429 }),
+      ),
+    );
+    const transport = transportFor();
+    transport.pushUser('something');
+    const failed = await transport.round(undefined, unstopped).catch((error: unknown) => error);
+    expect(failed).toBeInstanceOf(AiUnavailableError);
+    expect((failed as AiUnavailableError).kind).toBe('billing');
   });
 
   it('reports the vendor’s own sentence when the request itself is refused', async () => {
