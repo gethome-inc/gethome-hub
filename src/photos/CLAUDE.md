@@ -32,7 +32,13 @@ this directory.
   `forgetSubject`, `endMembership` calls `forgetMember` (chat photos only — a
   room photo somebody took stays the house's, with their name), and
   `reconcile()` at boot answers anything an older build removed after a
-  rollback. Chat photos also age out by their own `at` after
+  rollback — and leaves the rows alone when it cannot list the folder, since
+  only a folder that is not there has no files, and a read that failed would
+  otherwise read every row as missing. **A drawing made again from kept photos
+  is attached to them before the prune that makes room for it** — in both
+  services — or the prune, finding a photo used only by the drawing it is
+  taking, deletes it out from under the new one; and `attach` never throws,
+  answering the ids it attached. Chat photos also age out by their own `at` after
   `CHAT_PHOTO_RETAIN_DAYS`, which a suite holds equal to
   `RETAIN_TRANSCRIPT_DAYS`, and past `CHAT_PHOTOS_BUDGET_BYTES` the oldest go.
 - **The same photo again is the copy already kept.** A room drawn again from

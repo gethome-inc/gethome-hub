@@ -24,7 +24,7 @@ import type { AutomationEngine } from '../src/automations/engine.js';
 import { PortraitService } from '../src/portraits/store.js';
 import { RoomPictureService } from '../src/room-pictures/store.js';
 import { CHAT_PHOTO_RETAIN_DAYS, PHOTOS_MIN_FREE_BYTES, PhotoStore } from '../src/photos/store.js';
-import { activity as activityTable, aiRuns, automationChatMessages, members } from '../src/db/schema.js';
+import { activity as activityTable, aiRuns, automationChatMessages, devices, members } from '../src/db/schema.js';
 import type { AdapterBus, ProtocolAdapter } from '../src/adapters/adapter.js';
 import {
   bootedHome,
@@ -304,6 +304,85 @@ describe.skipIf(!handle)('the photo store', () => {
     expect(await store.get(live)).not.toBeNull();
     for (const gone of [orphaned, portrait, chat, fileless]) expect(await store.get(gone)).toBeNull();
     expect(files()).toEqual([`${live}.jpg`]);
+  });
+
+  it('leaves every row alone when the photos folder cannot be read', async () => {
+    await store.setHome({ room: true });
+    const kept = (await store.keep({ kind: 'room', subjectId: 'room-1', member: anna(), photos: [jpeg()], useId: 'pic-live' })).ids[0]!;
+    // There, but not a folder that can be listed: nothing can be concluded
+    // about the files, so nothing is concluded about the rows either.
+    rmSync(path.join(dir, 'photos'), { recursive: true, force: true });
+    writeFileSync(path.join(dir, 'photos'), 'not a folder');
+
+    await store.reconcile({ roomPictureIds: ['pic-live'] });
+
+    expect(await store.get(kept)).not.toBeNull();
+  });
+
+  it('attaches only what it still keeps, and never throws into the drawing', async () => {
+    await store.setHome({ room: true });
+    const kept = (await store.keep({ kind: 'room', subjectId: 'room-1', member: anna(), photos: [jpeg()], useId: 'pic-1' })).ids[0]!;
+    expect(await store.attach([kept, '00000000-0000-4000-8000-000000000000'], 'pic-2')).toEqual([kept]);
+    expect((await store.forUses(['pic-2'])).get('pic-2')?.map((photo) => photo.id)).toEqual([kept]);
+  });
+
+  it('keeps the photo a room is drawn again from when its only drawing is the one pruned', async () => {
+    await store.setHome({ room: true });
+    const draw = vi.fn(async () => ({ png: Buffer.alloc(1024, 1), usage: { inputTextTokens: 1, inputImageTokens: 1, outputTokens: 1 } }));
+    const locate = vi.fn(async () => ({ located: [], usage: { input_tokens: 1, output_tokens: 1 } }));
+    // One drawing a room: drawing again prunes the one the photo was kept with.
+    const pictures = new RoomPictureService(
+      dir,
+      new HubEventBus(),
+      undefined,
+      undefined,
+      { maxPerRoom: 1, minFreeBytes: 0 },
+      draw as never,
+      locate as never,
+      vi.fn() as never,
+      store,
+    );
+    const photo = { bytes: bytes(300), contentType: 'image/jpeg' };
+    const room = {
+      roomId: 'room-1',
+      roomName: 'Kitchen',
+      orientation: 'portrait' as const,
+      devices: [],
+      apiKey: 'sk-test',
+      locator: async () => [],
+      member: anna(),
+    };
+    const first = await pictures.draw({ ...room, photos: [photo], keepPhotos: true });
+    await pictures.settled();
+    const keptId = (await store.forUses([first.id])).get(first.id)![0]!.id;
+
+    const again = await pictures.draw({ ...room, photos: [{ ...photo, keptId }], keepPhotos: true });
+    await pictures.settled();
+
+    expect(again.photosKept).toEqual({ kept: 1 });
+    expect(pictures.get(first.id)).toBeUndefined();
+    expect(await store.get(keptId)).not.toBeNull();
+    expect((await store.forUses([again.id])).get(again.id)?.map((kept) => kept.id)).toEqual([keptId]);
+  });
+
+  it('keeps the photo a portrait is drawn again from when its only portrait is the one pruned', async () => {
+    await store.setHome({ portrait: true });
+    drawMock.mockResolvedValue({ png: Buffer.alloc(2048, 7), usage: { inputTextTokens: 200, inputImageTokens: 0, outputTokens: 4160 } });
+    const [device] = await db.insert(devices).values({ adapter: 'zigbee', externalId: 'kettle-1', name: 'Kettle' }).returning();
+    const events = new HubEventBus();
+    // One portrait a device: drawing again prunes the one the photo was kept with.
+    const portraits = new PortraitService(db, events, dir, log, new AiRunLog(db, events), { maxPerDevice: 1, minFreeBytes: 0 }, store);
+    const photo = { bytes: bytes(300), contentType: 'image/jpeg' };
+    const ask = { deviceId: device!.id, kind: 'outlet' as const, apiKey: 'sk-test', member: anna() };
+    const first = await portraits.draw({ ...ask, photo, keepPhoto: true });
+    const keptId = first.photo!.id;
+
+    const again = await portraits.draw({ ...ask, photo, keptPhotoId: keptId });
+
+    expect(again.photosKept).toEqual({ kept: 1 });
+    expect(again.photo?.id).toBe(keptId);
+    expect((await portraits.list(device!.id)).map((portrait) => portrait.id)).toEqual([again.id]);
+    expect(await store.get(keptId)).not.toBeNull();
   });
 
   it('keeps a chat photo exactly as long as the transcript it belongs to', () => {

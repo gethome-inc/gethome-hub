@@ -377,8 +377,9 @@ export class PhotoStore {
       for (const [index, photo] of input.photos.entries()) {
         const copy = copies[index];
         if (copy !== undefined) {
-          if (input.useId !== undefined) await this.attach([copy], input.useId);
-          ids.push(copy);
+          const attached = input.useId === undefined || (await this.attach([copy], input.useId)).length > 0;
+          ids.push(attached ? copy : null);
+          if (!attached) failed = true;
           continue;
         }
         if (!fits) {
@@ -445,11 +446,23 @@ export class PhotoStore {
     return undefined;
   }
 
-  /** Attach photos already kept to another use — a drawing made again from them. */
-  async attach(photoIds: readonly string[], useId: string): Promise<void> {
+  /**
+   * Attach photos already kept to another use — a drawing made again from
+   * them. Answers the ids it attached: one that went in the meantime (deleted
+   * while the drawing ran) is left out with a line in the log, never thrown
+   * into a drawing the home has already paid for.
+   */
+  async attach(photoIds: readonly string[], useId: string): Promise<string[]> {
+    const attached: string[] = [];
     for (const photoId of photoIds) {
-      await this.db.insert(keptPhotoUses).values({ photoId, useId }).onConflictDoNothing();
+      try {
+        await this.db.insert(keptPhotoUses).values({ photoId, useId }).onConflictDoNothing();
+        attached.push(photoId);
+      } catch (error) {
+        this.log?.warn({ err: error, photoId, useId }, 'A kept photo could not be attached to what was drawn from it.');
+      }
     }
+    return attached;
   }
 
   /**
@@ -617,7 +630,13 @@ export class PhotoStore {
 
       const rows = await this.db.select().from(keptPhotos);
       const expected = new Map(rows.map((row) => [path.basename(this.fileFor(row.id, row.mediaType)), row]));
-      const files = await readdir(this.root).catch(() => [] as string[]);
+      // Only a folder that is not there is a folder with no files. One that
+      // could not be read says nothing about them, and every row would read
+      // as missing — so that is thrown to the catch below, rows untouched.
+      const files = await readdir(this.root).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return [] as string[];
+        throw error;
+      });
       const present = new Set(files);
       for (const file of files) {
         if (!expected.has(file)) await rm(path.join(this.root, file), { force: true }).catch(() => undefined);

@@ -275,15 +275,21 @@ export class PortraitService {
       throw error;
     }
 
-    const stored = await this.store(input.deviceId, drawing.png, {
+    const id = await this.insert(input.deviceId, drawing.png, {
       provider: 'openai',
       model: PORTRAIT_MODEL,
       fromPhoto: input.photo !== undefined,
       ...(input.member !== undefined ? { member: input.member } : {}),
     });
     // After the portrait is safely on disk: the drawing is the job, and keeping
-    // its photo is a convenience that can neither fail it nor hold it up.
-    const photosKept = await this.keepPhoto(input, stored.id);
+    // its photo is a convenience that can neither fail it nor hold it up. **And
+    // before the prune**: a portrait drawn again from the photo of the one the
+    // prune takes is attached to it first, so the prune finds the photo still
+    // in use rather than deleting it out from under the portrait just drawn.
+    const photosKept = await this.keepPhoto(input, id);
+    await this.prune(input.deviceId);
+    const stored = (await this.list(input.deviceId)).find((record) => record.id === id);
+    if (!stored) throw new Error('portrait row vanished immediately after it was written');
     // After the picture is safely on disk: the drawing is the job, and a ledger
     // write that threw before it would lose one the home has already paid for.
     // `costUsd` is absent rather than zero when the provider reported no usage.
@@ -293,9 +299,7 @@ export class PortraitService {
       portraitId: stored.id,
       ...(costUsd !== undefined ? { costUsd } : {}),
     });
-    if (photosKept === undefined) return stored;
-    const relisted = (await this.list(input.deviceId)).find((record) => record.id === stored.id) ?? stored;
-    return { ...relisted, photosKept };
+    return photosKept === undefined ? stored : { ...stored, photosKept };
   }
 
   /**
@@ -306,8 +310,9 @@ export class PortraitService {
   private async keepPhoto(input: DrawInput, portraitId: string): Promise<KeepOutcome | undefined> {
     if (!this.photos) return input.keepPhoto === true ? { kept: 0, reason: 'off' } : undefined;
     if (input.keptPhotoId !== undefined) {
-      await this.photos.attach([input.keptPhotoId], portraitId);
-      return { kept: 1 };
+      // Gone before it could be attached — deleted while this was drawn.
+      const attached = await this.photos.attach([input.keptPhotoId], portraitId);
+      return attached.length > 0 ? { kept: 1 } : { kept: 0, reason: 'failed' };
     }
     if (input.keepPhoto !== true || input.photo === undefined) return undefined;
     const { outcome } = await this.photos.keep({
@@ -320,7 +325,11 @@ export class PortraitService {
     return outcome;
   }
 
-  private async store(
+  /**
+   * The portrait's file and row, selected. The prune is the caller's, after
+   * the photo it was drawn from has been kept or attached (`drawNow`).
+   */
+  private async insert(
     deviceId: string,
     png: Buffer,
     meta: {
@@ -329,7 +338,7 @@ export class PortraitService {
       fromPhoto: boolean;
       member?: { id: string; name: string };
     },
-  ): Promise<PortraitRecord> {
+  ): Promise<string> {
     const id = randomUUID();
     await mkdir(path.join(this.root, safeSegment(deviceId)), { recursive: true });
     await writeFile(this.fileFor(deviceId, id), png);
@@ -349,10 +358,7 @@ export class PortraitService {
       memberName: meta.member?.name ?? null,
       selected: true,
     });
-    await this.prune(deviceId);
-    const stored = (await this.list(deviceId)).find((record) => record.id === id);
-    if (!stored) throw new Error('portrait row vanished immediately after it was written');
-    return stored;
+    return id;
   }
 
   /**
@@ -387,7 +393,7 @@ export class PortraitService {
     // Deleting the picture a home was looking at must not quietly turn the
     // device back into a sphere: `null` means somebody *chose* the sphere, and
     // nobody did. The newest remaining takes the slot, which is the same rule
-    // `store` follows when a new one arrives. `prune` never reaches this — it
+    // `insert` follows when a new one arrives. `prune` never reaches this — it
     // refuses to evict a selected portrait in the first place.
     if (row.selected) await this.promoteNewest(row.deviceId);
     return row.deviceId;

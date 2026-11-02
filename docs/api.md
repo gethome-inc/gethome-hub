@@ -2641,7 +2641,9 @@ reading included.
 `photosKept: {kept, reason?}` — `reason` an open word, today `off` (the switch
 is off), `low-space` or `failed` — so an app can say where the photo went
 without a second read. Absent when nothing was asked, so an older app's answer
-is exactly what it was.
+is exactly what it was. A drawing made again from kept photos counts the ones
+it named; one deleted before the new drawing could be attached to it is left
+out, with `failed`.
 
 **Frames.** `{"type":"photos"}` goes to every member socket when the home's
 switches or photos change, and to one person's own sockets when theirs do —

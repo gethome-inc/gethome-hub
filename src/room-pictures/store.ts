@@ -328,11 +328,14 @@ export class RoomPictureService {
       ...this.read().map((other) => (other.roomId === input.roomId && other.selected ? { ...other, selected: false } : other)),
       record,
     ]);
-    await this.prune(input.roomId);
     // After the drawing is on disk and before the night: the photos are still
     // the buffers the route decoded, written as they are, and they are let go
-    // with the rest of the day's memory once this returns.
+    // with the rest of the day's memory once this returns. **And before the
+    // prune**: a drawing made again from the photos of the one the prune takes
+    // is attached to them first, so the prune finds them still in use rather
+    // than deleting them out from under the drawing that was just made.
     const photosKept = await this.keepPhotos(input, photos, record.id);
+    await this.prune(input.roomId);
     this.events?.emit('roomPicturesChanged', input.roomId);
     return photosKept === undefined ? record : { ...record, photosKept };
   }
@@ -348,9 +351,14 @@ export class RoomPictureService {
     pictureId: string,
   ): Promise<KeepOutcome | undefined> {
     const reused = photos.flatMap((photo) => (photo.keptId !== undefined ? [photo.keptId] : []));
-    if (this.photos && reused.length > 0) await this.photos.attach(reused, pictureId);
-    if (input.keepPhotos !== true) return reused.length > 0 ? { kept: reused.length } : undefined;
-    if (!this.photos) return { kept: reused.length, reason: 'off' };
+    const attached = this.photos && reused.length > 0 ? (await this.photos.attach(reused, pictureId)).length : 0;
+    // A photo named and gone before it could be attached — deleted while the
+    // room was being drawn — is one this drawing does not keep.
+    const lost: KeepOutcome['reason'] = attached < reused.length ? 'failed' : undefined;
+    if (input.keepPhotos !== true) {
+      return reused.length > 0 ? { kept: attached, ...(lost !== undefined ? { reason: lost } : {}) } : undefined;
+    }
+    if (!this.photos) return { kept: 0, reason: 'off' };
     const fresh = photos.filter((photo) => photo.keptId === undefined);
     const { outcome } = await this.photos.keep({
       kind: 'room',
@@ -359,9 +367,10 @@ export class RoomPictureService {
       photos: fresh.map((photo) => ({ bytes: photo.bytes, mediaType: photo.contentType })),
       useId: pictureId,
     });
+    const reason = outcome.reason ?? lost;
     return {
-      kept: outcome.kept + reused.length,
-      ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
+      kept: outcome.kept + attached,
+      ...(reason !== undefined ? { reason } : {}),
     };
   }
 
