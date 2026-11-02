@@ -16,7 +16,8 @@ import { PermitJoinService } from '../src/core/permit-join.js';
 import { AiRunLog } from '../src/core/ai-runs.js';
 import { writeRadioStandDown } from '../src/core/radio.js';
 import { MappingLibrary } from '../src/ai/library.js';
-import { settings as settingsTable } from '../src/db/schema.js';
+import { aiRuns, settings as settingsTable } from '../src/db/schema.js';
+import { inArray } from 'drizzle-orm';
 import type { AdapterBus, ProtocolAdapter } from '../src/adapters/adapter.js';
 import type { HubCommand } from '../src/schema/index.js';
 import {
@@ -933,6 +934,49 @@ describe.skipIf(!handle)('hub API', () => {
       deviceName: expect.any(String),
       memberName: expect.any(String),
     });
+  });
+
+  it('pages the AI run log from the newest back, and says on GET /hub that it can', async () => {
+    const hub = await app.inject({ method: 'GET', url: '/api/v1/hub' });
+    // Presence is the capability: an older hub strips `before` and answers the
+    // newest page again, so an app that does not find this asks once.
+    expect(hub.json()).toMatchObject({ aiRuns: { before: true, maxLimit: 100 } });
+
+    // Seven runs, two of them written in the same millisecond, which is the
+    // case a cursor on time alone would skip or repeat.
+    const base = Date.parse('2026-01-02T03:04:05Z');
+    const ids = Array.from({ length: 7 }, (_, index) => `00000000-0000-4000-a000-00000000000${index}`);
+    await db.insert(aiRuns).values(
+      ids.map((id, index) => ({
+        id,
+        at: new Date(base + (index === 4 ? 3 : index) * 1000),
+        kind: 'map',
+        adapter: 'zigbee',
+        exposesHash: 'h',
+        ok: true,
+        steps: [],
+      })),
+    );
+    const page = async (query: string) => {
+      const response = await app.inject({ method: 'GET', url: `/api/v1/ai/runs?${query}`, headers: auth(ownerToken) });
+      expect(response.statusCode).toBe(200);
+      return (response.json() as { id: string }[]).map((run) => run.id).filter((id) => ids.includes(id));
+    };
+
+    const first = await page('limit=3');
+    expect(first).toEqual([ids[6], ids[5], ids[4]]);
+    const second = await page(`limit=3&before=${first.at(-1)}`);
+    expect(second).toEqual([ids[3], ids[2], ids[1]]);
+    const last = await page(`limit=3&before=${second.at(-1)}`);
+    expect(last).toEqual([ids[0]]);
+    expect(await page(`limit=3&before=${ids[0]}`)).toEqual([]);
+    // A cursor that names no run leads nowhere rather than back to the start.
+    expect(await page('limit=3&before=not-a-run')).toEqual([]);
+    // And a page is never more than the hub says.
+    const tooMany = await app.inject({ method: 'GET', url: '/api/v1/ai/runs?limit=101', headers: auth(ownerToken) });
+    expect(tooMany.statusCode).toBe(400);
+
+    await db.delete(aiRuns).where(inArray(aiRuns.id, ids));
   });
 
   it('stores AI settings without ever returning the key', async () => {

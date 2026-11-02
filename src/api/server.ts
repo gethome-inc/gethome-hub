@@ -51,7 +51,7 @@ import {
   PictureSpaceError,
   RoomPictureService,
 } from '../room-pictures/store.js';
-import type { AiRunLog } from '../core/ai-runs.js';
+import { RUNS_PAGE_LIMIT, type AiRunLog } from '../core/ai-runs.js';
 import type { AutomationEngine, AutomationPresser } from '../automations/engine.js';
 import {
   AutomationNotConfiguredError,
@@ -951,6 +951,14 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // choices this hub will accept rather than a list from its own build.
     // Static, and therefore cannot throw — this route is the health check.
     apiKeys: { grantable: KEY_GRANTABLE },
+    // Additive, and presence is the capability: a hub carrying this block
+    // reads the AI run log a page at a time (`GET /ai/runs?before=<run id>`),
+    // so an app can reach every run it keeps rather than the newest page. An
+    // older hub's zod strips `before` and answers the newest page again, which
+    // an app would draw as the same runs twice — so one that does not find
+    // this asks once and stops. `maxLimit` is the most one read answers. A
+    // constant, so it cannot throw.
+    aiRuns: { before: true, maxLimit: RUNS_PAGE_LIMIT },
     // Additive, and presence is the capability: a hub carrying this block
     // takes `model`, `effort` and `attachments` on a chat message, with the
     // words `effort` accepts and how many photos of what size and type. An
@@ -3562,9 +3570,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    */
   app.get('/api/v1/ai/runs', needs('hub.ai'), async (request) => {
     const query = z
-      .object({ limit: z.coerce.number().int().min(1).max(100).default(30) })
+      .object({
+        limit: z.coerce.number().int().min(1).max(RUNS_PAGE_LIMIT).default(30),
+        /** The oldest run the caller already holds: the page is the runs before it. */
+        before: z.string().min(1).max(64).optional(),
+      })
       .parse(request.query);
-    const rows = await deps.aiRuns.list(query.limit);
+    const rows = await deps.aiRuns.list(query.limit, query.before);
     // How many rounds each run kept, so an app knows whether to offer the
     // disclosure at all — one grouped read rather than a body per run, since
     // the bodies are the expensive half and most runs have none.
