@@ -2181,9 +2181,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   });
 
   /**
-   * Delete your own chat photos — from the hub, and (through `clearedAt`) from
-   * every one of your devices that hears about it, now or the next time it
-   * asks. The conversations stay, each row still saying a photo was there.
+   * Delete your own chat photos — from the hub, and (through `clearedAt`) the
+   * copies your other devices fetched from it, once each hears about it. The
+   * device a photo was sent from keeps its own copy as it always has. The
+   * conversations stay, each row still saying a photo was there.
    */
   app.delete('/api/v1/photos/mine/chat', memberOnly, async (request) => {
     const { count, clearedAt } = await photos.clearChat(request.member!.id);

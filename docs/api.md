@@ -2642,7 +2642,9 @@ switches or photos change, and to one person's own sockets when theirs do —
 re-read `GET /photos`. Deleting room or portrait photos also sends the
 `roomPictures` / `portraits` frame for each room or device it touched.
 `mine.chat.clearedAt` is when the person last deleted their chat photos: a
-device that kept its own copies lets go of those sent before it.
+device that fetched copies of them from here lets go of the ones sent before
+it. The device a photo was sent from keeps its own copy for as long as it always
+has, which an app says before anybody deletes anything.
 
 **The log.** Turning a home switch writes `photos.keep` ("Anna started keeping
 room photos on the hub."), and deleting a kind writes `photos.deleted`; a
