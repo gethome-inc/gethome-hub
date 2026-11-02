@@ -594,8 +594,10 @@ domains — update them in the same change.
   `tookMs` also counts the answer arriving. Every step and every `said` sets
   `repliedAt` back, since words a round goes back to work after were narration;
   a hand-over does not, being reported after the words it is about. The first
-  `delta` frame is stamped with the same clock reading, so a client timing the
-  wait off the frames lands on the stored number.
+  `delta` frame is stamped with the same clock reading **and carries the number
+  itself** (`AutomationChatEvent.workedMs`), since the round's first frame goes
+  out after its clock starts — seconds after, on a first message on a small
+  board — and a client timing the wait between frames counted short of the row.
   **And two things a round produced were streamed and then dropped, so the trail
   somebody read back was a thinner thing than the one they watched.** The model's
   **reasoning** arrives between one step and the next, which makes it the working

@@ -2668,12 +2668,17 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
           // to — a client timing the wait off the frames gets the number the
           // row will say, not one a millisecond either side of a second.
           const now = Date.now();
+          // **And the reply's first word carries the number itself**, since
+          // the round's first frame goes out after its clock starts — see
+          // `AutomationChatEvent.workedMs`.
+          const begins = session.repliedAt === undefined && session.roundStartedAt !== undefined;
           session.repliedAt ??= now;
           this.emit({
             sessionId: session.id,
             phase: 'delta',
             at: new Date(now).toISOString(),
             text: delta,
+            ...(begins ? { workedMs: Math.max(0, Math.round(now - (session.roundStartedAt ?? now))) } : {}),
           });
         },
         /**

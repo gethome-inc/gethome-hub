@@ -1029,6 +1029,59 @@ describe('the assistant', () => {
       expect((await firstAgentRow(assistant, started.sessionId))?.workedMs).toBeGreaterThanOrEqual(70);
     });
 
+    /**
+     * The frames cannot say it: the round's clock starts when its turn begins
+     * and its first frame goes out later, so the number travels on the
+     * reply's first word itself — the very number the row stores.
+     */
+    it('is carried on the delta that begins the reply, and on no other', async () => {
+      const worked: (number | undefined)[] = [];
+      events.on('assistantChat', (event) => {
+        if (event.phase === 'delta') worked.push(event.workedMs);
+      });
+      const { assistant } = await assistantFor([{ kind: 'said', text: 'It is 21 degrees.' }], {
+        script: async (context) => {
+          await pause(40);
+          context?.onDelta?.('It is ');
+          await pause(20);
+          context?.onDelta?.('21 degrees.');
+        },
+      });
+      const started = await assistant.start({ memberId, message: 'how warm is it?' });
+      await assistant.idle();
+
+      const data = await firstAgentRow(assistant, started.sessionId);
+      expect(worked).toHaveLength(2);
+      expect(Number.isInteger(worked[0])).toBe(true);
+      expect(worked[0]).toBe(data?.workedMs);
+      expect(worked[1]).toBeUndefined();
+    });
+
+    /** Narration began a reply that was not the reply; the one after it is. */
+    it('is carried again on the words that follow the round going back to work', async () => {
+      const worked: (number | undefined)[] = [];
+      events.on('assistantChat', (event) => {
+        if (event.phase === 'delta') worked.push(event.workedMs);
+      });
+      const { assistant } = await assistantFor([{ kind: 'said', text: 'It is 21 degrees.' }], {
+        script: async (context) => {
+          context?.onDelta?.('I will check the sensor.');
+          context?.onSaid?.('I will check the sensor.');
+          await pause(40);
+          context?.onStep?.('Looking at one device closely', 'reading', 'Hall sensor');
+          await pause(40);
+          context?.onDelta?.('It is 21 degrees.');
+        },
+      });
+      const started = await assistant.start({ memberId, message: 'how warm is it?' });
+      await assistant.idle();
+
+      const data = await firstAgentRow(assistant, started.sessionId);
+      expect(worked).toHaveLength(2);
+      expect(worked[1]).toBe(data?.workedMs);
+      expect(worked[1]).toBeGreaterThan(worked[0] ?? Infinity);
+    });
+
     /** A hand-over is said once the words it is about have streamed. */
     it('is not set back by another model answering the same reply', async () => {
       const { assistant } = await assistantFor([{ kind: 'said', text: 'Sure.' }], {

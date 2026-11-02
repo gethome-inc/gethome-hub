@@ -1025,8 +1025,13 @@ goes off to call something with is narration (`said`, below), so every step and
 every interim sentence sets the clock back, and only the words after the last of
 them stop it. **A hand-over does not**: it is reported once the words it is
 about have already streamed. **And the first `delta` frame's `at` is the very
-instant it counts to** — one clock reading for the record and the frame — so a
-client timing the wait off the frames arrives at the number the row will say.
+instant it counts to** — one clock reading for the record and the frame — **and
+that frame carries the number itself** (`workedMs`), because the frames alone
+cannot say it: the round's clock starts when its turn begins and its first
+frame goes out only once the agent is ready to ask the model, which on a
+conversation's first message, on a small board, is seconds later. A client
+timing the wait between frames counted short, and changed its mind when the row
+landed.
 Absent on a round that ended without words of its own (a question, a card, a
 note alone — the note a failure, a refusal, the cost limit or the rounds
 running out writes included, whatever had streamed before the round broke off,
