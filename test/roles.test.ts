@@ -713,6 +713,25 @@ describe.skipIf(!handle)('roles and permissions', () => {
         detail: 'The voice couldn’t start: this home’s OpenAI account is out of credit.',
         failure: { provider: 'openai', kind: 'billing' },
       });
+
+      // And with the code alone under a sentence that says nothing of credit,
+      // which is read from the code rather than as a rate limit.
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(
+          new Response(JSON.stringify({ error: { code: 'insufficient_quota', message: 'Request failed.' } }), {
+            status: 429,
+          }),
+        ),
+      );
+      const coded = await app.inject({
+        method: 'POST',
+        url: '/api/v1/assistant/voice/session',
+        headers: auth(memberToken),
+        payload: { sdp: 'v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n' },
+      });
+      expect(coded.statusCode).toBe(502);
+      expect(coded.json()).toMatchObject({ failure: { provider: 'openai', kind: 'billing' } });
     } finally {
       vi.unstubAllGlobals();
       await app.inject({

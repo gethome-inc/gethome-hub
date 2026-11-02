@@ -410,6 +410,25 @@ describe('the OpenAI chat transport', () => {
     expect((other as Error).message).toBe('OpenAI response something unexpected');
   });
 
+  /**
+   * The same empty account refused before the stream, with a code and no
+   * sentence about credit: the code is what says so, and the classifier is
+   * handed it beside the message rather than the message alone.
+   */
+  it('reads an empty account from the code on a refused request', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ error: { code: 'insufficient_quota' } }), { status: 429 }),
+      ),
+    );
+    const transport = transportFor();
+    transport.pushUser('something');
+    const failed = await transport.round(undefined, unstopped).catch((error: unknown) => error);
+    expect(failed).toBeInstanceOf(AiUnavailableError);
+    expect((failed as AiUnavailableError).kind).toBe('billing');
+  });
+
   it('reports the vendor’s own sentence when the request itself is refused', async () => {
     vi.stubGlobal(
       'fetch',

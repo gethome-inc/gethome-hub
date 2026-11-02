@@ -1,5 +1,5 @@
 import type { Logger } from '../../logging.js';
-import { AiUnavailableError, classifyAgentFailure, classifyApiError } from '../errors.js';
+import { AiUnavailableError, classifyAgentFailure, classifyApiError, errorCodeIn } from '../errors.js';
 import { MAX_OUTPUT_TOKENS } from '../agent-core.js';
 import { estimateCostUsd } from '../models.js';
 import {
@@ -420,7 +420,7 @@ async function streamResponse(request: {
     // The classifier branches on HTTP status rather than on any vendor's error
     // vocabulary, which is exactly why it is structural.
     throw (
-      classifyApiError({ status: response.status, headers: response.headers, message }) ??
+      classifyApiError({ status: response.status, headers: response.headers, message, code: errorCodeIn(text) }) ??
       new Error(message)
     );
   }

@@ -1047,7 +1047,11 @@ remaining…", "You exceeded your current quota…") or inside a stream that had
 already answered 200, so `errors.ts` reads that wording as `billing` ahead of
 the rate-limit patterns — unless the text says "rate limit" itself, since a
 free-tier rate limit names the billing page too — and the OpenAI transport
-classifies a failure inside the stream as it does one before it.
+classifies a failure inside the stream as it does one before it. **The code is
+read as well as the sentence** (`errorCodeIn`, passed to `classifyApiError` as
+`code`): a 429 carrying `insufficient_quota` under a sentence that says nothing
+of credit, or no sentence at all, is an empty account, and every OpenAI caller
+— the chat, the voice, recognition, portraits and room pictures — hands it over.
 
 The other two refusals are the automations agent's, carrying the same codes
 because both apps already branch on them: `ai_not_configured` and

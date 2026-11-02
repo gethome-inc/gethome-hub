@@ -3,7 +3,7 @@ import type { Logger } from '../src/logging.js';
 import type { MappingDescriptor } from '../src/ai/descriptor.js';
 import type { Z2mDevice } from '../src/adapters/zigbee/exposes-mapper.js';
 import { mapExposes } from '../src/adapters/zigbee/exposes-mapper.js';
-import { classifyAgentFailure, classifyApiError, parseResetHint } from '../src/ai/errors.js';
+import { classifyAgentFailure, classifyApiError, errorCodeIn, parseResetHint } from '../src/ai/errors.js';
 import { buildMappingUserPrompt, zigbee2mqttDevicePage } from '../src/ai/prompts.js';
 import {
   DEFAULT_MODEL,
@@ -149,6 +149,35 @@ describe('classifyApiError', () => {
         now,
       )?.kind,
     ).toBe('rate_limited');
+  });
+
+  it('reads the vendor’s code beside a sentence that says nothing of credit', () => {
+    // A 429 whose body carries `insufficient_quota` under a generic sentence —
+    // or none, where the caller falls back to "OpenAI answered 429." — is an
+    // empty account, not a speed bump. Without the code it is a rate limit.
+    expect(classifyApiError({ status: 429, message: 'OpenAI answered 429.', code: 'insufficient_quota' }, now)?.kind).toBe(
+      'billing',
+    );
+    expect(classifyApiError({ status: 429, message: 'OpenAI answered 429.' }, now)?.kind).toBe('rate_limited');
+    // The code is read, never written into the error's message.
+    expect(
+      classifyApiError({ status: 429, message: 'Request failed.', code: 'insufficient_quota' }, now)?.message,
+    ).toBe('Request failed.');
+    // An ordinary rate limit's own code changes nothing.
+    expect(
+      classifyApiError({ status: 429, message: 'Rate limit reached for gpt-6.1-terra.', code: 'rate_limit_exceeded' }, now)
+        ?.kind,
+    ).toBe('rate_limited');
+  });
+
+  it('finds the vendor’s code in a body, as text or parsed', () => {
+    expect(errorCodeIn('{"error":{"code":"insufficient_quota","message":"x"}}')).toBe('insufficient_quota');
+    expect(errorCodeIn({ error: { code: 'insufficient_quota' } })).toBe('insufficient_quota');
+    // Anthropic's body names a type and no code; neither is a code.
+    expect(errorCodeIn('{"type":"error","error":{"type":"rate_limit_error","message":"x"}}')).toBeUndefined();
+    expect(errorCodeIn('not json')).toBeUndefined();
+    expect(errorCodeIn(null)).toBeUndefined();
+    expect(errorCodeIn({ error: { code: '' } })).toBeUndefined();
   });
 
   it('prefers the provider retry-after header over any heuristic', () => {

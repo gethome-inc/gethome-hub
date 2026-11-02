@@ -29,7 +29,7 @@
  * provider's own message rather than silently returning a boxed image.
  */
 
-import { classifyApiError } from '../ai/errors.js';
+import { classifyApiError, errorCodeIn } from '../ai/errors.js';
 
 export const PORTRAIT_MODEL = 'gpt-image-2.5-flare';
 
@@ -199,7 +199,8 @@ export async function drawPortrait(options: DrawOptions): Promise<PortraitDrawin
     const detail = messageIn(body) ?? `OpenAI answered ${response.status}.`;
     // Reuse the mapper's classifier: it branches on HTTP status rather than on
     // any vendor's error vocabulary, which is exactly why it is structural.
-    const kind = classifyApiError({ status: response.status, message: detail })?.kind ?? 'refused';
+    const kind =
+      classifyApiError({ status: response.status, message: detail, code: errorCodeIn(body) })?.kind ?? 'refused';
     throw new PortraitDrawError(detail, kind);
   }
 
