@@ -96,6 +96,60 @@ describe('working the home from a reply', () => {
     expect(context.sent).toHaveLength(ASSISTANT_MAX_COMMANDS_PER_DEVICE + 1);
   });
 
+  /**
+   * **The wait for a sleeping device is said only of one that sleeps.** The
+   * note rode on every command's result, so the model passed it on about
+   * whatever it had just switched — "It's a mains outlet, not a battery
+   * device…" after a plug came on — which is a sentence about nothing to
+   * somebody who asked for a light. A battery is what the device declares or
+   * reports, never guessed from its kind.
+   */
+  it('says a command may wait only of a device that runs on a battery', async () => {
+    const home: AutomationHomeView = {
+      rooms: [{ id: 'hall', name: 'Hall', zoneId: null }],
+      zones: [],
+      automations: [],
+      devices: [
+        {
+          id: 'plug',
+          name: 'Light TV',
+          roomId: 'hall',
+          online: true,
+          endpoints: [{ endpointId: 1, deviceKind: 'outlet', capabilities: ['onOff'] }],
+        },
+        {
+          id: 'valve',
+          name: 'Radiator',
+          roomId: 'hall',
+          online: true,
+          endpoints: [{ endpointId: 1, deviceKind: 'climate', capabilities: ['thermostat', 'battery'] }],
+        },
+        {
+          id: 'lock',
+          name: 'Front door',
+          roomId: 'hall',
+          online: true,
+          endpoints: [{ endpointId: 1, deviceKind: 'lock', capabilities: ['doorLock'] }],
+        },
+      ],
+    };
+    const context: AssistantToolContext = {
+      ...contextFor(home),
+      // A reading counts as much as a declaration: a battery reported before
+      // anything declared one is still a battery.
+      stateOf: (deviceId) => (deviceId === 'lock' ? { reachable: true, sensors: {}, battery: { percent: 80 } } : undefined),
+    };
+    const budget = { perDevice: new Map<string, number>() };
+    const send = (deviceId: string) =>
+      runAssistantTool('control_device', { deviceId, command: { type: 'power', on: true } }, context, budget);
+
+    const plug = await send('plug');
+    expect(plug.isError).toBeFalsy();
+    expect(plug.text).toBe('Sent.');
+    expect((await send('valve')).text).toContain('until it next wakes');
+    expect((await send('lock')).text).toContain('until it next wakes');
+  });
+
   it('refuses a device that is not in this home without counting it', async () => {
     const context = contextFor(homeOf(1));
     const budget = { perDevice: new Map<string, number>() };

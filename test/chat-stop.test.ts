@@ -538,7 +538,9 @@ describe('the assistant’s loop, stopped', () => {
     await conversation.send('what happened?');
     const outputs = bodyOf(fetchMock, 1).input.filter((item) => item.type === 'function_call_output');
     expect(outputs.map((item) => item.call_id)).toEqual(['call_0', 'call_1', 'call_2']);
-    expect(outputs[0]?.output).toBe('Sent. Note that reaching a battery device can take until it next wakes.');
+    // A light runs on the mains, so its result is the command and nothing
+    // about waiting (`test/assistant-tools.test.ts`).
+    expect(outputs[0]?.output).toBe('Sent.');
     expect(outputs[1]?.output).toContain('Not done: they stopped this answer before it ran.');
     expect(outputs[2]?.output).toContain('Not done');
   });

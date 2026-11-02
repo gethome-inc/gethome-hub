@@ -1315,6 +1315,11 @@ domains — update them in the same change.
   so a model pacing itself a device a round would run out of them at about
   nine devices — the prompt and the tool's description both ask for all of
   them in the same response, and a suite drives twenty through one round.
+  **And its result names the battery wait only for a device that has one**
+  (`runsOnBattery`: a declared `battery` capability or a battery reading). It
+  rode on every command's result, and the model passed it on about whatever it
+  had just switched — "a mains outlet, not a battery device" after a plug came
+  on — while the system prompt already says what a sleeping device means.
 - **A conversation names itself beside its first round, and the name is a
   frame of its own.** `chat/chat-title.ts` asks the cheapest model of the
   conversation's own vendor (`TITLE_MODELS`: Haiku 5.5, GPT-6 Luna) at `low`
