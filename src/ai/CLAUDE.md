@@ -712,7 +712,13 @@ domains — update them in the same change.
   thinking block with no signature; and of a reply cut off at `max_tokens` or
   by the context window, **only the words, and none of its calls run**, since
   a call cut off half way through its input can still parse
-  (`test/chat-anthropic-stops.test.ts`).
+  (`test/chat-anthropic-stops.test.ts`). **The OpenAI transport keeps the same
+  rule for `max_output_tokens`**, which it missed for a release: a response cut
+  off there is read as finished, so every `function_call` in it ran — one whose
+  arguments stopped after the required fields parses — and was echoed onto the
+  history. Its words alone go back now, no call and no reasoning item, since a
+  reasoning item left without the item it led to is refused as surely as an
+  unanswered call (`test/ai-openai-chat.test.ts`).
   **Every Claude request opts into server-side fallback** (`fallbacks:
   "default"`, beta `server-side-fallback-2026-07-01`) — the transport, the
   recognition agent and the room-picture locator alike, all through

@@ -109,6 +109,11 @@ reply another Claude finished through `anthropic-fallback.ts`.
 `chat/openai-transport.ts` is the Responses API over plain `fetch` — no second
 SDK for a Pi to download — with `summary: 'auto'` as that vendor's spelling of
 the same lesson and `store: false` with the encrypted reasoning replayed by hand.
+A reply it cut off at `max_output_tokens` is read the Anthropic way: its words
+are the answer and all that goes back onto the history, and none of its function
+calls runs — a call whose arguments were cut off can still parse, and an unrun
+call or a reasoning item left without the item it led to is a conversation that
+vendor refuses on the next message.
 Every one of those was learned by breaking something; a second copy is a second
 place to unlearn it.
 

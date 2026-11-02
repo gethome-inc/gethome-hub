@@ -314,9 +314,6 @@ export function createOpenAiTransport(options: ChatTransportOptions): ChatTransp
       usage.add(body.usage);
       cachedThrough = sent;
       const output = body.output ?? [];
-      // Verbatim, reasoning items included: without them the model loses its
-      // own chain of thought across the tool call it just made.
-      input.push(...output);
 
       const refusal = refusalIn(output);
       const said = output
@@ -327,6 +324,27 @@ export function createOpenAiTransport(options: ChatTransportOptions): ChatTransp
         .filter((text): text is string => typeof text === 'string')
         .join('\n')
         .trim();
+
+      /**
+       * **A reply cut off by the output ceiling is an answer, and only its
+       * words go onto the history** — `anthropic-transport.ts`'s rule, for its
+       * reason: a function call in it may have been cut off half way through
+       * its arguments, which can still parse as a smaller valid object — a
+       * command to a device with half its argument missing — so no call from a
+       * cut-off reply is ever run, and none goes onto the history to be
+       * answered. Its reasoning stays off it too, since a reasoning item
+       * without the item it led to is refused on the next request.
+       * `streamResponse` has already said that the model ran out of room. A
+       * refusal is still a refusal, cut off or not.
+       */
+      if (refusal === null && body.incomplete_details?.reason === 'max_output_tokens') {
+        if (said.length > 0) input.push({ role: 'assistant', content: said });
+        return { said, calls: [], stop: 'end' };
+      }
+
+      // Verbatim, reasoning items included: without them the model loses its
+      // own chain of thought across the tool call it just made.
+      input.push(...output);
 
       const calls: ChatToolCall[] = output
         .filter((item) => item.type === 'function_call')

@@ -342,6 +342,65 @@ describe('the OpenAI chat transport', () => {
     expect(transport.costUsd()).toBeGreaterThan(0);
   });
 
+  /**
+   * **And none of its calls run.** A function call in a reply cut off by the
+   * ceiling may have been cut off half way through its arguments, and half of
+   * a JSON object can still parse — a command with its endpoint missing — so
+   * the words are the answer, as on the other vendor
+   * (`test/chat-anthropic-stops.test.ts`), and nothing of the call reaches the
+   * history to be answered: a call with no output after it, or a reasoning item
+   * without the item it led to, is a conversation the API refuses.
+   */
+  it('runs no call from a reply the model ran out of room for', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          streamOf([
+            frame('response.output_text.delta', { delta: 'Switching the kitchen on.' }),
+            frame('response.incomplete', {
+              response: {
+                status: 'incomplete',
+                incomplete_details: { reason: 'max_output_tokens' },
+                output: [
+                  { type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'opaque' },
+                  {
+                    type: 'message',
+                    content: [{ type: 'output_text', text: 'Switching the kitchen on.' }],
+                  },
+                  {
+                    type: 'function_call',
+                    status: 'incomplete',
+                    call_id: 'call_cut',
+                    name: 'list_devices',
+                    // Whole JSON, as a cut can leave it: the optional half of
+                    // the object is what went missing.
+                    arguments: '{"roomId":"kitchen"}',
+                  },
+                ],
+                usage: { input_tokens: 40, output_tokens: 32_000 },
+              },
+            }),
+          ]),
+        ),
+      ),
+    );
+    const transport = transportFor();
+    transport.pushUser('switch the kitchen on');
+    const round = await transport.round(undefined, unstopped);
+
+    expect(round.calls).toEqual([]);
+    expect(round.stop).toBe('end');
+    expect(round.said).toBe('Switching the kitchen on.');
+
+    transport.pushUser('thanks');
+    await transport.round(undefined, unstopped);
+    const input = sentBody()['input'] as Record<string, unknown>[];
+    expect(input.filter((item) => item['type'] === 'function_call')).toEqual([]);
+    expect(input.filter((item) => item['type'] === 'reasoning')).toEqual([]);
+    expect(input).toContainEqual({ role: 'assistant', content: 'Switching the kitchen on.' });
+  });
+
   it('does not read a failed or unfinished stream as an answer', async () => {
     vi.stubGlobal(
       'fetch',
