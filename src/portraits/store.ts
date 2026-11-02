@@ -9,6 +9,7 @@ import type { HubEventBus } from '../core/bus.js';
 import type { Logger } from '../logging.js';
 import type { DeviceKind } from '../schema/index.js';
 import type { AiProvider } from '../core/settings.js';
+import type { KeepOutcome, PhotoStore } from '../photos/store.js';
 import { drawPortrait, portraitCostUsd, PortraitDrawError, PORTRAIT_MODEL } from './openai-images.js';
 import { EDIT_PROMPT, generatePrompt } from './prompts.js';
 
@@ -63,6 +64,13 @@ export interface PortraitRecord {
    * name outlives them, which is the point of copying it.
    */
   drawnBy?: { id: string | null; name: string };
+  /**
+   * The photo it was drawn from, when the home keeps those
+   * (`src/photos/store.ts`) — absent for a portrait drawn from the device's
+   * kind alone, drawn before the home switched keeping on, or whose photo was
+   * deleted since. The bytes are `GET /photos/:id`.
+   */
+  photo?: { id: string; bytes: number };
 }
 
 /** What `GET /hub` carries. Its *presence* is what says this hub can draw. */
@@ -90,7 +98,21 @@ export interface DrawInput {
   photo?: { bytes: Buffer; contentType: string };
   /** Who asked. Recorded on the portrait, which outlives the log row about it. */
   member?: { id: string; name: string };
+  /**
+   * Keep the photo with the portrait, where the home's switch is on and the
+   * hub has room. Asked by the app, never assumed: an older app tells people
+   * their photo is not kept, and never sends this.
+   */
+  keepPhoto?: boolean | undefined;
+  /**
+   * The photo is one the hub already keeps — drawing a portrait again from
+   * it. It is attached to the new portrait rather than written a second time.
+   */
+  keptPhotoId?: string | undefined;
 }
+
+/** A drawing, with what happened to the photo it was asked to keep. */
+export type DrawnPortrait = PortraitRecord & { photosKept?: KeepOutcome };
 
 export class PortraitService {
   private readonly root: string;
@@ -120,6 +142,12 @@ export class PortraitService {
      */
     private readonly runs: AiRunLog,
     limits: Partial<PortraitLimits> = {},
+    /**
+     * The photos a home keeps (`src/photos/store.ts`). Optional so a suite about
+     * something else need not build one; without it nothing is ever kept,
+     * which is what every hub did before.
+     */
+    private readonly photos?: PhotoStore | undefined,
   ) {
     this.limits = {
       maxPerDevice: limits.maxPerDevice ?? MAX_PER_DEVICE,
@@ -149,6 +177,7 @@ export class PortraitService {
       .from(devicePortraits)
       .where(eq(devicePortraits.deviceId, deviceId))
       .orderBy(desc(devicePortraits.at));
+    const kept = (await this.photos?.forUses(rows.map((row) => row.id))) ?? new Map<string, never[]>();
     return rows.map((row) => ({
       id: row.id,
       at: row.at.toISOString(),
@@ -162,6 +191,7 @@ export class PortraitService {
       // portrait from before this was recorded has neither and says nothing,
       // which an app draws as no line rather than as an empty one.
       ...(row.memberName !== null ? { drawnBy: { id: row.memberId, name: row.memberName } } : {}),
+      ...photoOf(kept.get(row.id)),
     }));
   }
 
@@ -191,7 +221,7 @@ export class PortraitService {
    * await* — which is what makes the space check below safe, since two
    * requests can no longer both pass it and then both write.
    */
-  async draw(input: DrawInput): Promise<PortraitRecord> {
+  async draw(input: DrawInput): Promise<DrawnPortrait> {
     if (this.drawing) throw new PortraitBusyError();
     this.drawing = true;
     try {
@@ -214,7 +244,7 @@ export class PortraitService {
    * It is what answers "why did nothing happen" a day later, and it is usually
    * free, which is exactly why `costUsd` is left absent rather than zeroed.
    */
-  private async drawNow(input: DrawInput): Promise<PortraitRecord> {
+  private async drawNow(input: DrawInput): Promise<DrawnPortrait> {
     await this.assertSpace();
     const run = this.runs.begin({
       kind: 'portrait',
@@ -251,6 +281,9 @@ export class PortraitService {
       fromPhoto: input.photo !== undefined,
       ...(input.member !== undefined ? { member: input.member } : {}),
     });
+    // After the portrait is safely on disk: the drawing is the job, and keeping
+    // its photo is a convenience that can neither fail it nor hold it up.
+    const photosKept = await this.keepPhoto(input, stored.id);
     // After the picture is safely on disk: the drawing is the job, and a ledger
     // write that threw before it would lose one the home has already paid for.
     // `costUsd` is absent rather than zero when the provider reported no usage.
@@ -260,7 +293,31 @@ export class PortraitService {
       portraitId: stored.id,
       ...(costUsd !== undefined ? { costUsd } : {}),
     });
-    return stored;
+    if (photosKept === undefined) return stored;
+    const relisted = (await this.list(input.deviceId)).find((record) => record.id === stored.id) ?? stored;
+    return { ...relisted, photosKept };
+  }
+
+  /**
+   * Keep the photo a portrait was drawn from, or attach the kept one it was
+   * drawn again from. Answers what happened only when keeping was asked —
+   * `undefined` otherwise, so an older app's answer is exactly what it was.
+   */
+  private async keepPhoto(input: DrawInput, portraitId: string): Promise<KeepOutcome | undefined> {
+    if (!this.photos) return input.keepPhoto === true ? { kept: 0, reason: 'off' } : undefined;
+    if (input.keptPhotoId !== undefined) {
+      await this.photos.attach([input.keptPhotoId], portraitId);
+      return { kept: 1 };
+    }
+    if (input.keepPhoto !== true || input.photo === undefined) return undefined;
+    const { outcome } = await this.photos.keep({
+      kind: 'portrait',
+      subjectId: input.deviceId,
+      member: input.member,
+      photos: [{ bytes: input.photo.bytes, mediaType: input.photo.contentType }],
+      useId: portraitId,
+    });
+    return outcome;
   }
 
   private async store(
@@ -325,6 +382,8 @@ export class PortraitService {
     if (!row) return null;
     await this.db.delete(devicePortraits).where(eq(devicePortraits.id, id));
     await this.unlink(row.deviceId, row.id);
+    // Its photo goes with it, unless another portrait was drawn from it too.
+    await this.photos?.release(row.id);
     // Deleting the picture a home was looking at must not quietly turn the
     // device back into a sphere: `null` means somebody *chose* the sphere, and
     // nobody did. The newest remaining takes the slot, which is the same rule
@@ -352,6 +411,7 @@ export class PortraitService {
    */
   async forgetDevice(deviceId: string): Promise<void> {
     await rm(path.join(this.root, safeSegment(deviceId)), { recursive: true, force: true }).catch(() => undefined);
+    await this.photos?.forgetSubject('portrait', deviceId).catch(() => 0);
   }
 
   // ── Bounds ────────────────────────────────────────────────────────────────
@@ -465,4 +525,10 @@ export class PortraitSpaceError extends Error {
  */
 function safeSegment(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]/g, '_');
+}
+
+/** The kept photo a portrait was drawn from, as its record carries it. */
+function photoOf(photos: readonly { id: string; bytes: number }[] | undefined): { photo?: { id: string; bytes: number } } {
+  const first = photos?.[0];
+  return first ? { photo: { id: first.id, bytes: first.bytes } } : {};
 }

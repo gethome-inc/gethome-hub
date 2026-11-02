@@ -200,6 +200,19 @@ The free-space check is **inside** the serialisation queue, so two requests
 cannot both pass it and then both write — and it runs *before* the request, not
 after: OpenAI has already billed by the time the bytes arrive.
 
+### The photo a portrait was drawn from
+
+**Not kept, unless the home keeps portrait photos and the app asked.** With the
+home's switch on (`PUT /photos/home {portrait: true}`) and `keepPhoto: true` on
+the drawing, the photo is written beside the portrait as a kept photo
+(`src/photos/store.ts`) and the portrait's record carries `photo: {id, bytes}`.
+It lives as long as the portrait does — the bounds above take it with the
+portrait — and a portrait drawn again from it (`keptPhotoId`) shares it, so it
+goes only with the last portrait drawn from it. It is written from the buffer
+the route already decoded and after the portrait is safely on disk, so keeping
+it can neither fail a drawing nor hold one up. `docs/api.md`, *Photos the hub
+keeps*, is canonical.
+
 ### Selection
 
 `selected: null` while portraits exist is a **state, not an absence**: it means

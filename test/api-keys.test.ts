@@ -295,6 +295,16 @@ describe.skipIf(!handle)('API keys', () => {
     'PATCH /api/v1/room-pictures/:id': 'permission home.structure',
     'POST /api/v1/room-pictures/:id/locate': 'permission hub.ai',
     'DELETE /api/v1/room-pictures/:id': 'permission home.structure',
+    // Photos of the inside of somebody's home: the member's, never a key's —
+    // reading included, the way conversations are (`photos/store.ts`).
+    'GET /api/v1/room-pictures/:id/photos': 'deny',
+    'GET /api/v1/photos': 'deny',
+    'PUT /api/v1/photos/home': 'deny',
+    'PUT /api/v1/photos/mine': 'deny',
+    'DELETE /api/v1/photos/home/:kind': 'deny',
+    'DELETE /api/v1/photos/mine/chat': 'deny',
+    'GET /api/v1/photos/:id': 'deny',
+    'DELETE /api/v1/photos/:id': 'deny',
     'POST /api/v1/matter/commission': 'permission device.add',
     // Two GETs with side effects — this one drives a radio for seconds, and
     // `GET /settings/mqtt` writes a row and hands out a password — which is

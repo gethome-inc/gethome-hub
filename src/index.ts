@@ -10,6 +10,8 @@ import { HubEventBus } from './core/bus.js';
 import { ActivityService } from './core/activity.js';
 import { HistoryService } from './core/history.js';
 import { PortraitService } from './portraits/store.js';
+import { RoomPictureService } from './room-pictures/store.js';
+import { PhotoStore } from './photos/store.js';
 import { watchUpdateOutcomes } from './core/update.js';
 import { createAutoUpdater } from './core/auto-update.js';
 import { HomeService } from './core/home.js';
@@ -128,6 +130,12 @@ async function main(): Promise<void> {
   // the portrait service because that service now writes to it.
   const aiRuns = new AiRunLog(db, events);
 
+  // The photos a home, or one person, chose to keep — the photos a room or a
+  // portrait was drawn from, and the ones a person added to a chat. One store
+  // for all of them, handed to every service that keeps into it, and keeping
+  // nothing until somebody switches a kind on (`photos/store.ts`).
+  const photos = new PhotoStore(db, settings, config.DATA_DIR, events, log.child({ module: 'photos' }));
+
   // The pictures a home has had drawn of its devices. Files under the data
   // directory with a row each; constructed unconditionally, because reading
   // them needs no credential and a hub with none simply has no rows.
@@ -137,7 +145,29 @@ async function main(): Promise<void> {
     config.DATA_DIR,
     log.child({ module: 'portraits' }),
     aiRuns,
+    {},
+    photos,
   );
+
+  // The pictures of the home's rooms — built here rather than inside the API so
+  // the photos they keep are reconciled against them at boot, below.
+  const roomPictures = new RoomPictureService(
+    config.DATA_DIR,
+    events,
+    log.child({ module: 'room-pictures' }),
+    aiRuns,
+    {},
+    undefined,
+    undefined,
+    undefined,
+    photos,
+  );
+  // Before the API answers anything: a drawing, a portrait or a message that
+  // an older build removed after a rollback still has its photos here, and
+  // this is where they go. It never throws — tidying is not a reason for a hub
+  // not to start.
+  await photos.reconcile({ roomPictureIds: roomPictures.list().map((picture) => picture.id) });
+  photos.start();
 
   // The rules the home runs by itself — and, with a manual trigger, the things
   // the apps draw as scenes. Constructed here and *started* after the registry
@@ -259,7 +289,27 @@ async function main(): Promise<void> {
     events,
     runs: aiRuns,
     log: log.child({ module: 'ai' }),
+    keptPhotos: photos,
   });
+  // The assistant. It holds the automations chat rather than the other way
+  // round, because delegation only goes one way: the assistant hands a job
+  // over, and the agent it hands to knows nothing about it.
+  const assistantChat = new AssistantChat({
+    db,
+    settings,
+    events,
+    runs: aiRuns,
+    log: log.child({ module: 'ai' }),
+    access,
+    activity,
+    registry,
+    engine: automations,
+    automationChat,
+    keptPhotos: photos,
+  });
+  // The fortnight a transcript is kept for, kept on a clock rather than only
+  // when somebody happens to begin a conversation (`ChatRuntime.startSweeping`).
+  const stopChatSweeps = [automationChat.startSweeping(), assistantChat.startSweeping()];
 
   let radioPressure: RadioPressureWatch | undefined;
 
@@ -345,21 +395,9 @@ async function main(): Promise<void> {
     // chat: no client, no prompt and no vendor SDK is loaded until the first
     // message, which is `lazy.ts`'s seam one module over.
     automationChat,
-    // The assistant. It holds the automations chat rather than the other way
-    // round, because delegation only goes one way: the assistant hands a job
-    // over, and the agent it hands to knows nothing about it.
-    assistantChat: new AssistantChat({
-      db,
-      settings,
-      events,
-      runs: aiRuns,
-      log: log.child({ module: 'ai' }),
-      access,
-      activity,
-      registry,
-      engine: automations,
-      automationChat,
-    }),
+    assistantChat,
+    photos,
+    roomPictures,
     mappings: new MappingLibrary({
       db,
       settings,
@@ -493,6 +531,8 @@ async function main(): Promise<void> {
     permitJoin.stop();
     radioPressure?.stop();
     updateOutcomes.stop();
+    photos.stop();
+    for (const stop of stopChatSweeps) stop();
     // Before the database closes: the hour being counted is written here.
     await autoUpdate.stop().catch(() => {});
     await automations.stop().catch(() => {});

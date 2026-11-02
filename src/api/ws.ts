@@ -231,6 +231,8 @@ const MAX_CLIENT_MESSAGE_BYTES = 4096;
  *   {"type":"permitJoin","active","remainingSeconds"}
  *   {"type":"commissioning","jobId","status","detail"?}
  *   {"type":"hubStatus","zigbee":{…},"radio":{…}}   a radio came up or went down
+ *   {"type":"portraits","deviceId"} / {"type":"roomPictures","roomId"}
+ *   {"type":"photos"}   what the hub keeps changed — re-read GET /photos
  *
  * and, only for a client that asked for them:
  *
@@ -369,6 +371,18 @@ export function attachWebSocket(
   /** A room's pictures moved — the `portraits` frame's reason, for a room. */
   const onRoomPictures = live((roomId: string) => send({ type: 'roomPictures', roomId }));
   /**
+   * The photos the hub keeps changed (`photos/store.ts`). The home's changes
+   * reach every member's socket; somebody's own — their chat photos, their
+   * switch — reach only theirs. Never a key's socket: no key may read a photo,
+   * so there is nothing for it to re-read. Bare, because `GET /photos` is one
+   * short read rendered for its caller.
+   */
+  const onPhotos = live((target: string | null) => {
+    if (key !== null || memberId === null) return;
+    if (target !== null && target !== memberId) return;
+    send({ type: 'photos' });
+  });
+  /**
    * One line of the home's history.
    *
    * Filtered per socket, and **asked at send time rather than captured when
@@ -479,6 +493,7 @@ export function attachWebSocket(
   deps.events.on('structureChanged', onStructure);
   deps.events.on('portraitsChanged', onPortraits);
   deps.events.on('roomPicturesChanged', onRoomPictures);
+  deps.events.on('photosChanged', onPhotos);
   deps.events.on('activity', onActivity);
   deps.events.on('accessChanged', onAccessChanged);
   deps.events.on('permitJoin', onPermitJoin);
@@ -738,6 +753,7 @@ export function attachWebSocket(
     deps.events.off('structureChanged', onStructure);
     deps.events.off('portraitsChanged', onPortraits);
     deps.events.off('roomPicturesChanged', onRoomPictures);
+    deps.events.off('photosChanged', onPhotos);
     deps.events.off('automationChanged', onAutomationChanged);
     deps.events.off('activity', onActivity);
     deps.events.off('accessChanged', onAccessChanged);

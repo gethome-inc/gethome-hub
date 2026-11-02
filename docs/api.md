@@ -248,7 +248,7 @@ than no button.
 
 | Method & path | Needs | Notes |
 |---|---|---|
-| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `matter: {bluetooth, bluetoothReason?, wifi, commissioning, settlingUntil?}` is present only while Matter is running and says what pairing this hub can actually do — and, in `settlingUntil`, whether it has finished finding the devices it already owns — see [below](#pairing-a-matter-accessory). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid). `wifiNetworks: {available, reason?}` is present on a hub that can be told about another Wi-Fi network before it is moved — `available: false` with `reason` `"no-networkmanager"` or `"not-installed"` when this machine cannot — see [below](#wi-fi-networks-settingswifi). `apiKeys: {grantable}` is present on a hub that takes [API keys](#api-keys), and lists the permissions a key may be given. `roomPictures: {model, maxPerRoom, maxPhotos}` is present on a hub that [draws rooms](#room-pictures). `chat: {models: true, stop: true, retry: true, efforts: ["low","medium","high"], images: {maxCount, maxBytes, mediaTypes}}` is present on a hub whose chat routes take a message's own `model`, `effort` and photos — an app that does not find it must offer none of the three, because an older hub strips them and answers 201; see [below](#what-a-chat-message-can-carry-model-effort-attachments). `chat.stop` says a running round can be [stopped part-way](#stopping-a-round-post-chatidstop) — an older hub answers that route 404, so an app that does not find it offers no stop — and `chat.retry` the same for [asking a failed round again](#asking-a-failed-round-again-post-chatidretry) |
+| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `matter: {bluetooth, bluetoothReason?, wifi, commissioning, settlingUntil?}` is present only while Matter is running and says what pairing this hub can actually do — and, in `settlingUntil`, whether it has finished finding the devices it already owns — see [below](#pairing-a-matter-accessory). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid). `wifiNetworks: {available, reason?}` is present on a hub that can be told about another Wi-Fi network before it is moved — `available: false` with `reason` `"no-networkmanager"` or `"not-installed"` when this machine cannot — see [below](#wi-fi-networks-settingswifi). `apiKeys: {grantable}` is present on a hub that takes [API keys](#api-keys), and lists the permissions a key may be given. `roomPictures: {model, maxPerRoom, maxPhotos}` is present on a hub that [draws rooms](#room-pictures). `photos: {kinds: ["room","portrait","chat"], minFreeBytes, chatRetainDays}` is present on a hub that can [keep photos](#photos-the-hub-keeps) — an app that does not find it never sends `keepPhotos` and says what it always said: photos stay on the device that took them. `chat: {models: true, stop: true, retry: true, efforts: ["low","medium","high"], images: {maxCount, maxBytes, mediaTypes}}` is present on a hub whose chat routes take a message's own `model`, `effort` and photos — an app that does not find it must offer none of the three, because an older hub strips them and answers 201; see [below](#what-a-chat-message-can-carry-model-effort-attachments). `chat.stop` says a running round can be [stopped part-way](#stopping-a-round-post-chatidstop) — an older hub answers that route 404, so an app that does not find it offers no stop — and `chat.retry` the same for [asking a failed round again](#asking-a-failed-round-again-post-chatidretry) |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
 | `POST /hub/proof` | — | `{nonce, address, tokenId}` → `{hubId, proof}`: this hub proving it is itself **at the address the app dialled**, to an app holding one of its tokens, without the token being sent. `403 proof_refused` for an address that is not this hub's or a token it does not hold — one answer for both. For an app following a saved hub to a new address — see [below](#following-a-hub-to-a-new-address-post-hubproof) |
 | `GET /home` · `PATCH /home` | floor · `home.rename` | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name) |
@@ -259,14 +259,21 @@ than no button.
 | `DELETE /devices/:id` | `device.remove` | also unpairs at the protocol level |
 | `POST /devices/:id/endpoints/:endpointId/commands` | floor (a key: `control`) | body = canonical command; `202`. IR-remote intents (`irLearn`/`irSaveLearned`/`irSend`/`irDeleteCommand`/`irRenameCommand`) are resolved against the endpoint's stored code library (see [device-schema.md](device-schema.md)) |
 | `GET /devices/:id/history?from=&to=&points=&series=` | floor | what this device's readings did over a window, already thinned to a drawable size — see [below](#recorded-readings-get-devicesidhistory). `from`/`to` are epoch ms and default to the last day; `from >= to` is `400 invalid_range`; an unknown device is `404` |
-| `GET /devices/:id/portraits` | floor | the pictures this home has had drawn of a device, newest first: `{id, at, bytes, provider, model, fromPhoto, selected, drawnBy?}`. `drawnBy: {id, name}` is who had it drawn — `id` is null once that person has left the home and absent altogether on a portrait drawn before the hub recorded it, so an app draws no line rather than an empty one. Reading is the floor — a portrait is what the device *looks like*, so a guest whose dashboard could not draw it would be looking at a different home. See [below](#device-portraits) |
+| `GET /devices/:id/portraits` | floor | the pictures this home has had drawn of a device, newest first: `{id, at, bytes, provider, model, fromPhoto, selected, drawnBy?, photo?}`. `photo: {id, bytes}` is the [kept photo](#photos-the-hub-keeps) it was drawn from, present only where the home keeps those. `drawnBy: {id, name}` is who had it drawn — `id` is null once that person has left the home and absent altogether on a portrait drawn before the hub recorded it, so an app draws no line rather than an empty one. Reading is the floor — a portrait is what the device *looks like*, so a guest whose dashboard could not draw it would be looking at a different home. See [below](#device-portraits) |
 | `GET /portraits/:portraitId` | floor | the PNG itself — `image/png`, a strong `ETag` and `Cache-Control: immutable`, because a portrait's bytes never change (a new one gets a new id) |
-| `POST /devices/:id/portraits` | `hub.ai` | draw one. `{photo?: base64, photoType?}` — absent draws from the device's kind alone. Synchronous, and it holds the request for the minutes an image takes. `409 openai_not_configured` (its own code: portraits are OpenAI's job, and a hub can be configured for recognition and not for this), `409 portrait_busy`, `409 no_space`, `502 {error:"provider_failed", kind, detail}` carrying OpenAI's own sentence |
-| `GET /room-pictures` · `GET /room-pictures/:id/day\|night` | floor | pictures of the home's rooms, newest first: `{pictures: [{id, roomId, at, orientation, width, height, hasNight, photoCount, markers, bytes, model, drawnBy?, selected?}]}`, and one picture's PNG, immutable — see [below](#room-pictures) |
-| `POST /room-pictures` · `POST /room-pictures/:id/locate` | `hub.ai` | draw a room from photos of it (`{roomId, orientation?, photos: [{data, type}]}`, one to eight), or read its devices off a picture again. `409 openai_not_configured`, `409 picture_busy`, `409 no_space`, `502 {error:"provider_failed", kind, detail}` |
+| `POST /devices/:id/portraits` | `hub.ai` | draw one. `{photo?: base64, photoType?, keepPhoto?, keptPhotoId?}` — absent draws from the device's kind alone; `keepPhoto: true` keeps the photo with the portrait where the home keeps portrait photos, and `keptPhotoId` draws again from one this device's portraits already keep (`404 photo_not_found` for any other; a `photo` beside it is a 400). The answer carries `photosKept: {kept, reason?}` when either was sent — see [below](#photos-the-hub-keeps). Synchronous, and it holds the request for the minutes an image takes. `409 openai_not_configured` (its own code: portraits are OpenAI's job, and a hub can be configured for recognition and not for this), `409 portrait_busy`, `409 no_space`, `502 {error:"provider_failed", kind, detail}` carrying OpenAI's own sentence |
+| `GET /room-pictures` · `GET /room-pictures/:id/day\|night` | floor | pictures of the home's rooms, newest first: `{pictures: [{id, roomId, at, orientation, width, height, hasNight, photoCount, markers, bytes, model, drawnBy?, selected?, keptPhotos?}]}` — `keptPhotos` is how many of the photos it was drawn from the hub keeps, absent at none, and one picture's PNG, immutable — see [below](#room-pictures) |
+| `POST /room-pictures` · `POST /room-pictures/:id/locate` | `hub.ai` | draw a room from photos of it (`{roomId, orientation?, photos: [{data, type}], keepPhotos?, keptPhotoIds?}`, one to eight between the two), or read its devices off a picture again. `keepPhotos: true` keeps the new photos with the drawing where the home keeps room photos; `keptPhotoIds` draws again from photos this room already keeps (`404 photo_not_found` for any other). The answer carries `photosKept: {kept, reason?}` when either was sent — see [below](#photos-the-hub-keeps). `409 openai_not_configured`, `409 picture_busy`, `409 no_space`, `502 {error:"provider_failed", kind, detail}` |
 | `PATCH /room-pictures/:id` · `DELETE /room-pictures/:id` | `home.structure` | where the devices stand on a picture (`{markers: [{deviceId, x, y}]}`, the whole list) and/or show this picture for its room (`{selected: true}`), or take the picture away |
 | `PATCH /devices/:id/portraits` | `device.edit` | `{selected: id\|null}` — which one the home sees. `null` is a *state*: the procedural sphere, chosen over every picture there is |
-| `DELETE /portraits/:portraitId` | `device.edit` | forget one, file and row |
+| `DELETE /portraits/:portraitId` | `device.edit` | forget one, file and row — and the [kept photo](#photos-the-hub-keeps) it was drawn from, unless another portrait was drawn from it too |
+| `GET /photos` | floor, member only | what the hub keeps: `{space?, minFreeBytes, paused, reason?, chatRetainDays, home: {room, portrait: {keep, count, bytes}}, mine: {chat: {keep, count, bytes, clearedAt?}}, drawings: {count, bytes}}` — see [below](#photos-the-hub-keeps) |
+| `PUT /photos/home` | `hub.ai`, member only | `{room?, portrait?}` → the `GET /photos` answer: whether the home keeps the photos rooms and portraits are drawn from. **Strict** (`400` on a field it does not know); each change writes a `photos.keep` row |
+| `PUT /photos/mine` | floor, member only | `{chat}` → the `GET /photos` answer: whether the hub keeps *your* chat photos. **Strict** |
+| `DELETE /photos/home/:kind` | `hub.ai`, member only | `room` or `portrait`: delete every kept photo of that kind → `{deleted, …GET /photos}`, with a `photos.deleted` row. The drawings stay |
+| `DELETE /photos/mine/chat` | floor, member only | delete your chat photos → `{deleted, clearedAt, …GET /photos}` |
+| `GET /photos/:id` · `DELETE /photos/:id` | member only | one kept photo's bytes (its own `content-type`, a strong `ETag`, `Cache-Control: private, immutable`), or delete it from everything it was kept for. A chat photo answers its sender alone — anybody else gets `404`; a room or portrait photo needs `hub.ai` (`403`) |
+| `GET /room-pictures/:id/photos` | `hub.ai`, member only | the kept photos one drawing was made from, oldest first: `{photos: [{id, kind, subjectId, at, bytes, mediaType, width?, height?, takenBy?}]}` |
 | `POST /devices/:id/remap` | `hub.ai` | force-regenerate the AI mapping (Zigbee devices) → `{requested}`. **It answers as soon as the run is under way, never when it ends**: a run is minutes and this is an HTTP request, so what the agent then did arrives on the `ai` stream and in `GET /ai/runs`. `requested: false` means the radio has no published schema for that device right now — a device row can outlive its `bridge/devices` entry — which is a different answer from a run that failed. Being explicit, it also drops a `rejected` mapping and **ignores the backoff gate**, because it is how somebody retries after fixing a key or changing the model. The hub also remaps automatically when a device publishes unknown parameters — see [ai-adaptation.md](ai-adaptation.md). `409 ai_not_configured` with no credential, `409 ai_disabled` when the owner has switched device recognition off |
 | `POST /matter/commission` | `device.add` | `{pairingCode, wifi?: {ssid, passphrase}}` → `202 {jobId, deadline}` (async). `wifi` is only for a hub that cannot read its own — see [below](#pairing-a-matter-accessory). `409 already_commissioning` when one is already running, `409 matter_disabled` when this hub has no Matter |
 | `GET /matter/commission/:jobId` | floor | `{status: running\|done\|failed, step?, nodeId?, error?, failure?, startedAt, deadline}` — see [below](#pairing-a-matter-accessory) |
@@ -2040,16 +2047,24 @@ to draw: `efforts` (the whole vocabulary, `["low","medium","high"]`) and
   it has arrived. Words alone are never refused for it, and a photo the app has
   downscaled to a few hundred kilobytes never meets it.
 
-**A photo is sent to the model for that one round and kept nowhere on the
-hub.** The person's row records what it *was* —
-`data.attachments: [{type, mediaType, ref?, width?, height?, bytes}]`, `ref`
-echoed so an app can draw its own copy — and never its bytes; once the round is
+**A photo is sent to the model for that one round, and kept on the hub only
+where its sender asked** — `keepPhotos: true` on the message, which an app sends
+only where `GET /hub` has `photos` and the person has [switched keeping their
+chat photos on](#photos-the-hub-keeps) — and then as a file, for the 14 days the
+conversation is kept, never in a row or a run. The answer carries
+`photosKept: {kept, reason?}` whenever it was asked. The person's row records
+what each photo *was* —
+`data.attachments: [{type, mediaType, ref?, width?, height?, bytes, kept?}]`,
+`ref` echoed so an app can draw its own copy, `kept: {id}` where the hub has
+one — and never its bytes; once the round is
 over the hub rebuilds the conversation from its transcript so the provider
 history stops holding the picture — closed or not, before any message queued
 behind it runs — and that record says a photo was sent and is no longer
 available. So a conversation read back on another device, or after a
-restart, has the row and not the picture: draw a placeholder when the app has no
-copy of its own under that `ref`.
+restart, has the row and not the picture: fetch `GET /photos/:id` where the
+attachment carries `kept`, and otherwise draw a placeholder when the app has no
+copy of its own under that `ref`. Keeping changes none of this: the model is
+sent the photo with its own round and never again.
 
 ### Stopping a round (`POST …/chat/:id/stop`)
 
@@ -2170,7 +2185,8 @@ back to an older build keeps the notes and has no route. Then:
   step marked `done`; never one the home refused), with the instruction to
   check before doing any of it again.
 - **Photos are the app's to send again** in `attachments`, exactly as with the
-  message: the hub never kept them. A message whose photos do not come back is
+  message: a retry never reads what the hub kept for the person, so a photo
+  goes to a model only when an app sends it. A message whose photos do not come back is
   sent with a line telling the model they are no longer available.
 - **Only the newest failure, and only once at a time.** `409
   {error: "nothing_to_retry", detail}` when the note is not the conversation's
@@ -2536,8 +2552,11 @@ picture need `home.structure`, since that is how the home is shown.
 **Files and a manifest**: `<data>/room-pictures/<id>-day.png`, `-night.png`
 and `pictures.json`, five per room (the newest kept, and the chosen one
 whatever its age) and 200 MB in all, with a
-refusal to draw on a nearly full card (`409 no_space`). **The photos are not
-kept.** Deleting a room forgets its pictures. Each drawing writes `ai_runs`
+refusal to draw on a nearly full card (`409 no_space`). **The photos are kept
+only where the home keeps room photos and the app asked** (`keepPhotos`) — and
+then for as long as a drawing made from them is; see
+[Photos the hub keeps](#photos-the-hub-keeps). Deleting a room forgets its
+pictures and its photos. Each drawing writes `ai_runs`
 rows (`kind: "roompicture"` for the day and the night, `"roomlocate"` for each
 reader asked) priced from the response's usage. Every change broadcasts
 `{"type":"roomPictures","roomId"}`.
@@ -2568,6 +2587,66 @@ A document the hub cannot use is a **422 with the reasons, and it is stored**.
 That is the difference between a dead end and a step: `POST …/repair` hands the
 draft and the exact complaints to the agent. Only `repair` needs a credential —
 listing, downloading, uploading and deleting are local operations on JSON.
+
+### Photos the hub keeps
+
+The photos a room or a portrait was drawn from, and the photos a person adds to
+a chat, can be **kept on the hub** — so anybody who may draw can draw a room
+again on any device, a portrait shows what it was drawn from, and a person's
+chat photos appear on their other devices. `src/photos/store.ts` holds the
+rules; this is the contract.
+
+**Off by default, and asked twice.** A photo is kept only when the request that
+carried it says so — `keepPhotos: true` on a chat message or a room drawing,
+`keepPhoto: true` on a portrait — **and** the switch for its kind is on: the
+home's for rooms and portraits (`PUT /photos/home`, `hub.ai`), the sender's own
+for chat (`PUT /photos/mine`, the floor). Both apps that shipped before this
+tell people their photos stay on the device that took them, and an app that
+never asks is an app whose sentence stays true. A hub older than this strips the
+field and keeps nothing; ask `GET /hub` for `photos` before offering any of it.
+
+**Room, never a board.** Photos are kept only while the hub's data partition
+keeps more than `minFreeBytes` (2 GiB) free after the write — far above the
+500 MB where drawing stops, so photos stop first. Below it keeping **pauses**
+(`GET /photos` says `paused: true, reason: "low-space"`) and nothing kept is
+deleted; it resumes once 2.5 GiB is free again. Kept photos are never processed:
+no thumbnail, no re-encode — an app downscales and caches its own.
+
+**A photo lives as long as what it was kept for.**
+
+| Kind | Kept for | Goes when |
+|---|---|---|
+| `room` | each drawing made from it | its last drawing is deleted or pruned (five per room, 200 MB in all), or the room is deleted |
+| `portrait` | each portrait drawn from it | its last portrait is deleted or pruned (six per device, 300 MB in all), or the device is removed |
+| `chat` | the message it was sent with | `chatRetainDays` (14) after it was sent — the conversation's fortnight — or sooner past 512 MB of everybody's chat photos, oldest first; and at once when its sender leaves the home |
+
+Turning a switch off keeps nothing new and deletes nothing; deleting is its own
+act (`DELETE /photos/home/:kind`, `DELETE /photos/mine/chat`, `DELETE
+/photos/:id`). **Keeping is not sending**: a kept photo reaches a provider only
+when somebody draws again from it (`keptPhotoIds`, `keptPhotoId`) — a new
+drawing, billed like any — and a chat photo never goes to a model again.
+
+**Who sees what.** A chat photo is its sender's alone: to anybody else,
+`GET /photos/:id` is a `404`, the owner included. A room or portrait photo is
+the house's, for whoever may draw (`hub.ai`). No API key reaches any of it,
+reading included.
+
+**What happened is said at once.** Every request that asked to keep answers
+`photosKept: {kept, reason?}` — `reason` an open word, today `off` (the switch
+is off), `low-space` or `failed` — so an app can say where the photo went
+without a second read. Absent when nothing was asked, so an older app's answer
+is exactly what it was.
+
+**Frames.** `{"type":"photos"}` goes to every member socket when the home's
+switches or photos change, and to one person's own sockets when theirs do —
+re-read `GET /photos`. Deleting room or portrait photos also sends the
+`roomPictures` / `portraits` frame for each room or device it touched.
+`mine.chat.clearedAt` is when the person last deleted their chat photos: a
+device that kept its own copies lets go of those sent before it.
+
+**The log.** Turning a home switch writes `photos.keep` ("Anna started keeping
+room photos on the hub."), and deleting a kind writes `photos.deleted`; a
+person's own chat photos write nothing.
 
 ### The activity log
 
@@ -2854,6 +2933,7 @@ authorized socket:
 {"type":"structure","rooms":[…],"zones":[…]}            rooms/zones changed — both lists in full
 {"type":"portraits","deviceId"}                         a device's portraits changed — go and re-read the list
 {"type":"roomPictures","roomId"}                        a room's pictures changed — re-read GET /room-pictures
+{"type":"photos"}                                       what the hub keeps changed — re-read GET /photos (member sockets only)
 
 {"type":"activity","entry":{id,at,kind,message,deviceId?,memberId?,data?}}
 {"type":"permitJoin","active":true,"remainingSeconds":60}

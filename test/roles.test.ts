@@ -544,6 +544,17 @@ describe.skipIf(!handle)('roles and permissions', () => {
         'hub.ai',
         undefined,
       ],
+      // What the home keeps of the photos its drawings are made from is the
+      // key that draws them (`photos/store.ts`) — switching it, deleting it and
+      // seeing a drawing's photos. The guard runs before the handler, so a
+      // picture that does not exist still proves the refusal.
+      ['PUT', '/api/v1/photos/home', 'hub.ai', { room: true } as object],
+      ['DELETE', '/api/v1/photos/home/room', 'hub.ai', undefined],
+      ['GET', '/api/v1/room-pictures/33333333-3333-4333-a333-333333333333/photos', 'hub.ai', undefined],
+      // And what is kept is the floor to read — the house, as any member
+      // reads it — while your own chat photos are yours to switch.
+      ['GET', '/api/v1/photos', '', undefined],
+      ['PUT', '/api/v1/photos/mine', '', { chat: false } as object],
     ];
     for (const [method, url, permission, payload] of cases) {
       const response = await app.inject({

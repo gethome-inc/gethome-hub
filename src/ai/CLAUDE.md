@@ -1124,8 +1124,12 @@ domains — update them in the same change.
   cannot quietly move somebody's chat back to the default. A pending recap is
   replaced rather than stacked (`primingFor` drops one that was never sent), and
   what is not a recap — `rememberSaved`'s ids, a spoken turn's marker — stays.
-  **A photo is sent for one round and kept nowhere, and the session is rebased
-  to let it go.** `ChatTurnContext.images` → the agent's `send`/`answer` →
+  **A photo is sent for one round and kept nowhere a model can reach, and the
+  session is rebased to let it go.** The one copy the hub may hold is its
+  sender's choice — `keepPhotos` on the message and their own switch on — and
+  that is a file in `src/photos/` (`say` → `ChatRuntime.keepPhotos`, one photo
+  decoded at a time, the row carrying `kept: {id}` and never bytes), which no
+  round, recap, retry or handoff ever reads. `ChatTurnContext.images` → the agent's `send`/`answer` →
   `ChatTransport.pushUser(text, images)` / `pushToolResults(results, images)`;
   the vendor shape lives in the transport (image blocks ahead of the words on
   Anthropic and after the `tool_result`s an answer closes; `input_image` data
