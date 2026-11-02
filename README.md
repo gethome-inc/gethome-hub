@@ -33,7 +33,8 @@
     <img src="docs/assets/screens/home-light.webp" width="31%" alt="The gethome app's Home pane for a demo home, City Apartment: all calm, 22.4° inside, one light on, everything secured, with scenes and favorite devices under it.">
   </picture>
   <picture>
-    <img src="docs/assets/screens/assistant-dark.webp" width="31%" alt="The gethome app's assistant: its round face over “What can I do for your home?”, four things to ask, and a box to type in with a button to talk.">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screens/assistant-dark.webp">
+    <img src="docs/assets/screens/assistant-light.webp" width="31%" alt="The gethome app's assistant: its round face over “What can I do for your home?”, four things to ask, and a box to type in with a button to talk.">
   </picture>
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screens/device-dark.webp">

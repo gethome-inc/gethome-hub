@@ -9,15 +9,8 @@ the badge on Apple's.
 | `mark.png` | the gethome app icon, 144 × 144 | the website's `public/icons/mark.png` | 2026-09-29 |
 | `app-store-badge.svg` | Apple's "Download on the App Store" badge, black, US English | developer.apple.com, as Apple publishes it — not the website, which shows Apple's white one on its dark close | 2026-10-06 |
 | `screens/home-{light,dark}.webp` | the app's Home pane for the City Apartment demo home, in a drawn iPhone frame | the website's `public/screens/` as of 2026-10-01, framed (below) | 2026-10-16 |
-| `screens/assistant-dark.webp` | the assistant as it opens — its round face — in a drawn iPhone frame, shown in both themes (below) | the website's `public/screens/` as of 2026-11-02, framed | 2026-11-02 |
-| `screens/device-{light,dark}.webp` | a lamp's device page (the older Studio demo home), in a drawn iPhone frame | the same | 2026-10-16 |
-
-**The assistant is dark in both themes for now.** The app's assistant became a
-face, and the website has a dark capture of it and no light one yet, so
-the README shows that one to every reader rather than the glass orb it replaced
-on a light page beside the face on a dark one — two different assistants
-depending on the reader's theme. A light capture, once the website publishes
-one, goes back under `screens/assistant-light.webp` with its `<source>` line.
+| `screens/assistant-{light,dark}.webp` | the assistant as it opens — its round face — in a drawn iPhone frame | the website's `public/screens/` as of 2026-11-02, framed | 2026-11-02 |
+| `screens/device-{light,dark}.webp` | a lamp's device page (the older Studio demo home), in a drawn iPhone frame | the website's `public/screens/` as of 2026-09-29, framed | 2026-10-16 |
 
 `mark.png` and the badge are byte-identical to the originals (sha256
 `c7189519…` and `a26fc5b3…`). The framed screens are made from the website's
