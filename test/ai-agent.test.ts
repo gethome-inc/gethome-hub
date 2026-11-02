@@ -79,6 +79,28 @@ describe('classifyAgentFailure', () => {
     expect(classifyAgentFailure('fetch failed: getaddrinfo ENOTFOUND api.anthropic.com')?.kind).toBe('network');
   });
 
+  it('reads OpenAI’s ways of saying an account is out of credit as billing, not a rate limit', () => {
+    // The prepaid wording, the older quota wording and the code both carry —
+    // each arrives as a 429 or inside a stream, and "try again in a minute"
+    // is a button that can only fail again on an empty account.
+    expect(
+      classifyAgentFailure(
+        'You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.',
+      )?.kind,
+    ).toBe('billing');
+    expect(
+      classifyAgentFailure('429 You exceeded your current quota, please check your plan and billing details.')?.kind,
+    ).toBe('billing');
+    expect(classifyAgentFailure('insufficient_quota: the account is out of funds')?.kind).toBe('billing');
+    // A free-tier rate limit names the billing page too, and it really is a
+    // speed bump — saying "rate limit" is what keeps it one.
+    expect(
+      classifyAgentFailure(
+        'Rate limit reached for gpt-6.1-terra on requests per min. Visit https://platform.openai.com/account/billing to add a payment method.',
+      )?.kind,
+    ).toBe('rate_limited');
+  });
+
   it('returns null for text that is not an availability problem', () => {
     expect(classifyAgentFailure('the descriptor was missing an endpoint')).toBeNull();
     expect(classifyAgentFailure('error_max_turns')).toBeNull();
@@ -96,6 +118,37 @@ describe('classifyApiError', () => {
     expect(classifyApiError({ status: 402, message: 'request failed' }, now)?.kind).toBe('billing');
     expect(classifyApiError({ status: 529, message: 'request failed' }, now)?.kind).toBe('overloaded');
     expect(classifyApiError({ status: 503, message: 'request failed' }, now)?.kind).toBe('overloaded');
+  });
+
+  it('reads a 429 that says the account is out of credit as billing', () => {
+    const noCredit = classifyApiError(
+      {
+        status: 429,
+        message:
+          'You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.',
+        headers: { 'retry-after': '20' },
+      },
+      now,
+    );
+    expect(noCredit?.kind).toBe('billing');
+    // Waiting does not fix an empty account, so nothing says when to come back.
+    expect(noCredit?.resetAt).toBeUndefined();
+    expect(
+      classifyApiError(
+        { status: 429, message: 'You exceeded your current quota, please check your plan and billing details.' },
+        now,
+      )?.kind,
+    ).toBe('billing');
+    expect(
+      classifyApiError(
+        {
+          status: 429,
+          message:
+            'Rate limit reached for gpt-6.1-terra on requests per min. Visit https://platform.openai.com/account/billing to add a payment method.',
+        },
+        now,
+      )?.kind,
+    ).toBe('rate_limited');
   });
 
   it('prefers the provider retry-after header over any heuristic', () => {

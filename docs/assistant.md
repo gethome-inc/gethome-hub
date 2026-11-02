@@ -1033,6 +1033,22 @@ conversation moving on, and nothing is asked again past it. A refusal is a failu
 vendor's model may genuinely answer differently — while a turn that ran into
 its cost cap or out of rounds is not. `docs/api.md` has the wire.
 
+**The voice says it in the same words** (`voiceFailure`, beside
+`failureSentence`): a session OpenAI would not open is `502 voice_unavailable`
+with *The voice couldn't start: this home's OpenAI account is out of credit.*
+in `detail` and `failure: {provider, kind, transient?}` beside it — one
+taxonomy and one set of sentences, so a chat note and a voice refusal never
+disagree about the same account. It used to be OpenAI's own sentence relayed,
+which on an empty account was a billing URL a phone cut off mid-word. There is
+no `switchTo`: GPT-Live is the only voice, so there is no other vendor to
+offer. **And an empty OpenAI account reads as one wherever it arrives**:
+OpenAI answers it with a 429 (`insufficient_quota`, "You have no credits
+remaining…", "You exceeded your current quota…") or inside a stream that had
+already answered 200, so `errors.ts` reads that wording as `billing` ahead of
+the rate-limit patterns — unless the text says "rate limit" itself, since a
+free-tier rate limit names the billing page too — and the OpenAI transport
+classifies a failure inside the stream as it does one before it.
+
 The other two refusals are the automations agent's, carrying the same codes
 because both apps already branch on them: `ai_not_configured` and
 `automation_needs_anthropic` — the second narrowed to what is still true of it,

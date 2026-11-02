@@ -55,7 +55,14 @@ const LIMIT_REACHED = /limit reached/i;
 const SAYS_RATE_LIMIT = /rate.?limit/i;
 const RATE_LIMIT = /rate.?limit|\b429\b|too many requests|number of request/i;
 const AUTH = /\b401\b|\b403\b|authentication|unauthorized|forbidden|invalid (?:api.?key|bearer|token)|api.?key.*invalid|token.*(?:expired|revoked)|expired.*token/i;
-const BILLING = /\b402\b|billing|credit balance|insufficient credit|payment required|purchase credits/i;
+// OpenAI says an account has run dry in three ways, none of them a 402: the
+// prepaid wording ("You have no credits remaining. Add credits to continue…"),
+// the older one ("You exceeded your current quota, please check your plan and
+// billing details"), and the code both carry (`insufficient_quota`). Each
+// arrives as a 429 or inside a stream that had already answered 200, so the
+// status says "slow down" about an account that will not answer at all.
+const BILLING =
+  /\b402\b|billing|credit balance|insufficient credit|payment required|purchase credits|no credits? remaining|add credits|insufficient[_ ]quota|exceeded your current quota/i;
 const OVERLOADED = /\b529\b|overloaded|capacity constraints/i;
 const NETWORK = /\benotfound\b|\beconnrefused\b|\betimedout\b|\beconnreset\b|fetch failed|network error|socket hang up|connection error/i;
 
@@ -69,6 +76,22 @@ function isUsageCap(text: string): boolean {
 }
 
 /**
+ * An account with nothing left to spend, rather than a speed bump.
+ *
+ * **Ahead of the rate-limit patterns, and only where the text does not say
+ * "rate limit" itself.** OpenAI's out-of-credit refusal is a 429 and its code
+ * is `insufficient_quota`, so read loosely it is a rate limit — and the two
+ * are answered very differently: a rate limit is "try again in a minute",
+ * which on an empty account is a button that can only fail again. The guard
+ * is for the opposite mistake: a free-tier rate limit names the billing page
+ * ("add a payment method … at platform.openai.com/account/billing"), and that
+ * one really is a speed bump.
+ */
+function isOutOfCredit(text: string): boolean {
+  return BILLING.test(text) && !SAYS_RATE_LIMIT.test(text);
+}
+
+/**
  * Classify an error/result text from an agent run into a transient
  * availability failure, or `null` when the text does not look like an
  * account/service problem (i.e. the run failed on its own merits).
@@ -77,6 +100,7 @@ export function classifyAgentFailure(text: string): AiUnavailableError | null {
   if (isUsageCap(text)) {
     return new AiUnavailableError('usage_limit', text, parseResetHint(text));
   }
+  if (isOutOfCredit(text)) return new AiUnavailableError('billing', text);
   if (RATE_LIMIT.test(text)) {
     return new AiUnavailableError('rate_limited', text, parseResetHint(text));
   }
@@ -124,9 +148,14 @@ export function classifyApiError(error: unknown, now: Date = new Date()): AiUnav
 
   if (status === 429) {
     // A 429 is a rate limit unless the body says an account cap is exhausted
-    // — those want the provider's own reset time, not a short retry.
-    const kind: AiFailureKind = isUsageCap(message) ? 'usage_limit' : 'rate_limited';
-    return new AiUnavailableError(kind, message, retryAfter ?? parseResetHint(message, now));
+    // — those want the provider's own reset time, not a short retry — or that
+    // the account is out of credit, which OpenAI also answers with a 429 and
+    // which no amount of waiting fixes, so it gets no reset time at all.
+    if (isUsageCap(message)) {
+      return new AiUnavailableError('usage_limit', message, retryAfter ?? parseResetHint(message, now));
+    }
+    if (isOutOfCredit(message)) return new AiUnavailableError('billing', message);
+    return new AiUnavailableError('rate_limited', message, retryAfter ?? parseResetHint(message, now));
   }
   if (status === 401 || status === 403) return new AiUnavailableError('auth_failed', message);
   if (status === 402) return new AiUnavailableError('billing', message);

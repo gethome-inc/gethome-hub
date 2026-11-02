@@ -97,28 +97,84 @@ export function failureSentence(
   if (!(error instanceof AiUnavailableError)) {
     return { kind: 'failed', text: sentence(`${label} couldn’t answer: ${readableFailure(error)}`) };
   }
-  switch (error.kind) {
-    case 'billing':
-      return { kind: 'billing', text: `${label} couldn’t answer: this home’s ${vendor} account is out of credit.` };
-    case 'usage_limit':
-      return {
-        kind: 'usage_limit',
-        text: `${label} couldn’t answer: this home’s ${vendor} account has reached its usage limit.`,
-      };
-    case 'rate_limited':
-      return {
-        kind: 'rate_limited',
-        text: `${label} couldn’t answer: ${vendor} is limiting how fast this home’s key can be used. Try again in a minute.`,
-      };
-    case 'auth_failed':
-      return { kind: 'auth_failed', text: `${label} couldn’t answer: ${vendor} didn’t accept this home’s key.` };
-    case 'overloaded':
-      return { kind: 'overloaded', text: `${label} couldn’t answer: ${vendor} is overloaded right now.` };
-    case 'network':
-      return { kind: 'network', text: `${label} couldn’t answer: your hub couldn’t reach ${vendor}.` };
-    case 'aborted':
-      return { kind: 'aborted', text: `${label} took too long to answer, so your hub stopped waiting.` };
+  if (error.kind === 'aborted') {
+    return { kind: 'aborted', text: `${label} took too long to answer, so your hub stopped waiting.` };
   }
+  return { kind: error.kind, text: `${label} couldn’t answer: ${accountReason(error.kind, vendor)}` };
+}
+
+/**
+ * Why a vendor said no, as the end of a sentence — "this home’s OpenAI account
+ * is out of credit." — for every kind but `aborted`, which is the hub's own
+ * watchdog rather than anything the vendor said.
+ *
+ * **One set of words for every surface a vendor can refuse**: a chat's note
+ * and the voice's refusal (`voiceFailure`) say the same thing about the same
+ * account, so the person reading either is sent to the same place.
+ */
+function accountReason(kind: Exclude<AiFailureKind, 'aborted'>, vendor: string): string {
+  switch (kind) {
+    case 'billing':
+      return `this home’s ${vendor} account is out of credit.`;
+    case 'usage_limit':
+      return `this home’s ${vendor} account has reached its usage limit.`;
+    case 'rate_limited':
+      return `${vendor} is limiting how fast this home’s key can be used. Try again in a minute.`;
+    case 'auth_failed':
+      return `${vendor} didn’t accept this home’s key.`;
+    case 'overloaded':
+      return `${vendor} is overloaded right now.`;
+    case 'network':
+      return `your hub couldn’t reach ${vendor}.`;
+  }
+}
+
+/** `failure` on a `502 voice_unavailable`: the chat note's own fields, less the model. */
+export interface VoiceFailureWire {
+  /** Always `openai` today — GPT-Live is the only voice — and open. */
+  provider: string;
+  kind: ChatFailureKind;
+  transient?: true;
+}
+
+/**
+ * A voice session OpenAI would not open, said the way a failed chat round is.
+ *
+ * **It used to be OpenAI's own sentence relayed**, which on an account with no
+ * credit left was "You have no credits remaining. Add credits to continue
+ * using the API at https://platform.openai.com/settings/organization/billing/."
+ * — a URL cut off mid-word on a phone, about an account the person may not
+ * hold, beside a chat note on the same page that said the same thing as
+ * "this home’s OpenAI account is out of credit." Same taxonomy, same words, so
+ * the two never disagree about one account.
+ *
+ * `kind` and `transient` ride beside the sentence for an app that can offer a
+ * way out by them; an app that has never heard of them draws `detail`, which
+ * stands on its own. An unrecognised refusal keeps OpenAI's words, since an
+ * invented reason would be worse than theirs.
+ */
+export function voiceFailure(error: unknown): { text: string; failure: VoiceFailureWire } {
+  const provider = 'openai';
+  const vendor = VENDOR[provider] ?? provider;
+  const lead = 'The voice couldn’t start';
+  if (!(error instanceof AiUnavailableError)) {
+    return {
+      text: sentence(`${lead}: ${readableFailure(error)}`),
+      failure: { provider, kind: 'failed' },
+    };
+  }
+  const text =
+    error.kind === 'aborted'
+      ? `${vendor} took too long to answer, so your hub stopped waiting.`
+      : `${lead}: ${accountReason(error.kind, vendor)}`;
+  return {
+    text,
+    failure: {
+      provider,
+      kind: error.kind,
+      ...(TRANSIENT.has(error.kind) ? { transient: true as const } : {}),
+    },
+  };
 }
 
 /**

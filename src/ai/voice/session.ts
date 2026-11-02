@@ -1,5 +1,5 @@
 import type { Logger } from '../../logging.js';
-import { classifyApiError } from '../errors.js';
+import { AiUnavailableError, classifyApiError } from '../errors.js';
 import {
   LIVE_AUDIO_RATE,
   LIVE_HISTORY_MESSAGES,
@@ -97,7 +97,10 @@ export async function openLiveSession(request: LiveSessionRequest): Promise<Open
       body: JSON.stringify(body),
     });
   } catch (error) {
-    throw new Error(
+    // Classified, so the person is told their hub could not reach OpenAI
+    // rather than handed Node's own words for a socket (`voiceFailure`).
+    throw new AiUnavailableError(
+      'network',
       `could not reach OpenAI to open a voice session: ${
         error instanceof Error ? error.message : String(error)
       }`,

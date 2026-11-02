@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { pino } from 'pino';
 import WebSocket from 'ws';
 import type { FastifyInstance } from 'fastify';
@@ -666,6 +666,62 @@ describe.skipIf(!handle)('roles and permissions', () => {
     });
     expect(opened.statusCode).toBe(409);
     expect(opened.json()).toMatchObject({ error: 'openai_not_configured' });
+  });
+
+  /**
+   * What OpenAI refused, said in the hub's words rather than relayed.
+   *
+   * An account with no credit left used to reach the phone as OpenAI's own
+   * sentence — "You have no credits remaining. Add credits to continue using
+   * the API at https://platform.openai.com/settings/organization/billing/." —
+   * which a phone cut off mid-URL in a header. The sentence is now the one a
+   * failed chat round uses, and the kind rides beside it for an app that can
+   * offer a way out by it. Only the dial to OpenAI is stubbed.
+   */
+  it('says what OpenAI refused a voice line for in the hub’s own words', async () => {
+    await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(ownerToken),
+      payload: { openaiApiKey: 'sk-proj-1234567890' },
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            error: {
+              code: 'insufficient_quota',
+              message:
+                'You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.',
+            },
+          }),
+          { status: 429 },
+        ),
+      ),
+    );
+    try {
+      const opened = await app.inject({
+        method: 'POST',
+        url: '/api/v1/assistant/voice/session',
+        headers: auth(memberToken),
+        payload: { sdp: 'v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n' },
+      });
+      expect(opened.statusCode).toBe(502);
+      expect(opened.json()).toEqual({
+        error: 'voice_unavailable',
+        detail: 'The voice couldn’t start: this home’s OpenAI account is out of credit.',
+        failure: { provider: 'openai', kind: 'billing' },
+      });
+    } finally {
+      vi.unstubAllGlobals();
+      await app.inject({
+        method: 'PATCH',
+        url: '/api/v1/settings/ai',
+        headers: auth(ownerToken),
+        payload: { clear: 'openai' },
+      });
+    }
   });
 
   /**
