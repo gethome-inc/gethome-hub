@@ -237,6 +237,20 @@ export interface AutomationChatEvent {
    */
   kind?: string;
   detail?: string;
+  /**
+   * On the `delta` that begins a round's reply — the first after the last
+   * thing the round did — how long the round worked before it: the same
+   * number the round's first row will store as `data.workedMs`, worked out
+   * here at the same instant.
+   *
+   * **It is sent because the frames cannot say it.** The round's clock starts
+   * when its turn begins, and its first frame goes out only once the agent is
+   * ready to ask the model — seconds later on a first message, on a small
+   * board — so a client timing the wait between frames counted short of the
+   * stored number and changed its mind when the row landed. Absent on every
+   * other frame, and from a hub older than it.
+   */
+  workedMs?: number;
 }
 
 /** One firing, as it happens. The stored trace is `automation_runs`. */
