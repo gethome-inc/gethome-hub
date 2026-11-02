@@ -355,14 +355,36 @@ export class PhotoStore {
           : (await this.homeSwitches())[input.kind];
       if (!on) return none('off');
 
-      const incoming = input.photos.reduce((sum, photo) => sum + photo.bytes.byteLength, 0);
-      if (!this.judge(await this.space.read(this.now()), incoming)) return none('low-space');
-      if (input.kind === 'chat') await this.fitChat(incoming);
+      // The same photo sent again for the same room or device — a room drawn
+      // again from the photos the phone that took them still has — is the copy
+      // already here, attached to the new use rather than written a second
+      // time, so a room drawn five times from one walk round it keeps one set.
+      // It costs no room, so it is attached even while keeping is paused.
+      // Chat photos are never compared: each is its sender's, for one message.
+      const copies: (string | undefined)[] = [];
+      for (const photo of input.photos) {
+        copies.push(input.kind === 'chat' ? undefined : await this.keptCopyOf(input.kind, input.subjectId, photo.bytes));
+      }
+      const fresh = input.photos.filter((_, index) => copies[index] === undefined);
+      const incoming = fresh.reduce((sum, photo) => sum + photo.bytes.byteLength, 0);
+      const fits = fresh.length === 0 || this.judge(await this.space.read(this.now()), incoming);
+      if (!fits && fresh.length === input.photos.length) return none('low-space');
+      if (fits && input.kind === 'chat') await this.fitChat(incoming);
 
-      await mkdir(this.root, { recursive: true });
+      if (fits && fresh.length > 0) await mkdir(this.root, { recursive: true });
       const ids: (string | null)[] = [];
       let failed = false;
-      for (const photo of input.photos) {
+      for (const [index, photo] of input.photos.entries()) {
+        const copy = copies[index];
+        if (copy !== undefined) {
+          if (input.useId !== undefined) await this.attach([copy], input.useId);
+          ids.push(copy);
+          continue;
+        }
+        if (!fits) {
+          ids.push(null);
+          continue;
+        }
         const id = randomUUID();
         try {
           const file = this.fileFor(id, photo.mediaType);
@@ -398,11 +420,29 @@ export class PhotoStore {
       this.space.invalidate();
       const kept = ids.filter((id) => id !== null).length;
       if (kept > 0) this.events?.emit('photosChanged', input.kind === 'chat' ? (input.member?.id ?? null) : null);
-      return { ids, outcome: { kept, ...(failed ? { reason: 'failed' as const } : {}) } };
+      const reason: KeepRefusal | undefined = failed ? 'failed' : fits ? undefined : 'low-space';
+      return { ids, outcome: { kept, ...(reason !== undefined ? { reason } : {}) } };
     } catch (error) {
       this.log?.warn({ err: error, kind: input.kind }, 'Photos could not be kept.');
       return none('failed');
     }
+  }
+
+  /**
+   * A photo of this room or device already kept with exactly these bytes. The
+   * hub stores a photo as it was sent and never re-encodes one, so a photo
+   * sent twice is the same bytes twice; only rows of the same size are read.
+   */
+  private async keptCopyOf(kind: PhotoKind, subjectId: string, bytes: Buffer): Promise<string | undefined> {
+    const candidates = await this.db
+      .select({ id: keptPhotos.id, mediaType: keptPhotos.mediaType })
+      .from(keptPhotos)
+      .where(and(eq(keptPhotos.kind, kind), eq(keptPhotos.subjectId, subjectId), eq(keptPhotos.bytes, bytes.byteLength)));
+    for (const candidate of candidates) {
+      const stored = await readFile(this.fileFor(candidate.id, candidate.mediaType)).catch(() => undefined);
+      if (stored?.equals(bytes) === true) return candidate.id;
+    }
+    return undefined;
   }
 
   /** Attach photos already kept to another use — a drawing made again from them. */

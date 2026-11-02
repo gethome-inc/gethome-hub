@@ -35,6 +35,17 @@ this directory.
   rollback. Chat photos also age out by their own `at` after
   `CHAT_PHOTO_RETAIN_DAYS`, which a suite holds equal to
   `RETAIN_TRANSCRIPT_DAYS`, and past `CHAT_PHOTOS_BUDGET_BYTES` the oldest go.
+- **The same photo again is the copy already kept.** A room drawn again from
+  the photos the phone that took them still has sends the same bytes a second
+  time, and writing them again would keep one walk round the room once per
+  drawing — five sets, and a count on the app's page five times the truth.
+  `keep()` compares each room or portrait photo against the subject's kept
+  photos of the same size (`keptCopyOf`, a read only where the length matches)
+  and attaches the copy it finds to the new use instead. That is only sound
+  because a photo is stored exactly as it was sent: re-encode one and the
+  comparison silently stops finding anything. It costs no room, so it happens
+  even while keeping is paused. **Chat photos are never compared** — each is
+  its sender's, for one message.
 - **The sweep is on a clock**, unlike the activity log's prune: "kept for 14
   days" is a promise about somebody's pictures, and a quiet hub must keep it.
   Hourly, unref'd, started by `src/index.ts` and never by a suite.

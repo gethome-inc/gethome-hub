@@ -2620,6 +2620,12 @@ no thumbnail, no re-encode — an app downscales and caches its own.
 | `portrait` | each portrait drawn from it | its last portrait is deleted or pruned (six per device, 300 MB in all), or the device is removed |
 | `chat` | the message it was sent with | `chatRetainDays` (14) after it was sent — the conversation's fortnight — or sooner past 512 MB of everybody's chat photos, oldest first; and at once when its sender leaves the home |
 
+**The same photo is kept once.** A room or portrait photo sent again for the
+same room or device — the same bytes, as when a room is drawn again from the
+photos the phone that took them still has — is attached to the new drawing as
+the copy already kept, never written a second time, even while keeping is
+paused. Chat photos are never compared.
+
 Turning a switch off keeps nothing new and deletes nothing; deleting is its own
 act (`DELETE /photos/home/:kind`, `DELETE /photos/mine/chat`, `DELETE
 /photos/:id`). **Keeping is not sending**: a kept photo reaches a provider only

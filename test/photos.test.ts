@@ -146,6 +146,62 @@ describe.skipIf(!handle)('the photo store', () => {
     expect(await store.release('pic-3')).toBe(0);
   });
 
+  it('attaches the copy already kept when the same photo comes again for the same room or device', async () => {
+    await store.setHome({ room: true });
+    const photo = jpeg();
+    const first = await store.keep({ kind: 'room', subjectId: 'room-1', member: anna(), photos: [photo, jpeg()], useId: 'pic-1' });
+    // The room drawn again from the photos the phone that took them still
+    // has: the same bytes, sent again, beside one new photo.
+    const again = await store.keep({
+      kind: 'room',
+      subjectId: 'room-1',
+      member: anna(),
+      photos: [{ ...photo, bytes: Buffer.from(photo.bytes) }, jpeg()],
+      useId: 'pic-2',
+    });
+    expect(again.outcome).toEqual({ kept: 2 });
+    expect(again.ids[0]).toBe(first.ids[0]);
+    expect(again.ids[1]).not.toBe(first.ids[1]);
+    expect(files()).toHaveLength(3);
+    // Kept for both drawings now, so the first one going leaves it.
+    await store.release('pic-1');
+    expect(await store.get(first.ids[0]!)).not.toBeNull();
+    await store.release('pic-2');
+    expect(await store.get(first.ids[0]!)).toBeNull();
+
+    // Another room's photo of the same bytes is that room's own.
+    const there = await store.keep({ kind: 'room', subjectId: 'room-2', member: anna(), photos: [photo], useId: 'pic-3' });
+    const here = await store.keep({ kind: 'room', subjectId: 'room-1', member: anna(), photos: [photo], useId: 'pic-4' });
+    expect(there.ids[0]).not.toBe(here.ids[0]);
+
+    // And a chat photo is never compared: each is its sender's, for one message.
+    await store.setMine(annaId, true);
+    const sent = jpeg(50);
+    const once = await store.keep({ kind: 'chat', subjectId: annaId, member: { id: annaId }, photos: [sent] });
+    const twice = await store.keep({ kind: 'chat', subjectId: annaId, member: { id: annaId }, photos: [sent] });
+    expect(once.ids[0]).toMatch(UUID);
+    expect(twice.ids[0]).toMatch(UUID);
+    expect(twice.ids[0]).not.toBe(once.ids[0]);
+  });
+
+  it('attaches a copy already kept while keeping is paused, and keeps nothing new', async () => {
+    await store.setHome({ room: true });
+    const photo = jpeg(100);
+    const first = await store.keep({ kind: 'room', subjectId: 'room-1', member: anna(), photos: [photo], useId: 'pic-1' });
+    now += 60_000;
+    free = 1_000;
+    const again = await store.keep({ kind: 'room', subjectId: 'room-1', member: anna(), photos: [photo, jpeg(100)], useId: 'pic-2' });
+    expect(again.ids).toEqual([first.ids[0], null]);
+    expect(again.outcome).toEqual({ kept: 1, reason: 'low-space' });
+    await store.release('pic-1');
+    expect(await store.get(first.ids[0]!)).not.toBeNull();
+    // Nothing that is all new is attached to anything.
+    expect((await store.keep({ kind: 'room', subjectId: 'room-1', member: anna(), photos: [jpeg(100)], useId: 'pic-3' })).outcome).toEqual({
+      kept: 0,
+      reason: 'low-space',
+    });
+  });
+
   it('pauses below the floor, starts again only past the second bound, and deletes nothing', async () => {
     await store.setHome({ room: true });
     const keep = () => store.keep({ kind: 'room', subjectId: 'room-1', member: anna(), photos: [jpeg(100)], useId: 'pic' });
