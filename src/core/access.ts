@@ -148,12 +148,19 @@ export const PERMISSIONS: readonly PermissionDescriptor[] = [
   {
     key: 'hub.ai',
     group: 'Hub',
-    title: 'AI keys and portraits',
+    title: 'AI keys, portraits and rooms',
     // "AI provider keys" rather than "API keys": the home's Anthropic and
     // OpenAI keys are a different thing from the `hub.apikeys` keys below, and
     // one word apart in a matrix is exactly where the two would be confused.
+    //
+    // The photos a drawing is made from are this key's too, rather than a new
+    // one: whoever may draw a room or a portrait is whoever decides whether the
+    // photos it was drawn from are kept, and may see and delete them — and a
+    // new key would have meant a migration and a matrix row for the same
+    // people. The wording is the hub's (`GET /permissions`), so an app one
+    // version behind still draws the true sentence.
     summary:
-      'The AI provider keys and the adaptation switch, drawing a device portrait, what has been spent, and the device-mapping library.',
+      'The AI provider keys and the adaptation switch, drawing device portraits and rooms, whether the photos they are drawn from are kept, what has been spent, and the device-mapping library.',
   },
   {
     key: 'hub.mqtt',

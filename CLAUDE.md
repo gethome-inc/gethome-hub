@@ -421,6 +421,16 @@ adapter/registry/API change.
   read behind `GET /hub`: **nothing that route reads may throw**, because it is
   the health check `install.sh` gates on — each read is `try`/`catch` with a
   documented fallback, and a new one has to be.
+- **A photo is kept only when the request asks *and* the switch is on, and
+  only while there is room** (`src/photos/CLAUDE.md`, which loads when you work
+  under `src/photos/`). The rule binds the chat runtime, the portraits and the
+  room pictures, which is why it is here: each passes the app's own
+  `keepPhotos`/`keepPhoto` through and keeps nothing on a switch alone, because
+  every app and Studio that shipped before this — and the Privacy Policy — told
+  people their photos stay on the device that took them. Whatever removes a
+  drawing, a portrait, a device, a room or a member releases the photos kept for
+  it, and nothing that keeps a photo may fail or delay the drawing or message
+  it came with.
 - **Portraits' conventions live in `src/portraits/CLAUDE.md`** — files beside
   rows, bounds on bulk, the pinned image model and its prompt, and what a
   drawing cost in `ai_runs` — and **the traps in the suites themselves live in
@@ -1035,7 +1045,7 @@ delegate registry → `docs/assistant.md`; portraits → `docs/portraits.md`;
 module boundaries → this file and the subsystem file for the directory you
 changed (`src/ai/CLAUDE.md`, `src/automations/CLAUDE.md`, `src/core/CLAUDE.md`,
 `src/adapters/zigbee/CLAUDE.md`, `src/adapters/matter/CLAUDE.md`,
-`src/portraits/CLAUDE.md`, `test/CLAUDE.md`, `deploy/CLAUDE.md`) +
+`src/portraits/CLAUDE.md`, `src/photos/CLAUDE.md`, `test/CLAUDE.md`, `deploy/CLAUDE.md`) +
 `docs/architecture.md`; installer markers, autostart or Zigbee detection →
 `docs/zigbee.md` + the marker list in `deploy/install.sh` (and flag the Studio
 repo); the boards and Zigbee sticks the hub is tested on or recognises →

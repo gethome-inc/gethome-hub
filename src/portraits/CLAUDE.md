@@ -65,3 +65,11 @@ secrets. `docs/portraits.md` is canonical — update it in the same change.
   not. The member's *name* rides beside the id for the log's own reason: an
   `ALTER TABLE` column gets no `ON DELETE` action in SQLite, so the id may point
   at somebody long removed.
+- **The photo a portrait is drawn from is kept only where the home asked**
+  (`src/photos/`): `keepPhoto` on the drawing and the home's portrait switch
+  on, written after the portrait is on disk and before the prune (so a
+  portrait drawn again from the photo of the one the prune takes keeps it),
+  released with the last portrait
+  that uses it (`remove` → `PhotoStore.release`, `forgetDevice` →
+  `forgetSubject`). Keeping it must never fail or delay a drawing, and the
+  hub still makes no thumbnail of it.

@@ -6,10 +6,10 @@ import Fastify, {
 } from 'fastify';
 import websocket from '@fastify/websocket';
 import { randomUUID } from 'node:crypto';
-import { eq, max } from 'drizzle-orm';
+import { eq, max, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
-import { invites, members, rooms, zones } from '../db/schema.js';
+import { devicePortraits, invites, members, rooms, zones } from '../db/schema.js';
 import type { DeviceRegistry } from '../core/registry.js';
 import type { PairingService } from '../core/pairing.js';
 import type { ActivityService } from '../core/activity.js';
@@ -51,7 +51,7 @@ import {
   PictureSpaceError,
   RoomPictureService,
 } from '../room-pictures/store.js';
-import type { AiRunLog } from '../core/ai-runs.js';
+import { RUNS_PAGE_LIMIT, type AiRunLog } from '../core/ai-runs.js';
 import type { AutomationEngine, AutomationPresser } from '../automations/engine.js';
 import {
   AutomationNotConfiguredError,
@@ -112,6 +112,7 @@ import { hostFromRequest, mqttAccess, type MqttBrokerConfig } from '../core/mqtt
 import { isHistoryKind, type HistoryKind, type HistoryService } from '../core/history.js';
 // Files and rows, and `fetch` when it draws. No SDK, so no dynamic import.
 import { PortraitBusyError, PortraitSpaceError, type PortraitService } from '../portraits/store.js';
+import { HOME_PHOTO_KINDS, PhotoStore, type PhotoRecord } from '../photos/store.js';
 import { PortraitDrawError } from '../portraits/openai-images.js';
 import { MAX_WINDOW_SECONDS, type PermitJoinService } from '../core/permit-join.js';
 import { createHubStatusReader } from '../core/hub-status.js';
@@ -169,6 +170,23 @@ export interface ApiDeps {
   history: HistoryService;
   /** The pictures a home has had drawn of its devices — `portraits/store.ts`. */
   portraits: PortraitService;
+  /**
+   * The photos a home, or one person, chose to keep — `photos/store.ts`.
+   *
+   * Optional, the `autoUpdate` way: a required field is one every
+   * `buildServer` call in `test/` has to grow. Left out, the server makes its
+   * own from the deps it already has — a hub where nothing has been switched
+   * on, so every suite still meets the real routes. `src/index.ts` passes the
+   * one the portraits, the room pictures and both chats were built with, so
+   * all of them keep into one store.
+   */
+  photos?: PhotoStore;
+  /**
+   * The pictures of the home's rooms — `room-pictures/store.ts`. Optional for
+   * the same reason: left out, the server makes its own, keeping into the
+   * store above.
+   */
+  roomPictures?: RoomPictureService;
   settings: SettingsService;
   /**
    * The hub's name, and the one place it lives. `GET /hub`, `GET /home` and the
@@ -502,14 +520,26 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   // and leaving every other module at the configured level. An operator who
   // asked for `debug` or `trace` clearly wants the requests, so they keep them.
   const verbose = deps.log.level === 'trace' || deps.log.level === 'debug';
+  // The photos a home or a person chose to keep (`photos/store.ts`). See
+  // `ApiDeps.photos`.
+  const photos =
+    deps.photos ??
+    new PhotoStore(deps.db, deps.settings, deps.dataDir, deps.events, deps.log.child({ module: 'photos' }));
   // Pictures of the home's rooms (`room-pictures/store.ts`): files beside the
   // database, drawn with the home's OpenAI key.
-  const roomPictures = new RoomPictureService(
-    deps.dataDir,
-    deps.events,
-    deps.log.child({ module: 'room-pictures' }),
-    deps.aiRuns,
-  );
+  const roomPictures =
+    deps.roomPictures ??
+    new RoomPictureService(
+      deps.dataDir,
+      deps.events,
+      deps.log.child({ module: 'room-pictures' }),
+      deps.aiRuns,
+      {},
+      undefined,
+      undefined,
+      undefined,
+      photos,
+    );
   const app = Fastify({
     loggerInstance: deps.log.child(
       { module: 'api' },
@@ -885,6 +915,14 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // Additive, and presence is the capability, the portraits' way: a hub
     // carrying this block draws pictures of rooms (`/room-pictures`).
     roomPictures: roomPictures.describe(),
+    // Additive, and presence is the capability: a hub carrying this block can
+    // keep the photos a room or a portrait was drawn from and the photos a
+    // person adds to a chat (`/photos`), with the bounds an app says out loud.
+    // An app that does not find it never sends `keepPhotos` — which an older
+    // hub's zod would strip, keeping nothing, harmlessly — and says what it
+    // always said: photos stay on the device that took them. Static, so this
+    // route still reads nothing from the disk.
+    photos: photos.describe(),
     // Additive, and presence is the capability once more: a hub carrying this
     // block mints **sign-in codes** (`POST /invites {memberId}`), so somebody
     // already in the home comes back on another device as themselves rather
@@ -913,6 +951,14 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // choices this hub will accept rather than a list from its own build.
     // Static, and therefore cannot throw — this route is the health check.
     apiKeys: { grantable: KEY_GRANTABLE },
+    // Additive, and presence is the capability: a hub carrying this block
+    // reads the AI run log a page at a time (`GET /ai/runs?before=<run id>`),
+    // so an app can reach every run it keeps rather than the newest page. An
+    // older hub's zod strips `before` and answers the newest page again, which
+    // an app would draw as the same runs twice — so one that does not find
+    // this asks once and stops. `maxLimit` is the most one read answers. A
+    // constant, so it cannot throw.
+    aiRuns: { before: true, maxLimit: RUNS_PAGE_LIMIT },
     // Additive, and presence is the capability: a hub carrying this block
     // takes `model`, `effort` and `attachments` on a chat message, with the
     // words `effort` accepts and how many photos of what size and type. An
@@ -1416,7 +1462,31 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       .map((device) => ({ id: device.id, name: device.name, kind: device.endpoints[0]?.deviceKind ?? 'appliance' }));
 
   /** Every room's pictures, newest first. Reading is the floor. */
-  app.get('/api/v1/room-pictures', authed, async () => ({ pictures: roomPictures.list() }));
+  app.get('/api/v1/room-pictures', authed, async () => {
+    const pictures = roomPictures.list();
+    // How many kept photos each drawing was made from — counted here rather
+    // than written into the manifest, so a photo deleted on its own is never
+    // a number left behind on a drawing.
+    const kept = await photos.forUses(pictures.map((picture) => picture.id));
+    return {
+      pictures: pictures.map((picture) => {
+        const count = kept.get(picture.id)?.length ?? 0;
+        return count > 0 ? { ...picture, keptPhotos: count } : picture;
+      }),
+    };
+  });
+
+  /**
+   * The kept photos one drawing was made from, oldest first — `hub.ai`, the key
+   * that draws from them, and never through an API key: a photo of the inside
+   * of somebody's home is not something a script needs.
+   */
+  app.get('/api/v1/room-pictures/:id/photos', memberOnlyNeeds('hub.ai'), async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    if (!roomPictures.get(id)) return reply.code(404).send({ error: 'not_found' });
+    const kept = await photos.forUses([id]);
+    return { photos: kept.get(id) ?? [] };
+  });
 
   /** One picture's PNG, by day or by night — never changes once drawn. */
   app.get('/api/v1/room-pictures/:id/:variant', authed, async (request, reply) => {
@@ -1447,14 +1517,45 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         .object({
           roomId: z.uuid(),
           orientation: z.enum(['portrait', 'landscape']).default('portrait'),
+          // No longer `min(1)` on its own: a drawing made again from the
+          // photos the hub keeps may send none — the refine below keeps "no
+          // photos at all" the 400 it always was.
           photos: z
             .array(z.object({ data: z.string().min(64), type: z.enum(['image/jpeg', 'image/png']).default('image/jpeg') }))
-            .min(1)
-            .max(MAX_PHOTOS),
+            .max(MAX_PHOTOS)
+            .default([]),
+          /** Keep the new photos with the drawing (`photos/store.ts`). */
+          keepPhotos: z.boolean().optional(),
+          /** Photos the hub already keeps for this room, to draw from again. */
+          keptPhotoIds: z.array(z.uuid()).max(MAX_PHOTOS).optional(),
         })
+        .refine(
+          (value) => {
+            const count = value.photos.length + (value.keptPhotoIds?.length ?? 0);
+            return count >= 1 && count <= MAX_PHOTOS;
+          },
+          { message: `Send between 1 and ${MAX_PHOTOS} photos.`, path: ['photos'] },
+        )
         .parse(request.body);
       const room = await deps.db.query.rooms.findFirst({ where: eq(rooms.id, body.roomId) });
       if (!room) return reply.code(404).send({ error: 'not_found' });
+
+      // The room's own kept photos and nobody else's: an id from another room,
+      // a portrait or a chat is the same answer as one that does not exist.
+      const reused: { bytes: Buffer<ArrayBuffer>; contentType: string; keptId: string }[] = [];
+      for (const keptId of body.keptPhotoIds ?? []) {
+        const found = await photos.read(keptId);
+        if (!found || found.record.kind !== 'room' || found.record.subjectId !== room.id) {
+          return reply.code(404).send({ error: 'photo_not_found' });
+        }
+        reused.push({
+          // Read from a file, so backed by a plain ArrayBuffer: the cast is the
+          // type's and costs no copy, on a board whose memory a drawing spends.
+          bytes: found.bytes as Buffer<ArrayBuffer>,
+          contentType: found.record.mediaType,
+          keptId,
+        });
+      }
 
       const apiKey = await deps.settings.aiKey('openai');
       if (!apiKey) return reply.code(409).send({ error: 'openai_not_configured' });
@@ -1468,7 +1569,11 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
           roomId: room.id,
           roomName: room.name,
           orientation: body.orientation,
-          photos: body.photos.map((photo) => ({ bytes: Buffer.from(photo.data, 'base64'), contentType: photo.type })),
+          photos: [
+            ...reused,
+            ...body.photos.map((photo) => ({ bytes: Buffer.from(photo.data, 'base64'), contentType: photo.type })),
+          ],
+          ...(body.keepPhotos !== undefined ? { keepPhotos: body.keepPhotos } : {}),
           devices,
           apiKey,
           locator: pictureLocator,
@@ -1887,8 +1992,26 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
           /** A base64 photo to restyle. Absent draws from the device's kind alone. */
           photo: z.string().min(64).max(PHOTO_BODY_LIMIT).optional(),
           photoType: z.enum(['image/jpeg', 'image/png']).default('image/jpeg'),
+          /** Keep the photo with the portrait (`photos/store.ts`). */
+          keepPhoto: z.boolean().optional(),
+          /** A photo the hub already keeps for this device, to draw from again. */
+          keptPhotoId: z.uuid().optional(),
+        })
+        .refine((value) => value.photo === undefined || value.keptPhotoId === undefined, {
+          message: 'Send a photo or name a kept one, not both.',
+          path: ['keptPhotoId'],
         })
         .parse(request.body ?? {});
+
+      // This device's own kept photo and nobody else's, the room route's rule.
+      let kept: { bytes: Buffer; contentType: string } | undefined;
+      if (body.keptPhotoId !== undefined) {
+        const found = await photos.read(body.keptPhotoId);
+        if (!found || found.record.kind !== 'portrait' || found.record.subjectId !== id) {
+          return reply.code(404).send({ error: 'photo_not_found' });
+        }
+        kept = { bytes: found.bytes, contentType: found.record.mediaType };
+      }
 
       // Its own refusal code, not `ai_not_configured`: portraits are drawn by
       // OpenAI and device recognition may be running on Anthropic, so a hub can
@@ -1913,6 +2036,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
           ...(body.photo !== undefined
             ? { photo: { bytes: Buffer.from(body.photo, 'base64'), contentType: body.photoType } }
             : {}),
+          ...(kept !== undefined ? { photo: kept, keptPhotoId: body.keptPhotoId } : {}),
+          ...(body.keepPhoto !== undefined ? { keepPhoto: body.keepPhoto } : {}),
         });
         // Recorded because it spent money and everybody in the home now sees a
         // different picture. Only the drawing: choosing between portraits and
@@ -1964,6 +2089,157 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const deviceId = await deps.portraits.remove(portraitId);
     if (!deviceId) return reply.code(404).send({ error: 'not_found' });
     announcePortraits(deviceId);
+    return reply.code(204).send();
+  });
+
+  // ── Photos the hub keeps ─────────────────────────────────────────────────
+  //
+  // `photos/store.ts` has the rules and `docs/api.md` (*Photos the hub keeps*)
+  // the contract. Every route here is the member's and never one of their
+  // keys': these are photos of the inside of somebody's home, and a script
+  // has no use for them that is worth the risk.
+
+  /**
+   * What the photos page draws: the room the hub has, what is kept of each
+   * kind and whether it is switched on, the caller's own chat photos, and —
+   * for scale — what the drawings themselves take. The floor: any member may
+   * see what the house keeps, as they may see the house.
+   */
+  const photosAnswer = async (memberId: string) => {
+    const [portraitTotal] = await deps.db
+      .select({
+        count: sql<number>`count(*)`,
+        bytes: sql<number>`coalesce(sum(${devicePortraits.bytes}), 0)`,
+      })
+      .from(devicePortraits);
+    const pictures = roomPictures.list();
+    return {
+      ...(await photos.state(memberId)),
+      drawings: {
+        count: (portraitTotal?.count ?? 0) + pictures.length,
+        bytes: (portraitTotal?.bytes ?? 0) + pictures.reduce((sum, picture) => sum + picture.bytes, 0),
+      },
+    };
+  };
+
+  /** The words an activity row uses for one of the home's kinds. */
+  const homePhotoWords = { room: 'room photos', portrait: 'portrait photos' } as const;
+
+  app.get('/api/v1/photos', memberOnly, async (request) => photosAnswer(request.member!.id));
+
+  /**
+   * Turn the home's switches — `hub.ai`, the key that draws rooms and portraits
+   * and so decides what is kept of the photos they are drawn from. Each change
+   * is a line in the activity log, because what a home keeps about itself is
+   * worth being able to read back a week later. `.strict()`, the `/api-keys`
+   * reason: a later field that narrows what is kept must not be stripped by
+   * an older hub without a word.
+   */
+  app.put('/api/v1/photos/home', memberOnlyNeeds('hub.ai'), async (request) => {
+    const body = z
+      .object({ room: z.boolean().optional(), portrait: z.boolean().optional() })
+      .strict()
+      .refine((value) => value.room !== undefined || value.portrait !== undefined, 'nothing to change')
+      .parse(request.body);
+    const before = await photos.homeSwitches();
+    const after = await photos.setHome(body);
+    const who = actor(request);
+    for (const kind of HOME_PHOTO_KINDS) {
+      if (before[kind] === after[kind]) continue;
+      await deps.activity.record({
+        kind: 'photos.keep',
+        message: after[kind]
+          ? `${who.name} started keeping ${homePhotoWords[kind]} on the hub.`
+          : `${who.name} stopped keeping new ${homePhotoWords[kind]} on the hub.`,
+        memberId: who.memberId,
+        data: { ...who.data, photoKind: kind, keep: after[kind] },
+      });
+    }
+    return photosAnswer(request.member!.id);
+  });
+
+  /**
+   * Your own chat photos — the floor, like your name and your favorites, and
+   * not a line in the activity log: it is nobody else's business.
+   */
+  app.put('/api/v1/photos/mine', memberOnly, async (request) => {
+    const body = z.object({ chat: z.boolean() }).strict().parse(request.body);
+    await photos.setMine(request.member!.id, body.chat);
+    return photosAnswer(request.member!.id);
+  });
+
+  /** Delete every kept photo of one of the home's kinds — `hub.ai`, and logged. */
+  app.delete('/api/v1/photos/home/:kind', memberOnlyNeeds('hub.ai'), async (request) => {
+    const { kind } = z.object({ kind: z.enum(HOME_PHOTO_KINDS) }).parse(request.params);
+    const { count, subjects } = await photos.deleteHome(kind);
+    if (count > 0) {
+      const who = actor(request);
+      await deps.activity.record({
+        kind: 'photos.deleted',
+        message: `${who.name} deleted the ${count === 1 ? `1 ${homePhotoWords[kind].slice(0, -1)}` : `${count} ${homePhotoWords[kind]}`} the hub kept.`,
+        memberId: who.memberId,
+        data: { ...who.data, photoKind: kind, count },
+      });
+      for (const subject of subjects) {
+        if (kind === 'room') deps.events.emit('roomPicturesChanged', subject);
+        else announcePortraits(subject);
+      }
+    }
+    return { deleted: count, ...(await photosAnswer(request.member!.id)) };
+  });
+
+  /**
+   * Delete your own chat photos — from the hub, and (through `clearedAt`) the
+   * copies your other devices fetched from it, once each hears about it. The
+   * device a photo was sent from keeps its own copy as it always has. The
+   * conversations stay, each row still saying a photo was there.
+   */
+  app.delete('/api/v1/photos/mine/chat', memberOnly, async (request) => {
+    const { count, clearedAt } = await photos.clearChat(request.member!.id);
+    return { deleted: count, clearedAt, ...(await photosAnswer(request.member!.id)) };
+  });
+
+  /**
+   * Whether this caller may reach one kept photo: a chat photo by its sender
+   * and nobody else — to anybody else it does not exist — and a room or
+   * portrait photo by whoever may draw from it.
+   */
+  const photoAccess = (request: FastifyRequest, record: PhotoRecord): 'yes' | 'hidden' | 'forbidden' => {
+    if (record.kind === 'chat') return record.subjectId === request.member!.id ? 'yes' : 'hidden';
+    return can(deps.access, request, 'hub.ai') ? 'yes' : 'forbidden';
+  };
+
+  /**
+   * One kept photo's bytes. Immutable — a photo is never rewritten, a new one
+   * is a new id — but `private`, since it is somebody's picture of their home.
+   */
+  app.get('/api/v1/photos/:id', memberOnly, async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const record = await photos.get(id);
+    const access = record ? photoAccess(request, record) : 'hidden';
+    if (!record || access === 'hidden') return reply.code(404).send({ error: 'not_found' });
+    if (access === 'forbidden') return reply.code(403).send({ error: 'forbidden', permission: 'hub.ai' });
+    const etag = `"${id}"`;
+    if (request.headers['if-none-match'] === etag) return reply.code(304).send();
+    const found = await photos.read(id);
+    if (!found) return reply.code(404).send({ error: 'not_found' });
+    return reply
+      .header('content-type', found.record.mediaType)
+      .header('cache-control', 'private, max-age=31536000, immutable')
+      .header('etag', etag)
+      .send(found.bytes);
+  });
+
+  /** Delete one kept photo, from every drawing or portrait it was kept for. */
+  app.delete('/api/v1/photos/:id', memberOnly, async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const record = await photos.get(id);
+    const access = record ? photoAccess(request, record) : 'hidden';
+    if (!record || access === 'hidden') return reply.code(404).send({ error: 'not_found' });
+    if (access === 'forbidden') return reply.code(403).send({ error: 'forbidden', permission: 'hub.ai' });
+    await photos.remove(id);
+    if (record.kind === 'room') deps.events.emit('roomPicturesChanged', record.subjectId);
+    if (record.kind === 'portrait') announcePortraits(record.subjectId);
     return reply.code(204).send();
   });
 
@@ -2567,6 +2843,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // a member who has left for the life of the process.
     deps.favorites.forgetMember(memberId);
     deps.access.forgetMember(memberId);
+    // Their chat photos go with them — nobody else could ever have seen them —
+    // while a room or portrait photo they took stays the house's. Files, so no
+    // cascade would ever reach them.
+    await photos.forgetMember(memberId).catch(() => 0);
     // Their keys went with the row too (`api_keys.member_id` cascades), and
     // their sockets with `sessions.revoke` above; this drops what was held
     // about the keys in memory — last use, last refusal, the rate bucket.
@@ -3290,9 +3570,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    */
   app.get('/api/v1/ai/runs', needs('hub.ai'), async (request) => {
     const query = z
-      .object({ limit: z.coerce.number().int().min(1).max(100).default(30) })
+      .object({
+        limit: z.coerce.number().int().min(1).max(RUNS_PAGE_LIMIT).default(30),
+        /** The oldest run the caller already holds: the page is the runs before it. */
+        before: z.string().min(1).max(64).optional(),
+      })
       .parse(request.query);
-    const rows = await deps.aiRuns.list(query.limit);
+    const rows = await deps.aiRuns.list(query.limit, query.before);
     // How many rounds each run kept, so an app knows whether to offer the
     // disclosure at all — one grouped read rather than a body per run, since
     // the bodies are the expensive half and most runs have none.
@@ -4512,6 +4796,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         message: `At most ${CHAT_IMAGE_MAX_COUNT} photos can go with one message.`,
       })
       .optional(),
+    /**
+     * Keep the photos on the hub, where the sender has switched that on for
+     * themselves (`photos/store.ts`). Asked only by an app that has said so on
+     * screen, and only of a hub whose `GET /hub` carries `photos` — an older
+     * hub strips it and keeps nothing, which is what the app said would happen.
+     */
+    keepPhotos: z.boolean().optional(),
   };
 
   /**
@@ -4532,6 +4823,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     model?: string | undefined;
     effort?: (typeof CHAT_EFFORTS)[number] | undefined;
     attachments?: z.infer<typeof chatImageSchema>[] | undefined;
+    keepPhotos?: boolean | undefined;
   }): ChatTurnRequest | undefined => {
     const images = (body.attachments ?? []).map((image) => ({
       mediaType: image.mediaType,
@@ -4547,6 +4839,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       ...(body.model !== undefined ? { model: body.model } : {}),
       ...(body.effort !== undefined ? { effort: body.effort } : {}),
       ...(images.length > 0 ? { images } : {}),
+      ...(images.length > 0 && body.keepPhotos === true ? { keepPhotos: true } : {}),
     };
   };
 

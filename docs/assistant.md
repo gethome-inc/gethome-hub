@@ -193,7 +193,12 @@ it would save is one cache rewrite per change of effort. Worth revisiting when
 it leaves beta, or if the run log shows long conversations paying for it
 often.
 
-**A photo reaches the model for one round and is kept nowhere.** It travels
+**A photo reaches the model for one round, and the hub keeps a copy only where
+its sender asked** — `keepPhotos` on the message and the person's own switch on
+(`PUT /photos/mine`), as a file for the conversation's fortnight, readable by
+nobody else, and never handed to a model again (`src/photos/store.ts`;
+`docs/api.md`, *Photos the hub keeps*). Everything below is unchanged by it. It
+travels
 `ChatTurnContext.images` → the agent's `send`/`answer` →
 `ChatTransport.pushUser(text, images)` / `pushToolResults(results, images)`:
 on Anthropic as image blocks ahead of the words (or after the tool results an

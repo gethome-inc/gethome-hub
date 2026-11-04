@@ -7,6 +7,7 @@ import type { AiRunLog } from '../core/ai-runs.js';
 import type { HubEventBus } from '../core/bus.js';
 import type { AiProvider, SettingsService } from '../core/settings.js';
 import type { Logger } from '../logging.js';
+import type { KeepOutcome, PhotoStore } from '../photos/store.js';
 import { drawRoomPicture, pictureCostUsd, RoomPictureDrawError, ROOM_PICTURE_MODEL, type PictureUsage } from './draw.js';
 import { LocateError, locateDevices } from './locate.js';
 import { dayPrompt, NIGHT_PROMPT, type PictureDevice } from './prompts.js';
@@ -38,7 +39,9 @@ import { dayPrompt, NIGHT_PROMPT, type PictureDevice } from './prompts.js';
  * **Markers are fractions of the picture**, read by the model or placed by a
  * person, and a placed one is never read over. **Files and a manifest**: one
  * deliberate write per drawing, bounded by bulk — a few per room, a budget for
- * all, a refusal to draw on a nearly full card. The photos are not kept.
+ * all, a refusal to draw on a nearly full card. The photos are kept only where
+ * the home switched that on and the app asked (`src/photos/store.ts`), and then
+ * for as long as a drawing made from them is.
  *
  * **A drawing gives its memory back when it is done** (`collectGarbage`), and
  * that is not tidiness. One drawing moves ~40 MB through the hub — photos,
@@ -135,7 +138,17 @@ export interface DrawInput {
   roomId: string;
   roomName: string;
   orientation: PictureOrientation;
-  photos: { bytes: Buffer<ArrayBuffer>; contentType: string }[];
+  /**
+   * The photos to draw from. One the hub already keeps carries its `keptId`,
+   * so a drawing made again from it is attached to it rather than writing it a
+   * second time.
+   */
+  photos: { bytes: Buffer<ArrayBuffer>; contentType: string; keptId?: string | undefined }[];
+  /**
+   * Keep the new photos with the drawing, where the home's switch is on and the
+   * hub has room. Asked by the app, never assumed — see `PhotoStore`.
+   */
+  keepPhotos?: boolean | undefined;
   /** Read off the finished picture — never named to the drawing (`prompts.ts`). */
   devices: PictureDevice[];
   apiKey: string;
@@ -148,6 +161,9 @@ export class PictureBusyError extends Error {
     super('A room is already being drawn.');
   }
 }
+
+/** A drawing, with what happened to the photos it was asked to keep. */
+export type DrawnPicture = RoomPictureRecord & { photosKept?: KeepOutcome };
 
 export class PictureSpaceError extends Error {
   constructor() {
@@ -180,6 +196,11 @@ export class RoomPictureService {
     private readonly draw_ = drawRoomPicture,
     private readonly locate_ = locateDevices,
     private readonly collect_ = collectGarbage,
+    /**
+     * The photos a home keeps. Optional so a suite about drawing need not build
+     * one; without it nothing is kept, which is what every hub did before.
+     */
+    private readonly photos?: PhotoStore | undefined,
   ) {
     this.root = path.join(dataDir, 'room-pictures');
     this.manifest = path.join(this.root, 'pictures.json');
@@ -230,7 +251,7 @@ export class RoomPictureService {
     }
   }
 
-  async draw(input: DrawInput): Promise<RoomPictureRecord> {
+  async draw(input: DrawInput): Promise<DrawnPicture> {
     if (this.drawing) throw new PictureBusyError();
     this.drawing = true;
     let handedOn = false;
@@ -251,7 +272,7 @@ export class RoomPictureService {
     }
   }
 
-  private async drawDay(input: DrawInput): Promise<RoomPictureRecord> {
+  private async drawDay(input: DrawInput): Promise<DrawnPicture> {
     await this.assertSpace();
     const size = input.orientation === 'landscape' ? '1536x1024' : '1024x1536';
     const run = this.runs?.begin({
@@ -307,9 +328,50 @@ export class RoomPictureService {
       ...this.read().map((other) => (other.roomId === input.roomId && other.selected ? { ...other, selected: false } : other)),
       record,
     ]);
+    // After the drawing is on disk and before the night: the photos are still
+    // the buffers the route decoded, written as they are, and they are let go
+    // with the rest of the day's memory once this returns. **And before the
+    // prune**: a drawing made again from the photos of the one the prune takes
+    // is attached to them first, so the prune finds them still in use rather
+    // than deleting them out from under the drawing that was just made.
+    const photosKept = await this.keepPhotos(input, photos, record.id);
     await this.prune(input.roomId);
     this.events?.emit('roomPicturesChanged', input.roomId);
-    return record;
+    return photosKept === undefined ? record : { ...record, photosKept };
+  }
+
+  /**
+   * Keep the photos a drawing was made from, attaching the ones the hub already
+   * keeps. Answers what happened only when keeping was asked, so an older
+   * app's answer is exactly what it was.
+   */
+  private async keepPhotos(
+    input: DrawInput,
+    photos: DrawInput['photos'],
+    pictureId: string,
+  ): Promise<KeepOutcome | undefined> {
+    const reused = photos.flatMap((photo) => (photo.keptId !== undefined ? [photo.keptId] : []));
+    const attached = this.photos && reused.length > 0 ? (await this.photos.attach(reused, pictureId)).length : 0;
+    // A photo named and gone before it could be attached — deleted while the
+    // room was being drawn — is one this drawing does not keep.
+    const lost: KeepOutcome['reason'] = attached < reused.length ? 'failed' : undefined;
+    if (input.keepPhotos !== true) {
+      return reused.length > 0 ? { kept: attached, ...(lost !== undefined ? { reason: lost } : {}) } : undefined;
+    }
+    if (!this.photos) return { kept: 0, reason: 'off' };
+    const fresh = photos.filter((photo) => photo.keptId === undefined);
+    const { outcome } = await this.photos.keep({
+      kind: 'room',
+      subjectId: input.roomId,
+      member: input.member,
+      photos: fresh.map((photo) => ({ bytes: photo.bytes, mediaType: photo.contentType })),
+      useId: pictureId,
+    });
+    const reason = outcome.reason ?? lost;
+    return {
+      kept: outcome.kept + attached,
+      ...(reason !== undefined ? { reason } : {}),
+    };
   }
 
   /** The night, as an edit of the day — after the drawing has answered. */
@@ -449,12 +511,16 @@ export class RoomPictureService {
     }
     this.write(remaining);
     await this.deleteFiles(id);
+    await this.photos?.release(id);
     this.events?.emit('roomPicturesChanged', record.roomId);
     return record.roomId;
   }
 
   /** Every picture of a room — the room was deleted. */
   async forgetRoom(roomId: string): Promise<void> {
+    // The room's photos first, and whatever its drawings: a photo is the room's
+    // as much as any drawing made from it is.
+    await this.photos?.forgetSubject('room', roomId);
     const gone = this.read().filter((record) => record.roomId === roomId);
     if (gone.length === 0) return;
     this.write(this.read().filter((record) => record.roomId !== roomId));
@@ -481,7 +547,12 @@ export class RoomPictureService {
     }
     if (doomed.size === 0) return;
     this.write(this.read().filter((record) => !doomed.has(record.id)));
-    for (const id of doomed) await this.deleteFiles(id);
+    for (const id of doomed) {
+      await this.deleteFiles(id);
+      // A drawing pruned takes its photos with it, unless a newer drawing of
+      // the room was made from them too.
+      await this.photos?.release(id);
+    }
   }
 
   private async assertSpace(): Promise<void> {

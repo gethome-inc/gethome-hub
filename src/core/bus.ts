@@ -45,6 +45,14 @@ export interface HubEvents {
    * nothing else, the portrait reason: the list is one short read.
    */
   roomPicturesChanged: [roomId: string];
+  /**
+   * The photos the hub keeps changed (`photos/store.ts`) — a switch turned,
+   * photos kept or deleted. `null` is the home's (every member socket hears
+   * it); a member id is that person's own chat photos (only their sockets do).
+   * Carries nothing else: `GET /photos` is one short read, rendered per
+   * caller.
+   */
+  photosChanged: [memberId: string | null];
   activity: [entry: ActivityEvent];
   permitJoin: [active: boolean, remainingSeconds: number];
   /**

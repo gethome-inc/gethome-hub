@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { and, asc, count, eq, isNull, lt, max, min, or, type SQL } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { automationChatMessages } from '../../db/schema.js';
+import type { KeepOutcome, PhotoStore } from '../../photos/store.js';
 import type { AutomationChatEvent, HubEventBus } from '../../core/bus.js';
 import type { AiProvider, SettingsService } from '../../core/settings.js';
 import type { AiRunKind, AiRunLog, SessionSpend } from '../../core/ai-runs.js';
@@ -178,6 +179,12 @@ export interface ChatMessageWire {
 export interface ChatReply {
   sessionId: string;
   messages: ChatMessageWire[];
+  /**
+   * What happened to the photos the message asked to keep
+   * (`ChatTurnRequest.keepPhotos`) — present only when it asked, so an older
+   * app's answer is exactly what it was.
+   */
+  photosKept?: KeepOutcome;
 }
 
 /**
@@ -435,6 +442,14 @@ export interface ChatTurnRequest {
   model?: string | undefined;
   effort?: ChatEffort | undefined;
   images?: readonly ChatImage[] | undefined;
+  /**
+   * Keep these photos on the hub, where the sender has switched that on for
+   * themselves and the hub has room (`src/photos/store.ts`). The app asks only
+   * once it has said so on screen; an older app never asks, and its "kept on
+   * the device it was sent from" stays true. **Keeping is not sending**: the
+   * photo still reaches the model for this one round and no other.
+   */
+  keepPhotos?: boolean | undefined;
 }
 
 /**
@@ -460,6 +475,12 @@ interface StoredAttachment {
   width?: number;
   height?: number;
   bytes: number;
+  /**
+   * The hub's own copy, where the sender chose to keep their chat photos — so
+   * the same person's other devices can draw it (`GET /photos/:id`). An id
+   * rather than the bytes, which is what keeps the row a few hundred bytes.
+   */
+  kept?: { id: string };
 }
 
 /**
@@ -484,15 +505,21 @@ function userRowData(
    * conversation was left on has to be able to step past it.
    */
   via?: ChatVia,
+  /** The hub's copy of each photo, by position — null where none was kept. */
+  kept?: readonly (string | null)[],
 ): Record<string, unknown> | undefined {
-  const attachments: StoredAttachment[] = (turn?.images ?? []).map((image) => ({
-    type: 'image' as const,
-    mediaType: image.mediaType,
-    ...(image.ref !== undefined ? { ref: image.ref } : {}),
-    ...(image.width !== undefined ? { width: image.width } : {}),
-    ...(image.height !== undefined ? { height: image.height } : {}),
-    bytes: base64Bytes(image.data),
-  }));
+  const attachments: StoredAttachment[] = (turn?.images ?? []).map((image, index) => {
+    const keptId = kept?.[index];
+    return {
+      type: 'image' as const,
+      mediaType: image.mediaType,
+      ...(image.ref !== undefined ? { ref: image.ref } : {}),
+      ...(image.width !== undefined ? { width: image.width } : {}),
+      ...(image.height !== undefined ? { height: image.height } : {}),
+      bytes: base64Bytes(image.data),
+      ...(keptId ? { kept: { id: keptId } } : {}),
+    };
+  });
   const data: Record<string, unknown> = {
     ...(turn?.model !== undefined ? { model: turn.model } : {}),
     ...(turn?.effort !== undefined ? { effort: turn.effort } : {}),
@@ -733,6 +760,11 @@ export interface ChatRuntimeOptions {
   /** The photos budget — `chatPhotoBudget`, the hub's one, unless a suite
    *  hands in its own. */
   photos?: ChatPhotoBudget;
+  /**
+   * Where a photo is kept when its sender asked (`src/photos/store.ts`).
+   * Optional: without it nothing is kept, which is what every hub did before.
+   */
+  keptPhotos?: PhotoStore;
   /**
    * What names a conversation: the vendors themselves (`askForTitle`) unless a
    * suite hands in a stand-in, and `null` to name nothing.
@@ -1718,13 +1750,18 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     // says so; the model is still sent the words the person actually sent.
     const sent = turn?.images?.length ?? 0;
     const wordless = sent > 0 && text.trim().length === 0;
+    // Kept before the row is written, so the row is born knowing where each
+    // copy is — and attached once it exists, which is what the copy lives for.
+    const keeping = await this.keepPhotos(session.memberId, turn);
     const written = await this.write(
       session,
       'user',
       wordless ? photoCaption(sent) : text,
-      userRowData(turn, wordless, origin?.via),
+      userRowData(turn, wordless, origin?.via, keeping?.ids),
       session.memberId,
     );
+    const keptIds = (keeping?.ids ?? []).filter((id): id is string => id !== null);
+    if (keptIds.length > 0) await this.base.keptPhotos?.attach(keptIds, written.id).catch(() => undefined);
     session.lastAt = Date.now();
     /**
      * **The effort somebody picked is this turn's**, the way a spoken turn's
@@ -1739,7 +1776,52 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     );
     // After the turn is queued, never in front of it — and never awaited.
     this.nameIfUntitled(session, text, turn?.model);
-    return { sessionId: session.id, messages: [written] };
+    return {
+      sessionId: session.id,
+      messages: [written],
+      ...(keeping !== undefined ? { photosKept: keeping.outcome } : {}),
+    };
+  }
+
+  /**
+   * Keep a message's photos, where it asked and its sender has switched that on.
+   *
+   * **One photo at a time**, decoded and written and let go before the next:
+   * the base64 is already held for the round (`ChatPhotoBudget`), and a decoded
+   * copy of all four at once would be six megabytes more on a board with
+   * thirty to spare. `undefined` when keeping was not asked — the row and the
+   * answer are then exactly what an older hub wrote.
+   */
+  private async keepPhotos(
+    memberId: string,
+    turn: ChatTurnRequest | undefined,
+  ): Promise<{ ids: (string | null)[]; outcome: KeepOutcome } | undefined> {
+    const images = turn?.images ?? [];
+    if (turn?.keepPhotos !== true || images.length === 0) return undefined;
+    const store = this.base.keptPhotos;
+    if (!store) return { ids: images.map(() => null), outcome: { kept: 0, reason: 'off' } };
+    const ids: (string | null)[] = [];
+    let reason: KeepOutcome['reason'];
+    for (const image of images) {
+      const { ids: one, outcome } = await store.keep({
+        kind: 'chat',
+        subjectId: memberId,
+        member: { id: memberId },
+        photos: [
+          {
+            bytes: Buffer.from(image.data, 'base64'),
+            mediaType: image.mediaType,
+            width: image.width,
+            height: image.height,
+            ref: image.ref,
+          },
+        ],
+      });
+      ids.push(one[0] ?? null);
+      reason ??= outcome.reason;
+    }
+    const kept = ids.filter((id) => id !== null).length;
+    return { ids, outcome: { kept, ...(reason !== undefined ? { reason } : {}) } };
   }
 
   /**
@@ -3074,6 +3156,21 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       costUsd: spent,
       durationMs: Date.now() - session.startedAt,
     });
+  }
+
+  /**
+   * Sweep every hour as well as when a conversation begins.
+   *
+   * The sweep used to run only from `start`, so a home that stopped beginning
+   * conversations kept its transcripts past the fortnight both apps and the
+   * Privacy Policy promise — and never recorded what an idle conversation had
+   * cost. On a timer that never keeps the process alive; `src/index.ts` starts
+   * it, and a suite never does. Returns the stop.
+   */
+  startSweeping(everyMs = 60 * 60_000): () => void {
+    const timer = setInterval(() => this.sweep(), everyMs);
+    timer.unref();
+    return () => clearInterval(timer);
   }
 
   /** Drop conversations nobody is coming back to, and prune old transcripts. */
