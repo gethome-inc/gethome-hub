@@ -1,3 +1,4 @@
+import type { StatsFs } from 'node:fs';
 import { mkdir, statfs } from 'node:fs/promises';
 
 /**
@@ -11,12 +12,40 @@ import { mkdir, statfs } from 'node:fs/promises';
  * name is never the claim.
  */
 export interface Space {
+  /**
+   * What the hub's own account could ever hold: the partition less the blocks
+   * ext4 keeps for root. So `totalBytes - freeBytes` is what is really stored.
+   */
   totalBytes: number;
+  /** What the hub's own account may still write — the reserve left out here too. */
   freeBytes: number;
 }
 
 /** A filesystem's answer, the way `statfs` gives it. */
 export type SpaceMeasure = (dir: string) => Promise<Space | null>;
+
+/** The four `statfs` figures a reading is made of. */
+export type BlockCounts = Pick<StatsFs, 'blocks' | 'bfree' | 'bavail' | 'bsize'>;
+
+/**
+ * Both figures as the hub's own account sees the partition, so they add up.
+ *
+ * `bavail`, not `bfree`, for what is free: the blocks this unprivileged account
+ * may write, which leaves out what ext4 reserves for root — measuring the
+ * reserve as room would promise the hub space it can never have. **And the
+ * total leaves out the same reserve**, because `blocks` beside `bavail` counts
+ * it as space in use: on a 64 GB card that was 2.55 GB nothing had written, drawn on the photos page as "everything else" beside 6.85 GB that
+ * really was — the bar a third longer than the card's contents. `df` makes the
+ * same split (its Size, Used and Avail do not add up); a page with one bar and
+ * one sentence cannot carry that, so the hub sends figures that do.
+ */
+export function spaceOf(stats: BlockCounts): Space {
+  const reserved = Math.max(stats.bfree - stats.bavail, 0);
+  return {
+    totalBytes: Math.max(stats.blocks - reserved, 0) * stats.bsize,
+    freeBytes: stats.bavail * stats.bsize,
+  };
+}
 
 /**
  * `statfs` on the data directory, creating it first if it is not there yet.
@@ -32,10 +61,7 @@ export const measureSpace: SpaceMeasure = async (dir) => {
       await mkdir(dir, { recursive: true });
       return statfs(dir);
     });
-    // `bavail`, not `bfree`: the blocks this unprivileged account may write,
-    // which leaves out what ext4 reserves for root. Measuring the reserve as
-    // room would promise the hub space it can never have.
-    return { totalBytes: stats.blocks * stats.bsize, freeBytes: stats.bavail * stats.bsize };
+    return spaceOf(stats);
   } catch {
     return null;
   }

@@ -24,6 +24,13 @@ this directory.
   photo lives on the card, not in memory, so a 512 MB board with a big card
   keeps photos exactly as a Pi 5 does — the radio budget's rule from the other
   side: measure the machine, never name it. **A pause deletes nothing.**
+  **The two figures `GET /photos` sends add up** (`spaceOf` in `space.ts`):
+  `freeBytes` is `bavail`, so it leaves out ext4's root reserve, and
+  `totalBytes` leaves out the same reserve. It once was `blocks`, which counted
+  the reserve as space in use, and the iPhone's bar — drawn as total less free
+  — showed 2.55 GB nobody had written as "everything else" on a 64 GB card,
+  a third more than was really there. `test/photos-space.test.ts` holds it to a
+  real card's `stat -f` and `df`.
 - **A photo lives as long as what it was kept for.** `kept_photo_uses` is the
   whole of its lifetime: a room picture, a portrait or a chat message, and the
   photo goes with the last of them (`release`). One photo can serve several,

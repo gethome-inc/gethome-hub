@@ -2612,6 +2612,12 @@ keeps more than `minFreeBytes` (2 GiB) free after the write — far above the
 deleted; it resumes once 2.5 GiB is free again. Kept photos are never processed:
 no thumbnail, no re-encode — an app downscales and caches its own.
 
+`space` is `{totalBytes, freeBytes}` for that partition **as the hub's own
+account sees it**, and absent when the disk would not say. Both leave out the
+blocks ext4 keeps for root (about 5% of a card), so `totalBytes − freeBytes` is
+what is really stored and a bar drawn from the two is the card's contents —
+`totalBytes` is therefore a little under `df`'s *Size* and the card's label.
+
 **A photo lives as long as what it was kept for.**
 
 | Kind | Kept for | Goes when |
