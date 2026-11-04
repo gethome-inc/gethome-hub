@@ -17,13 +17,16 @@ this directory.
   whose sentence stays true, and the hub cannot tell an old app from a new one
   any other way. Never keep a photo on the switch alone.
 - **Room, never a board.** Keeping is gated on the data partition keeping more
-  than `PHOTOS_MIN_FREE_BYTES` (2 GiB) free *after* the write, with a pause that
+  than `PHOTOS_MIN_FREE_BYTES` (2 GB) free *after* the write, with a pause that
   lifts only at `PHOTOS_RESUME_FREE_BYTES` so a hub on the line does not flap.
-  2 GiB sits far above the 500 MB where portraits and room pictures stop
-  drawing, so photos always stop first and never cost the home a drawing. A
-  photo lives on the card, not in memory, so a 512 MB board with a big card
-  keeps photos exactly as a Pi 5 does — the radio budget's rule from the other
-  side: measure the machine, never name it. **A pause deletes nothing.**
+  It is decimal, as phones and Macs count storage: an app prints `minFreeBytes`
+  with its system's byte formatter, where 2 GiB reads "2.15 GB" beside a Privacy
+  Policy saying 2 GB. It sits far above the 500 MB where portraits and room
+  pictures stop drawing, so photos always stop first and never cost the home a
+  drawing. A photo lives on the card, not in memory, so a 512 MB board with a
+  big card keeps photos exactly as a Pi 5 does — the radio budget's rule from
+  the other side: measure the machine, never name it. **A pause deletes
+  nothing.**
   **The two figures `GET /photos` sends add up** (`spaceOf` in `space.ts`):
   `freeBytes` is `bavail`, so it leaves out ext4's root reserve, and
   `totalBytes` leaves out the same reserve. It once was `blocks`, which counted

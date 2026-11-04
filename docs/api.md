@@ -2606,11 +2606,12 @@ never asks is an app whose sentence stays true. A hub older than this strips the
 field and keeps nothing; ask `GET /hub` for `photos` before offering any of it.
 
 **Room, never a board.** Photos are kept only while the hub's data partition
-keeps more than `minFreeBytes` (2 GiB) free after the write — far above the
-500 MB where drawing stops, so photos stop first. Below it keeping **pauses**
-(`GET /photos` says `paused: true, reason: "low-space"`) and nothing kept is
-deleted; it resumes once 2.5 GiB is free again. Kept photos are never processed:
-no thumbnail, no re-encode — an app downscales and caches its own.
+keeps more than `minFreeBytes` free after the write — 2 GB, in the decimal
+units phones and Macs count storage in, so an app prints it as "2 GB". That is
+far above the 500 MB where drawing stops, so photos stop first. Below it keeping
+**pauses** (`GET /photos` says `paused: true, reason: "low-space"`) and nothing
+kept is deleted; it resumes once 2.5 GB is free again. Kept photos are never
+processed: no thumbnail, no re-encode — an app downscales and caches its own.
 
 `space` is `{totalBytes, freeBytes}` for that partition **as the hub's own
 account sees it**, and absent when the disk would not say. Both leave out the

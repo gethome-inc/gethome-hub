@@ -51,13 +51,19 @@ export type PhotoKind = (typeof PHOTO_KINDS)[number];
 export const HOME_PHOTO_KINDS = ['room', 'portrait'] as const;
 export type HomePhotoKind = (typeof HOME_PHOTO_KINDS)[number];
 
-const GIB = 1024 * 1024 * 1024;
+/**
+ * The floor is counted in decimal units, as phones and Macs count storage, so
+ * an app's byte formatter prints it as the "2 GB" the Privacy Policy states —
+ * 2 GiB reads "2.15 GB".
+ */
+const GB = 1000 * 1000 * 1000;
+const MB = 1000 * 1000;
 const MIB = 1024 * 1024;
 
 /** Keep nothing new that would leave less than this free. */
-export const PHOTOS_MIN_FREE_BYTES = 2 * GIB;
+export const PHOTOS_MIN_FREE_BYTES = 2 * GB;
 /** Once paused for space, start again only with this much free. */
-export const PHOTOS_RESUME_FREE_BYTES = PHOTOS_MIN_FREE_BYTES + 512 * MIB;
+export const PHOTOS_RESUME_FREE_BYTES = PHOTOS_MIN_FREE_BYTES + 500 * MB;
 /**
  * Every member's chat photos together. A safety net rather than a target: a
  * fortnight of somebody sending a photo or two a day is tens of megabytes, and
