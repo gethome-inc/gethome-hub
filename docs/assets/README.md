@@ -1,8 +1,8 @@
 # Assets
 
-The pictures the [README](../../README.md) shows. Each was already public
-before it came here: the icon and the app's screens on the gethome website,
-the badge on Apple's.
+The pictures the [README](../../README.md) shows, and the repository's social
+preview. Each of the README's was already public before it came here: the icon
+and the app's screens on the gethome website, the badge on Apple's.
 
 | File | What it is | Copied from | On |
 |---|---|---|---|
@@ -11,6 +11,7 @@ the badge on Apple's.
 | `screens/home-{light,dark}.webp` | the app's Home pane for the City Apartment demo home, in a drawn iPhone frame | the website's `public/screens/` as of 2026-10-01, framed (below) | 2026-10-16 |
 | `screens/assistant-{light,dark}.webp` | the assistant as it opens — its round face — in a drawn iPhone frame | the website's `public/screens/` as of 2026-11-02, framed | 2026-11-02 |
 | `screens/device-{light,dark}.webp` | a lamp's device page (the older Studio demo home), in a drawn iPhone frame | the website's `public/screens/` as of 2026-09-29, framed | 2026-10-16 |
+| `social-preview.jpg` | the **social preview** — the picture a shared link to this repository shows, 1280 × 640: the gethome hub lockup, *The local brain of your home.* and *Matter, Zigbee and MQTT devices in one app.* over three iPhones with the app's screens (the assistant, a demo home's Home pane, its devices). Not shown in the README; GitHub takes it from *Settings → Social preview*, so a new one is uploaded there too | made in the marketing repository from the App Store's search art, which shows the same three screens | 2026-11-04 |
 
 `mark.png` and the badge are byte-identical to the originals (sha256
 `c7189519…` and `a26fc5b3…`). The framed screens are made from the website's
@@ -48,4 +49,7 @@ bare captures are kept here.
   reader. Apple's badge is the one exception, because Apple's rules make it
   one: it is Apple's artwork, used as published — never redrawn, recoloured,
   cropped or animated — linked to the app's own App Store page, and shown once.
-  Its alt text says what it says.
+  Its alt text says what it says. The social preview is the other: it is never
+  in the README, only where a link to the repository is shared, and a picture
+  there with no words would not say what the link is. Its words are the
+  README's own tagline and first line — change them together.
