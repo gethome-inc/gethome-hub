@@ -20,16 +20,21 @@ secrets. `docs/portraits.md` is canonical — update it in the same change.
   sphere, chosen — rather than an absence, which is what saves a column meaning
   the same thing twice. And **no thumbnails are made here**: that would mean a
   native image library on a 415 MB board for something each app already derives
-  and caches. `gpt-image-2.5-flare` is pinned because it supports transparent
+  and caches. `gpt-image-2.6-flare` is pinned because it supports transparent
   backgrounds, which is the whole point of a cut-out the apps float over their
-  own glow — and because it is the *fast* half of the 2.5 pair, on a surface
-  where somebody watches an orb until the picture lands. Moving off `gpt-image-2`
-  cost nothing at the wire: 2.5 kept the Image API's shape, so it was a model id
-  and a re-read of the three facts hanging off it. `quality` stays `high` rather
-  than reaching for the `xhigh`/`max` that 2.5 added — transparency is at its
-  best at medium or high, and spending the saved time on detail nobody sees at
-  card size would undo the reason for moving. **The prompt stopped naming a
-  scene** with it (`src/portraits/prompts.ts`): a prompt's instructions take
+  own glow — and because it is the *fast* half of the 2.6 pair, on a surface
+  where somebody watches an orb until the picture lands (a room takes
+  Sunburst, the quality half — `src/room-pictures/draw.ts`). Neither move, off
+  `gpt-image-2` and then 2.5 to 2.6, cost anything at the wire: each kept the
+  Image API's shape, so each was a model id and a re-read of the facts hanging
+  off it. `quality` stays `high` rather than reaching for the `xhigh`/`max`
+  that 2.5 added — transparency is at its best at medium or high, and spending
+  the saved time on detail nobody sees at card size would undo the reason for
+  moving. **2.6's `complexity` is not sent**, so it plans at its default,
+  `high`, until a lower one has been compared on real drawings — the app's
+  `OpenAIImageClient` sends the same request, and the two move together.
+  **The prompt stopped naming a scene** with the move to 2.5
+  (`src/portraits/prompts.ts`): a prompt's instructions take
   priority over `background: transparent`, so "empty space", "no ground plane"
   and "no scenery" were a backdrop described in front of the one capability the
   path exists for. The shadow ban stays — a shadow is something the object casts,
@@ -53,7 +58,7 @@ secrets. `docs/portraits.md` is canonical — update it in the same change.
   question, and three tables would be three screens answering it; `portraitId`
   links the row to what it bought the way `automationId` does for a rule, and
   `finish` times the run so the duration is free. The price is read off the
-  response's own `usage`, because 2.5 bills per token and estimating from the
+  response's own `usage`, because 2.6 bills per token and estimating from the
   size we asked for is a guess dressed as a fact — with **no usage meaning no
   price rather than a free one** (`$0.00` is a claim where nothing is the truth)
   and an unsplit input priced at the dearer image rate, since an estimate that

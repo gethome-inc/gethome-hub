@@ -4,28 +4,36 @@ import { classifyApiError, errorCodeIn } from '../ai/errors.js';
  * The one call that draws a room: OpenAI’s Image API, over plain HTTP, with
  * the photos of the room in and one picture out.
  *
- * **`gpt-image-2.5-sunburst`, the quality half of the 2.5 pair**, where the
+ * **`gpt-image-2.6-sunburst`, the quality half of the 2.6 pair**, where the
  * portraits take Flare. A portrait is one object at card size; a room is the
  * whole screen and a dozen things in it, with curtains, a hob and the magnets
  * on a fridge that the person who lives there will look for. Both bill the
- * same per token, and Sunburst takes about half a minute more — on a surface
- * that is drawn once and looked at every day, that is the trade to make.
+ * same per token, and on 2.5 Sunburst took about half a minute more — on a
+ * surface that is drawn once and looked at every day, that is the trade to
+ * make. 2.6 gives it a second reason: at medium or high quality Sunburst keeps
+ * details more consistent from one edit to the next, and the night is an edit
+ * of the day.
+ *
+ * **`complexity`, which 2.6 added, is not sent**, so the model plans at its
+ * own default — `high` on both 2.6 models, and where OpenAI says to start a
+ * complex layout. A room's layout is what makes it this room, so a lower
+ * setting would be compared on real rooms before it was tried here.
  *
  * **No SDK**, for the portraits' reason: one endpoint and one response field.
  */
 
-export const ROOM_PICTURE_MODEL = 'gpt-image-2.5-sunburst';
+export const ROOM_PICTURE_MODEL = 'gpt-image-2.6-sunburst';
 
 const EDITS_URL = 'https://api.openai.com/v1/images/edits';
 
 /**
- * Ten minutes, the portraits' ceiling. A room has measured at about half a
- * minute here; the deadline is a ceiling nobody should reach, kept generous
+ * Ten minutes, the portraits' ceiling. A room measured at about half a minute
+ * here on 2.5; the deadline is a ceiling nobody should reach, kept generous
  * because a drawing cut off is one the provider has already billed.
  */
 const TIMEOUT_MS = 10 * 60 * 1000;
 
-/** USD per million tokens — the 2.5 pair's shared rates. */
+/** USD per million tokens — the 2.6 pair's shared rates, which are 2.5's unchanged. */
 const PRICE_PER_MTOK = { textInput: 5, imageInput: 8, imageOutput: 30 } as const;
 
 export class RoomPictureDrawError extends Error {
