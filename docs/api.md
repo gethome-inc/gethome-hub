@@ -2251,7 +2251,7 @@ the second provider reads exactly what it read before — plus a per-provider ha
                                              { "id": "gpt-6.1-terra", "label": "GPT-6.1 Terra", … },
                                              { "id": "gpt-6-luna", "label": "GPT-6 Luna", … } ] } },
   "automations": { "model": "gpt-6.1-sol", "provider": "openai", "choosable": true, "models": [ … ], "choices": { … } },
-  "portraits": { "model": "gpt-image-2.5-flare", "maxPerDevice": 6, "budgetBytes": 314572800 }
+  "portraits": { "model": "gpt-image-2.6-flare", "maxPerDevice": 6, "budgetBytes": 314572800 }
 }
 ```
 
@@ -2421,8 +2421,9 @@ already knows the device's canonical `kind`, so a caller sends nothing but
 "draw this device", optionally with a photo to restyle — which is also what
 keeps two apps from producing two different-looking homes.
 
-Drawing needs an **OpenAI** key (`gpt-image-2.5-flare`, which supports
-transparent backgrounds and is used for a clean cut-out).
+Drawing needs an **OpenAI** key (`gpt-image-2.6-flare`, the fast half of
+OpenAI's 2.6 pair, which supports transparent backgrounds and is used for a
+clean cut-out).
 Recognition may be running on Anthropic at the same time, which is why the
 refusal is `openai_not_configured` rather than `ai_not_configured`.
 
@@ -2471,7 +2472,7 @@ answers "why did nothing happen" a day later — and it buys no picture, so
 `portraitId` is null.
 
 The price is read off the provider's own `usage`, never estimated from the size
-and quality we asked for: 2.5 bills per token, so the response is the only thing
+and quality we asked for: 2.6 bills per token, so the response is the only thing
 that actually knows. When it reports none, `costUsd` is **absent rather than
 zero** — `$0.00` is a claim and "nothing was reported" is the truth, the line
 `ai_runs` already holds for a conversation whose spend row has been pruned. And
@@ -2495,7 +2496,8 @@ been removed, and the row read next week is all that is left of them.
 ### Room pictures
 
 A room can be **drawn**: from one to eight phone photos of it, the hub has
-OpenAI's `gpt-image-2.5-sunburst` draw the room as the isometric cutaway a
+OpenAI's `gpt-image-2.6-sunburst` (the quality half of the 2.6 pair, where
+portraits take the fast one) draw the room as the isometric cutaway a
 smart-home app shows — the two near walls removed, seen close from high above
 its far corner — on a transparent ground. **Beautiful before realistic, but
 nothing moved**: a designed 3D illustration of the room, in a calm palette taken

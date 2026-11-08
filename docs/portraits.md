@@ -84,28 +84,42 @@ response field, and the hub ships its production `node_modules` to a Raspberry
 Pi — the same reasoning that keeps the GitHub update check and the installer's
 health poll on `fetch`.
 
-**`gpt-image-2.5-flare` is pinned, and the wire did not move to get there.**
-2.5 kept the Image API's shape — same two endpoints, same `size` / `background` /
-`output_format` / `quality` / `n` fields, same base64 answer — so the migration
-off `gpt-image-2` was a model id and a re-read of the facts hanging off it.
-Flare is the fast half of the 2.5 pair and draws in a fraction of `gpt-image-2`'s
-time, which is the whole reason to move on a surface where somebody watches an
-orb. `gpt-image-2.5-sunburst`, the quality half, is deliberately not taken: a
+**`gpt-image-2.6-flare` is pinned, and the wire has not moved to get there.**
+2.5 and then 2.6 kept the Image API's shape — same two endpoints, same `size` /
+`background` / `output_format` / `quality` / `n` fields, same base64 answer — so
+each move, off `gpt-image-2` to 2.5 Flare and on to 2.6 Flare, was a model id and
+a re-read of the facts hanging off it. Flare is the fast half of the pair: 2.5
+drew in a fraction of `gpt-image-2`'s time, and OpenAI says 2.6 draws 50% faster
+again, which is the whole reason to move on a surface where somebody watches an
+orb. `gpt-image-2.6-sunburst`, the quality half, is deliberately not taken: a
 portrait is one matte object on a transparent ground in a fixed palette, drawn at
 card size by every surface that shows it, so the slower tier would spend its time
-on detail this render throws away.
+on detail this render throws away. A room is the opposite case — the whole screen
+and a dozen things in it — and takes it ([room pictures](api.md#room-pictures)).
 
 A transparent cut-out is still the whole point — the apps float the object over
 their own glow and contact shadow, so a boxed image would be a grey slab on the
-page. Both 2.5 models support `background: transparent` outright rather than in
-preview, and a model that rejected it would fail with OpenAI's own message rather
-than quietly returning a square.
+page. Both 2.6 models support `background: transparent` outright rather than in
+preview — a product cut-out is OpenAI's own worked example for each — and a model
+that rejected it would fail with OpenAI's own message rather than quietly
+returning a square.
 
 **`quality` stays `high`** though 2.5 widened it to
-`low | medium | high | xhigh | max`. OpenAI's guidance puts a transparent
-background at its best at medium or high, so the tiers above are not free of risk
-on the one capability this path exists for — and spending Flare's saved time on
-detail nobody can see on a device tile would undo the reason for moving.
+`low | medium | high | xhigh | max`, and 2.6 kept the five. OpenAI's guidance
+puts a transparent background at its best at medium or high, so the tiers above
+are not free of risk on the one capability this path exists for — and spending
+Flare's saved time on detail nobody can see on a device tile would undo the
+reason for moving.
+
+**`complexity` is not sent.** 2.6 added it — how much the model plans before it
+renders, apart from how finely it renders — and without it both 2.6 models plan
+at `high`. OpenAI suggests the lower settings for quick edits, which a restyled
+photo is close to, so it is the next lever on the wait. It waits for a comparison
+on real drawings first: planning less is also planning less around a long prompt
+(the shadow ban, the centring, the palette), and OpenAI's own advice for a move
+between models is to change the model alone and compare against what the old one
+drew. The gethome app's own drawing, for homes with no hub, sends the same
+request, and the two move together.
 
 Failures carry the vendor's own sentence and a `kind` from the shared
 classifier in `src/ai/errors.ts` — which branches on HTTP status rather than on
@@ -130,7 +144,7 @@ sentence: it is what answers "why did nothing happen" a day later. It buys no
 picture, so `portraitId` is null — and it is usually free, which is exactly why
 its price is left absent rather than written as zero.
 
-**The price is the provider's own number.** 2.5 bills per token, so `usage` on
+**The price is the provider's own number.** 2.6 bills per token, so `usage` on
 the image response is the only thing that actually knows; estimating from the
 size and quality we asked for would be a guess dressed as a fact.
 `PRICE_PER_MTOK` lives in `openai-images.ts` rather than in `src/ai/models.ts`
@@ -229,15 +243,17 @@ uninterrupted animation from "reading your photo" to the finished portrait. If
 the phone gives up, the hub finishes, stores and announces anyway: nothing is
 lost but the animation.
 
-**Budget two to five minutes, and take that from this hub rather than from the
-web.** The published figures disagree wildly: OpenAI's own latency guidance says
-30–45 s with a complex prompt "close to two minutes", while blog posts measuring
-reseller proxies and small Azure quotas report three to five, which is mostly
-their queue. What a real gethome hub does, on this prompt, at `quality: high`
-with a transparent background and a photo to restyle, is **two to five minutes**
-— a heavier request than any of those benchmarks runs. The deadline is ten
-minutes, about twice the slowest run observed; a client should size its own from
-the same number, and neither should trust a figure it has not seen itself.
+**Size a deadline from this hub rather than from the web.** The published
+figures disagree wildly: OpenAI's own latency guidance says 30–45 s with a complex
+prompt "close to two minutes", while blog posts measuring reseller proxies and
+small Azure quotas report three to five, which is mostly their queue. What a real
+gethome hub did on `gpt-image-2`, on this prompt, at `quality: high` with a
+transparent background and a photo to restyle, was **two to five minutes** — a
+heavier request than any of those benchmarks runs. Flare draws in a fraction of
+that, and OpenAI says 2.6 is 50% faster than 2.5, but nothing here has timed 2.6
+yet. So the deadline stays ten minutes, about twice the slowest run ever
+observed; a client should size its own from the same number, and neither should
+trust a figure it has not seen itself.
 
 **A second asker is refused rather than queued**, and the reason is money before
 it is time: every drawing bills the home, so a queue turns four impatient taps

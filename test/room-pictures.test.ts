@@ -5,7 +5,7 @@ import path from 'node:path';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { HubEventBus } from '../src/core/bus.js';
 import { SettingsService } from '../src/core/settings.js';
-import { drawRoomPicture, pictureCostUsd, RoomPictureDrawError } from '../src/room-pictures/draw.js';
+import { drawRoomPicture, pictureCostUsd, RoomPictureDrawError, ROOM_PICTURE_MODEL } from '../src/room-pictures/draw.js';
 import { LocateError, locateDevices, normaliseAnswer } from '../src/room-pictures/locate.js';
 import { dayPrompt, describeKind, locatePrompt } from '../src/room-pictures/prompts.js';
 import { homeLocator, PictureBusyError, RoomPictureService, type Locator } from '../src/room-pictures/store.js';
@@ -612,6 +612,34 @@ describe('drawing', () => {
       ['image1.png', 'image/png'],
     ]);
     for (const [index, file] of sent.entries()) expect(Buffer.from(await file.arrayBuffer()).equals(photos[index]!)).toBe(true);
+  });
+
+  /**
+   * A room takes the quality half of the pair where a portrait takes the fast
+   * one (`PORTRAIT_MODEL`), and asks for high quality on a PNG.
+   */
+  it('draws on GPT Image 2.6 Sunburst, at high quality, on a PNG', async () => {
+    let form: FormData | undefined;
+    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      form = init!.body as FormData;
+      return new Response(JSON.stringify({ data: [{ b64_json: png(7).toString('base64') }] }), { status: 200 });
+    }) as unknown as typeof fetch;
+    await drawRoomPicture({
+      apiKey: 'k',
+      prompt: 'p',
+      images: [{ bytes: randomBytes(1_234), contentType: 'image/jpeg' }],
+      size: '1536x1024',
+      background: 'opaque',
+      fetchImpl,
+    });
+    expect(ROOM_PICTURE_MODEL).toBe('gpt-image-2.6-sunburst');
+    expect(form!.get('model')).toBe(ROOM_PICTURE_MODEL);
+    expect(form!.get('quality')).toBe('high');
+    expect(form!.get('output_format')).toBe('png');
+    expect(form!.get('size')).toBe('1536x1024');
+    expect(form!.get('background')).toBe('opaque');
+    // Left to the model's own default, `high` — see the note in `draw.ts`.
+    expect(form!.has('complexity')).toBe(false);
   });
 });
 
