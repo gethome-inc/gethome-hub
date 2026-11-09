@@ -337,7 +337,7 @@ export function attachWebSocket(
     // `activity.read`, so a grant reaches an open socket with no reconnect.
     send({
       type: 'deviceUpserted',
-      device: deviceWire(device, favorite, deviceWireView(deps, memberId, key), deps.webBlocks?.list(deviceId)),
+      device: deviceWire(device, favorite, deviceWireView(deps, memberId, key), deps.panels?.list(deviceId)),
     });
   });
   const onRemoved = live((deviceId: string) => send({ type: 'deviceRemoved', deviceId }));
@@ -477,7 +477,7 @@ export function attachWebSocket(
   deps.events.on('structureChanged', onStructure);
   deps.events.on('portraitsChanged', onPortraits);
   // A device's panels are part of its wire, so the device goes out again.
-  deps.events.on('webBlocksChanged', onUpserted);
+  deps.events.on('panelsChanged', onUpserted);
   deps.events.on('activity', onActivity);
   deps.events.on('accessChanged', onAccessChanged);
   deps.events.on('permitJoin', onPermitJoin);
@@ -692,7 +692,7 @@ export function attachWebSocket(
     }
     deps.events.off('stateChanged', onState);
     deps.events.off('deviceUpserted', onUpserted);
-    deps.events.off('webBlocksChanged', onUpserted);
+    deps.events.off('panelsChanged', onUpserted);
     deps.events.off('deviceRemoved', onRemoved);
     deps.events.off('commandFailed', onCommandFailed);
     deps.events.off('structureChanged', onStructure);

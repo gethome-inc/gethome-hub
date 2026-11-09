@@ -129,7 +129,7 @@ import {
   MemberSessions,
   UNAUTHORIZED_CLOSE_CODE,
 } from './ws.js';
-import { WebBlockError, WebBlockService } from '../web-blocks/store.js';
+import { PanelError, PanelService } from '../panels/store.js';
 import { CameraError, CameraProxy, cameraStatus } from '../cameras/proxy.js';
 
 export interface ApiDeps {
@@ -148,11 +148,11 @@ export interface ApiDeps {
   /** The pictures a home has had drawn of its devices — `portraits/store.ts`. */
   portraits: PortraitService;
   /**
-   * The panels installed on devices' pages — `web-blocks/store.ts`. Optional
-   * for the reason `allowedHosts` gives: a suite that doesn't care gets one
-   * made here, empty.
+   * The panels installed on devices' pages, of every kind — `panels/store.ts`.
+   * Optional for the reason `allowedHosts` gives: a suite that doesn't care
+   * gets one made here, empty.
    */
-  webBlocks?: WebBlockService;
+  panels?: PanelService;
   /** The camera proxy — `cameras/proxy.ts`. Optional for the same reason. */
   cameras?: CameraProxy;
   settings: SettingsService;
@@ -310,8 +310,8 @@ interface CommissionJob {
  * way to hand a Raspberry Pi ten megabytes of anything.
  */
 const PHOTO_BODY_LIMIT = 12 * 1024 * 1024;
-/** A web block's 512 KB, base64'd, with room for the JSON around it. */
-const WEB_BLOCK_BODY_LIMIT = 1024 * 1024;
+/** A `web` panel's 512 KB, base64'd, with room for the JSON around it. */
+const PANEL_BODY_LIMIT = 1024 * 1024;
 
 const COMMISSION_JOB_TTL_MS = 10 * 60 * 1000;
 /**
@@ -627,10 +627,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * Made here when a suite didn't pass them, so the routes are always there;
    * `src/index.ts` passes the real ones, loaded and shut down with the hub.
    */
-  const webBlocks = deps.webBlocks ?? new WebBlockService(deps.db, deps.events, deps.dataDir, deps.log);
+  const panels = deps.panels ?? new PanelService(deps.db, deps.events, deps.dataDir, deps.log);
   const cameras = deps.cameras ?? new CameraProxy({ log: deps.log });
   /** What the socket reads: the same services the routes use, never a second copy. */
-  const socketDeps: ApiDeps = { ...deps, webBlocks, cameras };
+  const socketDeps: ApiDeps = { ...deps, panels, cameras };
   // A stream left relaying after the server closed would hold its socket open.
   app.addHook('onClose', async () => cameras.close());
   const commissionJobs = new Map<string, CommissionJob>();
@@ -798,10 +798,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // cameras through itself (`/cameras/…`), and these are the stream kinds it
     // relays and how many cameras it streams at once.
     cameras: cameras.describe(),
-    // Additive, presence the capability: a hub carrying this block keeps web
-    // blocks on devices' pages (`/devices/:id/web-blocks/…`), within these
-    // bounds. An app that doesn't find it offers no panel to install.
-    webBlocks: webBlocks.describe(),
+    // Additive, presence the capability: a hub carrying this block keeps
+    // panels on devices' pages (`/devices/:id/panels/…`), within these bounds.
+    // `kinds` names each kind it takes, with that kind's own bounds — a client
+    // offers a kind of panel only where it is named, so a kind a later hub
+    // adds never reaches one that would refuse it. An app that doesn't find
+    // the block offers no panel to install.
+    panels: panels.describe(),
     // Additive, and presence is the capability once more: a hub carrying this
     // block mints **sign-in codes** (`POST /invites {memberId}`), so somebody
     // already in the home comes back on another device as themselves rather
@@ -1317,7 +1320,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     return deps.registry
       .listDevices()
       .map((device) =>
-        deviceWire(device, deps.favorites.isFavorite(memberId, device.id), view, webBlocks.list(device.id)),
+        deviceWire(device, deps.favorites.isFavorite(memberId, device.id), view, panels.list(device.id)),
       );
   });
 
@@ -1463,7 +1466,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       device,
       deps.favorites.isFavorite(memberId, id),
       deviceWireView(deps, memberId, request.apiKey),
-      webBlocks.list(id),
+      panels.list(id),
     );
   });
 
@@ -1751,16 +1754,23 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     return reply.code(204).send();
   });
 
-  // ── Web blocks ───────────────────────────────────────────────────────────
+  // ── Panels ───────────────────────────────────────────────────────────────
 
   /**
-   * Install a panel on a device's page, or replace the one with that id.
+   * Install a panel on a device's page, or replace the one with that id,
+   * whatever kind either is — one collection, so a device never has two
+   * panels under one id.
    *
    * `device.edit`, because a panel changes what everybody in the house sees on
    * that device's page — the same reason a rename needs it. JSON with the files
    * as base64 rather than an archive, as portraits take a photo: no archive
    * library on a 512 MB board, and every byte is checked as it is decoded.
    * An upload identical to what is stored writes nothing and records nothing.
+   *
+   * `kind` is required and checked by the store rather than by zod, so a kind
+   * this hub doesn't keep is its own refusal (`unsupported_panel_kind`) — a
+   * client that skipped `GET /hub`'s `panels.kinds` learns this hub is older
+   * than the panel, rather than that its request was malformed.
    *
    * **The member's, never an API key's** — a panel is code every phone in the
    * house runs, which is more than `device.edit` hands a key elsewhere (a
@@ -1769,18 +1779,19 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * additive, closing it after it shipped is not.
    */
   app.put(
-    '/api/v1/devices/:id/web-blocks/:blockId',
-    { ...memberOnlyNeeds('device.edit'), bodyLimit: WEB_BLOCK_BODY_LIMIT },
+    '/api/v1/devices/:id/panels/:panelId',
+    { ...memberOnlyNeeds('device.edit'), bodyLimit: PANEL_BODY_LIMIT },
     async (request, reply) => {
-      const { id, blockId } = z.object({ id: z.uuid(), blockId: z.string().max(40) }).parse(request.params);
+      const { id, panelId } = z.object({ id: z.uuid(), panelId: z.string().max(40) }).parse(request.params);
       const device = deps.registry.getDevice(id);
       if (!device) return reply.code(404).send({ error: 'not_found' });
       const body = z
         .object({
+          kind: z.string().min(1).max(40),
           title: z.string().min(1).max(60),
           height: z.number().int().min(60).max(800).optional(),
           files: z
-            .array(z.object({ path: z.string().min(1).max(120), dataBase64: z.string().max(WEB_BLOCK_BODY_LIMIT) }).strict())
+            .array(z.object({ path: z.string().min(1).max(120), dataBase64: z.string().max(PANEL_BODY_LIMIT) }).strict())
             .min(1)
             .max(64),
         })
@@ -1789,25 +1800,30 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       try {
         const member = request.member!;
         const who = actor(request);
-        const { changed, block } = await webBlocks.put(
+        const { changed, panel } = await panels.put(
           id,
-          blockId,
-          { title: body.title, files: body.files, ...(body.height !== undefined ? { height: body.height } : {}) },
+          panelId,
+          { kind: body.kind, title: body.title, files: body.files, ...(body.height !== undefined ? { height: body.height } : {}) },
           { id: member.id, name: member.name },
         );
         if (changed) {
           await deps.activity.record({
-            kind: 'device.web-block',
-            message: `${who.name} installed the panel “${block.title}” on ${device.name}.`,
+            kind: 'device.panel',
+            message: `${who.name} installed the panel “${panel.title}” on ${device.name}.`,
             memberId: who.memberId,
             deviceId: id,
-            data: { deviceName: device.name, blockId, title: block.title, ...who.data },
+            data: { deviceName: device.name, panelId, title: panel.title, ...who.data },
           });
         }
-        return { block, changed };
+        return { panel, changed };
       } catch (error) {
-        if (error instanceof WebBlockError) {
-          const status = error.code === 'invalid_block' ? 400 : error.code === 'storage_low' ? 507 : 409;
+        if (error instanceof PanelError) {
+          const status =
+            error.code === 'invalid_panel' || error.code === 'unsupported_panel_kind'
+              ? 400
+              : error.code === 'storage_low'
+                ? 507
+                : 409;
           return reply.code(status).send({ error: error.code, message: error.message });
         }
         throw error;
@@ -1815,36 +1831,38 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     },
   );
 
-  app.delete('/api/v1/devices/:id/web-blocks/:blockId', memberOnlyNeeds('device.edit'), async (request, reply) => {
-    const { id, blockId } = z.object({ id: z.uuid(), blockId: z.string().max(40) }).parse(request.params);
+  app.delete('/api/v1/devices/:id/panels/:panelId', memberOnlyNeeds('device.edit'), async (request, reply) => {
+    const { id, panelId } = z.object({ id: z.uuid(), panelId: z.string().max(40) }).parse(request.params);
     const device = deps.registry.getDevice(id);
-    if (!device || !(await webBlocks.remove(id, blockId))) return reply.code(404).send({ error: 'not_found' });
+    if (!device || !(await panels.remove(id, panelId))) return reply.code(404).send({ error: 'not_found' });
     const who = actor(request);
     await deps.activity.record({
-      kind: 'device.web-block',
+      kind: 'device.panel',
       message: `${who.name} removed a panel from ${device.name}.`,
       memberId: who.memberId,
       deviceId: id,
-      data: { deviceName: device.name, blockId, removed: true, ...who.data },
+      data: { deviceName: device.name, panelId, removed: true, ...who.data },
     });
     return reply.code(204).send();
   });
 
   /**
-   * One file of a panel, for the apps' web-block host to load.
+   * One file of a panel, for the apps' panel host to load.
    *
    * The floor, as reading the device is. The path is looked up in the stored
    * manifest — never on disk — and every answer says what it is and that it
    * may not be sniffed into anything else; the CSP is for anything that opens
    * one of these outside an app, where it must not reach the network either.
+   * Under `files/` rather than straight under the panel, so the panel's own
+   * path stays free for whatever a later kind needs beside its files.
    */
-  // For the apps' web-block host, which holds a member's token; a key has
-  // nothing to run a panel in.
-  app.get('/api/v1/devices/:id/web-blocks/:blockId/*', memberOnly, async (request, reply) => {
+  // For the apps' panel host, which holds a member's token; a key has nothing
+  // to run a panel in.
+  app.get('/api/v1/devices/:id/panels/:panelId/files/*', memberOnly, async (request, reply) => {
     const params = z
-      .object({ id: z.uuid(), blockId: z.string().max(40), '*': z.string().max(200) })
+      .object({ id: z.uuid(), panelId: z.string().max(40), '*': z.string().max(200) })
       .parse(request.params);
-    const found = await webBlocks.file(params.id, params.blockId, params['*']);
+    const found = await panels.file(params.id, params.panelId, params['*']);
     if (!found) return reply.code(404).send({ error: 'not_found' });
     const etag = `"${found.file.sha256}"`;
     if (request.headers['if-none-match'] === etag) return reply.code(304).send();

@@ -10,7 +10,7 @@ import { HubEventBus } from './core/bus.js';
 import { ActivityService } from './core/activity.js';
 import { HistoryService } from './core/history.js';
 import { PortraitService } from './portraits/store.js';
-import { WebBlockService } from './web-blocks/store.js';
+import { PanelService } from './panels/store.js';
 import { CameraProxy } from './cameras/proxy.js';
 import { recordFinishedUpdate } from './core/update.js';
 import { HomeService } from './core/home.js';
@@ -149,8 +149,8 @@ async function main(): Promise<void> {
   // The panels on devices' pages, the portraits' shape: files under the data
   // directory with a row each, indexed in memory at boot because the device
   // wire that carries them is built synchronously.
-  const webBlocks = new WebBlockService(db, events, config.DATA_DIR, log.child({ module: 'web-blocks' }));
-  await webBlocks.load();
+  const panels = new PanelService(db, events, config.DATA_DIR, log.child({ module: 'panels' }));
+  await panels.load();
   // The camera proxy keeps nothing but the streams it is relaying right now;
   // the server closes them when it closes.
   const cameras = new CameraProxy({ log: log.child({ module: 'cameras' }) });
@@ -290,7 +290,7 @@ async function main(): Promise<void> {
     activity,
     history,
     portraits,
-    webBlocks,
+    panels,
     cameras,
     settings,
     home: homeService,

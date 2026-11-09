@@ -1,6 +1,13 @@
-CREATE TABLE `device_web_blocks` (
+-- Panels on devices' pages, every kind in one table (`src/panels/`). Written
+-- by hand from what `db:generate` emits, for one reason: `IF NOT EXISTS`. This
+-- file replaced `0019_device_web_blocks` before anything released had either,
+-- under a later `when`, so a hub installed from the branch that had the old
+-- one runs this one too — and it has to stay harmless however many times a
+-- renumbering on the way to `main` makes such a hub meet it again.
+CREATE TABLE IF NOT EXISTS `device_panels` (
 	`device_id` text NOT NULL,
-	`block_id` text NOT NULL,
+	`panel_id` text NOT NULL,
+	`kind` text NOT NULL,
 	`title` text NOT NULL,
 	`sha256` text NOT NULL,
 	`bytes` integer NOT NULL,
@@ -9,7 +16,7 @@ CREATE TABLE `device_web_blocks` (
 	`updated_at` integer NOT NULL,
 	`member_id` text,
 	`member_name` text,
-	PRIMARY KEY(`device_id`, `block_id`),
+	PRIMARY KEY(`device_id`, `panel_id`),
 	FOREIGN KEY (`device_id`) REFERENCES `devices`(`id`) ON UPDATE no action ON DELETE cascade
 );
 --> statement-breakpoint

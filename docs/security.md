@@ -125,13 +125,14 @@ serving it, not a security boundary.
 - **Rules are data, not code.** A rule written by a person or by a model is
   interpreted by the hub and can never run arbitrary code, and a handful of
   guards hold whatever the document says — [`automations.md`](automations.md).
-- **A web block is code that runs on every phone in the house** — a small HTML
-  panel on a device's page, installed by somebody with `device.edit`. The hub
-  bounds what it keeps (a few hundred kilobytes of plain files of known types,
-  every path checked, served only from the stored list of files with a
-  content-security policy that allows no network), and the apps run it with no
-  network of their own and nothing but its own device's controls —
-  [`api.md`](api.md#web-blocks).
+- **A panel is code that runs on every phone in the house** — a card on a
+  device's page, of a kind the hub names (`web`, a few files of HTML, is the
+  only one), installed by somebody with `device.edit`. The hub refuses a kind
+  it doesn't keep and bounds what it keeps (a few hundred kilobytes of plain
+  files of known types, every path checked, served only from the stored list
+  of files with a content-security policy that allows no network), and the
+  apps run it with no network of their own and nothing but its own device's
+  controls — [`api.md`](api.md#panels).
 
 ## What the installer verifies
 

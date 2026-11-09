@@ -168,9 +168,9 @@ describe.skipIf(!handle)('hub API', () => {
       pairing: { signInCodes: true },
       // Presence again, and both say what an app needs to know before it
       // offers anything: the stream kinds the hub relays and how many cameras
-      // at once, and how big a panel may be.
+      // at once, and the kinds of panel it keeps with how big each may be.
       cameras: { kinds: ['snapshot', 'mjpeg'], maxStreams: 4 },
-      webBlocks: { maxBytes: 512 * 1024, maxFiles: 64, perDevice: 4 },
+      panels: { perDevice: 4, kinds: { web: { maxBytes: 512 * 1024, maxFiles: 64 } } },
     });
   });
 
@@ -377,22 +377,27 @@ describe.skipIf(!handle)('hub API', () => {
         (candidate) => candidate.id === device.id,
       )!;
     // Absent, not empty: every other device's wire is what it always was.
-    expect(await wireOf()).not.toHaveProperty('webBlocks');
+    expect(await wireOf()).not.toHaveProperty('panels');
 
     const html = '<!doctype html><p>Hall</p>';
     const put = await app.inject({
       method: 'PUT',
-      url: `/api/v1/devices/${device.id}/web-blocks/hall`,
+      url: `/api/v1/devices/${device.id}/panels/hall`,
       headers: auth(ownerToken),
-      payload: { title: 'Hall', height: 120, files: [{ path: 'index.html', dataBase64: Buffer.from(html).toString('base64') }] },
+      payload: {
+        kind: 'web',
+        title: 'Hall',
+        height: 120,
+        files: [{ path: 'index.html', dataBase64: Buffer.from(html).toString('base64') }],
+      },
     });
     expect(put.statusCode).toBe(200);
-    expect(put.json()).toMatchObject({ changed: true, block: { id: 'hall', title: 'Hall', height: 120 } });
-    expect((await wireOf()).webBlocks).toEqual([expect.objectContaining({ id: 'hall', title: 'Hall', height: 120 })]);
+    expect(put.json()).toMatchObject({ changed: true, panel: { id: 'hall', kind: 'web', title: 'Hall', height: 120 } });
+    expect((await wireOf()).panels).toEqual([expect.objectContaining({ id: 'hall', kind: 'web', title: 'Hall', height: 120 })]);
 
     const served = await app.inject({
       method: 'GET',
-      url: `/api/v1/devices/${device.id}/web-blocks/hall/index.html`,
+      url: `/api/v1/devices/${device.id}/panels/hall/files/index.html`,
       headers: auth(memberToken),
     });
     expect(served.statusCode).toBe(200);
@@ -402,31 +407,51 @@ describe.skipIf(!handle)('hub API', () => {
     expect(String(served.headers['content-security-policy'])).toContain("connect-src 'none'");
     const again = await app.inject({
       method: 'GET',
-      url: `/api/v1/devices/${device.id}/web-blocks/hall/index.html`,
+      url: `/api/v1/devices/${device.id}/panels/hall/files/index.html`,
       headers: { ...auth(memberToken), 'if-none-match': String(served.headers.etag) },
     });
     expect(again.statusCode).toBe(304);
     const missing = await app.inject({
       method: 'GET',
-      url: `/api/v1/devices/${device.id}/web-blocks/hall/../../secret.txt`,
+      url: `/api/v1/devices/${device.id}/panels/hall/files/../../secret.txt`,
       headers: auth(memberToken),
     });
     expect(missing.statusCode).toBe(404);
 
     const refused = await app.inject({
       method: 'PUT',
-      url: `/api/v1/devices/${device.id}/web-blocks/hall`,
+      url: `/api/v1/devices/${device.id}/panels/hall`,
       headers: auth(ownerToken),
-      payload: { title: 'Hall', files: [{ path: 'app.js', dataBase64: Buffer.from('x').toString('base64') }] },
+      payload: { kind: 'web', title: 'Hall', files: [{ path: 'app.js', dataBase64: Buffer.from('x').toString('base64') }] },
     });
     expect(refused.statusCode).toBe(400);
-    expect(refused.json()).toMatchObject({ error: 'invalid_block' });
+    expect(refused.json()).toMatchObject({ error: 'invalid_panel' });
+
+    // A kind this hub doesn't keep is its own refusal — the client learns the
+    // hub is older than the panel, not that it sent something malformed —
+    // and a panel with no kind at all is a malformed request.
+    const unknownKind = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/devices/${device.id}/panels/hall`,
+      headers: auth(ownerToken),
+      payload: { kind: 'native', title: 'Hall', files: [{ path: 'index.html', dataBase64: Buffer.from(html).toString('base64') }] },
+    });
+    expect(unknownKind.statusCode).toBe(400);
+    expect(unknownKind.json()).toMatchObject({ error: 'unsupported_panel_kind' });
+    const noKind = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/devices/${device.id}/panels/hall`,
+      headers: auth(ownerToken),
+      payload: { title: 'Hall', files: [{ path: 'index.html', dataBase64: Buffer.from(html).toString('base64') }] },
+    });
+    expect(noKind.statusCode).toBe(400);
+    expect((await wireOf()).panels).toEqual([expect.objectContaining({ id: 'hall', kind: 'web' })]);
 
     expect(
-      (await app.inject({ method: 'DELETE', url: `/api/v1/devices/${device.id}/web-blocks/hall`, headers: auth(ownerToken) }))
+      (await app.inject({ method: 'DELETE', url: `/api/v1/devices/${device.id}/panels/hall`, headers: auth(ownerToken) }))
         .statusCode,
     ).toBe(204);
-    expect(await wireOf()).not.toHaveProperty('webBlocks');
+    expect(await wireOf()).not.toHaveProperty('panels');
     await registry.removeDevice(device.id);
   });
 

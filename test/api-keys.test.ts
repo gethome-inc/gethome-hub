@@ -291,11 +291,11 @@ describe.skipIf(!handle)('API keys', () => {
     'DELETE /api/v1/portraits/:portraitId': 'permission device.edit',
     // A panel is code every phone in the house runs, which is more than
     // `device.edit` hands a key anywhere else — so installing or removing one
-    // is the member's, and its files are for the apps' web-block host, which
+    // is the member's, and its files are for the apps' panel host, which
     // holds a member's token.
-    'PUT /api/v1/devices/:id/web-blocks/:blockId': 'deny',
-    'DELETE /api/v1/devices/:id/web-blocks/:blockId': 'deny',
-    'GET /api/v1/devices/:id/web-blocks/:blockId/*': 'deny',
+    'PUT /api/v1/devices/:id/panels/:panelId': 'deny',
+    'DELETE /api/v1/devices/:id/panels/:panelId': 'deny',
+    'GET /api/v1/devices/:id/panels/:panelId/files/*': 'deny',
     // `camera.view` is not in `KEY_GRANTABLE`, so a key is refused here
     // whatever it was given: a camera shows people, and that is a person's.
     'GET /api/v1/cameras/:deviceId/:endpointId/:streamId/snapshot': 'permission camera.view',

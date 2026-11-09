@@ -40,14 +40,14 @@ export interface HubEvents {
    */
   portraitsChanged: [deviceId: string];
   /**
-   * A device's web blocks changed — one was installed, replaced or removed.
+   * A device's panels changed — one was installed, replaced or removed.
    *
    * Its own event rather than `deviceUpserted`, which is the registry's: the
    * automations engine reloads on that one, and a panel on a device's page
    * changes nothing a rule reads. The socket answers it with the same
-   * `deviceUpserted` frame, because the blocks are part of the device's wire.
+   * `deviceUpserted` frame, because the panels are part of the device's wire.
    */
-  webBlocksChanged: [deviceId: string];
+  panelsChanged: [deviceId: string];
   activity: [entry: ActivityEvent];
   permitJoin: [active: boolean, remainingSeconds: number];
   /**

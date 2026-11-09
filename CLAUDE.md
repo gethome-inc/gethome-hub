@@ -423,9 +423,9 @@ adapter/registry/API change.
   `test/CLAUDE.md`**: a mock's history is per test, and a wait has to be for
   the thing an assertion is about, never for a count something else can reach.
 - **Cameras' conventions live in `src/cameras/CLAUDE.md`** — the address
-  policy, attestation, one upstream per stream — and **web blocks' in
-  `src/web-blocks/CLAUDE.md`** — the bounds, serving from the manifest, the
-  write that writes nothing. One rule binds the schema, the AI descriptor and
+  policy, attestation, one upstream per stream — and **panels' in
+  `src/panels/CLAUDE.md`** — one collection for every kind, the bounds,
+  serving from the manifest, the write that writes nothing. One rule binds the schema, the AI descriptor and
   the automation DSL, so it stays here: **`camera` is a capability the hub
   derives and no document may declare.** Discovery, mappings and rules
   validate against `DECLARABLE_CAPABILITY_KINDS`, which stops one short of
@@ -1037,7 +1037,7 @@ delegate registry → `docs/assistant.md`; portraits → `docs/portraits.md`;
 module boundaries → this file and the subsystem file for the directory you
 changed (`src/ai/CLAUDE.md`, `src/automations/CLAUDE.md`, `src/core/CLAUDE.md`,
 `src/adapters/zigbee/CLAUDE.md`, `src/adapters/matter/CLAUDE.md`,
-`src/portraits/CLAUDE.md`, `src/cameras/CLAUDE.md`, `src/web-blocks/CLAUDE.md`,
+`src/portraits/CLAUDE.md`, `src/cameras/CLAUDE.md`, `src/panels/CLAUDE.md`,
 `test/CLAUDE.md`, `deploy/CLAUDE.md`) +
 `docs/architecture.md`; installer markers, autostart or Zigbee detection →
 `docs/zigbee.md` + the marker list in `deploy/install.sh` (and flag the Studio
