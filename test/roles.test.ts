@@ -526,11 +526,11 @@ describe.skipIf(!handle)('roles and permissions', () => {
       // so installing or removing one is the rename's permission.
       [
         'PUT',
-        `/api/v1/devices/${deviceId}/web-blocks/panel`,
+        `/api/v1/devices/${deviceId}/panels/panel`,
         'device.edit',
-        { title: 'Panel', files: [{ path: 'index.html', dataBase64: Buffer.from('<p>hi</p>').toString('base64') }] },
+        { kind: 'web', title: 'Panel', files: [{ path: 'index.html', dataBase64: Buffer.from('<p>hi</p>').toString('base64') }] },
       ],
-      ['DELETE', `/api/v1/devices/${deviceId}/web-blocks/panel`, 'device.edit', undefined],
+      ['DELETE', `/api/v1/devices/${deviceId}/panels/panel`, 'device.edit', undefined],
       // A camera shows people, and Guest starts without it. The guard runs
       // before the handler, so a device with no camera still proves it.
       ['GET', `/api/v1/cameras/${deviceId}/1/live/snapshot`, 'camera.view', undefined],
@@ -554,7 +554,7 @@ describe.skipIf(!handle)('roles and permissions', () => {
   });
 
   /**
-   * The other half of the camera and web-block rows above: a member gets past
+   * The other half of the camera and panel rows above: a member gets past
    * both guards, and the panel a member installed is the floor to read — a
    * guest sees it on the device's page like everybody else.
    */
@@ -571,21 +571,21 @@ describe.skipIf(!handle)('roles and permissions', () => {
     const html = '<!doctype html><p>Hello</p>';
     const installed = await app.inject({
       method: 'PUT',
-      url: `/api/v1/devices/${deviceId}/web-blocks/hello`,
+      url: `/api/v1/devices/${deviceId}/panels/hello`,
       headers: auth(memberToken),
-      payload: { title: 'Hello', files: [{ path: 'index.html', dataBase64: Buffer.from(html).toString('base64') }] },
+      payload: { kind: 'web', title: 'Hello', files: [{ path: 'index.html', dataBase64: Buffer.from(html).toString('base64') }] },
     });
     expect(installed.statusCode).toBe(200);
     const read = await app.inject({
       method: 'GET',
-      url: `/api/v1/devices/${deviceId}/web-blocks/hello/index.html`,
+      url: `/api/v1/devices/${deviceId}/panels/hello/files/index.html`,
       headers: auth(guestToken),
     });
     expect(read.statusCode).toBe(200);
     expect(read.body).toBe(html);
     const removed = await app.inject({
       method: 'DELETE',
-      url: `/api/v1/devices/${deviceId}/web-blocks/hello`,
+      url: `/api/v1/devices/${deviceId}/panels/hello`,
       headers: auth(memberToken),
     });
     expect(removed.statusCode).toBe(204);

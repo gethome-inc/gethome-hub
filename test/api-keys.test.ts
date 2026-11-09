@@ -373,11 +373,11 @@ describe.skipIf(!handle)('API keys', () => {
     'DELETE /api/v1/portraits/:portraitId': 'permission device.edit',
     // A panel is code every phone in the house runs, which is more than
     // `device.edit` hands a key anywhere else — so installing or removing one
-    // is the member's, and its files are for the apps' web-block host, which
+    // is the member's, and its files are for the apps' panel host, which
     // holds a member's token.
-    'PUT /api/v1/devices/:id/web-blocks/:blockId': 'deny',
-    'DELETE /api/v1/devices/:id/web-blocks/:blockId': 'deny',
-    'GET /api/v1/devices/:id/web-blocks/:blockId/*': 'deny',
+    'PUT /api/v1/devices/:id/panels/:panelId': 'deny',
+    'DELETE /api/v1/devices/:id/panels/:panelId': 'deny',
+    'GET /api/v1/devices/:id/panels/:panelId/files/*': 'deny',
     // A camera shows people, so `camera.view` is a key's only when it was
     // given it on purpose. A still is a fresh request under the key's rate
     // limit; a live stream is held by the proxy to one a key at a time, and

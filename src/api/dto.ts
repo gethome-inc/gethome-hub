@@ -1,7 +1,7 @@
 import type { AccessService, KeyGrant } from '../core/access.js';
 import { hubWifiView, offlineElsewhere, type HubWifiView } from '../core/device-network.js';
 import type { RegistryDevice } from '../core/registry.js';
-import type { WebBlockSummary } from '../web-blocks/store.js';
+import type { PanelSummary } from '../panels/store.js';
 
 /**
  * What a device's rendering depends on besides the device: the reader, and
@@ -46,15 +46,15 @@ export function deviceWireView(
  * off the device, because one device answers differently to each member, and
  * the WebSocket renders this per socket for exactly that reason.
  *
- * `webBlocks` is the device's own — the panels installed on its page,
- * `web-blocks/store.ts` — and is passed per device rather than carried in the
- * view, which is the reader's and asked once per render.
+ * `panels` is the device's own — the panels installed on its page, of every
+ * kind, `panels/store.ts` — and is passed per device rather than carried in
+ * the view, which is the reader's and asked once per render.
  */
 export function deviceWire(
   device: RegistryDevice,
   favorite: boolean,
   view: DeviceWireView = {},
-  webBlocks?: WebBlockSummary[],
+  panels?: PanelSummary[],
 ) {
   const elsewhere = offlineElsewhere(device, view.hubWifi);
   return {
@@ -102,8 +102,10 @@ export function deviceWire(
       : {}),
     // **Presence is the capability once more**: only a device with panels
     // carries the key, so the wire of every other device is byte-for-byte what
-    // it was, and an app from before web blocks never meets it at all.
-    ...(webBlocks && webBlocks.length > 0 ? { webBlocks } : {}),
+    // it was, and an app from before panels never meets it at all. Each
+    // carries its `kind`, which an app reads as an open word and leaves off
+    // the page when it doesn't draw it.
+    ...(panels && panels.length > 0 ? { panels } : {}),
     endpoints: device.endpoints.map((endpoint) => ({
       endpointId: endpoint.endpointId,
       deviceKind: endpoint.deviceKind,
