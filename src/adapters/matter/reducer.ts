@@ -150,8 +150,8 @@ function route(report: AttributeReport, state: EndpointState): void {
       // builds shipped so far (November 2026) cannot draw a level outside its
       // limits, so they leave here in order, for as long as those builds are
       // on somebody's phone.
-      level.current = Math.max(level.current, level.min);
       level.max = Math.max(level.max, level.min);
+      level.current = Math.min(Math.max(level.current, level.min), level.max);
       state.level = level;
       return;
     }

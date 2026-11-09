@@ -41,6 +41,9 @@ describe('Matter attribute reducer (port of the app reducer)', () => {
     // A level under the device's own floor, in either order.
     expect(level([0x0002, 10], [0x0000, 3])).toEqual({ current: 10, min: 10, max: 254 });
     expect(level([0x0000, 3], [0x0002, 10])).toEqual({ current: 10, min: 10, max: 254 });
+    // A level over the device's own ceiling, in either order.
+    expect(level([0x0003, 100], [0x0000, 200])).toEqual({ current: 100, min: 1, max: 100 });
+    expect(level([0x0000, 200], [0x0003, 100])).toEqual({ current: 100, min: 1, max: 100 });
     // Limits the wrong way round, in either order.
     expect(level([0x0002, 200], [0x0003, 100])).toEqual({ current: 200, min: 200, max: 200 });
     expect(level([0x0003, 100], [0x0002, 200])).toEqual({ current: 200, min: 200, max: 200 });
