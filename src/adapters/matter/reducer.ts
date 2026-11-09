@@ -145,6 +145,13 @@ function route(report: AttributeReport, state: EndpointState): void {
       else if (attributeId === 0x0002) level.min = Math.max(1, raw);
       else if (attributeId === 0x0003) level.max = raw;
       else return;
+      // A device can report a level under its own MinLevel, or a MinLevel
+      // before any level at all, and the three go out together. The iPhone
+      // builds shipped so far (November 2026) cannot draw a level outside its
+      // limits, so they leave here in order, for as long as those builds are
+      // on somebody's phone.
+      level.current = Math.max(level.current, level.min);
+      level.max = Math.max(level.max, level.min);
       state.level = level;
       return;
     }
