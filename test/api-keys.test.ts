@@ -801,7 +801,8 @@ describe.skipIf(!handle)('API keys', () => {
       const runs = (
         await app.inject({ method: 'GET', url: `/api/v1/automations/${created.id}/runs`, headers: auth(ownerToken) })
       ).json() as Array<{ cause: string }>;
-      expect(runs[0]?.cause).toBe('Anna’s “Node-RED” pressed Leaving');
+      // The run sits under the rule's own name, so its cause is who pressed it.
+      expect(runs[0]?.cause).toBe('Pressed by Anna’s “Node-RED”');
     });
 
     it('writes the press and the mode switch as its member’s, through the key', async () => {
@@ -1173,6 +1174,14 @@ describe.skipIf(!handle)('API keys', () => {
         refused: 0,
       });
       await waitFor('automationRun');
+      // Whether a rule is working rides the same stream, under its own key.
+      events.emit('automationStatus', {
+        automationId: 'a',
+        status: { today: { date: '2026-06-15', runs: 1, problems: 0, skipped: 0 } },
+      });
+      expect(await waitFor('automationStatus')).toMatchObject({
+        automationStatus: { automationId: 'a', status: { today: { runs: 1 } } },
+      });
       expect(
         frames.some(
           (frame) => frame.type === 'automationChat' || frame.type === 'assistantChat' || frame.type === 'chatTitle',

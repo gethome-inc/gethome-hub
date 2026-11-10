@@ -86,6 +86,25 @@ directory. `docs/automations.md` is canonical — update it in the same change.
   relay for the fortieth time this hour" look identical from outside. The one
   automatic firing that does get a row is the breaker switching a rule off,
   because somebody has to find that a week later.
+  **A trace is written in the home's words, and the exact terms sit beside
+  them** (`narrate.ts`). Every shipped app prints a run's `cause` and a step's
+  `summary` as they arrive, so they are sentences made from the home's names —
+  "Motion in the Living Room", "Motion LED turned on", "Hall lamp didn’t answer
+  — it was offline" — and never a capability path; the path, comparator and
+  command go in `causeDetail` and `detail`. A `cause` is read under the rule's
+  name and does not repeat it, which is why the manual run's activity row
+  carries its own `sentence` ("Anna pressed Leaving") rather than the cause. A
+  new trigger kind, command or guard needs its words there, or it reads as its
+  own type.
+  **Whether a rule is working is remembered, not derived** (`status.ts`):
+  twenty traces is a minute of a busy rule, so the engine counts. Runs, skips
+  and problems are three things — a skip is the rule declining before it acts,
+  a problem is something asked for that did not happen, and the idempotence
+  guard's "was already on" is neither. "Today" is the home's own day and rolls
+  over on read. It is flushed to `automation_status` about once a minute and on
+  `stop()`, **never per firing**, and announced on the opt-in stream at most
+  once per rule every ten seconds: anything added here has to survive a rule
+  that fires every few seconds.
   **`enabled` and `active` are two words with two permissions.** `enabled` is
   whether the rule exists and is listening → `automation.manage`; `active` is
   whether a mode is switched on right now → **the floor**, because pressing

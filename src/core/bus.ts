@@ -148,6 +148,17 @@ export interface HubEvents {
    */
   automationRun: [event: AutomationRunEvent];
   /**
+   * Whether a rule is working moved: it ran, was skipped, was pressed.
+   *
+   * On the same opt-in stream as `automationRun` and **throttled per rule by
+   * the engine** — at once the first time, then at most once every ten
+   * seconds — because a rule can fire every few seconds and a status is a
+   * thing somebody glances at, not a trace. It carries the status itself, the
+   * same object `GET /automations` puts on the rule, so a client drawing a
+   * list patches one card instead of re-reading the home.
+   */
+  automationStatus: [event: AutomationStatusEvent];
+  /**
    * Something happened inside a conversation in which a rule is being written.
    *
    * On the same opt-in stream as `automationRun`, and for a sharper version of
@@ -261,6 +272,13 @@ export interface AutomationChatEvent {
   workedMs?: number;
 }
 
+/** One rule's status, as it moves. `status` is `AutomationStatus`
+ *  (`automations/status.ts`), typed loosely here because the bus is below it. */
+export interface AutomationStatusEvent {
+  automationId: string;
+  status: Record<string, unknown>;
+}
+
 /** One firing, as it happens. The stored trace is `automation_runs`. */
 export interface AutomationRunEvent {
   automationId: string;
@@ -268,8 +286,12 @@ export interface AutomationRunEvent {
   at: string;
   /** manual | deviceState | deviceEvent | schedule | interval | action */
   trigger: string;
-  /** One sentence naming what set it off. */
+  /** One sentence naming what set it off, the way somebody in the house
+   *  would say it: "Motion in the Hall", "19:30", "Pressed by Anna". */
   cause: string;
+  /** The same cause in the hub's exact terms — device, path, comparator,
+   *  value. Absent where there are none behind it. */
+  causeDetail?: string;
   outcome: 'ran' | 'skipped' | 'refused' | 'failed' | 'interrupted';
   /** How many commands actually reached a device. */
   commands: number;

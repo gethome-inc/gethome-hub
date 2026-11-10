@@ -77,7 +77,7 @@ import { automationCatalog } from '../automations/catalog.js';
 import { AUTOMATION_TEMPLATES, findTemplate } from '../automations/templates.js';
 import { automationOutline } from '../automations/outline.js';
 import { automationShape, describeAutomation } from '../automations/summarize.js';
-import { automationRoom } from '../automations/scope.js';
+import { automationDevices, automationRoom } from '../automations/scope.js';
 import type { AutomationHomeView } from '../automations/targets.js';
 import type { MemoryPressure } from '../core/radio-pressure.js';
 import { recordRadioChoice, RADIO_MODES, writeRadioMode, type RadioBudget, type RadioMode } from '../core/radio.js';
@@ -936,6 +936,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // add exactly the duplicate person this exists to prevent, which is the
     // one refusal that must not be discovered afterwards.
     pairing: { signInCodes: true },
+    // Additive, and presence is the capability: a hub carrying this block
+    // says **whether each rule is working** (`status` on every automation, and
+    // the `automationStatus` frame on the `automations` stream) and **which
+    // devices each rule uses** (`devices`). Both fields are always present on
+    // a rule from such a hub, so this block is for the home that has no rules
+    // yet — where there is nothing to look for a field on.
+    automations: { status: true, devices: true },
     // Additive, and presence is the capability: a hub carrying this block has
     // `GET/POST/DELETE /settings/wifi…`, so an app may offer to add the Wi-Fi
     // network a hub is about to be carried to. `available: false` says this
@@ -4293,6 +4300,23 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
      * computed on every read rather than written down anywhere.
      */
     roomId: automationRoom(record.document, home),
+    /**
+     * The devices this rule reads and the devices it works, by id — the same
+     * walk `roomId` is, kept as lists (`automationDevices`). It is what lets a
+     * device's page say which rules use it, with no app decoding a document.
+     * Derived per read for `roomId`'s reason: a selector means whatever it
+     * resolves to today.
+     */
+    devices: automationDevices(record.document, home),
+    /**
+     * Whether the rule is working: when it last ran and how that went, how
+     * busy it has been in the home's own day, the last thing that went wrong
+     * in a sentence, when a button was last pressed, since when a mode has
+     * been on, and when a rule on a clock fires next (`AutomationStatus`).
+     * Always present on a hub that keeps it, so an app reads its absence as
+     * "this hub does not say" rather than "this rule has never run".
+     */
+    status: deps.automations.statusOf(record.id),
     document: record.document,
     createdAt: record.createdAt.toISOString(),
     updatedAt: record.updatedAt.toISOString(),
