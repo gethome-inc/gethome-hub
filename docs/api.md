@@ -2126,9 +2126,58 @@ included, since a round runs only in memory. An app whose socket comes back
 `false` means the round has ended and the rows say how, which is everything the
 missed `turn` frame would have led it to; `true` means the rest is still to
 come, on the socket it has now. The route reads `answering` before the rows,
-and a round stops counting only once its rows are written, so a transcript read
-after `false` always holds how the round ended. **Always present** — its absence
-is a hub older than it, which can only be judged from the rows.
+and a round stops counting only once its rows are written — at the instant its
+`turn` frame goes out, not once whatever the hub tidies away after it is done —
+so a transcript read after `false` always holds how the round ended, and a
+`true` read by a socket that has already subscribed means that frame will reach
+it. Read it **after** `subscribed`, for that reason. **Always present** — its
+absence is a hub older than it, which can only be judged from the rows.
+
+#### What it missed of a round still running: the `chatRound` frame
+
+The frames of a round are increments — a `delta` is the next few words — so a
+socket that comes back to a reply still being written has missed the words
+written while it was away, and drawing the rest on would leave a hole in the
+middle until the round lands. So the moment a socket subscribes to
+`automations`, before anything else of the conversations, it is sent one
+`chatRound` frame for every round running in its member's **own** conversations
+— narrowed by `hub.ai`, and `automation.manage` for the automations agent's,
+like the frames, and never sent to a key:
+
+```
+{"type":"chatRound","chatRound":{
+  "surface":"assistant", "sessionId":"…", "at":"…", "elapsedMs":8400,
+  "since":"<the newest row the agent had written when the round began>",
+  "answering":"<the person's row it answers>",
+  "steps":[{"text":"Thinking","kind":"thinking","detail":"They want the desk lamp on."},
+           {"text":"Looking at the lamps","kind":"reading"},
+           {"text":"I'll switch it on.","kind":"said"},
+           {"text":"Switching the desk lamp on","kind":"acting","detail":"Desk lamp"}],
+  "reply":"Done — the desk", "workedMs":6100}}
+```
+
+It is the round **as its frames left it**, folded the way a client folds them:
+`steps` exactly as the round's first row will store them (`data.steps`, without
+`done`) — the reasoning hung on the step it was produced under, narration a
+round wrote before going back to work as a `said` step — `thinking` the
+reasoning that has arrived since the last step, and then either `reply`, the
+reply from its first word with the `workedMs` its first `delta` carried, or,
+while the round is back at work, `held`: the words it paused on, which a client
+keeps where the reply goes until new ones arrive. `elapsedMs` is how long the
+round has been running, for a client starting its clock from here.
+
+**It comes ahead of every frame still to come**, in the same tick the listeners
+go on, so the frames carry on from exactly where it leaves off — nothing missed
+and nothing twice: draw it, then apply the frames as ever. **`since` says whether
+it is the round you were drawing**: a round that ended while you were away wrote
+its rows before this one began, so a `since` your copy of the transcript does
+not hold means the round on your screen is over — read the transcript again and
+draw this one as a round of its own; absent, this is the conversation's first
+round. A round that has begun writing its answer is not sent: its `turn` frame
+is the next thing to hear. A frame `type` of its own rather than a phase, for
+the `chatTitle` reason — every shipped iOS build reads a phase it has never met
+as `turn` — so a client that does not know it drops it and is where it was
+before.
 
 ### When a round fails, and asking it again (`POST …/chat/:id/retry`)
 
@@ -3168,6 +3217,8 @@ and then:
 {"type":"automationChat","chat":{sessionId,phase,at,text,kind?,detail?,workedMs?}}  phase: thinking | delta | step | turn | amend
 {"type":"assistantChat","chat":{…the same shape…}}      the assistant, on the same stream
 {"type":"chatTitle","chatTitle":{surface,sessionId,title,at}}  a conversation was named; surface: assistant | automations
+{"type":"chatRound","chatRound":{surface,sessionId,at,elapsedMs,since?,answering?,steps,thinking?,reply?,held?,workedMs?}}
+                                                        once, on subscribing to "automations": each round already running in your own conversations
 ```
 
 **A socket opened with an [API key](#api-keys) is the key's view of all of

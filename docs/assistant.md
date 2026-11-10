@@ -89,13 +89,33 @@ whether one is still going. A phone put away mid-round has its socket torn down
 by its own system while the round runs on, writes its rows and sends a `turn`
 frame to nobody — and that frame was the app's only reason to read the
 transcript again and take its "thinking" down. `GET …/chat/:id` carries
-`answering` (`ChatRuntime.isAnswering`): turns taken and not yet finished, the
-one running and any queued behind it, counted by `chain` and counted down only
-after a turn's rows are written and its frame has gone, and read by the route
-before the rows. An app whose socket comes back reads it for every
-conversation it was drawing a round in, and lands the ones that say no exactly
-as the missed frame would have. `docs/api.md` (*A socket that missed a round*)
-has the contract.
+`answering` (`ChatRuntime.isAnswering`): turns taken whose `turn` frame has not
+gone out yet, the one running and any queued behind it — counted by `chain`,
+and the running one let go of by `settle` itself (`ChatSession.settled`) rather
+than when the turn has been tidied away behind it, since a rebase after a photo
+or a declined message runs after the frame and a phone that came back in the
+middle of one was told the rest was still to come — read by the route before
+the rows. An app whose socket comes back reads it for every conversation it
+was drawing a round in, and lands the ones that say no exactly as the missed
+frame would have.
+
+**What it missed of a round still running is sent to it as one frame.** The
+frames are increments — a `delta` is the next few words — so a phone that came
+back to a reply still being written joined it with a hole where the words
+written while it was away belonged, and kept the hole until the round landed.
+So a socket that subscribes to the conversations is sent `chatRound` first, for
+every round running in its member's own conversations
+(`ChatRuntime.roundsSoFar`): the steps as they will be stored, the reasoning not
+yet hung on one, and the reply from its first word — or, while the round is back
+at work, the words it paused on — beside `since`, the newest row the agent had
+written when the round began, which is how an app tells it from a round that
+ended while it was away. It is the round as its frames left it, read off the
+session (`ChatSession.live`, which the callbacks keep beside the steps and
+which goes once the round writes its answer), and it is sent in the same tick
+the listeners go on, so it is ahead of every frame still to come and the frames
+carry on from exactly there. A frame `type` of its own, never a phase, for
+`chatTitle`'s reason. `docs/api.md` (*A socket that missed a round*) has the
+contract.
 
 It was all inside `AutomationChat`, and none of it was ever about automations.
 A subclass supplies three things and nothing else: which model and prompt open
