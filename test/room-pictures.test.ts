@@ -652,6 +652,18 @@ describe('the words', () => {
     expect(describeKind('kettle-of-the-future')).toBe('a smart device');
   });
 
+  it('asks for the room as it is: its own colours and materials, in daylight', () => {
+    const prompt = dayPrompt('Bedroom', 3, 'portrait');
+    expect(prompt).toContain('real colours, materials and textures');
+    expect(prompt).toContain('daylight from the windows');
+    expect(prompt).toContain('Nothing is moved, swapped, added or left out');
+    // The designed look these words replaced, which drew the same room paler
+    // and flatter — see the note at the top of `prompts.ts`.
+    expect(prompt).not.toMatch(/softened|studio light|solid tones|edge to edge/);
+    expect(prompt).toContain('fills most of the tall image');
+    expect(dayPrompt('Bedroom', 1, 'landscape')).toContain('fills most of the wide image');
+  });
+
   it('prices what the provider reported, and nothing it did not', () => {
     expect(pictureCostUsd([undefined])).toBeUndefined();
     expect(pictureCostUsd([usage])).toBeCloseTo(0.0779, 3);

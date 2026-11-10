@@ -18,14 +18,31 @@
  * it wasn't — a marker, which a person can move, rather than an object painted
  * into their room.
  *
- * **Beautiful before realistic, but never rearranged.** The room is drawn as
- * a designed 3D illustration of itself — a calm, curated palette taken from its
- * own colours, clean softly modelled shapes, soft studio light, seen close from
- * high above its far corner — rather than as a photograph of it, because that
- * is what makes it a pleasure to look at every day. What it may not do is move
- * anything: every piece of furniture, door and window stays where the photos
- * show it, at its size and against its wall, since that is what makes it this
- * room, and what the devices' markers are placed by.
+ * **The room's own colours, in daylight — and never rearranged.** The room is
+ * drawn as a 3D artist's model of itself: its real colours, materials and
+ * textures, soft daylight from its own windows, crisp geometry and fine detail,
+ * seen from one corner with the two near walls removed. Those are the words the
+ * first pictures were drawn from, and they came back on 2026-11-10. From
+ * 2026-10-23 until then the look was a designed one — the palette softened
+ * and unified into off-whites and taupes, patterns calmed to solid tones, even
+ * studio light, the walls' cut tops in a light tone, the far corner held at the
+ * top centre and the room filling the image edge to edge — and one room drawn
+ * both ways from the same photos made the case against it. The designed one
+ * was paler and flatter: its windows blank where the other's let the day in,
+ * its floor and fabrics without their grain and pattern, its outline lost on a
+ * white page for want of the darker wall tops, and a long room bent to fit a
+ * view that suits a square one. What makes a room a pleasure to look at turned
+ * out to be what makes it recognisable. **That pair was also drawn a model
+ * apart** — the first on 2.5 Sunburst, the designed one on 2.6 — so how much
+ * of the difference was the words alone is not measured, and these words have
+ * not been compared on 2.6 either: if a room drawn from them still comes out
+ * flat, the model is what is left to compare, on the same photos, before any
+ * more is changed here. What it may not do is move anything, which the designed
+ * version said best and which stays in its words: every piece of furniture,
+ * door and window stands where the photos show it, at its size and against its
+ * wall, since that is what makes it this room, and what the devices' markers
+ * are placed by — and whatever stands against the two removed walls stays, cut
+ * low, because a draft without that line left a kitchen counter out.
  *
  * **Day, then night as an edit of the day** — the same picture with the light
  * changed, so the apps cross from one to the other with nothing moving.
@@ -39,13 +56,10 @@ export interface PictureDevice {
 }
 
 const STYLE =
-  'The look: a calm, harmonious, curated palette taken from the room’s own colours but softened and unified — ' +
-  'warm off-whites, soft greys, gentle taupes and woods, with the room’s main colour kept as one muted accent; ' +
-  'busy patterns on fabrics and floors become calm, solid tones. Clean, softly modelled shapes with gentle rounded ' +
-  'edges, matte and satin materials. Soft, even studio light with gentle global illumination, soft ambient ' +
-  'occlusion and soft contact shadows — no harsh light, no glare, no colour casts. The walls are thick, clean ' +
-  'slabs, cut flat along the top in a light tone; a thin floor slab under the room. Minimal, airy and quietly ' +
-  'luxurious, like a premium 3D render for a smart-home app';
+  'Soft, diffuse daylight from the windows — a room with no window is lit as softly from above — gentle ambient ' +
+  'occlusion, soft contact shadows, matte materials with a subtle sheen, crisp clean geometry, walls cut as thick ' +
+  'clean sections with a slightly darker top edge, a thin floor slab under the room. Calm, tidy and quietly ' +
+  'luxurious, highly detailed';
 
 /** What a kind of device is, in the words a picture is read with. */
 export function describeKind(kind: string): string {
@@ -99,30 +113,27 @@ export function dayPrompt(roomName: string, photoCount: number, orientation: 'po
   lines.push(
     'Ignore any white guide lines, buttons and other on-screen overlays in the photos.',
     '',
-    'Draw this room as a beautiful 3D illustration for a premium smart-home app: an isometric diorama of the ' +
-      'room, modelled and rendered the way a top 3D designer would for a showcase — designed, not photographed.',
+    'Draw this room as the room render of a premium smart-home app: an isometric cutaway of the whole room, seen ' +
+      'from above at about 35 degrees from one corner, the two walls nearest the viewer removed so the room can be ' +
+      'seen into like a dollhouse, the two far walls standing full height. Choose the corner that shows the most of ' +
+      'the room — the windows and the main furniture against the two far walls.',
     '',
-    'The view: isometric, from high above at about 35 degrees, looking into the room’s far corner, which stands ' +
-      'near the top centre of the image; the two far walls rise full height from it, receding to the left and ' +
-      'the right, and the two near walls are removed so the whole room can be seen into. Choose the corner that ' +
-      'shows the most of the room — the windows and the main furniture against the two far walls. The room is ' +
-      'seen close.',
+    'A 3D artist’s model of this very room: its real shape and proportions, in the room’s real colours, materials ' +
+      'and textures — the floor, the wall paint, the furniture, the fabrics and their patterns, the appliances, the ' +
+      'curtains — so the person who lives here recognises their own room at a glance.',
     '',
     'The layout is exact: every piece of furniture, every appliance, every door, window and fixture stands where ' +
-      'the photos show it, at its real size, facing the way it faces, against the same wall — the person who lives ' +
-      'here must recognise their own room at a glance. Each thing becomes a clean, softly modelled version of ' +
-      'itself; nothing is moved, swapped, added or left out — whatever stands against the two removed walls stays, ' +
-      'cut away low at the front like the walls themselves. Tidy away clutter, laundry, bags, cables and mess, and ' +
-      'ignore the photos’ dim lighting and colour casts.',
+      'the photos show it, at its real size, facing the way it faces, against the same wall. Nothing is moved, ' +
+      'swapped, added or left out — whatever stands against the two removed walls stays, cut away low at the front ' +
+      'like the walls themselves. Tidy away clutter, laundry, bags, cables and mess, and ignore the photos’ dim ' +
+      'lighting and colour casts.',
     '',
     'Draw only what the photos show. Add nothing that is not in them — no devices, sensors, gadgets, lamps or ' +
       'other objects the room does not have.',
   );
   lines.push(
     '',
-    `${STYLE}.`,
-    '',
-    `The room fills the ${orientation === 'portrait' ? 'tall' : 'wide'} image almost edge to edge, standing on its ` +
+    `${STYLE}. The room fills most of the ${orientation === 'portrait' ? 'tall' : 'wide'} image, standing on its ` +
       'own on a transparent background — no floor, backdrop or shadow beyond the room itself.',
     '',
     'No text, no labels, no people, no watermark.',

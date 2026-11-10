@@ -2498,13 +2498,18 @@ been removed, and the row read next week is all that is left of them.
 A room can be **drawn**: from one to eight phone photos of it, the hub has
 OpenAI's `gpt-image-2.6-sunburst` (the quality half of the 2.6 pair, where
 portraits take the fast one) draw the room as the isometric cutaway a
-smart-home app shows — the two near walls removed, seen close from high above
-its far corner — on a transparent ground. **Beautiful before realistic, but
-nothing moved**: a designed 3D illustration of the room, in a calm palette taken
-from its own colours with soft studio light (and by night, charcoal with the
-room's own lights in warm pools), with every piece of furniture, door and window
-where the photos show it — the layout is what makes it this room, and what the
-markers are read by. **Only what the
+smart-home app shows — the two near walls removed, seen from above from one
+corner — on a transparent ground. **The room's own colours, in daylight, and
+nothing moved**: a 3D artist's model of the room in its real colours, materials
+and textures, lit by soft daylight from its windows (and by night, charcoal with
+the room's own lights in warm pools), with every piece of furniture, door and
+window where the photos show it — the layout is what makes it this room, and
+what the markers are read by. From 2026-10-23 until 2026-11-10 a designed look
+was asked for instead — the palette softened towards off-whites and taupes,
+patterns calmed to solid tones, even studio light — so a picture drawn in those
+weeks was asked for differently from one drawn before or since, and keeps the
+look it was drawn in until its room is drawn again.
+**Only what the
 photos show is drawn**: the prompt names no device and asks for nothing the
 photos don't have, since a sensor too small to see in a photo would otherwise
 be invented — painted into the room, somewhere it isn't. A device the photos
