@@ -1094,6 +1094,37 @@ describe('POST …/chat/:id/stop', () => {
     });
   }
 
+  // The same held round, read back the way an app whose socket missed its
+  // frames reads it: `answering` until the round has landed, and its end in
+  // the rows once it says no (`ChatRuntime.isAnswering`).
+  for (const surface of ['assistant', 'automations'] as const) {
+    it(`says on the ${surface} transcript whether a round is running, until every round asked for has landed`, async () => {
+      const read = async (id: string) =>
+        (await app.inject({ method: 'GET', url: `/api/v1/${surface}/chat/${id}`, headers: auth(token) })).json() as {
+          answering?: unknown;
+          messages: { role: string; text: string }[];
+        };
+      const before = sent.length;
+      const started = await post(`/api/v1/${surface}/chat`, token, { message: 'one more slow question' });
+      const { sessionId } = started.json() as { sessionId: string };
+      await until(() => sent.length === before + 1, 'the round to begin');
+      expect((await read(sessionId)).answering).toBe(true);
+
+      // A message sent behind it is waiting its turn, and still counts.
+      expect((await post(`/api/v1/${surface}/chat/${sessionId}/messages`, token, { message: 'and a quick one' })).statusCode).toBe(200);
+      expect((await read(sessionId)).answering).toBe(true);
+
+      await post(`/api/v1/${surface}/chat/${sessionId}/stop`);
+      await idle();
+      const over = await read(sessionId);
+      expect(over.answering).toBe(false);
+      expect(over.messages.at(-1)).toMatchObject({ role: 'agent', text: 'Done.' });
+
+      // Always there, so an app tells an idle hub from one too old to say.
+      expect((await read(randomUUID())).answering).toBe(false);
+    });
+  }
+
   it('says there is nothing to stop in a conversation the hub holds no memory of', async () => {
     const response = await post(`/api/v1/assistant/chat/${randomUUID()}/stop`);
     expect(response.statusCode).toBe(200);

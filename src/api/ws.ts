@@ -13,6 +13,7 @@ import type {
   AutomationRunEvent,
   AutomationStatusEvent,
   ChatChangesEvent,
+  ChatRoundSoFar,
   ChatTitleEvent,
   CommissioningUpdate,
 } from '../core/bus.js';
@@ -249,6 +250,11 @@ const MAX_CLIENT_MESSAGE_BYTES = 4096;
  *   {"type":"mqtt","dropped":N}              rate limit hit; N frames skipped
  *   {"type":"zigbeeEvent","event":{at,type,ieee,name?}}
  *   {"type":"aiRun","event":{phase,id,at,kind,exposesHash,step?,ok?,costUsd?}}
+ *   {"type":"automationRun","run":{…}}
+ *   {"type":"automationChat"|"assistantChat","chat":{sessionId,phase,at,text,…}}
+ *   {"type":"chatTitle","chatTitle":{surface,sessionId,title,at}}
+ *   {"type":"chatRound","chatRound":{surface,sessionId,steps,reply?,…}}   on subscribing
+ *       to "automations": each round already running in your conversations, so far
  *
  * Client → server (the only inbound frames read):
  *
@@ -634,6 +640,40 @@ export function attachWebSocket(
   };
 
   /**
+   * Where each round running in this member's conversations has got to, sent
+   * the moment the conversations' frames are attached (`chatRound`).
+   *
+   * **A round outlives the socket that was watching it**, and a phone that
+   * comes back to one has missed whatever was said while it was away: a
+   * `delta` is the next few words, so the reply it joined had a hole in it
+   * until the round ended. Sent in the same tick the listeners go on, ahead of
+   * every frame of the round still to come, so a client draws the round as it
+   * stands and the frames carry on from exactly there — nothing missed and
+   * nothing twice.
+   *
+   * Narrowed as the frames are — `hub.ai`, and `automation.manage` for the
+   * automations agent's — and to the member's own conversations besides
+   * (`roundsSoFar`). Only ever called for a member's own socket: a key's
+   * stream carries no conversation, so `subscribe` never reaches here for one.
+   * **It must never cost the subscription**, so a runtime that cannot answer
+   * sends nothing.
+   */
+  const sendRoundsSoFar = (): void => {
+    if (memberId === null || !deps.access.canAs(memberId, 'hub.ai', null)) return;
+    let rounds: ChatRoundSoFar[];
+    try {
+      rounds = [...deps.assistantChat.roundsSoFar(memberId), ...deps.automationChat.roundsSoFar(memberId)];
+    } catch {
+      return;
+    }
+    const readsAutomations = deps.access.canAs(memberId, 'automation.manage', null);
+    for (const round of rounds) {
+      if (round.surface === 'automations' && !readsAutomations) continue;
+      send({ type: 'chatRound', chatRound: round });
+    }
+  };
+
+  /**
    * What this socket may subscribe to.
    *
    * **A key gets neither the broker nor the AI**: `mqtt` is every message on
@@ -677,6 +717,7 @@ export function attachWebSocket(
           deps.events.on('assistantChat', onAssistantChat);
           deps.events.on('chatTitle', onChatTitle);
           deps.events.on('chatChanges', onChatChanges);
+          sendRoundsSoFar();
         }
       }
     }

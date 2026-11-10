@@ -232,6 +232,70 @@ export interface ChatTitleEvent {
 }
 
 /**
+ * A round as far as it has got, for a socket that joins it part-way — the
+ * `chatRound` frame.
+ *
+ * **A round outlives the socket that was watching it.** A phone put away
+ * mid-round has its socket torn down while the round runs on here, and its
+ * frames are not sent again: a `delta` is the next few words and nothing more,
+ * so a phone that came back to a reply still being written joined it with a
+ * hole in the middle — the words written while it was away — and kept the hole
+ * until the round's `turn` put the stored row in its place. So a socket that
+ * subscribes to the conversations is sent, before anything else of them, where
+ * each round running in its member's conversations has got to: everything a
+ * client needs to draw the round as it would stand had it seen every frame,
+ * after which the frames carry on from exactly there.
+ *
+ * **A frame `type` of its own, never a phase** — `chatTitle`'s reasoning: every
+ * shipped iOS build reads a chat phase it has never met as `turn` and ends the
+ * round on screen, while a `type` it has never met is dropped.
+ */
+export interface ChatRoundSoFar {
+  /** Which agent — the routes' own word, `assistant` · `automations`. */
+  surface: 'assistant' | 'automations';
+  sessionId: string;
+  /** When this was read, by the hub's clock. */
+  at: string;
+  /** How long the round has been running, in milliseconds — the span its first row will count as `tookMs` from. */
+  elapsedMs: number;
+  /**
+   * The newest row the agent had written in this conversation when the round
+   * began (any role but `user`) — absent for a conversation's first round.
+   *
+   * **What tells a client whether this is the round it was drawing.** A round
+   * that ended while the client was away wrote its rows before the next one
+   * began, so a `since` the client's copy of the transcript does not hold
+   * means the round it has on screen is over — read the transcript again, and
+   * draw this one as a round of its own.
+   */
+  since?: string;
+  /** The person's row this round answers. */
+  answering?: string;
+  /**
+   * What the round has done so far, oldest first, exactly as its `step` frames
+   * said it — its last twelve — with the model's reasoning already hung on the
+   * step it was produced under, and its narration as `said` steps: the shape
+   * the first row the round writes will carry as `data.steps`.
+   */
+  steps: Array<{ text: string; kind: string; detail?: string }>;
+  /** The model's reasoning since the last step, not yet hung on one. */
+  thinking?: string;
+  /** The words of the reply being written now, from its first — absent while the round is at work. */
+  reply?: string;
+  /**
+   * The words the round wrote and then went back to work after — already a
+   * `said` step — which a client keeps where the reply goes until new words
+   * take their place. Absent while `reply` is present.
+   */
+  held?: string;
+  /** With `reply`: the milliseconds from the round beginning to its first word, which the first `delta` carried. */
+  workedMs?: number;
+  /** What the round has changed in the home so far — the list its
+   *  `chatChanges` frames carry (`ChatChangeWire[]`). Absent when nothing. */
+  changes?: readonly Record<string, unknown>[];
+}
+
+/**
  * One thing a conversation did, live.
  *
  * **Four phases, because a spinner is not an answer to "what is happening".**

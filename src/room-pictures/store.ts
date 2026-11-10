@@ -8,7 +8,15 @@ import type { HubEventBus } from '../core/bus.js';
 import type { AiProvider, SettingsService } from '../core/settings.js';
 import type { Logger } from '../logging.js';
 import type { KeepOutcome, PhotoStore } from '../photos/store.js';
-import { drawRoomPicture, pictureCostUsd, RoomPictureDrawError, ROOM_PICTURE_MODEL, type PictureUsage } from './draw.js';
+import {
+  DAY_SETTINGS,
+  drawRoomPicture,
+  NIGHT_SETTINGS,
+  pictureCostUsd,
+  RoomPictureDrawError,
+  ROOM_PICTURE_MODEL,
+  type PictureUsage,
+} from './draw.js';
 import { LocateError, locateDevices } from './locate.js';
 import { dayPrompt, NIGHT_PROMPT, type PictureDevice } from './prompts.js';
 
@@ -182,8 +190,12 @@ export class RoomPictureService {
   private readonly manifest: string;
   private readonly limits: PictureLimits;
   private records: RoomPictureRecord[] | null = null;
-  /** One at a time, day to night: refused, not queued — every drawing bills the home. */
-  private drawing = false;
+  /**
+   * The room being drawn, from the moment it is asked for until its night has
+   * landed or failed — null while nothing is. One at a time, day to night:
+   * refused, not queued — every drawing bills the home.
+   */
+  private drawingRoom: string | null = null;
   /** The night still being drawn after a drawing answered — for tests to wait on. */
   private night: Promise<void> | null = null;
 
@@ -216,7 +228,26 @@ export class RoomPictureService {
   }
 
   get isDrawing(): boolean {
-    return this.drawing;
+    return this.drawingRoom !== null;
+  }
+
+  /**
+   * The rooms being drawn right now — at most one — for `GET /room-pictures`.
+   *
+   * **For an app whose request died with its connection.** A phone that is
+   * put away mid-drawing has its request torn down by its own OS while this
+   * hub carries on, so the app cannot tell from its side whether the drawing
+   * is still under way, finished, or never arrived. The picture appearing in
+   * the list answers the second; this answers the other two, so an app waits
+   * while its room is here and stops waiting when it is not, rather than
+   * sitting out a deadline over nothing.
+   *
+   * **A drawing ends only after its picture is written**, which is what makes
+   * the pair safe to read together: whoever reads this before the list finds
+   * the picture of any drawing this says is over.
+   */
+  drawingNow(): { roomId: string }[] {
+    return this.drawingRoom === null ? [] : [{ roomId: this.drawingRoom }];
   }
 
   /** Resolves once a night picture still being drawn has landed. */
@@ -252,21 +283,21 @@ export class RoomPictureService {
   }
 
   async draw(input: DrawInput): Promise<DrawnPicture> {
-    if (this.drawing) throw new PictureBusyError();
-    this.drawing = true;
+    if (this.drawingRoom !== null) throw new PictureBusyError();
+    this.drawingRoom = input.roomId;
     let handedOn = false;
     try {
       const record = await this.drawDay(input);
       handedOn = true;
       this.night = this.drawNight(record, input.apiKey).finally(() => {
-        this.drawing = false;
+        this.drawingRoom = null;
         this.night = null;
         this.collect_();
       });
       return record;
     } finally {
       if (!handedOn) {
-        this.drawing = false;
+        this.drawingRoom = null;
         this.collect_();
       }
     }
@@ -286,6 +317,7 @@ export class RoomPictureService {
     let day;
     try {
       day = await this.draw_({
+        ...DAY_SETTINGS,
         apiKey: input.apiKey,
         prompt: dayPrompt(input.roomName, photos.length, input.orientation),
         images: photos,
@@ -391,6 +423,7 @@ export class RoomPictureService {
     let usage: PictureUsage | undefined;
     try {
       const night = await this.draw_({
+        ...NIGHT_SETTINGS,
         apiKey,
         prompt: NIGHT_PROMPT,
         images: [{ bytes: day, contentType: 'image/png' }],

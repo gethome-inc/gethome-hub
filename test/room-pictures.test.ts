@@ -5,9 +5,16 @@ import path from 'node:path';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { HubEventBus } from '../src/core/bus.js';
 import { SettingsService } from '../src/core/settings.js';
-import { drawRoomPicture, pictureCostUsd, RoomPictureDrawError, ROOM_PICTURE_MODEL } from '../src/room-pictures/draw.js';
+import {
+  DAY_SETTINGS,
+  drawRoomPicture,
+  NIGHT_SETTINGS,
+  pictureCostUsd,
+  RoomPictureDrawError,
+  ROOM_PICTURE_MODEL,
+} from '../src/room-pictures/draw.js';
 import { LocateError, locateDevices, normaliseAnswer } from '../src/room-pictures/locate.js';
-import { dayPrompt, describeKind, locatePrompt } from '../src/room-pictures/prompts.js';
+import { dayPrompt, describeKind, locatePrompt, NIGHT_PROMPT } from '../src/room-pictures/prompts.js';
 import { homeLocator, PictureBusyError, RoomPictureService, type Locator } from '../src/room-pictures/store.js';
 import { AGENT_MODELS, estimateCostUsd, LOCATOR_MODELS, PROVIDER_MODELS } from '../src/ai/models.js';
 import { openTestDb, resetDb } from './helpers/db.js';
@@ -85,6 +92,9 @@ describe('RoomPictureService', () => {
     expect(String(day['prompt'])).toContain('“Living Room”');
     expect(String(day['prompt'])).not.toContain('Light TV');
     expect(String(day['prompt'])).toContain('Draw only what the photos show.');
+    // The day at the rung above `high`; `complexity` is 2.6's, never sent.
+    expect(day['quality']).toBe('xhigh');
+    expect(day['complexity']).toBeUndefined();
 
     // The devices were read off the day picture, and the answer came before the night.
     expect(locate).toHaveBeenCalledTimes(1);
@@ -98,6 +108,9 @@ describe('RoomPictureService', () => {
     await pictures.settled();
     const night = (draw.mock.calls[1] as unknown[])[0] as Record<string, unknown>;
     expect(night['background']).toBe('opaque');
+    // The night is an edit that changes only the light, at `high`.
+    expect(night['quality']).toBe('high');
+    expect(night['complexity']).toBeUndefined();
     expect(pictures.get(record.id)?.hasNight).toBe(true);
     expect(await pictures.bytes(record.id, 'night')).not.toBeNull();
     expect(pictures.isDrawing).toBe(false);
@@ -219,6 +232,36 @@ describe('RoomPictureService', () => {
     pending[1]!({ png: png(2), usage });
     await pictures.settled();
     expect(pictures.isDrawing).toBe(false);
+  });
+
+  // What an app whose request died with its connection reads to know whether
+  // to keep waiting (`GET /room-pictures`'s `drawing`). The answer it waits for
+  // is the picture in the list, so what is pinned is the overlap: the picture
+  // is listed before the room stops being drawn, never after.
+  it('says which room it is drawing from the ask until the night has landed, and none once it is over', async () => {
+    const pending: ((value: { png: Buffer; usage: typeof usage }) => void)[] = [];
+    const draw = vi.fn(() => new Promise<{ png: Buffer; usage: typeof usage }>((resolve) => pending.push(resolve)));
+    const { pictures } = service({ draw });
+    expect(pictures.drawingNow()).toEqual([]);
+
+    const first = pictures.draw(input);
+    expect(pictures.drawingNow()).toEqual([{ roomId: 'room-living' }]);
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    pending[0]!({ png: png(1), usage });
+    const record = await first;
+    // Answered, with its night still being drawn: listed, and still drawing.
+    expect(pictures.list().map((listed) => listed.id)).toContain(record.id);
+    expect(pictures.drawingNow()).toEqual([{ roomId: 'room-living' }]);
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    pending[1]!({ png: png(2), usage });
+    await pictures.settled();
+    expect(pictures.drawingNow()).toEqual([]);
+
+    // A day that fails is over at once, with nothing listed for it.
+    const failing = service({ draw: vi.fn().mockRejectedValue(new RoomPictureDrawError('no', 'billing')) });
+    await expect(failing.pictures.draw({ ...input, roomId: 'room-bed' })).rejects.toBeInstanceOf(RoomPictureDrawError);
+    expect(failing.pictures.drawingNow()).toEqual([]);
+    expect(failing.pictures.list()).toEqual([]);
   });
 
   it('never reads over a marker a person placed', async () => {
@@ -595,6 +638,7 @@ describe('drawing', () => {
       return new Response(JSON.stringify({ data: [{ b64_json: png(7).toString('base64') }] }), { status: 200 });
     }) as unknown as typeof fetch;
     const drawing = await drawRoomPicture({
+      ...DAY_SETTINGS,
       apiKey: 'k',
       prompt: 'p',
       images: [
@@ -615,31 +659,38 @@ describe('drawing', () => {
   });
 
   /**
-   * A room takes the quality half of the pair where a portrait takes the fast
-   * one (`PORTRAIT_MODEL`), and asks for high quality on a PNG.
+   * A room takes the quality half of the 2.5 pair — the model that drew the
+   * owner's flat as itself, where 2.6 split it into two boxes — on a PNG: the
+   * day at `xhigh`, the night at `high`, and no `complexity`, which 2.5 does
+   * not have. See `draw.ts`.
    */
-  it('draws on GPT Image 2.6 Sunburst, at high quality, on a PNG', async () => {
-    let form: FormData | undefined;
+  it('draws on GPT Image 2.5 Sunburst on a PNG, the day at xhigh and the night at high', async () => {
+    const forms: FormData[] = [];
     const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
-      form = init!.body as FormData;
+      forms.push(init!.body as FormData);
       return new Response(JSON.stringify({ data: [{ b64_json: png(7).toString('base64') }] }), { status: 200 });
     }) as unknown as typeof fetch;
-    await drawRoomPicture({
+    const common = {
       apiKey: 'k',
       prompt: 'p',
       images: [{ bytes: randomBytes(1_234), contentType: 'image/jpeg' }],
-      size: '1536x1024',
-      background: 'opaque',
+      size: '1536x1024' as const,
       fetchImpl,
-    });
-    expect(ROOM_PICTURE_MODEL).toBe('gpt-image-2.6-sunburst');
-    expect(form!.get('model')).toBe(ROOM_PICTURE_MODEL);
-    expect(form!.get('quality')).toBe('high');
-    expect(form!.get('output_format')).toBe('png');
-    expect(form!.get('size')).toBe('1536x1024');
-    expect(form!.get('background')).toBe('opaque');
-    // Left to the model's own default, `high` — see the note in `draw.ts`.
-    expect(form!.has('complexity')).toBe(false);
+    };
+    await drawRoomPicture({ ...common, ...DAY_SETTINGS, background: 'transparent' });
+    await drawRoomPicture({ ...common, ...NIGHT_SETTINGS, background: 'opaque' });
+    const [day, night] = forms as [FormData, FormData];
+    expect(ROOM_PICTURE_MODEL).toBe('gpt-image-2.5-sunburst');
+    expect(day.get('model')).toBe(ROOM_PICTURE_MODEL);
+    expect(day.get('output_format')).toBe('png');
+    expect(day.get('size')).toBe('1536x1024');
+    expect(day.get('background')).toBe('transparent');
+    expect(day.get('quality')).toBe('xhigh');
+    expect(night.get('background')).toBe('opaque');
+    expect(night.get('quality')).toBe('high');
+    // 2.6's field, which 2.5 does not take.
+    expect(day.has('complexity')).toBe(false);
+    expect(night.has('complexity')).toBe(false);
   });
 });
 
@@ -650,6 +701,45 @@ describe('the words', () => {
     expect(prompt).toContain('no devices, sensors, gadgets');
     expect(locatePrompt(devices)).toContain('- tv: “Light TV” (a smart plug — look for what it powers)');
     expect(describeKind('kettle-of-the-future')).toBe('a smart device');
+  });
+
+  /**
+   * The words that drew the owner's flat best, on 2026-10-23, pinned to the
+   * character (`prompts.ts`): two rewrites did worse, and a rewrite that reads
+   * better is not evidence. Change this only with a drawing of a real room
+   * beside the old one.
+   */
+  it('asks for the room in the first drawings’ own words', () => {
+    expect(dayPrompt('Living Room', 5, 'portrait')).toBe(
+      'The first 5 images are phone photos of “Living Room”, a room of a real home, taken from different corners.\n' +
+        'Ignore any white guide lines, buttons and other on-screen overlays in the photos.\n' +
+        '\n' +
+        'Draw this room as the room render of a premium smart-home app: an isometric cutaway of the whole room, seen ' +
+        'from above at about 35 degrees from one corner, the two walls nearest the viewer removed so the room can be ' +
+        'seen into like a dollhouse, the two far walls standing full height. A 3D artist’s model of this very room: ' +
+        'its real shape and proportions, every piece of furniture where the photos show it, in the room’s real ' +
+        'colours, materials and textures — the floor, the wall paint, the furniture, the fabrics, the appliances, ' +
+        'the curtains — so the person who lives here recognises their own room at a glance. Tidy away clutter, bags ' +
+        'and mess, and ignore the photos’ dim lighting and colour casts.\n' +
+        '\n' +
+        'Draw only what the photos show. Add nothing that is not in them — no devices, sensors, gadgets, lamps or ' +
+        'other objects the room does not have.\n' +
+        '\n' +
+        'Soft, diffuse daylight from the windows, gentle ambient occlusion, soft contact shadows, matte materials ' +
+        'with a subtle sheen, crisp clean geometry, walls cut as thick clean sections with a slightly darker top ' +
+        'edge, a thin floor slab under the room. Calm, tidy and quietly luxurious, highly detailed. The room fills ' +
+        'most of the tall image, standing on its own on a transparent background — no floor, backdrop or shadow ' +
+        'beyond the room itself.\n' +
+        '\n' +
+        'No text, no labels, no people, no watermark.',
+    );
+    expect(dayPrompt('Office', 1, 'landscape')).toContain('The first image is a phone photo of “Office”');
+    expect(dayPrompt('Office', 1, 'landscape')).toContain('The room fills most of the wide image');
+  });
+
+  it('lets the night change only the light', () => {
+    expect(NIGHT_PROMPT).toContain('Redraw the very same render at night.');
+    expect(NIGHT_PROMPT).toContain('Only the light changes.');
   });
 
   it('prices what the provider reported, and nothing it did not', () => {

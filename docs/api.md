@@ -262,7 +262,7 @@ than no button.
 | `GET /devices/:id/portraits` | floor | the pictures this home has had drawn of a device, newest first: `{id, at, bytes, provider, model, fromPhoto, selected, drawnBy?, photo?}`. `photo: {id, bytes}` is the [kept photo](#photos-the-hub-keeps) it was drawn from, present only where the home keeps those. `drawnBy: {id, name}` is who had it drawn — `id` is null once that person has left the home and absent altogether on a portrait drawn before the hub recorded it, so an app draws no line rather than an empty one. Reading is the floor — a portrait is what the device *looks like*, so a guest whose dashboard could not draw it would be looking at a different home. See [below](#device-portraits) |
 | `GET /portraits/:portraitId` | floor | the PNG itself — `image/png`, a strong `ETag` and `Cache-Control: immutable`, because a portrait's bytes never change (a new one gets a new id) |
 | `POST /devices/:id/portraits` | `hub.ai` | draw one. `{photo?: base64, photoType?, keepPhoto?, keptPhotoId?}` — absent draws from the device's kind alone; `keepPhoto: true` keeps the photo with the portrait where the home keeps portrait photos, and `keptPhotoId` draws again from one this device's portraits already keep (`404 photo_not_found` for any other; a `photo` beside it is a 400). The answer carries `photosKept: {kept, reason?}` when either was sent — see [below](#photos-the-hub-keeps). Synchronous, and it holds the request for the minutes an image takes. `409 openai_not_configured` (its own code: portraits are OpenAI's job, and a hub can be configured for recognition and not for this), `409 portrait_busy`, `409 no_space`, `502 {error:"provider_failed", kind, detail}` carrying OpenAI's own sentence |
-| `GET /room-pictures` · `GET /room-pictures/:id/day\|night` | floor | pictures of the home's rooms, newest first: `{pictures: [{id, roomId, at, orientation, width, height, hasNight, photoCount, markers, bytes, model, drawnBy?, selected?, keptPhotos?}]}` — `keptPhotos` is how many of the photos it was drawn from the hub keeps, absent at none, and one picture's PNG, immutable — see [below](#room-pictures) |
+| `GET /room-pictures` · `GET /room-pictures/:id/day\|night` | floor | pictures of the home's rooms, newest first, and the room being drawn: `{pictures: [{id, roomId, at, orientation, width, height, hasNight, photoCount, markers, bytes, model, drawnBy?, selected?, keptPhotos?}], drawing: [{roomId}]}` — `keptPhotos` is how many of the photos it was drawn from the hub keeps, absent at none; `drawing` is `[]` while nothing is drawn, and absent only on a hub older than it — and one picture's PNG, immutable — see [below](#room-pictures) |
 | `POST /room-pictures` · `POST /room-pictures/:id/locate` | `hub.ai` | draw a room from photos of it (`{roomId, orientation?, photos: [{data, type}], keepPhotos?, keptPhotoIds?}`, one to eight between the two), or read its devices off a picture again. `keepPhotos: true` keeps the new photos with the drawing where the home keeps room photos; `keptPhotoIds` draws again from photos this room already keeps (`404 photo_not_found` for any other). The answer carries `photosKept: {kept, reason?}` when either was sent — see [below](#photos-the-hub-keeps). `409 openai_not_configured`, `409 picture_busy`, `409 no_space`, `502 {error:"provider_failed", kind, detail}` |
 | `PATCH /room-pictures/:id` · `DELETE /room-pictures/:id` | `home.structure` | where the devices stand on a picture (`{markers: [{deviceId, x, y}]}`, the whole list) and/or show this picture for its room (`{selected: true}`), or take the picture away |
 | `PATCH /devices/:id/portraits` | `device.edit` | `{selected: id\|null}` — which one the home sees. `null` is a *state*: the procedural sphere, chosen over every picture there is |
@@ -307,7 +307,7 @@ than no button.
 | `POST /automations/chat/:id/stop` | `automation.manage` **+** `hub.ai` · never a key | stop the round the conversation is running, part-way → `200 {stopped}` at once: `true` when a round was told to stop, `false` when none was running (one that finished a moment earlier, or a conversation the hub holds no memory of). The round winds down on the socket like any other — what had reached the page kept as the answer, then a `note` row with `data.stopped: true` — and only that round: a message sent behind it still runs. `409 not_your_conversation` for somebody else's. See [below](#stopping-a-round-post-chatidstop) |
 | `POST /automations/chat/:id/retry` | `automation.manage` **+** `hub.ai` · never a key | ask the person's last message again after the round it started failed: `{model, effort?, attachments?}` → `202 {sessionId, retrying: true}`, on the model named — usually the other vendor's, which the failure's note offers. No second message is written. `409 nothing_to_retry` when the conversation has moved on from the failure or it is already being answered, `409 not_your_conversation`, `409 model_unavailable`, `410 conversation_ended`. See [below](#asking-a-failed-round-again-post-chatidretry) |
 | `GET /automations/chats` | `automation.manage` **+** `hub.ai` · never a key | every conversation this home has had, newest first: `[{sessionId, startedAt, updatedAt, messageCount, title, live, spend?, mine, handedFrom?}]`. `title` is **the conversation's name**: a few words the hub had the cheapest model of the conversation's own vendor write from what the person said first, a moment after the first message (see [below](#a-conversations-name-the-chattitle-frame)) — and until it has one, or where none could be had, the **first thing the person said**, as it always was, never the agent's opening line, which is about the home rather than about what was asked; a conversation that opened with a photo and no words is `Photo` (or `2 photos`) until words come — and `live` is whether it can still be *continued*, which is a different question from whether it can be read. `spend` is `{usd, provider, modelId, model}`: what it cost and what answered, with `model` the label to draw and `modelId` the id as recorded. It is **absent rather than zero** when the hub cannot say — `ai_runs` keeps the last 250 runs of every kind and a transcript a fortnight, so a readable conversation can outlive its own spend row, and `$0.00` about one that plainly cost something is a claim. **`mine`** is whether the caller had the conversation — the first thing said in it was theirs — because every member's are listed and only the owner can carry one on; an app that wants a person's own list shows `mine !== false` (absent on an older hub). **`handedFrom`** is the *assistant* conversation that handed this one over, read back from its `handoff` row (the newest, when there were several) — absent for a chat somebody started themselves |
-| `GET /automations/chat/:id` | `automation.manage` **+** `hub.ai` · never a key | `{sessionId, live, spend?, handedFrom?, messages}` — the transcript, oldest first, with the same `spend` block the list carries so a chat opened from a link says what it cost without the list having been read. `live: false` is history. A message is `{id, at, role, text, data?}` with `role` an **open** vocabulary (`user`/`agent`/`question`/`preview`/`note`); see [`docs/automations.md`](automations.md) for what `data` carries per row. **One turn can write several `preview` rows** — a reply that delivers two rules is one `agent` line followed by a card each, in submission order, so draw a card per row rather than assuming one per turn; a turn that reached the conversation's cost limit with rules already accepted still writes their cards, with a `note` after them saying so. The **first** row a round writes also carries `data.steps` — `[{text, kind, detail?, done?}]`, what the agent did to produce it: the same three fields the `step` frame streams, and `done: true` on a step whose change to the home took (a device worked, a scene pressed, a job handed over), which only the stored copy carries — so a conversation read back next week shows the working and not only the answer — and **`data.tookMs`**, the whole milliseconds from the round beginning to that row — and, where the round ended in words of its own, **`data.workedMs`**: the milliseconds from the round beginning to the first of those words, the first `delta` after the last thing the round did (narration a round wrote before going back to work does not count, a hand-over does not move it). `tookMs` therefore also counts the reply arriving word by word, while `workedMs` is the wait before there was anything to read; the first such `delta` frame's `at` is the very instant `workedMs` counts to, and that frame carries the number itself as `chat.workedMs` — the frames alone cannot say it, since a round's first frame goes out after its clock starts (seconds later on a conversation's first message, on a small board). Absent on a round that ended in a question, a card or a note alone (the note of a failure, a refusal, the cost limit or the rounds running out included, whatever had streamed before the round broke off), and on rows written before it existed. The person's own row carries `data` only when their message asked for something besides its words or was spoken: `{model?, effort?, attachments?: [{type: "image", mediaType, ref?, width?, height?, bytes}], wordless?, via?}`, only the keys the request named — **never a photo's bytes** — and, on the row the conversation was named from, **`chatTitle`**, the name the list answers with. `via: "voice"` marks a message spoken to the assistant: it names no model and no effort, exactly as a typed one following the home's does, so a client reading the newest typed message for the thinking word a conversation was left on steps past it. **A photo sent with no words stores a caption as `text`** — `Photo`, `2 photos`, the list's own words — with `data.wordless: true`: an app that predates photos draws a person's row from `text` alone, and shows that rather than an empty bubble; an app that draws the photos leaves the caption off when `wordless` is set |
+| `GET /automations/chat/:id` | `automation.manage` **+** `hub.ai` · never a key | `{sessionId, live, answering, spend?, handedFrom?, messages}` — the transcript, oldest first, with the same `spend` block the list carries so a chat opened from a link says what it cost without the list having been read. `live: false` is history. **`answering`** is whether a round is running or waiting behind one — from the moment a message is taken until its `turn` frame has gone out — for an app whose socket was down when that frame went: `false` means every round has ended and the rows say how, `true` that the rest is still to come on the socket. It is read before the rows and a round stops counting only once its rows are written, so the two never disagree; always present, so its absence is a hub older than it rather than an idle one (see [below](#a-socket-that-missed-a-round-answering)). A message is `{id, at, role, text, data?}` with `role` an **open** vocabulary (`user`/`agent`/`question`/`preview`/`note`); see [`docs/automations.md`](automations.md) for what `data` carries per row. **One turn can write several `preview` rows** — a reply that delivers two rules is one `agent` line followed by a card each, in submission order, so draw a card per row rather than assuming one per turn; a turn that reached the conversation's cost limit with rules already accepted still writes their cards, with a `note` after them saying so. The **first** row a round writes also carries `data.steps` — `[{text, kind, detail?, done?}]`, what the agent did to produce it: the same three fields the `step` frame streams, and `done: true` on a step whose change to the home took (a device worked, a scene pressed, a job handed over), which only the stored copy carries — so a conversation read back next week shows the working and not only the answer — and **`data.tookMs`**, the whole milliseconds from the round beginning to that row — and, where the round ended in words of its own, **`data.workedMs`**: the milliseconds from the round beginning to the first of those words, the first `delta` after the last thing the round did (narration a round wrote before going back to work does not count, a hand-over does not move it). `tookMs` therefore also counts the reply arriving word by word, while `workedMs` is the wait before there was anything to read; the first such `delta` frame's `at` is the very instant `workedMs` counts to, and that frame carries the number itself as `chat.workedMs` — the frames alone cannot say it, since a round's first frame goes out after its clock starts (seconds later on a conversation's first message, on a small board). Absent on a round that ended in a question, a card or a note alone (the note of a failure, a refusal, the cost limit or the rounds running out included, whatever had streamed before the round broke off), and on rows written before it existed. The person's own row carries `data` only when their message asked for something besides its words or was spoken: `{model?, effort?, attachments?: [{type: "image", mediaType, ref?, width?, height?, bytes}], wordless?, via?}`, only the keys the request named — **never a photo's bytes** — and, on the row the conversation was named from, **`chatTitle`**, the name the list answers with. `via: "voice"` marks a message spoken to the assistant: it names no model and no effort, exactly as a typed one following the home's does, so a client reading the newest typed message for the thinking word a conversation was left on steps past it. **A photo sent with no words stores a caption as `text`** — `Photo`, `2 photos`, the list's own words — with `data.wordless: true`: an app that predates photos draws a person's row from `text` alone, and shows that rather than an empty bubble; an app that draws the photos leaves the caption off when `wordless` is set |
 | `DELETE /automations/chat/:id` | `automation.manage` **+** `hub.ai` · never a key | end it and write down what it spent |
 | `POST /assistant/chat` | `hub.ai` · never a key | start a conversation with the **assistant** — the agent behind the app's assistant button: `{message, model?, effort?, attachments?}` → `201 {sessionId, messages}`. Same acknowledgement shape and same rule as the automations chat above, and the same `409` refusals, `model_unavailable` and `photos_busy` included. Guarded by `hub.ai` **alone**: asking what the kitchen is doing and switching a lamp on is the floor, and the key is asked because a conversation spends the home's money. Handing a job to another agent is where `automation.manage` is asked, and it is asked *inside the tool* — so a member whose role cannot do it gets a sentence the model reads out rather than a route that 403s |
 | `POST /assistant/chat/:id/messages` | `hub.ai` · never a key | `{message, model?, effort?, attachments?}` → the same acknowledgement. `410 conversation_ended` only when there is nothing left to read — or when the conversation is somebody else's |
@@ -315,7 +315,7 @@ than no button.
 | `POST /assistant/chat/:id/retry` | `hub.ai` · never a key | the same retry, for the assistant |
 | `POST /assistant/chat/:id/undo` | `hub.ai` · never a key | `{messageId}` → `200 {undone, skipped}` — put back what one of the assistant's replies [changed](#what-a-reply-changed-and-putting-it-back), device by device. **Never unlocks a lock**, leaves alone a device changed again since, and writes each one to the activity log. `409 nothing_to_undo` (with `skipped`), `409 already_undone`, `409 not_your_conversation`, `404 not_found` |
 | `GET /assistant/chats` | `hub.ai` · never a key | the assistant's own conversations, newest first, in the same shape `GET /automations/chats` answers (`mine` included; `handedFrom` never — nothing hands a conversation to the assistant). The two lists are **disjoint**: rows carry a `surface`, and a row written before that column existed is an automations row |
-| `GET /assistant/chat/:id` | `hub.ai` · never a key | `{sessionId, live, spend?, messages}`, the same shape as an automations transcript with one more `role`: **`handoff`**, a job handed to another agent. Its `data` is `{agent, title, brief, sessionId, status, automationIds}` — `sessionId` is the *other* agent's conversation, which is where the live trail, its questions and the rules it wrote are read from; `status` is `working`/`asked`/`delivered`/`failed` and is an **open** string; `automationIds` fills as that agent saves rules. Nothing about the other conversation is copied into this one |
+| `GET /assistant/chat/:id` | `hub.ai` · never a key | `{sessionId, live, answering, spend?, messages}`, the same shape as an automations transcript — `answering` included — with one more `role`: **`handoff`**, a job handed to another agent. Its `data` is `{agent, title, brief, sessionId, status, automationIds}` — `sessionId` is the *other* agent's conversation, which is where the live trail, its questions and the rules it wrote are read from; `status` is `working`/`asked`/`delivered`/`failed` and is an **open** string; `automationIds` fills as that agent saves rules. Nothing about the other conversation is copied into this one |
 | `DELETE /assistant/chat/:id` | `hub.ai` · never a key | end it and write down what it spent |
 | `POST /assistant/voice/session` | `hub.ai` · never a key | open a live **voice** session: `{sdp, sessionId?}` → `201 {answerSdp, audioRate, sessionId}`. `sdp` is the client's own **WebRTC offer** and is required, because that is the only transport a phone can hold: Live authenticates a WebSocket with the *project API key* and has no ephemeral client secret anywhere in the family, so the hub does the offer/answer exchange with the home's key and the client is handed **no credential at all** — a stronger containment than the expiring secret this route was first built around. The hub builds the whole session — model, voice, instructions, history, delegation mode — and never sends it to the app, so a prompt change or a configuration key this API grows next month reaches the microphone with no app release. `delegation.type` is **`client`**, which is the architecture in one field: the voice asks *this hub* for help rather than a model OpenAI hosts, so the home keeps its own agent, its own tools, its own transcript and whichever provider it picked. No `audio.format` is sent — WebRTC negotiates its own and refuses the field — and `audioRate` is the rate the app's graph is pointed at. `sessionId` is the assistant conversation to write into — **sent back** when the app already has one, since stopping and restarting the microphone on a page is one conversation rather than two, and minted fresh when it is absent; when it is sent, that conversation's last few exchanges are seeded into `session.input`, so pressing the microphone on a page you have been typing on continues one conversation. It grants nothing new — a home's transcripts are shared by design. When it is sent, that conversation's history is bounded in **characters as well as messages** — `session.input` is capped at 8,192 tokens as well as at 128 messages, and a transcript row holds up to 4,000 characters, so a count alone had a long conversation refused outright on every attempt. A `sessionId` belonging to **somebody else** in the home is `409 not_your_conversation`: reading a home's transcripts is shared by design and writing into one is not. Refuses `409 openai_not_configured` — a code of its own, and a real one: GPT-Live is OpenAI's and there is no substitute, so a home whose assistant answers perfectly well on Anthropic still cannot *speak* without an OpenAI key. `502 voice_unavailable` when OpenAI itself refuses — a different screen from a `409`, which is something in this home's settings — with the reason in the words a failed chat round uses for it in `detail` (*The voice couldn't start: this home's OpenAI account is out of credit.*; OpenAI's own sentence only for a refusal the hub does not recognise) and, additively, `failure: {provider, kind, transient?}` — the chat note's `failure` less the model, `kind` an open string (`billing`, `usage_limit`, `auth_failed`, `rate_limited`, `overloaded`, `network`, `failed`) and `transient` present where asking again may work. **The hub then attaches its own sideband** to the same session (`wss://api.openai.com/v1/live/sessions/{id}/attach`, the home's key again) and that is where the delegation loop lives: client delegation says "I need help" and nothing else, so somebody has to assemble the request from the transcript and answer it — doing that on the phone added two LAN legs to the one thing on this surface measured in how fast a lamp goes off. The sideband owns three facts outright, on the API's own rule that two connections onto one session need one owner per action: **delegations** (the phone answers none), **the transcript** (`askAloud` writes the person's row and the answer, so a spoken exchange leaves exactly what a typed one does) and **what it cost** (`session.usage.updated` / `session.closed`, the seconds OpenAI will bill). Audio is deliberately not one of them: media stays on the phone's WebRTC connection. `POST /assistant/voice/said` and `POST /assistant/voice/ended` are **gone** with it — the phone wrote the transcript and measured the seconds with a stopwatch only because the hub was not in the session at all |
 | `GET /settings/timezone` · `PUT /settings/timezone` | floor · `automation.manage` | what "at ten in the evening" means. The system's zone seeds it and the database owns it; `400 unknown_timezone` for one `Intl` cannot use, refused here rather than taking every schedule down on every tick |
@@ -2289,6 +2289,78 @@ What a stopped round leaves behind:
   vendor reports usage for a reply it never finished, so the share they had not
   counted is estimated from what had streamed — on the low side.
 
+### A socket that missed a round (`answering`)
+
+A message is acknowledged the moment it is taken and its round is answered on
+the socket — the `step`, `thinking` and `delta` frames, and the `turn` frame
+that says the transcript is ready to read again. **A round outlives the socket
+that was watching it**: a phone put away mid-round has its socket torn down by
+its own system while the round runs on here, writes its rows and announces
+itself to nobody, so the app comes back to a conversation drawn as still
+thinking over an answer it never heard about.
+
+So `GET /assistant/chat/:id` and `GET /automations/chat/:id` carry
+**`answering`**: `true` from the moment a message is taken until its round's
+`turn` frame has gone out — a message waiting behind a running round counts as
+well — and `false` otherwise, a conversation this hub holds no memory of
+included, since a round runs only in memory. An app whose socket comes back
+(`hello`) reads the transcript of each conversation it was drawing a round in:
+`false` means the round has ended and the rows say how, which is everything the
+missed `turn` frame would have led it to; `true` means the rest is still to
+come, on the socket it has now. The route reads `answering` before the rows,
+and a round stops counting only once its rows are written — at the instant its
+`turn` frame goes out, not once whatever the hub tidies away after it is done —
+so a transcript read after `false` always holds how the round ended, and a
+`true` read by a socket that has already subscribed means that frame will reach
+it. Read it **after** `subscribed`, for that reason. **Always present** — its
+absence is a hub older than it, which can only be judged from the rows.
+
+#### What it missed of a round still running: the `chatRound` frame
+
+The frames of a round are increments — a `delta` is the next few words — so a
+socket that comes back to a reply still being written has missed the words
+written while it was away, and drawing the rest on would leave a hole in the
+middle until the round lands. So the moment a socket subscribes to
+`automations`, before anything else of the conversations, it is sent one
+`chatRound` frame for every round running in its member's **own** conversations
+— narrowed by `hub.ai`, and `automation.manage` for the automations agent's,
+like the frames, and never sent to a key:
+
+```
+{"type":"chatRound","chatRound":{
+  "surface":"assistant", "sessionId":"…", "at":"…", "elapsedMs":8400,
+  "since":"<the newest row the agent had written when the round began>",
+  "answering":"<the person's row it answers>",
+  "steps":[{"text":"Thinking","kind":"thinking","detail":"They want the desk lamp on."},
+           {"text":"Looking at the lamps","kind":"reading"},
+           {"text":"I'll switch it on.","kind":"said"},
+           {"text":"Switching the desk lamp on","kind":"acting","detail":"Desk lamp"}],
+  "reply":"Done — the desk", "workedMs":6100}}
+```
+
+It is the round **as its frames left it**, folded the way a client folds them:
+`steps` exactly as the round's first row will store them (`data.steps`, without
+`done`) — the reasoning hung on the step it was produced under, narration a
+round wrote before going back to work as a `said` step — `thinking` the
+reasoning that has arrived since the last step, and then either `reply`, the
+reply from its first word with the `workedMs` its first `delta` carried, or,
+while the round is back at work, `held`: the words it paused on, which a client
+keeps where the reply goes until new ones arrive. `elapsedMs` is how long the
+round has been running, for a client starting its clock from here.
+
+**It comes ahead of every frame still to come**, in the same tick the listeners
+go on, so the frames carry on from exactly where it leaves off — nothing missed
+and nothing twice: draw it, then apply the frames as ever. **`since` says whether
+it is the round you were drawing**: a round that ended while you were away wrote
+its rows before this one began, so a `since` your copy of the transcript does
+not hold means the round on your screen is over — read the transcript again and
+draw this one as a round of its own; absent, this is the conversation's first
+round. A round that has begun writing its answer is not sent: its `turn` frame
+is the next thing to hear. A frame `type` of its own rather than a phase, for
+the `chatTitle` reason — every shipped iOS build reads a phase it has never met
+as `turn` — so a client that does not know it drops it and is where it was
+before.
+
 ### When a round fails, and asking it again (`POST …/chat/:id/retry`)
 
 <a id="asking-a-failed-round-again-post-chatidretry"></a>
@@ -2391,7 +2463,9 @@ of its own:
 ```
 
 Each frame carries the round's **whole list so far**, so replace what you hold
-rather than appending; the row the round then writes carries the same list. It
+rather than appending; the row the round then writes carries the same list. A
+socket that joins a round part-way is told the list as it stands in that
+round's `chatRound` frame (`changes`, absent when there are none). It
 is gated like the conversation's other frames (`hub.ai`, never a key), and a
 client that has never met the type drops it.
 
@@ -2786,15 +2860,19 @@ been removed, and the row read next week is all that is left of them.
 ### Room pictures
 
 A room can be **drawn**: from one to eight phone photos of it, the hub has
-OpenAI's `gpt-image-2.6-sunburst` (the quality half of the 2.6 pair, where
-portraits take the fast one) draw the room as the isometric cutaway a
-smart-home app shows — the two near walls removed, seen close from high above
-its far corner — on a transparent ground. **Beautiful before realistic, but
-nothing moved**: a designed 3D illustration of the room, in a calm palette taken
-from its own colours with soft studio light (and by night, charcoal with the
-room's own lights in warm pools), with every piece of furniture, door and window
-where the photos show it — the layout is what makes it this room, and what the
-markers are read by. **Only what the
+OpenAI's `gpt-image-2.5-sunburst` (the quality half of the 2.5 pair) draw the
+room as the isometric cutaway a smart-home app shows — seen from above one
+corner, the two walls nearest the viewer removed like a dollhouse — on a
+transparent ground, at `xhigh` quality: a 3D artist's model of this very room,
+its real shape and proportions, every piece where the photos show it, in its
+real colours, materials and textures, tidied (and by night, the same render
+with the room's own lamps on). **Rooms are on 2.5 rather than the 2.6 the
+portraits use**, deliberately: on 2.6 a long room with a kitchen niche came out
+under a many-sided outline with the kitchen as a second box, with both prompts
+it was given, while 2.5 draws it as itself — so the words are the first
+drawings', kept verbatim, and a later model is a comparison on real rooms
+before it is a change.
+**Only what the
 photos show is drawn**: the prompt names no device and asks for nothing the
 photos don't have, since a sensor too small to see in a photo would otherwise
 be invented — painted into the room, somewhere it isn't. A device the photos
@@ -2827,12 +2905,27 @@ part way, places nothing rather than half the devices.
 day picture is drawn and its devices read — about a minute — with
 `hasNight: false`; the **night** picture, an edit of the day with the room's
 lamps on and the window dark, is drawn after the answer and announced when it
-lands. It comes back on an opaque ground, and the apps cut it out with the day
-picture's own outline. A night that fails keeps the day. The hub draws **one
+lands. It is asked to change only the light, at `high` quality, because it
+comes back on an opaque ground and the apps cut it out with the day picture's
+own outline. A night that fails keeps the day. The hub draws **one
 room at a time**, day to night, and refuses a second asker (`409
 picture_busy`) rather than queueing a second bill. On a 512 MB board a drawing
 is also the most memory the hub ever holds at once, and it hands it back when
 the night lands ([zigbee.md](zigbee.md#running-both-on-a-board-measured-for-one)).
+
+**A drawing outlives the request that asked for it, and the list says which
+room is being drawn.** The hub finishes a drawing whether or not the app is
+still connected — and an app often is not: a phone put away mid-drawing has its
+request torn down by its own system while the hub carries on, finishes, stores
+the picture and announces it to nobody. So `GET /room-pictures` carries
+`drawing: [{roomId}]` from the moment a drawing is asked for until its night has
+landed or failed, and `drawing: []` otherwise — **always present**, so its
+absence is a hub older than it rather than an idle one. An app whose request
+died that way asks the list until a new picture of its room is in it, and stops
+asking once its room is no longer in `drawing` without one: the drawing ended
+without a picture, or never arrived. The pair never disagrees in between,
+because a drawing ends only after its picture is written and the route reads
+`drawing` before the list.
 
 **It is the house's**, the portraits' argument: drawn once, every member sees
 it, markers included. **A room shows one picture** (`selected: true`): a new
@@ -3423,6 +3516,8 @@ and then:
 {"type":"assistantChat","chat":{…the same shape…}}      the assistant, on the same stream
 {"type":"chatTitle","chatTitle":{surface,sessionId,title,at}}  a conversation was named; surface: assistant | automations
 {"type":"chatChanges","chatChanges":{surface,sessionId,at,changes}}  what the running round has changed in the home so far — the whole list each time
+{"type":"chatRound","chatRound":{surface,sessionId,at,elapsedMs,since?,answering?,steps,thinking?,changes?,reply?,held?,workedMs?}}
+                                                        once, on subscribing to "automations": each round already running in your own conversations
 ```
 
 **A socket opened with an [API key](#api-keys) is the key's view of all of

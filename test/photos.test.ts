@@ -677,6 +677,39 @@ describe.skipIf(!handle)('photos over the API', () => {
     expect(after).toBe(before);
   });
 
+  // Not about photos, but this is the suite that draws rooms through the
+  // server: the list's `drawing` is what an app whose request died with its
+  // connection waits on (`RoomPictureService.drawingNow`).
+  it('lists the room being drawn beside the pictures, until its night has landed', async () => {
+    type Drawn = Awaited<ReturnType<typeof drawRoom>>;
+    const quiet = (await call('GET', '/api/v1/room-pictures', memberToken)).json() as { drawing?: unknown };
+    // There while nothing is drawn, so an app can tell an idle hub from one too old to say.
+    expect(quiet.drawing).toEqual([]);
+
+    const nights: ((value: Drawn) => void)[] = [];
+    drawRoom.mockImplementationOnce(async () => ({ png: Buffer.alloc(4096, 1), usage }));
+    drawRoom.mockImplementationOnce(() => new Promise<Drawn>((resolve) => nights.push(resolve)));
+    const drawn = await call('POST', '/api/v1/room-pictures', memberToken, {
+      roomId: hallId,
+      photos: [{ data: bytes(300).toString('base64'), type: 'image/jpeg' }],
+    });
+    expect(drawn.statusCode).toBe(200);
+    const id = (drawn.json() as { id: string }).id;
+
+    const during = (await call('GET', '/api/v1/room-pictures', memberToken)).json() as {
+      pictures: { id: string }[];
+      drawing: { roomId: string }[];
+    };
+    expect(during.pictures.map((picture) => picture.id)).toContain(id);
+    expect(during.drawing).toEqual([{ roomId: hallId }]);
+
+    await vi.waitFor(() => expect(nights).toHaveLength(1));
+    nights[0]!({ png: Buffer.alloc(4096, 2), usage });
+    await pictures.settled();
+    const over = (await call('GET', '/api/v1/room-pictures', memberToken)).json() as { drawing?: unknown };
+    expect(over.drawing).toEqual([]);
+  });
+
   it('keeps a portrait’s photo when asked, draws it again from it, and lets it go with its portrait', async () => {
     drawMock.mockResolvedValue({ png: Buffer.alloc(2048, 7), usage: { inputTextTokens: 200, inputImageTokens: 0, outputTokens: 4160 } });
     const photo = bytes(500);

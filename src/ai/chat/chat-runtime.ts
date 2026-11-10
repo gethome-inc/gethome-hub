@@ -4,7 +4,7 @@ import { and, asc, count, eq, isNull, lt, max, min, or, type SQL } from 'drizzle
 import type { Db } from '../../db/client.js';
 import { automationChatMessages } from '../../db/schema.js';
 import type { KeepOutcome, PhotoStore } from '../../photos/store.js';
-import type { AutomationChatEvent, HubEventBus } from '../../core/bus.js';
+import type { AutomationChatEvent, ChatRoundSoFar, HubEventBus } from '../../core/bus.js';
 import type { AiProvider, SettingsService } from '../../core/settings.js';
 import type { AiRunKind, AiRunLog, SessionSpend } from '../../core/ai-runs.js';
 import type { Logger } from '../../logging.js';
@@ -791,11 +791,58 @@ export interface ChatRuntimeOptions {
   askTitle?: TitleAsker | null;
 }
 
+/**
+ * What a round has put on a page beyond its steps, as it goes — the half of
+ * `ChatRoundSoFar` that is not already on the session.
+ */
+interface LiveRound {
+  /** The newest row the agent had written when the round began. */
+  since?: string | undefined;
+  /** The person's row the round answers. */
+  answering?: string | undefined;
+  /** The model's reasoning since the last step, not yet hung on one. */
+  reasoning: string;
+  /** The words of the reply being written now, from its first. */
+  saying: string;
+  /** Words the round wrote and then went back to work after, until new ones begin. */
+  held: string;
+}
+
 export interface ChatSession<Turn> {
   id: string;
   memberId: string;
   conversation: AgentConversation<Turn>;
   lastAt: number;
+  /**
+   * How many turns this conversation has taken and not yet finished — the one
+   * running and any queued behind it (`chain`). Counted down only once a turn
+   * has written its rows and sent its `turn` frame, so `isAnswering` saying no
+   * means the transcript already holds how every round ended.
+   */
+  pending: number;
+  /**
+   * The turn now running has sent its `turn` frame (`settle`), so an app has
+   * been told it is over — whatever is still being tidied away behind it: a
+   * rebase after a photo, the photos let go. Cleared when a turn is queued and
+   * when one begins. **What makes `isAnswering` exact**: counted by `pending`
+   * alone, a round stayed "answering" through that tidying, and a phone that
+   * came back in the middle of it was told the rest was still to come over a
+   * socket that had already missed its `turn` frame.
+   */
+  settled?: boolean | undefined;
+  /**
+   * Where the round now running has got to beyond its steps, for a socket that
+   * joins it part-way (`roundsSoFar`). Set when the round begins; gone once it
+   * starts writing its answer, since by then the next thing a page hears about
+   * it is its `turn` frame.
+   */
+  live?: LiveRound | undefined;
+  /**
+   * The newest row the agent has written in this conversation — any role but
+   * the person's — which a round records as `since` when it begins. Read back
+   * off the rows for a revived conversation.
+   */
+  lastAnswer?: string | undefined;
   /**
    * When the conversation opened.
    *
@@ -989,6 +1036,15 @@ function namingFromRows(rows: ChatMessageWire[]): { title?: string; titleTries: 
     ...(title !== undefined ? { title } : {}),
     titleTries: Math.min(own.filter((row) => !isWordless(row)).length, TITLE_MAX_MESSAGES),
   };
+}
+
+/**
+ * The newest row the agent wrote in a conversation read back — what a revived
+ * conversation's next round records as `since` (`ChatRoundSoFar`).
+ */
+function lastAnswerOf(rows: ChatMessageWire[]): { lastAnswer?: string } {
+  const last = rows.findLast((row) => row.role !== 'user');
+  return last !== undefined ? { lastAnswer: last.id } : {};
 }
 
 /**
@@ -1523,6 +1579,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       memberId,
       conversation,
       lastAt: Date.now(),
+      pending: 0,
       startedAt: Date.now(),
       inFlight: Promise.resolve(),
       recordedUsd: 0,
@@ -1640,9 +1697,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
         forget: declinedPriming(target.note),
         retried: { model: turn.model, ...(turn.effort !== undefined ? { effort: turn.effort } : {}) },
       };
-      session.inFlight = session.inFlight.then(() =>
-        this.exchange(session, text, 'send', asked, turn, target.message.id, finished, retry),
-      );
+      this.chain(session, () => this.exchange(session, text, 'send', asked, turn, target.message.id, finished, retry));
       return 'retrying';
     } catch (error) {
       if (claimed !== undefined) this.retrying.delete(claimed);
@@ -1714,6 +1769,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       memberId,
       conversation,
       lastAt: Date.now(),
+      pending: 0,
       startedAt: Date.now(),
       inFlight: Promise.resolve(),
       recordedUsd: 0,
@@ -1727,6 +1783,8 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       // Named already, or how many chances it has had — off the rows, so a
       // restart neither asks for a name twice nor forgets one is owed.
       ...namingFromRows(rows),
+      // What a round begun from here records as `since` — see `roundsSoFar`.
+      ...lastAnswerOf(rows),
     };
     this.sessions.set(sessionId, session);
     this.base.log.info({ sessionId, surface: this.surface }, 'chat: revived from its transcript');
@@ -1790,9 +1848,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
      */
     const asked: TurnOrigin | undefined =
       origin ?? (turn?.effort !== undefined ? { effort: turn.effort } : undefined);
-    session.inFlight = session.inFlight.then(() =>
-      this.exchange(session, text, how, asked, turn, written.id, release),
-    );
+    this.chain(session, () => this.exchange(session, text, how, asked, turn, written.id, release));
     // After the turn is queued, never in front of it — and never awaited.
     this.nameIfUntitled(session, text, turn?.model);
     return {
@@ -2197,6 +2253,106 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
   }
 
   /**
+   * Where every round running in `memberId`'s conversations has got to — what a
+   * socket that subscribes part-way through one is sent first (`chatRound`).
+   *
+   * **The member's own conversations only.** The frames of a round go to every
+   * socket allowed the stream, which is what a handoff card needs; this is a
+   * reconstruction of a round for a page about to draw it, and the pages that
+   * draw a conversation belong to the person whose it is (`revive` reads the
+   * owner back for the same reason).
+   *
+   * Everything here is what the round's frames already said, folded the way a
+   * client folds them: the steps as kept for the round's first row (reasoning
+   * hung on the step it belongs to, narration as `said` steps), the reasoning
+   * not yet hung on one, and the reply from its first word — or, while the
+   * round is back at work, the words it paused on. A round that has begun
+   * writing its answer is not here: its `turn` frame is the next thing to hear.
+   */
+  roundsSoFar(memberId: string): ChatRoundSoFar[] {
+    const now = Date.now();
+    const surface = this.surface === 'automation' ? 'automations' : 'assistant';
+    const rounds: ChatRoundSoFar[] = [];
+    for (const session of this.sessions.values()) {
+      const live = session.live;
+      const began = session.roundStartedAt;
+      if (live === undefined || began === undefined || session.memberId !== memberId) continue;
+      const replying = live.saying.length > 0;
+      rounds.push({
+        surface,
+        sessionId: session.id,
+        at: new Date(now).toISOString(),
+        elapsedMs: Math.max(0, Math.round(now - began)),
+        ...(live.since !== undefined ? { since: live.since } : {}),
+        ...(live.answering !== undefined ? { answering: live.answering } : {}),
+        // The frame's three fields: `done` is the stored copy's alone.
+        steps: session.steps.map((step) => ({
+          text: step.text,
+          kind: step.kind,
+          ...(step.detail !== undefined ? { detail: step.detail } : {}),
+        })),
+        ...(live.reasoning.length > 0 ? { thinking: live.reasoning } : {}),
+        // What the round has already changed in the home: a socket joining
+        // now has missed the `chatChanges` frames that said so, and a round
+        // that sends no further command would send no other.
+        ...(session.changes !== undefined && session.changes.length > 0
+          ? { changes: session.changes as unknown as Record<string, unknown>[] }
+          : {}),
+        ...(replying ? { reply: live.saying } : live.held.length > 0 ? { held: live.held } : {}),
+        ...(replying && session.repliedAt !== undefined
+          ? { workedMs: Math.max(0, Math.round(session.repliedAt - began)) }
+          : {}),
+      });
+    }
+    return rounds;
+  }
+
+  /**
+   * Whether this conversation has a round running, or one waiting behind it —
+   * from the moment its message is taken until its `turn` frame has gone out.
+   *
+   * **For an app whose socket was down when that frame went.** A phone put
+   * away mid-round has its socket torn down by its own system while the round
+   * runs on here, writes its rows and announces itself to nobody — and the
+   * frame was the only thing that told the app to read the transcript again
+   * and take its "thinking" down. So an app that comes back asks: no means
+   * every round it was drawing has ended and the transcript says how; yes
+   * means the rest is still to come, on the socket it has now. A conversation
+   * this hub holds no memory of is answering nothing, since a round runs only
+   * in memory.
+   *
+   * **Until the frame, and not a moment longer.** The running turn stops
+   * counting when `settle` sends it (`ChatSession.settled`) rather than when
+   * the turn has been tidied away — a rebase after a photo or a declined
+   * message runs after the frame, and a phone that asked in the middle of one
+   * was told the rest was still to come over a socket that had already missed
+   * it.
+   */
+  isAnswering(sessionId: string): boolean {
+    const session = this.sessions.get(sessionId);
+    if (session === undefined) return false;
+    // The turn running has stopped counting once its `turn` frame is out —
+    // `settled`, which a turn queued behind it, or one beginning, clears.
+    return session.pending > (session.settled === true ? 1 : 0);
+  }
+
+  /**
+   * Put a turn on this conversation's chain, counted until it has finished.
+   *
+   * The count goes down after the turn's own promise settles — which is after
+   * its rows are written and its `turn` frame is sent, since `exchange` awaits
+   * both — and never rejects anything `inFlight` would not have: `exchange`
+   * wraps every path, the failing ones included.
+   */
+  private chain(session: ChatSession<Turn>, turn: () => Promise<void>): void {
+    session.pending += 1;
+    session.settled = false;
+    session.inFlight = session.inFlight.then(turn).finally(() => {
+      session.pending -= 1;
+    });
+  }
+
+  /**
    * Stop the round this conversation is running, part-way.
    *
    * **The round somebody is watching, and nothing else.** A message sent while
@@ -2260,6 +2416,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     // a stop pressed while the conversation is being moved still lands.
     const halt = new AbortController();
     session.halt = halt;
+    session.settled = false;
     try {
       await this.exchangeHeld(session, text, how, origin, turn, messageId, halt.signal, retry);
     } finally {
@@ -2381,9 +2538,11 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       ).catch(() => undefined);
       this.settle(session, 'stopped');
     }
-    // A round that wrote nothing leaves no clock behind for a later row.
+    // A round that wrote nothing leaves no clock behind for a later row, and
+    // nothing for a socket joining later to be told is still under way.
     session.roundStartedAt = undefined;
     session.repliedAt = undefined;
+    session.live = undefined;
     // A declined message leaves the model's memory before the next turn
     // begins, and so does a photo, whatever this turn ended as — one rebase
     // does both. See `rebase`.
@@ -2677,7 +2836,14 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
      * long as the wait. Written onto that step's `detail` it survives with the
      * rest of the round's working.
      */
-    let reasoning = '';
+    const live: LiveRound = {
+      reasoning: '',
+      saying: '',
+      held: '',
+      ...(session.lastAnswer !== undefined ? { since: session.lastAnswer } : {}),
+      ...(session.answering !== undefined ? { answering: session.answering } : {}),
+    };
+    session.live = live;
     /**
      * Hang whatever has been reasoned onto the step it was produced under.
      *
@@ -2688,12 +2854,22 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
      * detail belongs to nothing else either.
      */
     const settleReasoning = (): void => {
-      const said = reasoning.trim();
-      reasoning = '';
+      const said = live.reasoning.trim();
+      live.reasoning = '';
       if (said.length === 0) return;
       const last = session.steps[session.steps.length - 1];
       if (last === undefined || last.detail !== undefined) return;
       last.detail = clip(said, STEP_DETAIL_LIMIT);
+    };
+    /**
+     * The round is back at work, so the words it was writing were narration:
+     * a page keeps them where the reply goes until new words begin (`held`),
+     * and the next words are a reply of their own (`saying`). The app's
+     * `settleInterimProse`, kept here for a socket that joins part-way.
+     */
+    const backToWork = (): void => {
+      if (live.saying.trim().length > 0) live.held = live.saying;
+      live.saying = '';
     };
     /** The hand-over this turn has already said, so a conversation the API
      *  keeps routing to another model says it once rather than every round. */
@@ -2718,6 +2894,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
           // Whatever was reasoned belongs to the step it was reasoned under,
           // which is the one already there rather than this one.
           settleReasoning();
+          backToWork();
           // Back at work, so whatever was said before this was not the reply
           // that ends the round — see `ChatSession.repliedAt`.
           session.repliedAt = undefined;
@@ -2746,13 +2923,14 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
         // twice.
         onSaid: (text) => {
           settleReasoning();
+          backToWork();
           // Narration, and the round is going back to work: its reply has not
           // begun yet.
           session.repliedAt = undefined;
           this.keep(session, { text: clip(text, STEP_TEXT_LIMIT), kind: 'said' });
         },
         onThinking: (delta) => {
-          reasoning += delta;
+          live.reasoning += delta;
           this.emit({
             sessionId: session.id,
             phase: 'thinking',
@@ -2775,6 +2953,9 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
           // `AutomationChatEvent.workedMs`.
           const begins = session.repliedAt === undefined && session.roundStartedAt !== undefined;
           session.repliedAt ??= now;
+          // New words take the place of any the round had paused on.
+          if (live.saying.length === 0) live.held = '';
+          live.saying += delta;
           this.emit({
             sessionId: session.id,
             phase: 'delta',
@@ -2973,6 +3154,10 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
 
   /** Say the exchange is over and the stored messages are what to draw. */
   protected settle(session: ChatSession<Turn>, kind: string): void {
+    // Before the frame, so anything that hears it — and a transcript read the
+    // moment after — already finds the round over.
+    session.settled = true;
+    session.live = undefined;
     this.emit({
       sessionId: session.id,
       phase: 'turn',
@@ -3055,6 +3240,9 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     // rule — see `noteChange`.
     const changes = role === 'user' ? undefined : session.changes;
     if (changes !== undefined) session.changes = undefined;
+    // The round is writing its answer, so the next thing a page hears about
+    // it is its `turn` frame — nothing is left to tell a socket joining now.
+    if (role !== 'user') session.live = undefined;
     /**
      * **How long the round took, on the same row its working goes on.** An
      * integer of milliseconds from the moment the round began to the moment
@@ -3094,7 +3282,9 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
           }
         : data;
 
-    return this.writeRow(session.id, role, text, payload, memberId);
+    const row = await this.writeRow(session.id, role, text, payload, memberId);
+    if (role !== 'user') session.lastAnswer = row.id;
+    return row;
   }
 
   /**

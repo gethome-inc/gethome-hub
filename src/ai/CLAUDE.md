@@ -1348,7 +1348,13 @@ domains — update them in the same change.
   phase it has never met as `turn` and ends the round on screen, so the name
   goes out as `{type: 'chatTitle', chatTitle: …}`, which every client drops
   when it does not know it — and anything else new for the chat stream takes
-  the same road. **Stored on the person's row** (`data.chatTitle`) and announced
+  the same road, as `chatRound` did: a round as far as it has got
+  (`ChatRuntime.roundsSoFar`), sent to a socket the moment it subscribes and
+  ahead of every frame still to come, because a `delta` is only the next few
+  words and a phone that came back mid-reply otherwise drew a hole. What it is
+  built from is kept beside the steps as the round goes (`ChatSession.live`);
+  a new callback that changes what a page shows has to keep its half there
+  too, or the snapshot and the frames disagree. **Stored on the person's row** (`data.chatTitle`) and announced
   only once written, so `list()` repeats what the socket said and a revival
   reads it back rather than asking twice. **`NONE` is an answer, not a
   failure**: the next message is asked about (up to `TITLE_MAX_MESSAGES`) and

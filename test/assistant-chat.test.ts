@@ -1460,6 +1460,7 @@ describe('the assistant', () => {
     });
     const frames: { sessionId: string; changes: readonly Record<string, unknown>[] }[] = [];
     events.on('chatChanges', (event) => frames.push(event));
+    let joining: readonly Record<string, unknown>[] | undefined;
     let assistant!: AssistantChat;
     ({ assistant } = await assistantFor([{ kind: 'said', text: 'Done.' }], {
       devices: home.devices,
@@ -1469,6 +1470,8 @@ describe('the assistant', () => {
         ).toolContext(memberId, sessionId);
         for (const [deviceId, command] of commands) await tools.control(deviceId, 1, command);
         apply();
+        // What a socket joining the round now would be told.
+        joining = assistant.roundsSoFar(memberId).find((round) => round.sessionId === sessionId)?.changes;
       },
     }));
     if (spoken) {
@@ -1481,12 +1484,12 @@ describe('the assistant', () => {
     }
     const rows = await assistant.transcript(sessionId);
     const answer = rows.find((row) => row.role === 'agent')!;
-    return { assistant, sessionId, answer, frames, rows };
+    return { assistant, sessionId, answer, frames, rows, joining };
   };
 
   it('says on the reply what it changed and what was there before, as commands', async () => {
     const home = changedHome();
-    const { answer, frames, sessionId, rows } = await roundThatSends(
+    const { answer, frames, sessionId, rows, joining } = await roundThatSends(
       home,
       [
         [home.lamp, { type: 'power', on: false }],
@@ -1518,6 +1521,8 @@ describe('the assistant', () => {
     expect(frames.map((frame) => frame.changes.length)).toEqual([1, 2]);
     expect(frames.at(-1)).toMatchObject({ surface: 'assistant', sessionId });
     expect(frames.at(-1)?.changes).toEqual(changes);
+    // …and a socket that joined the round part-way was told the same list.
+    expect(joining).toEqual(changes);
     // The person's own row never carries them.
     expect((rows[0]?.data as { changes?: unknown } | undefined)?.changes).toBeUndefined();
   });
