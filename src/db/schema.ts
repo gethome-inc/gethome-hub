@@ -844,6 +844,13 @@ export const automationRuns = sqliteTable(
     trigger: text('trigger').notNull(),
     /** One sentence naming what set it off. */
     cause: text('cause').notNull(),
+    /**
+     * The same cause in the hub's exact terms — the device, the path, the
+     * comparator and the value as stored — which the sentence above
+     * deliberately leaves out. Null on a run written before this column, and
+     * on a cause that has no terms behind it (somebody pressed a button).
+     */
+    causeDetail: text('cause_detail'),
     /** ran | skipped | refused | failed | interrupted */
     outcome: text('outcome').notNull(),
     durationMs: integer('duration_ms'),
@@ -852,6 +859,29 @@ export const automationRuns = sqliteTable(
   },
   (table) => [index('automation_runs_automation').on(table.automationId, table.at)],
 );
+
+/**
+ * Whether a rule is working, kept across a restart.
+ *
+ * One row per rule: when it last ran and how that ended, how many times it has
+ * fired in the home's own day, the last thing that went wrong. `automation_runs`
+ * cannot answer any of that — it keeps twenty traces per rule, so a rule that
+ * fires every few seconds has a minute of them — and the engine holds the
+ * numbers in memory, which an update at four in the morning would otherwise
+ * reset to "never ran".
+ *
+ * **Written on a timer, never per firing** — `STATE_FLUSH_MS`'s rule: a motion
+ * rule fires all day and an SD card has a finite number of writes. The row is
+ * one JSON document because every field in it is the engine's own and is read
+ * back whole; a field a later build adds is simply absent from an older row.
+ */
+export const automationStatus = sqliteTable('automation_status', {
+  automationId: text('automation_id')
+    .primaryKey()
+    .references(() => automations.id, { onDelete: 'cascade' }),
+  data: text('data', { mode: 'json' }).notNull(),
+  updatedAt: createdAt('updated_at'),
+});
 
 /**
  * What was said while a rule was being written.

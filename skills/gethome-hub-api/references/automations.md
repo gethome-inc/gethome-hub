@@ -159,9 +159,25 @@ A mode with an "off" side:
 ## Why it fired
 
 `GET /api/v1/automations/{automationId}/runs` answers each firing with its
-`trigger`, `cause` (a sentence), `outcome` (`ran`, `skipped`, `refused`,
-`failed`, `interrupted`) and the commands sent **and refused** — the hub's own
-guards decline to flap a relay, and the trace says so.
+`trigger`, `cause`, `outcome` (`ran`, `skipped`, `refused`, `failed`,
+`interrupted`) and `steps`: the commands sent **and refused** — the hub's own
+guards decline to flap a relay, and the trace says so. `cause` and each step's
+`summary` are sentences for a person ("Motion in the Living Room", "Hall lamp
+turned on"); do not parse them. The exact terms are beside them, in
+`causeDetail` (may be `null`) and a step's `detail`.
+
+Each rule in `GET /api/v1/automations` also carries two things worth reading
+before asking for traces:
+
+- `status` — `today: {date, runs, problems, skipped}` for the home's own day,
+  and, when there is one, `lastRun: {at, outcome, cause, problem?}`,
+  `lastProblem: {at, outcome, reason}`, `lastSkipped`, `lastPressed`,
+  `activeSince` (a mode that is on) and `nextRunAt` (a rule on a clock). A
+  *skip* is the rule declining before it acts and is not a problem.
+- `devices` — `{reads: [deviceId…], controls: [deviceId…]}`: what the rule
+  watches and what it sends commands to, as the home is right now.
+
+An older hub sends neither field; treat absence as "not known", not as zero.
 
 ## Templates
 

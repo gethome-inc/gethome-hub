@@ -261,6 +261,47 @@ A trace records the commands a guard **refused** as well as the ones it sent:
 "nothing happened" and "the hub declined to switch that relay for the fortieth
 time this hour" look identical from outside.
 
+### A trace is written in the home's words
+
+Both apps print a run's `cause` and each step's `summary` exactly as they
+arrive, so those two strings are made to be read (`narrate.ts`): "Motion in the
+Living Room", "19:30", "Pressed by George"; "Motion LED turned on", "Bedroom
+blind closed to 40%", "Hall lamp didn’t answer — it was offline". Three rules.
+**The home's names, never the schema's** — a device is what the home calls it
+and a room's reading is the room's ("Temperature in the Bedroom went above
+25 °C"), because nobody in the house has ever said a capability path. **The
+exact terms are kept beside the sentence** — `causeDetail` on the run, `detail`
+on a step — since they are what somebody debugging a rule is looking for.
+**Past tense**: the storyboard's "goes above" is a rule waiting, a trace's "went
+above" is the moment it stopped. A `cause` is read under the rule's own name and
+does not repeat it; the one manual-run row in the activity log is read without
+it, and keeps its whole sentence ("Anna pressed Leaving").
+
+A firing declined before it began used to leave a trace with no steps and so
+nothing to say why. It now carries one line — "A condition didn’t hold, so
+nothing ran."
+
+### Whether a rule is working
+
+`automation_runs` cannot say how a rule's day has gone: twenty traces is a
+minute of a rule that fires every few seconds. So the engine keeps a small
+status per rule (`status.ts`) — the last run and how it ended, today's runs,
+problems and skips in the home's own day, the last problem and the last skip as
+sentences, when a button was pressed, since when a mode has been on — and works
+out when a rule on a clock fires next. It rides on every rule the API sends;
+[the API reference](api.md#whether-a-rule-is-working) has the fields.
+
+| | Bound | Why |
+|---|---|---|
+| `automation_status` | one row per rule | written about once a minute and when the hub stops, **never per firing** — `STATE_FLUSH_MS`'s rule, for a motion rule that fires all day |
+| `automationStatus` frames | one per rule per ten seconds | the first at once, then one catch-up — a status is glanced at, a trace is watched |
+
+A run, a skip and a problem are kept apart because they answer three questions:
+a skip is a rule declining before it acts, which for "only at night" is most
+firings and is the rule working; a problem is a run in which something asked
+for did not happen. The idempotence guard declining a command — the lamp was
+already on — is neither.
+
 ---
 
 ## The catalog is generated
@@ -488,6 +529,15 @@ an answer that belongs to somebody else.
 says one thing: *this rule is not one room's*.
 
 ---
+
+### The devices a rule uses
+
+The same walk as a list (`automationDevices`): every rule on the wire carries
+`devices: {reads, controls}` — the ids it watches (triggers and conditions) and
+the ids it sends commands to (actions and a mode's off-branch), resolved against
+the home as it is right now. It is what lets a device's page name the rules that
+use it without an app decoding a document, and it moves the way `roomId` does:
+with the home, not only with the rule.
 
 ## Writing one in conversation
 

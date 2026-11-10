@@ -141,6 +141,13 @@
       "when": 1793654242146,
       "tag": "0019_kept_photos",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1794292442956,
+      "tag": "0020_automation_status",
+      "breakpoints": true
     }
   ]
 }

@@ -1,6 +1,6 @@
 import { and, asc, desc, eq, lt, sql } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
-import { automationRuns, automationVersions, automations } from '../db/schema.js';
+import { automationRuns, automationStatus, automationVersions, automations } from '../db/schema.js';
 import { automationDocumentSchema, type AutomationDocument } from './schema.js';
 
 /**
@@ -74,6 +74,8 @@ export interface AutomationRunRecord {
   automationId: string;
   trigger: string;
   cause: string;
+  /** The cause in the hub's exact terms — see the column. */
+  causeDetail?: string;
   outcome: 'ran' | 'skipped' | 'refused' | 'failed' | 'interrupted';
   durationMs: number;
   steps: AutomationRunStep[];
@@ -276,6 +278,7 @@ export class AutomationStore {
         automationId: run.automationId,
         trigger: run.trigger,
         cause: run.cause.slice(0, 400),
+        ...(run.causeDetail !== undefined ? { causeDetail: run.causeDetail.slice(0, 400) } : {}),
         outcome: run.outcome,
         durationMs: run.durationMs,
         steps: run.steps.slice(0, MAX_RUN_STEPS),
@@ -283,6 +286,45 @@ export class AutomationStore {
       await this.pruneRuns(run.automationId);
     } catch {
       // See above.
+    }
+  }
+
+  /**
+   * What the engine remembered about each rule before it last stopped —
+   * opaque here, because the shape is the engine's (`status.ts`) and a row an
+   * older or newer build wrote has to be read by whoever knows what to make
+   * of it. Never throws: a hub that cannot read this starts with every rule
+   * saying it has not run yet, which is true of this boot.
+   */
+  async loadStatus(): Promise<Map<string, unknown>> {
+    try {
+      const rows = await this.db.select().from(automationStatus);
+      return new Map(rows.map((row) => [row.automationId, row.data]));
+    } catch {
+      return new Map();
+    }
+  }
+
+  /**
+   * Write down what the engine remembers, for the rules it says have moved.
+   *
+   * Called on a timer, never per firing — see the table. A rule deleted in the
+   * meantime is a foreign key refusing its row, which is the right outcome and
+   * must not take the other rows with it, so each is written on its own.
+   */
+  async saveStatus(entries: ReadonlyMap<string, unknown>): Promise<void> {
+    for (const [automationId, data] of entries) {
+      try {
+        await this.db
+          .insert(automationStatus)
+          .values({ automationId, data, updatedAt: new Date() })
+          .onConflictDoUpdate({
+            target: automationStatus.automationId,
+            set: { data, updatedAt: new Date() },
+          });
+      } catch {
+        // See above.
+      }
     }
   }
 

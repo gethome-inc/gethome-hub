@@ -27,6 +27,7 @@ import {
   aiRuns,
   automationChatMessages,
   automationRuns,
+  automationStatus,
   automationVersions,
   automations,
   deviceFavorites,
@@ -82,6 +83,7 @@ export async function openTestDb(): Promise<TestDb | null> {
 export async function resetDb(db: Db): Promise<void> {
   await db.delete(activity);
   await db.delete(automationRuns);
+  await db.delete(automationStatus);
   await db.delete(automationVersions);
   await db.delete(automations);
   // Transcripts outlive the conversations that wrote them by a fortnight,
