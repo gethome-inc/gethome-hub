@@ -1461,8 +1461,21 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       .filter((device) => device.roomId === roomId)
       .map((device) => ({ id: device.id, name: device.name, kind: device.endpoints[0]?.deviceKind ?? 'appliance' }));
 
-  /** Every room's pictures, newest first. Reading is the floor. */
+  /**
+   * Every room's pictures, newest first, and the room being drawn right now.
+   * Reading is the floor.
+   *
+   * `drawing` is how an app whose request died with its connection — a phone
+   * put away mid-drawing — tells a drawing still under way from one that ended
+   * without a picture (`RoomPictureService.drawingNow`). **Always present**,
+   * `[]` while nothing is drawn, so its absence is an older hub rather than an
+   * idle one. **Read before the list**: a drawing ends only after its picture
+   * is written, so a list read afterwards holds the picture of any drawing
+   * this says is over — read the other way round, one whose night failed at
+   * once could end in between and be neither drawing nor drawn.
+   */
   app.get('/api/v1/room-pictures', authed, async () => {
+    const drawing = roomPictures.drawingNow();
     const pictures = roomPictures.list();
     // How many kept photos each drawing was made from — counted here rather
     // than written into the manifest, so a photo deleted on its own is never
@@ -1473,6 +1486,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         const count = kept.get(picture.id)?.length ?? 0;
         return count > 0 ? { ...picture, keptPhotos: count } : picture;
       }),
+      drawing,
     };
   });
 

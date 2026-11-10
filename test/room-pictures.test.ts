@@ -221,6 +221,36 @@ describe('RoomPictureService', () => {
     expect(pictures.isDrawing).toBe(false);
   });
 
+  // What an app whose request died with its connection reads to know whether
+  // to keep waiting (`GET /room-pictures`'s `drawing`). The answer it waits for
+  // is the picture in the list, so what is pinned is the overlap: the picture
+  // is listed before the room stops being drawn, never after.
+  it('says which room it is drawing from the ask until the night has landed, and none once it is over', async () => {
+    const pending: ((value: { png: Buffer; usage: typeof usage }) => void)[] = [];
+    const draw = vi.fn(() => new Promise<{ png: Buffer; usage: typeof usage }>((resolve) => pending.push(resolve)));
+    const { pictures } = service({ draw });
+    expect(pictures.drawingNow()).toEqual([]);
+
+    const first = pictures.draw(input);
+    expect(pictures.drawingNow()).toEqual([{ roomId: 'room-living' }]);
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    pending[0]!({ png: png(1), usage });
+    const record = await first;
+    // Answered, with its night still being drawn: listed, and still drawing.
+    expect(pictures.list().map((listed) => listed.id)).toContain(record.id);
+    expect(pictures.drawingNow()).toEqual([{ roomId: 'room-living' }]);
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    pending[1]!({ png: png(2), usage });
+    await pictures.settled();
+    expect(pictures.drawingNow()).toEqual([]);
+
+    // A day that fails is over at once, with nothing listed for it.
+    const failing = service({ draw: vi.fn().mockRejectedValue(new RoomPictureDrawError('no', 'billing')) });
+    await expect(failing.pictures.draw({ ...input, roomId: 'room-bed' })).rejects.toBeInstanceOf(RoomPictureDrawError);
+    expect(failing.pictures.drawingNow()).toEqual([]);
+    expect(failing.pictures.list()).toEqual([]);
+  });
+
   it('never reads over a marker a person placed', async () => {
     const { pictures, locate } = service();
     const record = await pictures.draw(input);

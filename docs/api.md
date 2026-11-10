@@ -262,7 +262,7 @@ than no button.
 | `GET /devices/:id/portraits` | floor | the pictures this home has had drawn of a device, newest first: `{id, at, bytes, provider, model, fromPhoto, selected, drawnBy?, photo?}`. `photo: {id, bytes}` is the [kept photo](#photos-the-hub-keeps) it was drawn from, present only where the home keeps those. `drawnBy: {id, name}` is who had it drawn — `id` is null once that person has left the home and absent altogether on a portrait drawn before the hub recorded it, so an app draws no line rather than an empty one. Reading is the floor — a portrait is what the device *looks like*, so a guest whose dashboard could not draw it would be looking at a different home. See [below](#device-portraits) |
 | `GET /portraits/:portraitId` | floor | the PNG itself — `image/png`, a strong `ETag` and `Cache-Control: immutable`, because a portrait's bytes never change (a new one gets a new id) |
 | `POST /devices/:id/portraits` | `hub.ai` | draw one. `{photo?: base64, photoType?, keepPhoto?, keptPhotoId?}` — absent draws from the device's kind alone; `keepPhoto: true` keeps the photo with the portrait where the home keeps portrait photos, and `keptPhotoId` draws again from one this device's portraits already keep (`404 photo_not_found` for any other; a `photo` beside it is a 400). The answer carries `photosKept: {kept, reason?}` when either was sent — see [below](#photos-the-hub-keeps). Synchronous, and it holds the request for the minutes an image takes. `409 openai_not_configured` (its own code: portraits are OpenAI's job, and a hub can be configured for recognition and not for this), `409 portrait_busy`, `409 no_space`, `502 {error:"provider_failed", kind, detail}` carrying OpenAI's own sentence |
-| `GET /room-pictures` · `GET /room-pictures/:id/day\|night` | floor | pictures of the home's rooms, newest first: `{pictures: [{id, roomId, at, orientation, width, height, hasNight, photoCount, markers, bytes, model, drawnBy?, selected?, keptPhotos?}]}` — `keptPhotos` is how many of the photos it was drawn from the hub keeps, absent at none, and one picture's PNG, immutable — see [below](#room-pictures) |
+| `GET /room-pictures` · `GET /room-pictures/:id/day\|night` | floor | pictures of the home's rooms, newest first, and the room being drawn: `{pictures: [{id, roomId, at, orientation, width, height, hasNight, photoCount, markers, bytes, model, drawnBy?, selected?, keptPhotos?}], drawing: [{roomId}]}` — `keptPhotos` is how many of the photos it was drawn from the hub keeps, absent at none; `drawing` is `[]` while nothing is drawn, and absent only on a hub older than it — and one picture's PNG, immutable — see [below](#room-pictures) |
 | `POST /room-pictures` · `POST /room-pictures/:id/locate` | `hub.ai` | draw a room from photos of it (`{roomId, orientation?, photos: [{data, type}], keepPhotos?, keptPhotoIds?}`, one to eight between the two), or read its devices off a picture again. `keepPhotos: true` keeps the new photos with the drawing where the home keeps room photos; `keptPhotoIds` draws again from photos this room already keeps (`404 photo_not_found` for any other). The answer carries `photosKept: {kept, reason?}` when either was sent — see [below](#photos-the-hub-keeps). `409 openai_not_configured`, `409 picture_busy`, `409 no_space`, `502 {error:"provider_failed", kind, detail}` |
 | `PATCH /room-pictures/:id` · `DELETE /room-pictures/:id` | `home.structure` | where the devices stand on a picture (`{markers: [{deviceId, x, y}]}`, the whole list) and/or show this picture for its room (`{selected: true}`), or take the picture away |
 | `PATCH /devices/:id/portraits` | `device.edit` | `{selected: id\|null}` — which one the home sees. `null` is a *state*: the procedural sphere, chosen over every picture there is |
@@ -2543,6 +2543,20 @@ room at a time**, day to night, and refuses a second asker (`409
 picture_busy`) rather than queueing a second bill. On a 512 MB board a drawing
 is also the most memory the hub ever holds at once, and it hands it back when
 the night lands ([zigbee.md](zigbee.md#running-both-on-a-board-measured-for-one)).
+
+**A drawing outlives the request that asked for it, and the list says which
+room is being drawn.** The hub finishes a drawing whether or not the app is
+still connected — and an app often is not: a phone put away mid-drawing has its
+request torn down by its own system while the hub carries on, finishes, stores
+the picture and announces it to nobody. So `GET /room-pictures` carries
+`drawing: [{roomId}]` from the moment a drawing is asked for until its night has
+landed or failed, and `drawing: []` otherwise — **always present**, so its
+absence is a hub older than it rather than an idle one. An app whose request
+died that way asks the list until a new picture of its room is in it, and stops
+asking once its room is no longer in `drawing` without one: the drawing ended
+without a picture, or never arrived. The pair never disagrees in between,
+because a drawing ends only after its picture is written and the route reads
+`drawing` before the list.
 
 **It is the house's**, the portraits' argument: drawn once, every member sees
 it, markers included. **A room shows one picture** (`selected: true`): a new
