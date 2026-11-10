@@ -95,7 +95,8 @@ orb. `gpt-image-2.6-sunburst`, the quality half, is deliberately not taken: a
 portrait is one matte object on a transparent ground in a fixed palette, drawn at
 card size by every surface that shows it, so the slower tier would spend its time
 on detail this render throws away. A room is the opposite case — the whole screen
-and a dozen things in it — and takes it ([room pictures](api.md#room-pictures)).
+and a dozen things in it — and takes the quality half, on 2.5, where 2.6 split a
+long room into two boxes ([room pictures](api.md#room-pictures)).
 
 A transparent cut-out is still the whole point — the apps float the object over
 their own glow and contact shadow, so a boxed image would be a grey slab on the

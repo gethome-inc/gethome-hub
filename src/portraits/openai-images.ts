@@ -21,7 +21,8 @@
  * taken: a portrait here is one matte object on a transparent ground in a fixed
  * palette, drawn at card size by every surface that shows it, so the tier that
  * spends longer would spend it on detail this render throws away. A room is the
- * opposite case, and takes it (`src/room-pictures/draw.ts`).
+ * opposite case, and takes the quality half — on 2.5, where 2.6 split a long
+ * room into two boxes (`src/room-pictures/draw.ts`).
  *
  * **A transparent cut-out is still the whole point** — the apps float the object
  * over their own glow and contact shadow, so a baked-in white square would be a
