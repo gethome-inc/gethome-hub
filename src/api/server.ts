@@ -5068,6 +5068,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   app.get('/api/v1/automations/chat/:id', memberOnlyNeeds('automation.manage'), async (request, reply) => {
     if (await chatGuard(request, reply)) return reply;
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    // Read first — see the assistant's route below.
+    const answering = deps.automationChat.isAnswering(id);
     // The same `spend` block the list carries, so a chat opened straight from
     // a link says what it cost without the list having been read first.
     const spend = await deps.automationChat.spend(id);
@@ -5077,6 +5079,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     return {
       sessionId: id,
       live: deps.automationChat.isLive(id),
+      answering,
       ...(spend !== undefined ? { spend } : {}),
       ...(handedFrom !== undefined ? { handedFrom } : {}),
       messages: await deps.automationChat.transcript(id),
@@ -5191,10 +5194,15 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
 
   app.get('/api/v1/assistant/chat/:id', memberOnlyNeeds('hub.ai'), async (request) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    // Before the transcript, for `drawing`'s reason on the room pictures: a
+    // round stops counting only once its rows are written, so a transcript
+    // read after "not answering" holds how every round ended.
+    const answering = deps.assistantChat.isAnswering(id);
     const spend = await deps.assistantChat.spend(id);
     return {
       sessionId: id,
       live: deps.assistantChat.isLive(id),
+      answering,
       ...(spend !== undefined ? { spend } : {}),
       messages: await deps.assistantChat.transcript(id),
     };

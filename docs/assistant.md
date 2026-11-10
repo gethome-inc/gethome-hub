@@ -84,6 +84,19 @@ awaited before the `turn` frame so an app re-reading on that signal finds the
 round it has just watched, and swallowed if the write fails, because
 bookkeeping must not be what ends a turn.
 
+**And a round outlives the socket that was watching it**, so the transcript says
+whether one is still going. A phone put away mid-round has its socket torn down
+by its own system while the round runs on, writes its rows and sends a `turn`
+frame to nobody — and that frame was the app's only reason to read the
+transcript again and take its "thinking" down. `GET …/chat/:id` carries
+`answering` (`ChatRuntime.isAnswering`): turns taken and not yet finished, the
+one running and any queued behind it, counted by `chain` and counted down only
+after a turn's rows are written and its frame has gone, and read by the route
+before the rows. An app whose socket comes back reads it for every
+conversation it was drawing a round in, and lands the ones that say no exactly
+as the missed frame would have. `docs/api.md` (*A socket that missed a round*)
+has the contract.
+
 It was all inside `AutomationChat`, and none of it was ever about automations.
 A subclass supplies three things and nothing else: which model and prompt open
 a conversation, what to write down for the turn arms only it can produce, and

@@ -785,6 +785,13 @@ export interface ChatSession<Turn> {
   conversation: AgentConversation<Turn>;
   lastAt: number;
   /**
+   * How many turns this conversation has taken and not yet finished — the one
+   * running and any queued behind it (`chain`). Counted down only once a turn
+   * has written its rows and sent its `turn` frame, so `isAnswering` saying no
+   * means the transcript already holds how every round ended.
+   */
+  pending: number;
+  /**
    * When the conversation opened.
    *
    * Separate from `lastAt`, which every message and every finished turn moves
@@ -1504,6 +1511,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       memberId,
       conversation,
       lastAt: Date.now(),
+      pending: 0,
       startedAt: Date.now(),
       inFlight: Promise.resolve(),
       recordedUsd: 0,
@@ -1621,9 +1629,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
         forget: declinedPriming(target.note),
         retried: { model: turn.model, ...(turn.effort !== undefined ? { effort: turn.effort } : {}) },
       };
-      session.inFlight = session.inFlight.then(() =>
-        this.exchange(session, text, 'send', asked, turn, target.message.id, finished, retry),
-      );
+      this.chain(session, () => this.exchange(session, text, 'send', asked, turn, target.message.id, finished, retry));
       return 'retrying';
     } catch (error) {
       if (claimed !== undefined) this.retrying.delete(claimed);
@@ -1695,6 +1701,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
       memberId,
       conversation,
       lastAt: Date.now(),
+      pending: 0,
       startedAt: Date.now(),
       inFlight: Promise.resolve(),
       recordedUsd: 0,
@@ -1771,9 +1778,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
      */
     const asked: TurnOrigin | undefined =
       origin ?? (turn?.effort !== undefined ? { effort: turn.effort } : undefined);
-    session.inFlight = session.inFlight.then(() =>
-      this.exchange(session, text, how, asked, turn, written.id, release),
-    );
+    this.chain(session, () => this.exchange(session, text, how, asked, turn, written.id, release));
     // After the turn is queued, never in front of it — and never awaited.
     this.nameIfUntitled(session, text, turn?.model);
     return {
@@ -2175,6 +2180,39 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
   /** Whether this conversation can still be continued, or is history. */
   isLive(sessionId: string): boolean {
     return this.sessions.has(sessionId);
+  }
+
+  /**
+   * Whether this conversation has a round running, or one waiting behind it —
+   * from the moment its message is taken until its `turn` frame has gone out.
+   *
+   * **For an app whose socket was down when that frame went.** A phone put
+   * away mid-round has its socket torn down by its own system while the round
+   * runs on here, writes its rows and announces itself to nobody — and the
+   * frame was the only thing that told the app to read the transcript again
+   * and take its "thinking" down. So an app that comes back asks: no means
+   * every round it was drawing has ended and the transcript says how; yes
+   * means the rest is still to come, on the socket it has now. A conversation
+   * this hub holds no memory of is answering nothing, since a round runs only
+   * in memory.
+   */
+  isAnswering(sessionId: string): boolean {
+    return (this.sessions.get(sessionId)?.pending ?? 0) > 0;
+  }
+
+  /**
+   * Put a turn on this conversation's chain, counted until it has finished.
+   *
+   * The count goes down after the turn's own promise settles — which is after
+   * its rows are written and its `turn` frame is sent, since `exchange` awaits
+   * both — and never rejects anything `inFlight` would not have: `exchange`
+   * wraps every path, the failing ones included.
+   */
+  private chain(session: ChatSession<Turn>, turn: () => Promise<void>): void {
+    session.pending += 1;
+    session.inFlight = session.inFlight.then(turn).finally(() => {
+      session.pending -= 1;
+    });
   }
 
   /**
