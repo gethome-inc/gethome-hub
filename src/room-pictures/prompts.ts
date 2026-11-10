@@ -18,23 +18,19 @@
  * it wasn't — a marker, which a person can move, rather than an object painted
  * into their room.
  *
- * **This room at its best, drawn as one box.** The room is a 3D render of
- * itself in its own colours, materials and patterns, tidied and polished — what
- * the first drawings asked for, on 2026-10-23, and still the best of them on
- * the owner's own flat. Later the same day it became a designed illustration
- * instead: a curated palette with patterns calmed to solid tones, the room seen
- * close and filling the picture edge to edge. On 2.6 Sunburst that came apart on
- * a long room with a kitchen niche at one end — drawn under a many-sided
- * outline, the kitchen a second box in front of the first (2026-11-10). So the
- * geometry is written as a specification rather than left to the model's
- * planning: one room on one level floor, one solid box, two walls standing and
- * two cut low, the whole room in the frame with space around it. That is
- * OpenAI's own advice for 2.6 — a fully specified design leaves a model
- * planning at `high` complexity little to reinterpret. **The arrangement is
- * kept**: what stands against which wall, and in what order. Distances may be
- * evened out and an alcove folded into the box, since a room recognised at a
- * glance is the point, and the devices' markers are read off the finished
- * picture either way.
+ * **The words that drew the owner's flat best, kept verbatim, on the model that
+ * drew it.** The first drawings, on 2026-10-23, asked for a 3D artist's model of
+ * this very room — its real shape and proportions, every piece where the photos
+ * show it, in its real colours, materials and textures — and drew the owner's
+ * own flat as itself. Two rewrites followed and neither did better: a designed
+ * illustration the same evening (a curated palette, patterns calmed, the room
+ * filling the picture edge to edge), and on 2.6 Sunburst a specification of the
+ * geometry as one solid box. On 2.6 both came apart on that flat — a long room
+ * with a kitchen niche at one end, drawn under a many-sided outline with the
+ * kitchen as a second box in front of the first — so rooms went back to 2.5
+ * Sunburst and to these words (`draw.ts`), which the suite pins to the
+ * character. **Change them only with a drawing of a real room beside the old
+ * one**; a sentence that reads better is not evidence.
  *
  * **Day, then night as an edit of the day** — the same picture with the light
  * changed, so the apps cross from one to the other with nothing moving.
@@ -47,15 +43,11 @@ export interface PictureDevice {
   kind: string;
 }
 
-/** How the room looks — its own colours, materials and patterns, at their best. */
-const LOOK =
-  'The look: the room’s own colours, materials and patterns — the wall paint, the floor, the woods, the fabrics, ' +
-  'the prints on the curtains and cushions — so that it is unmistakably this room, at its best: clean, fresh and ' +
-  'cared for, as if newly finished and styled for a photograph. Crisp, clean geometry with gently softened edges, ' +
-  'matte materials with a subtle sheen, rich fine detail. Soft, diffuse daylight from the windows, gentle global ' +
-  'illumination, soft ambient occlusion and soft contact shadows — no harsh light, no glare, no colour casts. The ' +
-  'walls are thick, clean slabs, their cut tops a slightly darker tone; a thin floor slab under the room. Calm, ' +
-  'tidy and quietly luxurious, highly detailed';
+/** How the render is lit and finished — the first drawings' own words. */
+const STYLE =
+  'Soft, diffuse daylight from the windows, gentle ambient occlusion, soft contact shadows, matte materials with a ' +
+  'subtle sheen, crisp clean geometry, walls cut as thick clean sections with a slightly darker top edge, a thin ' +
+  'floor slab under the room. Calm, tidy and quietly luxurious, highly detailed';
 
 /** What a kind of device is, in the words a picture is read with. */
 export function describeKind(kind: string): string {
@@ -97,73 +89,51 @@ export function describeKind(kind: string): string {
   }
 }
 
-/**
- * The day picture, from `photoCount` photos of the room and nothing else — in
- * labelled sections, the shape OpenAI's prompting guide gives a complex
- * request: what the photos are, what to draw, then the view, the shape, what is
- * in it, the look and the frame, each a constraint the model is held to.
- */
+/** The day picture, from `photoCount` photos of the room and nothing else. */
 export function dayPrompt(roomName: string, photoCount: number, orientation: 'portrait' | 'landscape'): string {
   const name = roomName.trim().length > 0 ? `“${roomName.trim()}”` : 'one room';
-  const frame = orientation === 'portrait' ? 'tall' : 'wide';
-  return [
+  const lines: string[] = [];
+  lines.push(
     photoCount === 1
       ? `The first image is a phone photo of ${name}, a room of a real home.`
-      : `The first ${photoCount} images are phone photos of ${name}, a room of a real home, taken from different ` +
-        'corners. Together they show one room: work out its shape and where everything in it stands from all of ' +
-        'them, and draw that one room.',
+      : `The first ${photoCount} images are phone photos of ${name}, a room of a real home, taken from different corners.`,
+  );
+  lines.push(
     'Ignore any white guide lines, buttons and other on-screen overlays in the photos.',
     '',
-    'Draw this room as the room picture of a premium smart-home app: a beautiful, highly detailed 3D render of ' +
-      'this very room as an isometric dollhouse cutaway, modelled the way a top 3D artist would for a showcase.',
-    '',
-    'The view: true isometric — parallel lines stay parallel — from high above at about 35 degrees, looking into ' +
-      'one corner of the room, which stands near the top centre of the image. The two walls that meet in that ' +
-      'corner stand full height, receding to the left and the right; the two walls nearest the viewer are cut ' +
-      'down to a low ledge along the floor, so the whole room can be seen into. Choose the corner that puts the ' +
-      'windows and the main pieces on the two standing walls where it can.',
-    '',
-    'The shape: one room on one level floor, built as one solid box. The floor is a single rectangle, and the ' +
-      'four walls stand on its edges as straight, unbroken slabs meeting at right angles, the two low ones cut ' +
-      'level along their whole length. An alcove or niche — a kitchen recess, a bay — is part of that box, against ' +
-      'one of its walls. Never split the room into separate blocks, boxes or levels, and never give it corners or ' +
-      'angles it does not have.',
-    '',
-    'What is in it: every piece of furniture, every appliance, every door, window and fixture the photos show, at ' +
-      'its real size, facing the way it faces, against the wall the photos show it against and in the same order ' +
-      'along it — the person who lives here must recognise their own room at a glance. Nothing is swapped, added ' +
-      'or left out; what stands along the two low walls stays, cut down with them where it would hide the room. ' +
-      'The room may be drawn a little more regular than it is — distances evened out, its outline a clean box — ' +
-      'but its arrangement is kept. Tidy away clutter, laundry, drying racks, bags, cables and mess, and ignore ' +
-      'the photos’ dim lighting and colour casts.',
+    'Draw this room as the room render of a premium smart-home app: an isometric cutaway of the whole room, seen ' +
+      'from above at about 35 degrees from one corner, the two walls nearest the viewer removed so the room can be ' +
+      'seen into like a dollhouse, the two far walls standing full height. A 3D artist’s model of this very room: ' +
+      'its real shape and proportions, every piece of furniture where the photos show it, in the room’s real ' +
+      'colours, materials and textures — the floor, the wall paint, the furniture, the fabrics, the appliances, ' +
+      'the curtains — so the person who lives here recognises their own room at a glance. Tidy away clutter, bags ' +
+      'and mess, and ignore the photos’ dim lighting and colour casts.',
     '',
     'Draw only what the photos show. Add nothing that is not in them — no devices, sensors, gadgets, lamps or ' +
       'other objects the room does not have.',
+  );
+  lines.push(
     '',
-    `${LOOK}.`,
-    '',
-    `The frame: the whole room is in the ${frame} image, centred, filling most of it with a little clear space on ` +
-      'every side — nothing cut off at the edges — standing on its own on a transparent background, with no ' +
-      'floor, backdrop or shadow beyond the room itself.',
+    `${STYLE}. The room fills most of the ${orientation === 'portrait' ? 'tall' : 'wide'} image, standing on its own ` +
+      'on a transparent background — no floor, backdrop or shadow beyond the room itself.',
     '',
     'No text, no labels, no people, no watermark.',
-  ].join('\n');
+  );
+  return lines.join('\n');
 }
 
 /** The night picture, as an edit of the finished day picture. */
 export const NIGHT_PROMPT = [
-  'The image is a 3D render of one room of a home, by day. Redraw the very same render at night.',
+  'The image is a render of one room of a home, by day. Redraw the very same render at night.',
   '',
-  'Change only the light. Keep everything else exactly as it is: the camera and the framing, the room’s outline ' +
-    'against the background, every wall, every piece of furniture and every object, each with its shape, ' +
-    'material and colour, the composition — this picture is laid exactly over the day one.',
+  'Keep everything exactly as it is: the camera angle and framing, the room, every wall, every piece of ' +
+    'furniture, every material and colour, the composition. Only the light changes.',
   '',
-  'Night, as a premium smart-home app’s night mode: the room is dark and calm, its surfaces in deep, rich ' +
-    'charcoal and warm shadow; the daylight is gone and the windows show deep blue night. The room’s own lights ' +
-    'are on — the ceiling lights, any lamp, any light under cabinets or shelves — each giving a warm amber glow ' +
-    'and soft pools of light on the floor, the furniture and the walls near it, falling off softly into ' +
-    'darkness. The cut tops of the walls are dark grey. Screens are off. The background around the room is ' +
-    'plain, flat and near-black, with nothing on it. Moody, warm, high in contrast, quietly luxurious.',
+  'Night: the windows show dark blue night outside; the daylight is gone and the room is dim. The room’s own ' +
+    'lamps are on — the ceiling lights and any lamp in the room — casting warm, soft pools of light on the ' +
+    'floor, the furniture and the walls near them, with soft falloff into shadow. Screens are off. The ' +
+    'background around the room is a plain, flat, very dark charcoal with nothing on it. Moody, warm, quietly ' +
+    'luxurious, like a premium smart-home app’s night mode.',
   '',
   'No text, no labels, no people, no watermark.',
 ].join('\n');

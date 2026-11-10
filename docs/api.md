@@ -2568,17 +2568,18 @@ been removed, and the row read next week is all that is left of them.
 ### Room pictures
 
 A room can be **drawn**: from one to eight phone photos of it, the hub has
-OpenAI's `gpt-image-2.6-sunburst` (the quality half of the 2.6 pair, where
-portraits take the fast one) draw the room as the isometric cutaway a
-smart-home app shows — seen from high above one corner, the two walls meeting
-there standing and the two nearest cut low — on a transparent ground, at
-`xhigh` quality. **This room at its best, drawn as one box**: a 3D render in the
-room's own colours, materials and patterns, tidied and polished (and by night,
-charcoal with the room's own lights in warm pools); one room on one level floor,
-the whole of it in the frame; its arrangement kept — what stands against which
-wall, in what order — while distances may be evened out and an alcove folded
-into the box. The geometry is spelt out because 2.6, left to plan it, drew a
-long room with a kitchen niche as two boxes under a many-sided outline.
+OpenAI's `gpt-image-2.5-sunburst` (the quality half of the 2.5 pair) draw the
+room as the isometric cutaway a smart-home app shows — seen from above one
+corner, the two walls nearest the viewer removed like a dollhouse — on a
+transparent ground, at `xhigh` quality: a 3D artist's model of this very room,
+its real shape and proportions, every piece where the photos show it, in its
+real colours, materials and textures, tidied (and by night, the same render
+with the room's own lamps on). **Rooms are on 2.5 rather than the 2.6 the
+portraits use**, deliberately: on 2.6 a long room with a kitchen niche came out
+under a many-sided outline with the kitchen as a second box, with both prompts
+it was given, while 2.5 draws it as itself — so the words are the first
+drawings', kept verbatim, and a later model is a comparison on real rooms
+before it is a change.
 **Only what the
 photos show is drawn**: the prompt names no device and asks for nothing the
 photos don't have, since a sensor too small to see in a photo would otherwise
@@ -2612,9 +2613,8 @@ part way, places nothing rather than half the devices.
 day picture is drawn and its devices read — about a minute — with
 `hasNight: false`; the **night** picture, an edit of the day with the room's
 lamps on and the window dark, is drawn after the answer and announced when it
-lands. It is asked to change only the light, at `complexity: low` and `high`
-quality — OpenAI's settings for an edit that must keep everything else — because
-it comes back on an opaque ground and the apps cut it out with the day picture's
+lands. It is asked to change only the light, at `high` quality, because it
+comes back on an opaque ground and the apps cut it out with the day picture's
 own outline. A night that fails keeps the day. The hub draws **one
 room at a time**, day to night, and refuses a second asker (`409
 picture_busy`) rather than queueing a second bill. On a 512 MB board a drawing
