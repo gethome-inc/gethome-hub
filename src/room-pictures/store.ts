@@ -8,7 +8,15 @@ import type { HubEventBus } from '../core/bus.js';
 import type { AiProvider, SettingsService } from '../core/settings.js';
 import type { Logger } from '../logging.js';
 import type { KeepOutcome, PhotoStore } from '../photos/store.js';
-import { drawRoomPicture, pictureCostUsd, RoomPictureDrawError, ROOM_PICTURE_MODEL, type PictureUsage } from './draw.js';
+import {
+  DAY_SETTINGS,
+  drawRoomPicture,
+  NIGHT_SETTINGS,
+  pictureCostUsd,
+  RoomPictureDrawError,
+  ROOM_PICTURE_MODEL,
+  type PictureUsage,
+} from './draw.js';
 import { LocateError, locateDevices } from './locate.js';
 import { dayPrompt, NIGHT_PROMPT, type PictureDevice } from './prompts.js';
 
@@ -309,6 +317,7 @@ export class RoomPictureService {
     let day;
     try {
       day = await this.draw_({
+        ...DAY_SETTINGS,
         apiKey: input.apiKey,
         prompt: dayPrompt(input.roomName, photos.length, input.orientation),
         images: photos,
@@ -414,6 +423,7 @@ export class RoomPictureService {
     let usage: PictureUsage | undefined;
     try {
       const night = await this.draw_({
+        ...NIGHT_SETTINGS,
         apiKey,
         prompt: NIGHT_PROMPT,
         images: [{ bytes: day, contentType: 'image/png' }],

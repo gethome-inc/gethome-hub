@@ -14,10 +14,18 @@ import { classifyApiError, errorCodeIn } from '../ai/errors.js';
  * details more consistent from one edit to the next, and the night is an edit
  * of the day.
  *
- * **`complexity`, which 2.6 added, is not sent**, so the model plans at its
- * own default — `high` on both 2.6 models, and where OpenAI says to start a
- * complex layout. A room's layout is what makes it this room, so a lower
- * setting would be compared on real rooms before it was tried here.
+ * **The day and the night are asked for differently** (`DAY_SETTINGS`,
+ * `NIGHT_SETTINGS`), because they are different jobs. The day is drawn once
+ * from the photos and looked at every day, so it takes `xhigh`, one of the two
+ * rungs above `high` — more detail at more cost, and nothing more on this
+ * board, since the picture is the same size; `complexity` is left to the
+ * model's default, `high`, which is where OpenAI says to start a complex layout
+ * and a room put together from several photos is one. The night is an edit
+ * that may change only the light, so it takes `complexity: low` — OpenAI's
+ * advice for an edit, since a model that plans less reinterprets less — at
+ * `high` quality, where OpenAI places Sunburst's consistency from one edit to
+ * the next: the apps cut the night by the day's own outline and dissolve one
+ * into the other, so a night that drifted would show at its edges.
  *
  * **No SDK**, for the portraits' reason: one endpoint and one response field.
  */
@@ -58,7 +66,21 @@ export interface Drawing {
   usage?: PictureUsage;
 }
 
-export interface EditInput {
+/** How much detail and how much planning one picture is drawn with — see the note at the top. */
+export interface PictureSettings {
+  /** `low` … `max`; only the two a room is drawn at are named. */
+  quality: 'high' | 'xhigh';
+  /** How much the model plans; absent leaves 2.6's own default, `high`. */
+  complexity?: 'low' | 'medium' | 'high';
+}
+
+/** The day picture, drawn from the photos. */
+export const DAY_SETTINGS: PictureSettings = { quality: 'xhigh' };
+
+/** The night picture, an edit of the day that changes only its light. */
+export const NIGHT_SETTINGS: PictureSettings = { quality: 'high', complexity: 'low' };
+
+export interface EditInput extends PictureSettings {
   apiKey: string;
   prompt: string;
   /** In the order the prompt names them. Never shared memory, so a Blob can take them as they are. */
@@ -76,7 +98,8 @@ export async function drawRoomPicture(input: EditInput): Promise<Drawing> {
   form.set('prompt', input.prompt);
   form.set('size', input.size);
   form.set('n', '1');
-  form.set('quality', 'high');
+  form.set('quality', input.quality);
+  if (input.complexity !== undefined) form.set('complexity', input.complexity);
   form.set('background', input.background);
   form.set('output_format', 'png');
   // The bytes as they are: a Blob copies what it is given, so copying them

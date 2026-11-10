@@ -5,9 +5,16 @@ import path from 'node:path';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { HubEventBus } from '../src/core/bus.js';
 import { SettingsService } from '../src/core/settings.js';
-import { drawRoomPicture, pictureCostUsd, RoomPictureDrawError, ROOM_PICTURE_MODEL } from '../src/room-pictures/draw.js';
+import {
+  DAY_SETTINGS,
+  drawRoomPicture,
+  NIGHT_SETTINGS,
+  pictureCostUsd,
+  RoomPictureDrawError,
+  ROOM_PICTURE_MODEL,
+} from '../src/room-pictures/draw.js';
 import { LocateError, locateDevices, normaliseAnswer } from '../src/room-pictures/locate.js';
-import { dayPrompt, describeKind, locatePrompt } from '../src/room-pictures/prompts.js';
+import { dayPrompt, describeKind, locatePrompt, NIGHT_PROMPT } from '../src/room-pictures/prompts.js';
 import { homeLocator, PictureBusyError, RoomPictureService, type Locator } from '../src/room-pictures/store.js';
 import { AGENT_MODELS, estimateCostUsd, LOCATOR_MODELS, PROVIDER_MODELS } from '../src/ai/models.js';
 import { openTestDb, resetDb } from './helpers/db.js';
@@ -85,6 +92,9 @@ describe('RoomPictureService', () => {
     expect(String(day['prompt'])).toContain('“Living Room”');
     expect(String(day['prompt'])).not.toContain('Light TV');
     expect(String(day['prompt'])).toContain('Draw only what the photos show.');
+    // The day at the rung above `high`, planning at the model's own default.
+    expect(day['quality']).toBe('xhigh');
+    expect(day['complexity']).toBeUndefined();
 
     // The devices were read off the day picture, and the answer came before the night.
     expect(locate).toHaveBeenCalledTimes(1);
@@ -98,6 +108,10 @@ describe('RoomPictureService', () => {
     await pictures.settled();
     const night = (draw.mock.calls[1] as unknown[])[0] as Record<string, unknown>;
     expect(night['background']).toBe('opaque');
+    // The night is an edit that changes only the light: low complexity, at
+    // the quality OpenAI keeps Sunburst's edits consistent at.
+    expect(night['quality']).toBe('high');
+    expect(night['complexity']).toBe('low');
     expect(pictures.get(record.id)?.hasNight).toBe(true);
     expect(await pictures.bytes(record.id, 'night')).not.toBeNull();
     expect(pictures.isDrawing).toBe(false);
@@ -625,6 +639,7 @@ describe('drawing', () => {
       return new Response(JSON.stringify({ data: [{ b64_json: png(7).toString('base64') }] }), { status: 200 });
     }) as unknown as typeof fetch;
     const drawing = await drawRoomPicture({
+      ...DAY_SETTINGS,
       apiKey: 'k',
       prompt: 'p',
       images: [
@@ -646,30 +661,36 @@ describe('drawing', () => {
 
   /**
    * A room takes the quality half of the pair where a portrait takes the fast
-   * one (`PORTRAIT_MODEL`), and asks for high quality on a PNG.
+   * one (`PORTRAIT_MODEL`), on a PNG: the day at `xhigh` with the model's own
+   * planning, the night at `high` and `low` complexity — see `draw.ts`.
    */
-  it('draws on GPT Image 2.6 Sunburst, at high quality, on a PNG', async () => {
-    let form: FormData | undefined;
+  it('draws on GPT Image 2.6 Sunburst on a PNG, the day at xhigh and the night as a light edit', async () => {
+    const forms: FormData[] = [];
     const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
-      form = init!.body as FormData;
+      forms.push(init!.body as FormData);
       return new Response(JSON.stringify({ data: [{ b64_json: png(7).toString('base64') }] }), { status: 200 });
     }) as unknown as typeof fetch;
-    await drawRoomPicture({
+    const common = {
       apiKey: 'k',
       prompt: 'p',
       images: [{ bytes: randomBytes(1_234), contentType: 'image/jpeg' }],
-      size: '1536x1024',
-      background: 'opaque',
+      size: '1536x1024' as const,
       fetchImpl,
-    });
+    };
+    await drawRoomPicture({ ...common, ...DAY_SETTINGS, background: 'transparent' });
+    await drawRoomPicture({ ...common, ...NIGHT_SETTINGS, background: 'opaque' });
+    const [day, night] = forms as [FormData, FormData];
     expect(ROOM_PICTURE_MODEL).toBe('gpt-image-2.6-sunburst');
-    expect(form!.get('model')).toBe(ROOM_PICTURE_MODEL);
-    expect(form!.get('quality')).toBe('high');
-    expect(form!.get('output_format')).toBe('png');
-    expect(form!.get('size')).toBe('1536x1024');
-    expect(form!.get('background')).toBe('opaque');
+    expect(day.get('model')).toBe(ROOM_PICTURE_MODEL);
+    expect(day.get('output_format')).toBe('png');
+    expect(day.get('size')).toBe('1536x1024');
+    expect(day.get('background')).toBe('transparent');
+    expect(day.get('quality')).toBe('xhigh');
     // Left to the model's own default, `high` — see the note in `draw.ts`.
-    expect(form!.has('complexity')).toBe(false);
+    expect(day.has('complexity')).toBe(false);
+    expect(night.get('background')).toBe('opaque');
+    expect(night.get('quality')).toBe('high');
+    expect(night.get('complexity')).toBe('low');
   });
 });
 
@@ -677,9 +698,28 @@ describe('the words', () => {
   it('draws from the photos alone, and reads the devices by name and kind', () => {
     const prompt = dayPrompt('Bedroom', 3, 'portrait');
     expect(prompt).toContain('first 3 images are phone photos');
+    expect(prompt).toContain('Together they show one room');
     expect(prompt).toContain('no devices, sensors, gadgets');
     expect(locatePrompt(devices)).toContain('- tv: “Light TV” (a smart plug — look for what it powers)');
     expect(describeKind('kettle-of-the-future')).toBe('a smart device');
+  });
+
+  // What the composition is held to, since 2.6 left to plan it split a long
+  // room into two boxes under a many-sided outline (`prompts.ts`).
+  it('draws one room as one box, whole in its frame, in its own colours and patterns', () => {
+    const prompt = dayPrompt('Living Room', 5, 'portrait');
+    expect(prompt).toContain('one room on one level floor, built as one solid box');
+    expect(prompt).toContain('Never split the room into separate blocks, boxes or levels');
+    expect(prompt).toContain('the whole room is in the tall image');
+    expect(prompt).toContain('nothing cut off at the edges');
+    expect(prompt).toContain('the prints on the curtains and cushions');
+    expect(prompt).not.toContain('edge to edge');
+    expect(dayPrompt('Office', 1, 'landscape')).toContain('the whole room is in the wide image');
+  });
+
+  it('lets the night change only the light, and keep the outline the day is cut by', () => {
+    expect(NIGHT_PROMPT).toContain('Change only the light.');
+    expect(NIGHT_PROMPT).toContain('the room’s outline against the background');
   });
 
   it('prices what the provider reported, and nothing it did not', () => {
