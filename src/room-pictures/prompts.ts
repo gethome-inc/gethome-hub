@@ -44,6 +44,20 @@
  * are placed by — and whatever stands against the two removed walls stays, cut
  * low, because a draft without that line left a kitchen counter out.
  *
+ * **Flattered a little, in how things look and never in where they stand.** A
+ * room need not be drawn one to one: it is drawn on its best day — each thing
+ * the best-kept version of itself, clean and unworn, fabrics smooth, colours a
+ * touch richer than a phone photo of them, a television showing a landscape
+ * rather than a black slab. None of the earlier words said so outright. The
+ * first asked only for clutter to be tidied away; the designed look meant it
+ * and said it as a softer palette, which is how beautiful came out as pale.
+ * So it is said here in so many words, and pointed at the surface of things.
+ * The line it stops at is the two paragraphs around it. Nothing is restyled
+ * or swapped for a better one, because the room has to be recognised; nothing
+ * is moved, because the markers are placed by where things stand; and nothing
+ * is added, because the picture is then read for the home's devices and an
+ * invented lamp is somewhere a light's marker would be stood.
+ *
  * **Day, then night as an edit of the day** — the same picture with the light
  * changed, so the apps cross from one to the other with nothing moving.
  */
@@ -121,6 +135,12 @@ export function dayPrompt(roomName: string, photoCount: number, orientation: 'po
     'A 3D artist’s model of this very room: its real shape and proportions, in the room’s real colours, materials ' +
       'and textures — the floor, the wall paint, the furniture, the fabrics and their patterns, the appliances, the ' +
       'curtains — so the person who lives here recognises their own room at a glance.',
+    '',
+    'Flatter the room a little, as a good 3D artist would: each thing is the best-kept version of itself — clean, ' +
+      'fresh and well made, with no wear, stains or dust — fabrics smooth, cushions and curtains sitting neatly, a ' +
+      'bed made, colours a touch richer and cleaner than the photos show, and a television’s screen may show a calm ' +
+      'landscape rather than stand black. It is the room on its best day and still this room: flatter what is ' +
+      'there, never restyle it or swap a thing for a better one.',
     '',
     'The layout is exact: every piece of furniture, every appliance, every door, window and fixture stands where ' +
       'the photos show it, at its real size, facing the way it faces, against the same wall. Nothing is moved, ' +

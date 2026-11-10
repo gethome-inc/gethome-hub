@@ -2504,11 +2504,22 @@ nothing moved**: a 3D artist's model of the room in its real colours, materials
 and textures, lit by soft daylight from its windows (and by night, charcoal with
 the room's own lights in warm pools), with every piece of furniture, door and
 window where the photos show it — the layout is what makes it this room, and
-what the markers are read by. From 2026-10-23 until 2026-11-10 a designed look
+what the markers are read by. **Flattered a little, in how things look**: the
+room on its best day — each thing clean and unworn, fabrics smooth, colours a
+touch richer than a phone photo of them, a television showing a landscape rather
+than a black slab — and never restyled, with nothing swapped for a better one.
+From 2026-10-23 until 2026-11-10 a designed look
 was asked for instead — the palette softened towards off-whites and taupes,
 patterns calmed to solid tones, even studio light — so a picture drawn in those
 weeks was asked for differently from one drawn before or since, and keeps the
 look it was drawn in until its room is drawn again.
+**Both pictures are asked for at `quality: xhigh`**, one tier above the `high`
+a room was drawn at until 2026-11-10: a room is drawn once and looked at every
+day, at the size of the screen. What that costs and how long it takes are not
+measured yet: the cost is read from each answer, per token, so the run log
+says what a drawing came to. And the day's transparent ground is the thing to
+look at first on a room drawn this way, since nothing published says how the
+tiers above `high` keep one.
 **Only what the
 photos show is drawn**: the prompt names no device and asks for nothing the
 photos don't have, since a sensor too small to see in a photo would otherwise
@@ -2539,11 +2550,16 @@ another Claude in the same request; a refusal that stands, or an answer cut off
 part way, places nothing rather than half the devices.
 
 **The answer comes before the night.** `POST /room-pictures` answers once the
-day picture is drawn and its devices read — about a minute — with
+day picture is drawn and its devices read — about a minute at `high`, and not
+yet measured at `xhigh` — with
 `hasNight: false`; the **night** picture, an edit of the day with the room's
 lamps on and the window dark, is drawn after the answer and announced when it
-lands. It comes back on an opaque ground, and the apps cut it out with the day
-picture's own outline. A night that fails keeps the day. The hub draws **one
+lands. The night is asked for at `complexity: low` where the day is left at the
+model's default, `high`: it is an edit that may change the light and nothing
+else, OpenAI recommends `low` for edits, and a higher setting can introduce
+changes nobody asked for. It comes back on an opaque ground, and the apps cut
+it out with the day picture's own outline — which is why a night that moved
+anything would show. A night that fails keeps the day. The hub draws **one
 room at a time**, day to night, and refuses a second asker (`409
 picture_busy`) rather than queueing a second bill. On a 512 MB board a drawing
 is also the most memory the hub ever holds at once, and it hands it back when

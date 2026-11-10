@@ -5,7 +5,13 @@ import path from 'node:path';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { HubEventBus } from '../src/core/bus.js';
 import { SettingsService } from '../src/core/settings.js';
-import { drawRoomPicture, pictureCostUsd, RoomPictureDrawError, ROOM_PICTURE_MODEL } from '../src/room-pictures/draw.js';
+import {
+  drawRoomPicture,
+  pictureCostUsd,
+  RoomPictureDrawError,
+  ROOM_PICTURE_MODEL,
+  ROOM_PICTURE_QUALITY,
+} from '../src/room-pictures/draw.js';
 import { LocateError, locateDevices, normaliseAnswer } from '../src/room-pictures/locate.js';
 import { dayPrompt, describeKind, locatePrompt } from '../src/room-pictures/prompts.js';
 import { homeLocator, PictureBusyError, RoomPictureService, type Locator } from '../src/room-pictures/store.js';
@@ -85,6 +91,8 @@ describe('RoomPictureService', () => {
     expect(String(day['prompt'])).toContain('“Living Room”');
     expect(String(day['prompt'])).not.toContain('Light TV');
     expect(String(day['prompt'])).toContain('Draw only what the photos show.');
+    // A whole room laid out from photos: planned at the model's own default.
+    expect('complexity' in day).toBe(false);
 
     // The devices were read off the day picture, and the answer came before the night.
     expect(locate).toHaveBeenCalledTimes(1);
@@ -98,6 +106,8 @@ describe('RoomPictureService', () => {
     await pictures.settled();
     const night = (draw.mock.calls[1] as unknown[])[0] as Record<string, unknown>;
     expect(night['background']).toBe('opaque');
+    // An edit that may change the light and nothing else — see the note in `draw.ts`.
+    expect(night['complexity']).toBe('low');
     expect(pictures.get(record.id)?.hasNight).toBe(true);
     expect(await pictures.bytes(record.id, 'night')).not.toBeNull();
     expect(pictures.isDrawing).toBe(false);
@@ -616,9 +626,9 @@ describe('drawing', () => {
 
   /**
    * A room takes the quality half of the pair where a portrait takes the fast
-   * one (`PORTRAIT_MODEL`), and asks for high quality on a PNG.
+   * one (`PORTRAIT_MODEL`), and asks for the tier above `high` on a PNG.
    */
-  it('draws on GPT Image 2.6 Sunburst, at high quality, on a PNG', async () => {
+  it('draws on GPT Image 2.6 Sunburst, at xhigh quality, on a PNG', async () => {
     let form: FormData | undefined;
     const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
       form = init!.body as FormData;
@@ -634,12 +644,31 @@ describe('drawing', () => {
     });
     expect(ROOM_PICTURE_MODEL).toBe('gpt-image-2.6-sunburst');
     expect(form!.get('model')).toBe(ROOM_PICTURE_MODEL);
-    expect(form!.get('quality')).toBe('high');
+    expect(ROOM_PICTURE_QUALITY).toBe('xhigh');
+    expect(form!.get('quality')).toBe(ROOM_PICTURE_QUALITY);
     expect(form!.get('output_format')).toBe('png');
     expect(form!.get('size')).toBe('1536x1024');
     expect(form!.get('background')).toBe('opaque');
-    // Left to the model's own default, `high` — see the note in `draw.ts`.
+    // Left to the model's own default, `high`, unless a caller says — see the note in `draw.ts`.
     expect(form!.has('complexity')).toBe(false);
+  });
+
+  it('sends how much to plan only when it is said', async () => {
+    let form: FormData | undefined;
+    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      form = init!.body as FormData;
+      return new Response(JSON.stringify({ data: [{ b64_json: png(7).toString('base64') }] }), { status: 200 });
+    }) as unknown as typeof fetch;
+    await drawRoomPicture({
+      apiKey: 'k',
+      prompt: 'p',
+      images: [{ bytes: randomBytes(1_234), contentType: 'image/png' }],
+      size: '1024x1536',
+      background: 'opaque',
+      complexity: 'low',
+      fetchImpl,
+    });
+    expect(form!.get('complexity')).toBe('low');
   });
 });
 
@@ -657,6 +686,9 @@ describe('the words', () => {
     expect(prompt).toContain('real colours, materials and textures');
     expect(prompt).toContain('daylight from the windows');
     expect(prompt).toContain('Nothing is moved, swapped, added or left out');
+    // Flattered in how things look, and held to the room in everything else.
+    expect(prompt).toContain('Flatter the room a little');
+    expect(prompt).toContain('never restyle it or swap a thing for a better one');
     // The designed look these words replaced, which drew the same room paler
     // and flatter — see the note at the top of `prompts.ts`.
     expect(prompt).not.toMatch(/softened|studio light|solid tones|edge to edge/);

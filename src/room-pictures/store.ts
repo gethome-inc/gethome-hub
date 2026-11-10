@@ -8,7 +8,14 @@ import type { HubEventBus } from '../core/bus.js';
 import type { AiProvider, SettingsService } from '../core/settings.js';
 import type { Logger } from '../logging.js';
 import type { KeepOutcome, PhotoStore } from '../photos/store.js';
-import { drawRoomPicture, pictureCostUsd, RoomPictureDrawError, ROOM_PICTURE_MODEL, type PictureUsage } from './draw.js';
+import {
+  drawRoomPicture,
+  NIGHT_COMPLEXITY,
+  pictureCostUsd,
+  RoomPictureDrawError,
+  ROOM_PICTURE_MODEL,
+  type PictureUsage,
+} from './draw.js';
 import { LocateError, locateDevices } from './locate.js';
 import { dayPrompt, NIGHT_PROMPT, type PictureDevice } from './prompts.js';
 
@@ -396,6 +403,8 @@ export class RoomPictureService {
         images: [{ bytes: day, contentType: 'image/png' }],
         size: record.orientation === 'landscape' ? '1536x1024' : '1024x1536',
         background: 'opaque',
+        // An edit that may change the light and nothing else — see `draw.ts`.
+        complexity: NIGHT_COMPLEXITY,
       });
       usage = night.usage;
       // The drawing may have been removed while the night was drawn.

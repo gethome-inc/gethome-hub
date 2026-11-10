@@ -14,22 +14,65 @@ import { classifyApiError, errorCodeIn } from '../ai/errors.js';
  * details more consistent from one edit to the next, and the night is an edit
  * of the day.
  *
- * **`complexity`, which 2.6 added, is not sent**, so the model plans at its
- * own default — `high` on both 2.6 models, and where OpenAI says to start a
- * complex layout. A room's layout is what makes it this room, so a lower
- * setting would be compared on real rooms before it was tried here.
+ * **`xhigh`, the tier above the `high` a room was drawn at until 2026-11-10.**
+ * A room is drawn once and looked at every day, at the size of the screen and
+ * closer when it is pinched into, so it takes the detail a portrait's tile
+ * would throw away. The day and the night both take it: they are one picture
+ * dissolving into the other, and should carry the same grain. **Four things
+ * about it are not measured, and a first drawing is what tells.** The wait —
+ * the ceiling below and the apps' own deadline were set when a room took about
+ * half a minute at `high`, and the apps say "about a minute". The cost, which
+ * is per token and so is read from each answer rather than assumed. The
+ * transparent ground the day is asked for: the portraits stay at `high` over
+ * a note that OpenAI's guidance puts a transparent background at its best at
+ * medium or high (`src/portraits/openai-images.ts`), and nothing published
+ * says how the two tiers above behave, so the outline is the first thing to
+ * look at on a room drawn this way. And how closely the night keeps to the
+ * day: the sentence above about edits names medium and high, and says nothing
+ * of the tiers over them. OpenAI's own word on those tiers is to use them only
+ * where they meet a need `high` does not, and that a higher setting does not
+ * promise a better picture: if a room at `xhigh` is not visibly finer, `high`
+ * is the answer again.
+ *
+ * **`complexity`, which 2.6 added, is the model's own default for the day and
+ * `low` for the night.** It is how much the model plans before it renders. The
+ * day is a whole room laid out from several photos — the scene of many things
+ * and many constraints OpenAI says to leave at the default, `high` — and its
+ * layout is what makes it this room. The night is an edit that may change one
+ * thing. OpenAI recommends `low` for edits and says a higher setting can
+ * introduce unwanted changes, and an unwanted change is the one fault a night
+ * cannot carry: it is cut out by the day's outline and laid over the day's
+ * depth, so anything that moved shows. Not compared on real rooms yet — if
+ * nights come out duller for it, `NIGHT_COMPLEXITY` is what to put back.
+ *
+ * **The size stays 1024 × 1536, or its landscape.** 2.6 takes larger ones, and
+ * a larger picture would be sharper when it is pinched into. It is not taken
+ * along with `xhigh`, and not without measuring: a drawing is already the most
+ * memory this hub holds at once, which on a 512 MB board once stood a radio
+ * down; every app already shipped would be handed the larger picture to stand
+ * up as a relief; and two settings moved together cannot be told apart in what
+ * comes back. It is the next thing to try, by itself.
  *
  * **No SDK**, for the portraits' reason: one endpoint and one response field.
  */
 
 export const ROOM_PICTURE_MODEL = 'gpt-image-2.6-sunburst';
 
+/** How finely both pictures are rendered — see the note above. */
+export const ROOM_PICTURE_QUALITY = 'xhigh';
+
+export type PictureComplexity = 'low' | 'medium' | 'high';
+
+/** How much the night's edit is planned — see the note above. The day sends none. */
+export const NIGHT_COMPLEXITY: PictureComplexity = 'low';
+
 const EDITS_URL = 'https://api.openai.com/v1/images/edits';
 
 /**
  * Ten minutes, the portraits' ceiling. A room measured at about half a minute
- * here on 2.5; the deadline is a ceiling nobody should reach, kept generous
- * because a drawing cut off is one the provider has already billed.
+ * here on 2.5 at `high`, and has not been measured at `xhigh`; the deadline is
+ * a ceiling nobody should reach, kept generous because a drawing cut off is
+ * one the provider has already billed.
  */
 const TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -65,6 +108,8 @@ export interface EditInput {
   images: { bytes: Buffer<ArrayBuffer>; contentType: string }[];
   size: '1024x1536' | '1536x1024';
   background: 'transparent' | 'opaque';
+  /** Left out, the model plans at its own default (`high`). */
+  complexity?: PictureComplexity;
   signal?: AbortSignal;
   /** For tests. */
   fetchImpl?: typeof fetch;
@@ -76,7 +121,8 @@ export async function drawRoomPicture(input: EditInput): Promise<Drawing> {
   form.set('prompt', input.prompt);
   form.set('size', input.size);
   form.set('n', '1');
-  form.set('quality', 'high');
+  form.set('quality', ROOM_PICTURE_QUALITY);
+  if (input.complexity !== undefined) form.set('complexity', input.complexity);
   form.set('background', input.background);
   form.set('output_format', 'png');
   // The bytes as they are: a Blob copies what it is given, so copying them
