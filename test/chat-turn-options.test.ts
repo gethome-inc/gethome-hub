@@ -276,6 +276,9 @@ describe('the four chat routes', () => {
       models: true,
       stop: true,
       retry: true,
+      // What a reply changed in the home rides on its row, and can be put back.
+      changes: true,
+      undo: true,
       efforts: ['low', 'medium', 'high'],
       images: {
         maxCount: CHAT_IMAGE_MAX_COUNT,

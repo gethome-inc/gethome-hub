@@ -12,6 +12,7 @@ import type {
   AutomationChatEvent,
   AutomationRunEvent,
   AutomationStatusEvent,
+  ChatChangesEvent,
   ChatTitleEvent,
   CommissioningUpdate,
 } from '../core/bus.js';
@@ -622,6 +623,17 @@ export function attachWebSocket(
   };
 
   /**
+   * What a round has changed in the home so far — a conversation's content,
+   * so it is gated exactly as the conversation's own frames are, and a frame
+   * `type` of its own for `chatTitle`'s reason.
+   */
+  const onChatChanges = (event: ChatChangesEvent) => {
+    if (memberId === null || !deps.access.canAs(memberId, 'hub.ai', key)) return;
+    if (event.surface === 'automations' && !deps.access.canAs(memberId, 'automation.manage', key)) return;
+    send({ type: 'chatChanges', chatChanges: event });
+  };
+
+  /**
    * What this socket may subscribe to.
    *
    * **A key gets neither the broker nor the AI**: `mqtt` is every message on
@@ -664,6 +676,7 @@ export function attachWebSocket(
           deps.events.on('automationChat', onAutomationChat);
           deps.events.on('assistantChat', onAssistantChat);
           deps.events.on('chatTitle', onChatTitle);
+          deps.events.on('chatChanges', onChatChanges);
         }
       }
     }
@@ -689,6 +702,7 @@ export function attachWebSocket(
         deps.events.off('automationChat', onAutomationChat);
         deps.events.off('assistantChat', onAssistantChat);
         deps.events.off('chatTitle', onChatTitle);
+        deps.events.off('chatChanges', onChatChanges);
       }
     }
     send({ type: 'subscribed', streams: [...subscribed] });
@@ -790,6 +804,7 @@ export function attachWebSocket(
       deps.events.off('automationChat', onAutomationChat);
       deps.events.off('assistantChat', onAssistantChat);
       deps.events.off('chatTitle', onChatTitle);
+      deps.events.off('chatChanges', onChatChanges);
     }
     subscribed.clear();
   };

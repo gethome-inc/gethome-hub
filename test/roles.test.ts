@@ -521,6 +521,12 @@ describe.skipIf(!handle)('roles and permissions', () => {
         'hub.ai',
         { model: 'claude-opus-5-5' } as object,
       ],
+      [
+        'POST',
+        '/api/v1/assistant/chat/44444444-4444-4444-a444-444444444444/undo',
+        'hub.ai',
+        { messageId: '55555555-5555-4555-a555-555555555555' } as object,
+      ],
       // **Talking out loud is the same conversation by another route**, so it
       // takes the same key and nothing more — and there is now exactly one
       // route to guard. Client delegation makes no structured tool calls, so a

@@ -380,6 +380,7 @@ describe.skipIf(!handle)('API keys', () => {
     'POST /api/v1/assistant/chat/:id/messages': 'deny',
     'POST /api/v1/assistant/chat/:id/stop': 'deny',
     'POST /api/v1/assistant/chat/:id/retry': 'deny',
+    'POST /api/v1/assistant/chat/:id/undo': 'deny',
     'GET /api/v1/assistant/chats': 'deny',
     'GET /api/v1/assistant/chat/:id': 'deny',
     'POST /api/v1/assistant/voice/session': 'deny',
@@ -895,6 +896,7 @@ describe.skipIf(!handle)('API keys', () => {
         ['GET', `/api/v1/assistant/chat/${uuid}`, undefined, 403, notAllowed],
         ['POST', '/api/v1/assistant/chat', { message: 'hi' }, 403, notAllowed],
         ['POST', `/api/v1/assistant/chat/${uuid}/stop`, undefined, 403, notAllowed],
+        ['POST', `/api/v1/assistant/chat/${uuid}/undo`, { messageId: uuid }, 403, notAllowed],
         ['POST', '/api/v1/assistant/voice/session', { sdp: 'v=0' }, 403, notAllowed],
         // Permissions no key may hold say which, so the integration knows what
         // it has to do without.

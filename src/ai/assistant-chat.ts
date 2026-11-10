@@ -1,3 +1,11 @@
+import {
+  changesOf,
+  commandAsSet,
+  commandBefore,
+  undoVerdict,
+  type ChatChangeWire,
+  type UndoSkip,
+} from './chat/changes.js';
 import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { members } from '../db/schema.js';
@@ -107,6 +115,20 @@ export interface AssistantChatOptions extends ChatRuntimeOptions {
  * ledger.
  */
 const VOICE_MAX_SECONDS = SIDEBAND_MAX_SECONDS;
+
+/** One device an undo put back, and the command that did it. */
+export interface UndoneChange {
+  deviceId: string;
+  endpointId: number;
+  command: HubCommand;
+}
+
+/** One device an undo left alone, and why. */
+export interface SkippedChange {
+  deviceId: string;
+  endpointId: number;
+  reason: UndoSkip;
+}
 
 export class AssistantChat extends ChatRuntime<AssistantTurn> {
   protected readonly surface: AgentSurface = 'assistant';
@@ -525,6 +547,7 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
           endpointId,
           command,
           this.spokenSessions.has(sessionId) ? 'voice' : 'assistant',
+          sessionId,
         );
       },
       runAutomation: async (id) =>
@@ -859,9 +882,24 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
     endpointId: number,
     command: HubCommand,
     via: 'assistant' | 'voice',
+    /** The conversation whose round asked for it — what the change is kept with. */
+    sessionId?: string,
   ): Promise<void> {
+    // Read *before* the command goes out: a mains device reports its new
+    // state within the second, and what it was before is then gone.
+    const before = commandBefore(command, this.options.engine.stateFor(deviceId, endpointId));
     await this.options.registry.execute(deviceId, endpointId, command);
     const device = this.options.engine.homeView().devices.find((entry) => entry.id === deviceId);
+    if (sessionId !== undefined) {
+      this.noteChange(sessionId, {
+        deviceId,
+        endpointId,
+        name: device?.name ?? deviceId,
+        at: new Date().toISOString(),
+        set: commandAsSet(command, before),
+        ...(before !== undefined ? { before } : {}),
+      });
+    }
     /**
      * **Written down, but never at the price of the answer.** The device has
      * taken the command by now; a row that could not be written — a busy
@@ -891,6 +929,110 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
       this.options.log.warn(
         { err: error, deviceId },
         'a command the assistant carried out could not be written to the activity log',
+      );
+    }
+  }
+
+  /**
+   * Put back what one reply changed.
+   *
+   * **A route of the hub's rather than commands an app sends itself**, because
+   * three rules have to hold whichever app, and whichever build of it, is
+   * asking: a lock is never unlocked by an undo; a device somebody has changed
+   * again since is left as they left it; and it is written to the home's
+   * activity like any other change. An app replaying the recorded `before`
+   * values through `POST /devices/:id/commands` would be trusted with all
+   * three, in every version that ever ships.
+   *
+   * Device by device, never all-or-nothing: four lamps switched off and one
+   * since switched back on by hand is three lamps to put back and one to leave
+   * alone, and refusing the lot over the one would be refusing the request.
+   * What was skipped is answered with why (`UndoSkip`).
+   *
+   * Only the person whose conversation it is, and only once — the row is
+   * marked (`data.undone`), which is also what tells every other screen the
+   * card's button is spent.
+   */
+  async undo(
+    sessionId: string,
+    messageId: string,
+    memberId: string,
+  ): Promise<
+    | { outcome: 'not_found' | 'not_yours' | 'already_undone' }
+    | { outcome: 'done' | 'nothing'; undone: UndoneChange[]; skipped: SkippedChange[] }
+  > {
+    const rows = await this.transcript(sessionId);
+    const row = rows.find((entry) => entry.id === messageId);
+    if (row === undefined) return { outcome: 'not_found' };
+    if ((await this.ownerOf(sessionId)) !== memberId) return { outcome: 'not_yours' };
+    const data = (typeof row.data === 'object' && row.data !== null ? row.data : {}) as Record<string, unknown>;
+    if (data.undone !== undefined) return { outcome: 'already_undone' };
+
+    const undone: UndoneChange[] = [];
+    const skipped: SkippedChange[] = [];
+    const home = this.options.engine.homeView();
+    // Newest first: a device switched on and then dimmed is dimmed back
+    // before it is switched off.
+    for (const change of changesOf(row.data).reverse()) {
+      const where = { deviceId: change.deviceId, endpointId: change.endpointId };
+      if (!home.devices.some((device) => device.id === change.deviceId)) {
+        skipped.push({ ...where, reason: 'gone' });
+        continue;
+      }
+      const verdict = undoVerdict(change, this.options.engine.stateFor(change.deviceId, change.endpointId));
+      if (verdict !== null || change.before === undefined) {
+        skipped.push({ ...where, reason: verdict ?? 'no_before' });
+        continue;
+      }
+      try {
+        await this.options.registry.execute(change.deviceId, change.endpointId, change.before);
+      } catch {
+        skipped.push({ ...where, reason: 'failed' });
+        continue;
+      }
+      undone.push({ ...where, command: change.before });
+      await this.logUndo(memberId, change, messageId);
+    }
+
+    if (undone.length === 0) return { outcome: 'nothing', undone, skipped };
+
+    await this.amend(messageId, {
+      ...data,
+      undone: { at: new Date().toISOString(), devices: undone.length, skipped: skipped.length },
+    });
+    // The row moved and no round ended: `amend`, the handoff card's own word
+    // for exactly that, so every screen showing this conversation re-reads it.
+    this.emit({ sessionId, phase: 'amend', at: new Date().toISOString(), text: 'undo' });
+    return { outcome: 'done', undone, skipped };
+  }
+
+  /** An undo, in the home's activity — a command like any other, named for
+   *  the person, and saying what it was (`data.undo`). Never at the price of
+   *  the undo itself, `control`'s rule. */
+  private async logUndo(memberId: string, change: ChatChangeWire, messageId: string): Promise<void> {
+    if (change.before === undefined) return;
+    try {
+      const name = (await this.memberName(memberId)) ?? 'Somebody';
+      const device = this.options.engine.homeView().devices.find((entry) => entry.id === change.deviceId);
+      const deviceName = device?.name ?? change.name;
+      await this.options.activity.record({
+        kind: 'device.command',
+        message: `${name} · ${deviceName}: ${change.before.type} (undo)`,
+        deviceId: change.deviceId,
+        memberId,
+        data: {
+          command: change.before,
+          deviceName,
+          memberName: name,
+          via: 'assistant',
+          undo: true,
+          undoOf: messageId,
+        },
+      });
+    } catch (error) {
+      this.options.log.warn(
+        { err: error, deviceId: change.deviceId },
+        'an undo the assistant carried out could not be written to the activity log',
       );
     }
   }

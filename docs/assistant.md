@@ -427,6 +427,33 @@ system prompt and `control_device`'s own description both ask for all of a
 request's devices in the same response, however many there are, and
 `test/assistant-tools.test.ts` drives twenty through one round.
 
+**What `control_device` changes is written down with the reply.** At the
+moment each command goes out, `AssistantChat.control` reads the device's state
+and notes two commands (`chat/changes.ts`): `set`, the one that was sent, and
+`before`, the one that would put the device back. The list rides on the first
+row the round writes, as `data.changes`, beside `steps` and by the same rule —
+and each addition is announced whole on the socket as a `chatChanges` frame, a
+type of its own for the reason `chatTitle` is. Read *before* the command,
+because a mains device reports its new state within the second and what it was
+is then gone; absent when the device never said, which means "cannot be put
+back" and never "was off". Spoken rounds record the same way, since they run
+the same path.
+
+**Putting a reply back is the hub's route, not the app's commands**
+(`POST /assistant/chat/:id/undo`, `AssistantChat.undo`). An app could replay
+the recorded `before` values through the ordinary command route, and would then
+be trusted — in every build that ever ships — with three rules that must hold
+whoever asks. **A lock is never unlocked by an undo**: it is one tap on a card
+under an old message. **A device changed again since is left alone**, and that
+is asked of the device rather than of a log, because a wall switch writes no
+row anywhere: only a device still the way the reply left it is put back. **And
+it is written to the activity log** as a `device.command` named for the person,
+with `undo: true`. It is answered device by device rather than all-or-nothing —
+four lamps off and one since switched back on by hand is three to put back —
+and marks the row (`data.undone`) so it is done once. It is not a round: no
+model is asked and nothing is spent. [The API reference](api.md#what-a-reply-changed-and-putting-it-back)
+has the shapes.
+
 **`delegate`** is below. `run_automation` presses a rule somebody could press,
 through the engine's own `runManually`. `ask_user` is the automations agent's
 schema **verbatim**, so a question the assistant asks draws with the same

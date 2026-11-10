@@ -5171,6 +5171,49 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   });
 
   /**
+   * Put back what one of the assistant's replies changed — `AssistantChat.undo`
+   * has the argument for this being the hub's route rather than commands an
+   * app replays.
+   *
+   * `{messageId}` names the row carrying `data.changes`. Answered device by
+   * device: `undone` is what was put back and `skipped` what was left alone
+   * and why — `lock` (an undo never unlocks a door), `changed_since`,
+   * `already_as_before`, `no_before`, `gone`, `failed`. `409 nothing_to_undo`
+   * carries the same `skipped` when not one device could be put back, so an
+   * app can still say which and why.
+   */
+  app.post('/api/v1/assistant/chat/:id/undo', memberOnlyNeeds('hub.ai'), async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const { messageId } = z.object({ messageId: z.uuid() }).strict().parse(request.body);
+    const result = await deps.assistantChat.undo(id, messageId, request.member!.id);
+    switch (result.outcome) {
+      case 'not_found':
+        return reply.code(404).send({ error: 'not_found' });
+      case 'not_yours':
+        return reply.code(409).send({
+          error: 'not_your_conversation',
+          detail: 'That conversation belongs to somebody else in this home, so only they can undo it.',
+        });
+      case 'already_undone':
+        return reply.code(409).send({
+          error: 'already_undone',
+          detail: 'That reply has already been undone.',
+        });
+      case 'nothing':
+        return reply.code(409).send({
+          error: 'nothing_to_undo',
+          detail:
+            result.skipped.length === 0
+              ? 'That reply did not change anything that can be put back.'
+              : 'Nothing was put back — everything that reply changed has been changed again since, or cannot be undone.',
+          skipped: result.skipped,
+        });
+      case 'done':
+        return { undone: result.undone, skipped: result.skipped };
+    }
+  });
+
+  /**
    * Ask a failed round again, on the model named — the other vendor's, when
    * the note offered it — see `ChatRuntime.retry` and `retryAnswer`.
    */

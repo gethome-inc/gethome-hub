@@ -1,3 +1,4 @@
+import { mergeChange, type ChatChangeWire } from './changes.js';
 import { randomUUID } from 'node:crypto';
 import { and, asc, count, eq, isNull, lt, max, min, or, type SQL } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
@@ -402,6 +403,17 @@ export const CHAT_CAPABILITY = {
    * a hub put back to an older build keeps those notes and has no route.
    */
   retry: true,
+  /**
+   * A reply says what it changed in the home: `data.changes` on the row a
+   * round writes, and the `chatChanges` frame as it happens. Presence so an
+   * app can tell "this reply changed nothing" from "this hub does not say".
+   */
+  changes: true,
+  /**
+   * What a reply changed can be put back — `POST /assistant/chat/:id/undo`.
+   * An older hub answers that route 404.
+   */
+  undo: true,
   /** The words `effort` takes, from least to most. */
   efforts: CHAT_EFFORTS,
   images: {
@@ -850,6 +862,13 @@ export interface ChatSession<Turn> {
    * between the two cannot hand its working to the next one's answer.
    */
   steps: ChatStepWire[];
+  /**
+   * What the round now running has changed in the home, waiting for the row
+   * it produces — `steps`' rule: cleared when a round begins, taken by the
+   * first row the round writes (`data.changes`). Absent on a session whose
+   * agent changes nothing itself.
+   */
+  changes?: ChatChangeWire[] | undefined;
   /**
    * When the round now running began, until the first row it writes takes it
    * as `tookMs`.
@@ -2639,6 +2658,7 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     // the rows are written, so a turn that throws between the two cannot hand
     // its steps to the next answer.
     session.steps = [];
+    session.changes = undefined;
     // And so does its clock, which the first row it writes takes as `tookMs`
     // — and, where words ended it, as `workedMs` up to the first of them.
     session.roundStartedAt = Date.now();
@@ -2920,6 +2940,33 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
     }
   }
 
+  /**
+   * A command the round now running asked for has gone out: remember what it
+   * set and what was there before, and say so.
+   *
+   * **Written down at the moment of the command**, never worked out afterwards
+   * from the answer's words: the device's own state a second later already
+   * says the new value, and "what it was before" is gone. The list goes on the
+   * first row the round writes, as `steps` do, and each addition is announced
+   * whole (`chatChanges`), so a client holding the frames and one re-reading
+   * the transcript end up with the same list. A round that changed nothing
+   * carries nothing, on either.
+   *
+   * With no live session there is no reply for the change to belong to, and
+   * nothing is kept.
+   */
+  protected noteChange(sessionId: string, change: ChatChangeWire): void {
+    const session = this.sessions.get(sessionId);
+    if (session === undefined) return;
+    session.changes = mergeChange(session.changes ?? [], change);
+    this.base.events.emit('chatChanges', {
+      surface: this.surface === 'automation' ? 'automations' : 'assistant',
+      sessionId,
+      at: new Date().toISOString(),
+      changes: session.changes as unknown as Record<string, unknown>[],
+    });
+  }
+
   protected emit(event: AutomationChatEvent): void {
     this.base.events.emit(this.eventName, event);
   }
@@ -3004,6 +3051,10 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
   ): Promise<ChatMessageWire> {
     const steps = role === 'user' ? [] : session.steps;
     if (steps.length > 0) session.steps = [];
+    // What the round changed in the home, on the same row and by the same
+    // rule — see `noteChange`.
+    const changes = role === 'user' ? undefined : session.changes;
+    if (changes !== undefined) session.changes = undefined;
     /**
      * **How long the round took, on the same row its working goes on.** An
      * integer of milliseconds from the moment the round began to the moment
@@ -3033,10 +3084,11 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
         ? undefined
         : Math.max(0, Math.round(repliedAt - startedAt));
     const payload =
-      steps.length > 0 || tookMs !== undefined
+      steps.length > 0 || tookMs !== undefined || changes !== undefined
         ? {
             ...(typeof data === 'object' && data !== null ? data : {}),
             ...(steps.length > 0 ? { steps } : {}),
+            ...(changes !== undefined && changes.length > 0 ? { changes } : {}),
             ...(tookMs !== undefined ? { tookMs } : {}),
             ...(workedMs !== undefined ? { workedMs } : {}),
           }

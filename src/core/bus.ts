@@ -199,6 +199,26 @@ export interface HubEvents {
    * the same way, since a name is made of what somebody said.
    */
   chatTitle: [event: ChatTitleEvent];
+  /**
+   * What the round a conversation is running has changed in the home so far.
+   *
+   * A frame of its own for `chatTitle`'s reason — a new *phase* would end the
+   * round on every shipped phone — and addressed like it, by surface and
+   * session. Sent each time a command the round asked for goes out, carrying
+   * the whole list so far, so a client replaces what it holds rather than
+   * adding to it; the row the round then writes carries the same list as
+   * `data.changes`.
+   */
+  chatChanges: [event: ChatChangesEvent];
+}
+
+/** `changes` is `ChatChangeWire[]` (`ai/chat/changes.ts`), loose here because
+ *  the bus is below it. */
+export interface ChatChangesEvent {
+  surface: 'assistant' | 'automations';
+  sessionId: string;
+  at: string;
+  changes: readonly Record<string, unknown>[];
 }
 
 /** A conversation's name, as it is settled. */

@@ -248,7 +248,7 @@ than no button.
 
 | Method & path | Needs | Notes |
 |---|---|---|
-| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `matter: {bluetooth, bluetoothReason?, wifi, commissioning, settlingUntil?}` is present only while Matter is running and says what pairing this hub can actually do — and, in `settlingUntil`, whether it has finished finding the devices it already owns — see [below](#pairing-a-matter-accessory). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid). `wifiNetworks: {available, reason?}` is present on a hub that can be told about another Wi-Fi network before it is moved — `available: false` with `reason` `"no-networkmanager"` or `"not-installed"` when this machine cannot — see [below](#wi-fi-networks-settingswifi). `apiKeys: {grantable}` is present on a hub that takes [API keys](#api-keys), and lists the permissions a key may be given. `aiRuns: {before: true, maxLimit}` is present on a hub whose `GET /ai/runs` reads a page at a time (`before`, in the [route table](#rest-routes)) — an app that does not find it asks for one page and stops, because an older hub strips `before` and answers the newest page again. `roomPictures: {model, maxPerRoom, maxPhotos}` is present on a hub that [draws rooms](#room-pictures). `photos: {kinds: ["room","portrait","chat"], minFreeBytes, chatRetainDays}` is present on a hub that can [keep photos](#photos-the-hub-keeps) — an app that does not find it never sends `keepPhotos` and says what it always said: photos stay on the device that took them. `chat: {models: true, stop: true, retry: true, efforts: ["low","medium","high"], images: {maxCount, maxBytes, mediaTypes}}` is present on a hub whose chat routes take a message's own `model`, `effort` and photos — an app that does not find it must offer none of the three, because an older hub strips them and answers 201; see [below](#what-a-chat-message-can-carry-model-effort-attachments). `chat.stop` says a running round can be [stopped part-way](#stopping-a-round-post-chatidstop) — an older hub answers that route 404, so an app that does not find it offers no stop — and `chat.retry` the same for [asking a failed round again](#asking-a-failed-round-again-post-chatidretry). `automations: {status: true, devices: true}` is present on a hub that says [whether each rule is working](#whether-a-rule-is-working) and [which devices it uses](#the-devices-a-rule-uses) — both ride on every rule such a hub sends, so the block is for a home with no rule yet to look for them on |
+| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `matter: {bluetooth, bluetoothReason?, wifi, commissioning, settlingUntil?}` is present only while Matter is running and says what pairing this hub can actually do — and, in `settlingUntil`, whether it has finished finding the devices it already owns — see [below](#pairing-a-matter-accessory). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid). `wifiNetworks: {available, reason?}` is present on a hub that can be told about another Wi-Fi network before it is moved — `available: false` with `reason` `"no-networkmanager"` or `"not-installed"` when this machine cannot — see [below](#wi-fi-networks-settingswifi). `apiKeys: {grantable}` is present on a hub that takes [API keys](#api-keys), and lists the permissions a key may be given. `aiRuns: {before: true, maxLimit}` is present on a hub whose `GET /ai/runs` reads a page at a time (`before`, in the [route table](#rest-routes)) — an app that does not find it asks for one page and stops, because an older hub strips `before` and answers the newest page again. `roomPictures: {model, maxPerRoom, maxPhotos}` is present on a hub that [draws rooms](#room-pictures). `photos: {kinds: ["room","portrait","chat"], minFreeBytes, chatRetainDays}` is present on a hub that can [keep photos](#photos-the-hub-keeps) — an app that does not find it never sends `keepPhotos` and says what it always said: photos stay on the device that took them. `chat: {models: true, stop: true, retry: true, efforts: ["low","medium","high"], images: {maxCount, maxBytes, mediaTypes}}` is present on a hub whose chat routes take a message's own `model`, `effort` and photos — an app that does not find it must offer none of the three, because an older hub strips them and answers 201; see [below](#what-a-chat-message-can-carry-model-effort-attachments). `chat.stop` says a running round can be [stopped part-way](#stopping-a-round-post-chatidstop) — an older hub answers that route 404, so an app that does not find it offers no stop — and `chat.retry` the same for [asking a failed round again](#asking-a-failed-round-again-post-chatidretry); `chat.changes` says a reply carries [what it changed in the home](#what-a-reply-changed-and-putting-it-back) and `chat.undo` that it can be put back. `automations: {status: true, devices: true}` is present on a hub that says [whether each rule is working](#whether-a-rule-is-working) and [which devices it uses](#the-devices-a-rule-uses) — both ride on every rule such a hub sends, so the block is for a home with no rule yet to look for them on |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
 | `POST /hub/proof` | — | `{nonce, address, tokenId}` → `{hubId, proof}`: this hub proving it is itself **at the address the app dialled**, to an app holding one of its tokens, without the token being sent. `403 proof_refused` for an address that is not this hub's or a token it does not hold — one answer for both. For an app following a saved hub to a new address — see [below](#following-a-hub-to-a-new-address-post-hubproof) |
 | `GET /home` · `PATCH /home` | floor · `home.rename` | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name) |
@@ -313,6 +313,7 @@ than no button.
 | `POST /assistant/chat/:id/messages` | `hub.ai` · never a key | `{message, model?, effort?, attachments?}` → the same acknowledgement. `410 conversation_ended` only when there is nothing left to read — or when the conversation is somebody else's |
 | `POST /assistant/chat/:id/stop` | `hub.ai` · never a key | the same, for the assistant. A job it has already handed to another agent goes on — that is the other agent's conversation now, with its own stop |
 | `POST /assistant/chat/:id/retry` | `hub.ai` · never a key | the same retry, for the assistant |
+| `POST /assistant/chat/:id/undo` | `hub.ai` · never a key | `{messageId}` → `200 {undone, skipped}` — put back what one of the assistant's replies [changed](#what-a-reply-changed-and-putting-it-back), device by device. **Never unlocks a lock**, leaves alone a device changed again since, and writes each one to the activity log. `409 nothing_to_undo` (with `skipped`), `409 already_undone`, `409 not_your_conversation`, `404 not_found` |
 | `GET /assistant/chats` | `hub.ai` · never a key | the assistant's own conversations, newest first, in the same shape `GET /automations/chats` answers (`mine` included; `handedFrom` never — nothing hands a conversation to the assistant). The two lists are **disjoint**: rows carry a `surface`, and a row written before that column existed is an automations row |
 | `GET /assistant/chat/:id` | `hub.ai` · never a key | `{sessionId, live, spend?, messages}`, the same shape as an automations transcript with one more `role`: **`handoff`**, a job handed to another agent. Its `data` is `{agent, title, brief, sessionId, status, automationIds}` — `sessionId` is the *other* agent's conversation, which is where the live trail, its questions and the rules it wrote are read from; `status` is `working`/`asked`/`delivered`/`failed` and is an **open** string; `automationIds` fills as that agent saves rules. Nothing about the other conversation is copied into this one |
 | `DELETE /assistant/chat/:id` | `hub.ai` · never a key | end it and write down what it spent |
@@ -2286,6 +2287,114 @@ what can be done about it:
   so the next message is not read beside it, and declined for it. The model is
   told only that a message was declined and what that round had already done.
 
+### What a reply changed, and putting it back
+
+When the assistant works devices it answers in words, and the row carrying
+those words also says **what it changed**:
+
+```json
+{
+  "id": "0c1d…", "at": "2026-11-10T19:02:11.305Z", "role": "agent",
+  "text": "Done — the desk lamp is off and the bedroom blind is down.",
+  "data": {
+    "steps": [ … ],
+    "changes": [
+      { "deviceId": "…", "endpointId": 1, "name": "Desk lamp", "at": "2026-11-10T19:02:09.871Z",
+        "set":    { "type": "power", "on": false },
+        "before": { "type": "power", "on": true } },
+      { "deviceId": "…", "endpointId": 1, "name": "Bedroom blind", "at": "2026-11-10T19:02:10.240Z",
+        "set":    { "type": "closeCovering" },
+        "before": { "type": "setCoveringPercent", "percent100ths": 0 } }
+    ]
+  }
+}
+```
+
+**Both halves are [commands](device-schema.md).** `set` is the command that
+went out, and `before` is the command that would put the device back the way it
+was — the one shape every client already reads and sends, in the schema's own
+units, so there is no second vocabulary of "values". A `toggle` is written as
+the `power` it turned out to be. `name` is what the home called the device at
+the time, for a row read after the device has gone.
+
+- **Recorded at the moment each command is sent**, for typed and spoken rounds
+  alike, and kept with the conversation for as long as the transcript is.
+- **On the first row the round writes**, beside `steps`, whichever kind of row
+  that is. **A round that changed nothing carries no `changes`.**
+- **`before` is absent when the hub could not read it** — a device that had
+  never reported that value, or a command with nothing behind it (an IR code, a
+  blind told to stop). Absent means *cannot be put back*, never "was off".
+- One entry per device per kind of command: a lamp switched on and then dimmed
+  is two entries; a lamp dimmed twice is one, with the first `before` and the
+  last `set`. At most 60 entries a round.
+- Only what the assistant sent itself. A scene it pressed (`run_automation`)
+  and a job it handed to another agent are not listed.
+
+**Live**, the list arrives as it grows, on the `automations` stream, as a frame
+of its own:
+
+```
+{"type":"chatChanges","chatChanges":{"surface":"assistant","sessionId":"…","at":"…","changes":[ …the whole list so far… ]}}
+```
+
+Each frame carries the round's **whole list so far**, so replace what you hold
+rather than appending; the row the round then writes carries the same list. It
+is gated like the conversation's other frames (`hub.ai`, never a key), and a
+client that has never met the type drops it.
+
+`GET /hub`'s `chat.changes` says a hub records these — which is how an app tells
+"this reply changed nothing" from "this hub does not say" — and `chat.undo` that
+it has the route below.
+
+#### `POST /assistant/chat/:id/undo`
+
+`{messageId}` — the row carrying `changes` — puts back what that reply changed,
+and answers device by device:
+
+```json
+{
+  "undone":  [ { "deviceId": "…", "endpointId": 1, "command": { "type": "power", "on": true } } ],
+  "skipped": [ { "deviceId": "…", "endpointId": 1, "reason": "changed_since" } ]
+}
+```
+
+**It is the hub's route, rather than commands an app sends from `before`
+itself, because three rules have to hold whichever app is asking:**
+
+- **A lock is never unlocked by an undo.** A change whose `before` is
+  `{"type":"lock","engage":false}` is always skipped, `reason: "lock"`. Locking
+  a door again *is* an undo anybody may make.
+- **A device changed again since is left as it is.** Each device is asked what
+  it is now: only one that is still the way the reply left it (give or take a
+  device's own rounding) is put back. One somebody has since changed — from an
+  app, a wall switch or a rule — or that reports nothing, is skipped as
+  `changed_since`; one already back the way it was, as `already_as_before`.
+- **It is written to the home's activity** like any other change: one
+  `device.command` row per device, named for the person, with `data.undo: true`
+  and `data.undoOf` the message's id.
+
+| `reason` | |
+|---|---|
+| `lock` | putting it back would unlock a door |
+| `changed_since` | it is no longer the way that reply left it |
+| `already_as_before` | it is already the way it was |
+| `no_before` | what it was before was never known |
+| `gone` | the device is no longer in the home |
+| `failed` | it was asked and did not take the command |
+
+Treat `reason` as an open string. The devices are put back newest first.
+
+| Answer | When |
+|---|---|
+| `200 {undone, skipped}` | at least one device was put back. The row is then marked `data.undone: {at, devices, skipped}` and an `amend` frame is sent on the conversation, so every screen showing it re-reads and stops offering the button |
+| `409 {error: "nothing_to_undo", detail, skipped}` | not one device could be put back — `skipped` says why for each, and is empty for a row that changed nothing. The row is not marked |
+| `409 {error: "already_undone", detail}` | that reply was undone before |
+| `409 {error: "not_your_conversation", detail}` | only the person whose conversation it is may undo it |
+| `404 {error: "not_found"}` | no such message in that conversation; and an older hub has no such route |
+
+An undo is not a round: it asks no model, spends nothing, and writes no new
+row. `hub.ai`, and never an API key, as every conversation route is.
+
 **`POST /assistant/chat/:id/retry`** and **`POST /automations/chat/:id/retry`**
 answer the failed message again: `{model, effort?, attachments?}`, with
 `model` required — `switchTo.model` for the offer, or `failure.model` to try the
@@ -2827,6 +2936,11 @@ the house arriving on the next line, with no reconnect and nothing to poll.
 }
 ```
 
+A command the assistant sent carries `via: "assistant"` (or `"voice"`) in
+`data`, and one sent by [undoing a reply](#what-a-reply-changed-and-putting-it-back)
+also `undo: true` and `undoOf`, the message that was undone — its `message`
+ends "(undo)".
+
 `message` is the whole sentence and is all a client needs — Studio renders
 exactly that. `data` is the same facts structured, so an app can compose its
 own wording ("Brightness set"), pick an icon and a tone, and fold a burst of
@@ -3255,6 +3369,7 @@ and then:
 {"type":"automationChat","chat":{sessionId,phase,at,text,kind?,detail?,workedMs?}}  phase: thinking | delta | step | turn | amend
 {"type":"assistantChat","chat":{…the same shape…}}      the assistant, on the same stream
 {"type":"chatTitle","chatTitle":{surface,sessionId,title,at}}  a conversation was named; surface: assistant | automations
+{"type":"chatChanges","chatChanges":{surface,sessionId,at,changes}}  what the running round has changed in the home so far — the whole list each time
 ```
 
 **A socket opened with an [API key](#api-keys) is the key's view of all of

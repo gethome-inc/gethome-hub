@@ -1306,6 +1306,19 @@ domains — update them in the same change.
   wrong model id, then a WebSocket kept with a client secret assumed to exist
   for it. Both times the containment is what made the fix a constant and a
   route rather than a hunt through an audio pipeline.
+  **What a reply changed is written down when the command is sent, as two
+  commands** (`chat/changes.ts`): `set`, and the `before` that would put the
+  device back — read from the device *before* the command, since a mains
+  device reports its new state within the second. `ChatRuntime.noteChange`
+  keeps the round's list (`ChatSession.changes`, `steps`' rule: cleared when a
+  round begins, taken by its first row as `data.changes`) and announces it as
+  a `chatChanges` frame — **a frame type of its own, never a phase**, the
+  `chatTitle` rule. **Undo is the hub's route** (`AssistantChat.undo`), because
+  its rules must hold whichever app asks: `undoVerdict` refuses to unlock a
+  lock *first and without exception*, and leaves alone any device that is no
+  longer the way the reply left it — asked of the device's state, never of a
+  log, since a wall switch writes no row. A new command type needs its line in
+  `commandBefore` and `commandHolds`, or it is simply not undoable.
   **`control_device` is the one tool that writes to the home**, through the
   registry's ordinary path and into the activity log **named for the person who
   asked** — the feed is read a week later and "the assistant" is nobody anyone

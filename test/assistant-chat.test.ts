@@ -1380,4 +1380,341 @@ describe('the assistant', () => {
     const unknown = await tools.delegate('laundry', 'do the washing');
     expect(unknown.refused).toContain('laundry');
   });
+
+  // ── What a reply changed, and putting it back ──────────────────────────────
+
+  /** A home with a lamp, a blind and a lock, whose states a test moves by
+   *  hand — the registry here records commands and reports nothing back. */
+  const changedHome = () => {
+    const lamp = randomUUID();
+    const blind = randomUUID();
+    const lock = randomUUID();
+    const devices: ReturnType<EngineRegistry['listDevices']> = [
+      {
+        id: lamp,
+        name: 'Desk lamp',
+        roomId: null,
+        online: true,
+        endpoints: [
+          {
+            endpointId: 1,
+            deviceKind: 'light',
+            capabilities: ['onOff', 'level'],
+            state: { reachable: true, sensors: {}, onOff: true, level: { current: 200, min: 1, max: 254 } },
+          },
+        ],
+      },
+      {
+        id: blind,
+        name: 'Bedroom blind',
+        roomId: null,
+        online: true,
+        endpoints: [
+          {
+            endpointId: 1,
+            deviceKind: 'shade',
+            capabilities: ['windowCovering'],
+            state: {
+              reachable: true,
+              sensors: {},
+              covering: { currentPositionLiftPercent100ths: 0, isMoving: false },
+            },
+          },
+        ],
+      },
+      {
+        id: lock,
+        name: 'Front door',
+        roomId: null,
+        online: true,
+        endpoints: [
+          {
+            endpointId: 1,
+            deviceKind: 'lock',
+            capabilities: ['doorLock'],
+            state: { reachable: true, sensors: {}, lock: 2 },
+          },
+        ],
+      },
+    ];
+    const stateOf = (id: string) => devices.find((device) => device.id === id)!.endpoints[0]!.state;
+    return { lamp, blind, lock, devices, stateOf };
+  };
+
+  type Control = (deviceId: string, endpointId: number, command: object) => Promise<void>;
+
+  /**
+   * Run one round in which the assistant sends `commands`, the way its loop
+   * does: through the tool context, while the round is running. The home then
+   * "reports" each new state, which is what `apply` is for.
+   */
+  const roundThatSends = async (
+    home: ReturnType<typeof changedHome>,
+    commands: [string, object][],
+    apply: () => void,
+    spoken = false,
+  ) => {
+    let sessionId = '';
+    events.on('assistantChat', (event) => {
+      sessionId = event.sessionId;
+    });
+    const frames: { sessionId: string; changes: readonly Record<string, unknown>[] }[] = [];
+    events.on('chatChanges', (event) => frames.push(event));
+    let assistant!: AssistantChat;
+    ({ assistant } = await assistantFor([{ kind: 'said', text: 'Done.' }], {
+      devices: home.devices,
+      script: async () => {
+        const tools = (
+          assistant as unknown as { toolContext: (id: string, session: string) => { control: Control } }
+        ).toolContext(memberId, sessionId);
+        for (const [deviceId, command] of commands) await tools.control(deviceId, 1, command);
+        apply();
+      },
+    }));
+    if (spoken) {
+      sessionId = assistant.beginVoice();
+      await assistant.askAloud({ sessionId, memberId, question: 'lights off' });
+    } else {
+      const started = await assistant.start({ memberId, message: 'lights off' });
+      sessionId = started.sessionId;
+      await assistant.idle();
+    }
+    const rows = await assistant.transcript(sessionId);
+    const answer = rows.find((row) => row.role === 'agent')!;
+    return { assistant, sessionId, answer, frames, rows };
+  };
+
+  it('says on the reply what it changed and what was there before, as commands', async () => {
+    const home = changedHome();
+    const { answer, frames, sessionId, rows } = await roundThatSends(
+      home,
+      [
+        [home.lamp, { type: 'power', on: false }],
+        [home.blind, { type: 'closeCovering' }],
+      ],
+      () => {
+        home.stateOf(home.lamp).onOff = false;
+        home.stateOf(home.blind).covering!.currentPositionLiftPercent100ths = 10_000;
+      },
+    );
+
+    const changes = (answer.data as { changes: Record<string, unknown>[] }).changes;
+    expect(changes).toMatchObject([
+      {
+        deviceId: home.lamp,
+        endpointId: 1,
+        name: 'Desk lamp',
+        set: { type: 'power', on: false },
+        before: { type: 'power', on: true },
+      },
+      {
+        deviceId: home.blind,
+        set: { type: 'closeCovering' },
+        // Where it was, in the one command that puts it back there.
+        before: { type: 'setCoveringPercent', percent100ths: 0 },
+      },
+    ]);
+    // Live, the list grows a command at a time and each frame carries all of it.
+    expect(frames.map((frame) => frame.changes.length)).toEqual([1, 2]);
+    expect(frames.at(-1)).toMatchObject({ surface: 'assistant', sessionId });
+    expect(frames.at(-1)?.changes).toEqual(changes);
+    // The person's own row never carries them.
+    expect((rows[0]?.data as { changes?: unknown } | undefined)?.changes).toBeUndefined();
+  });
+
+  it('carries nothing on a round that changed nothing', async () => {
+    const home = changedHome();
+    const { answer, frames } = await roundThatSends(home, [], () => {});
+    expect((answer.data as { changes?: unknown }).changes).toBeUndefined();
+    expect(frames).toEqual([]);
+  });
+
+  it('keeps the first "before" and the last "set" for a device worked twice the same way', async () => {
+    const home = changedHome();
+    const { answer } = await roundThatSends(
+      home,
+      [
+        [home.lamp, { type: 'setLevel', level: 40 }],
+        [home.lamp, { type: 'setLevel', level: 120 }],
+        // A toggle is written down as the power it came to.
+        [home.lamp, { type: 'toggle' }],
+      ],
+      () => {},
+    );
+    expect((answer.data as { changes: unknown[] }).changes).toMatchObject([
+      { set: { type: 'setLevel', level: 120 }, before: { type: 'setLevel', level: 200 } },
+      { set: { type: 'power', on: false }, before: { type: 'power', on: true } },
+    ]);
+  });
+
+  it('records a spoken round’s changes the same way', async () => {
+    const home = changedHome();
+    const { answer } = await roundThatSends(
+      home,
+      [[home.lamp, { type: 'power', on: false }]],
+      () => {
+        home.stateOf(home.lamp).onOff = false;
+      },
+      true,
+    );
+    expect((answer.data as { changes: unknown[] }).changes).toMatchObject([
+      { deviceId: home.lamp, set: { type: 'power', on: false }, before: { type: 'power', on: true } },
+    ]);
+  });
+
+  it('puts a reply back device by device, writes it to the home’s activity, and only once', async () => {
+    const home = changedHome();
+    const { assistant, sessionId, answer } = await roundThatSends(
+      home,
+      [
+        [home.lamp, { type: 'power', on: false }],
+        [home.blind, { type: 'closeCovering' }],
+      ],
+      () => {
+        home.stateOf(home.lamp).onOff = false;
+        home.stateOf(home.blind).covering!.currentPositionLiftPercent100ths = 10_000;
+      },
+    );
+    const record = vi.spyOn(activity, 'record');
+    const amended: string[] = [];
+    events.on('assistantChat', (event) => {
+      if (event.phase === 'amend') amended.push(event.text);
+    });
+    commanded.length = 0;
+
+    const result = await assistant.undo(sessionId, answer.id, memberId);
+    expect(result).toMatchObject({
+      outcome: 'done',
+      // Newest first.
+      undone: [
+        { deviceId: home.blind, command: { type: 'setCoveringPercent', percent100ths: 0 } },
+        { deviceId: home.lamp, command: { type: 'power', on: true } },
+      ],
+      skipped: [],
+    });
+    expect(commanded.map((entry) => entry.type)).toEqual(['setCoveringPercent', 'power']);
+    expect(record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'device.command',
+        memberId,
+        deviceId: home.lamp,
+        message: 'Anna · Desk lamp: power (undo)',
+        data: expect.objectContaining({ undo: true, undoOf: answer.id, via: 'assistant', command: { type: 'power', on: true } }),
+      }),
+    );
+    // The row says so, and every screen showing it is told to re-read.
+    const row = (await assistant.transcript(sessionId)).find((entry) => entry.id === answer.id);
+    expect(row?.data).toMatchObject({ undone: { devices: 2, skipped: 0 } });
+    expect(amended).toEqual(['undo']);
+
+    expect(await assistant.undo(sessionId, answer.id, memberId)).toEqual({ outcome: 'already_undone' });
+    record.mockRestore();
+  });
+
+  it('never unlocks a door by undoing, and still locks one again', async () => {
+    const home = changedHome();
+    // "Lock the front door": it was unlocked, so putting it back would open it.
+    const locked = await roundThatSends(
+      home,
+      [
+        [home.lock, { type: 'lock', engage: true }],
+        [home.lamp, { type: 'power', on: false }],
+      ],
+      () => {
+        home.stateOf(home.lock).lock = 1;
+        home.stateOf(home.lamp).onOff = false;
+      },
+    );
+    commanded.length = 0;
+    const result = await locked.assistant.undo(locked.sessionId, locked.answer.id, memberId);
+    expect(result).toMatchObject({
+      outcome: 'done',
+      undone: [{ deviceId: home.lamp }],
+      skipped: [{ deviceId: home.lock, reason: 'lock' }],
+    });
+    expect(commanded.map((entry) => entry.type)).toEqual(['power']);
+    expect(home.stateOf(home.lock).lock).toBe(1);
+
+    // "Unlock the front door" is the other way round: undoing it locks.
+    const other = changedHome();
+    other.stateOf(other.lock).lock = 1;
+    const unlocked = await roundThatSends(
+      other,
+      [[other.lock, { type: 'lock', engage: false }]],
+      () => {
+        other.stateOf(other.lock).lock = 2;
+      },
+    );
+    expect(await unlocked.assistant.undo(unlocked.sessionId, unlocked.answer.id, memberId)).toMatchObject({
+      outcome: 'done',
+      undone: [{ deviceId: other.lock, command: { type: 'lock', engage: true } }],
+    });
+  });
+
+  it('leaves alone a device somebody has changed again since', async () => {
+    const home = changedHome();
+    const { assistant, sessionId, answer } = await roundThatSends(
+      home,
+      [
+        [home.lamp, { type: 'setLevel', level: 40 }],
+        [home.blind, { type: 'setCoveringPercent', percent100ths: 4000 }],
+      ],
+      () => {
+        home.stateOf(home.lamp).level!.current = 40;
+        home.stateOf(home.blind).covering!.currentPositionLiftPercent100ths = 4000;
+      },
+    );
+    // Somebody at the wall dims the lamp further; the blind is as it was left.
+    home.stateOf(home.lamp).level!.current = 90;
+    commanded.length = 0;
+
+    expect(await assistant.undo(sessionId, answer.id, memberId)).toMatchObject({
+      outcome: 'done',
+      undone: [{ deviceId: home.blind }],
+      skipped: [{ deviceId: home.lamp, reason: 'changed_since' }],
+    });
+    expect(commanded.map((entry) => entry.deviceId)).toEqual([home.blind]);
+  });
+
+  it('refuses when nothing can be put back, and says why for each device', async () => {
+    const home = changedHome();
+    const { assistant, sessionId, answer, rows } = await roundThatSends(
+      home,
+      [[home.lamp, { type: 'power', on: false }]],
+      () => {
+        home.stateOf(home.lamp).onOff = false;
+      },
+    );
+    // Switched back on by hand: already as it was before.
+    home.stateOf(home.lamp).onOff = true;
+    commanded.length = 0;
+    expect(await assistant.undo(sessionId, answer.id, memberId)).toEqual({
+      outcome: 'nothing',
+      undone: [],
+      skipped: [{ deviceId: home.lamp, endpointId: 1, reason: 'already_as_before' }],
+    });
+    expect(commanded).toEqual([]);
+    // Nothing was done, so it is not marked: it can be asked again.
+    expect(await assistant.undo(sessionId, answer.id, memberId)).toMatchObject({ outcome: 'nothing' });
+
+    // A row with nothing on it, and a row that is not in this conversation.
+    expect(await assistant.undo(sessionId, rows[0]!.id, memberId)).toMatchObject({ outcome: 'nothing', skipped: [] });
+    expect(await assistant.undo(sessionId, randomUUID(), memberId)).toEqual({ outcome: 'not_found' });
+  });
+
+  it('lets only the person whose conversation it is undo it', async () => {
+    const home = changedHome();
+    const { assistant, sessionId, answer } = await roundThatSends(
+      home,
+      [[home.lamp, { type: 'power', on: false }]],
+      () => {
+        home.stateOf(home.lamp).onOff = false;
+      },
+    );
+    const other = randomUUID();
+    await handle!.db.insert(membersTable).values({ id: other, name: 'Ben', role: 'member' });
+    commanded.length = 0;
+    expect(await assistant.undo(sessionId, answer.id, other)).toEqual({ outcome: 'not_yours' });
+    expect(commanded).toEqual([]);
+  });
 });
