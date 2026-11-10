@@ -1285,3 +1285,116 @@ describe('whether a rule is working', () => {
     expect(engine.statusOf(id).lastRun).toBeUndefined();
   });
 });
+
+describe('a command the radio took is not a command the device did', () => {
+  const failure = (deviceId: string, kind = 'unreachable') => ({
+    deviceId,
+    property: 'state',
+    kind,
+    detail: 'Publish \'set\' \'state\' failed: no response from the device',
+  });
+
+  it('says a device was offline when it was asked, rather than that it did the thing', async () => {
+    const id = await install(lampOn);
+    registry.listDevices().find((device) => device.id === lampId)!.online = false;
+    registry.report(motionId, 1, { sensors: { occupied: true } });
+    await settle();
+
+    // Still sent — a sleeping device takes it when it wakes — and said truly.
+    expect(registry.sent).toHaveLength(1);
+    const [trace] = await store.runs(id);
+    expect(stepsOf(trace)).toMatchObject([
+      { kind: 'command', summary: 'Kitchen lamp was offline when this was sent' },
+    ]);
+    expect(engine.statusOf(id)).toMatchObject({
+      today: { runs: 1, problems: 1 },
+      lastProblem: { reason: 'Kitchen lamp was offline when this was sent' },
+    });
+  });
+
+  it('puts a finished run right when the radio then says the write never landed', async () => {
+    const id = await install(lampOn);
+    registry.report(motionId, 1, { sensors: { occupied: true } });
+    await settle();
+    const ranAt = new Date(now).toISOString();
+    expect(stepsOf((await store.runs(id))[0])[0]?.summary).toBe('Kitchen lamp turned on');
+    expect(engine.statusOf(id).today).toMatchObject({ runs: 1, problems: 0 });
+
+    const heard: unknown[] = [];
+    events.on('automationStatus', (event) => heard.push(event));
+    now += 9_000;
+    events.emit('commandFailed', failure(lampId));
+    await settle();
+
+    // The step that was never true is replaced where it stood, not followed.
+    expect(stepsOf((await store.runs(id))[0])).toEqual([
+      {
+        at: ranAt,
+        kind: 'refused',
+        summary: 'Kitchen lamp didn’t answer',
+        detail: expect.stringContaining('power on=true · Publish'),
+      },
+    ]);
+    const status = engine.statusOf(id);
+    expect(status.today).toMatchObject({ runs: 1, problems: 1 });
+    expect(status.lastRun).toMatchObject({ at: ranAt, outcome: 'ran', problem: 'Kitchen lamp didn’t answer' });
+    expect(status.lastProblem).toEqual({ at: ranAt, outcome: 'ran', reason: 'Kitchen lamp didn’t answer' });
+    // …and whoever is watching the rule is told, inside the usual throttle.
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(heard.at(-1)).toMatchObject({ automationId: id, status: { today: { problems: 1 } } });
+
+    // One failure, one problem: a second word about the same write changes nothing.
+    events.emit('commandFailed', failure(lampId));
+    await settle();
+    expect(engine.statusOf(id).today.problems).toBe(1);
+  });
+
+  it('corrects a run that is still going, and counts the problem once when it reports', async () => {
+    const id = await install({
+      name: 'Both lamps',
+      triggers: [{ kind: 'manual' }],
+      actions: [
+        { kind: 'deviceCommand', target: { deviceIds: [lampId] }, command: { type: 'power', on: true } },
+        { kind: 'deviceCommand', target: { deviceIds: [otherLampId] }, command: { type: 'power', on: true } },
+      ],
+    });
+    // The first command goes straight through; the second is held open.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let calls = 0;
+    registry.hold = () => ((calls += 1) === 1 ? Promise.resolve() : gate);
+
+    await engine.runManually(id, { name: 'Anna' });
+    await settle();
+    expect(registry.sent).toHaveLength(2);
+    expect(runs).toHaveLength(0);
+
+    events.emit('commandFailed', failure(lampId));
+    release();
+    await engine.settled();
+    await settle();
+
+    expect(stepsOf((await store.runs(id))[0]).map((step) => [step.kind, step.summary])).toEqual([
+      ['refused', 'Kitchen lamp didn’t answer'],
+      ['command', 'Counter lamp turned on'],
+    ]);
+    expect(engine.statusOf(id)).toMatchObject({
+      today: { runs: 1, problems: 1 },
+      lastRun: { problem: 'Kitchen lamp didn’t answer' },
+    });
+  });
+
+  it('leaves a run alone over a failure too late, or about a device it never worked', async () => {
+    const id = await install(lampOn);
+    registry.report(motionId, 1, { sensors: { occupied: true } });
+    await settle();
+
+    events.emit('commandFailed', failure(otherLampId));
+    now += 5 * 60_000;
+    events.emit('commandFailed', failure(lampId));
+    await settle();
+
+    expect(stepsOf((await store.runs(id))[0])[0]?.summary).toBe('Kitchen lamp turned on');
+    expect(engine.statusOf(id).today.problems).toBe(0);
+  });
+});

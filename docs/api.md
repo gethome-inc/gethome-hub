@@ -1486,6 +1486,28 @@ problem.
 A firing the rule declined before doing anything — a condition did not hold, it
 was already running — is `outcome: "skipped"` with one step saying why.
 
+**A step says what the hub knows, and is put right when it learns more.** A
+command is handed to a radio, and the radio taking it is not the device doing
+it. So:
+
+- a device the hub could not reach when the command went out reads "Hall lamp
+  was offline when this was sent" rather than "turned on" — it is still sent,
+  since a sleeping battery device takes it when it wakes — and the run counts
+  as one with a problem;
+- a device that could be reached reads "Hall lamp turned on", and if the radio
+  reports within a minute that the write never landed, **that step is replaced
+  where it stands** by "Hall lamp didn’t answer" (or "refused the command"),
+  `kind: "refused"`, with the radio's own words in `detail`. The run's `status`
+  moves with it — `today.problems`, `lastRun.problem`, `lastProblem` — and an
+  `automationStatus` frame says so.
+
+So a trace read a minute after a run can differ from the one read straight
+away: re-read it when the rule's status reports a problem you have not shown.
+A reading that is a *state* rather than an amount is said by the state reached
+— "Smoke in the Hall", "Front door was unlocked", "Air quality in the Bedroom
+became poor" — and a numbered mode only as having changed; the number tested
+and the number read are in `causeDetail`.
+
 ### Whether a rule is working
 
 Every automation carries `status`:
@@ -1504,7 +1526,7 @@ Every automation carries `status`:
 
 | Field | When it is there | What it says |
 |---|---|---|
-| `today` | always | the home's own day, `date` in the home's [timezone](#rest-routes): `runs` — firings that got as far as their actions; `problems` — how many of those had something asked for that did not happen; `skipped` — firings the rule declined before acting. It answers zero for a new day when it is *read*, without anything having to fire first |
+| `today` | always | the home's own day, `date` in the home's [timezone](#rest-routes): `runs` — firings that got as far as their actions; `problems` — how many of those had something asked for that did not happen; `skipped` — firings the rule declined before acting. It answers zero for a new day when it is *read*, without anything having to fire first. `problems` can rise up to a minute *after* a run, when a radio reports that one of its commands never landed |
 | `lastRun` | once it has run | the last firing that got as far as its actions: `at`, `outcome` (`ran`/`failed`/`refused`/`interrupted`, an **open** string) and its `cause`. `problem` is added — a sentence — when something in it did not happen |
 | `lastProblem` | once something has gone wrong | the last run with a problem, and `reason`: a sentence to show as it is |
 | `lastSkipped` | once it has declined | the last firing it declined, what set it off, and why in a sentence |

@@ -95,7 +95,17 @@ directory. `docs/automations.md` is canonical — update it in the same change.
   name and does not repeat it, which is why the manual run's activity row
   carries its own `sentence` ("Anna pressed Leaving") rather than the cause. A
   new trigger kind, command or guard needs its words there, or it reads as its
-  own type.
+  own type — and a new readable path that is a *state* behind a number (an
+  alarm, a lock) needs an entry in `STATES`, or its cause is a threshold and a
+  code; `test/automations-narrate.test.ts` walks every path for that.
+  **A step claims only what the hub knows.** `execute` resolving means a radio
+  took the write, so a device offline at that moment reads "was offline when
+  this was sent" and is a problem, and a `commandFailed` within
+  `LATE_FAILURE_MS` of a rule's command to that device **replaces the step
+  where it stands** (`RunLedger`, `onCommandFailed`): in the live array while
+  the run is going, in the stored row — behind the write that made it — once it
+  is not, with the status corrected once per run. Never a second step after
+  the first, which would be a trace arguing with itself.
   **Whether a rule is working is remembered, not derived** (`status.ts`):
   twenty traces is a minute of a busy rule, so the engine counts. Runs, skips
   and problems are three things — a skip is the rule declining before it acts,

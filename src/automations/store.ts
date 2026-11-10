@@ -71,6 +71,8 @@ export interface AutomationRunStep {
 }
 
 export interface AutomationRunRecord {
+  /** The row's own id, when the engine needs to find this trace again. */
+  id?: string;
   automationId: string;
   trigger: string;
   cause: string;
@@ -275,6 +277,7 @@ export class AutomationStore {
   async recordRun(run: AutomationRunRecord): Promise<void> {
     try {
       await this.db.insert(automationRuns).values({
+        ...(run.id !== undefined ? { id: run.id } : {}),
         automationId: run.automationId,
         trigger: run.trigger,
         cause: run.cause.slice(0, 400),
@@ -284,6 +287,37 @@ export class AutomationStore {
         steps: run.steps.slice(0, MAX_RUN_STEPS),
       });
       await this.pruneRuns(run.automationId);
+    } catch {
+      // See above.
+    }
+  }
+
+  /**
+   * Put one step of a stored trace right: the step that said a command went
+   * out, once the radio has said it never landed.
+   *
+   * Found by when it was written and what it said, and replaced where it
+   * stands, so the trace reads in the order things happened; a step that can
+   * no longer be found is added at the end rather than lost. Never throws,
+   * for `recordRun`'s reason, and a trace already pruned is simply gone.
+   */
+  async correctRunStep(
+    runId: string,
+    was: { at: string; summary: string },
+    now: AutomationRunStep,
+  ): Promise<void> {
+    try {
+      const [row] = await this.db
+        .select({ steps: automationRuns.steps })
+        .from(automationRuns)
+        .where(eq(automationRuns.id, runId))
+        .limit(1);
+      if (!row) return;
+      const steps = Array.isArray(row.steps) ? ([...row.steps] as AutomationRunStep[]) : [];
+      const index = steps.findIndex((step) => step.at === was.at && step.summary === was.summary);
+      if (index >= 0) steps[index] = now;
+      else if (steps.length < MAX_RUN_STEPS) steps.push(now);
+      await this.db.update(automationRuns).set({ steps }).where(eq(automationRuns.id, runId));
     } catch {
       // See above.
     }

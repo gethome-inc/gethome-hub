@@ -277,6 +277,28 @@ above" is the moment it stopped. A `cause` is read under the rule's own name and
 does not repeat it; the one manual-run row in the activity log is read without
 it, and keeps its whole sentence ("Anna pressed Leaving").
 
+**And a step says only what is known.** `registry.execute` resolves when a
+radio has *taken* a write — for Zigbee, when the broker has — which is not the
+device having done it. So a command to a device that was offline at that moment
+reads "Hall lamp was offline when this was sent" and counts as a problem (it is
+still sent: the resolver deliberately does not filter on reachability). And
+when a `commandFailed` arrives for a device within a minute of a rule's command
+to it (`LATE_FAILURE_MS`), the engine puts the run right: the step that said
+"turned on" is **replaced where it stands** with "didn’t answer" — in memory
+while the run is still going, in its stored row afterwards — and the rule's
+status counts the run as one with a problem, once. Replaced rather than
+followed, because "turned on" then "didn’t answer" is a trace contradicting
+itself over a line that was never true. The failure carries a device and
+nothing else, so it is matched by device and time; a command somebody sent the
+same device by hand inside that minute would be read as the rule's, and either
+way the device is not answering, which is what the rule's page has to say.
+
+A reading that is a *state* rather than an amount — an alarm, a lock, air
+quality — is a number on the wire and is tested with a threshold, so the cause
+is made from what the device read when the rule fired, not from the threshold:
+"Smoke in the Hall", "Front door was unlocked". A numbered mode is said only to
+have changed.
+
 A firing declined before it began used to leave a trace with no steps and so
 nothing to say why. It now carries one line — "A condition didn’t hold, so
 nothing ran."

@@ -90,6 +90,8 @@ const OWN: Partial<Record<ReadablePath, string>> = {
   'fan.mode': 'fan mode',
   'fan.percentCurrent': 'fan speed',
   'sensors.flowCubicMetersPerHour': 'water flow',
+  'sensors.smokeAlarm': 'smoke alarm',
+  'sensors.coAlarm': 'CO alarm',
   'battery.percent': 'battery',
   'power.activeMilliwatts': 'power draw',
   'power.importedEnergyMilliwattHours': 'energy use',
@@ -152,15 +154,6 @@ const FLIPPED: Partial<
     stayedOn: (device) => `${device.name} stayed connected`,
     stayedOff: (device) => `${device.name} stayed offline`,
   },
-  'sensors.smokeAlarm': {
-    on: (device) => (device.room ? `Smoke ${inRoom(device.room)}` : `${device.name} detected smoke`),
-    off: (device) => `${device.name} stopped detecting smoke`,
-  },
-  'sensors.coAlarm': {
-    on: (device) =>
-      device.room ? `Carbon monoxide ${inRoom(device.room)}` : `${device.name} detected carbon monoxide`,
-    off: (device) => `${device.name} stopped detecting carbon monoxide`,
-  },
   playbackPlaying: {
     on: (device) => `${device.name} started playing`,
     off: (device) => `${device.name} stopped playing`,
@@ -168,7 +161,73 @@ const FLIPPED: Partial<
 };
 
 /**
+ * Readings that are a short scale of *states* rather than an amount — an
+ * alarm, a lock — said by the state the device is now in.
+ *
+ * These are numbers on the wire (0 normal · 1 warning · 2 critical; 1 locked ·
+ * 2 unlocked), so a rule tests them with a threshold, and reading the
+ * threshold out loud gave "Hall detector sensors.smokeAlarm reached 1": the
+ * path and a code, in the one sentence that matters most when it is true. The
+ * device's own reading at the moment the rule fired says which state that is.
+ * `null` is a value with no word, which falls back to the plain form below.
+ */
+const STATES: Partial<
+  Record<ReadablePath, (value: number, device: NarratedDevice) => { now: string; stayed?: string } | null>
+> = {
+  'sensors.smokeAlarm': (value, device) =>
+    value <= 0
+      ? { now: `${device.name} stopped detecting smoke` }
+      : {
+          now:
+            `${value === 1 ? 'Smoke warning' : 'Smoke'} ` +
+            (device.room ? inRoom(device.room) : `at ${device.name}`),
+        },
+  'sensors.coAlarm': (value, device) =>
+    value <= 0
+      ? { now: `${device.name} stopped detecting carbon monoxide` }
+      : {
+          now:
+            `${value === 1 ? 'Carbon monoxide warning' : 'Carbon monoxide'} ` +
+            (device.room ? inRoom(device.room) : `at ${device.name}`),
+        },
+  lock: (value, device) =>
+    value === 1
+      ? { now: `${device.name} was locked`, stayed: `${device.name} stayed locked` }
+      : value === 2
+        ? { now: `${device.name} was unlocked`, stayed: `${device.name} stayed unlocked` }
+        : value === 0
+          ? { now: `${device.name} was left not fully locked`, stayed: `${device.name} stayed not fully locked` }
+          : null,
+  'sensors.airQuality': (value, device) => {
+    // Matter's own scale; 0 is "unknown", which is not a state to announce.
+    const word = [null, 'good', 'fair', 'moderate', 'poor', 'very poor', 'extremely poor'][value];
+    if (word === null || word === undefined) return null;
+    return {
+      now: device.room
+        ? `Air quality ${inRoom(device.room)} became ${word}`
+        : `${device.name} air quality became ${word}`,
+    };
+  },
+};
+
+/**
+ * Numbers that *name* a mode. The number says nothing out loud — "mode 4" is
+ * a lookup nobody in the house can do — so the sentence says that it changed
+ * and the detail says to what.
+ */
+const MODES: ReadonlySet<ReadablePath> = new Set<ReadablePath>([
+  'thermostat.systemMode',
+  'fan.mode',
+  'currentMode',
+  'rvcOperationalState',
+]);
+
+/**
  * A reading crossed the line a rule draws.
+ *
+ * `actual` is what the device read at the moment of crossing. A threshold
+ * says where the line is; for a reading that is a state rather than an amount
+ * it is the reading itself that says what happened.
  *
  * `heldMs` is the trigger's `for`, when it has one: the firing then reports a
  * state that lasted rather than a moment, so "No motion in the Hall for 20
@@ -182,13 +241,26 @@ export function narrateStateCause(
     for?: number | undefined;
   },
   device: NarratedDevice,
+  actual?: number | boolean | undefined,
 ): Narration {
   const held = trigger.for !== undefined && trigger.for > 0 ? trigger.for : undefined;
   const lasting = held !== undefined ? ` for ${formatDuration(held)}` : '';
   const detail =
     `${device.name} · ${trigger.path} ${trigger.op}` +
     (trigger.value !== undefined ? ` ${String(trigger.value)}` : '') +
+    // The reading itself, where it is not simply the value tested for.
+    (typeof actual === 'number' && actual !== trigger.value ? ` · read ${actual}` : '') +
     (held !== undefined ? ` · held for ${held / 1000}s` : '');
+
+  if (typeof actual === 'number') {
+    const state = STATES[trigger.path]?.(actual, device);
+    if (state) {
+      return { text: `${held !== undefined ? (state.stayed ?? state.now) : state.now}${lasting}`, detail };
+    }
+  }
+  if (MODES.has(trigger.path)) {
+    return { text: `${device.name} changed ${OWN[trigger.path] ?? 'mode'}${lasting}`, detail };
+  }
 
   const flipped = FLIPPED[trigger.path];
   if (flipped !== undefined && typeof trigger.value === 'boolean' && trigger.op !== 'changed') {
@@ -293,6 +365,20 @@ export function narrateCommand(device: NarratedDevice, command: HubCommand): Nar
   return { text: `${device.name} ${commandDid(command)}`, detail: commandTerms(command) };
 }
 
+/**
+ * A command that went out to a device the hub could not reach at the time.
+ *
+ * It is still sent — a sleeping battery device takes it when it next wakes —
+ * but "turned on" would be a claim about a lamp nobody can see, so the step
+ * says what is actually known: it was offline, and this was sent anyway.
+ */
+export function narrateSentWhileOffline(device: NarratedDevice, command: HubCommand): Narration {
+  return {
+    text: `${device.name} was offline when this was sent`,
+    detail: `${commandTerms(command)} · sent while the device was offline`,
+  };
+}
+
 /** What a device already being the way it was asked to be reads as. */
 function alreadyThere(command: HubCommand): string {
   switch (command.type) {
@@ -354,12 +440,18 @@ export function narrateFailure(
   device: NarratedDevice,
   command: HubCommand,
   error: string,
+  /**
+   * How the radio classed it, when it did (`commandFailed.kind`, an open
+   * string): `refused` is a device that answered and said no, which is not
+   * the same thing to go and look at as one that never answered.
+   */
+  kind?: string,
 ): Narration {
-  return {
-    text:
-      device.online === false
+  const text =
+    kind === 'refused'
+      ? `${device.name} refused the command`
+      : device.online === false
         ? `${device.name} didn’t answer — it was offline`
-        : `${device.name} didn’t answer`,
-    detail: `${commandTerms(command)} · ${error}`,
-  };
+        : `${device.name} didn’t answer`;
+  return { text, detail: `${commandTerms(command)} · ${error}` };
 }

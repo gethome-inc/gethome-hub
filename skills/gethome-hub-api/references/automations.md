@@ -163,7 +163,11 @@ A mode with an "off" side:
 `interrupted`) and `steps`: the commands sent **and refused** — the hub's own
 guards decline to flap a relay, and the trace says so. `cause` and each step's
 `summary` are sentences for a person ("Motion in the Living Room", "Hall lamp
-turned on"); do not parse them. The exact terms are beside them, in
+turned on"); do not parse them. A step is what the hub knew when it wrote it:
+if a radio reports within a minute that a command never landed, the step is
+replaced ("Hall lamp didn’t answer", `kind: "refused"`) and the rule's
+`status.today.problems` rises — so read a trace again before telling somebody
+a device acted. The exact terms are beside them, in
 `causeDetail` (may be `null`) and a step's `detail`.
 
 Each rule in `GET /api/v1/automations` also carries two things worth reading

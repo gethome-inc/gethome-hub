@@ -1,16 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import type { EndpointState, HubCommand } from '../schema/index.js';
-import type { AutomationRunEvent, HubEventBus } from '../core/bus.js';
+import type { AutomationRunEvent, CommandFailure, HubEventBus } from '../core/bus.js';
 import { formatDuration } from './phrasing.js';
 import {
   narrateCommand,
   narrateEventCause,
   narrateFailure,
   narrateRefusal,
+  narrateSentWhileOffline,
   narrateStateCause,
   type NarratedDevice,
 } from './narrate.js';
-import { AutomationStatusBook, type AutomationStatus } from './status.js';
+import { AutomationStatusBook, type AutomationStatus, type NotedRun } from './status.js';
 import { isToggle } from './schema.js';
 import type { ActivityService } from '../core/activity.js';
 import type { Logger } from '../logging.js';
@@ -89,6 +90,14 @@ const STATUS_FLUSH_MS = 60_000;
  */
 const STATUS_NOTIFY_MS = 10_000;
 
+/**
+ * How long after a command went out a radio's word that it never landed is
+ * still about that command. Zigbee2MQTT gives a write about ten seconds
+ * before it reports the device unreachable; a minute covers a busy network
+ * without pinning yesterday's failure on this morning's run.
+ */
+const LATE_FAILURE_MS = 60_000;
+
 /** The registry, as much of it as this module needs. Structural on purpose:
  *  the engine is testable against a fake, and `DeviceRegistry` stays unaware. */
 export interface EngineRegistry {
@@ -166,8 +175,43 @@ interface FireOptions {
   sentence?: string;
 }
 
+/**
+ * One run, for as long as something may still have to be said about it.
+ *
+ * **A command that reached the protocol is not a command that reached the
+ * device.** `registry.execute` resolves when the radio has *taken* a write —
+ * for Zigbee, when the broker has — and the word that it never landed comes
+ * seconds later, as a `commandFailed`, often after the run has ended and been
+ * written down as fine. This is what that word is matched back to: the trace
+ * while the run is still going (corrected in place), and once it is written,
+ * how it was counted and the write a correction has to land behind.
+ */
+interface RunLedger {
+  automationId: string;
+  runId: string;
+  /** The trace while the run is going; gone once it has been handed over. */
+  steps?: AutomationRunStep[] | undefined;
+  /** A failure that arrived while the run was going, for its own report. */
+  lateProblem?: string;
+  /** How the run was written down, once it was. */
+  reported?: NotedRun;
+  /** The trace being written, so a correction is not lost to the race. */
+  recorded?: Promise<void>;
+}
+
+/** The last command a rule sent one device, until its fate is known or stale. */
+interface SentCommand {
+  ledger: RunLedger;
+  command: HubCommand;
+  /** The step that says it went out — the one a failure replaces. */
+  step: AutomationRunStep;
+  at: number;
+}
+
 /** How one firing ended, as `report` is told it. */
 interface RunReport {
+  /** The run's ledger, when it got as far as its actions. */
+  ledger?: RunLedger;
   steps?: AutomationRunStep[];
   commands?: number;
   refused?: number;
@@ -200,6 +244,8 @@ export class AutomationEngine {
   /** Runs nobody is awaiting — see `detach`. */
   private readonly detached = new Set<Promise<void>>();
 
+  /** Per device: the last command a rule sent it — see `RunLedger`. */
+  private readonly sentCommands = new Map<string, SentCommand>();
   /** Whether each rule is working — `status.ts`. */
   private readonly book: AutomationStatusBook;
   private lastStatusFlush = 0;
@@ -225,6 +271,7 @@ export class AutomationEngine {
     this.options.events.on('deviceUpserted', this.onHomeMoved);
     this.options.events.on('deviceRemoved', this.onDeviceRemoved);
     this.options.events.on('structureChanged', this.onHomeMoved);
+    this.options.events.on('commandFailed', this.onCommandFailed);
 
     this.timer = setInterval(() => {
       void this.tick();
@@ -259,6 +306,8 @@ export class AutomationEngine {
     this.options.events.off('deviceUpserted', this.onHomeMoved);
     this.options.events.off('deviceRemoved', this.onDeviceRemoved);
     this.options.events.off('structureChanged', this.onHomeMoved);
+    this.options.events.off('commandFailed', this.onCommandFailed);
+    this.sentCommands.clear();
     // Anything mid-`wait` is abandoned rather than resumed. Its trace already
     // says `interrupted`, which is the honest word for it.
     for (const handle of this.running.values()) handle.cancelled = true;
@@ -415,8 +464,48 @@ export class AutomationEngine {
     });
   };
 
+  /**
+   * A radio saying a write never landed. If the last thing sent to that
+   * device was a rule's, the rule's trace and its status are put right.
+   *
+   * **The step is corrected where it stands**, not followed by a second one:
+   * "Hall lamp turned on" and then "Hall lamp didn’t answer" is a trace that
+   * contradicts itself, and the first of those was never true. A run still
+   * going is corrected in memory and counts the problem when it reports; one
+   * already written is corrected in its row, behind the write that made it.
+   *
+   * Attributed by device and by time only, which is as much as the failure
+   * carries. A command somebody sent the same device by hand inside the
+   * minute would be read as the rule's — and either way the device is not
+   * answering, which is what the rule's page needs to say.
+   */
+  private readonly onCommandFailed = (failure: CommandFailure): void => {
+    const sent = this.sentCommands.get(failure.deviceId);
+    if (sent === undefined) return;
+    this.sentCommands.delete(failure.deviceId);
+    if (this.now() - sent.at > LATE_FAILURE_MS) return;
+
+    const said = narrateFailure(this.narrated(failure.deviceId), sent.command, failure.detail, failure.kind);
+    const was = { at: sent.step.at, summary: sent.step.summary };
+    const corrected: AutomationRunStep = { at: was.at, kind: 'refused', summary: said.text, detail: said.detail };
+    const { ledger } = sent;
+
+    if (ledger.steps !== undefined) {
+      Object.assign(sent.step, corrected);
+      ledger.lateProblem ??= said.text;
+      return;
+    }
+    if (ledger.reported === undefined) return;
+    this.book.lateProblem(ledger.automationId, ledger.reported, said.text);
+    this.announceStatus(ledger.automationId);
+    void (ledger.recorded ?? Promise.resolve()).then(() =>
+      this.options.store.correctRunStep(ledger.runId, was, corrected),
+    );
+  };
+
   private readonly onDeviceRemoved = (deviceId: string): void => {
     this.guards.forgetDevice(deviceId);
+    this.sentCommands.delete(deviceId);
     for (const key of [...this.edges.keys()]) {
       if (key.endsWith(`:${deviceId}`)) this.forgetEdge(key);
     }
@@ -482,7 +571,7 @@ export class AutomationEngine {
 
     if (!outcome.fires) return;
 
-    const cause = narrateStateCause(trigger, this.narrated(deviceId));
+    const cause = narrateStateCause(trigger, this.narrated(deviceId), value);
     const origin = this.guards.causeOf(deviceId, endpointId);
     const depth = origin ? origin.depth + 1 : 0;
 
@@ -861,15 +950,18 @@ export class AutomationEngine {
     const startedAt = this.now();
     const runId = randomUUID();
     const steps: AutomationRunStep[] = [];
-    const note = (kind: string, summary: string, detail?: string): void => {
-      if (steps.length >= MAX_RUN_STEPS) return;
-      steps.push({
+    const note = (kind: string, summary: string, detail?: string): AutomationRunStep | undefined => {
+      if (steps.length >= MAX_RUN_STEPS) return undefined;
+      const step: AutomationRunStep = {
         at: new Date(this.now()).toISOString(),
         kind,
         summary,
         ...(detail !== undefined ? { detail } : {}),
-      });
+      };
+      steps.push(step);
+      return step;
     };
+    const ledger: RunLedger = { automationId: record.id, runId, steps };
 
     const home = this.homeView();
     const context: ConditionContext = {
@@ -916,7 +1008,7 @@ export class AutomationEngine {
         break;
       }
       try {
-        const result = await this.runAction(action, { record, runId, depth, home, note, handle });
+        const result = await this.runAction(action, { record, runId, depth, home, note, handle, ledger });
         sent += result.sent;
         refused += result.refused;
         if (firstRefusal === undefined && result.refusal !== undefined) firstRefusal = result.refusal;
@@ -935,9 +1027,11 @@ export class AutomationEngine {
       commands: sent,
       refused,
       detail: firstRefusal,
-      reason: firstProblem,
-      problem: problems > 0,
+      // A radio may already have said one of this run's commands never landed.
+      reason: firstProblem ?? ledger.lateProblem,
+      problem: problems > 0 || ledger.lateProblem !== undefined,
       startedAt,
+      ledger,
     });
 
     /**
@@ -975,8 +1069,9 @@ export class AutomationEngine {
       runId: string;
       depth: number;
       home: AutomationHomeView;
-      note: (kind: string, summary: string, detail?: string) => void;
+      note: (kind: string, summary: string, detail?: string) => AutomationRunStep | undefined;
       handle: RunHandle;
+      ledger: RunLedger;
     },
   ): Promise<{
     sent: number;
@@ -988,7 +1083,7 @@ export class AutomationEngine {
     /** The first of those, as the trace says it. */
     problem?: string;
   }> {
-    const { record, runId, depth, home, note, handle } = context;
+    const { record, runId, depth, home, note, handle, ledger } = context;
 
     switch (action.kind) {
       case 'deviceCommand': {
@@ -1051,8 +1146,26 @@ export class AutomationEngine {
           try {
             await this.options.registry.execute(entry.deviceId, entry.endpointId, command);
             sent += 1;
-            const said = narrateCommand(this.narrated(entry.deviceId), command);
-            note('command', said.text, said.detail);
+            /**
+             * **Taken by the radio, which is not the same as done.** A device
+             * the hub could not reach when this went out is said to have been
+             * offline rather than to have "turned on", and counts as a
+             * problem: it is the answer to "why didn't the light come on".
+             * For the rest the step says what was asked, and is put right if
+             * the radio reports within the minute that it never landed
+             * (`onCommandFailed`).
+             */
+            const device = this.narrated(entry.deviceId);
+            const offline = device.online === false;
+            const said = offline ? narrateSentWhileOffline(device, command) : narrateCommand(device, command);
+            if (offline) {
+              problems += 1;
+              problem ??= said.text;
+            }
+            const step = note('command', said.text, said.detail);
+            if (step !== undefined) {
+              this.sentCommands.set(entry.deviceId, { ledger, command, step, at: this.now() });
+            }
           } catch (error) {
             refused += 1;
             refusal ??= (error as Error).message;
@@ -1198,7 +1311,7 @@ export class AutomationEngine {
     };
     this.options.events.emit('automationRun', event);
 
-    this.book.note(record.id, {
+    const noted = this.book.note(record.id, {
       outcome,
       cause,
       reason: run.reason,
@@ -1207,7 +1320,8 @@ export class AutomationEngine {
     });
     this.announceStatus(record.id);
 
-    void this.options.store.recordRun({
+    const recorded = this.options.store.recordRun({
+      ...(run.ledger !== undefined ? { id: run.ledger.runId } : {}),
       automationId: record.id,
       trigger,
       cause,
@@ -1216,6 +1330,13 @@ export class AutomationEngine {
       durationMs: run.startedAt !== undefined ? this.now() - run.startedAt : 0,
       steps,
     });
+    // From here a late failure is a correction to a written trace and a
+    // counted run, no longer to this array.
+    if (run.ledger !== undefined) {
+      run.ledger.steps = undefined;
+      run.ledger.reported = noted;
+      run.ledger.recorded = recorded;
+    }
   }
 
   // ── Reading the home ───────────────────────────────────────────────────────

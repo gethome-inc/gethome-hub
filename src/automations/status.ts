@@ -74,6 +74,15 @@ export interface StatusNote {
   pressedBy?: string | undefined;
 }
 
+/** How one firing was written down — see `AutomationStatusBook.note`. */
+export interface NotedRun {
+  at: string;
+  /** The home's day it was counted in. */
+  date: string;
+  /** Whether it has been counted as a run with a problem. */
+  problem: boolean;
+}
+
 const iso = (at: number): string => new Date(at).toISOString();
 
 export class AutomationStatusBook {
@@ -136,10 +145,15 @@ export class AutomationStatusBook {
     }
   }
 
-  /** One firing, however it ended. */
-  note(id: string, note: StatusNote): void {
+  /**
+   * One firing, however it ended. Answers how it was written down — when, in
+   * which of the home's days, and whether it already counted as a run with a
+   * problem — for a failure that is only reported afterwards (`lateProblem`).
+   */
+  note(id: string, note: StatusNote): NotedRun {
     const entry = this.entry(id);
     const at = iso(this.now());
+    let counted = false;
 
     if (note.pressedBy !== undefined) {
       entry.lastPressed = { at, by: note.pressedBy };
@@ -152,6 +166,7 @@ export class AutomationStatusBook {
       const problem = note.problem === true || note.outcome === 'failed' || note.outcome === 'refused';
       entry.today.runs += 1;
       if (problem) entry.today.problems += 1;
+      counted = problem;
       entry.lastRun = {
         at,
         outcome: note.outcome,
@@ -165,6 +180,33 @@ export class AutomationStatusBook {
           reason: note.reason ?? 'Something did not go through.',
         };
       }
+    }
+    this.dirty.add(id);
+    return { at, date: entry.today.date, problem: counted };
+  }
+
+  /**
+   * A command a run sent turned out not to have landed, after the run was
+   * written down as fine.
+   *
+   * A radio reports a write that failed seconds after it took the message, so
+   * a run can end "ran" over a lamp that never moved. This puts that right:
+   * the run counts as one with a problem — once, however many of its commands
+   * failed, and only in the day it ran in — and the reason is kept as the
+   * last problem unless a newer one already is.
+   */
+  lateProblem(id: string, run: NotedRun, reason: string): void {
+    const entry = this.entries.get(id);
+    if (!entry) return;
+    if (!run.problem) {
+      run.problem = true;
+      if (this.entry(id).today.date === run.date) entry.today.problems += 1;
+    }
+    if (entry.lastRun?.at === run.at && entry.lastRun.problem === undefined) {
+      entry.lastRun = { ...entry.lastRun, problem: reason };
+    }
+    if (entry.lastProblem === undefined || entry.lastProblem.at <= run.at) {
+      entry.lastProblem = { at: run.at, outcome: 'ran', reason };
     }
     this.dirty.add(id);
   }
