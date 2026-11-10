@@ -633,20 +633,20 @@ export function attachWebSocket(
    *
    * Narrowed as the frames are — `hub.ai`, and `automation.manage` for the
    * automations agent's — and to the member's own conversations besides
-   * (`roundsSoFar`). Never to a key, whose stream carries no conversation.
+   * (`roundsSoFar`). Only ever called for a member's own socket: a key's
+   * stream carries no conversation, so `subscribe` never reaches here for one.
    * **It must never cost the subscription**, so a runtime that cannot answer
    * sends nothing.
    */
   const sendRoundsSoFar = (): void => {
-    if (key !== null || memberId === null) return;
-    if (!deps.access.canAs(memberId, 'hub.ai', key)) return;
+    if (memberId === null || !deps.access.canAs(memberId, 'hub.ai', null)) return;
     let rounds: ChatRoundSoFar[];
     try {
       rounds = [...deps.assistantChat.roundsSoFar(memberId), ...deps.automationChat.roundsSoFar(memberId)];
     } catch {
       return;
     }
-    const readsAutomations = deps.access.canAs(memberId, 'automation.manage', key);
+    const readsAutomations = deps.access.canAs(memberId, 'automation.manage', null);
     for (const round of rounds) {
       if (round.surface === 'automations' && !readsAutomations) continue;
       send({ type: 'chatRound', chatRound: round });
