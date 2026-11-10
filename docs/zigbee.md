@@ -892,19 +892,35 @@ Passing it through unchanged is what put eighteen characters of hex on the tile
 in the app, reading as a hub that had failed to recognise the device when it had
 in fact mapped every one of its exposes.
 
-`suggestedNameFor()` therefore names it from the rest of the same record, in
-order: `definition.description` (upstream writes a short human one for every
-device it supports — "Smart plug EU"), then `vendor` + `model`, then the address
-if the record says nothing else at all. The last four hex digits ride along,
-because two units of one model would otherwise be two identical rows with no way
-to tell them apart.
+The first answer to that was to name it from the rest of the same record —
+`definition.description` ("Smart plug EU"), then `vendor` + `model`, with the
+last four hex digits to tell two units apart — and `suggestedNameFor()` still
+builds that string. But "Smart temperature and humidity sensor FEA7" then stood
+on every card, in every answer the assistant gave and in every line of the
+activity log, and it is the model's word for the thing rather than anybody's.
 
-It is deliberately **not** the device kind. "Outlet" is already a line of its own
-in the apps, and a name repeating it says nothing about *which* outlet this is.
+So the adapter now says which kind of name it is handing over
+(`suggestedNameIsModel`), and the registry decides (`core/device-names.ts`):
 
-Two names always outrank it: one somebody chose in Zigbee2MQTT, and the owner's
-own — `suggestedName` is read on the registry's insert only, never over an
-existing row.
+- **A name somebody chose in Zigbee2MQTT is kept** — `nameSource: "upstream"`.
+- **Anything else is the model talking, and a new device is named for what it
+  is**: "Climate sensor", "Motion sensor", "Plug". From its kind and its
+  capabilities — and, only where those leave a bare "Sensor", from the words in
+  `definition.description` (a leak sensor has no capability of its own) — so it
+  needs no key. Where AI recognition ran for the device anyway, the descriptor
+  may carry a `name` and that is used. Two of one kind are told apart by number
+  ("Plug 2"); the vendor and the model stay on the device as they were.
+- **A device adopted before this keeps its name** and is *offered* short ones
+  (`nameSuggestions`) until a person picks or types one.
+
+The earlier objection to naming by kind — the apps already show the kind on a
+line of its own — was about a name that said *nothing else*. What changed is
+the choice it was weighed against: a long model string nobody says out loud.
+
+**What a person called a device is never replaced**: the registry records where
+each name came from, and only a name it made up itself may be improved, once.
+[The API reference](api.md#what-a-device-is-called-and-who-called-it-that) has
+the fields.
 
 Two fields say whether that interview finished, and both are read:
 Zigbee2MQTT 2.x replaced the boolean `interview_completed` with the four-valued

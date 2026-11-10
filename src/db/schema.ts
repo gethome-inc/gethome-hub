@@ -107,6 +107,16 @@ export const devices = sqliteTable(
     vendor: text('vendor'),
     model: text('model'),
     name: text('name').notNull(),
+    /**
+     * Where `name` came from — `DeviceNameSource` (`core/device-names.ts`):
+     * `person`, `upstream`, `hub`, `recognition` or `model`.
+     *
+     * It is what lets the hub give a new device a short plain name and still
+     * keep the one promise about names: **what a person called a device is
+     * never replaced**. Null on every row written before this column, which
+     * the hub reads as "cannot say" and so treats as a person's.
+     */
+    nameSource: text('name_source'),
     roomId: text('room_id').references(() => rooms.id, { onDelete: 'set null' }),
     /**
      * **Legacy, and kept only so a rollback still boots.** A favorite is one

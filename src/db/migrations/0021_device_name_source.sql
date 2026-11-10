@@ -1,0 +1,1 @@
+ALTER TABLE `devices` ADD `name_source` text;

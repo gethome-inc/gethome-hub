@@ -192,6 +192,10 @@ Rules of thumb: declare a capability only if you map at least one state rule for
 with the hub's static endpoints when extending them (the whole device is endpoint 1); pick deviceKind from what the \
 device physically is; be conservative — an unmapped extra is better than a wrong mapping.
 
+Beside "endpoints" the descriptor takes an optional top-level "name": what somebody at home would call a device of \
+this model, in one to three plain words — "Climate sensor", "Motion sensor", "Plug", "Ceiling light", "Door \
+sensor". Never the model number, the maker or the address. Leave it out rather than guess.
+
 Two things a descriptor must never do, each of which produces a control bound to nothing:
 - **Never name a property the device does not publish.** Every "property" and every customField "id" has to appear \
 in the exposes tree or in the sample payloads you were given. A field for a property that will never arrive is a \

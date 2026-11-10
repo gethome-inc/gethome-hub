@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { suggestedNameFor } from '../src/adapters/zigbee/adapter.js';
+import { nameWasChosen, suggestedNameFor } from '../src/adapters/zigbee/adapter.js';
 
 const plug = {
   ieee_address: '0x54ef44100047c1bf',
@@ -29,5 +29,11 @@ describe('naming a Zigbee device the first time it is seen', () => {
   it('distinguishes two units of one model', () => {
     const second = { ...plug, ieee_address: '0x54ef4410004aa201', friendly_name: '0x54ef4410004aa201' };
     expect(suggestedNameFor(plug)).not.toBe(suggestedNameFor(second));
+  });
+
+  it('says whether the name is somebody’s or the model’s, so the hub knows which it may improve', () => {
+    // Zigbee2MQTT's own name is the address until somebody renames the device there.
+    expect(nameWasChosen(plug)).toBe(false);
+    expect(nameWasChosen({ ...plug, friendly_name: 'Kitchen kettle' })).toBe(true);
   });
 });

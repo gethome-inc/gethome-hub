@@ -37,6 +37,8 @@ export interface ZigbeeAiAssist {
 export interface AppliedAiMapping {
   /** Whether the agent produced this descriptor or somebody uploaded it. */
   source?: 'ai' | 'imported';
+  /** A short plain name for a device of this model, when the descriptor gave one. */
+  name?: string;
   endpoints: Array<{
     endpointId: number;
     deviceKind: DeviceKind;
@@ -589,6 +591,10 @@ export class ZigbeeAdapter implements ProtocolAdapter {
       ...(raw.definition?.vendor ? { vendor: raw.definition.vendor } : {}),
       ...(raw.definition?.model ? { model: raw.definition.model } : {}),
       suggestedName: suggestedNameFor(raw),
+      // Zigbee2MQTT's own name is only somebody's while it is not the address.
+      ...(nameWasChosen(raw) ? {} : { suggestedNameIsModel: true }),
+      ...(tracked.aiMapping?.name !== undefined ? { plainName: tracked.aiMapping.name } : {}),
+      ...(raw.definition?.description ? { nameHint: raw.definition.description } : {}),
       endpoints: mergedEndpoints(tracked),
       needsReview: needsReview(tracked),
       recognition: recognitionOf(tracked, exposesHash(raw)),
@@ -802,6 +808,13 @@ function interviewFinished(device: Z2mDevice): boolean {
  * it is not just the address, and the owner's, because the registry writes this
  * on the insert only and never over an existing row.
  */
+/** Whether somebody named this device in Zigbee2MQTT, as against Z2M having
+ *  named it after its own address. */
+export function nameWasChosen(device: Z2mDevice): boolean {
+  const chosen = device.friendly_name?.trim();
+  return !!chosen && chosen.toLowerCase() !== device.ieee_address.toLowerCase();
+}
+
 export function suggestedNameFor(device: Z2mDevice): string {
   const chosen = device.friendly_name?.trim();
   if (chosen && chosen.toLowerCase() !== device.ieee_address.toLowerCase()) return chosen;

@@ -338,6 +338,25 @@ there, because those reach the routes as well. `docs/api.md` and
   at boot, `forgetDevice` is wired to the `deviceRemoved` event and
   `forgetMember` to `endMembership`, because both deletes are done by the
   cascade and the map would otherwise hold pins on things that are gone.
+- **A new device is named for what it is, and a name a person gave is never
+  replaced** (`device-names.ts`). Devices used to carry their model's name —
+  "Smart temperature and humidity sensor FEA7" — on every card, answer and log
+  line. `insertDevice` now keeps a name somebody chose upstream and otherwise
+  makes a short plain one ("Climate sensor", "Plug"), from recognition's answer
+  when the descriptor carried one and from the kind and capabilities when not,
+  so a home with no key is named as well. Four rules. **`devices.name_source`
+  records where a name came from**, and `updateDevice` — the one path a person
+  renames through — writes `person`. **Only `hub` may be renamed by the hub**,
+  once, to recognition's name (`reconcileName`); `person`, `upstream`,
+  `recognition`, `model` and **null** are all left alone, null because a row
+  from before the column might be anybody's. **A device already carrying its
+  model's name is not renamed**: a legacy row whose name still equals what its
+  adapter would suggest is classified `model`, and `nameSuggestions()` offers
+  one to three names for it on the wire until a person names it. And **names
+  are unique by number, reserved while the row is written** (`reservedNames`),
+  since two devices have two write queues and both would otherwise become
+  "Plug". Room names for the suggestions are kept in memory off
+  `structureChanged`, so a device read still touches no table.
 - **A device being offline is sometimes the plan, and only a person knows.**
   Somebody unplugs a heater for the summer: the device is unreachable, the home
   is fine, and nothing could say so — so the dashboard counted it, put *Needs

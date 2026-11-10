@@ -943,6 +943,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // a rule from such a hub, so this block is for the home that has no rules
     // yet — where there is nothing to look for a field on.
     automations: { status: true, devices: true },
+    // Additive, and presence is the capability: a hub carrying this block
+    // gives a new device a short plain name, says where each name came from
+    // (`nameSource`), and offers names for a device still carrying its
+    // model's (`nameSuggestions`). Both fields are absent on a device with
+    // nothing to say, so this is how an app tells that from an older hub.
+    deviceNames: { sources: true, suggestions: true },
     // Additive, and presence is the capability: a hub carrying this block has
     // `GET/POST/DELETE /settings/wifi…`, so an app may offer to add the Wi-Fi
     // network a hub is about to be carried to. `available: false` says this

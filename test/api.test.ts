@@ -154,6 +154,9 @@ describe.skipIf(!handle)('hub API', () => {
       // invite — which adds the duplicate person the whole feature exists to
       // stop, with nothing on the way back to say so.
       pairing: { signInCodes: true },
+      // Whether each rule is working, which devices it uses, and how devices are named.
+      automations: { status: true, devices: true },
+      deviceNames: { sources: true, suggestions: true },
     });
   });
 

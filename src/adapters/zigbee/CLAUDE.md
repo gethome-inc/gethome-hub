@@ -65,10 +65,15 @@ change.
   upstream's own one-line description, all mapped correctly. `suggestedNameFor()`
   prefers that description ("Smart plug EU"), then vendor + model, and appends
   the last four hex digits because two units of one model would otherwise be two
-  identical rows. Not the device *kind* ("Outlet") — the apps already show that
-  on its own line, and repeating it says nothing about which plug this is. Two
-  names always win over it: one somebody set in Z2M, and the owner's, since
-  `insertDevice` writes this on the insert only and never over an existing row.
+  identical rows. **That string is the model's word, not anybody's, and the
+  adapter says so** (`suggestedNameIsModel`, from `nameWasChosen`): it then
+  stood on every card, answer and log line as "Smart temperature and humidity
+  sensor FEA7", so the registry names a *new* device for what it is instead
+  ("Climate sensor" — `core/device-names.ts`, from the kind, the capabilities,
+  `nameHint`, or the descriptor's own `name` when recognition ran) and only
+  *offers* names for a device already carrying the raw one. A name somebody
+  set in Z2M is passed through as theirs (`upstream`), and the registry never
+  writes over that or over the owner's.
 - Zigbee2MQTT conversions to watch: cover position is **inverted** (Z2M
   100 = open), temperatures ×100, power W → mW, energy kWh → mWh, hue/sat
   degrees/percent → 0–254 cluster units. `action` enums parse through

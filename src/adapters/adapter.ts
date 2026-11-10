@@ -34,6 +34,17 @@ export interface AdapterDeviceDescriptor {
   model?: string;
   /** Used as the device name on first sight; user renames win afterwards. */
   suggestedName?: string;
+  /**
+   * `suggestedName` is the device's *model* talking — a description, a product
+   * name — rather than a name somebody chose in the protocol's own tool. The
+   * registry then gives a new device a short plain name of its own instead
+   * (`core/device-names.ts`), and offers one for a device already carrying it.
+   */
+  suggestedNameIsModel?: boolean;
+  /** A short plain name recognition returned for this model — "Climate sensor". */
+  plainName?: string;
+  /** What the device says it is, in its maker's words: a last hint for naming. */
+  nameHint?: string;
   endpoints: Array<{
     endpointId: number;
     deviceKind: DeviceKind;

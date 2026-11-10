@@ -556,6 +556,7 @@ export function interpret(
   }
   return {
     source,
+    ...(descriptor.name !== undefined ? { name: descriptor.name } : {}),
     endpoints: descriptor.endpoints.map((endpoint) => ({
       endpointId: endpoint.endpointId,
       deviceKind: endpoint.deviceKind,

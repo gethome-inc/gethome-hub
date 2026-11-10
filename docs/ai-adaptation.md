@@ -570,6 +570,7 @@ mapper — it is interpreted, never executed):
 ```json
 {
   "version": 1,
+  "name": "Ceiling light",
   "endpoints": [{
     "endpointId": 1,
     "deviceKind": "light",
@@ -590,6 +591,19 @@ mapper — it is interpreted, never executed):
   }]
 }
 ```
+
+`name` is optional: what somebody at home would call a device of this model,
+in one to three plain words. The run already has the device's whole schema in
+front of it, so the name costs nothing extra to ask for. The hub uses it for a
+device nobody has named — at adoption, or once afterwards over its own
+kind-derived name — and only if it reads as a name (`acceptablePlainName`
+refuses a model number, an address or a product sheet); it is **never** put
+over a name a person gave, and for a device that already carries its model's
+name it is only *offered* (`nameSuggestions`). A descriptor without one — every
+one written before this, and any uploaded — is as valid as ever: the hub names
+the device from its kind and capabilities instead, which is also what a home
+with no key or with recognition switched off gets. See
+[the API reference](api.md#what-a-device-is-called-and-who-called-it-that).
 
 - **stateRules** run device → canonical: payload property (dotted paths
   supported) → one of the whitelisted canonical state paths, through a

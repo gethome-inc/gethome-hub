@@ -37,6 +37,12 @@ mirrors the Matter data model. The hub's `docs/device-schema.md` is canonical.
   fine) and `offlineElsewhere` (it is on a Wi-Fi network the hub has left) mean
   an offline device is **not** a fault. Don't alarm about either.
 - `favorite` is the key's member's own pin, not the home's.
+- `nameSource` (optional) says where `name` came from: `person` or `upstream`
+  is a name somebody chose; `hub` and `recognition` are short names the hub
+  gave; `model` is the device's model talking. `nameSuggestions` (optional,
+  only with `model`) is one to three short names the hub offers. **Renaming is
+  the person's decision** — never apply a suggestion, or rename a device whose
+  `nameSource` is `person` or `upstream`, without being asked to.
 - Absent sub-objects in `state` mean that capability has not reported yet —
   not zero. `sensors` is always present, possibly empty.
 

@@ -1,3 +1,12 @@
+import {
+  acceptablePlainName,
+  hubMayRename,
+  knownNameSource,
+  plainNameFor,
+  suggestNames,
+  uniqueName,
+  type DeviceNameSource,
+} from './device-names.js';
 import { randomUUID } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
@@ -28,6 +37,19 @@ export interface RegistryDevice {
   vendor: string | null;
   model: string | null;
   name: string;
+  /**
+   * Where `name` came from, or null for a device named before the hub kept
+   * track — which it treats as a person's. See `core/device-names.ts`.
+   */
+  nameSource: DeviceNameSource | null;
+  /**
+   * What recognition called this device's model, when it said — offered as a
+   * suggestion over a raw name. **Memory only**, `wifiNetwork`'s rule: the
+   * adapter re-announces it from the mapping library at every start.
+   */
+  recognisedName: string | null;
+  /** What the device calls itself, as a last hint for naming. Memory only. */
+  nameHint: string | null;
   roomId: string | null;
   online: boolean;
   needsReview: boolean;
@@ -134,6 +156,34 @@ export class DeviceRegistry implements AdapterBus {
     private readonly log: Logger,
   ) {}
 
+  private roomNames = new Map<string, string>();
+  /** Names being given to devices whose rows are still being written — two
+   *  plugs adopted in the same instant must not both become "Plug". */
+  private readonly reservedNames = new Set<string>();
+
+  /** Every name in the home but one device's own. */
+  private namesBut(deviceId?: string): string[] {
+    const names = [...this.reservedNames];
+    for (const device of this.cache.values()) if (device.id !== deviceId) names.push(device.name);
+    return names;
+  }
+
+  /**
+   * One to three short names to offer for a device still carrying its model's
+   * name — and nothing for any other device. A name a person gave, upstream or
+   * here, is theirs; a name the hub made up is already short; and a device
+   * named before the hub kept track might be either, so it is left alone.
+   */
+  nameSuggestions(device: RegistryDevice): string[] {
+    if (device.nameSource !== 'model') return [];
+    return suggestNames({
+      shape: { endpoints: device.endpoints, hint: device.nameHint ?? device.model },
+      recognised: device.recognisedName,
+      room: device.roomId !== null ? this.roomNames.get(device.roomId) : undefined,
+      taken: this.namesBut(device.id),
+    });
+  }
+
   registerAdapter(adapter: ProtocolAdapter): void {
     this.adapters.set(adapter.id, adapter);
   }
@@ -145,6 +195,17 @@ export class DeviceRegistry implements AdapterBus {
   /** Load persisted devices into the cache, then start every adapter. */
   async start(): Promise<void> {
     this.startedAt = Date.now();
+    // Room names, for the one thing here that says them: a name offered for a
+    // device ("Bedroom climate sensor"). Kept current off the same event every
+    // socket hears, so nothing on a device read touches the database.
+    try {
+      for (const room of await this.db.query.rooms.findMany()) this.roomNames.set(room.id, room.name);
+    } catch (error) {
+      this.log.warn({ err: error }, 'Room names could not be read; name suggestions will leave them out.');
+    }
+    this.events.on('structureChanged', (structure) => {
+      this.roomNames = new Map(structure.rooms.map((room) => [room.id, room.name]));
+    });
     // Two queries, not one per device. The old shape issued an `endpoints`
     // query inside the device loop, so boot time grew with the size of the
     // home on exactly the machines least able to afford it.
@@ -164,6 +225,9 @@ export class DeviceRegistry implements AdapterBus {
         vendor: row.vendor,
         model: row.model,
         name: row.name,
+        nameSource: knownNameSource(row.nameSource),
+        recognisedName: null,
+        nameHint: null,
         roomId: row.roomId,
         online: row.online,
         needsReview: row.needsReview,
@@ -606,12 +670,18 @@ export class DeviceRegistry implements AdapterBus {
   ): Promise<RegistryDevice | undefined> {
     const device = this.getDevice(deviceId);
     if (!device) return undefined;
-    if (fields.name !== undefined) device.name = fields.name;
+    // **A name set here is a person's**, whatever it was before — this is the
+    // route somebody renames a device through — and from this moment nothing
+    // the hub does replaces it or offers another.
+    if (fields.name !== undefined) {
+      device.name = fields.name;
+      device.nameSource = 'person';
+    }
     if (fields.roomId !== undefined) device.roomId = fields.roomId;
     await this.db
       .update(devices)
       .set({
-        ...(fields.name !== undefined ? { name: fields.name } : {}),
+        ...(fields.name !== undefined ? { name: fields.name, nameSource: 'person' } : {}),
         ...(fields.roomId !== undefined ? { roomId: fields.roomId } : {}),
       })
       .where(eq(devices.id, deviceId));
@@ -715,21 +785,49 @@ export class DeviceRegistry implements AdapterBus {
   }
 
   private async insertDevice(descriptor: AdapterDeviceDescriptor): Promise<void> {
-    const name = descriptor.suggestedName ?? descriptor.model ?? `New ${descriptor.adapter} device`;
-    const [row] = await this.db
-      .insert(devices)
-      .values({
-        adapter: descriptor.adapter,
-        externalId: descriptor.externalId,
-        vendor: descriptor.vendor ?? null,
-        model: descriptor.model ?? null,
-        name,
-        needsReview: descriptor.needsReview ?? false,
-        recognition: descriptor.recognition ?? null,
-      })
-      .onConflictDoNothing()
-      .returning();
-    if (!row) return;
+    /**
+     * **A name somebody chose upstream is kept; anything else is the model
+     * talking, and the device is named for what it is instead** — "Climate
+     * sensor" rather than "Smart temperature and humidity sensor FEA7". From
+     * recognition's own answer when it gave one, else from the device's kind
+     * and capabilities, so a home with no key is named just as well; and made
+     * the only one of its name in the home, by number.
+     */
+    const chosen = descriptor.suggestedName !== undefined && descriptor.suggestedNameIsModel !== true;
+    const recognised = acceptablePlainName(descriptor.plainName);
+    const hint = descriptor.nameHint ?? descriptor.suggestedName ?? descriptor.model ?? null;
+    const name = chosen
+      ? descriptor.suggestedName!
+      : uniqueName(
+          recognised ?? plainNameFor({ endpoints: descriptor.endpoints, hint }),
+          this.namesBut(),
+        );
+    const nameSource: DeviceNameSource = chosen ? 'upstream' : recognised !== null ? 'recognition' : 'hub';
+    this.reservedNames.add(name);
+    let row: typeof devices.$inferSelect | undefined;
+    try {
+      [row] = await this.db
+        .insert(devices)
+        .values({
+          adapter: descriptor.adapter,
+          externalId: descriptor.externalId,
+          vendor: descriptor.vendor ?? null,
+          model: descriptor.model ?? null,
+          name,
+          nameSource,
+          needsReview: descriptor.needsReview ?? false,
+          recognition: descriptor.recognition ?? null,
+        })
+        .onConflictDoNothing()
+        .returning();
+    } catch (error) {
+      this.reservedNames.delete(name);
+      throw error;
+    }
+    if (!row) {
+      this.reservedNames.delete(name);
+      return;
+    }
     const device: RegistryDevice = {
       id: row.id,
       adapter: descriptor.adapter,
@@ -737,6 +835,9 @@ export class DeviceRegistry implements AdapterBus {
       vendor: row.vendor,
       model: row.model,
       name: row.name,
+      nameSource,
+      recognisedName: recognised,
+      nameHint: hint,
       roomId: row.roomId,
       online: row.online,
       needsReview: row.needsReview,
@@ -768,6 +869,7 @@ export class DeviceRegistry implements AdapterBus {
     }
     this.cache.set(this.key(descriptor.adapter, descriptor.externalId), device);
     this.byId.set(device.id, device);
+    this.reservedNames.delete(name);
     this.events.emit('deviceUpserted', device.id);
     await this.activityLog.record({
       kind: 'device.added',
@@ -775,6 +877,43 @@ export class DeviceRegistry implements AdapterBus {
       deviceId: device.id,
       data: { deviceName: device.name },
     });
+  }
+
+  /**
+   * What a re-announcement may do to a name, which is very little.
+   *
+   * **Nothing, to a name a person gave** — here (`person`) or in the
+   * protocol's own tool (`upstream`) — and nothing to a device named before
+   * the hub kept track, beyond working out which kind of name it has: one
+   * that is still exactly what its model would have been called is `model`,
+   * the raw name suggestions are offered over, and it is **not renamed**; one
+   * that still matches what somebody chose upstream is `upstream`; anything
+   * else stays "cannot say" and is treated as a person's.
+   *
+   * The one rename is of the hub's own word. A device the hub named from its
+   * kind ("Sensor") whose model recognition has since named ("Leak sensor")
+   * takes that name, once: it becomes `recognition` and is not touched again,
+   * so asking recognition to work a device out a second time cannot rename it
+   * under somebody.
+   */
+  private reconcileName(device: RegistryDevice, descriptor: AdapterDeviceDescriptor): void {
+    if (device.nameSource === null) {
+      const raw = descriptor.suggestedName;
+      if (raw !== undefined && device.name === raw) {
+        device.nameSource = descriptor.suggestedNameIsModel === true ? 'model' : 'upstream';
+      } else if (raw === undefined && descriptor.model !== undefined && device.name === descriptor.model) {
+        // What `insertDevice` used to fall back to when nothing was suggested.
+        device.nameSource = 'model';
+      }
+      return;
+    }
+    if (!hubMayRename(device.nameSource) || device.recognisedName === null) return;
+    if (device.recognisedName.toLowerCase() === device.name.toLowerCase()) {
+      device.nameSource = 'recognition';
+      return;
+    }
+    device.name = uniqueName(device.recognisedName, this.namesBut(device.id));
+    device.nameSource = 'recognition';
   }
 
   /**
@@ -791,11 +930,16 @@ export class DeviceRegistry implements AdapterBus {
     device.needsReview = descriptor.needsReview ?? false;
     device.recognition = descriptor.recognition ?? null;
     device.wifiNetwork = descriptor.wifiNetwork ?? null;
+    device.recognisedName = acceptablePlainName(descriptor.plainName);
+    device.nameHint = descriptor.nameHint ?? descriptor.model ?? device.nameHint;
+    this.reconcileName(device, descriptor);
     await this.db
       .update(devices)
       .set({
         vendor: device.vendor,
         model: device.model,
+        name: device.name,
+        nameSource: device.nameSource,
         needsReview: device.needsReview,
         recognition: device.recognition,
       })

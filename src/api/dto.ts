@@ -15,6 +15,8 @@ export interface DeviceWireView {
    * is told a device is on another network and not which one.
    */
   namesNetworks?: boolean;
+  /** Short names to offer for a device still carrying its model's name. */
+  suggestNames?: ((device: RegistryDevice) => string[]) | undefined;
 }
 
 /**
@@ -25,13 +27,19 @@ export interface DeviceWireView {
  * ever given, so a key is told a device is on another network and not which.
  */
 export function deviceWireView(
-  deps: { dataDir: string; hubWifi?: () => HubWifiView | undefined; access: AccessService },
+  deps: {
+    dataDir: string;
+    hubWifi?: () => HubWifiView | undefined;
+    access: AccessService;
+    registry?: { nameSuggestions?: (device: RegistryDevice) => string[] };
+  },
   memberId: string | null,
   grant?: KeyGrant | null,
 ): DeviceWireView {
   return {
     hubWifi: (deps.hubWifi ?? (() => hubWifiView(deps.dataDir)))(),
     namesNetworks: memberId !== null && deps.access.canAs(memberId, 'hub.wifi', grant),
+    suggestNames: (device) => deps.registry?.nameSuggestions?.(device) ?? [],
   };
 }
 
@@ -47,6 +55,7 @@ export function deviceWireView(
  */
 export function deviceWire(device: RegistryDevice, favorite: boolean, view: DeviceWireView = {}) {
   const elsewhere = offlineElsewhere(device, view.hubWifi);
+  const suggestions = view.suggestNames?.(device) ?? [];
   return {
     id: device.id,
     // The device's address on its own protocol — a Zigbee IEEE, an MQTT
@@ -57,6 +66,17 @@ export function deviceWire(device: RegistryDevice, favorite: boolean, view: Devi
     // two rows under two names.
     externalId: device.externalId,
     name: device.name,
+    // Additive. Where the name came from — `person`, `upstream`, `hub`,
+    // `recognition` or `model` — and absent for a device named before the hub
+    // kept track, which is "cannot say", never "nobody named it".
+    ...(device.nameSource !== null && device.nameSource !== undefined
+      ? { nameSource: device.nameSource }
+      : {}),
+    // Additive, and presence is the answer: one to three short names to offer
+    // for a device that still carries its model's name. Never applied by the
+    // hub — a person picks one with `PATCH /devices/:id {name}`, or types
+    // their own, and from then on there is nothing here.
+    ...(suggestions.length > 0 ? { nameSuggestions: suggestions } : {}),
     roomId: device.roomId,
     favorite,
     online: device.online,

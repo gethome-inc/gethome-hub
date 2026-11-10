@@ -796,7 +796,9 @@ export class MatterAdapter implements ProtocolAdapter {
       ...(typeof info?.nodeLabel === 'string' && info.nodeLabel.length > 0
         ? { suggestedName: info.nodeLabel }
         : typeof info?.productName === 'string'
-          ? { suggestedName: info.productName }
+          ? // The product's name is its model's, not somebody's: the registry
+            // names a new device for what it is instead.
+            { suggestedName: info.productName, suggestedNameIsModel: true, nameHint: info.productName }
           : {}),
       ...(wifiNetwork !== undefined ? { wifiNetwork } : {}),
       endpoints,

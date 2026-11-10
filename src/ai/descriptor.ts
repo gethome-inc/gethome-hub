@@ -204,6 +204,14 @@ export const mappingDescriptorSchema = z
     // one device. The parse fills it in; a model that does send it is
     // unaffected.
     version: z.literal(1).default(1),
+    /**
+     * What somebody would call a device of this model, in a couple of plain
+     * words — "Climate sensor", "Motion sensor", "Plug". Optional: a
+     * descriptor written before it, or uploaded without it, is as valid as
+     * ever, and the hub then names the device from its kind. Never the model
+     * number, never the maker (`acceptablePlainName` refuses those anyway).
+     */
+    name: z.string().min(1).max(40).optional(),
     endpoints: z.array(endpointMappingSchema).min(1),
   })
   .strict();
