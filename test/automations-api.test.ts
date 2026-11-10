@@ -676,7 +676,7 @@ describe('the room on a rule', () => {
 describe('the devices a rule uses, and whether it is working', () => {
   it('says the hub keeps both, for a home with no rule to look at', async () => {
     const hub = await app.inject({ method: 'GET', url: '/api/v1/hub' });
-    expect(hub.json()).toMatchObject({ automations: { status: true, devices: true } });
+    expect(hub.json()).toMatchObject({ automations: { status: true, devices: true, problems: true } });
   });
 
   it('carries both on every rule, and the run’s exact terms beside its sentence', async () => {

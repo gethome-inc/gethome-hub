@@ -1333,6 +1333,7 @@ describe('a command the radio took is not a command the device did', () => {
         kind: 'refused',
         summary: 'Kitchen lamp didn’t answer',
         detail: expect.stringContaining('power on=true · Publish'),
+        problem: true,
       },
     ]);
     const status = engine.statusOf(id);
@@ -1396,5 +1397,78 @@ describe('a command the radio took is not a command the device did', () => {
 
     expect(stepsOf((await store.runs(id))[0])[0]?.summary).toBe('Kitchen lamp turned on');
     expect(engine.statusOf(id).today.problems).toBe(0);
+  });
+});
+
+describe('which steps were a problem', () => {
+  /**
+   * `kind` cannot say it: a guard declining "it is already on" and a lamp that
+   * did not answer are both `refused`, inside a run whose outcome is `ran`.
+   * `problem` on the step is what the rule's status counted, said per step.
+   */
+  it('marks a device that did not answer, and not one that was already as asked', async () => {
+    const id = await install({
+      name: 'Both lamps',
+      triggers: [{ kind: 'manual' }],
+      actions: [
+        { kind: 'deviceCommand', target: { deviceIds: [lampId] }, command: { type: 'power', on: true } },
+        { kind: 'deviceCommand', target: { deviceIds: [otherLampId] }, command: { type: 'power', on: true } },
+        { kind: 'deviceCommand', target: { deviceIds: [meterId] }, command: { type: 'power', on: false } },
+      ],
+    });
+    // The first lamp is already on; the second will not answer; the third works.
+    registry.report(lampId, 1, { onOff: true });
+    let calls = 0;
+    const execute = registry.execute.bind(registry);
+    registry.execute = async (...args) => {
+      if ((calls += 1) === 1) throw new Error('the radio refused');
+      return execute(...args);
+    };
+
+    await engine.runManually(id, { name: 'Anna' });
+    await engine.settled();
+    await settle();
+
+    const steps = stepsOf((await store.runs(id))[0]) as { kind: string; summary: string; problem?: true }[];
+    expect(steps.map((step) => [step.kind, step.summary, step.problem])).toEqual([
+      // The same `kind`, as every shipped build draws it — and only one is a problem.
+      ['refused', 'Kitchen lamp was already on', undefined],
+      ['refused', 'Counter lamp didn’t answer', true],
+      ['command', 'Washing machine turned off', undefined],
+    ]);
+    // The frame counts the same steps, where `refused` counts both.
+    expect(runs.at(-1)).toMatchObject({ outcome: 'ran', refused: 2, problems: 1 });
+    // …and it is exactly what the rule's status counted.
+    expect(engine.statusOf(id).today).toMatchObject({ runs: 1, problems: 1 });
+  });
+
+  it('marks nothing in a run that went as asked, or in one that was skipped', async () => {
+    const id = await install(lampOn);
+    registry.report(motionId, 1, { sensors: { occupied: true } });
+    await settle();
+    expect(runs.at(-1)).toMatchObject({ outcome: 'ran', problems: 0 });
+    expect(stepsOf((await store.runs(id))[0]).some((step) => 'problem' in step)).toBe(false);
+
+    const skipped = await install({
+      ...lampOn,
+      name: 'Night only',
+      conditions: [{ kind: 'timeRange', from: '22:00', to: '06:00' }],
+    });
+    registry.report(motionId, 1, { sensors: { occupied: false } });
+    now += 60_000;
+    registry.report(motionId, 1, { sensors: { occupied: true } });
+    await settle();
+    const trace = (await store.runs(skipped))[0];
+    expect(trace?.outcome).toBe('skipped');
+    expect(stepsOf(trace).some((step) => 'problem' in step)).toBe(false);
+  });
+
+  it('marks a command sent to a device that was offline, though its kind is still "command"', async () => {
+    const id = await install(lampOn);
+    registry.listDevices().find((device) => device.id === lampId)!.online = false;
+    registry.report(motionId, 1, { sensors: { occupied: true } });
+    await settle();
+    expect(stepsOf((await store.runs(id))[0])).toMatchObject([{ kind: 'command', problem: true }]);
+    expect(runs.at(-1)).toMatchObject({ problems: 1 });
   });
 });

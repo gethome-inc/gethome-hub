@@ -68,6 +68,18 @@ export interface AutomationRunStep {
   kind: string;
   summary: string;
   detail?: string;
+  /**
+   * Set on a step that is **something asked for that did not happen** — a
+   * device that did not answer or was offline, a relay the hub protected, a
+   * chain cut, the breaker. It is exactly what the rule's status counts as a
+   * problem, said per step.
+   *
+   * It exists because `kind` cannot say it. A `refused` step is also what the
+   * idempotence guard writes for "was already on", which is the house being
+   * as asked — and every shipped build draws a step by its `kind`, so that
+   * word's meaning has to stay where it is. Absent, never `false`.
+   */
+  problem?: true;
 }
 
 export interface AutomationRunRecord {

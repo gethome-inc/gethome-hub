@@ -293,6 +293,17 @@ nothing else, so it is matched by device and time; a command somebody sent the
 same device by hand inside that minute would be read as the rule's, and either
 way the device is not answering, which is what the rule's page has to say.
 
+**Which steps were a problem is said on the step.** `kind: "refused"` is what
+the idempotence guard writes for "was already on" as well as what a lamp that
+did not answer gets, inside a run whose outcome is `ran` either way — and every
+shipped build draws a step by its `kind`, so neither word can be given a new
+meaning. `problem: true` on a step is the additive answer: it marks exactly the
+steps the rule's status counts (a device that did not answer or was offline, a
+relay the hub protected, a chain cut, the breaker), and the `automationRun`
+frame, which has no steps, carries their count as `problems`. One definition in
+three places — the step, the frame, `status.today.problems` — and
+`test/automations-engine.test.ts` holds them together.
+
 A reading that is a *state* rather than an amount — an alarm, a lock, air
 quality — is a number on the wire and is tested with a threshold, so the cause
 is made from what the device read when the rule fired, not from the threshold:

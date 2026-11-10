@@ -358,6 +358,14 @@ export interface AutomationRunEvent {
   commands: number;
   /** How many a guard declined to send, and why the first one was declined. */
   refused: number;
+  /**
+   * How many steps of the run were something asked for that did not happen —
+   * the steps its trace marks `problem`. `refused` cannot say this: it also
+   * counts a device that was already the way the rule wanted it. Absent from
+   * a hub older than it; a run can gain one afterwards, when a radio reports
+   * late, and that is the `automationStatus` frame's to say.
+   */
+  problems?: number;
   detail?: string;
 }
 

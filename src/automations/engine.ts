@@ -487,7 +487,13 @@ export class AutomationEngine {
 
     const said = narrateFailure(this.narrated(failure.deviceId), sent.command, failure.detail, failure.kind);
     const was = { at: sent.step.at, summary: sent.step.summary };
-    const corrected: AutomationRunStep = { at: was.at, kind: 'refused', summary: said.text, detail: said.detail };
+    const corrected: AutomationRunStep = {
+      at: was.at,
+      kind: 'refused',
+      summary: said.text,
+      detail: said.detail,
+      problem: true,
+    };
     const { ledger } = sent;
 
     if (ledger.steps !== undefined) {
@@ -950,13 +956,19 @@ export class AutomationEngine {
     const startedAt = this.now();
     const runId = randomUUID();
     const steps: AutomationRunStep[] = [];
-    const note = (kind: string, summary: string, detail?: string): AutomationRunStep | undefined => {
+    const note = (
+      kind: string,
+      summary: string,
+      detail?: string,
+      problem = false,
+    ): AutomationRunStep | undefined => {
       if (steps.length >= MAX_RUN_STEPS) return undefined;
       const step: AutomationRunStep = {
         at: new Date(this.now()).toISOString(),
         kind,
         summary,
         ...(detail !== undefined ? { detail } : {}),
+        ...(problem ? { problem: true as const } : {}),
       };
       steps.push(step);
       return step;
@@ -1017,7 +1029,7 @@ export class AutomationEngine {
       } catch (error) {
         outcome = 'failed';
         firstProblem ??= 'A step failed, so the rest did not run.';
-        note('note', 'A step failed, so the rest did not run.', (error as Error).message);
+        note('note', 'A step failed, so the rest did not run.', (error as Error).message, true);
         break;
       }
     }
@@ -1069,7 +1081,12 @@ export class AutomationEngine {
       runId: string;
       depth: number;
       home: AutomationHomeView;
-      note: (kind: string, summary: string, detail?: string) => AutomationRunStep | undefined;
+      note: (
+        kind: string,
+        summary: string,
+        detail?: string,
+        problem?: boolean,
+      ) => AutomationRunStep | undefined;
       handle: RunHandle;
       ledger: RunLedger;
     },
@@ -1123,11 +1140,14 @@ export class AutomationEngine {
             const said = narrateRefusal(this.narrated(entry.deviceId), command, verdict);
             // Already the way the rule wanted it is the house being as asked,
             // not something that failed to happen.
-            if (verdict.kind !== 'unchanged') {
+            const wrong = verdict.kind !== 'unchanged';
+            if (wrong) {
               problems += 1;
               problem ??= said.text;
             }
-            note('refused', said.text, said.detail);
+            // `kind` stays `refused` either way — every shipped build draws by
+            // it — and `problem` is what tells the two apart.
+            note('refused', said.text, said.detail, wrong);
             continue;
           }
           /**
@@ -1162,7 +1182,7 @@ export class AutomationEngine {
               problems += 1;
               problem ??= said.text;
             }
-            const step = note('command', said.text, said.detail);
+            const step = note('command', said.text, said.detail, offline);
             if (step !== undefined) {
               this.sentCommands.set(entry.deviceId, { ledger, command, step, at: this.now() });
             }
@@ -1176,7 +1196,7 @@ export class AutomationEngine {
             );
             problems += 1;
             problem ??= said.text;
-            note('refused', said.text, said.detail);
+            note('refused', said.text, said.detail, true);
           }
         }
         return {
@@ -1227,7 +1247,7 @@ export class AutomationEngine {
          */
         if (depth + 1 > this.guards.limitsInUse().maxCausationDepth) {
           const said = `“${other.name}” was not run — rules were setting each other off.`;
-          note('refused', said, 'too deep a chain of automations');
+          note('refused', said, 'too deep a chain of automations', true);
           return {
             sent: 0,
             refused: 1,
@@ -1295,6 +1315,8 @@ export class AutomationEngine {
         kind: outcome === 'refused' ? 'refused' : 'note',
         summary: run.reason,
         ...(run.detail !== undefined ? { detail: run.detail } : {}),
+        // The breaker switching the rule off is a problem; a skip is not.
+        ...(outcome === 'refused' ? { problem: true as const } : {}),
       });
     }
     const event: AutomationRunEvent = {
@@ -1307,6 +1329,7 @@ export class AutomationEngine {
       outcome,
       commands: run.commands ?? 0,
       refused: run.refused ?? 0,
+      problems: steps.filter((step) => step.problem === true).length,
       ...(run.detail !== undefined ? { detail: run.detail } : {}),
     };
     this.options.events.emit('automationRun', event);

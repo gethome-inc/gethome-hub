@@ -248,7 +248,7 @@ than no button.
 
 | Method & path | Needs | Notes |
 |---|---|---|
-| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `matter: {bluetooth, bluetoothReason?, wifi, commissioning, settlingUntil?}` is present only while Matter is running and says what pairing this hub can actually do — and, in `settlingUntil`, whether it has finished finding the devices it already owns — see [below](#pairing-a-matter-accessory). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid). `wifiNetworks: {available, reason?}` is present on a hub that can be told about another Wi-Fi network before it is moved — `available: false` with `reason` `"no-networkmanager"` or `"not-installed"` when this machine cannot — see [below](#wi-fi-networks-settingswifi). `apiKeys: {grantable}` is present on a hub that takes [API keys](#api-keys), and lists the permissions a key may be given. `aiRuns: {before: true, maxLimit}` is present on a hub whose `GET /ai/runs` reads a page at a time (`before`, in the [route table](#rest-routes)) — an app that does not find it asks for one page and stops, because an older hub strips `before` and answers the newest page again. `roomPictures: {model, maxPerRoom, maxPhotos}` is present on a hub that [draws rooms](#room-pictures). `photos: {kinds: ["room","portrait","chat"], minFreeBytes, chatRetainDays}` is present on a hub that can [keep photos](#photos-the-hub-keeps) — an app that does not find it never sends `keepPhotos` and says what it always said: photos stay on the device that took them. `chat: {models: true, stop: true, retry: true, efforts: ["low","medium","high"], images: {maxCount, maxBytes, mediaTypes}}` is present on a hub whose chat routes take a message's own `model`, `effort` and photos — an app that does not find it must offer none of the three, because an older hub strips them and answers 201; see [below](#what-a-chat-message-can-carry-model-effort-attachments). `chat.stop` says a running round can be [stopped part-way](#stopping-a-round-post-chatidstop) — an older hub answers that route 404, so an app that does not find it offers no stop — and `chat.retry` the same for [asking a failed round again](#asking-a-failed-round-again-post-chatidretry). `automations: {status: true, devices: true}` is present on a hub that says [whether each rule is working](#whether-a-rule-is-working) and [which devices it uses](#the-devices-a-rule-uses) — both ride on every rule such a hub sends, so the block is for a home with no rule yet to look for them on |
+| `GET /hub` | — | `{hubId, name, version, build?, apiVersion, claimed, zigbee: {enabled, connected}, radio: {budget, mode, matter, canRunBoth}}`. `name` is the home's name — see [below](#the-hubs-name-is-the-homes-name). `build` is CI's stamp (`<version>-<sha>-<branch>`) and names the release directory on the machine — `version` alone reads the same before and after an update, so it can't answer "did my update land?". Absent on a hub built from source. `zigbee.connected` is Zigbee2MQTT's bridge reporting itself online, not merely that the broker is up, so an app can say "plug a coordinator in" instead of showing an empty section; `zigbee.problem` is [below](#why-zigbee-is-down-zigbeeproblem); `zigbee.permitJoin: {active, remainingSeconds}` is the live join window and is [below](#the-zigbee-join-window). `radio` is [further below](#radio-get-hub-and-put-settingsradio). `history: {bucketSeconds, retentionDays}` (300 and 7 today) is present only on a hub that records readings — its *absence* is how an older hub says it doesn't, see [below](#recorded-readings-get-devicesidhistory). `portraits: {model, maxPerDevice, budgetBytes}` is the same shape of answer for device portraits: present means this hub can draw them, and whether a *key* has been saved is a different question `GET /settings/ai` answers — see [below](#device-portraits). `matter: {bluetooth, bluetoothReason?, wifi, commissioning, settlingUntil?}` is present only while Matter is running and says what pairing this hub can actually do — and, in `settlingUntil`, whether it has finished finding the devices it already owns — see [below](#pairing-a-matter-accessory). `pairing: {signInCodes: true}` is presence-means-capability once more, and the one where reading it matters most: an app that does not find it **must not** ask for a sign-in code, because an older hub strips the unknown field and answers with an ordinary invite — see [below](#signing-in-again-post-invites-with-a-memberid). `wifiNetworks: {available, reason?}` is present on a hub that can be told about another Wi-Fi network before it is moved — `available: false` with `reason` `"no-networkmanager"` or `"not-installed"` when this machine cannot — see [below](#wi-fi-networks-settingswifi). `apiKeys: {grantable}` is present on a hub that takes [API keys](#api-keys), and lists the permissions a key may be given. `aiRuns: {before: true, maxLimit}` is present on a hub whose `GET /ai/runs` reads a page at a time (`before`, in the [route table](#rest-routes)) — an app that does not find it asks for one page and stops, because an older hub strips `before` and answers the newest page again. `roomPictures: {model, maxPerRoom, maxPhotos}` is present on a hub that [draws rooms](#room-pictures). `photos: {kinds: ["room","portrait","chat"], minFreeBytes, chatRetainDays}` is present on a hub that can [keep photos](#photos-the-hub-keeps) — an app that does not find it never sends `keepPhotos` and says what it always said: photos stay on the device that took them. `chat: {models: true, stop: true, retry: true, efforts: ["low","medium","high"], images: {maxCount, maxBytes, mediaTypes}}` is present on a hub whose chat routes take a message's own `model`, `effort` and photos — an app that does not find it must offer none of the three, because an older hub strips them and answers 201; see [below](#what-a-chat-message-can-carry-model-effort-attachments). `chat.stop` says a running round can be [stopped part-way](#stopping-a-round-post-chatidstop) — an older hub answers that route 404, so an app that does not find it offers no stop — and `chat.retry` the same for [asking a failed round again](#asking-a-failed-round-again-post-chatidretry). `automations: {status: true, devices: true, problems: true}` is present on a hub that says [whether each rule is working](#whether-a-rule-is-working) and [which devices it uses](#the-devices-a-rule-uses) — both ride on every rule such a hub sends, so the block is for a home with no rule yet to look for them on — and, with `problems`, that [marks the steps of a run that were a problem](#what-a-run-says) |
 | `POST /pair` | — | claim / join, returns `{token, member}`; 401 on bad code, 429 after repeated failures; reuse `claimId` when retrying |
 | `POST /hub/proof` | — | `{nonce, address, tokenId}` → `{hubId, proof}`: this hub proving it is itself **at the address the app dialled**, to an app holding one of its tokens, without the token being sent. `403 proof_refused` for an address that is not this hub's or a token it does not hold — one answer for both. For an app following a saved hub to a new address — see [below](#following-a-hub-to-a-new-address-post-hubproof) |
 | `GET /home` · `PATCH /home` | floor · `home.rename` | `{id, name}`. `PATCH {name}` (trimmed, 1–80 chars) renames the hub *and* the home — they are one name, see [below](#the-hubs-name-is-the-homes-name) |
@@ -1452,7 +1452,7 @@ first, and the `automationRun` frame carries each one as it happens:
   "steps": [
     { "at": "…", "kind": "command", "summary": "Motion LED turned on", "detail": "power on=true" },
     { "at": "…", "kind": "command", "summary": "Bedroom blind closed to 40%", "detail": "setCoveringPercent percent100ths=4000" },
-    { "at": "…", "kind": "refused", "summary": "Hall lamp didn’t answer — it was offline", "detail": "power on=true · Device is unreachable" }
+    { "at": "…", "kind": "refused", "summary": "Hall lamp didn’t answer — it was offline", "detail": "power on=true · Device is unreachable", "problem": true }
   ]
 }
 ```
@@ -1477,11 +1477,27 @@ sentence.
 
 Both strings are English and plain, as `summary` and `outline` are. `kind` on a
 step is an **open** string — `command`, `refused`, `condition`, `wait`, `note`
-today — and a `refused` step is one of two things an app may want to tell
-apart only by reading it: a command the hub declined or a device did not take,
-and a device that was *already* the way the rule wanted it ("was already on"),
-which is the house being as asked. `status` below counts only the first as a
-problem.
+today.
+
+**`problem: true` marks a step that was something asked for that did not
+happen**, and is the only thing that says so. `kind` cannot: a `refused` step
+is a command the hub declined or a device did not take, *and* a device that was
+already the way the rule wanted it ("was already on"), which is the house being
+as asked — while a command sent to a device that was offline is still
+`kind: "command"`. And `outcome` cannot: a run in which one lamp of four did
+not answer is still `ran`. So:
+
+- a step is a problem when it carries `problem: true` — the flag is absent,
+  never `false`, on every other step;
+- a run had a problem when any of its steps does, which is exactly what
+  [`status`](#whether-a-rule-is-working) counts in `today.problems`;
+- the `automationRun` frame has no steps, so it carries the count:
+  `problems`, beside `refused` (which also counts the "already so" steps).
+
+`kind` and `outcome` mean what they always did, so a client that draws by them
+is unchanged. A run written before a hub marked its steps carries no flags —
+`GET /hub`'s `automations.problems` says a hub marks them, and from then on an
+unmarked step is one that was fine.
 
 A firing the rule declined before doing anything — a condition did not hold, it
 was already running — is `outcome: "skipped"` with one step saying why.
@@ -1492,12 +1508,12 @@ it. So:
 
 - a device the hub could not reach when the command went out reads "Hall lamp
   was offline when this was sent" rather than "turned on" — it is still sent,
-  since a sleeping battery device takes it when it wakes — and the run counts
-  as one with a problem;
+  since a sleeping battery device takes it when it wakes — and the step is
+  `problem: true`, so the run counts as one with a problem;
 - a device that could be reached reads "Hall lamp turned on", and if the radio
   reports within a minute that the write never landed, **that step is replaced
   where it stands** by "Hall lamp didn’t answer" (or "refused the command"),
-  `kind: "refused"`, with the radio's own words in `detail`. The run's `status`
+  `kind: "refused"` and `problem: true`, with the radio's own words in `detail`. The run's `status`
   moves with it — `today.problems`, `lastRun.problem`, `lastProblem` — and an
   `automationStatus` frame says so.
 
@@ -3363,7 +3379,7 @@ and then:
 {"type":"mqtt","dropped":N}                             rate limit hit; N frames skipped
 {"type":"zigbeeEvent","event":{at,type,ieee,name?}}     joined|announced|interviewing|interviewed|interview-failed|left
 {"type":"aiRun","event":{phase,id,at,kind,exposesHash,vendor?,model?,step?,ok?,costUsd?,error?}}
-{"type":"automationRun","run":{automationId,name,at,trigger,cause,causeDetail?,outcome,commands,refused,detail?}}
+{"type":"automationRun","run":{automationId,name,at,trigger,cause,causeDetail?,outcome,commands,refused,problems?,detail?}}
 {"type":"automationStatus","automationStatus":{automationId,status}}  a rule's status moved; at most one per rule every ten seconds
 {"type":"automationChat","chat":{sessionId,phase,at,text,kind?,detail?,workedMs?}}  phase: thinking | delta | step | turn | amend
 {"type":"assistantChat","chat":{…the same shape…}}      the assistant, on the same stream

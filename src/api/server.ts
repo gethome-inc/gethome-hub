@@ -941,8 +941,11 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // the `automationStatus` frame on the `automations` stream) and **which
     // devices each rule uses** (`devices`). Both fields are always present on
     // a rule from such a hub, so this block is for the home that has no rules
-    // yet — where there is nothing to look for a field on.
-    automations: { status: true, devices: true },
+    // yet — where there is nothing to look for a field on. `problems` says a
+    // run's trace marks the steps that were a problem (`problem` on a step,
+    // `problems` on the `automationRun` frame) — which is the only way to tell
+    // an unmarked step that was fine from one this hub never marks.
+    automations: { status: true, devices: true, problems: true },
     // Additive, and presence is the capability: a hub carrying this block has
     // `GET/POST/DELETE /settings/wifi…`, so an app may offer to add the Wi-Fi
     // network a hub is about to be carried to. `available: false` says this

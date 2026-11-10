@@ -46,7 +46,7 @@ runs), and on `automations` it hears rules firing and **never** a conversation.
 ```text
 → {"type":"subscribe","streams":["automations"]}
 ← {"type":"subscribed","streams":["automations"]}
-← {"type":"automationRun","run":{automationId,name,at,trigger,cause,causeDetail?,outcome,commands,refused,detail?}}
+← {"type":"automationRun","run":{automationId,name,at,trigger,cause,causeDetail?,outcome,commands,refused,problems?,detail?}}
 ← {"type":"automationStatus","automationStatus":{automationId,status}}
 → {"type":"unsubscribe","streams":["automations"]}
 ```

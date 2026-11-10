@@ -106,6 +106,12 @@ directory. `docs/automations.md` is canonical — update it in the same change.
   the run is going, in the stored row — behind the write that made it — once it
   is not, with the status corrected once per run. Never a second step after
   the first, which would be a trace arguing with itself.
+  **And a problem is marked on the step, because `kind` and `outcome` cannot
+  say it** (`AutomationRunStep.problem`, `problems` on the run frame): a
+  `refused` step is "was already on" as well as "didn’t answer", a run with one
+  dead lamp is still `ran`, and both words are drawn as they are by every build
+  that shipped. Anything that counts toward `status.today.problems` has to set
+  the flag on its step, or the trace and the card disagree.
   **Whether a rule is working is remembered, not derived** (`status.ts`):
   twenty traces is a minute of a busy rule, so the engine counts. Runs, skips
   and problems are three things — a skip is the rule declining before it acts,
