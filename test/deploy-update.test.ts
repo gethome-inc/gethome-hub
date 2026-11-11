@@ -11,7 +11,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -125,6 +125,12 @@ function runUpdate(options: {
         GETHOME_CONF: conf,
         GETHOME_DIR: opt,
         PATH: `${bin}:${process.env.PATH ?? ''}`,
+        // The script reads and writes <data>/update as the hub's account, and
+        // the staged directory belongs to whoever runs the suite, so that is
+        // the account — test/helpers/fake-nmcli.ts's reasoning. Without it a
+        // suite running as root (a container, a CI image) asks for a `gethome`
+        // account that is not there, and every write to <data> fails.
+        GETHOME_USER: userInfo().username,
         // The real wait is thirty attempts two seconds apart, because a Zero 2 W
         // takes over a minute to come back. A test must not.
         GETHOME_UPDATE_SETTLE_TRIES: '2',
@@ -383,7 +389,8 @@ describe('root, in the hub’s own data directory', () => {
    * there handed root's pen to the target; the new writer uses a pid-suffixed
    * temp it creates itself and renames into place, so the planted name is never
    * opened and the target keeps its content and its mode. Run as the same user
-   * the test suite is — `as_hub` then runs the command directly — so what this
+   * the test suite is — `as_hub` runs the command directly, or through
+   * `setpriv` as that same account when the suite is root — so what this
    * proves is the *mechanism* (a name root no longer writes through), not the
    * privilege drop that backs it on the Pi.
    */

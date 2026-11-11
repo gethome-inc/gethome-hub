@@ -10,6 +10,7 @@ import { FavoritesService } from '../../src/core/favorites.js';
 import { AccessService } from '../../src/core/access.js';
 import { HistoryService } from '../../src/core/history.js';
 import { PortraitService } from '../../src/portraits/store.js';
+import type { PhotoStore } from '../../src/photos/store.js';
 import { ActivityService } from '../../src/core/activity.js';
 import { AutomationEngine, type EngineRegistry } from '../../src/automations/engine.js';
 import { AutomationStore } from '../../src/automations/store.js';
@@ -26,6 +27,7 @@ import {
   aiRuns,
   automationChatMessages,
   automationRuns,
+  automationStatus,
   automationVersions,
   automations,
   deviceFavorites,
@@ -36,6 +38,9 @@ import {
   historySeries,
   home,
   invites,
+  keptPhotos,
+  keptPhotoUses,
+  memberPhotoSettings,
   members,
   roles,
   rooms,
@@ -78,6 +83,7 @@ export async function openTestDb(): Promise<TestDb | null> {
 export async function resetDb(db: Db): Promise<void> {
   await db.delete(activity);
   await db.delete(automationRuns);
+  await db.delete(automationStatus);
   await db.delete(automationVersions);
   await db.delete(automations);
   // Transcripts outlive the conversations that wrote them by a fortnight,
@@ -94,6 +100,11 @@ export async function resetDb(db: Db): Promise<void> {
   await db.delete(deviceFavorites);
   await db.delete(devicePortraits);
   await db.delete(devices);
+  // Kept photos are rows beside files, and a suite that keeps one must not
+  // leave it for the next suite's counts.
+  await db.delete(keptPhotoUses);
+  await db.delete(keptPhotos);
+  await db.delete(memberPhotoSettings);
   await db.delete(members);
   // Built-in roles are seeded by the migration and are part of the schema a
   // hub boots with, so they stay. A role a test invented does not.
@@ -225,9 +236,14 @@ export async function startedAutomations(
     createConversation?: AutomationChatOptions['createConversation'];
     /** The same, for the assistant. */
     createAssistantConversation?: AssistantChatOptions['createConversation'];
+    /** Stands in for the vendor that names a conversation, for both agents.
+     *  Absent, a runtime whose conversations are stand-ins names nothing. */
+    askTitle?: AutomationChatOptions['askTitle'];
     /** The suite's own, when it has one — the assistant asks it whether a
      *  member may hand a job to another agent. */
     access?: AccessService;
+    /** Where both chats keep a photo somebody asked to keep — absent, none is. */
+    keptPhotos?: PhotoStore;
   } = {},
 ): Promise<{
   engine: AutomationEngine;
@@ -269,6 +285,8 @@ export async function startedAutomations(
     ...(options.createConversation !== undefined
       ? { createConversation: options.createConversation }
       : {}),
+    ...(options.askTitle !== undefined ? { askTitle: options.askTitle } : {}),
+    ...(options.keptPhotos !== undefined ? { keptPhotos: options.keptPhotos } : {}),
   });
   const access = options.access ?? new AccessService(db, events);
   if (options.access === undefined) await access.load();
@@ -286,6 +304,8 @@ export async function startedAutomations(
     ...(options.createAssistantConversation !== undefined
       ? { createConversation: options.createAssistantConversation }
       : {}),
+    ...(options.askTitle !== undefined ? { askTitle: options.askTitle } : {}),
+    ...(options.keptPhotos !== undefined ? { keptPhotos: options.keptPhotos } : {}),
   });
   return { engine, store, chat, assistant };
 }

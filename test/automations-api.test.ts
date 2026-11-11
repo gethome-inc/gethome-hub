@@ -672,3 +672,52 @@ describe('the room on a rule', () => {
     }
   });
 });
+
+describe('the devices a rule uses, and whether it is working', () => {
+  it('says the hub keeps both, for a home with no rule to look at', async () => {
+    const hub = await app.inject({ method: 'GET', url: '/api/v1/hub' });
+    expect(hub.json()).toMatchObject({ automations: { status: true, devices: true, problems: true } });
+  });
+
+  it('carries both on every rule, and the run’s exact terms beside its sentence', async () => {
+    const created = await create(button);
+    const { id } = created.json() as { id: string };
+    // No devices in this home, so both lists are there and empty — which is
+    // how an app tells "uses nothing" from a hub that does not say.
+    expect(created.json()).toMatchObject({
+      devices: { reads: [], controls: [] },
+      status: { today: { runs: 0, problems: 0, skipped: 0 } },
+    });
+
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/automations/${id}`,
+      headers: auth(token),
+      payload: { enabled: true },
+    });
+    await app.inject({ method: 'POST', url: `/api/v1/automations/${id}/run`, headers: auth(token) });
+    await engine.settled();
+
+    const list = await app.inject({ method: 'GET', url: '/api/v1/automations', headers: auth(token) });
+    const rule = (
+      list.json() as { automations: { id: string; status: Record<string, unknown> }[] }
+    ).automations.find((entry) => entry.id === id);
+    expect(rule?.status).toMatchObject({
+      today: { runs: 1, problems: 0 },
+      lastRun: { outcome: 'ran', cause: 'Pressed by Georgy' },
+      lastPressed: { by: 'Georgy' },
+    });
+
+    const runs = await app.inject({
+      method: 'GET',
+      url: `/api/v1/automations/${id}/runs`,
+      headers: auth(token),
+    });
+    expect((runs.json() as { cause: string; causeDetail: string | null }[])[0]).toMatchObject({
+      cause: 'Pressed by Georgy',
+      causeDetail: null,
+    });
+
+    await app.inject({ method: 'DELETE', url: `/api/v1/automations/${id}`, headers: auth(token) });
+  });
+});

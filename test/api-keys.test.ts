@@ -300,6 +300,22 @@ describe.skipIf(!handle)('API keys', () => {
     // whatever it was given: a camera shows people, and that is a person's.
     'GET /api/v1/cameras/:deviceId/:endpointId/:streamId/snapshot': 'permission camera.view',
     'GET /api/v1/cameras/:deviceId/:endpointId/:streamId/mjpeg': 'permission camera.view',
+    'GET /api/v1/room-pictures': 'read',
+    'GET /api/v1/room-pictures/:id/:variant': 'read',
+    'POST /api/v1/room-pictures': 'permission hub.ai',
+    'PATCH /api/v1/room-pictures/:id': 'permission home.structure',
+    'POST /api/v1/room-pictures/:id/locate': 'permission hub.ai',
+    'DELETE /api/v1/room-pictures/:id': 'permission home.structure',
+    // Photos of the inside of somebody's home: the member's, never a key's —
+    // reading included, the way conversations are (`photos/store.ts`).
+    'GET /api/v1/room-pictures/:id/photos': 'deny',
+    'GET /api/v1/photos': 'deny',
+    'PUT /api/v1/photos/home': 'deny',
+    'PUT /api/v1/photos/mine': 'deny',
+    'DELETE /api/v1/photos/home/:kind': 'deny',
+    'DELETE /api/v1/photos/mine/chat': 'deny',
+    'GET /api/v1/photos/:id': 'deny',
+    'DELETE /api/v1/photos/:id': 'deny',
     'POST /api/v1/matter/commission': 'permission device.add',
     // Two GETs with side effects — this one drives a radio for seconds, and
     // `GET /settings/mqtt` writes a row and hands out a password — which is
@@ -342,6 +358,7 @@ describe.skipIf(!handle)('API keys', () => {
     'PUT /api/v1/settings/radio': 'permission hub.radio',
     'GET /api/v1/system/update': 'read',
     'POST /api/v1/system/update': 'permission hub.update',
+    'PUT /api/v1/system/update/automatic': 'permission hub.update',
     'GET /api/v1/system/update/log': 'read',
     'GET /api/v1/settings/wifi': 'permission hub.wifi',
     'POST /api/v1/settings/wifi/networks': 'permission hub.wifi',
@@ -365,11 +382,15 @@ describe.skipIf(!handle)('API keys', () => {
     // Every conversation, reading included: what people said is not a key's.
     'POST /api/v1/automations/chat': 'deny',
     'POST /api/v1/automations/chat/:id/messages': 'deny',
+    'POST /api/v1/automations/chat/:id/stop': 'deny',
+    'POST /api/v1/automations/chat/:id/retry': 'deny',
     'GET /api/v1/automations/chats': 'deny',
     'GET /api/v1/automations/chat/:id': 'deny',
     'DELETE /api/v1/automations/chat/:id': 'deny',
     'POST /api/v1/assistant/chat': 'deny',
     'POST /api/v1/assistant/chat/:id/messages': 'deny',
+    'POST /api/v1/assistant/chat/:id/stop': 'deny',
+    'POST /api/v1/assistant/chat/:id/retry': 'deny',
     'GET /api/v1/assistant/chats': 'deny',
     'GET /api/v1/assistant/chat/:id': 'deny',
     'POST /api/v1/assistant/voice/session': 'deny',
@@ -791,7 +812,8 @@ describe.skipIf(!handle)('API keys', () => {
       const runs = (
         await app.inject({ method: 'GET', url: `/api/v1/automations/${created.id}/runs`, headers: auth(ownerToken) })
       ).json() as Array<{ cause: string }>;
-      expect(runs[0]?.cause).toBe('Anna’s “Node-RED” pressed Leaving');
+      // The run sits under the rule's own name, so its cause is who pressed it.
+      expect(runs[0]?.cause).toBe('Pressed by Anna’s “Node-RED”');
     });
 
     it('writes the press and the mode switch as its member’s, through the key', async () => {
@@ -879,9 +901,11 @@ describe.skipIf(!handle)('API keys', () => {
         ['GET', '/api/v1/automations/chats', undefined, 403, notAllowed],
         ['GET', `/api/v1/automations/chat/${uuid}`, undefined, 403, notAllowed],
         ['POST', '/api/v1/automations/chat', { message: 'hi' }, 403, notAllowed],
+        ['POST', `/api/v1/automations/chat/${uuid}/stop`, undefined, 403, notAllowed],
         ['GET', '/api/v1/assistant/chats', undefined, 403, notAllowed],
         ['GET', `/api/v1/assistant/chat/${uuid}`, undefined, 403, notAllowed],
         ['POST', '/api/v1/assistant/chat', { message: 'hi' }, 403, notAllowed],
+        ['POST', `/api/v1/assistant/chat/${uuid}/stop`, undefined, 403, notAllowed],
         ['POST', '/api/v1/assistant/voice/session', { sdp: 'v=0' }, 403, notAllowed],
         // Permissions no key may hold say which, so the integration knows what
         // it has to do without.
@@ -1147,6 +1171,9 @@ describe.skipIf(!handle)('API keys', () => {
       const chat = { sessionId: '55555555-5555-4555-a555-555555555555', phase: 'delta' as const, at: new Date().toISOString(), text: 'private' };
       events.emit('automationChat', chat);
       events.emit('assistantChat', chat);
+      // A conversation's name is made of what somebody said, so it is a
+      // conversation too.
+      events.emit('chatTitle', { surface: 'assistant', sessionId: chat.sessionId, title: 'Private', at: chat.at });
       events.emit('automationRun', {
         automationId: 'a',
         name: 'Night',
@@ -1158,7 +1185,19 @@ describe.skipIf(!handle)('API keys', () => {
         refused: 0,
       });
       await waitFor('automationRun');
-      expect(frames.some((frame) => frame.type === 'automationChat' || frame.type === 'assistantChat')).toBe(false);
+      // Whether a rule is working rides the same stream, under its own key.
+      events.emit('automationStatus', {
+        automationId: 'a',
+        status: { today: { date: '2026-06-15', runs: 1, problems: 0, skipped: 0 } },
+      });
+      expect(await waitFor('automationStatus')).toMatchObject({
+        automationStatus: { automationId: 'a', status: { today: { runs: 1 } } },
+      });
+      expect(
+        frames.some(
+          (frame) => frame.type === 'automationChat' || frame.type === 'assistantChat' || frame.type === 'chatTitle',
+        ),
+      ).toBe(false);
       socket.close();
     });
 

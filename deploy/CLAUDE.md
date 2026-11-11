@@ -117,6 +117,13 @@ in `deploy/install.sh` must stay accurate.
   `gethome-hubctl update`. That is what lets a phone update a hub at all —
   Studio does it over SSH with a key it planted, and an iPhone has none.
   Any member may ask; see the owner-only bullet above for why that moved.
+  **The hub may also ask by itself**, at a quiet hour, where somebody in its
+  home switched automatic updates on (`src/core/auto-update.ts`, off by
+  default). Nothing here changes for it — it writes the same request — and two
+  rules here are what keep it safe: the unit is never enabled, so the only way
+  an update starts is a request somebody (or the hub, on somebody's say-so)
+  wrote, and the runner only ever installs `main`, which is why the hub refuses
+  to update a branch build by itself rather than undo somebody's test.
   Seven things to keep. **The unit is never enabled and never ordered after the
   hub**: an enabled update service updates on every boot, and a unit ordered
   after `gethome-hubd` is one systemd may take down with the hub *this very run
@@ -738,14 +745,22 @@ in `deploy/install.sh` must stay accurate.
   an earlier association left, and the app asks, as it does for an Ethernet hub.
   A scan that fails or does not show the network changes nothing. `nmcli -t`
   escapes `\` and `:` inside a name, so the comparison decodes in awk, with the
-  name passed in the environment because `awk -v` processes backslashes. And the
+  name passed in the environment because `awk -v` processes backslashes. **The
+  profile's own name and PSK are read with `nmcli -e no -g`**, because `-g` is
+  terse output and escapes the same two characters, and one field has no
+  columns to keep apart — `profile_ssid`'s reasoning. Read without it, `My:Net`
+  was handed to every accessory as `My\:Net`, a network that does not exist,
+  and the decoded scan, compared with the escaped name, never matched. And the
   shell-quoting is built into a variable before it is used, because inline
   inside the `printf` the replacement's backslashes go through a second round of
   quote removal and `Dave's Wi-Fi` comes out mangled — the sed-program rule from
   `test/deploy-wifi.test.ts`, in a second place. (The same family bit the 5 GHz
   code while it was written: bash 3.2 keeps the quotes of a quoted replacement
   in `${var//pattern/"$x"}`, so escaping the name in the shell produced
-  `My"\:"Net` on macOS and `My\:Net` on the Pi.)
+  `My"\:"Net` on macOS and `My\:Net` on the Pi.) **And the hub undoes the
+  quoting, not only the quotes** (`readWifiCredentials`): it once took off the
+  outer pair and nothing else, so `Dave's Wi-Fi` reached an accessory as
+  `Dave'\''s Wi-Fi`.
 - **A hub that loses its Wi-Fi profile is a hub nobody can reach to fix it, so
   it keeps its own copy and puts it back.** On 2026-10-12 the owner's Zero 2 W
   (Trixie, NetworkManager 1.52.1 storing profiles through netplan, Wi-Fi from
@@ -937,6 +952,15 @@ in `deploy/install.sh` must stay accurate.
   `--max-semi-space-size=1` beside it, at 176 → 139 MB resident with Matter
   loaded for about half a second of startup. They have to be **argv**:
   `NODE_OPTIONS` refuses `--optimize-for-size` outright.
+  **The 512 MB tier also hands a room drawing's memory back**: `--expose-gc`
+  in the same flags, which `src/room-pictures/store.ts` uses when it is there
+  and skips when it is not, and `HUB_MALLOC_ENV`
+  (`MALLOC_MMAP_THRESHOLD_=131072 MALLOC_ARENA_MAX=2`) on a line of its own in
+  the hub's unit, empty everywhere else. Both are **measured, not reasoned** —
+  by replaying a drawing on a Zero 2 W with `scripts/replay-room-picture.mjs`,
+  which spends nothing; the figures are in `docs/zigbee.md`. They are the fix
+  for a drawing that held the hub at its `MemoryHigh` until the pressure watch
+  stood Matter down, and the watch itself was right and was not touched.
   **The numbers above are the 512 MB tier's, and a 1 GB board gets its own**
   (`TIGHT_BOARD`): hub `MemoryHigh=400M` with a 320 MB heap, Z2M `320M`/`400M`,
   and `--optimize-for-size` without the semi-space pin, which buys memory with

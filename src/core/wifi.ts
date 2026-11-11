@@ -55,15 +55,27 @@ export function readWifiCredentials(file: string = WIFI_ENV_FILE): WifiCredentia
     if (trimmed.length === 0 || trimmed.startsWith('#')) continue;
     const eq = trimmed.indexOf('=');
     if (eq <= 0) continue;
-    // Shell-quoted on the way in, because an SSID may contain a space and the
-    // file is sourced by the dispatcher that writes it.
-    const value = trimmed.slice(eq + 1).replace(/^(['"])(.*)\1$/, '$2');
-    values.set(trimmed.slice(0, eq), value);
+    values.set(trimmed.slice(0, eq), unquote(trimmed.slice(eq + 1)));
   }
   const ssid = values.get('WIFI_SSID') ?? '';
   const passphrase = values.get('WIFI_PSK') ?? '';
   if (ssid.length === 0 || passphrase.length === 0) return undefined;
   return { ssid, passphrase };
+}
+
+/**
+ * A value with the dispatcher's quoting undone. It writes each one in single
+ * quotes, so a space survives, and an apostrophe inside as `'\''` — close the
+ * quote, an escaped one, open it again — because nothing else can stand for
+ * one there: `Dave's Wi-Fi` is `'Dave'\''s Wi-Fi'` on disk. Taking off only
+ * the outer pair handed an accessory `Dave'\''s Wi-Fi`, a network that does
+ * not exist. A value in double quotes, or in none, reads as it always did.
+ */
+function unquote(value: string): string {
+  if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
+    return value.slice(1, -1).replaceAll("'\\''", "'");
+  }
+  return value.replace(/^"(.*)"$/, '$1');
 }
 
 /**

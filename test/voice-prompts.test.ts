@@ -240,6 +240,25 @@ describe('the voice prompt', () => {
     expect(history).not.toHaveLength(0);
   });
 
+  /**
+   * A photo cannot follow a conversation into the voice — the line carries
+   * none and the hub never kept it — so a message that came with one says so,
+   * and one that was *only* a photo is not sent as an empty message.
+   */
+  it('says a photo was sent, rather than sending an empty message', () => {
+    const photo = { type: 'image', mediaType: 'image/jpeg', bytes: 1024 };
+    const rows: ChatMessageWire[] = [
+      { id: '1', at: '2026-09-14T10:00:00.000Z', role: 'user', text: 'what is this?', data: { attachments: [photo] } },
+      { id: '2', at: '2026-09-14T10:00:01.000Z', role: 'agent', text: 'A lamp.' },
+      { id: '3', at: '2026-09-14T10:00:02.000Z', role: 'user', text: '', data: { attachments: [photo, photo] } },
+    ];
+    expect(liveHistory(rows).map((message) => message.content[0].text)).toEqual([
+      'what is this? (sent with a photo)',
+      'A lamp.',
+      '(sent 2 photos)',
+    ]);
+  });
+
   it('carries a short conversation whole', () => {
     const rows: ChatMessageWire[] = [
       { id: '1', at: '2026-09-14T10:00:00.000Z', role: 'user', text: 'turn the kettle on' },

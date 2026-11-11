@@ -39,9 +39,9 @@
  *
  * **Succession.** A stored choice counts only while the model it names is still
  * *offered*; otherwise the hub runs the first model along its successor chain
- * that is — Opus 5 → Opus 5.5, Sonnet 5 → Sonnet 5.5, GPT-5.6 Sol and Terra →
- * GPT-6 Sol → GPT-6.1 Sol — and only where there is no such model, the
- * vendor's default. Three rules.
+ * that is — Opus 5 → Opus 5.5, Sonnet 5 → Sonnet 5.5, Fable 5.1 → Fable 5.2,
+ * GPT-5.6 Sol → GPT-6 Sol → GPT-6.1 Sol, GPT-5.6 Terra → GPT-6.1 Terra — and
+ * only where there is no such model, the vendor's default. Four rules.
  *  - **It is resolved when settings are read, never written back.** Updating a
  *    hub is therefore all it takes to move every home on a retired model, with
  *    no migration and nothing for its owner to do — and it is also the only
@@ -58,6 +58,12 @@
  *    points at Opus 5, which points at Opus 5.5; the walk follows the chain. So
  *    retiring a model is an edit to its own row only, and nothing already
  *    written has to be revisited.
+ *  - **A tier keeps its tier.** The model that replaced a Sonnet is the next
+ *    Sonnet, and a Terra's the next Terra, because somebody who chose the
+ *    quicker, cheaper rung chose the rung. Only while a vendor has nothing on
+ *    that rung does its row point at the nearest one — GPT-5.6 Terra went to
+ *    GPT-6 Sol while GPT-6 had no Terra — and the row moves back the day the
+ *    rung does.
  *
  * Prices are list prices in USD per million tokens, from each vendor's model
  * pages (checked 9 October 2026). They move rarely, and the caps they feed are
@@ -74,9 +80,10 @@ export interface ModelPricing {
   readonly outputPerMTok: number;
   /**
    * What a cached read costs, as a fraction of the input rate, where this model
-   * is billed differently from the usual tenth. Opus 5.5, Sonnet 5.5 and
-   * GPT-6.1 Sol read at a twentieth and Fable 5.1 at a fortieth, and pricing
-   * them at a tenth would overstate every long conversation on them.
+   * is billed differently from the usual tenth. Opus 5.5, Sonnet 5.5, GPT-6.1
+   * Sol and GPT-6.1 Terra read at a twentieth and Fable 5.1 and 5.2 at a
+   * fortieth, and pricing them at a tenth would overstate every long
+   * conversation on them.
    */
   readonly cacheReadMultiplier?: number;
   /** The same for a cache write, where it differs from the usual 1.25×. */
@@ -118,6 +125,16 @@ export interface ModelChoice {
   readonly note: string;
   /** Exactly one choice per provider carries this. */
   readonly recommended?: boolean;
+  /**
+   * The model reads a photo sent with a chat message.
+   *
+   * **Additive, and a fact about the model rather than a promise about the
+   * route**: an app asks it before offering to attach a picture to a chat on
+   * this model, rather than shipping its own list of which models can see. True
+   * for every model offered to the agents today; a later one that cannot will
+   * simply not carry it, and an app treats absent as "no".
+   */
+  readonly images?: boolean;
 }
 
 /** Everything the hub knows about one model, offered or not. */
@@ -129,7 +146,31 @@ interface KnownModel {
    * the same vendor's, always. Absent on a model that is still current.
    */
   readonly successor?: string;
+  /** It reads images. Written on the row, beside the price, because it is the
+   *  same kind of fact — what the vendor's model is, not what a surface offers. */
+  readonly images?: boolean;
+  /**
+   * Where it stands in its vendor's line-up (`AgentTier`). Written on the row
+   * for the reason `images` is, and required of every model an agent is
+   * offered (`test/ai-model-choice.test.ts`), because it is what a failed
+   * round is offered on the other vendor (`agentCounterpart`).
+   */
+  readonly tier?: AgentTier;
 }
+
+/**
+ * The level a model stands at in its vendor's line-up, dearest first: the most
+ * capable, the everyday one each vendor recommends, the quicker one at about
+ * half that price, and the quickest and cheapest. One vocabulary for every
+ * vendor, so a model on one vendor's list can be read across to the other's.
+ *
+ * **A tier is the vendor's rung, not a price band**: Opus 5.5 and GPT-6.1 Sol
+ * are both `main` though Opus costs twice as much, because each is the model
+ * its vendor recommends for this kind of work. The price is the tie-break
+ * within a tier, never the other way round.
+ */
+export const AGENT_TIERS = ['top', 'main', 'quick', 'lite'] as const;
+export type AgentTier = (typeof AGENT_TIERS)[number];
 
 /**
  * Every model the hub has ever run or accepted, per vendor.
@@ -140,25 +181,46 @@ interface KnownModel {
  */
 const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>> = {
   anthropic: {
-    // GPT-6 Astra's price, with a cached read at a fortieth ($0.25). It refuses
-    // a forced `tool_choice` — which no loop here sends — and, like Opus 5.5,
+    // $8/$40, with a cached read at a fortieth ($0.20) and a write at the usual
+    // 1.25× (list prices, checked 11 November 2026). It refuses a forced
+    // `tool_choice` — which no loop here sends — and, like Opus 5.5,
     // `temperature` and a prefilled reply, and it binds each thinking block to
     // everything ahead of it, so a conversation may only ever be appended to,
-    // which every loop here already does. It can also decline with
+    // which every loop here already does. Fable 5.1 checked that binding only
+    // on accounts opened from 31 August 2026; this one checks it on **every**
+    // key, so an edit to an earlier turn is a 400 on old accounts too, and the
+    // append-only rule is no longer one only some homes depend on. No model
+    // released before it reads its thinking blocks — Fable 5.1 and the
+    // refusal fallback's Opus 5 and Opus 4.8 included — so a round another
+    // Claude finishes runs without them: the API drops them unbilled, and
+    // nothing here strips them. It can also decline with
     // `stop_reason: 'refusal'`, which both loops already report.
     // Anthropic keeps its requests for 30 days with no zero-retention option,
-    // which are the ordinary terms for an API key. Mythos 5.1, the same model
+    // which are the ordinary terms for an API key. Mythos 5.2, the same model
     // for verified organisations only, is never offered: a home's key would be
     // refused.
+    'claude-fable-5-2': {
+      label: 'Fable 5.2',
+      price: { inputPerMTok: 8, outputPerMTok: 40, cacheReadMultiplier: 0.025 },
+      images: true,
+      tier: 'top',
+    },
+    // Still served, and replaced in the picker the way Opus 5 was: Fable 5.2
+    // is cheaper ($8/$40 against $10/$50) and stronger, so nothing a home
+    // chose is lost by moving. Its row keeps its own price, which is what the
+    // rows recorded on it were estimated at.
     'claude-fable-5-1': {
       label: 'Fable 5.1',
       price: { inputPerMTok: 10, outputPerMTok: 50, cacheReadMultiplier: 0.025 },
+      successor: 'claude-fable-5-2',
     },
     'claude-opus-5-5': {
       label: 'Opus 5.5',
       // A twentieth of the input rate for a cached read, where every model
       // before it billed a tenth.
       price: { inputPerMTok: 4, outputPerMTok: 20, cacheReadMultiplier: 0.05 },
+      images: true,
+      tier: 'main',
     },
     'claude-opus-5': {
       label: 'Opus 5',
@@ -185,6 +247,8 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
     'claude-sonnet-5-5': {
       label: 'Sonnet 5.5',
       price: { inputPerMTok: 2, outputPerMTok: 10, cacheReadMultiplier: 0.05 },
+      images: true,
+      tier: 'quick',
     },
     'claude-sonnet-5': {
       label: 'Sonnet 5',
@@ -207,12 +271,16 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
         outputPerMTok: 0.5,
         longPrompt: { aboveTokens: 100_000, inputMultiplier: 5, outputMultiplier: 5 },
       },
+      images: true,
+      tier: 'lite',
     },
   },
   openai: {
     'gpt-6-astra': {
       label: 'GPT-6 Astra',
       price: { inputPerMTok: 10, outputPerMTok: 50, longPrompt: GPT_6_LONG_PROMPT },
+      images: true,
+      tier: 'top',
     },
     // GPT-6 Sol's price, with a cached read at a twentieth ($0.10) where GPT-6
     // Sol reads at the usual tenth. It takes the same requests: the Responses
@@ -222,6 +290,21 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
     'gpt-6.1-sol': {
       label: 'GPT-6.1 Sol',
       price: { inputPerMTok: 2, outputPerMTok: 10, cacheReadMultiplier: 0.05, longPrompt: GPT_6_LONG_PROMPT },
+      images: true,
+      tier: 'main',
+    },
+    // Half GPT-6.1 Sol's price, with the same twentieth for a cached read
+    // ($0.05), and OpenAI's quicker tier — about three times Sol's speed, by
+    // OpenAI's own figures. It takes what Sol takes: the Responses API with
+    // function tools, images, and `reasoning.effort` low, medium and high (it
+    // accepts `none` as well, which nothing here sends). Offered to the agents
+    // only, as Sonnet 5.5 is: recognition never offers a tier cheaper than its
+    // default.
+    'gpt-6.1-terra': {
+      label: 'GPT-6.1 Terra',
+      price: { inputPerMTok: 1, outputPerMTok: 5, cacheReadMultiplier: 0.05, longPrompt: GPT_6_LONG_PROMPT },
+      images: true,
+      tier: 'quick',
     },
     // Still served, and replaced in the picker the way Opus 5 was: GPT-6.1 Sol
     // is the same price and stronger, so nothing a home chose is lost by moving.
@@ -233,12 +316,14 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
     'gpt-6-luna': {
       label: 'GPT-6 Luna',
       price: { inputPerMTok: 0.1, outputPerMTok: 0.5, longPrompt: GPT_6_LONG_PROMPT },
+      images: true,
+      tier: 'lite',
     },
-    // GPT-5.6 was Sol, Terra and Luna; GPT-6 is Astra, Sol and Luna. There is
-    // no GPT-6 Terra, and GPT-6 Sol is both cheaper than 5.6 Terra ($2/$12) and
-    // stronger than 5.6 Sol — so both of the tiers this hub offered move to it.
-    // Sol's $4/$20 was a promotional rate (standard $5/$30); it is kept as the
-    // price the rows recorded on it were estimated at.
+    // GPT-5.6 was Sol, Terra and Luna; GPT-6 was Astra, Sol and Luna, with no
+    // Terra, and GPT-6 Sol was both cheaper than 5.6 Terra ($2/$12) and
+    // stronger than 5.6 Sol — so both of the tiers this hub offered moved to
+    // it. Sol's $4/$20 was a promotional rate (standard $5/$30); it is kept as
+    // the price the rows recorded on it were estimated at.
     'gpt-5.6-sol': {
       label: 'GPT-5.6 Sol',
       price: { inputPerMTok: 4, outputPerMTok: 20 },
@@ -252,10 +337,15 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
       price: { inputPerMTok: 4, outputPerMTok: 20 },
       successor: 'gpt-6-sol',
     },
+    // Back on its own tier now that the tier is back: GPT-6.1 Terra is the
+    // Terra after it, the way Sonnet 4.6 walks to Sonnet 5.5 and never to Opus.
+    // It went to GPT-6 Sol while GPT-6 had no Terra. Recognition offers no
+    // Terra, so a recognition setting naming it walks off the end of the chain
+    // and runs that list's default, GPT-6.1 Sol — where it already ran.
     'gpt-5.6-terra': {
       label: 'GPT-5.6 Terra',
       price: { inputPerMTok: 2, outputPerMTok: 12 },
-      successor: 'gpt-6-sol',
+      successor: 'gpt-6.1-terra',
     },
   },
 };
@@ -268,7 +358,13 @@ const MODELS: Readonly<Record<AiProvider, Readonly<Record<string, KnownModel>>>>
 function offer(provider: AiProvider, id: string, note: string, recommended = false): ModelChoice {
   const known = knownModel(provider, id);
   if (known === undefined) throw new Error(`models: ${provider} offers ${id}, which MODELS does not know`);
-  return { id, label: known.label, note, ...(recommended ? { recommended: true } : {}) };
+  return {
+    id,
+    label: known.label,
+    note,
+    ...(recommended ? { recommended: true } : {}),
+    ...(known.images === true ? { images: true } : {}),
+  };
 }
 
 function knownModel(provider: AiProvider, id: string): KnownModel | undefined {
@@ -290,7 +386,7 @@ function knownModel(provider: AiProvider, id: string): KnownModel | undefined {
  * argument is about *cheaper* models, and it is the invariant the tests keep;
  * a *more* thorough one costs more on a job that runs a handful of times in a
  * hub's life, which is a choice a home can make. So each vendor offers two —
- * Opus 5.5 by default with Fable 5.1 above it, GPT-6.1 Sol by default with
+ * Opus 5.5 by default with Fable 5.2 above it, GPT-6.1 Sol by default with
  * Astra above it — and Sonnet, Haiku and Luna are on neither list.
  *
  * Each named by an **explicit** id, never an alias: an alias is the vendor's to
@@ -303,8 +399,8 @@ export const PROVIDER_MODELS: Readonly<
   anthropic: {
     default: 'claude-opus-5-5',
     choices: [
-      offer('anthropic', 'claude-fable-5-1', 'Anthropic’s most thorough, at two and a half times Opus’s price.'),
-      offer('anthropic', 'claude-opus-5-5', 'Thorough, at two fifths of Fable’s price.', true),
+      offer('anthropic', 'claude-fable-5-2', 'Anthropic’s most thorough, at twice Opus’s price.'),
+      offer('anthropic', 'claude-opus-5-5', 'Thorough, at half Fable’s price.', true),
     ],
   },
   openai: {
@@ -324,10 +420,11 @@ export const PROVIDER_MODELS: Readonly<
  * rounds, it is read the moment it is written, and a reply somebody does not
  * like is answered with another message — so what a model costs per round is a
  * real trade a home can make, and both halves of it are visible. So the cheaper
- * tiers are offered here: Sonnet 5.5 at half Opus 5.5's price, Haiku 5.5 at a
- * fortieth of it, and GPT-6 Luna at a twentieth of Sol's — with the dearest of
- * each vendor's above the default, Fable 5.1 and GPT-6 Astra, as recognition
- * offers them.
+ * tiers are offered here: Sonnet 5.5 at half Opus 5.5's price and Haiku 5.5 at
+ * a fortieth of it, GPT-6.1 Terra at half Sol's and GPT-6 Luna at a twentieth
+ * of it — four rungs a vendor, the same ladder on both (`AgentTier`, which
+ * `agentCounterpart` reads across) — with the dearest of each vendor's above
+ * the default, Fable 5.2 and GPT-6 Astra, as recognition offers them.
  *
  * **One table for both agents, and two stored columns.** It was
  * `ASSISTANT_MODELS`, and the automations agent read `ai_model` — the
@@ -344,8 +441,8 @@ export const AGENT_MODELS: Readonly<
   anthropic: {
     default: 'claude-opus-5-5',
     choices: [
-      offer('anthropic', 'claude-fable-5-1', 'Anthropic’s most capable, at two and a half times Opus’s price.'),
-      offer('anthropic', 'claude-opus-5-5', 'Best when it has to work things out, at two fifths of Fable’s price.', true),
+      offer('anthropic', 'claude-fable-5-2', 'Anthropic’s most capable, at twice Opus’s price.'),
+      offer('anthropic', 'claude-opus-5-5', 'Best when it has to work things out, at half Fable’s price.', true),
       offer('anthropic', 'claude-sonnet-5-5', 'Quicker, and half the price of Opus 5.5.'),
       offer('anthropic', 'claude-haiku-5-5', 'The quickest and cheapest Claude. Fine for simple requests.'),
     ],
@@ -355,10 +452,164 @@ export const AGENT_MODELS: Readonly<
     choices: [
       offer('openai', 'gpt-6-astra', 'OpenAI’s most capable, at five times Sol’s price.'),
       offer('openai', 'gpt-6.1-sol', 'Nearly as capable as Astra, at a fifth of the price.', true),
+      offer('openai', 'gpt-6.1-terra', 'Quicker, and half the price of Sol.'),
       offer('openai', 'gpt-6-luna', 'The quickest and cheapest. Fine for simple requests.'),
     ],
   },
 };
+
+/**
+ * The model on `to`'s agent list that stands where `model` stands in its own
+ * vendor's: the same tier, and among several there the nearest in price.
+ *
+ * It is what a failed round is offered on the other vendor (`chat/failure.ts`):
+ * a chat somebody put on GPT-6.1 Terra is answered again by Sonnet 5.5, never
+ * by Opus 5.5 a tier above it at four times Terra's price, and a question sent
+ * to Fable 5.2 is not answered again by the other vendor's everyday model.
+ *
+ * **Written so that a new model needs nothing here.** The tier is on the
+ * model's own row in `MODELS`, so adding Opus 6 is its row and its line in
+ * `AGENT_MODELS`, as it always was, and retiring Opus 5.5 is its `successor`
+ * — a model no longer offered is read as the one that replaced it, which keeps
+ * its tier. Two models offered on one tier while a vendor moves between them
+ * are both candidates, and the nearer in price is chosen; a tier one vendor has
+ * and the other does not is answered from the nearest tier the other has. The
+ * vendor's default is the answer only for a model that cannot be placed at all
+ * — an id this build never knew — which is what was offered before tiers.
+ */
+export function agentCounterpart(model: string, to: AiProvider): string {
+  const from = knownProviderOf(model);
+  const offered = from === null ? null : onOffer(from, model, AGENT_MODELS[from].choices);
+  const tier = offered === null ? undefined : agentTier(offered);
+  if (offered === null || tier === undefined) return AGENT_MODELS[to].default;
+  const candidates = AGENT_MODELS[to].choices.map((choice) => ({
+    id: choice.id,
+    tier: agentTier(choice.id),
+    rate: blendedRate(choice.id),
+    recommended: choice.recommended === true,
+  }));
+  return closestOnLadder({ tier, rate: blendedRate(offered) }, candidates) ?? AGENT_MODELS[to].default;
+}
+
+/** The tier a model's row places it on, or nothing for a model with none. */
+export function agentTier(model: string): AgentTier | undefined {
+  const provider = knownProviderOf(model);
+  return provider === null ? undefined : knownModel(provider, model)?.tier;
+}
+
+/** One model on the other vendor's list, as `closestOnLadder` weighs it. */
+export interface LadderCandidate {
+  readonly id: string;
+  /** Absent for a model nobody has placed — it is never chosen. */
+  readonly tier: AgentTier | undefined;
+  /** What it costs, as one number (`blendedRate`); only ratios are compared. */
+  readonly rate: number;
+  readonly recommended: boolean;
+}
+
+/**
+ * The candidate nearest to a model at `tier` costing `rate`: the nearest tier
+ * first, then the nearest price (as a ratio, either way), then the one its
+ * vendor recommends, then the order its list gives.
+ *
+ * Exported apart from `agentCounterpart` so the suites can hand it the
+ * line-ups that do not exist yet — two models on one tier, a tier one vendor
+ * lacks — which the real table cannot be made to hold.
+ */
+export function closestOnLadder(
+  failed: { readonly tier: AgentTier; readonly rate: number },
+  candidates: readonly LadderCandidate[],
+): string | undefined {
+  const at = AGENT_TIERS.indexOf(failed.tier);
+  let best: { id: string; key: readonly number[] } | undefined;
+  for (const [order, candidate] of candidates.entries()) {
+    if (candidate.tier === undefined) continue;
+    const key = [
+      Math.abs(AGENT_TIERS.indexOf(candidate.tier) - at),
+      Math.abs(Math.log(candidate.rate / failed.rate)),
+      candidate.recommended ? 0 : 1,
+      order,
+    ];
+    if (best === undefined || before(key, best.key)) best = { id: candidate.id, key };
+  }
+  return best?.id;
+}
+
+/** Whether one sort key comes before another, field by field. */
+function before(a: readonly number[], b: readonly number[]): boolean {
+  for (const [index, value] of a.entries()) {
+    const other = b[index]!;
+    // A rounding hair is not a difference in price.
+    if (Math.abs(value - other) > 1e-9) return value < other;
+  }
+  return false;
+}
+
+/**
+ * A model's price as one number, for comparing two models with: a million
+ * tokens in and a million out at list rates. Input and output move together
+ * across both vendors' line-ups, so one sum orders them as either rate would.
+ */
+function blendedRate(model: string): number {
+  const price = priceOf(model);
+  return price.inputPerMTok + price.outputPerMTok;
+}
+
+/**
+ * What names a conversation, per vendor: the cheapest model each offers.
+ *
+ * **Not a setting, and not the conversation's own model.** A name is a few
+ * words worked out once per conversation, beside its first round
+ * (`chat/chat-title.ts`), and every model on either list writes "Porch light at
+ * sunset" equally well — so what is chosen is the one that costs least and
+ * answers fastest, at the lowest effort either vendor takes. A home that runs
+ * its chats on Fable 5.2 pays Haiku's price for the name, about four
+ * thousandths of a cent. The vendor is still the conversation's, first: the
+ * person's words go where they were already going, and only a failure there
+ * takes them to the other vendor — on a key this home holds for exactly that.
+ *
+ * Named from the table rather than written out, so an id `MODELS` has never
+ * heard of fails at module load, and `test/chat-title.test.ts` pins the
+ * invariant that matters: nothing either agent is offered is cheaper.
+ */
+export const TITLE_MODELS: Readonly<Record<AiProvider, string>> = {
+  anthropic: known('anthropic', 'claude-haiku-5-5'),
+  openai: known('openai', 'gpt-6-luna'),
+};
+
+/**
+ * What reads where a room picture's devices stand, per vendor: the middle rung
+ * of each (`room-pictures/locate.ts`) — OpenAI's asked first, since OpenAI drew
+ * the picture, and Anthropic's only when that fails
+ * (`room-pictures/store.ts`'s `homeLocator`).
+ *
+ * **Never recognition's model.** It read on whatever recognition ran on, which
+ * made a home that chose Fable 5.2 or GPT-6 Astra for its mappings pay their
+ * price for a few points on a picture — and that list is strong-only for a
+ * reason that is not this job's: a mapping is cached against a device model
+ * for good, while a point in the wrong place is one drag from right and is
+ * never read over once a person has placed it. A reading is one picture and
+ * one short answer. **And it is part of the wait**: a drawing goes back to the
+ * app only once its devices are read (`room-pictures/store.ts`), so a quicker
+ * model shows the room sooner.
+ *
+ * **Not the cheapest rung.** A device the picture does not show is put where it
+ * would plausibly be, which takes reading the room, and the saving over this
+ * rung is about a cent a reading.
+ *
+ * Named from the table rather than written out, as `TITLE_MODELS` is, and
+ * `test/room-pictures.test.ts` pins what matters: each is still offered, takes
+ * a picture, and costs less than anything recognition offers.
+ */
+export const LOCATOR_MODELS: Readonly<Record<AiProvider, string>> = {
+  anthropic: known('anthropic', 'claude-sonnet-5-5'),
+  openai: known('openai', 'gpt-6.1-terra'),
+};
+
+function known(provider: AiProvider, id: string): string {
+  if (knownModel(provider, id) === undefined) throw new Error(`models: ${provider} has no ${id}`);
+  return id;
+}
 
 /**
  * The first model along `stored`'s succession chain that `choices` offers, or
@@ -456,6 +707,100 @@ export function effectiveAgentModel(
     }
   }
   return null;
+}
+
+/**
+ * The model one chat asked for by name, when it can run on it right now —
+ * otherwise `null`.
+ *
+ * **Narrower than `effectiveAgentModel`, on purpose.** That one answers "what
+ * will this home's setting run on", and its answer to an id it cannot use is a
+ * fallback, because a stored column nobody chose must never become a refusal.
+ * A chat's own pick is a different thing: somebody chose it a moment ago from
+ * the list this hub offered, so quietly running something else would be the
+ * picker lying about what answered. So an id no agent is offered, or one whose
+ * vendor has no usable key, is `null` here — the route says so
+ * (`409 model_unavailable`), and a revived conversation falls back to the
+ * home's setting rather than to a vendor guessed by the resolver.
+ *
+ * What it does answer still goes **through** `effectiveAgentModel`, so the
+ * vendor and key rules stay written once.
+ */
+export function requestedAgentModel(
+  modelId: string | null | undefined,
+  usable: UsableProviders,
+): { provider: AiProvider; modelId: string } | null {
+  const provider = agentProviderOf(modelId);
+  if (provider === null || !usable[provider]) return null;
+  return effectiveAgentModel(modelId, usable);
+}
+
+/**
+ * How hard the model works on one round.
+ *
+ * **It belongs to the turn, not to the conversation.** A transport is built
+ * once and holds the message history, so an effort chosen there is chosen for
+ * the life of the chat — and the same conversation is typed in the morning and
+ * talked to in the evening (`spokenSessions`' own reasoning). A spoken round is
+ * answered out loud while somebody stands there waiting, and a typed one is
+ * read when it lands.
+ *
+ * **Three words, because it is one value sent to two vendors.** It goes
+ * straight onto the wire — Anthropic's `output_config.effort` and OpenAI's
+ * `reasoning.effort` — and the vocabularies are only the same where they
+ * overlap, so a wider type here is a value one transport would send and the
+ * other would be refused for, discovered as a 400 in somebody's kitchen rather
+ * than by the checker. It carried `xhigh` and `max` for a while with nothing
+ * setting them, which is the same trap one step from firing. Widening one is
+ * deliberate work: check both vendors take the word, or give the transport
+ * that cannot a mapping of its own.
+ *
+ * **And the words are the hub's.** A typed message may ask for its own round's
+ * effort, and the home keeps one of its own for each agent — both from
+ * `CHAT_EFFORTS`, as the routes validate it and `GET /hub` and
+ * `GET /settings/ai` advertise it — so an app draws a picker for whatever this
+ * hub says and never ships a vocabulary of its own.
+ *
+ * It lives here rather than beside the chat runtime that spends it because the
+ * settings service stores the home's word, and this is the one module it may
+ * import from the AI side.
+ */
+export type ChatEffort = 'low' | 'medium' | 'high';
+
+/**
+ * The hub's whole effort vocabulary, in the order an app draws it.
+ *
+ * Exactly `ChatEffort`, and the `satisfies` is what keeps it so: this is the
+ * list a request is validated against and the list the hub advertises, so a
+ * word added to one and not the other would be a picker offering something the
+ * route refuses.
+ */
+export const CHAT_EFFORTS = ['low', 'medium', 'high'] as const satisfies readonly ChatEffort[];
+
+/**
+ * What a conversation works at when nothing chose otherwise — the default of
+ * the home's own word for each agent, and so what every typed round ran at
+ * before the home had one.
+ *
+ * `medium` against the mapper's `high`: a descriptor is cached against a
+ * device model for ever, while a chat is many small rounds read the moment
+ * they arrive. Named once here because the agents, the settings and the run
+ * log all state it — several places for one number is the drift this avoids.
+ */
+export const AGENT_EFFORT: ChatEffort = 'medium';
+
+/**
+ * A stored word this build can send, or null.
+ *
+ * **Read, never trusted.** The column is written by the route, which validates
+ * against `CHAT_EFFORTS` — but a newer build may have widened the list and
+ * then been rolled back, and a word this build would put on the wire for a
+ * vendor to refuse is worse than the default it falls back to.
+ */
+export function knownEffort(value: unknown): ChatEffort | null {
+  return typeof value === 'string' && (CHAT_EFFORTS as readonly string[]).includes(value)
+    ? (value as ChatEffort)
+    : null;
 }
 
 /** Which provider has ever billed for this id, offered or retired. */
@@ -600,11 +945,12 @@ export function estimateCostUsd(model: string, usage: TokenUsage): number {
  * Every cap here — a recognition run's, an assistant conversation's, an
  * automations conversation's — was sized against Opus 5 at $5/$25, as "a run
  * that has spent this much has gone wrong". A model priced above that buys less
- * work for the same money, so on GPT-6 Astra or Fable 5.1 ($10/$50) a fixed cap
- * would stop a perfectly healthy run at half the work it allows everywhere
- * else, and a paid run would end unfinished — somebody would have chosen the
- * most thorough model and got the least done. So the cap scales with the price, by whichever of the
- * two rates is further above the reference, and never below 1: a cheaper model
+ * work for the same money, so on GPT-6 Astra ($10/$50) or Fable 5.2 ($8/$40) a
+ * fixed cap would stop a perfectly healthy run at half or five eighths of the
+ * work it allows everywhere else, and a paid run would end unfinished —
+ * somebody would have chosen the most thorough model and got the least done.
+ * So the cap scales with the price, by whichever of the two rates is further
+ * above the reference, and never below 1: a cheaper model
  * gets the same dollar ceiling rather than a tighter one, because a cap is a
  * safety rail on spend and not a quota to be used up.
  */

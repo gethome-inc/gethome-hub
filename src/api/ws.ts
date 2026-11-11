@@ -8,7 +8,14 @@ import type {
   ZigbeeLifecycleEvent,
 } from '../core/bus.js';
 import type { AiRunEvent } from '../core/ai-runs.js';
-import type { AutomationChatEvent, AutomationRunEvent, CommissioningUpdate } from '../core/bus.js';
+import type {
+  AutomationChatEvent,
+  AutomationRunEvent,
+  AutomationStatusEvent,
+  ChatRoundSoFar,
+  ChatTitleEvent,
+  CommissioningUpdate,
+} from '../core/bus.js';
 import { deviceWire, deviceWireView } from './dto.js';
 import type { HubStatusReader } from '../core/hub-status.js';
 import { apiKeyState, type ApiKeyRecord } from '../core/api-keys.js';
@@ -231,6 +238,8 @@ const MAX_CLIENT_MESSAGE_BYTES = 4096;
  *   {"type":"permitJoin","active","remainingSeconds"}
  *   {"type":"commissioning","jobId","status","detail"?}
  *   {"type":"hubStatus","zigbee":{…},"radio":{…}}   a radio came up or went down
+ *   {"type":"portraits","deviceId"} / {"type":"roomPictures","roomId"}
+ *   {"type":"photos"}   what the hub keeps changed — re-read GET /photos
  *
  * and, only for a client that asked for them:
  *
@@ -240,6 +249,11 @@ const MAX_CLIENT_MESSAGE_BYTES = 4096;
  *   {"type":"mqtt","dropped":N}              rate limit hit; N frames skipped
  *   {"type":"zigbeeEvent","event":{at,type,ieee,name?}}
  *   {"type":"aiRun","event":{phase,id,at,kind,exposesHash,step?,ok?,costUsd?}}
+ *   {"type":"automationRun","run":{…}}
+ *   {"type":"automationChat"|"assistantChat","chat":{sessionId,phase,at,text,…}}
+ *   {"type":"chatTitle","chatTitle":{surface,sessionId,title,at}}
+ *   {"type":"chatRound","chatRound":{surface,sessionId,steps,reply?,…}}   on subscribing
+ *       to "automations": each round already running in your conversations, so far
  *
  * Client → server (the only inbound frames read):
  *
@@ -366,6 +380,20 @@ export function attachWebSocket(
    * heavy opt-in streams, not after.
    */
   const onPortraits = live((deviceId: string) => send({ type: 'portraits', deviceId }));
+  /** A room's pictures moved — the `portraits` frame's reason, for a room. */
+  const onRoomPictures = live((roomId: string) => send({ type: 'roomPictures', roomId }));
+  /**
+   * The photos the hub keeps changed (`photos/store.ts`). The home's changes
+   * reach every member's socket; somebody's own — their chat photos, their
+   * switch — reach only theirs. Never a key's socket: no key may read a photo,
+   * so there is nothing for it to re-read. Bare, because `GET /photos` is one
+   * short read rendered for its caller.
+   */
+  const onPhotos = live((target: string | null) => {
+    if (key !== null || memberId === null) return;
+    if (target !== null && target !== memberId) return;
+    send({ type: 'photos' });
+  });
   /**
    * One line of the home's history.
    *
@@ -478,6 +506,8 @@ export function attachWebSocket(
   deps.events.on('portraitsChanged', onPortraits);
   // A device's panels are part of its wire, so the device goes out again.
   deps.events.on('panelsChanged', onUpserted);
+  deps.events.on('roomPicturesChanged', onRoomPictures);
+  deps.events.on('photosChanged', onPhotos);
   deps.events.on('activity', onActivity);
   deps.events.on('accessChanged', onAccessChanged);
   deps.events.on('permitJoin', onPermitJoin);
@@ -540,10 +570,34 @@ export function attachWebSocket(
    * and names the thing.
    */
   const onAutomationRun = (event: AutomationRunEvent) => send({ type: 'automationRun', run: event });
-  /** The model's text as it arrives, and one line per thing a turn did. On the
-   *  same opt-in stream: it is the highest-rate frame the hub can emit and it
-   *  matters only to the one client with the chat open. */
-  const onAutomationChat = (event: AutomationChatEvent) => send({ type: 'automationChat', chat: event });
+  /**
+   * Whether a rule is working, as it moves — already throttled per rule by
+   * the engine. Under a key of its own for the reason `run` has one above: a
+   * typed client decodes one envelope for every frame.
+   */
+  const onAutomationStatus = (event: AutomationStatusEvent) =>
+    send({ type: 'automationStatus', automationStatus: event });
+  /**
+   * The model's text as it arrives, and one line per thing a turn did. On the
+   * same opt-in stream: it is the highest-rate frame the hub can emit and it
+   * matters only to the one client with the chat open.
+   *
+   * **Narrowed per socket the way the routes are, asked at send time.** A
+   * conversation is what somebody in the home said, and reading one by REST
+   * takes `automation.manage` and `hub.ai` — while the stream was open to any
+   * member, so a guest who subscribed to `automations` heard every member's
+   * replies, reasoning and steps live, from a role the transcript route turns
+   * away with a 403. Asked when each frame goes out rather than when the
+   * socket subscribed, the `activity.read` rule: a role edit lands on the next
+   * frame, with no reconnect. Nothing a shipped app draws is lost — a member
+   * without these cannot open the conversation the frames are about.
+   */
+  const onAutomationChat = (event: AutomationChatEvent) => {
+    if (memberId === null) return;
+    if (!deps.access.canAs(memberId, 'hub.ai', key)) return;
+    if (!deps.access.canAs(memberId, 'automation.manage', key)) return;
+    send({ type: 'automationChat', chat: event });
+  };
   /**
    * The assistant's own frames, on the **same** opt-in stream.
    *
@@ -551,8 +605,63 @@ export function attachWebSocket(
    * *other* agent's `automationChat` frames: an app watching an assistant
    * conversation has to receive both to draw the card, and asking it to
    * subscribe twice for one screen is a contract that will be got wrong once.
+   * `hub.ai` alone, as `GET /assistant/chat/:id` asks.
    */
-  const onAssistantChat = (event: AutomationChatEvent) => send({ type: 'assistantChat', chat: event });
+  const onAssistantChat = (event: AutomationChatEvent) => {
+    if (memberId === null || !deps.access.canAs(memberId, 'hub.ai', key)) return;
+    send({ type: 'assistantChat', chat: event });
+  };
+  /**
+   * A conversation's name, as it is settled — either agent's, narrowed the way
+   * that agent's own frames are, since a name is made of what somebody said.
+   *
+   * **A frame `type` of its own** (`chatTitle`), never a phase on the two
+   * above: every shipped iOS build reads a phase it has never met as `turn`,
+   * so a name arriving mid-round would end that round on every phone not yet
+   * updated, while an unknown `type` is dropped by every client. Its own key
+   * (`chatTitle`) for the reason `run` has one: one struct decodes every frame
+   * on the iOS side, and a second shape under a key it already knows would
+   * take the whole frame with it.
+   */
+  const onChatTitle = (event: ChatTitleEvent) => {
+    if (memberId === null || !deps.access.canAs(memberId, 'hub.ai', key)) return;
+    if (event.surface === 'automations' && !deps.access.canAs(memberId, 'automation.manage', key)) return;
+    send({ type: 'chatTitle', chatTitle: event });
+  };
+
+  /**
+   * Where each round running in this member's conversations has got to, sent
+   * the moment the conversations' frames are attached (`chatRound`).
+   *
+   * **A round outlives the socket that was watching it**, and a phone that
+   * comes back to one has missed whatever was said while it was away: a
+   * `delta` is the next few words, so the reply it joined had a hole in it
+   * until the round ended. Sent in the same tick the listeners go on, ahead of
+   * every frame of the round still to come, so a client draws the round as it
+   * stands and the frames carry on from exactly there — nothing missed and
+   * nothing twice.
+   *
+   * Narrowed as the frames are — `hub.ai`, and `automation.manage` for the
+   * automations agent's — and to the member's own conversations besides
+   * (`roundsSoFar`). Only ever called for a member's own socket: a key's
+   * stream carries no conversation, so `subscribe` never reaches here for one.
+   * **It must never cost the subscription**, so a runtime that cannot answer
+   * sends nothing.
+   */
+  const sendRoundsSoFar = (): void => {
+    if (memberId === null || !deps.access.canAs(memberId, 'hub.ai', null)) return;
+    let rounds: ChatRoundSoFar[];
+    try {
+      rounds = [...deps.assistantChat.roundsSoFar(memberId), ...deps.automationChat.roundsSoFar(memberId)];
+    } catch {
+      return;
+    }
+    const readsAutomations = deps.access.canAs(memberId, 'automation.manage', null);
+    for (const round of rounds) {
+      if (round.surface === 'automations' && !readsAutomations) continue;
+      send({ type: 'chatRound', chatRound: round });
+    }
+  };
 
   /**
    * What this socket may subscribe to.
@@ -588,6 +697,7 @@ export function attachWebSocket(
       if (stream === 'ai') deps.events.on('aiRun', onAiRun);
       if (stream === 'automations') {
         deps.events.on('automationRun', onAutomationRun);
+        deps.events.on('automationStatus', onAutomationStatus);
         // A key's stream is the rules firing and nothing else: the two
         // conversations are what people in the home said, which no key reads
         // by REST either — so the listeners are never attached, rather than
@@ -595,6 +705,8 @@ export function attachWebSocket(
         if (key === null) {
           deps.events.on('automationChat', onAutomationChat);
           deps.events.on('assistantChat', onAssistantChat);
+          deps.events.on('chatTitle', onChatTitle);
+          sendRoundsSoFar();
         }
       }
     }
@@ -616,8 +728,10 @@ export function attachWebSocket(
       if (stream === 'ai') deps.events.off('aiRun', onAiRun);
       if (stream === 'automations') {
         deps.events.off('automationRun', onAutomationRun);
+        deps.events.off('automationStatus', onAutomationStatus);
         deps.events.off('automationChat', onAutomationChat);
         deps.events.off('assistantChat', onAssistantChat);
+        deps.events.off('chatTitle', onChatTitle);
       }
     }
     send({ type: 'subscribed', streams: [...subscribed] });
@@ -697,6 +811,8 @@ export function attachWebSocket(
     deps.events.off('commandFailed', onCommandFailed);
     deps.events.off('structureChanged', onStructure);
     deps.events.off('portraitsChanged', onPortraits);
+    deps.events.off('roomPicturesChanged', onRoomPictures);
+    deps.events.off('photosChanged', onPhotos);
     deps.events.off('automationChanged', onAutomationChanged);
     deps.events.off('activity', onActivity);
     deps.events.off('accessChanged', onAccessChanged);
@@ -714,8 +830,10 @@ export function attachWebSocket(
     if (subscribed.has('ai')) deps.events.off('aiRun', onAiRun);
     if (subscribed.has('automations')) {
       deps.events.off('automationRun', onAutomationRun);
+      deps.events.off('automationStatus', onAutomationStatus);
       deps.events.off('automationChat', onAutomationChat);
       deps.events.off('assistantChat', onAssistantChat);
+      deps.events.off('chatTitle', onChatTitle);
     }
     subscribed.clear();
   };

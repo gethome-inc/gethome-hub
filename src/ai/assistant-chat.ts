@@ -10,6 +10,7 @@ import type { HubCommand } from '../schema/index.js';
 import type { AssistantTurn } from './assistant-agent.js';
 import type { AssistantToolContext, DelegateOutcome } from './assistant-tools.js';
 import { delegateAgents, type DelegateAgent } from './agents/registry.js';
+import { requestedAgentModel } from './models.js';
 import { LIVE_MODEL, LIVE_USD_PER_MINUTE, SIDEBAND_MAX_SECONDS } from './voice/live-wire.js';
 import type { AutomationChat } from './automation-chat.js';
 import {
@@ -138,6 +139,14 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
        * transcript; this is the transcript to say so about.
        */
       chatId: string;
+      /**
+       * The round's working, when it landed on the card itself — a handover
+       * with no prose before it makes the card the round's first row, and the
+       * first row is where `steps` and `tookMs` go. Kept so an `amend`, which
+       * replaces a row's whole `data`, carries them on rather than wiping
+       * them the first time the other agent moves.
+       */
+      working?: { steps?: unknown; tookMs?: unknown } | undefined;
     }
   >();
 
@@ -151,6 +160,11 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
       if (event.phase !== 'turn') return;
       void this.followDelegated(event.sessionId).catch(() => undefined);
     });
+  }
+
+  /** A suite's conversations name nothing unless it says otherwise. */
+  protected override standsIn(): boolean {
+    return this.options.createConversation !== undefined;
   }
 
   // ── The handoff ────────────────────────────────────────────────────────────
@@ -309,7 +323,8 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
       return;
     }
     this.delegated.set(sessionId, { ...tracked, payload });
-    await this.amend(tracked.messageId, payload);
+    // The whole of `data` is replaced, so the round's working rides along.
+    await this.amend(tracked.messageId, { ...payload, ...tracked.working });
     /**
      * The card is on **this** conversation's transcript, so this is the
      * conversation to say it moved about — and `amend` rather than `turn`,
@@ -361,6 +376,11 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
         ...standing,
       };
       const row = await this.write(session, 'handoff', handoff.brief, payload);
+      const written = (row.data ?? {}) as { steps?: unknown; tookMs?: unknown };
+      const working = {
+        ...(written.steps !== undefined ? { steps: written.steps } : {}),
+        ...(written.tookMs !== undefined ? { tookMs: written.tookMs } : {}),
+      };
       // **The newest row for that session wins**, which is what makes a
       // follow-up work: a second handover to the same conversation writes a
       // second card, and the status belongs to the one somebody is looking at
@@ -369,6 +389,7 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
         messageId: row.id,
         payload,
         chatId: session.id,
+        ...(Object.keys(working).length > 0 ? { working } : {}),
       });
       messages.push(row);
       session.produced += 1;
@@ -399,6 +420,7 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
     memberId: string;
     topic: string | undefined;
     sessionId: string;
+    model?: string | undefined;
   }): Promise<AgentConversation<AssistantTurn>> {
     const ai = await this.options.settings.getAiSettings();
     if (!ai.hasKey) throw new AgentNotConfiguredError('ai_not_configured');
@@ -413,7 +435,18 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
      * it. The code stays because both apps branch on it; the sentence says the
      * true thing now.
      */
-    const provider = ai.assistant.provider;
+    /**
+     * **A conversation that chose its own model runs on it** — the chat's own
+     * picker, which moves this conversation and nobody else's — while that
+     * model is still offered and its vendor's key usable. Resolved through
+     * `requestedAgentModel` so the vendor rules stay in one place; anything it
+     * cannot run falls back to the home's setting below.
+     */
+    const chosen =
+      input.model !== undefined
+        ? requestedAgentModel(input.model, await this.options.settings.agentProviders())
+        : null;
+    const provider = chosen?.provider ?? ai.assistant.provider;
     if (provider === null) {
       throw new AgentNotConfiguredError(
         'automation_needs_anthropic',
@@ -426,7 +459,7 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
 
     // What will *run*, never the stored column — the one gap that cost the
     // mapper a release, and `getAiSettings` has already closed it here.
-    const modelId = ai.assistant.model;
+    const modelId = chosen?.modelId ?? ai.assistant.model;
 
     // Imported here rather than at the top, the `lazy.ts` seam: a hub nobody
     // has talked to never loads the SDK.
@@ -633,8 +666,10 @@ export class AssistantChat extends ChatRuntime<AssistantTurn> {
    *
    * It is per **turn** rather than per conversation because one conversation
    * is both: typed in the morning, talked to in the evening. Deliberately not
-   * a setting — see `ChatTransportOptions.effort` on why two knobs for one
-   * decision is one too many.
+   * a home setting, which would move every member's chats at once (`src/ai/
+   * CLAUDE.md`'s effort rule). A typed message may ask for its own round's
+   * effort, and a spoken round's `low` outranks it: `say` reads a request's
+   * effort only when no origin was given.
    *
    * `via` rides with it for the same reason and lands in the same place: the
    * `ai_runs` row, where a spoken round would otherwise be indistinguishable

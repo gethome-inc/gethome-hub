@@ -6,10 +6,10 @@ import Fastify, {
 } from 'fastify';
 import websocket from '@fastify/websocket';
 import { randomUUID } from 'node:crypto';
-import { eq, max } from 'drizzle-orm';
+import { eq, max, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Db } from '../db/client.js';
-import { invites, members, rooms, zones } from '../db/schema.js';
+import { devicePortraits, invites, members, rooms, zones } from '../db/schema.js';
 import type { DeviceRegistry } from '../core/registry.js';
 import type { PairingService } from '../core/pairing.js';
 import type { ActivityService } from '../core/activity.js';
@@ -33,21 +33,43 @@ import type { ZigbeeAdapter } from '../adapters/zigbee/adapter.js';
 // it here does not pull the AI stack into the API layer.
 import {
   AGENT_MODELS,
+  agentProviderOf,
   effectiveModel,
   isSupportedModel,
+  modelLabel,
   offeredModelIds,
   PROVIDER_MODELS,
 } from '../ai/models.js';
 // Local operations on stored JSON — zod only, no Anthropic SDK in this graph.
 // `MappingLibrary.repair` loads the agent on demand.
 import type { MappingLibrary } from '../ai/library.js';
-import type { AiRunLog } from '../core/ai-runs.js';
+import { RoomPictureDrawError } from '../room-pictures/draw.js';
+import {
+  homeLocator,
+  MAX_PHOTOS,
+  PictureBusyError,
+  PictureSpaceError,
+  RoomPictureService,
+} from '../room-pictures/store.js';
+import { RUNS_PAGE_LIMIT, type AiRunLog } from '../core/ai-runs.js';
 import type { AutomationEngine, AutomationPresser } from '../automations/engine.js';
 import {
   AutomationNotConfiguredError,
   type AutomationChat,
 } from '../ai/automation-chat.js';
 import type { AssistantChat } from '../ai/assistant-chat.js';
+import {
+  base64Bytes,
+  CHAT_CAPABILITY,
+  CHAT_EFFORTS,
+  CHAT_IMAGE_MAX_BASE64,
+  CHAT_IMAGE_MAX_BYTES,
+  CHAT_IMAGE_MAX_COUNT,
+  CHAT_IMAGE_MEDIA_TYPES,
+  ChatPhotosBusyError,
+  type ChatEffort,
+  type ChatTurnRequest,
+} from '../ai/chat/chat-runtime.js';
 import type { AutomationStore } from '../automations/store.js';
 import { automationDocumentSchema } from '../automations/schema.js';
 import { sanityCheckAutomation } from '../automations/sanity.js';
@@ -55,10 +77,11 @@ import { automationCatalog } from '../automations/catalog.js';
 import { AUTOMATION_TEMPLATES, findTemplate } from '../automations/templates.js';
 import { automationOutline } from '../automations/outline.js';
 import { automationShape, describeAutomation } from '../automations/summarize.js';
-import { automationRoom } from '../automations/scope.js';
+import { automationDevices, automationRoom } from '../automations/scope.js';
 import type { AutomationHomeView } from '../automations/targets.js';
 import type { MemoryPressure } from '../core/radio-pressure.js';
 import { recordRadioChoice, RADIO_MODES, writeRadioMode, type RadioBudget, type RadioMode } from '../core/radio.js';
+import { createAutoUpdater, type AutoUpdater } from '../core/auto-update.js';
 import {
   canApplyUpdate,
   checkForUpdate,
@@ -66,6 +89,7 @@ import {
   readUpdateLog,
   readUpdateRun,
   requestUpdate,
+  sameCommit,
 } from '../core/update.js';
 import {
   awaitWifiChange,
@@ -88,6 +112,7 @@ import { hostFromRequest, mqttAccess, type MqttBrokerConfig } from '../core/mqtt
 import { isHistoryKind, type HistoryKind, type HistoryService } from '../core/history.js';
 // Files and rows, and `fetch` when it draws. No SDK, so no dynamic import.
 import { PortraitBusyError, PortraitSpaceError, type PortraitService } from '../portraits/store.js';
+import { HOME_PHOTO_KINDS, PhotoStore, type PhotoRecord } from '../photos/store.js';
 import { PortraitDrawError } from '../portraits/openai-images.js';
 import { MAX_WINDOW_SECONDS, type PermitJoinService } from '../core/permit-join.js';
 import { createHubStatusReader } from '../core/hub-status.js';
@@ -155,6 +180,23 @@ export interface ApiDeps {
   panels?: PanelService;
   /** The camera proxy — `cameras/proxy.ts`. Optional for the same reason. */
   cameras?: CameraProxy;
+  /**
+   * The photos a home, or one person, chose to keep — `photos/store.ts`.
+   *
+   * Optional, the `autoUpdate` way: a required field is one every
+   * `buildServer` call in `test/` has to grow. Left out, the server makes its
+   * own from the deps it already has — a hub where nothing has been switched
+   * on, so every suite still meets the real routes. `src/index.ts` passes the
+   * one the portraits, the room pictures and both chats were built with, so
+   * all of them keep into one store.
+   */
+  photos?: PhotoStore;
+  /**
+   * The pictures of the home's rooms — `room-pictures/store.ts`. Optional for
+   * the same reason: left out, the server makes its own, keeping into the
+   * store above.
+   */
+  roomPictures?: RoomPictureService;
   settings: SettingsService;
   /**
    * The hub's name, and the one place it lives. `GET /hub`, `GET /home` and the
@@ -166,6 +208,17 @@ export interface ApiDeps {
   version: string;
   /** CI's build stamp, when this install came from a published bundle. */
   build?: string;
+  /**
+   * The hub updating itself, when its home has said it may — `core/auto-update.ts`.
+   *
+   * Optional, for the reason `allowedHosts` is: a required field is one every
+   * `buildServer` call in `test/` has to grow. Left out, the server makes its
+   * own from the deps it already has, loaded and switched off and never
+   * started — which is a hub where nobody has turned automatic updates on, so
+   * every suite still meets the real routes. `src/index.ts` always passes the
+   * one it started.
+   */
+  autoUpdate?: AutoUpdater;
   /** Present when the corresponding adapter is enabled and running. */
   matter?: MatterAdapter;
   zigbee?: ZigbeeAdapter;
@@ -258,17 +311,6 @@ export interface ApiDeps {
 }
 
 /**
- * Whether two commits are the same one.
- *
- * A build stamp carries seven characters and GitHub can answer with forty, so
- * these are compared by prefix in whichever direction is shorter. Same test
- * Studio makes.
- */
-function sameCommit(a: string, b: string): boolean {
-  return a.startsWith(b) || b.startsWith(a);
-}
-
-/**
  * A Matter pairing, as the app watches it.
  *
  * **Everything new here is additive, and that is the whole design.** `status`
@@ -312,6 +354,65 @@ interface CommissionJob {
 const PHOTO_BODY_LIMIT = 12 * 1024 * 1024;
 /** A `web` panel's 512 KB, base64'd, with room for the JSON around it. */
 const PANEL_BODY_LIMIT = 1024 * 1024;
+
+/**
+ * One photo at the ceiling as a JSON encoder writes it: its base64, plus room
+ * for `/` written as `\/`.
+ *
+ * **Apple's encoders escape every slash by default** — `JSONSerialization`
+ * and `JSONEncoder` without `.withoutEscapingSlashes` — and `/` is one base64
+ * character in sixty-four, so four photos at the ceiling came to the door
+ * about 128 KB heavier than their parsed size: past the slack this limit had,
+ * and refused with a bare 413 a request the schema would have taken. The
+ * allowance is twice the expected share, since a photo's bytes are not
+ * perfectly random.
+ */
+const CHAT_IMAGE_MAX_JSON = CHAT_IMAGE_MAX_BASE64 + Math.ceil(CHAT_IMAGE_MAX_BASE64 / 32);
+
+/**
+ * A chat message carrying as many photos as it may, each as large as it may
+ * be, with room for the words and the JSON around them.
+ *
+ * **Per route, on the four that take a message, and never on the server** —
+ * `PHOTO_BODY_LIMIT`'s rule: nothing else on this API grows a mouth this size
+ * (the two photo routes take 12 MB, every other route Fastify's one-megabyte
+ * default). It is the ceiling, not the expectation: the apps downscale a photo
+ * to a few hundred kilobytes before sending it, and a message with one is well
+ * under the default. Derived rather than written out, so raising the count or
+ * the size cannot leave a request the schema accepts — as an ordinary JSON
+ * encoder writes it, slashes escaped included — refused at the door with a
+ * 413. (No bound covers every encoding JSON allows: `\u002f` is six bytes for
+ * one character.)
+ */
+const CHAT_BODY_LIMIT = CHAT_IMAGE_MAX_COUNT * CHAT_IMAGE_MAX_JSON + 64 * 1024;
+
+/**
+ * Whether a string is well-formed base64, checked by walking it.
+ *
+ * A loop rather than a regular expression, because the string can be two
+ * million characters — `CHAT_IMAGE_MAX_BASE64`, and no longer, since the
+ * schema's `.max` before this check aborts on a string past it (zod runs a
+ * refine even after a failed `.max` otherwise, and the body limit would have
+ * let one of eight million through) — and a pattern that has to count its way
+ * through groups of four is a backtracking stack that size. Well-formed means
+ * what both vendors decode: a length that is a multiple of four, the standard
+ * alphabet, and at most two `=` at the very end.
+ */
+function isBase64(data: string): boolean {
+  if (data.length === 0 || data.length % 4 !== 0) return false;
+  const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0;
+  for (let index = 0; index < data.length - padding; index += 1) {
+    const code = data.charCodeAt(index);
+    const ok =
+      (code >= 65 && code <= 90) || // A-Z
+      (code >= 97 && code <= 122) || // a-z
+      (code >= 48 && code <= 57) || // 0-9
+      code === 43 || // +
+      code === 47; // /
+    if (!ok) return false;
+  }
+  return true;
+}
 
 const COMMISSION_JOB_TTL_MS = 10 * 60 * 1000;
 /**
@@ -431,6 +532,26 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   // and leaving every other module at the configured level. An operator who
   // asked for `debug` or `trace` clearly wants the requests, so they keep them.
   const verbose = deps.log.level === 'trace' || deps.log.level === 'debug';
+  // The photos a home or a person chose to keep (`photos/store.ts`). See
+  // `ApiDeps.photos`.
+  const photos =
+    deps.photos ??
+    new PhotoStore(deps.db, deps.settings, deps.dataDir, deps.events, deps.log.child({ module: 'photos' }));
+  // Pictures of the home's rooms (`room-pictures/store.ts`): files beside the
+  // database, drawn with the home's OpenAI key.
+  const roomPictures =
+    deps.roomPictures ??
+    new RoomPictureService(
+      deps.dataDir,
+      deps.events,
+      deps.log.child({ module: 'room-pictures' }),
+      deps.aiRuns,
+      {},
+      undefined,
+      undefined,
+      undefined,
+      photos,
+    );
   const app = Fastify({
     loggerInstance: deps.log.child(
       { module: 'api' },
@@ -449,6 +570,25 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     ) as unknown as FastifyBaseLogger,
   });
   await app.register(websocket);
+
+  // See `ApiDeps.autoUpdate`. Loaded, never started: it answers and it
+  // switches, and only the process that owns the clock lets it look at one.
+  const autoUpdate =
+    deps.autoUpdate ??
+    (await (async () => {
+      const made = createAutoUpdater({
+        dataDir: deps.dataDir,
+        build: deps.build,
+        settings: deps.settings,
+        timezone: () => deps.settings.timezone,
+        activity: deps.activity,
+        events: deps.events,
+        rules: deps.automations,
+        log: deps.log.child({ module: 'update' }),
+      });
+      await made.load();
+      return made;
+    })());
 
   app.decorateRequest('member', null);
   app.decorateRequest('apiKey', null);
@@ -805,6 +945,17 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // adds never reaches one that would refuse it. An app that doesn't find
     // the block offers no panel to install.
     panels: panels.describe(),
+    // Additive, and presence is the capability, the portraits' way: a hub
+    // carrying this block draws pictures of rooms (`/room-pictures`).
+    roomPictures: roomPictures.describe(),
+    // Additive, and presence is the capability: a hub carrying this block can
+    // keep the photos a room or a portrait was drawn from and the photos a
+    // person adds to a chat (`/photos`), with the bounds an app says out loud.
+    // An app that does not find it never sends `keepPhotos` — which an older
+    // hub's zod would strip, keeping nothing, harmlessly — and says what it
+    // always said: photos stay on the device that took them. Static, so this
+    // route still reads nothing from the disk.
+    photos: photos.describe(),
     // Additive, and presence is the capability once more: a hub carrying this
     // block mints **sign-in codes** (`POST /invites {memberId}`), so somebody
     // already in the home comes back on another device as themselves rather
@@ -818,6 +969,16 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // add exactly the duplicate person this exists to prevent, which is the
     // one refusal that must not be discovered afterwards.
     pairing: { signInCodes: true },
+    // Additive, and presence is the capability: a hub carrying this block
+    // says **whether each rule is working** (`status` on every automation, and
+    // the `automationStatus` frame on the `automations` stream) and **which
+    // devices each rule uses** (`devices`). Both fields are always present on
+    // a rule from such a hub, so this block is for the home that has no rules
+    // yet — where there is nothing to look for a field on. `problems` says a
+    // run's trace marks the steps that were a problem (`problem` on a step,
+    // `problems` on the `automationRun` frame) — which is the only way to tell
+    // an unmarked step that was fine from one this hub never marks.
+    automations: { status: true, devices: true, problems: true },
     // Additive, and presence is the capability: a hub carrying this block has
     // `GET/POST/DELETE /settings/wifi…`, so an app may offer to add the Wi-Fi
     // network a hub is about to be carried to. `available: false` says this
@@ -833,6 +994,21 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // choices this hub will accept rather than a list from its own build.
     // Static, and therefore cannot throw — this route is the health check.
     apiKeys: { grantable: KEY_GRANTABLE },
+    // Additive, and presence is the capability: a hub carrying this block
+    // reads the AI run log a page at a time (`GET /ai/runs?before=<run id>`),
+    // so an app can reach every run it keeps rather than the newest page. An
+    // older hub's zod strips `before` and answers the newest page again, which
+    // an app would draw as the same runs twice — so one that does not find
+    // this asks once and stops. `maxLimit` is the most one read answers. A
+    // constant, so it cannot throw.
+    aiRuns: { before: true, maxLimit: RUNS_PAGE_LIMIT },
+    // Additive, and presence is the capability: a hub carrying this block
+    // takes `model`, `effort` and `attachments` on a chat message, with the
+    // words `effort` accepts and how many photos of what size and type. An
+    // older hub's zod strips all three and answers 201 — a photo the model
+    // never saw, a model the chat never moved to — so an app that does not
+    // find this offers none of them. A constant, so it cannot throw either.
+    chat: CHAT_CAPABILITY,
     // Additive: an app that doesn't know about this field ignores it, and one
     // that does can say "plug a coordinator in" instead of showing an empty
     // Zigbee section with no explanation.
@@ -1190,6 +1366,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (!room) return reply.code(404).send({ error: 'not_found' });
     await deps.db.delete(rooms).where(eq(rooms.id, id));
     deps.registry.clearRoom(id);
+    // A picture of a room that is gone is a picture of nothing.
+    await roomPictures.forgetRoom(id);
     const who = actor(request);
     await deps.activity.record({
       kind: 'room.removed',
@@ -1313,6 +1491,216 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   };
 
   // ── Devices & commands ───────────────────────────────────────────────────
+
+  // ── Room pictures — `room-pictures/store.ts`, `docs/api.md` → *Room pictures*
+
+  /** Who reads the devices off a picture, in the order they are asked (`homeLocator`). */
+  const pictureLocator = homeLocator(deps.settings);
+
+  /** A room's devices as the picture prompts name them. */
+  const pictureDevices = (roomId: string) =>
+    deps.registry
+      .listDevices()
+      .filter((device) => device.roomId === roomId)
+      .map((device) => ({ id: device.id, name: device.name, kind: device.endpoints[0]?.deviceKind ?? 'appliance' }));
+
+  /**
+   * Every room's pictures, newest first, and the room being drawn right now.
+   * Reading is the floor.
+   *
+   * `drawing` is how an app whose request died with its connection — a phone
+   * put away mid-drawing — tells a drawing still under way from one that ended
+   * without a picture (`RoomPictureService.drawingNow`). **Always present**,
+   * `[]` while nothing is drawn, so its absence is an older hub rather than an
+   * idle one. **Read before the list**: a drawing ends only after its picture
+   * is written, so a list read afterwards holds the picture of any drawing
+   * this says is over — read the other way round, one whose night failed at
+   * once could end in between and be neither drawing nor drawn.
+   */
+  app.get('/api/v1/room-pictures', authed, async () => {
+    const drawing = roomPictures.drawingNow();
+    const pictures = roomPictures.list();
+    // How many kept photos each drawing was made from — counted here rather
+    // than written into the manifest, so a photo deleted on its own is never
+    // a number left behind on a drawing.
+    const kept = await photos.forUses(pictures.map((picture) => picture.id));
+    return {
+      pictures: pictures.map((picture) => {
+        const count = kept.get(picture.id)?.length ?? 0;
+        return count > 0 ? { ...picture, keptPhotos: count } : picture;
+      }),
+      drawing,
+    };
+  });
+
+  /**
+   * The kept photos one drawing was made from, oldest first — `hub.ai`, the key
+   * that draws from them, and never through an API key: a photo of the inside
+   * of somebody's home is not something a script needs.
+   */
+  app.get('/api/v1/room-pictures/:id/photos', memberOnlyNeeds('hub.ai'), async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    if (!roomPictures.get(id)) return reply.code(404).send({ error: 'not_found' });
+    const kept = await photos.forUses([id]);
+    return { photos: kept.get(id) ?? [] };
+  });
+
+  /** One picture's PNG, by day or by night — never changes once drawn. */
+  app.get('/api/v1/room-pictures/:id/:variant', authed, async (request, reply) => {
+    const params = z.object({ id: z.uuid(), variant: z.enum(['day', 'night']) }).parse(request.params);
+    const etag = `"${params.id}-${params.variant}"`;
+    if (request.headers['if-none-match'] === etag) return reply.code(304).send();
+    const bytes = await roomPictures.bytes(params.id, params.variant);
+    if (!bytes) return reply.code(404).send({ error: 'not_found' });
+    return reply
+      .header('content-type', 'image/png')
+      .header('cache-control', 'public, max-age=31536000, immutable')
+      .header('etag', etag)
+      .send(bytes);
+  });
+
+  /**
+   * Draw a room from photos of it. `hub.ai`, because it spends the home's
+   * money — the portraits' key for the portraits' reason — and OpenAI's job,
+   * so its own refusal when that key is missing. Answers once the day picture
+   * is drawn and its devices read off it, about a minute; the night follows
+   * and is announced. One at a time, refused rather than queued.
+   */
+  app.post(
+    '/api/v1/room-pictures',
+    { ...needs('hub.ai'), bodyLimit: PHOTO_BODY_LIMIT },
+    async (request, reply) => {
+      const body = z
+        .object({
+          roomId: z.uuid(),
+          orientation: z.enum(['portrait', 'landscape']).default('portrait'),
+          // No longer `min(1)` on its own: a drawing made again from the
+          // photos the hub keeps may send none — the refine below keeps "no
+          // photos at all" the 400 it always was.
+          photos: z
+            .array(z.object({ data: z.string().min(64), type: z.enum(['image/jpeg', 'image/png']).default('image/jpeg') }))
+            .max(MAX_PHOTOS)
+            .default([]),
+          /** Keep the new photos with the drawing (`photos/store.ts`). */
+          keepPhotos: z.boolean().optional(),
+          /** Photos the hub already keeps for this room, to draw from again. */
+          keptPhotoIds: z.array(z.uuid()).max(MAX_PHOTOS).optional(),
+        })
+        .refine(
+          (value) => {
+            const count = value.photos.length + (value.keptPhotoIds?.length ?? 0);
+            return count >= 1 && count <= MAX_PHOTOS;
+          },
+          { message: `Send between 1 and ${MAX_PHOTOS} photos.`, path: ['photos'] },
+        )
+        .parse(request.body);
+      const room = await deps.db.query.rooms.findFirst({ where: eq(rooms.id, body.roomId) });
+      if (!room) return reply.code(404).send({ error: 'not_found' });
+
+      // The room's own kept photos and nobody else's: an id from another room,
+      // a portrait or a chat is the same answer as one that does not exist.
+      const reused: { bytes: Buffer<ArrayBuffer>; contentType: string; keptId: string }[] = [];
+      for (const keptId of body.keptPhotoIds ?? []) {
+        const found = await photos.read(keptId);
+        if (!found || found.record.kind !== 'room' || found.record.subjectId !== room.id) {
+          return reply.code(404).send({ error: 'photo_not_found' });
+        }
+        reused.push({
+          // Read from a file, so backed by a plain ArrayBuffer: the cast is the
+          // type's and costs no copy, on a board whose memory a drawing spends.
+          bytes: found.bytes as Buffer<ArrayBuffer>,
+          contentType: found.record.mediaType,
+          keptId,
+        });
+      }
+
+      const apiKey = await deps.settings.aiKey('openai');
+      if (!apiKey) return reply.code(409).send({ error: 'openai_not_configured' });
+
+      // For the reading afterwards only: the drawing is told about no device,
+      // so it draws none the photos don't show (`room-pictures/prompts.ts`).
+      const devices = pictureDevices(room.id);
+
+      try {
+        return await roomPictures.draw({
+          roomId: room.id,
+          roomName: room.name,
+          orientation: body.orientation,
+          photos: [
+            ...reused,
+            ...body.photos.map((photo) => ({ bytes: Buffer.from(photo.data, 'base64'), contentType: photo.type })),
+          ],
+          ...(body.keepPhotos !== undefined ? { keepPhotos: body.keepPhotos } : {}),
+          devices,
+          apiKey,
+          locator: pictureLocator,
+          member: { id: request.member!.id, name: request.member!.name },
+        });
+      } catch (error) {
+        if (error instanceof PictureBusyError) {
+          return reply.code(409).send({ error: 'picture_busy', detail: error.message });
+        }
+        if (error instanceof PictureSpaceError) {
+          return reply.code(409).send({ error: 'no_space', detail: error.message });
+        }
+        if (error instanceof RoomPictureDrawError) {
+          return reply.code(502).send({ error: 'provider_failed', kind: error.kind, detail: error.message });
+        }
+        throw error;
+      }
+    },
+  );
+
+  /**
+   * Where the devices stand on a picture, as a person placed them. The whole
+   * list, replacing the old — `home.structure`, since it is how the home is
+   * shown to everybody in it.
+   */
+  /**
+   * Where the devices stand on a picture, and which picture its room shows —
+   * both how the home is shown, so both `home.structure`. Either or both.
+   */
+  app.patch('/api/v1/room-pictures/:id', needs('home.structure'), async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const body = z
+      .object({
+        markers: z
+          .array(
+            z.object({
+              deviceId: z.string().min(1).max(160),
+              x: z.number().min(0).max(1),
+              y: z.number().min(0).max(1),
+              source: z.string().max(20).default('placed'),
+            }),
+          )
+          .max(400)
+          .optional(),
+        selected: z.literal(true).optional(),
+      })
+      .refine((value) => value.markers !== undefined || value.selected === true, 'nothing to change')
+      .parse(request.body);
+    if (!roomPictures.get(id)) return reply.code(404).send({ error: 'not_found' });
+    if (body.markers) roomPictures.setMarkers(id, body.markers);
+    if (body.selected) roomPictures.select(id);
+    return roomPictures.get(id);
+  });
+
+  /** Read the devices off a picture again — for devices added since. Keeps placed markers. */
+  app.post('/api/v1/room-pictures/:id/locate', needs('hub.ai'), async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const existing = roomPictures.get(id);
+    if (!existing) return reply.code(404).send({ error: 'not_found' });
+    const record = await roomPictures.relocate(id, pictureDevices(existing.roomId), pictureLocator);
+    if (!record) return reply.code(404).send({ error: 'not_found' });
+    return record;
+  });
+
+  app.delete('/api/v1/room-pictures/:id', needs('home.structure'), async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const roomId = await roomPictures.remove(id);
+    if (roomId === null) return reply.code(404).send({ error: 'not_found' });
+    return reply.code(204).send();
+  });
 
   app.get('/api/v1/devices', authed, async (request) => {
     const memberId = request.member!.id;
@@ -1674,8 +2062,26 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
           /** A base64 photo to restyle. Absent draws from the device's kind alone. */
           photo: z.string().min(64).max(PHOTO_BODY_LIMIT).optional(),
           photoType: z.enum(['image/jpeg', 'image/png']).default('image/jpeg'),
+          /** Keep the photo with the portrait (`photos/store.ts`). */
+          keepPhoto: z.boolean().optional(),
+          /** A photo the hub already keeps for this device, to draw from again. */
+          keptPhotoId: z.uuid().optional(),
+        })
+        .refine((value) => value.photo === undefined || value.keptPhotoId === undefined, {
+          message: 'Send a photo or name a kept one, not both.',
+          path: ['keptPhotoId'],
         })
         .parse(request.body ?? {});
+
+      // This device's own kept photo and nobody else's, the room route's rule.
+      let kept: { bytes: Buffer; contentType: string } | undefined;
+      if (body.keptPhotoId !== undefined) {
+        const found = await photos.read(body.keptPhotoId);
+        if (!found || found.record.kind !== 'portrait' || found.record.subjectId !== id) {
+          return reply.code(404).send({ error: 'photo_not_found' });
+        }
+        kept = { bytes: found.bytes, contentType: found.record.mediaType };
+      }
 
       // Its own refusal code, not `ai_not_configured`: portraits are drawn by
       // OpenAI and device recognition may be running on Anthropic, so a hub can
@@ -1700,6 +2106,8 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
           ...(body.photo !== undefined
             ? { photo: { bytes: Buffer.from(body.photo, 'base64'), contentType: body.photoType } }
             : {}),
+          ...(kept !== undefined ? { photo: kept, keptPhotoId: body.keptPhotoId } : {}),
+          ...(body.keepPhoto !== undefined ? { keepPhoto: body.keepPhoto } : {}),
         });
         // Recorded because it spent money and everybody in the home now sees a
         // different picture. Only the drawing: choosing between portraits and
@@ -1941,6 +2349,157 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (!source || source.kind !== kind) return null;
     return { key: `${deviceId}/${String(endpointId)}/${streamId}`, externalId: source.externalId, url: source.url };
   }
+
+  // ── Photos the hub keeps ─────────────────────────────────────────────────
+  //
+  // `photos/store.ts` has the rules and `docs/api.md` (*Photos the hub keeps*)
+  // the contract. Every route here is the member's and never one of their
+  // keys': these are photos of the inside of somebody's home, and a script
+  // has no use for them that is worth the risk.
+
+  /**
+   * What the photos page draws: the room the hub has, what is kept of each
+   * kind and whether it is switched on, the caller's own chat photos, and —
+   * for scale — what the drawings themselves take. The floor: any member may
+   * see what the house keeps, as they may see the house.
+   */
+  const photosAnswer = async (memberId: string) => {
+    const [portraitTotal] = await deps.db
+      .select({
+        count: sql<number>`count(*)`,
+        bytes: sql<number>`coalesce(sum(${devicePortraits.bytes}), 0)`,
+      })
+      .from(devicePortraits);
+    const pictures = roomPictures.list();
+    return {
+      ...(await photos.state(memberId)),
+      drawings: {
+        count: (portraitTotal?.count ?? 0) + pictures.length,
+        bytes: (portraitTotal?.bytes ?? 0) + pictures.reduce((sum, picture) => sum + picture.bytes, 0),
+      },
+    };
+  };
+
+  /** The words an activity row uses for one of the home's kinds. */
+  const homePhotoWords = { room: 'room photos', portrait: 'portrait photos' } as const;
+
+  app.get('/api/v1/photos', memberOnly, async (request) => photosAnswer(request.member!.id));
+
+  /**
+   * Turn the home's switches — `hub.ai`, the key that draws rooms and portraits
+   * and so decides what is kept of the photos they are drawn from. Each change
+   * is a line in the activity log, because what a home keeps about itself is
+   * worth being able to read back a week later. `.strict()`, the `/api-keys`
+   * reason: a later field that narrows what is kept must not be stripped by
+   * an older hub without a word.
+   */
+  app.put('/api/v1/photos/home', memberOnlyNeeds('hub.ai'), async (request) => {
+    const body = z
+      .object({ room: z.boolean().optional(), portrait: z.boolean().optional() })
+      .strict()
+      .refine((value) => value.room !== undefined || value.portrait !== undefined, 'nothing to change')
+      .parse(request.body);
+    const before = await photos.homeSwitches();
+    const after = await photos.setHome(body);
+    const who = actor(request);
+    for (const kind of HOME_PHOTO_KINDS) {
+      if (before[kind] === after[kind]) continue;
+      await deps.activity.record({
+        kind: 'photos.keep',
+        message: after[kind]
+          ? `${who.name} started keeping ${homePhotoWords[kind]} on the hub.`
+          : `${who.name} stopped keeping new ${homePhotoWords[kind]} on the hub.`,
+        memberId: who.memberId,
+        data: { ...who.data, photoKind: kind, keep: after[kind] },
+      });
+    }
+    return photosAnswer(request.member!.id);
+  });
+
+  /**
+   * Your own chat photos — the floor, like your name and your favorites, and
+   * not a line in the activity log: it is nobody else's business.
+   */
+  app.put('/api/v1/photos/mine', memberOnly, async (request) => {
+    const body = z.object({ chat: z.boolean() }).strict().parse(request.body);
+    await photos.setMine(request.member!.id, body.chat);
+    return photosAnswer(request.member!.id);
+  });
+
+  /** Delete every kept photo of one of the home's kinds — `hub.ai`, and logged. */
+  app.delete('/api/v1/photos/home/:kind', memberOnlyNeeds('hub.ai'), async (request) => {
+    const { kind } = z.object({ kind: z.enum(HOME_PHOTO_KINDS) }).parse(request.params);
+    const { count, subjects } = await photos.deleteHome(kind);
+    if (count > 0) {
+      const who = actor(request);
+      await deps.activity.record({
+        kind: 'photos.deleted',
+        message: `${who.name} deleted the ${count === 1 ? `1 ${homePhotoWords[kind].slice(0, -1)}` : `${count} ${homePhotoWords[kind]}`} the hub kept.`,
+        memberId: who.memberId,
+        data: { ...who.data, photoKind: kind, count },
+      });
+      for (const subject of subjects) {
+        if (kind === 'room') deps.events.emit('roomPicturesChanged', subject);
+        else announcePortraits(subject);
+      }
+    }
+    return { deleted: count, ...(await photosAnswer(request.member!.id)) };
+  });
+
+  /**
+   * Delete your own chat photos — from the hub, and (through `clearedAt`) the
+   * copies your other devices fetched from it, once each hears about it. The
+   * device a photo was sent from keeps its own copy as it always has. The
+   * conversations stay, each row still saying a photo was there.
+   */
+  app.delete('/api/v1/photos/mine/chat', memberOnly, async (request) => {
+    const { count, clearedAt } = await photos.clearChat(request.member!.id);
+    return { deleted: count, clearedAt, ...(await photosAnswer(request.member!.id)) };
+  });
+
+  /**
+   * Whether this caller may reach one kept photo: a chat photo by its sender
+   * and nobody else — to anybody else it does not exist — and a room or
+   * portrait photo by whoever may draw from it.
+   */
+  const photoAccess = (request: FastifyRequest, record: PhotoRecord): 'yes' | 'hidden' | 'forbidden' => {
+    if (record.kind === 'chat') return record.subjectId === request.member!.id ? 'yes' : 'hidden';
+    return can(deps.access, request, 'hub.ai') ? 'yes' : 'forbidden';
+  };
+
+  /**
+   * One kept photo's bytes. Immutable — a photo is never rewritten, a new one
+   * is a new id — but `private`, since it is somebody's picture of their home.
+   */
+  app.get('/api/v1/photos/:id', memberOnly, async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const record = await photos.get(id);
+    const access = record ? photoAccess(request, record) : 'hidden';
+    if (!record || access === 'hidden') return reply.code(404).send({ error: 'not_found' });
+    if (access === 'forbidden') return reply.code(403).send({ error: 'forbidden', permission: 'hub.ai' });
+    const etag = `"${id}"`;
+    if (request.headers['if-none-match'] === etag) return reply.code(304).send();
+    const found = await photos.read(id);
+    if (!found) return reply.code(404).send({ error: 'not_found' });
+    return reply
+      .header('content-type', found.record.mediaType)
+      .header('cache-control', 'private, max-age=31536000, immutable')
+      .header('etag', etag)
+      .send(found.bytes);
+  });
+
+  /** Delete one kept photo, from every drawing or portrait it was kept for. */
+  app.delete('/api/v1/photos/:id', memberOnly, async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const record = await photos.get(id);
+    const access = record ? photoAccess(request, record) : 'hidden';
+    if (!record || access === 'hidden') return reply.code(404).send({ error: 'not_found' });
+    if (access === 'forbidden') return reply.code(403).send({ error: 'forbidden', permission: 'hub.ai' });
+    await photos.remove(id);
+    if (record.kind === 'room') deps.events.emit('roomPicturesChanged', record.subjectId);
+    if (record.kind === 'portrait') announcePortraits(record.subjectId);
+    return reply.code(204).send();
+  });
 
   // ── Matter commissioning & Zigbee joining ────────────────────────────────
 
@@ -2542,6 +3101,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // a member who has left for the life of the process.
     deps.favorites.forgetMember(memberId);
     deps.access.forgetMember(memberId);
+    // Their chat photos go with them — nobody else could ever have seen them —
+    // while a room or portrait photo they took stays the house's. Files, so no
+    // cascade would ever reach them.
+    await photos.forgetMember(memberId).catch(() => 0);
     // Their keys went with the row too (`api_keys.member_id` cascades), and
     // their sockets with `sessions.revoke` above; this drops what was held
     // about the keys in memory — last use, last refusal, the rate bucket.
@@ -3024,13 +3587,26 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
      * `provider` is derived from the model rather than stored beside it — see
      * `agentProviderOf` — so the two can never disagree, and a picker writes
      * that provider's default model id rather than a second setting.
+     *
+     * `effort` is the home's word for a typed round nobody chose one for, and
+     * `efforts` the words it may be — the list a chat message is validated
+     * against. **Their presence is the capability**: a hub older than them ran
+     * every typed round at `medium` and strips `assistantEffort` from a PATCH
+     * without a word, so an app offers the control only where it finds them.
      */
-    const forAgent = (agent: { model: string; provider: AiProvider | null; choosable: boolean }) => ({
+    const forAgent = (agent: {
+      model: string;
+      provider: AiProvider | null;
+      choosable: boolean;
+      effort: ChatEffort;
+    }) => ({
       model: agent.model,
       provider: agent.provider,
       models: agent.provider === null ? [] : AGENT_MODELS[agent.provider].choices,
       choices: { anthropic: AGENT_MODELS.anthropic.choices, openai: AGENT_MODELS.openai.choices },
       choosable: agent.choosable,
+      effort: agent.effort,
+      efforts: CHAT_EFFORTS,
     });
     const forProvider = (provider: AiProvider) => ({
       hasKey: ai[provider].hasKey,
@@ -3122,6 +3698,18 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     assistantModel: z.string().min(1).max(120).nullable().optional(),
     /** Which model writes the home's rules. Unvalidated for the reason above. */
     automationsModel: z.string().min(1).max(120).nullable().optional(),
+    /**
+     * How hard each agent works on a typed round nobody chose an effort for.
+     *
+     * **Validated, unlike the models beside it**, and the difference is the
+     * point: a model id this build has never heard of is harmless to store
+     * because `getAiSettings` answers with what will run, while an effort is
+     * put on the wire as written and a word one vendor does not take is a 400
+     * in the middle of somebody's conversation. `null` puts it back on
+     * `AGENT_EFFORT`.
+     */
+    assistantEffort: z.enum(CHAT_EFFORTS).nullable().optional(),
+    automationsEffort: z.enum(CHAT_EFFORTS).nullable().optional(),
     anthropicApiKey: apiKeyField('anthropic'),
     openaiApiKey: apiKeyField('openai'),
     mappingProvider: z.enum(AI_PROVIDERS).optional(),
@@ -3203,6 +3791,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (body.assistantModel !== undefined) {
       await deps.settings.setAssistantModel(body.assistantModel);
     }
+    if (body.assistantEffort !== undefined) {
+      await deps.settings.setAgentEffort('assistant', body.assistantEffort);
+    }
+    if (body.automationsEffort !== undefined) {
+      await deps.settings.setAgentEffort('automations', body.automationsEffort);
+    }
     if (body.mappingProvider !== undefined) {
       // Asked after the key writes above, so one request can save a key and
       // point the agent at it. A provider with no credential is refused rather
@@ -3234,9 +3828,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    */
   app.get('/api/v1/ai/runs', needs('hub.ai'), async (request) => {
     const query = z
-      .object({ limit: z.coerce.number().int().min(1).max(100).default(30) })
+      .object({
+        limit: z.coerce.number().int().min(1).max(RUNS_PAGE_LIMIT).default(30),
+        /** The oldest run the caller already holds: the page is the runs before it. */
+        before: z.string().min(1).max(64).optional(),
+      })
       .parse(request.query);
-    const rows = await deps.aiRuns.list(query.limit);
+    const rows = await deps.aiRuns.list(query.limit, query.before);
     // How many rounds each run kept, so an app knows whether to offer the
     // disclosure at all — one grouped read rather than a body per run, since
     // the bodies are the expensive half and most runs have none.
@@ -3511,7 +4109,51 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       /** Whether this machine has the runner and the units at all. */
       canApply: canApplyUpdate(deps.dataDir),
       ...(run !== undefined ? { run } : {}),
+      // Always present on a hub that has automatic updates at all, so its
+      // presence is how an app knows to offer the switch — see `PUT` below.
+      automatic: autoUpdate.describe(),
     };
+  });
+
+  /**
+   * Let the hub update itself, or stop it.
+   *
+   * **`hub.update`, the same key as pressing the button**: whoever may start an
+   * update now may decide that the hub starts one at an hour the home is quiet,
+   * which is less disruption rather than more. A key that holds it may switch
+   * this too, as it may `POST` — nothing new is grantable.
+   *
+   * **The body is strict**, the `/api-keys` reasoning: a field a later build
+   * adds to *narrow* this — certain nights, say — would be stripped by an
+   * older hub, which would then update itself more freely than it was asked
+   * to. A 400 is the only safe answer from a build that cannot read it.
+   *
+   * Switching it on where this machine has no update runner is the refusal
+   * `POST` already gives there: an app offering a switch that cannot do
+   * anything is the same dead end as a button that cannot. Switching it off is
+   * always allowed.
+   */
+  app.put('/api/v1/system/update/automatic', needs('hub.update'), async (request, reply) => {
+    const body = z.object({ enabled: z.boolean() }).strict().parse(request.body);
+    if (body.enabled && !autoUpdate.enabled && !canApplyUpdate(deps.dataDir)) {
+      return reply.code(409).send({ error: 'update_unsupported' });
+    }
+    const changed = body.enabled !== autoUpdate.enabled;
+    const automatic = await autoUpdate.setEnabled(body.enabled);
+    if (changed) {
+      // Read a week later by somebody asking why the hub restarted at three in
+      // the morning — so it names who said it could.
+      const who = actor(request);
+      await deps.activity.record({
+        kind: 'hub.update',
+        message: body.enabled
+          ? `${who.name} turned on automatic hub updates.`
+          : `${who.name} turned off automatic hub updates.`,
+        memberId: who.memberId,
+        data: { ...who.data, outcome: body.enabled ? 'auto-on' : 'auto-off' },
+      });
+    }
+    return { automatic };
   });
 
   /**
@@ -3909,6 +4551,23 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
      * computed on every read rather than written down anywhere.
      */
     roomId: automationRoom(record.document, home),
+    /**
+     * The devices this rule reads and the devices it works, by id — the same
+     * walk `roomId` is, kept as lists (`automationDevices`). It is what lets a
+     * device's page say which rules use it, with no app decoding a document.
+     * Derived per read for `roomId`'s reason: a selector means whatever it
+     * resolves to today.
+     */
+    devices: automationDevices(record.document, home),
+    /**
+     * Whether the rule is working: when it last ran and how that went, how
+     * busy it has been in the home's own day, the last thing that went wrong
+     * in a sentence, when a button was last pressed, since when a mode has
+     * been on, and when a rule on a clock fires next (`AutomationStatus`).
+     * Always present on a hub that keeps it, so an app reads its absence as
+     * "this hub does not say" rather than "this rule has never run".
+     */
+    status: deps.automations.statusOf(record.id),
     document: record.document,
     createdAt: record.createdAt.toISOString(),
     updatedAt: record.updatedAt.toISOString(),
@@ -4324,13 +4983,21 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * recognising a device and drawing a portrait. `needs()` takes one, so the
    * second is checked here and refused in the same shape, since an app turns
    * `{error, permission}` into a sentence and has no way to read a bare 403.
+   *
+   * **It answers whether it refused, never the reply.** It used to hand back
+   * `reply` itself — and a Fastify reply is a *thenable*, so the `await` at
+   * every call site adopted it and resolved to `undefined`: the 403 went out
+   * and the handler carried straight on past `if (refused)`, starting a
+   * conversation on the home's money for a member the guard had just turned
+   * away, then failing to send its own answer over the one already sent. A
+   * boolean cannot be mistaken for a promise.
    */
-  const chatGuard = async (request: FastifyRequest, reply: FastifyReply) => {
+  const chatGuard = async (request: FastifyRequest, reply: FastifyReply): Promise<boolean> => {
     if (!can(deps.access, request, 'hub.ai')) {
       await reply.code(403).send({ error: 'forbidden', permission: 'hub.ai' });
-      return reply;
+      return true;
     }
-    return undefined;
+    return false;
   };
 
   /**
@@ -4347,41 +5014,260 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (error instanceof AutomationNotConfiguredError) {
       return reply.code(409).send({ error: error.code, detail: error.message });
     }
+    // Photos past what the hub can hold at once, refused before anything was
+    // taken — the `portrait_busy` rule, in bytes (`ChatPhotoBudget`).
+    if (error instanceof ChatPhotosBusyError) {
+      return reply.code(409).send({ error: error.code, detail: error.message });
+    }
     throw error;
   };
 
-  app.post('/api/v1/automations/chat', memberOnlyNeeds('automation.manage'), async (request, reply) => {
-    const refused = await chatGuard(request, reply);
-    if (refused) return refused;
-    const body = z
-      .object({ message: z.string().trim().min(1).max(2_000), automationId: z.uuid().optional() })
-      .parse(request.body);
-    if (body.automationId !== undefined && !deps.automations.get(body.automationId)) {
-      return reply.code(404).send({ error: 'not_found' });
-    }
-    try {
-      const reply_ = await deps.automationChat.start({
-        memberId: request.member!.id,
-        message: body.message,
-        ...(body.automationId !== undefined ? { automationId: body.automationId } : {}),
-      });
-      return reply.code(201).send(reply_);
-    } catch (error) {
-      return chatRefusal(error, reply);
-    }
+  /**
+   * One photo sent with a message.
+   *
+   * Everything about it is checked here, before a byte of it reaches a turn:
+   * the type against the short list both vendors take, the size against the
+   * hub's own bound (from the length — `base64Bytes` — never by decoding it),
+   * and the alphabet, so a garbled upload is a 400 the app can say rather than
+   * a provider error read out as the model having failed. `ref`, `width` and
+   * `height` are the app's own, stored beside the row so it can draw its copy;
+   * the hub does nothing else with them.
+   */
+  const chatImageSchema = z.object({
+    type: z.literal('image'),
+    mediaType: z.enum(CHAT_IMAGE_MEDIA_TYPES, {
+      message: 'A photo has to be a JPEG, PNG or WebP image.',
+    }),
+    data: z
+      .string()
+      .max(CHAT_IMAGE_MAX_BASE64, {
+        message: `Each photo can be at most ${CHAT_IMAGE_MAX_BYTES / (1024 * 1024)} MB.`,
+        // Stop here: walking eight million characters to report the same
+        // thing twice is work for nobody — see `isBase64`.
+        abort: true,
+      })
+      .refine(isBase64, { message: 'A photo has to be sent as base64.' })
+      .refine((data) => base64Bytes(data) <= CHAT_IMAGE_MAX_BYTES, {
+        message: `Each photo can be at most ${CHAT_IMAGE_MAX_BYTES / (1024 * 1024)} MB.`,
+      }),
+    ref: z.string().min(1).max(64).optional(),
+    width: z.number().int().min(1).max(20_000).optional(),
+    height: z.number().int().min(1).max(20_000).optional(),
   });
+
+  /**
+   * What a chat message may carry besides its words, on all four routes that
+   * take one. **All optional**: an older app sends none of them and sees
+   * exactly what it always did, and `GET /hub`'s `chat` block is how a newer
+   * one knows they will be read rather than stripped.
+   */
+  const chatTurnFields = {
+    /** An agent model id, checked against what this home can run below. */
+    model: z.string().trim().min(1).max(120).optional(),
+    effort: z.enum(CHAT_EFFORTS).optional(),
+    attachments: z
+      .array(chatImageSchema)
+      .max(CHAT_IMAGE_MAX_COUNT, {
+        message: `At most ${CHAT_IMAGE_MAX_COUNT} photos can go with one message.`,
+      })
+      .optional(),
+    /**
+     * Keep the photos on the hub, where the sender has switched that on for
+     * themselves (`photos/store.ts`). Asked only by an app that has said so on
+     * screen, and only of a hub whose `GET /hub` carries `photos` — an older
+     * hub strips it and keeps nothing, which is what the app said would happen.
+     */
+    keepPhotos: z.boolean().optional(),
+  };
+
+  /**
+   * **A message is words, a photo, or both** — never neither. `message` lost
+   * its `min(1)` for a picture sent on its own, and this is what keeps an
+   * empty send a 400, as it always was.
+   */
+  const saysSomething = (body: { message: string; attachments?: unknown[] | undefined }) =>
+    body.message.length > 0 || (body.attachments?.length ?? 0) > 0;
+  const saysSomethingIssue = { message: 'Say something, or attach a photo.', path: ['message'] };
+
+  const chatMessageSchema = z
+    .object({ message: z.string().trim().max(2_000), ...chatTurnFields })
+    .refine(saysSomething, saysSomethingIssue);
+
+  /** The parsed extras, as the turn the runtime runs. */
+  const turnOf = (body: {
+    model?: string | undefined;
+    effort?: (typeof CHAT_EFFORTS)[number] | undefined;
+    attachments?: z.infer<typeof chatImageSchema>[] | undefined;
+    keepPhotos?: boolean | undefined;
+  }): ChatTurnRequest | undefined => {
+    const images = (body.attachments ?? []).map((image) => ({
+      mediaType: image.mediaType,
+      data: image.data,
+      ...(image.ref !== undefined ? { ref: image.ref } : {}),
+      ...(image.width !== undefined ? { width: image.width } : {}),
+      ...(image.height !== undefined ? { height: image.height } : {}),
+    }));
+    if (body.model === undefined && body.effort === undefined && images.length === 0) {
+      return undefined;
+    }
+    return {
+      ...(body.model !== undefined ? { model: body.model } : {}),
+      ...(body.effort !== undefined ? { effort: body.effort } : {}),
+      ...(images.length > 0 ? { images } : {}),
+      ...(images.length > 0 && body.keepPhotos === true ? { keepPhotos: true } : {}),
+    };
+  };
+
+  /**
+   * Refuse a chat's own model when this home cannot run it — **before** the
+   * message is taken, so nothing is written for a turn that would not run.
+   *
+   * `409 model_unavailable`, a **new code for a new situation** rather than a
+   * reuse of `ai_not_configured`: that one sends an app to add a key, and the
+   * fix here is usually to pick another model from a list the app already has.
+   * `detail` names which, because an older app shows it for a code it has never
+   * met. Two cases. An id no agent is offered — a typo, a model retired since
+   * the app read the list. And an offered model whose vendor has no usable key
+   * here while the other vendor's does, since the picker draws both vendors'
+   * models. A home with no usable key at all is left to the conversation's own
+   * refusal, which is the more useful sentence: there is nothing to pick.
+   *
+   * Never let an unknown id reach the conversation: the agents throw a plain
+   * `Error` for a model they cannot run, which is a 500.
+   */
+  const modelRefusal = async (model: string | undefined, reply: FastifyReply): Promise<boolean> => {
+    if (model === undefined) return false;
+    const provider = agentProviderOf(model);
+    const usable = await deps.settings.agentProviders();
+    if (provider !== null && usable[provider]) return false;
+    if (provider !== null && !usable.anthropic && !usable.openai) return false;
+    const vendor = provider === 'openai' ? 'OpenAI' : 'Anthropic';
+    await reply.code(409).send({
+      error: 'model_unavailable',
+      detail:
+        provider === null
+          ? 'That isn’t a model this hub offers for chats. Pick one from the list.'
+          : `${modelLabel(provider, model)} runs on ${vendor}, and this home has no ${vendor} key ` +
+            'it can use. Pick another model, or add the key in the home’s AI settings.',
+    });
+    // Whether it refused, never the reply — see `chatGuard` on why a reply
+    // handed back through an `await` reads as "carry on".
+    return true;
+  };
+
+  /**
+   * What `POST …/chat/:id/stop` answers, on either agent.
+   *
+   * **An acknowledgement, the rule every chat route keeps**: the round winds
+   * down at its next safe point and says so on the socket like any other turn
+   * — what had reached the page kept as the answer, then a note that it
+   * stopped — so `stopped` is that a round was told to, and `false` that none
+   * was running, which a round that finished a moment earlier is too. Only the
+   * person whose conversation it is may stop it, refused in the words the voice
+   * route already uses for the same situation (`not_your_conversation`).
+   */
+  const stopAnswer = (outcome: 'stopped' | 'idle' | 'not_yours', reply: FastifyReply) => {
+    if (outcome === 'not_yours') {
+      return reply.code(409).send({
+        error: 'not_your_conversation',
+        detail: 'That conversation belongs to somebody else in this home, so only they can stop it.',
+      });
+    }
+    return { stopped: outcome === 'stopped' };
+  };
+
+  /**
+   * A failed round asked again (`POST …/chat/:id/retry`): the model to answer
+   * on, and the photos the message went with — the hub kept none, so they are
+   * the app's to send again — with the thinking word the chat chose, if any.
+   * `model` is required: the offer on the note names one, and asking again on
+   * whatever the conversation happens to be on is the same choice said less
+   * plainly.
+   */
+  const chatRetrySchema = z.object({
+    ...chatTurnFields,
+    model: z.string().trim().min(1).max(120),
+  });
+
+  /**
+   * What a retry answers. **An acknowledgement**, the rule every chat route
+   * keeps — `202`, because the turn runs off the request and says so on the
+   * socket. `nothing_to_retry` is a new code for a new situation: the
+   * conversation has moved on from the failure, or it is already being
+   * answered, and either way pressing again must not run the message twice.
+   */
+  const retryAnswer = (
+    id: string,
+    outcome: 'retrying' | 'nothing_to_retry' | 'not_yours' | 'ended',
+    reply: FastifyReply,
+  ) => {
+    switch (outcome) {
+      case 'retrying':
+        return reply.code(202).send({ sessionId: id, retrying: true });
+      case 'not_yours':
+        return reply.code(409).send({
+          error: 'not_your_conversation',
+          detail: 'That conversation belongs to somebody else in this home, so only they can ask it again.',
+        });
+      case 'nothing_to_retry':
+        return reply.code(409).send({
+          error: 'nothing_to_retry',
+          detail: 'There is nothing to ask again: the conversation has moved on, or it is already being answered.',
+        });
+      case 'ended':
+        return reply.code(410).send({ error: 'conversation_ended' });
+    }
+  };
+
+  app.post(
+    '/api/v1/automations/chat',
+    { ...memberOnlyNeeds('automation.manage'), bodyLimit: CHAT_BODY_LIMIT },
+    async (request, reply) => {
+      if (await chatGuard(request, reply)) return reply;
+      const body = z
+        .object({
+          message: z.string().trim().max(2_000),
+          automationId: z.uuid().optional(),
+          ...chatTurnFields,
+        })
+        .refine(saysSomething, saysSomethingIssue)
+        .parse(request.body);
+      if (body.automationId !== undefined && !deps.automations.get(body.automationId)) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
+      if (await modelRefusal(body.model, reply)) return reply;
+      const turn = turnOf(body);
+      try {
+        const reply_ = await deps.automationChat.start({
+          memberId: request.member!.id,
+          message: body.message,
+          ...(body.automationId !== undefined ? { automationId: body.automationId } : {}),
+          ...(turn !== undefined ? { turn } : {}),
+        });
+        return reply.code(201).send(reply_);
+      } catch (error) {
+        return chatRefusal(error, reply);
+      }
+    },
+  );
 
   app.post(
     '/api/v1/automations/chat/:id/messages',
-    memberOnlyNeeds('automation.manage'),
+    { ...memberOnlyNeeds('automation.manage'), bodyLimit: CHAT_BODY_LIMIT },
     async (request, reply) => {
-      const refused = await chatGuard(request, reply);
-      if (refused) return refused;
+      if (await chatGuard(request, reply)) return reply;
       const { id } = z.object({ id: z.uuid() }).parse(request.params);
-      const { message } = z
-        .object({ message: z.string().trim().min(1).max(2_000) })
-        .parse(request.body);
-      const answered = await deps.automationChat.reply(id, request.member!.id, message);
+      const body = chatMessageSchema.parse(request.body);
+      if (await modelRefusal(body.model, reply)) return reply;
+      let answered;
+      try {
+        // Continuing a conversation the hub has forgotten opens a new one, and
+        // that can be refused like starting one — a 409 with a sentence, not
+        // the 500 it used to fall through as.
+        answered = await deps.automationChat.reply(id, request.member!.id, body.message, turnOf(body));
+      } catch (error) {
+        return chatRefusal(error, reply);
+      }
       /**
        * `410` rather than `404`, and the difference matters: the conversation
        * existed and its transcript is still readable — what is gone is the
@@ -4394,6 +5280,38 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     },
   );
 
+  /** Stop the round a conversation is running — see `stopAnswer`. */
+  app.post(
+    '/api/v1/automations/chat/:id/stop',
+    memberOnlyNeeds('automation.manage'),
+    async (request, reply) => {
+      if (await chatGuard(request, reply)) return reply;
+      const { id } = z.object({ id: z.uuid() }).parse(request.params);
+      return stopAnswer(deps.automationChat.stop(id, request.member!.id), reply);
+    },
+  );
+
+  /** Ask a failed round again, on the model named — see `retryAnswer`. */
+  app.post(
+    '/api/v1/automations/chat/:id/retry',
+    { ...memberOnlyNeeds('automation.manage'), bodyLimit: CHAT_BODY_LIMIT },
+    async (request, reply) => {
+      if (await chatGuard(request, reply)) return reply;
+      const { id } = z.object({ id: z.uuid() }).parse(request.params);
+      const body = chatRetrySchema.parse(request.body);
+      if (await modelRefusal(body.model, reply)) return reply;
+      try {
+        const outcome = await deps.automationChat.retry(id, request.member!.id, {
+          ...turnOf(body),
+          model: body.model,
+        });
+        return retryAnswer(id, outcome, reply);
+      } catch (error) {
+        return chatRefusal(error, reply);
+      }
+    },
+  );
+
   /**
    * Every conversation this home has had.
    *
@@ -4403,29 +5321,34 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * for, which is the same shape of thing the rules themselves are.
    */
   app.get('/api/v1/automations/chats', memberOnlyNeeds('automation.manage'), async (request, reply) => {
-    const refused = await chatGuard(request, reply);
-    if (refused) return refused;
-    return deps.automationChat.list();
+    if (await chatGuard(request, reply)) return reply;
+    // Who is asking, so each row can say whether it is theirs (`mine`).
+    return deps.automationChat.list(request.member!.id);
   });
 
   app.get('/api/v1/automations/chat/:id', memberOnlyNeeds('automation.manage'), async (request, reply) => {
-    const refused = await chatGuard(request, reply);
-    if (refused) return refused;
+    if (await chatGuard(request, reply)) return reply;
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    // Read first — see the assistant's route below.
+    const answering = deps.automationChat.isAnswering(id);
     // The same `spend` block the list carries, so a chat opened straight from
     // a link says what it cost without the list having been read first.
     const spend = await deps.automationChat.spend(id);
+    // Where it came from, when the assistant handed it over — so a chat opened
+    // straight from a card can say so and go back, without the list.
+    const handedFrom = await deps.automationChat.handedFrom(id);
     return {
       sessionId: id,
       live: deps.automationChat.isLive(id),
+      answering,
       ...(spend !== undefined ? { spend } : {}),
+      ...(handedFrom !== undefined ? { handedFrom } : {}),
       messages: await deps.automationChat.transcript(id),
     };
   });
 
   app.delete('/api/v1/automations/chat/:id', memberOnlyNeeds('automation.manage'), async (request, reply) => {
-    const refused = await chatGuard(request, reply);
-    if (refused) return refused;
+    if (await chatGuard(request, reply)) return reply;
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     await deps.automationChat.close(id);
     return reply.code(204).send();
@@ -4449,40 +5372,98 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    * guest gets a sentence the model can read out rather than a feature that is
    * silently absent.
    */
-  app.post('/api/v1/assistant/chat', memberOnlyNeeds('hub.ai'), async (request, reply) => {
-    const body = z.object({ message: z.string().trim().min(1).max(2_000) }).parse(request.body);
-    try {
-      const started = await deps.assistantChat.start({
-        memberId: request.member!.id,
-        message: body.message,
-      });
-      return reply.code(201).send(started);
-    } catch (error) {
-      return chatRefusal(error, reply);
-    }
+  app.post(
+    '/api/v1/assistant/chat',
+    { ...memberOnlyNeeds('hub.ai'), bodyLimit: CHAT_BODY_LIMIT },
+    async (request, reply) => {
+      const body = chatMessageSchema.parse(request.body);
+      if (await modelRefusal(body.model, reply)) return reply;
+      const turn = turnOf(body);
+      try {
+        const started = await deps.assistantChat.start({
+          memberId: request.member!.id,
+          message: body.message,
+          ...(turn !== undefined ? { turn } : {}),
+        });
+        return reply.code(201).send(started);
+      } catch (error) {
+        return chatRefusal(error, reply);
+      }
+    },
+  );
+
+  app.post(
+    '/api/v1/assistant/chat/:id/messages',
+    { ...memberOnlyNeeds('hub.ai'), bodyLimit: CHAT_BODY_LIMIT },
+    async (request, reply) => {
+      const { id } = z.object({ id: z.uuid() }).parse(request.params);
+      const body = chatMessageSchema.parse(request.body);
+      if (await modelRefusal(body.model, reply)) return reply;
+      let answered;
+      try {
+        // A forgotten conversation is reopened here, which can be refused the
+        // way starting one is — a 409 with a sentence rather than a 500.
+        answered = await deps.assistantChat.reply(id, request.member!.id, body.message, turnOf(body));
+      } catch (error) {
+        return chatRefusal(error, reply);
+      }
+      // `410` rather than `404`: the conversation existed and its transcript is
+      // still readable — what is gone is the ability to continue it.
+      if (!answered) return reply.code(410).send({ error: 'conversation_ended' });
+      return answered;
+    },
+  );
+
+  /**
+   * Stop the round a conversation is running — see `stopAnswer`. A job the
+   * assistant has already handed over goes on: it is the other agent's
+   * conversation now, with its own stop.
+   */
+  app.post('/api/v1/assistant/chat/:id/stop', memberOnlyNeeds('hub.ai'), async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    return stopAnswer(deps.assistantChat.stop(id, request.member!.id), reply);
   });
 
-  app.post('/api/v1/assistant/chat/:id/messages', memberOnlyNeeds('hub.ai'), async (request, reply) => {
-    const { id } = z.object({ id: z.uuid() }).parse(request.params);
-    const { message } = z
-      .object({ message: z.string().trim().min(1).max(2_000) })
-      .parse(request.body);
-    const answered = await deps.assistantChat.reply(id, request.member!.id, message);
-    // `410` rather than `404`: the conversation existed and its transcript is
-    // still readable — what is gone is the ability to continue it.
-    if (!answered) return reply.code(410).send({ error: 'conversation_ended' });
-    return answered;
-  });
+  /**
+   * Ask a failed round again, on the model named — the other vendor's, when
+   * the note offered it — see `ChatRuntime.retry` and `retryAnswer`.
+   */
+  app.post(
+    '/api/v1/assistant/chat/:id/retry',
+    { ...memberOnlyNeeds('hub.ai'), bodyLimit: CHAT_BODY_LIMIT },
+    async (request, reply) => {
+      const { id } = z.object({ id: z.uuid() }).parse(request.params);
+      const body = chatRetrySchema.parse(request.body);
+      if (await modelRefusal(body.model, reply)) return reply;
+      try {
+        const outcome = await deps.assistantChat.retry(id, request.member!.id, {
+          ...turnOf(body),
+          model: body.model,
+        });
+        return retryAnswer(id, outcome, reply);
+      } catch (error) {
+        return chatRefusal(error, reply);
+      }
+    },
+  );
 
   /** Listed before the `:id` route below, or Fastify parses `chats` as a uuid. */
-  app.get('/api/v1/assistant/chats', memberOnlyNeeds('hub.ai'), async () => deps.assistantChat.list());
+  app.get('/api/v1/assistant/chats', memberOnlyNeeds('hub.ai'), async (request) =>
+    // Who is asking, so each row can say whether it is theirs (`mine`).
+    deps.assistantChat.list(request.member!.id),
+  );
 
   app.get('/api/v1/assistant/chat/:id', memberOnlyNeeds('hub.ai'), async (request) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    // Before the transcript, for `drawing`'s reason on the room pictures: a
+    // round stops counting only once its rows are written, so a transcript
+    // read after "not answering" holds how every round ended.
+    const answering = deps.assistantChat.isAnswering(id);
     const spend = await deps.assistantChat.spend(id);
     return {
       sessionId: id,
       live: deps.assistantChat.isLive(id),
+      answering,
       ...(spend !== undefined ? { spend } : {}),
       messages: await deps.assistantChat.transcript(id),
     };
@@ -4612,8 +5593,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
      * `502` rather than `409`, because the two are different screens: a `409`
      * is something in this home's settings, and the way out is on a page
      * somebody can open. This is OpenAI saying no — a key that has been
-     * revoked, a balance that has run out, a rate limit — so the detail is
-     * *their* sentence, which is always better than one invented here.
+     * revoked, a balance that has run out, a rate limit — so the detail names
+     * *their* reason, in the words a failed chat round already uses for it,
+     * and keeps their own sentence for a refusal nothing here recognises.
      */
     let opened: Awaited<ReturnType<typeof openLiveSession>>;
     try {
@@ -4629,9 +5611,18 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         log: deps.log,
       });
     } catch (error) {
+      // **Said the way a failed chat round is** (`voiceFailure`): the same
+      // taxonomy and the same words, so "this home’s OpenAI account is out of
+      // credit" is one sentence on both, rather than OpenAI's own with a
+      // billing URL cut off mid-word on a phone. `failure` is additive — the
+      // kind an app can pick a way out by — and `detail` stands on its own for
+      // every app that has never heard of it.
+      const { voiceFailure } = await import('../ai/chat/failure.js');
+      const said = voiceFailure(error);
       return reply.code(502).send({
         error: 'voice_unavailable',
-        detail: error instanceof Error ? error.message : 'OpenAI would not open a voice session.',
+        detail: said.text,
+        failure: said.failure,
       });
     }
 

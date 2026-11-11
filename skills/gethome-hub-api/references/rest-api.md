@@ -19,7 +19,7 @@ reading; the key's member must also hold any permission named. The hub's
 | `activity.read` | read everybody's activity, not only its member's |
 | `automation.manage` | create, change, delete and revert rules (needs `control`) |
 | `hub.radio` | switch which radio the hub runs |
-| `hub.update` | start a hub update |
+| `hub.update` | start a hub update, or let the hub update itself |
 
 `GET /api/v1/hub` lists the grantable permissions in `apiKeys.grantable`; a key
 can never be given anything else. These are **never** a key's, whatever it is
@@ -38,16 +38,17 @@ API keys, and every conversation with the hub's assistant or automations agent.
 | `GET /api/v1/zones` | `[{id, name, sortOrder}]` |
 | `GET /api/v1/devices` | every device — see [devices-and-commands.md](devices-and-commands.md) |
 | `GET /api/v1/devices/{deviceId}/history?from=&to=&points=&series=` | recorded readings in five-minute buckets for about a week; `from`/`to` epoch ms |
+| `GET /api/v1/room-pictures` · `GET /api/v1/room-pictures/{id}/{variant}` | pictures of the home's rooms, drawn from photos by the app's users: the list `{pictures: [{id, roomId, at, hasNight, markers: [{deviceId, x, y, source}], …}], drawing: [{roomId}]}` newest first — `drawing` names the room being drawn right now, `[]` while none is — and one picture as `image/png` — `variant` is `day` or `night`. `x` and `y` are fractions of the picture, from its top-left corner. Drawing one spends the home's OpenAI key and is the app's |
 | `GET /api/v1/devices/{deviceId}/portraits` · `GET /api/v1/portraits/{portraitId}` | the pictures drawn of a device, and one picture itself as `image/png` (it never changes; a new one gets a new id) |
 | `GET /api/v1/members` | who is in the home |
 | `GET /api/v1/roles` · `GET /api/v1/permissions` | the role table and the permission catalog, with the hub's own wording |
 | `GET /api/v1/activity?limit=&before=` | newest first; only the member's own rows unless the key has `activity.read` |
-| `GET /api/v1/automations` | `{automations, unreadable}` — an object, not a list. `automations` is every rule, each with `summary` (a sentence), `outline`, `shape` (`button`/`toggle`/`watching`), `enabled`, `active`, `roomId`; `unreadable` is rules a newer build wrote that this hub cannot run, kept rather than lost |
+| `GET /api/v1/automations` | `{automations, unreadable}` — an object, not a list. `automations` is every rule, each with `summary` (a sentence), `outline`, `shape` (`button`/`toggle`/`watching`), `enabled`, `active`, `roomId`, `devices` (`{reads, controls}`, device ids) and `status` (whether it is working — see the automations reference); `unreadable` is rules a newer build wrote that this hub cannot run, kept rather than lost |
 | `GET /api/v1/automations/{automationId}` · `GET /api/v1/automations/{automationId}/runs` | one rule, and why it fired |
 | `GET /api/v1/automations/capabilities` | the rule vocabulary, generated from the hub's own schema |
 | `GET /api/v1/automations/templates` | the shipped presets |
 | `GET /api/v1/settings/timezone` | the home's timezone, which schedules use |
-| `GET /api/v1/system/update` · `GET /api/v1/system/update/log` | what is installed and how an update is going |
+| `GET /api/v1/system/update` · `GET /api/v1/system/update/log` | what is installed, how an update is going, and `automatic`: whether the hub updates itself and when it next may |
 | `GET /api/v1/matter/commission/{jobId}` | a Matter pairing in progress |
 
 ## Working the home (`control`)
@@ -65,6 +66,7 @@ API keys, and every conversation with the hub's assistant or automations agent.
 |---|---|
 | `PATCH /api/v1/devices/{deviceId}` with `name`, `roomId` or `offlineExpected` | `device.edit` |
 | `PATCH /api/v1/devices/{deviceId}/portraits` · `DELETE /api/v1/portraits/{portraitId}` | `device.edit` |
+| `PATCH /api/v1/room-pictures/{id}` `{"markers": [{"deviceId", "x", "y"}]}` and/or `{"selected": true}` · `DELETE /api/v1/room-pictures/{id}` | `home.structure` — moves where devices stand on a room's picture (the whole list, replacing the old), makes it the picture its room shows, or takes the picture away, for everybody in the home |
 | `DELETE /api/v1/devices/{deviceId}` | `device.remove` — **ask the person first**. `204` once the home has let go; the hub unpairs it from its radio afterwards, and a device paired again is a new device |
 | `POST /api/v1/zigbee/permit-join` `{"seconds": 120}` | `device.add` |
 | `POST /api/v1/matter/commission` `{"pairingCode": "…"}` · `POST /api/v1/matter/commission/{jobId}/cancel` · `GET /api/v1/matter/discoverable` | `device.add` |
@@ -76,6 +78,7 @@ API keys, and every conversation with the hub's assistant or automations agent.
 | `PUT /api/v1/settings/timezone` | `automation.manage` |
 | `PUT /api/v1/settings/radio` `{"mode": "auto"}` | `hub.radio` — restarts the hub's radios; ask first |
 | `POST /api/v1/system/update` | `hub.update` — the home goes offline for minutes; ask first |
+| `PUT /api/v1/system/update/automatic` `{"enabled": true}` | `hub.update` — from then on the hub updates itself at an hour its home is usually quiet; ask first. `409 update_unsupported` on a hub that cannot update itself |
 
 ## Patterns worth knowing
 

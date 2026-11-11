@@ -34,7 +34,7 @@
   </picture>
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screens/assistant-dark.webp">
-    <img src="docs/assets/screens/assistant-light.webp" width="31%" alt="The gethome app's assistant: a glass orb asking “How can I help?”, with a box to type in and a microphone.">
+    <img src="docs/assets/screens/assistant-light.webp" width="31%" alt="The gethome app's assistant: its round face over “What can I do for your home?”, four things to ask, and a box to type in with a button to talk.">
   </picture>
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screens/device-dark.webp">
@@ -76,7 +76,7 @@ flowchart TB
 - **Build your own.** Anything that can publish JSON over MQTT can be a device, with no hub-side code. Your own scripts, dashboards and AI agents use the hub's local REST and WebSocket API with an API key — narrowed to what you give it, and taken back with one tap. → [Building on a hub](docs/integrations.md) · [Agent skills](#build-with-an-ai-agent) · [The MQTT convention](docs/mqtt-integrations.md) · [The API](docs/api.md)
 - **Private by default.** No cloud account, and your AI key stays on the hub. → [Private by design](#private-by-design)
 
-Also: AI portraits of your devices, drawn on the hub with your OpenAI key and shared by everyone in the home ([portraits](docs/portraits.md)).
+Also: AI portraits of your devices, drawn on the hub with your OpenAI key and shared by everyone in the home ([portraits](docs/portraits.md)) — and pictures of your rooms, drawn from a few photos as an isometric cutaway with every device marked where it stands ([room pictures](docs/api.md#room-pictures)).
 
 ## The gethome family
 

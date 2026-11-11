@@ -119,8 +119,9 @@ second — and the hub may be a 512 MB board running the whole house. On
 
 ## Hubs of every age
 
-Hubs update only when their owner asks, so the one you meet may be months old
-or newer than these docs.
+A hub updates when somebody in its home asks it to, or by itself where they
+have switched that on, so the one you meet may be months old or newer than
+these docs.
 
 - **What a hub can do is read from what it carries**, never inferred from
   `version` or `apiVersion`: `apiKeys`, `history` and `portraits` on

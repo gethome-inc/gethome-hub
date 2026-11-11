@@ -844,6 +844,13 @@ export const automationRuns = sqliteTable(
     trigger: text('trigger').notNull(),
     /** One sentence naming what set it off. */
     cause: text('cause').notNull(),
+    /**
+     * The same cause in the hub's exact terms — the device, the path, the
+     * comparator and the value as stored — which the sentence above
+     * deliberately leaves out. Null on a run written before this column, and
+     * on a cause that has no terms behind it (somebody pressed a button).
+     */
+    causeDetail: text('cause_detail'),
     /** ran | skipped | refused | failed | interrupted */
     outcome: text('outcome').notNull(),
     durationMs: integer('duration_ms'),
@@ -852,6 +859,29 @@ export const automationRuns = sqliteTable(
   },
   (table) => [index('automation_runs_automation').on(table.automationId, table.at)],
 );
+
+/**
+ * Whether a rule is working, kept across a restart.
+ *
+ * One row per rule: when it last ran and how that ended, how many times it has
+ * fired in the home's own day, the last thing that went wrong. `automation_runs`
+ * cannot answer any of that — it keeps twenty traces per rule, so a rule that
+ * fires every few seconds has a minute of them — and the engine holds the
+ * numbers in memory, which an update at four in the morning would otherwise
+ * reset to "never ran".
+ *
+ * **Written on a timer, never per firing** — `STATE_FLUSH_MS`'s rule: a motion
+ * rule fires all day and an SD card has a finite number of writes. The row is
+ * one JSON document because every field in it is the engine's own and is read
+ * back whole; a field a later build adds is simply absent from an older row.
+ */
+export const automationStatus = sqliteTable('automation_status', {
+  automationId: text('automation_id')
+    .primaryKey()
+    .references(() => automations.id, { onDelete: 'cascade' }),
+  data: text('data', { mode: 'json' }).notNull(),
+  updatedAt: createdAt('updated_at'),
+});
 
 /**
  * What was said while a rule was being written.
@@ -945,3 +975,88 @@ export const devicePanels = sqliteTable(
   },
   (table) => [primaryKey({ columns: [table.deviceId, table.panelId] })],
 );
+
+/**
+ * The photos a home, or one person, chose to keep on the hub
+ * (`src/photos/store.ts`; `docs/api.md`, *Photos the hub keeps*).
+ *
+ * **Off by default, and only ever on request.** A photo lands here when the
+ * request that carried it asked (`keepPhotos`) *and* the matching switch is on
+ * *and* the hub has room — so a hub nobody has touched keeps exactly what it
+ * always did: nothing.
+ *
+ * **The bytes are files, the record is a row**, the portraits' rule and for
+ * their reason: `<data>/photos/<id>.<ext>`, because a photo through the WAL is
+ * the write amplification the rest of the store is arranged to avoid.
+ *
+ * `kind` is an open word (`room`, `portrait`, `chat`), and `subject_id` is what
+ * the photo is *of* or *whose* — a room's id, a device's id, or for a chat
+ * photo the member who sent it — which is what a bulk delete and a cascade
+ * from somewhere else are keyed on. A new table, so its foreign key may carry
+ * an action: a member removed leaves their room and portrait photos behind as
+ * the house's, with the name copied for the reason `device_portraits` copies
+ * it, while their chat photos are deleted by `PhotoStore.forgetMember` before
+ * the row goes.
+ */
+export const keptPhotos = sqliteTable(
+  'kept_photos',
+  {
+    id: uuidPk(),
+    kind: text('kind').notNull(),
+    subjectId: text('subject_id').notNull(),
+    memberId: text('member_id').references(() => members.id, { onDelete: 'set null' }),
+    memberName: text('member_name'),
+    /** The app's own name for a chat photo, so a bubble on another device finds it. */
+    ref: text('ref'),
+    mediaType: text('media_type').notNull(),
+    bytes: integer('bytes').notNull(),
+    width: integer('width'),
+    height: integer('height'),
+    at: createdAt('at'),
+  },
+  (table) => [
+    index('kept_photos_subject').on(table.kind, table.subjectId),
+    index('kept_photos_kind_at').on(table.kind, table.at),
+  ],
+);
+
+/**
+ * What each kept photo is kept *for* — a room picture, a portrait, or a chat
+ * message — and the whole of how long it lives: **a photo goes with its last
+ * use.** One photo can serve several, because drawing a room again from the
+ * photos it was drawn from is the reason they are kept.
+ *
+ * `use_id` carries no foreign key on purpose: room pictures live in a
+ * manifest, not a table, and a portrait or a message row going is answered by
+ * `PhotoStore.release` from the code that removes it, with `reconcile()` at
+ * boot for anything an older build removed after a rollback.
+ */
+export const keptPhotoUses = sqliteTable(
+  'kept_photo_uses',
+  {
+    photoId: text('photo_id')
+      .notNull()
+      .references(() => keptPhotos.id, { onDelete: 'cascade' }),
+    useId: text('use_id').notNull(),
+    at: createdAt('at'),
+  },
+  (table) => [
+    primaryKey({ columns: [table.photoId, table.useId] }),
+    index('kept_photo_uses_use').on(table.useId),
+  ],
+);
+
+/**
+ * One person's own choice about their chat photos — the floor, like their
+ * name and their favorites, so nobody decides it for them.
+ *
+ * `chat_cleared_at` is when they last deleted their chat photos, which is how
+ * a device that was away when they did learns to let go of its own copies.
+ */
+export const memberPhotoSettings = sqliteTable('member_photo_settings', {
+  memberId: text('member_id')
+    .primaryKey()
+    .references(() => members.id, { onDelete: 'cascade' }),
+  keepChat: integer('keep_chat', { mode: 'boolean' }).notNull().default(false),
+  chatClearedAt: integer('chat_cleared_at', { mode: 'timestamp_ms' }),
+});

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { asc, desc, eq, inArray, isNotNull, lt, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNotNull, lt, or, sql } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import { aiRunExchanges, aiRuns } from '../db/schema.js';
 // Type-only, so the Anthropic SDK is not pulled into the core graph.
@@ -20,6 +20,13 @@ import type { HubEventBus } from './bus.js';
  * reaches, and chat rows carry no steps, so they are the cheap ones.
  */
 const RETAIN_RUNS = 250;
+
+/**
+ * The most runs one read answers. Fewer than the hub keeps, so the log is read
+ * a page at a time (`list`'s `before`), and advertised on `GET /hub` so an app
+ * never copies the number out of this file.
+ */
+export const RUNS_PAGE_LIMIT = 100;
 
 /** Steps recorded per run. A run that searches more than this has gone wrong
  *  in a way the first forty lines will already show. */
@@ -44,7 +51,7 @@ const RETAIN_EXCHANGES = 1000;
  * device recognition from rule-writing into two tables would make it two
  * screens. Such a row leaves `exposesHash` empty and fills `automationId`.
  */
-export type AiRunKind = 'map' | 'repair' | 'automate' | 'assist' | 'portrait' | 'voice';
+export type AiRunKind = 'map' | 'repair' | 'automate' | 'assist' | 'portrait' | 'voice' | 'roompicture' | 'roomlocate';
 
 export interface AiRunEvent {
   phase: 'started' | 'step' | 'finished';
@@ -344,12 +351,32 @@ export class AiRunLog {
     return spend;
   }
 
-  async list(limit = 30) {
+  /**
+   * Newest first, a page at a time. `before` is the id of the oldest run a
+   * caller already holds, and the page is the runs older than it — by time,
+   * then by id, so two runs written in the same millisecond are neither skipped
+   * nor read twice. A cursor naming no run (pruned since, or never one)
+   * answers nothing, which is where it would have led: the prune takes the
+   * oldest first.
+   */
+  async list(limit = 30, before?: string) {
+    const size = Math.min(Math.max(limit, 1), RUNS_PAGE_LIMIT);
+    const newest = [desc(aiRuns.at), desc(aiRuns.id)] as const;
+    if (before === undefined) {
+      return this.db
+        .select()
+        .from(aiRuns)
+        .orderBy(...newest)
+        .limit(size);
+    }
+    const [cursor] = await this.db.select({ at: aiRuns.at }).from(aiRuns).where(eq(aiRuns.id, before)).limit(1);
+    if (!cursor) return [];
     return this.db
       .select()
       .from(aiRuns)
-      .orderBy(desc(aiRuns.at))
-      .limit(Math.min(Math.max(limit, 1), 100));
+      .where(or(lt(aiRuns.at, cursor.at), and(eq(aiRuns.at, cursor.at), lt(aiRuns.id, before))))
+      .orderBy(...newest)
+      .limit(size);
   }
 
   /**

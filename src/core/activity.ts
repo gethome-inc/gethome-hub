@@ -1,4 +1,4 @@
-import { and, desc, eq, lt, sql } from 'drizzle-orm';
+import { and, desc, eq, isNotNull, lt, sql } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import { activity } from '../db/schema.js';
 import type { ActivityEvent, HubEventBus } from './bus.js';
@@ -79,6 +79,25 @@ export class ActivityService {
       .where(cursor && mine ? and(cursor, mine) : (cursor ?? mine))
       .orderBy(desc(activity.id))
       .limit(Math.min(Math.max(limit, 1), 200));
+  }
+
+  /**
+   * When somebody last asked the hub for anything: the newest row with a
+   * member on it, which is every command, press and setting a person made,
+   * through an app, a key or a conversation.
+   *
+   * Read once, at start-up, by the hub's automatic updates, which otherwise
+   * learn it from the bus — and a restart is exactly when the bus has said
+   * nothing yet. Walks back from the newest id, so it is bounded by the row cap.
+   */
+  async lastAskedAt(): Promise<number | undefined> {
+    const [row] = await this.db
+      .select({ at: activity.at })
+      .from(activity)
+      .where(isNotNull(activity.memberId))
+      .orderBy(desc(activity.id))
+      .limit(1);
+    return row?.at.getTime();
   }
 
   /**

@@ -12,6 +12,7 @@ import {
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { readWifiCredentials } from '../src/core/wifi.js';
 
 /**
  * The two halves of pairing a Matter accessory that has never been on a
@@ -196,15 +197,19 @@ interface CredentialsOutcome {
   output: string;
   file: string;
   mode: string;
+  /** Where the file is, for the hub's own reader. */
+  path: string;
 }
 
 /**
  * Run `deploy/wifi-credentials.sh` against a fake `nmcli`.
  *
- * `freq` is the frequency the hub is associated on (absent: `nmcli` does not
- * say), `scan` the rows a fresh scan returns in `nmcli -t -f FREQ,SSID` form,
- * already escaped the way `nmcli -t` escapes them, and `existing` a `wifi.env`
- * an earlier association left behind.
+ * `ssid` and `psk` are the profile's own values, which the fake prints the way
+ * `nmcli -g` does: as terse output, with `\` and `:` escaped unless the script
+ * asks with `-e no`. `freq` is the frequency the hub is associated on (absent:
+ * `nmcli` does not say), `scan` the rows a fresh scan returns in
+ * `nmcli -t -f FREQ,SSID` form, already escaped the way `nmcli -t` escapes
+ * them, and `existing` a `wifi.env` an earlier association left behind.
  */
 function credentials(options: {
   ssid?: string;
@@ -228,10 +233,12 @@ function credentials(options: {
     script_(
       path.join(bin, 'nmcli'),
       `echo "$*" >> "${calls}"
+       case " $* " in *" -e no "*) escape='' ;; *) escape='s/[\\\\:]/\\\\&/g' ;; esac
+       value() { printf '%s\\n' "$1" | sed "$escape"; }
        case "$*" in
          *"connection show --active"*) [ "$FAKE_ACTIVE" = "no" ] || printf 'abc-123:802-11-wireless\\n' ;;
-         *"802-11-wireless.ssid"*)     printf '%s\\n' "$FAKE_SSID" ;;
-         *"802-11-wireless-security.psk"*) printf '%s\\n' "$FAKE_PSK" ;;
+         *"802-11-wireless.ssid"*)     value "$FAKE_SSID" ;;
+         *"802-11-wireless-security.psk"*) value "$FAKE_PSK" ;;
          *"dev wifi list --rescan no"*) [ -n "$FAKE_FREQ" ] && printf 'no:2437 MHz\\nyes:%s MHz\\n' "$FAKE_FREQ" ;;
          *"dev wifi list --rescan yes"*) [ "$FAKE_SCAN_FAILS" = "yes" ] && exit 8; printf '%s' "$FAKE_SCAN" ;;
        esac
@@ -275,6 +282,7 @@ function credentials(options: {
     output,
     file: existsSync(file) ? readFileSync(file, 'utf8') : '',
     mode: existsSync(file) ? (statSync(file).mode & 0o777).toString(8) : '',
+    path: file,
     scanned: existsSync(calls) && readFileSync(calls, 'utf8').includes('--rescan yes'),
   };
 }
@@ -298,6 +306,39 @@ describe('the Wi-Fi the hub passes on to an accessory', () => {
     // space, so the one character that ends the quoting has to survive.
     const run = credentials({ ssid: "Dave's Wi-Fi" });
     expect(run.file).toContain("WIFI_SSID='Dave'\\''s Wi-Fi'");
+  });
+
+  /**
+   * `nmcli -g` is terse output, which escapes `\` and `:` inside a value
+   * unless asked not to — so a network called `My:Net` was handed to every
+   * accessory as `My\:Net`, a name that does not exist, and the pairing failed
+   * at its last step. Read back through the hub's own reader, because what it
+   * hands the accessory is the point.
+   */
+  it('hands over a name and a password with colons and backslashes in them unchanged', () => {
+    const ssid = 'My:Net\\B';
+    const psk = 'correct:horse:battery';
+    const run = credentials({ ssid, psk });
+    expect(run.file).toContain(`WIFI_SSID='${ssid}'`);
+    expect(run.file).toContain(`WIFI_PSK='${psk}'`);
+    expect(readWifiCredentials(run.path)).toEqual({ ssid, passphrase: psk });
+  });
+
+  /**
+   * The quoting above, undone on the other side. The hub took off only the
+   * outer quotes, so `Dave's Wi-Fi` — written `'Dave'\''s Wi-Fi'` — reached an
+   * accessory as `Dave'\''s Wi-Fi`. Wherever the apostrophe falls, and in the
+   * password too.
+   */
+  it('hands over a name and a password with apostrophes in them unchanged', () => {
+    const cases = [
+      { ssid: "Dave's Wi-Fi", psk: "Dave's password" },
+      { ssid: "'Flat 3'", psk: "ends with '" },
+    ];
+    for (const { ssid, psk } of cases) {
+      const run = credentials({ ssid, psk });
+      expect(readWifiCredentials(run.path), ssid).toEqual({ ssid, passphrase: psk });
+    }
   });
 
   it('writes an empty password for an open network rather than pretending', () => {

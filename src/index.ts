@@ -12,7 +12,10 @@ import { HistoryService } from './core/history.js';
 import { PortraitService } from './portraits/store.js';
 import { PanelService } from './panels/store.js';
 import { CameraProxy } from './cameras/proxy.js';
-import { recordFinishedUpdate } from './core/update.js';
+import { RoomPictureService } from './room-pictures/store.js';
+import { PhotoStore } from './photos/store.js';
+import { watchUpdateOutcomes } from './core/update.js';
+import { createAutoUpdater } from './core/auto-update.js';
 import { HomeService } from './core/home.js';
 import { FavoritesService } from './core/favorites.js';
 import { AccessService } from './core/access.js';
@@ -109,12 +112,6 @@ async function main(): Promise<void> {
   const pairing = new PairingService(db, config.DATA_DIR, log, access);
   await pairing.boot();
 
-  // An update restarts this process, so the hub cannot write down how its own
-  // update went while it is happening. The runner leaves the outcome in a file
-  // and this is where it becomes one line of the home's history — once, keyed
-  // on the run id, so a reboot a month later doesn't re-announce it.
-  void recordFinishedUpdate(config.DATA_DIR, activity, log).catch(() => undefined);
-
   const registry = new DeviceRegistry(db, events, activity, log.child({ module: 'registry' }));
   // What the readings did, so an app can draw the last few days. Listens on
   // the bus rather than hooking the registry: nothing on the report path
@@ -135,6 +132,12 @@ async function main(): Promise<void> {
   // the portrait service because that service now writes to it.
   const aiRuns = new AiRunLog(db, events);
 
+  // The photos a home, or one person, chose to keep — the photos a room or a
+  // portrait was drawn from, and the ones a person added to a chat. One store
+  // for all of them, handed to every service that keeps into it, and keeping
+  // nothing until somebody switches a kind on (`photos/store.ts`).
+  const photos = new PhotoStore(db, settings, config.DATA_DIR, events, log.child({ module: 'photos' }));
+
   // The pictures a home has had drawn of its devices. Files under the data
   // directory with a row each; constructed unconditionally, because reading
   // them needs no credential and a hub with none simply has no rows.
@@ -144,6 +147,8 @@ async function main(): Promise<void> {
     config.DATA_DIR,
     log.child({ module: 'portraits' }),
     aiRuns,
+    {},
+    photos,
   );
 
   // The panels on devices' pages, the portraits' shape: files under the data
@@ -154,6 +159,25 @@ async function main(): Promise<void> {
   // The camera proxy keeps nothing but the streams it is relaying right now;
   // the server closes them when it closes.
   const cameras = new CameraProxy({ log: log.child({ module: 'cameras' }) });
+  // The pictures of the home's rooms — built here rather than inside the API so
+  // the photos they keep are reconciled against them at boot, below.
+  const roomPictures = new RoomPictureService(
+    config.DATA_DIR,
+    events,
+    log.child({ module: 'room-pictures' }),
+    aiRuns,
+    {},
+    undefined,
+    undefined,
+    undefined,
+    photos,
+  );
+  // Before the API answers anything: a drawing, a portrait or a message that
+  // an older build removed after a rollback still has its photos here, and
+  // this is where they go. It never throws — tidying is not a reason for a hub
+  // not to start.
+  await photos.reconcile({ roomPictureIds: roomPictures.list().map((picture) => picture.id) });
+  photos.start();
 
   // The rules the home runs by itself — and, with a manual trigger, the things
   // the apps draw as scenes. Constructed here and *started* after the registry
@@ -275,9 +299,70 @@ async function main(): Promise<void> {
     events,
     runs: aiRuns,
     log: log.child({ module: 'ai' }),
+    keptPhotos: photos,
   });
+  // The assistant. It holds the automations chat rather than the other way
+  // round, because delegation only goes one way: the assistant hands a job
+  // over, and the agent it hands to knows nothing about it.
+  const assistantChat = new AssistantChat({
+    db,
+    settings,
+    events,
+    runs: aiRuns,
+    log: log.child({ module: 'ai' }),
+    access,
+    activity,
+    registry,
+    engine: automations,
+    automationChat,
+    keptPhotos: photos,
+  });
+  // The fortnight a transcript is kept for, kept on a clock rather than only
+  // when somebody happens to begin a conversation (`ChatRuntime.startSweeping`).
+  const stopChatSweeps = [automationChat.startSweeping(), assistantChat.startSweeping()];
 
   let radioPressure: RadioPressureWatch | undefined;
+
+  // Somebody standing in front of a device: a Matter pairing in flight, or the
+  // Zigbee network open for joining. Neither the radio watch's retry nor an
+  // automatic update restarts the hub in the middle of one.
+  const somebodyIsPairing = (): boolean => matter?.isCommissioning === true || permitJoin.state.active;
+
+  // The hub updating itself, when its home has said it may. *Loaded* here,
+  // before the API listens, so `GET /system/update` never answers "off" for a
+  // hub that is on in the seconds after a boot; counting from boot, below;
+  // and looking at the clock only once there is a home and its rules to stay
+  // out of the way of.
+  const autoUpdate = createAutoUpdater({
+    dataDir: config.DATA_DIR,
+    build,
+    settings,
+    timezone: () => settings.timezone,
+    activity,
+    events,
+    rules: automations,
+    busy: somebodyIsPairing,
+    log: log.child({ module: 'update' }),
+  });
+  await autoUpdate.load();
+  autoUpdate.start();
+
+  // An update restarts this process, so the hub cannot write down how its own
+  // update went while it is happening. The runner leaves the outcome in a file
+  // — and writes it only *after* the hub is back, so this boot finds the run
+  // still going and the watch keeps looking until it is not. Then it becomes
+  // one line of the home's history — once, keyed on the run id, so a reboot a
+  // month later doesn't re-announce it — and the hub's own updates hear a
+  // rollback before that line is written. After the updater is loaded,
+  // because a run the hub asked for by itself says so.
+  const updateOutcomes = watchUpdateOutcomes({
+    dataDir: config.DATA_DIR,
+    activity,
+    log: log.child({ module: 'update' }),
+    ended: (run) => autoUpdate.runEnded(run),
+    automaticRunId: () => autoUpdate.automaticRunId(),
+  });
+  updateOutcomes.start();
 
   const app = await buildServer({
     db,
@@ -322,21 +407,9 @@ async function main(): Promise<void> {
     // chat: no client, no prompt and no vendor SDK is loaded until the first
     // message, which is `lazy.ts`'s seam one module over.
     automationChat,
-    // The assistant. It holds the automations chat rather than the other way
-    // round, because delegation only goes one way: the assistant hands a job
-    // over, and the agent it hands to knows nothing about it.
-    assistantChat: new AssistantChat({
-      db,
-      settings,
-      events,
-      runs: aiRuns,
-      log: log.child({ module: 'ai' }),
-      access,
-      activity,
-      registry,
-      engine: automations,
-      automationChat,
-    }),
+    assistantChat,
+    photos,
+    roomPictures,
     mappings: new MappingLibrary({
       db,
       settings,
@@ -345,6 +418,7 @@ async function main(): Promise<void> {
       runs: aiRuns,
       ...(zigbee ? { zigbee } : {}),
     }),
+    autoUpdate,
     ...(build ? { build } : {}),
     ...(matter ? { matter } : {}),
     ...(zigbee ? { zigbee } : {}),
@@ -399,7 +473,14 @@ async function main(): Promise<void> {
     .then(() => automations.start())
     .catch((error) => {
       log.error({ err: error }, 'Device registry failed to start.');
-    });
+    })
+    // The hub's own updates look at the clock once the rules are running,
+    // because the rules are what an update has to stay out of the way of —
+    // and look even where the home failed to load, since an update is how a
+    // hub gets past a build that cannot load it. With the switch off a look
+    // is one comparison, and the switch can be turned on at any time without
+    // a restart.
+    .finally(() => autoUpdate.startLooking());
 
   // A hub asked to run both radios on a board measured for one is watched, and
   // hands a radio back itself if the board really does run out. Started
@@ -415,7 +496,7 @@ async function main(): Promise<void> {
     // Somebody standing in front of a device. Only the retry waits for it: a
     // hub that restarted itself mid-pairing would take the pairing with it,
     // for a trial that had no reason to happen in that particular minute.
-    busy: () => matter?.isCommissioning === true || permitJoin.state.active,
+    busy: somebodyIsPairing,
     log: log.child({ module: 'radio' }),
     onStandDown: async (record) => {
       // Both, in this order, and both before the mode is written: the frame is
@@ -461,6 +542,11 @@ async function main(): Promise<void> {
     log.info(`${signal} received, shutting down…`);
     permitJoin.stop();
     radioPressure?.stop();
+    updateOutcomes.stop();
+    photos.stop();
+    for (const stop of stopChatSweeps) stop();
+    // Before the database closes: the hour being counted is written here.
+    await autoUpdate.stop().catch(() => {});
     await automations.stop().catch(() => {});
     await mdns?.stop().catch(() => {});
     await app.close().catch(() => {});

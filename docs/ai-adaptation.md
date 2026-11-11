@@ -180,6 +180,21 @@ reproduces the guard: the old mock stubbed `create` with a bare `vi.fn()`, which
 is more permissive than the real client, which is why a whole suite passed over
 an agent that could not make a request.
 
+**A turn the model's safety classifiers decline is asked again of another
+Claude, in the same request** (`fallbacks: "default"`, through
+`client.beta.messages`; `src/ai/anthropic-fallback.ts`). Researching a door
+lock, an alarm panel or a camera reads like security work often enough that the
+`cyber` classifier is a real cost here, and the rescue happens server-side: the
+API runs the declined turn on the Claude it recommends for that kind of refusal
+and returns that model's answer. What the declined model began before the
+hand-over — its thinking, a call it started — is neither run nor sent back,
+each attempt is priced at its own model's rates (`usage.iterations`), and the
+run's steps say which model answered, since the run log names the model the
+home chose. A request the API refuses *because of the field* is sent once more
+without it and the field is not sent again by that process, so a retired beta
+costs a hub its fallback rather than device recognition. Only a refusal the
+whole chain declines ends the run.
+
 **Two cache breakpoints, which is what an agent loop asks for.** The explicit
 one sits on the system prompt and covers the tool definitions with it (tools
 sort ahead of system in the cached prefix) — the large, byte-identical prefix
@@ -263,17 +278,17 @@ the hub's database, never returned by any API, and used only to run the
 mapping agent.
 
 **Model.** Default **`claude-opus-5-5`** (Opus 5.5) on Anthropic, with
-**`claude-fable-5-1`** offered above it, and **`gpt-6.1-sol`** (GPT-6.1 Sol) on
+**`claude-fable-5-2`** (Fable 5.2) offered above it, and **`gpt-6.1-sol`** (GPT-6.1 Sol) on
 OpenAI, with **`gpt-6-astra`** offered above Sol — every one pinned as an
 explicit id rather than a floating alias, so no vendor can re-point what a home
 runs without somebody here deciding to. The choice is an allowlist, not a free
 string (`src/ai/models.ts`), because the research tools have model floors —
 Anthropic's `_20260209` tools only exist on Opus 4.6+ and Sonnet 4.6+, so
 pointing the hub at Haiku 4.5 or a 4.5-era model would not degrade the run, it
-would 400 it. The allowlist is every model this hub has ever run: Fable 5.1,
-Opus 5.5, 5, 4.8, 4.7 and 4.6, Sonnet 5.5, 5 and 4.6, Haiku 5.5, GPT-6.1 Sol,
-GPT-6 Astra, Sol and Luna, GPT-5.6 Sol and Terra, and `gpt-5.6` — the bare
-OpenAI alias, accepted because a hub that stored it must not be told its setting
+would 400 it. The allowlist is every model this hub has ever run: Fable 5.2
+and 5.1, Opus 5.5, 5, 4.8, 4.7 and 4.6, Sonnet 5.5, 5 and 4.6, Haiku 5.5, GPT-6.1 Sol
+and Terra, GPT-6 Astra, Sol and Luna, GPT-5.6 Sol and Terra, and `gpt-5.6` —
+the bare OpenAI alias, accepted because a hub that stored it must not be told its setting
 is invalid, but never offered as a choice.
 
 **The apps do not ship that list.** `GET /settings/ai` carries
@@ -293,17 +308,17 @@ a way that is easy to underestimate, because the descriptor is cached per device
 somebody notices and remaps. Saving a few cents on a job that runs a handful of
 times in a hub's life is the wrong trade for that. That argument is about
 *cheaper* models and says nothing against a more thorough one, so Anthropic's
-list is Opus 5.5 with Fable 5.1 above it and OpenAI's is GPT-6.1 Sol with Astra
-above it, while Sonnet, Haiku and Luna — all offered to the agents — are on
-neither vendor's recognition list.
+list is Opus 5.5 with Fable 5.2 above it and OpenAI's is GPT-6.1 Sol with Astra
+above it, while Sonnet, Haiku, Terra and Luna — all offered to the agents — are
+on neither vendor's recognition list.
 
 **A stored model counts only while it is still offered, and a retired one is
 succeeded** (`effectiveModel`). Retiring a model otherwise leaves the homes
 that had chosen it as the only homes still running it — exactly the homes the
 retirement is for — and silently, since nothing on any screen would have
 changed. So every model the hub has known names the model that replaced it
-(Opus 5 → Opus 5.5; Sonnet 5 → Sonnet 5.5; GPT-5.6 Sol, the alias and GPT-5.6
-Terra → GPT-6 Sol → GPT-6.1 Sol), a run is given the first model along that
+(Opus 5 → Opus 5.5; Sonnet 5 → Sonnet 5.5; Fable 5.1 → Fable 5.2; GPT-5.6 Sol
+and the alias → GPT-6 Sol → GPT-6.1 Sol; GPT-5.6 Terra → GPT-6.1 Terra), a run is given the first model along that
 chain which is still offered, and only where there is none the vendor's default.
 It is resolved on every read and **never written back**: updating the hub is all
 it takes, with no migration and nothing for its owner to do, and the previous
@@ -324,7 +339,7 @@ the one nobody can judge.
 **Cost.** A typical adaptation run costs cents, bounded by the per-run cap.
 Neither API reports what a run cost, so the hub prices its own token usage
 against list prices (input, output, cache reads at 0.1× — 0.05× on Opus 5.5,
-Sonnet 5.5 and GPT-6.1 Sol and 0.025× on Fable 5.1, each of which says so on its
+Sonnet 5.5 and GPT-6.1 Sol and 0.025× on Fable 5.1 and 5.2, each of which says so on its
 own row — cache writes at 1.25×, web searches at $10/1000) and
 `status.lastRun.costUsd` is an **estimate**. **It is priced one request at a
 time and then added up**, never from a run's token totals: GPT-6 bills a prompt
@@ -333,8 +348,8 @@ everything, for that whole request — and a run re-sends its whole conversation
 every turn, so its totals cross either line long before any one prompt does. An
 unknown model falls back to the most expensive known tier, so the cap can only
 ever trip early. **The cap is in the run's own model's dollars**: $2 was sized
-against Opus 5's $5/$25, and a model priced above that — GPT-6 Astra or Fable
-5.1, at twice it — gets it stretched by the same factor (`budgetScale`), so
+against Opus 5's $5/$25, and a model priced above that — GPT-6 Astra at twice
+it, Fable 5.2 at 1.6 times — gets it stretched by the same factor (`budgetScale`), so
 choosing the most thorough model buys a more thorough run rather than one cut
 off at half the work. A cheaper model keeps the same $2 ceiling rather than a
 tighter one. OpenAI reports cached input and cache writes *inside* the input
@@ -541,7 +556,8 @@ A mapping run sends no home names, member names, tokens, or any other hub data
 that **none of that traffic is an input either**: see "What can reach the
 agent, and what cannot" above. Without a configured credential, or with the
 switch off, nothing is sent at all. That is recognition's promise, not the
-hub's: the assistant, the automations agent, the voice and portraits send more,
+hub's: the assistant, the automations agent, the voice, portraits and room
+pictures send more,
 because they have to, and the [privacy policy](https://gethome.me/privacy#ai)
 lists what each of them sends.
 
@@ -680,8 +696,8 @@ earns its keep — see [assistant.md](assistant.md).
 
 It is a **summary, never a transcript.** Model prose is the largest thing a run
 produces and the least useful to read later, so it is not stored. Bounded at
-both ends — 40 steps per run, 60 runs retained, `detail` truncated at 2 KB —
-which is tens of kilobytes on a machine whose disk is an SD card.
+both ends — 40 steps per run, 250 runs retained, `detail` truncated at 2 KB —
+which keeps it small on a machine whose disk is an SD card.
 
 Before it, the hub recorded exactly two facts under one settings key (the last
 run and the last error), so once a second device had been adopted there was no

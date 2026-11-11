@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -16,7 +16,8 @@ import { PermitJoinService } from '../src/core/permit-join.js';
 import { AiRunLog } from '../src/core/ai-runs.js';
 import { writeRadioStandDown } from '../src/core/radio.js';
 import { MappingLibrary } from '../src/ai/library.js';
-import { settings as settingsTable } from '../src/db/schema.js';
+import { aiRuns, settings as settingsTable } from '../src/db/schema.js';
+import { inArray } from 'drizzle-orm';
 import type { AdapterBus, ProtocolAdapter } from '../src/adapters/adapter.js';
 import type { HubCommand } from '../src/schema/index.js';
 import {
@@ -160,6 +161,8 @@ describe.skipIf(!handle)('hub API', () => {
       // readings at all, which is how it knows to offer a chart rather than a
       // doorway to a 404.
       history: { bucketSeconds: 300, retentionDays: 7 },
+      // Presence again: a hub carrying it draws pictures of rooms.
+      roomPictures: { model: 'gpt-image-2.5-sunburst', maxPerRoom: 5, maxPhotos: 8 },
       // Same rule, and here it is load-bearing rather than tidy: an app that
       // does not find this block must not ask for a sign-in code, because an
       // older hub strips the unknown `memberId` and answers with an ordinary
@@ -1091,6 +1094,49 @@ describe.skipIf(!handle)('hub API', () => {
     });
   });
 
+  it('pages the AI run log from the newest back, and says on GET /hub that it can', async () => {
+    const hub = await app.inject({ method: 'GET', url: '/api/v1/hub' });
+    // Presence is the capability: an older hub strips `before` and answers the
+    // newest page again, so an app that does not find this asks once.
+    expect(hub.json()).toMatchObject({ aiRuns: { before: true, maxLimit: 100 } });
+
+    // Seven runs, two of them written in the same millisecond, which is the
+    // case a cursor on time alone would skip or repeat.
+    const base = Date.parse('2026-01-02T03:04:05Z');
+    const ids = Array.from({ length: 7 }, (_, index) => `00000000-0000-4000-a000-00000000000${index}`);
+    await db.insert(aiRuns).values(
+      ids.map((id, index) => ({
+        id,
+        at: new Date(base + (index === 4 ? 3 : index) * 1000),
+        kind: 'map',
+        adapter: 'zigbee',
+        exposesHash: 'h',
+        ok: true,
+        steps: [],
+      })),
+    );
+    const page = async (query: string) => {
+      const response = await app.inject({ method: 'GET', url: `/api/v1/ai/runs?${query}`, headers: auth(ownerToken) });
+      expect(response.statusCode).toBe(200);
+      return (response.json() as { id: string }[]).map((run) => run.id).filter((id) => ids.includes(id));
+    };
+
+    const first = await page('limit=3');
+    expect(first).toEqual([ids[6], ids[5], ids[4]]);
+    const second = await page(`limit=3&before=${first.at(-1)}`);
+    expect(second).toEqual([ids[3], ids[2], ids[1]]);
+    const last = await page(`limit=3&before=${second.at(-1)}`);
+    expect(last).toEqual([ids[0]]);
+    expect(await page(`limit=3&before=${ids[0]}`)).toEqual([]);
+    // A cursor that names no run leads nowhere rather than back to the start.
+    expect(await page('limit=3&before=not-a-run')).toEqual([]);
+    // And a page is never more than the hub says.
+    const tooMany = await app.inject({ method: 'GET', url: '/api/v1/ai/runs?limit=101', headers: auth(ownerToken) });
+    expect(tooMany.statusCode).toBe(400);
+
+    await db.delete(aiRuns).where(inArray(aiRuns.id, ids));
+  });
+
   it('stores AI settings without ever returning the key', async () => {
     const put = await app.inject({
       method: 'PUT',
@@ -1194,8 +1240,9 @@ describe.skipIf(!handle)('hub API', () => {
       // Terra is retired and still known, so the write is taken rather than
       // 400-ing an app that has not shipped an update — the same stance
       // `authType` takes one field over. What it must not do is come back as
-      // the model this hub runs, because it isn't: it comes back as the model
-      // that replaced it.
+      // the model this hub runs, because it isn't: it comes back as what runs
+      // in its place — recognition's default here, since the Terra that
+      // replaced it is not on recognition's list.
       payload: { openaiApiKey: 'sk-proj-1234567890', openaiModel: 'gpt-5.6-terra' },
     });
     expect(saved.statusCode).toBe(200);
@@ -1322,7 +1369,8 @@ describe.skipIf(!handle)('hub API', () => {
     expect(saved.statusCode).toBe(200);
     const body = saved.json() as Record<string, unknown>;
     expect(body).toMatchObject({
-      assistant: { model: 'gpt-6.1-sol', provider: 'openai', choosable: true },
+      // GPT-5.6 Terra's successor is the Terra after it: a tier keeps its tier.
+      assistant: { model: 'gpt-6.1-terra', provider: 'openai', choosable: true },
       automations: { model: 'claude-opus-5-5', provider: 'anthropic', choosable: true },
     });
     const assistant = body.assistant as {
@@ -1331,9 +1379,14 @@ describe.skipIf(!handle)('hub API', () => {
     };
     // `models` is the answering vendor's list — what an app a version behind
     // draws its pills from — and `choices` the whole table.
-    expect(assistant.models.map((model) => model.id)).toEqual(['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-luna']);
+    expect(assistant.models.map((model) => model.id)).toEqual([
+      'gpt-6-astra',
+      'gpt-6.1-sol',
+      'gpt-6.1-terra',
+      'gpt-6-luna',
+    ]);
     expect(assistant.choices.anthropic?.map((model) => model.id)).toEqual([
-      'claude-fable-5-1',
+      'claude-fable-5-2',
       'claude-opus-5-5',
       'claude-sonnet-5-5',
       'claude-haiku-5-5',
@@ -1341,6 +1394,7 @@ describe.skipIf(!handle)('hub API', () => {
     expect(assistant.choices.openai?.map((model) => model.label)).toEqual([
       'GPT-6 Astra',
       'GPT-6.1 Sol',
+      'GPT-6.1 Terra',
       'GPT-6 Luna',
     ]);
 
@@ -1387,6 +1441,52 @@ describe.skipIf(!handle)('hub API', () => {
       headers: auth(ownerToken),
       payload: { apiKey: 'sk-ant-api-1234567890' },
     });
+  });
+
+  /**
+   * Each agent's effort, end to end — the shape both apps draw their effort
+   * control from, and the write they send. **Presence is the capability**: a
+   * hub older than the field answers without `effort` and strips the write, so
+   * both fields are pinned on a hub that never chose one.
+   */
+  it('answers each agent’s effort with the words it may be, and writes it back', async () => {
+    const fresh = await app.inject({ method: 'GET', url: '/api/v1/settings/ai', headers: auth(memberToken) });
+    expect(fresh.json()).toMatchObject({
+      assistant: { effort: 'medium', efforts: ['low', 'medium', 'high'] },
+      automations: { effort: 'medium', efforts: ['low', 'medium', 'high'] },
+    });
+
+    const saved = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { assistantEffort: 'high', automationsEffort: 'low' },
+    });
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json()).toMatchObject({ assistant: { effort: 'high' }, automations: { effort: 'low' } });
+
+    // A word no vendor is sent is refused rather than stored — it would be a
+    // 400 in the middle of somebody's conversation instead of here — and the
+    // refusal leaves what was there.
+    const refused = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { assistantEffort: 'max' },
+    });
+    expect(refused.statusCode).toBe(400);
+    const kept = await app.inject({ method: 'GET', url: '/api/v1/settings/ai', headers: auth(memberToken) });
+    expect(kept.json()).toMatchObject({ assistant: { effort: 'high' } });
+
+    // `null` puts it back on the default, as the model fields beside it do —
+    // and leaves the hub as the next test expects to find it.
+    const cleared = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings/ai',
+      headers: auth(memberToken),
+      payload: { assistantEffort: null, automationsEffort: null },
+    });
+    expect(cleared.json()).toMatchObject({ assistant: { effort: 'medium' }, automations: { effort: 'medium' } });
   });
 
   it('switches adaptation off without asking for the key again', async () => {
@@ -1552,7 +1652,7 @@ describe.skipIf(!handle)('hub API', () => {
     // taken and succeeded, so listing it as something recognition "runs on"
     // would send somebody to a model that never runs.
     const detail = (put.json() as { detail: string }).detail;
-    expect(detail).toContain('device recognition runs on: claude-fable-5-1, claude-opus-5-5');
+    expect(detail).toContain('device recognition runs on: claude-fable-5-2, claude-opus-5-5');
     expect(detail).not.toMatch(/claude-opus-5(?!-5)|claude-opus-4|claude-sonnet/);
   });
 
@@ -2209,6 +2309,75 @@ describe.skipIf(!handle)('hub API', () => {
       });
       expect(response.statusCode).toBe(200);
       expect(response.json()).toMatchObject({ lines: [], total: 0 });
+    });
+
+    describe('by itself', () => {
+      const switchTo = (enabled: unknown, token = memberToken, extra: object = {}) =>
+        app.inject({
+          method: 'PUT',
+          url: '/api/v1/system/update/automatic',
+          headers: auth(token),
+          payload: { enabled, ...extra },
+        });
+      const switchRows = async () =>
+        (
+          (await app
+            .inject({ method: 'GET', url: '/api/v1/activity?limit=50', headers: auth(ownerToken) })
+            .then((r) => r.json())) as Array<{ kind: string; message: string; data?: { outcome?: string } }>
+        ).filter((row) => row.kind === 'hub.update' && /^auto-o(n|ff)$/.test(row.data?.outcome ?? ''));
+
+      it('is off until somebody says otherwise, and says when it could not run here anyway', async () => {
+        // Its presence is how an app knows to offer the switch at all. This
+        // hub has no CI stamp, so even switched on it would have nothing to
+        // compare — said now, before anybody switches it on and waits.
+        const body = await app
+          .inject({ method: 'GET', url: '/api/v1/system/update', headers: auth(memberToken) })
+          .then((r) => r.json());
+        expect(body.automatic).toEqual({ enabled: false, blocked: 'no_build_stamp' });
+      });
+
+      it('lets a member switch it on, and names them', async () => {
+        const response = await switchTo(true);
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({ automatic: { enabled: true, blocked: 'no_build_stamp' } });
+        const rows = await switchRows();
+        expect(rows).toHaveLength(1);
+        expect(rows[0]?.message).toMatch(/turned on automatic hub updates\.$/);
+
+        const body = await app
+          .inject({ method: 'GET', url: '/api/v1/system/update', headers: auth(ownerToken) })
+          .then((r) => r.json());
+        expect(body.automatic).toMatchObject({ enabled: true });
+      });
+
+      it('writes one row per change, not one per request', async () => {
+        expect((await switchTo(true)).statusCode).toBe(200);
+        expect(await switchRows()).toHaveLength(1);
+      });
+
+      it('refuses a field it does not know rather than dropping it', async () => {
+        // A field a later build adds to narrow this — certain nights, say —
+        // stripped here would mean a hub updating itself more freely than it
+        // was asked to.
+        expect((await switchTo(true, memberToken, { nights: [5, 6] })).statusCode).toBe(400);
+        expect((await switchTo('yes')).statusCode).toBe(400);
+      });
+
+      it('always switches off, and will not switch on where the machine cannot update itself', async () => {
+        rmSync(path.join(updateDir(), 'enabled'));
+        try {
+          const off = await switchTo(false);
+          expect(off.statusCode).toBe(200);
+          expect(off.json()).toMatchObject({ automatic: { enabled: false, blocked: 'unsupported' } });
+          expect((await switchRows()).at(0)?.message).toMatch(/turned off automatic hub updates\.$/);
+
+          const on = await switchTo(true);
+          expect(on.statusCode).toBe(409);
+          expect(on.json()).toMatchObject({ error: 'update_unsupported' });
+        } finally {
+          writeFileSync(path.join(updateDir(), 'enabled'), '');
+        }
+      });
     });
   });
 
