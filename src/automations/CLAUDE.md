@@ -86,6 +86,41 @@ directory. `docs/automations.md` is canonical — update it in the same change.
   relay for the fortieth time this hour" look identical from outside. The one
   automatic firing that does get a row is the breaker switching a rule off,
   because somebody has to find that a week later.
+  **A trace is written in the home's words, and the exact terms sit beside
+  them** (`narrate.ts`). Every shipped app prints a run's `cause` and a step's
+  `summary` as they arrive, so they are sentences made from the home's names —
+  "Motion in the Living Room", "Motion LED turned on", "Hall lamp didn’t answer
+  — it was offline" — and never a capability path; the path, comparator and
+  command go in `causeDetail` and `detail`. A `cause` is read under the rule's
+  name and does not repeat it, which is why the manual run's activity row
+  carries its own `sentence` ("Anna pressed Leaving") rather than the cause. A
+  new trigger kind, command or guard needs its words there, or it reads as its
+  own type — and a new readable path that is a *state* behind a number (an
+  alarm, a lock) needs an entry in `STATES`, or its cause is a threshold and a
+  code; `test/automations-narrate.test.ts` walks every path for that.
+  **A step claims only what the hub knows.** `execute` resolving means a radio
+  took the write, so a device offline at that moment reads "was offline when
+  this was sent" and is a problem, and a `commandFailed` within
+  `LATE_FAILURE_MS` of a rule's command to that device **replaces the step
+  where it stands** (`RunLedger`, `onCommandFailed`): in the live array while
+  the run is going, in the stored row — behind the write that made it — once it
+  is not, with the status corrected once per run. Never a second step after
+  the first, which would be a trace arguing with itself.
+  **And a problem is marked on the step, because `kind` and `outcome` cannot
+  say it** (`AutomationRunStep.problem`, `problems` on the run frame): a
+  `refused` step is "was already on" as well as "didn’t answer", a run with one
+  dead lamp is still `ran`, and both words are drawn as they are by every build
+  that shipped. Anything that counts toward `status.today.problems` has to set
+  the flag on its step, or the trace and the card disagree.
+  **Whether a rule is working is remembered, not derived** (`status.ts`):
+  twenty traces is a minute of a busy rule, so the engine counts. Runs, skips
+  and problems are three things — a skip is the rule declining before it acts,
+  a problem is something asked for that did not happen, and the idempotence
+  guard's "was already on" is neither. "Today" is the home's own day and rolls
+  over on read. It is flushed to `automation_status` about once a minute and on
+  `stop()`, **never per firing**, and announced on the opt-in stream at most
+  once per rule every ten seconds: anything added here has to survive a rule
+  that fires every few seconds.
   **`enabled` and `active` are two words with two permissions.** `enabled` is
   whether the rule exists and is listening → `automation.manage`; `active` is
   whether a mode is switched on right now → **the floor**, because pressing

@@ -11,6 +11,7 @@ import type { AiRunEvent } from '../core/ai-runs.js';
 import type {
   AutomationChatEvent,
   AutomationRunEvent,
+  AutomationStatusEvent,
   ChatRoundSoFar,
   ChatTitleEvent,
   CommissioningUpdate,
@@ -568,6 +569,13 @@ export function attachWebSocket(
    */
   const onAutomationRun = (event: AutomationRunEvent) => send({ type: 'automationRun', run: event });
   /**
+   * Whether a rule is working, as it moves — already throttled per rule by
+   * the engine. Under a key of its own for the reason `run` has one above: a
+   * typed client decodes one envelope for every frame.
+   */
+  const onAutomationStatus = (event: AutomationStatusEvent) =>
+    send({ type: 'automationStatus', automationStatus: event });
+  /**
    * The model's text as it arrives, and one line per thing a turn did. On the
    * same opt-in stream: it is the highest-rate frame the hub can emit and it
    * matters only to the one client with the chat open.
@@ -687,6 +695,7 @@ export function attachWebSocket(
       if (stream === 'ai') deps.events.on('aiRun', onAiRun);
       if (stream === 'automations') {
         deps.events.on('automationRun', onAutomationRun);
+        deps.events.on('automationStatus', onAutomationStatus);
         // A key's stream is the rules firing and nothing else: the two
         // conversations are what people in the home said, which no key reads
         // by REST either — so the listeners are never attached, rather than
@@ -717,6 +726,7 @@ export function attachWebSocket(
       if (stream === 'ai') deps.events.off('aiRun', onAiRun);
       if (stream === 'automations') {
         deps.events.off('automationRun', onAutomationRun);
+        deps.events.off('automationStatus', onAutomationStatus);
         deps.events.off('automationChat', onAutomationChat);
         deps.events.off('assistantChat', onAssistantChat);
         deps.events.off('chatTitle', onChatTitle);
@@ -817,6 +827,7 @@ export function attachWebSocket(
     if (subscribed.has('ai')) deps.events.off('aiRun', onAiRun);
     if (subscribed.has('automations')) {
       deps.events.off('automationRun', onAutomationRun);
+      deps.events.off('automationStatus', onAutomationStatus);
       deps.events.off('automationChat', onAutomationChat);
       deps.events.off('assistantChat', onAssistantChat);
       deps.events.off('chatTitle', onChatTitle);
