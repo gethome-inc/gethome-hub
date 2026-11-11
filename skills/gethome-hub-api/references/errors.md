@@ -31,7 +31,7 @@ not.
 | 409 | `{error:"<message>"}` on a command | the device cannot honour that command |
 | 409 | `automation_disabled`, `not_pressable`, `not_a_toggle` | pressing a rule that is off, has nothing to press, or is not a mode |
 | 409 | `already_commissioning`, `matter_disabled`, `zigbee_disabled` | pairing refusals |
-| 409 | `update_in_progress`, `update_unsupported` | hub update refusals |
+| 409 | `update_in_progress`, `update_unsupported` | hub update refusals; `update_unsupported` also refuses switching on automatic updates |
 | 409 | `{error:"camera_busy"}` | the hub is streaming as many cameras as it relays, this key already has a stream open, or only the last free stream is left (it is kept for people) — take a still, or try later |
 | 502 | `camera_unreachable`, `camera_unverified`, `camera_address_refused`, `camera_bad_response` | the hub could not, or would not, fetch from that camera |
 | 422 | `{error:"invalid_automation", issues}` or `{…, problems, warnings}` | a rule the schema refuses, or one this home cannot use |
@@ -55,4 +55,5 @@ not.
 - **`needsReview: true`** means the hub could not map every one of the device's
   parameters, not that it is unusable.
 - **The hub restarting** (an update, a radio switch) is unreachable for a minute
-  or two, then back.
+  or two, then back. A hub with automatic updates on can do this by itself,
+  at an hour its home is usually quiet.

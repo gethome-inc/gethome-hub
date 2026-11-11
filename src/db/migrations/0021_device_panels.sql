@@ -1,9 +1,11 @@
 -- Panels on devices' pages, every kind in one table (`src/panels/`). Written
 -- by hand from what `db:generate` emits, for one reason: `IF NOT EXISTS`. This
 -- file replaced `0019_device_web_blocks` before anything released had either,
--- under a later `when`, so a hub installed from the branch that had the old
--- one runs this one too — and it has to stay harmless however many times a
--- renumbering on the way to `main` makes such a hub meet it again.
+-- under a later `when`, and was renumbered from `0019_device_panels` to here
+-- when `main` took 0019 and 0020 first — with a new `when`, because a hub
+-- already past those skips any migration dated before them. So a hub installed
+-- from the branch under an earlier number meets this one again, and it has to
+-- stay harmless however many times that happens.
 CREATE TABLE IF NOT EXISTS `device_panels` (
 	`device_id` text NOT NULL,
 	`panel_id` text NOT NULL,

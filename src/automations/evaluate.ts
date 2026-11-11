@@ -139,6 +139,22 @@ export function evaluateEdge(
 
 // ── Time ─────────────────────────────────────────────────────────────────────
 
+/**
+ * Before this, the clock is not to be trusted.
+ *
+ * A Raspberry Pi has no real-time clock: it boots at whatever the last shutdown
+ * wrote, or at the epoch, and NTP corrects it seconds to minutes later. A
+ * scheduler that ran during that window would fire every rule whose time
+ * happened to match a fictional clock. Nothing is skipped by waiting — the
+ * tick fires on the minute it *is* in, so the moment the clock is right the
+ * right minute comes round.
+ *
+ * Exported because it is not only the scheduler's: the hub's automatic updates
+ * read the same clock to decide when the home is asleep, and two copies of
+ * "when is the clock real" would be two places for one of them to be wrong.
+ */
+export const MIN_PLAUSIBLE_CLOCK = Date.UTC(2025, 0, 1);
+
 const formatters = new Map<string, Intl.DateTimeFormat>();
 
 /**
@@ -242,4 +258,86 @@ export function evaluateConditions(
 ): boolean {
   if (!conditions || conditions.length === 0) return true;
   return conditions.every((condition) => evaluateCondition(condition, context));
+}
+
+const dateFormatters = new Map<string, Intl.DateTimeFormat>();
+
+/** The home's own calendar date, `YYYY-MM-DD` — what "today" means in it. */
+export function localDateIn(timezone: string, at: number): string {
+  let formatter = dateFormatters.get(timezone);
+  if (!formatter) {
+    // `en-CA` writes a date the ISO way round, which is the one property wanted.
+    formatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    });
+    dateFormatters.set(timezone, formatter);
+  }
+  return formatter.format(new Date(at));
+}
+
+/**
+ * The instant a wall-clock `HH:MM` falls on a calendar date in a timezone, or
+ * `null` when that date has no such minute (the hour a clock skips in spring).
+ *
+ * Found by guessing the instant as if the zone were UTC and correcting by how
+ * far the zone's own reading of that guess is from what was asked — twice,
+ * because the first correction can land on the other side of a change of
+ * summer time. The answer is then *checked* with the helpers `tick` itself
+ * uses, so "when will this fire" cannot disagree with "did this fire".
+ */
+function instantOf(timezone: string, date: string, time: string): number | null {
+  const [year, month, day] = date.split('-').map(Number);
+  const [hour, minute] = time.split(':').map(Number);
+  if ([year, month, day, hour, minute].some((part) => part === undefined || Number.isNaN(part))) {
+    return null;
+  }
+  const wanted = Date.UTC(year!, month! - 1, day!, hour!, minute!);
+  const readAsUtc = (at: number): number => {
+    const [y, m, d] = localDateIn(timezone, at).split('-').map(Number);
+    const [h, min] = timeOfDayIn(timezone, at).split(':').map(Number);
+    return Date.UTC(y!, m! - 1, d!, h!, min!);
+  };
+  let guess = wanted;
+  for (let pass = 0; pass < 2; pass += 1) guess += wanted - readAsUtc(guess);
+  return localDateIn(timezone, guess) === date && timeOfDayIn(timezone, guess) === time
+    ? guess
+    : null;
+}
+
+/**
+ * When a set of `schedule` triggers next fires after `now`, or `null`.
+ *
+ * Looked for over the coming eight days — a schedule names days of the week,
+ * so one that is going to fire at all fires within seven — and a timezone
+ * `Intl` cannot use answers `null`, exactly as `tick` holds every schedule in
+ * one.
+ */
+export function nextScheduleAt(
+  schedules: readonly { at: string; days?: readonly number[] | undefined }[],
+  timezone: string,
+  now: number,
+): number | null {
+  if (schedules.length === 0) return null;
+  let next: number | null = null;
+  try {
+    const seen = new Set<string>();
+    // Stepped in half days so a 23- or 25-hour day cannot be stepped over.
+    for (let step = 0; step <= 16; step += 1) {
+      const date = localDateIn(timezone, now + step * 12 * 60 * 60_000);
+      if (seen.has(date)) continue;
+      seen.add(date);
+      for (const schedule of schedules) {
+        const at = instantOf(timezone, date, schedule.at);
+        if (at === null || at <= now) continue;
+        if (schedule.days !== undefined && !schedule.days.includes(dayOfWeekIn(timezone, at))) continue;
+        if (next === null || at < next) next = at;
+      }
+    }
+  } catch {
+    return null;
+  }
+  return next;
 }

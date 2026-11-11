@@ -112,6 +112,11 @@ describe.skipIf(!broker || !passwdTool)('the MQTT ACL install.sh writes', () => 
       chmodSync(path.join(dir, file), 0o644);
     }
 
+    // Where AppArmor confines mosquitto to /etc/mosquitto — Ubuntu 26.04 ships
+    // that profile — this broker cannot read a config from a temporary
+    // directory and never listens. CI unloads the profile first (the Start
+    // Mosquitto step in `.github/workflows/ci.yml`); a local run on such a
+    // machine fails the same way until it is unloaded there too.
     process = spawn(broker!, ['-c', path.join(dir, 'mosquitto.conf')], { stdio: 'ignore' });
     expect(await listening(port), 'the test broker never came up').toBe(true);
   }, 30_000);

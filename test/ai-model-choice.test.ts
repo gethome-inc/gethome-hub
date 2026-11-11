@@ -33,8 +33,19 @@ vi.mock('../src/ai/openai-agent.js', () => ({ createOpenAiMappingAgent }));
 
 const { SettingsService } = await import('../src/core/settings.js');
 const { AiDeviceMapper } = await import('../src/ai/mapper.js');
-const { AGENT_MODELS, PROVIDER_MODELS, defaultModelFor, effectiveAgentModel, effectiveModel, modelLabel } =
-  await import('../src/ai/models.js');
+const {
+  AGENT_MODELS,
+  AGENT_TIERS,
+  PROVIDER_MODELS,
+  agentCounterpart,
+  agentTier,
+  closestOnLadder,
+  defaultModelFor,
+  effectiveAgentModel,
+  effectiveModel,
+  estimateCostUsd,
+  modelLabel,
+} = await import('../src/ai/models.js');
 const { openTestDb, resetDb } = await import('./helpers/db.js');
 const { settings: settingsTable } = await import('../src/db/schema.js');
 const { mapExposes } = await import('../src/adapters/zigbee/exposes-mapper.js');
@@ -116,11 +127,38 @@ describe.skipIf(!handle)('which model a run is given', () => {
   });
 
   it('leaves the more thorough of Anthropic’s two alone as well', async () => {
-    await settings.setAiSettings({ model: 'claude-fable-5-1', apiKey: 'sk-ant-api-key-0000' });
+    await settings.setAiSettings({ model: 'claude-fable-5-2', apiKey: 'sk-ant-api-key-0000' });
     const mapper = new AiDeviceMapper(db, settings, log);
     await mapper.requestMapping(lamp, mapExposes(lamp), { force: true });
 
-    expect(new Set(modelsGiven(createMappingAgent))).toEqual(new Set(['claude-fable-5-1']));
+    expect(new Set(modelsGiven(createMappingAgent))).toEqual(new Set(['claude-fable-5-2']));
+  });
+
+  /**
+   * A home that chose Fable 5.1 chose the top rung, and keeps it: every
+   * surface runs Fable 5.2, never the default a rung below, while each column
+   * still says what somebody wrote in it — so the build before this one, which
+   * has never heard of Fable 5.2, reads them exactly as it always did.
+   */
+  it('moves a home on Fable 5.1 to Fable 5.2, and leaves the columns alone', async () => {
+    await settings.setAiSettings({ model: 'claude-fable-5-1', apiKey: 'sk-ant-api-key-0000' });
+    await settings.setAssistantModel('claude-fable-5-1');
+    await settings.setAutomationsModel('claude-fable-5-1');
+    const mapper = new AiDeviceMapper(db, settings, log);
+    await mapper.requestMapping(lamp, mapExposes(lamp), { force: true });
+
+    expect(new Set(modelsGiven(createMappingAgent))).toEqual(new Set(['claude-fable-5-2']));
+    const ai = await settings.getAiSettings();
+    expect(effectiveModel('anthropic', ai.anthropic.model)).toBe('claude-fable-5-2');
+    expect(ai.assistant).toMatchObject({ provider: 'anthropic', model: 'claude-fable-5-2' });
+    expect(ai.automations).toMatchObject({ provider: 'anthropic', model: 'claude-fable-5-2' });
+
+    const stored = new Map(
+      (await db.select().from(settingsTable)).map((row) => [row.key, row.value] as const),
+    );
+    expect(stored.get('ai_model')).toBe('claude-fable-5-1');
+    expect(stored.get('ai_assistant_model')).toBe('claude-fable-5-1');
+    expect(stored.get('ai_automations_model')).toBe('claude-fable-5-1');
   });
 
   it('leaves the more thorough of OpenAI’s two alone as well', async () => {
@@ -135,8 +173,10 @@ describe.skipIf(!handle)('which model a run is given', () => {
   /**
    * **What updating a hub does to a home that chose a model this build
    * retired**: it runs the model that replaced it — Opus 5 → Opus 5.5, GPT-6
-   * Sol → GPT-6.1 Sol, and both GPT-5.6 tiers on down that chain — and nobody
-   * has to do anything.
+   * Sol → GPT-6.1 Sol — and nobody has to do anything. GPT-5.6 Terra lands on
+   * GPT-6.1 Sol here as well, for a different reason: its successor is GPT-6.1
+   * Terra, which recognition does not offer, so the walk runs off the end of
+   * the chain and recognition's default is what runs.
    */
   it('hands a run the successor of a retired model, on either provider', async () => {
     await settings.setAiSettings({ model: 'claude-opus-5', apiKey: 'sk-ant-api-key-0000' });
@@ -181,7 +221,7 @@ describe.skipIf(!handle)('which model a run is given', () => {
 
     const ai = await settings.getAiSettings();
     expect(effectiveModel('openai', ai.openai.model)).toBe('gpt-6.1-sol');
-    expect(ai.assistant).toMatchObject({ provider: 'openai', model: 'gpt-6.1-sol' });
+    expect(ai.assistant).toMatchObject({ provider: 'openai', model: 'gpt-6.1-terra' });
     expect(ai.automations).toMatchObject({ provider: 'anthropic', model: 'claude-opus-5-5' });
 
     // And straight from the rows: exactly what was written, every one.
@@ -212,11 +252,13 @@ describe('which model an agent is given once its own is retired', () => {
       modelId: 'claude-sonnet-5-5',
     });
     expect(effectiveAgentModel('gpt-6-sol', both)).toEqual({ provider: 'openai', modelId: 'gpt-6.1-sol' });
-    // Down a chain again: GPT-5.6 was replaced by GPT-6 Sol, which GPT-6.1
+    // Down a chain again: GPT-5.6 Sol was replaced by GPT-6 Sol, which GPT-6.1
     // Sol has replaced in turn.
     expect(effectiveAgentModel('gpt-5.6-sol', both)).toEqual({ provider: 'openai', modelId: 'gpt-6.1-sol' });
-    expect(effectiveAgentModel('gpt-5.6-terra', both)).toEqual({ provider: 'openai', modelId: 'gpt-6.1-sol' });
     expect(effectiveAgentModel('gpt-5.6', both)).toEqual({ provider: 'openai', modelId: 'gpt-6.1-sol' });
+    // And a tier keeps its tier: GPT-5.6 Terra went to Sol only while GPT-6
+    // had no Terra, and is GPT-6.1 Terra's now there is one.
+    expect(effectiveAgentModel('gpt-5.6-terra', both)).toEqual({ provider: 'openai', modelId: 'gpt-6.1-terra' });
     // Down a chain: every Opus before 5 walks to 5.5 rather than stopping.
     expect(effectiveAgentModel('claude-opus-4-6', both)).toEqual({
       provider: 'anthropic',
@@ -260,6 +302,7 @@ describe('the model table', () => {
   /** Every model a hub in the field may have stored, from every build so far. */
   const everShipped = {
     anthropic: [
+      'claude-fable-5-2',
       'claude-fable-5-1',
       'claude-haiku-5-5',
       'claude-opus-5-5',
@@ -271,7 +314,16 @@ describe('the model table', () => {
       'claude-sonnet-5',
       'claude-sonnet-4-6',
     ],
-    openai: ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6', 'gpt-5.6-terra'],
+    openai: [
+      'gpt-6-astra',
+      'gpt-6.1-sol',
+      'gpt-6.1-terra',
+      'gpt-6-sol',
+      'gpt-6-luna',
+      'gpt-5.6-sol',
+      'gpt-5.6',
+      'gpt-5.6-terra',
+    ],
   } as const;
 
   it('still knows, and names, every model a hub may have stored', () => {
@@ -305,6 +357,109 @@ describe('the model table', () => {
         expect(choices.filter((choice) => choice.recommended).map((choice) => choice.id)).toEqual([fallback]);
       }
     }
+  });
+});
+
+/**
+ * The agents' line-ups read across the vendors, which is what a failed round is
+ * offered on the other one (`chat/failure.ts`). A model an agent is offered
+ * with no tier would be answered again on the other vendor's default whatever
+ * it was — Opus 5.5 offered to a chat on GPT-6.1 Terra, at four times its
+ * price, is the bug this exists for.
+ */
+describe('the agents’ tiers, read across the vendors', () => {
+  const providers = ['anthropic', 'openai'] as const;
+  const offered = (provider: (typeof providers)[number]) => AGENT_MODELS[provider].choices.map((choice) => choice.id);
+  const blended = (model: string) => estimateCostUsd(model, { input_tokens: 1000, output_tokens: 1000 });
+
+  it('places every model an agent is offered on a tier', () => {
+    // The guard for a model added later: its row in MODELS needs a `tier`.
+    for (const provider of providers) {
+      for (const id of offered(provider)) expect(AGENT_TIERS, id).toContain(agentTier(id));
+    }
+  });
+
+  it('keeps each vendor’s tiers in price order — a higher tier is never the cheaper', () => {
+    for (const provider of providers) {
+      for (const a of offered(provider)) {
+        for (const b of offered(provider)) {
+          if (AGENT_TIERS.indexOf(agentTier(a)!) < AGENT_TIERS.indexOf(agentTier(b)!)) {
+            expect(blended(a), `${a} above ${b}`).toBeGreaterThan(blended(b));
+          }
+        }
+      }
+    }
+  });
+
+  it('answers each of today’s models with the other vendor’s on its tier, both ways round', () => {
+    const pairs = [
+      ['claude-fable-5-2', 'gpt-6-astra'],
+      ['claude-opus-5-5', 'gpt-6.1-sol'],
+      ['claude-sonnet-5-5', 'gpt-6.1-terra'],
+      ['claude-haiku-5-5', 'gpt-6-luna'],
+    ] as const;
+    for (const [claude, gpt] of pairs) {
+      expect(agentCounterpart(claude, 'openai')).toBe(gpt);
+      expect(agentCounterpart(gpt, 'anthropic')).toBe(claude);
+    }
+  });
+
+  it('never offers a model more than three times dearer or cheaper on either rate', () => {
+    // The widest pairing a hub has run is 2.5× (Opus 5 against GPT-6 Sol); the
+    // bug was 4×. A new model that breaks this is a decision, not a typo.
+    const input = (model: string) => estimateCostUsd(model, { input_tokens: 1000 });
+    const output = (model: string) => estimateCostUsd(model, { output_tokens: 1000 });
+    for (const [from, to] of [['anthropic', 'openai'], ['openai', 'anthropic']] as const) {
+      for (const id of offered(from)) {
+        const other = agentCounterpart(id, to);
+        for (const rate of [input, output]) {
+          const [a, b] = [rate(id), rate(other)];
+          expect(Math.max(a, b) / Math.min(a, b), `${id} → ${other}`).toBeLessThanOrEqual(3);
+        }
+      }
+    }
+  });
+
+  describe('a line-up that does not exist yet', () => {
+    const at = (id: string, tier: (typeof AGENT_TIERS)[number] | undefined, rate: number, recommended = false) => ({
+      id,
+      tier,
+      rate,
+      recommended,
+    });
+
+    it('chooses the nearer in price of two models a vendor offers on one tier', () => {
+      // A vendor between versions: the old and the new both offered.
+      const sol = { tier: 'main', rate: 12 } as const;
+      expect(closestOnLadder(sol, [at('opus-6', 'main', 30, true), at('opus-5-5', 'main', 24)])).toBe('opus-5-5');
+      // The same price: the one the vendor recommends, then the list's order.
+      expect(closestOnLadder(sol, [at('opus-5-5', 'main', 24), at('opus-6', 'main', 24, true)])).toBe('opus-6');
+      expect(closestOnLadder(sol, [at('opus-6', 'main', 24), at('opus-5-5', 'main', 24)])).toBe('opus-6');
+    });
+
+    it('keeps the tier ahead of the price', () => {
+      // A cheaper model a tier down is not offered for an everyday one, even
+      // when it is nearer the price.
+      expect(closestOnLadder({ tier: 'main', rate: 12 }, [at('opus', 'main', 24), at('sonnet', 'quick', 12)])).toBe(
+        'opus',
+      );
+    });
+
+    it('answers from the nearest tier where the other vendor has none on this one', () => {
+      const terra = { tier: 'quick', rate: 6 } as const;
+      expect(closestOnLadder(terra, [at('opus', 'main', 24), at('haiku', 'lite', 0.6)])).toBe('opus');
+      expect(closestOnLadder(terra, [at('opus', 'main', 60), at('haiku', 'lite', 3)])).toBe('haiku');
+      expect(closestOnLadder({ tier: 'top', rate: 60 }, [at('opus', 'main', 24), at('haiku', 'lite', 0.6)])).toBe(
+        'opus',
+      );
+    });
+
+    it('never chooses a model nobody placed', () => {
+      expect(closestOnLadder({ tier: 'main', rate: 12 }, [at('new', undefined, 12), at('haiku', 'lite', 0.6)])).toBe(
+        'haiku',
+      );
+      expect(closestOnLadder({ tier: 'main', rate: 12 }, [at('new', undefined, 12)])).toBeUndefined();
+    });
   });
 });
 

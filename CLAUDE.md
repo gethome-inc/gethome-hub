@@ -66,7 +66,7 @@ section. The iOS and Studio repositories carry the same section from their side
 
 | | It ships when | It reaches somebody | What is still out there |
 |---|---|---|---|
-| **gethome hub** | a pull request merges to `main` — merging *is* releasing, and we choose when | a new install at once (every path runs `main`'s `install.sh` and downloads `bundle-main`); an existing hub only when somebody asks it to (*Update* in an app, where it is offered the next time an app looks, or `gethome-hubctl update`) | every build ever merged — a hub never updates itself |
+| **gethome hub** | a pull request merges to `main` — merging *is* releasing, and we choose when | a new install at once (every path runs `main`'s `install.sh` and downloads `bundle-main`); an existing hub when somebody asks it to (*Update* in an app, where it is offered the next time an app looks, or `gethome-hubctl update`) — or by itself, on a quiet night once the build has been on `main` for a day, where somebody in that home has switched automatic updates on (off by default) | every build ever merged — a hub updates itself only where its home has switched that on |
 | **gethome studio** | we run `scripts/release.sh` and merge the site's pull request — we choose when | Sparkle offers it within a day; installing it is the reader's click, since installing by itself is off by default | every release, and every SD card one of them wrote |
 | **gethome for iPhone** | Apple passes it — App Review takes a day to a week, and can reject | when the phone updates, which for some phones is never | every build that ever passed review |
 
@@ -105,7 +105,11 @@ rules follow from that.
   because that is what an older app shows for a `kind` it has never met; a new
   refusal code is for a new situation and never a rename of an old one, since
   an older app already has its own words for the old one and only a generic
-  failure for the new.
+  failure for the new. **And the fallback is not the same in every field**:
+  every shipped iOS build reads a chat `phase` it has never met as `turn`,
+  which ends the round on screen, while a socket frame `type` it has never met
+  is dropped — so anything new on the chat stream is a frame of its own
+  (`chatTitle` is), never another phase.
 - **A capability is advertised, never inferred.** An app learns what a hub can
   do from presence — `history`, `portraits` and `pairing.signInCodes` on
   `GET /hub`, `streams` on `hello` — never from a version number, because a hub
@@ -417,6 +421,16 @@ adapter/registry/API change.
   read behind `GET /hub`: **nothing that route reads may throw**, because it is
   the health check `install.sh` gates on — each read is `try`/`catch` with a
   documented fallback, and a new one has to be.
+- **A photo is kept only when the request asks *and* the switch is on, and
+  only while there is room** (`src/photos/CLAUDE.md`, which loads when you work
+  under `src/photos/`). The rule binds the chat runtime, the portraits and the
+  room pictures, which is why it is here: each passes the app's own
+  `keepPhotos`/`keepPhoto` through and keeps nothing on a switch alone, because
+  every app and Studio that shipped before this — and the Privacy Policy — told
+  people their photos stay on the device that took them. Whatever removes a
+  drawing, a portrait, a device, a room or a member releases the photos kept for
+  it, and nothing that keeps a photo may fail or delay the drawing or message
+  it came with.
 - **Portraits' conventions live in `src/portraits/CLAUDE.md`** — files beside
   rows, bounds on bulk, the pinned image model and its prompt, and what a
   drawing cost in `ai_runs` — and **the traps in the suites themselves live in
@@ -912,7 +926,12 @@ outside `deploy/`, so they stay here:
   (`src/core/update.ts`) writes one line into `<data>/update/` and a root
   oneshot runs it; `<data>/update/enabled` is the capability. What is running
   afterwards is read back from `GET /hub`, never from the log, and a rollback
-  is its own outcome that only the `@@ROLLBACK@@` marker can report.
+  is its own outcome that only the `@@ROLLBACK@@` marker can report. **The hub
+  may now write that line itself** — `src/core/auto-update.ts`, at a quiet hour,
+  only where somebody switched automatic updates on — and nothing on the root
+  side knows the difference: the unit is still never enabled, and the runner
+  still only installs `main`. The rules for when it may are in
+  `src/core/CLAUDE.md`.
 - **The hub records a Wi-Fi network change the same way, and waits for it.**
   `POST`/`DELETE /settings/wifi/networks` (`src/core/wifi-networks.ts`) write
   one request into `<data>/wifi/`, `gethome-wifi.path` notices, and
@@ -1037,8 +1056,8 @@ delegate registry → `docs/assistant.md`; portraits → `docs/portraits.md`;
 module boundaries → this file and the subsystem file for the directory you
 changed (`src/ai/CLAUDE.md`, `src/automations/CLAUDE.md`, `src/core/CLAUDE.md`,
 `src/adapters/zigbee/CLAUDE.md`, `src/adapters/matter/CLAUDE.md`,
-`src/portraits/CLAUDE.md`, `src/cameras/CLAUDE.md`, `src/panels/CLAUDE.md`,
-`test/CLAUDE.md`, `deploy/CLAUDE.md`) +
+`src/portraits/CLAUDE.md`, `src/photos/CLAUDE.md`, `src/cameras/CLAUDE.md`,
+`src/panels/CLAUDE.md`, `test/CLAUDE.md`, `deploy/CLAUDE.md`) +
 `docs/architecture.md`; installer markers, autostart or Zigbee detection →
 `docs/zigbee.md` + the marker list in `deploy/install.sh` (and flag the Studio
 repo); the boards and Zigbee sticks the hub is tested on or recognises →

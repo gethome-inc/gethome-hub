@@ -138,8 +138,22 @@
     {
       "idx": 19,
       "version": "6",
-      "when": 1792229986515,
-      "tag": "0019_device_panels",
+      "when": 1793654242146,
+      "tag": "0019_kept_photos",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1794292442956,
+      "tag": "0020_automation_status",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "6",
+      "when": 1794368001737,
+      "tag": "0021_device_panels",
       "breakpoints": true
     }
   ]

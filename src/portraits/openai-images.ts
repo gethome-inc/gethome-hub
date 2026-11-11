@@ -9,41 +9,57 @@
  * handing back typed content blocks for a forty-turn tool loop; nothing here
  * needs that.
  *
- * **`gpt-image-2.5-flare` is pinned, and moving off `gpt-image-2` cost nothing
- * at the wire.** Same two endpoints, same fields, same base64 answer: 2.5 kept
- * the Image API's shape, so the migration is a model id plus a re-read of the
- * three facts that hang off it (transparency, format, quality). What changes is
- * the wait — Flare is the small, fast half of the 2.5 pair and draws in a
- * fraction of `gpt-image-2`'s time, which on a surface where somebody watches an
- * orb is the whole reason to move. The other half, `gpt-image-2.5-sunburst`, is
- * the quality tier and is deliberately **not** taken: a portrait here is one
- * matte object on a transparent ground in a fixed palette, drawn at card size by
- * every surface that shows it, so the tier that spends longer would spend it on
- * detail this render throws away.
+ * **`gpt-image-2.6-flare` is pinned, and no move between models has touched the
+ * wire.** `gpt-image-2` to 2.5, and 2.5 to 2.6, each kept the Image API's shape
+ * — same two endpoints, same fields, same base64 answer — so each was a model id
+ * plus a re-read of the facts that hang off it (transparency, format, quality,
+ * and since 2.6 complexity). What changes is the wait. Flare is the small, fast
+ * half of the pair: 2.5 Flare drew in a fraction of `gpt-image-2`'s time, and
+ * OpenAI says 2.6 draws 50% faster than 2.5, which on a surface where somebody
+ * watches an orb is the whole reason to move. The other half,
+ * `gpt-image-2.6-sunburst`, is the quality tier and is deliberately **not**
+ * taken: a portrait here is one matte object on a transparent ground in a fixed
+ * palette, drawn at card size by every surface that shows it, so the tier that
+ * spends longer would spend it on detail this render throws away. A room is the
+ * opposite case, and takes the quality half — on 2.5, where 2.6 split a long
+ * room into two boxes (`src/room-pictures/draw.ts`).
  *
  * **A transparent cut-out is still the whole point** — the apps float the object
  * over their own glow and contact shadow, so a baked-in white square would be a
- * grey slab on the page. Both 2.5 models support `transparent` outright rather
- * than in preview, which is what makes this pin ordinary rather than a bet on a
- * capability that might be withdrawn; if it ever is, the request fails with the
- * provider's own message rather than silently returning a boxed image.
+ * grey slab on the page. Both 2.6 models support `transparent` outright rather
+ * than in preview — a product cut-out is OpenAI's own worked example for each —
+ * which is what makes this pin ordinary rather than a bet on a capability that
+ * might be withdrawn; if it ever is, the request fails with the provider's own
+ * message rather than silently returning a boxed image.
  */
 
-import { classifyApiError } from '../ai/errors.js';
+import { classifyApiError, errorCodeIn } from '../ai/errors.js';
 
-export const PORTRAIT_MODEL = 'gpt-image-2.5-flare';
+export const PORTRAIT_MODEL = 'gpt-image-2.6-flare';
 
 /** Square, because every surface that draws a portrait draws it in a square. */
 const SIZE = '1024x1024';
 
 /**
- * 2.5 widened this to `low | medium | high | xhigh | max`, and `high` stays.
+ * 2.5 widened this to `low | medium | high | xhigh | max`, 2.6 kept the same
+ * five, and `high` stays.
  *
  * Two reasons, and neither is thrift alone. OpenAI's own guidance puts a
  * transparent background at its best at medium or high, so the tiers above it
  * are not free of risk on the one capability this whole path exists for. And
  * the point of moving to Flare was the wait: spending the time it saves on
  * detail nobody can see on a device tile would be the migration undoing itself.
+ *
+ * **`complexity`, which 2.6 added beside it, is not sent**, so the model plans
+ * at its own default — `high`, on both 2.6 models. It is how much the model
+ * plans before it renders rather than how finely it renders, and OpenAI suggests
+ * the lower settings for quick edits, which a restyled photo is close to — so it
+ * is the next lever on the wait. It is not pulled yet: OpenAI's advice for a
+ * move between models is to change the model alone and compare against what the
+ * old one drew, and planning less is also planning less around a long prompt —
+ * the shadow ban, the centring, the palette. Compare it on real drawings before
+ * reaching for it, here and in the app's `OpenAIImageClient`, which sends the
+ * same request.
  */
 const QUALITY = 'high';
 
@@ -78,11 +94,11 @@ const EDITS_URL = 'https://api.openai.com/v1/images/edits';
  * came from.
  *
  * **That measurement is `gpt-image-2`'s, and the deadline is deliberately kept
- * as it is.** Flare draws in a fraction of that time, so ten minutes went from
- * merely safe to generous — which is the right direction for a ceiling nobody
- * should ever reach. Re-measure before tightening it: the figure above was
- * earned on this prompt, at this quality, with a photo to restyle, and nothing
- * here has been timed on the new model yet.
+ * as it is.** Flare draws in a fraction of that time, and OpenAI says 2.6 is 50%
+ * faster again, so ten minutes went from merely safe to generous — which is the
+ * right direction for a ceiling nobody should ever reach. Re-measure before
+ * tightening it: the figure above was earned on this prompt, at this quality,
+ * with a photo to restyle, and nothing here has been timed on 2.6 yet.
  */
 const TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -136,6 +152,10 @@ export interface PortraitDrawing {
  * Output dominates: a 1024² render is thousands of output tokens against a
  * prompt of a few hundred, so an input rate that is a little wrong barely moves
  * the total while a missing output rate would be the whole of it.
+ *
+ * 2.6 bills exactly what 2.5 did — $5 text in, $8 image in, $30 image out — so
+ * the move left these three numbers where they were. A move that changes them
+ * changes them here, in the same commit as the model id.
  */
 const PRICE_PER_MTOK = { textInput: 5, imageInput: 8, imageOutput: 30 } as const;
 
@@ -199,7 +219,8 @@ export async function drawPortrait(options: DrawOptions): Promise<PortraitDrawin
     const detail = messageIn(body) ?? `OpenAI answered ${response.status}.`;
     // Reuse the mapper's classifier: it branches on HTTP status rather than on
     // any vendor's error vocabulary, which is exactly why it is structural.
-    const kind = classifyApiError({ status: response.status, message: detail })?.kind ?? 'refused';
+    const kind =
+      classifyApiError({ status: response.status, message: detail, code: errorCodeIn(body) })?.kind ?? 'refused';
     throw new PortraitDrawError(detail, kind);
   }
 

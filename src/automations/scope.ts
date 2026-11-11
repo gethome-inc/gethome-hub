@@ -31,6 +31,8 @@ interface ScopedTarget {
   target: AutomationTarget;
   /** `null` for a read: a trigger or a condition watches whatever is there. */
   capability: CapabilityKind | null;
+  /** Whether the rule sends this target a command, rather than watching it. */
+  writes: boolean;
 }
 
 /**
@@ -117,14 +119,14 @@ function* automationTargets(document: AutomationDocument): Generator<ScopedTarge
 
 function* triggerTargets(trigger: AutomationTrigger): Generator<ScopedTarget> {
   if (trigger.kind === 'deviceState' || trigger.kind === 'deviceEvent') {
-    yield { target: trigger.target, capability: null };
+    yield { target: trigger.target, capability: null, writes: false };
   }
 }
 
 function* conditionTargets(condition: AutomationCondition): Generator<ScopedTarget> {
   switch (condition.kind) {
     case 'deviceState':
-      yield { target: condition.target, capability: null };
+      yield { target: condition.target, capability: null, writes: false };
       return;
     case 'all':
     case 'any':
@@ -140,6 +142,42 @@ function* conditionTargets(condition: AutomationCondition): Generator<ScopedTarg
 
 function* actionTargets(action: AutomationAction): Generator<ScopedTarget> {
   if (action.kind === 'deviceCommand') {
-    yield { target: action.target, capability: commandCapability(action.command.type) };
+    yield {
+      target: action.target,
+      capability: commandCapability(action.command.type),
+      writes: true,
+    };
   }
+}
+
+/**
+ * The devices a rule reads and the devices it works, by id.
+ *
+ * The other half of `automationRoom`'s walk, and derived for the same reason:
+ * a selector means whatever it resolves to *today*, so the list moves when a
+ * lamp is paired or a sensor changes room, with the rule untouched. It is what
+ * lets a device's own page say which rules use it without the app decoding a
+ * document.
+ *
+ * `reads` is what the rule watches — triggers and conditions, nested ones
+ * included. `controls` is what it sends commands to, resolved with the
+ * capability the command needs exactly as a run resolves it, a toggle's
+ * off-actions included. A device can be in both: a rule that switches a plug
+ * off when its own power draw falls reads it and controls it. Each list is in
+ * the order the rule meets them and names a device once. A `runAutomation` is
+ * not followed, for `automationRoom`'s reason.
+ */
+export function automationDevices(
+  document: AutomationDocument,
+  home: AutomationHomeView,
+): { reads: string[]; controls: string[] } {
+  const reads = new Set<string>();
+  const controls = new Set<string>();
+  for (const { target, capability, writes } of automationTargets(document)) {
+    const into = writes ? controls : reads;
+    for (const entry of resolveTarget(target, home, capability !== null ? { capability } : {})) {
+      into.add(entry.deviceId);
+    }
+  }
+  return { reads: [...reads], controls: [...controls] };
 }

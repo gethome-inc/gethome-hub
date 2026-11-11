@@ -1,4 +1,7 @@
+import { and, asc, eq } from 'drizzle-orm';
 import type { AiProvider } from '../core/settings.js';
+import { automationChatMessages } from '../db/schema.js';
+import { requestedAgentModel } from './models.js';
 import type { AiRunKind } from '../core/ai-runs.js';
 import type { AutomationEngine } from '../automations/engine.js';
 import type { AutomationStore } from '../automations/store.js';
@@ -12,6 +15,7 @@ import {
   type ChatMessageWire,
   type ChatRuntimeOptions,
   type ChatSession,
+  type ChatTurnRequest,
 } from './chat/chat-runtime.js';
 
 /**
@@ -65,17 +69,66 @@ export class AutomationChat extends ChatRuntime<AutomationTurn> {
     super(options);
   }
 
+  /** A suite's conversations name nothing unless it says otherwise. */
+  protected override standsIn(): boolean {
+    return this.options.createConversation !== undefined;
+  }
+
   /** Start a conversation, optionally about a rule that already exists. */
   override async start(input: {
     memberId: string;
     message: string;
     automationId?: string | undefined;
+    turn?: ChatTurnRequest | undefined;
   }): Promise<import('./chat/chat-runtime.js').ChatReply> {
     return super.start({
       memberId: input.memberId,
       message: input.message,
       ...(input.automationId !== undefined ? { topic: input.automationId } : {}),
+      ...(input.turn !== undefined ? { turn: input.turn } : {}),
     });
+  }
+
+  /**
+   * The assistant conversation that handed this one over, when one did.
+   *
+   * **The link is written once, on the other side**: the assistant's
+   * `handoff` row names the session it started and nothing here names it
+   * back, so this reads that row backwards rather than keeping a second copy
+   * of the same fact to drift. The newest handover wins — a follow-up goes
+   * back to the conversation that did the work, so one session can be handed
+   * on more than once, and the card somebody most recently saw is the one to
+   * return to.
+   */
+  async handedFrom(sessionId: string): Promise<string | undefined> {
+    return (await this.handedOver()).get(sessionId);
+  }
+
+  /**
+   * Every handover the assistant has written, by the session it started.
+   *
+   * One query over the assistant's `handoff` rows, which are few — a
+   * fortnight of them is the most there ever is — and filtered here rather
+   * than with `json_extract` so the reading of `data` stays the same plain
+   * JSON every other reader of this table does.
+   */
+  protected override async handedOver(): Promise<Map<string, string>> {
+    const rows = await this.options.db
+      .select({ sessionId: automationChatMessages.sessionId, data: automationChatMessages.data })
+      .from(automationChatMessages)
+      .where(
+        and(
+          eq(automationChatMessages.role, 'handoff'),
+          eq(automationChatMessages.surface, 'assistant'),
+        ),
+      )
+      .orderBy(asc(automationChatMessages.at));
+    const parents = new Map<string, string>();
+    for (const row of rows) {
+      const child = (row.data as { sessionId?: unknown } | null)?.sessionId;
+      if (typeof child === 'string') parents.set(child, row.sessionId);
+    }
+    return parents;
   }
 
   /**
@@ -117,12 +170,13 @@ export class AutomationChat extends ChatRuntime<AutomationTurn> {
       saved.push(await this.save(session, parsed.data, rule.replaces));
       session.produced += 1;
     }
-    if (saved.length === 0) return messages;
-    // A conversation that produced a rule has done its job; recording the
-    // spend now means an abandoned tab does not delay the row for hours.
-    await this.record(session, true);
-    if (turn.text.trim().length > 0) {
-      messages.push(await this.write(session, 'agent', turn.text));
+    if (saved.length > 0) {
+      // A conversation that produced a rule has done its job; recording the
+      // spend now means an abandoned tab does not delay the row for hours.
+      await this.record(session, true);
+      if (turn.text.trim().length > 0) {
+        messages.push(await this.write(session, 'agent', turn.text));
+      }
     }
     /**
      * The card an app draws, and it carries the rule's **name** and its
@@ -153,6 +207,16 @@ export class AutomationChat extends ChatRuntime<AutomationTurn> {
           },
         ),
       );
+    }
+    /**
+     * **Why the turn stopped, after the cards it stopped with.** A turn that
+     * ran into the cost limit with a rule already accepted delivers the rule
+     * rather than dropping it, and the limit is the hub's own note — the row a
+     * `stopped` turn writes, in the place a person reads last, since it is
+     * about what they can do next.
+     */
+    if (turn.stopped !== undefined) {
+      messages.push(await this.write(session, 'note', turn.stopped));
     }
     return messages;
   }
@@ -233,6 +297,7 @@ export class AutomationChat extends ChatRuntime<AutomationTurn> {
     memberId: string;
     topic: string | undefined;
     sessionId: string;
+    model?: string | undefined;
   }): Promise<AutomationConversation> {
     const automationId = input.topic;
     const ai = await this.options.settings.getAiSettings();
@@ -267,7 +332,19 @@ export class AutomationChat extends ChatRuntime<AutomationTurn> {
      * key — so a home holding only that has, for this purpose, no Anthropic key
      * at all, and `getAiSettings` has already decided that.
      */
-    const provider = ai.automations.provider;
+    /**
+     * **A conversation that chose its own model runs on it**, while that model
+     * is still offered and its vendor's key usable — the picker in the chat,
+     * applied to this one conversation and to nobody else's. Through
+     * `requestedAgentModel`, so whether a vendor counts is still decided in
+     * one place; an id it cannot run falls back to this agent's own setting,
+     * which is what an unchosen conversation has always run on.
+     */
+    const chosen =
+      input.model !== undefined
+        ? requestedAgentModel(input.model, await this.options.settings.agentProviders())
+        : null;
+    const provider = chosen?.provider ?? ai.automations.provider;
     if (provider === null) {
       throw new AgentNotConfiguredError(
         'automation_needs_anthropic',
@@ -296,7 +373,7 @@ export class AutomationChat extends ChatRuntime<AutomationTurn> {
      * *reported* a model went through the resolver while the call that picked
      * one to run read the column.
      */
-    const modelId = ai.automations.model;
+    const modelId = chosen?.modelId ?? ai.automations.model;
 
     const home = this.options.engine.homeView();
     const editing =

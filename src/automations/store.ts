@@ -1,6 +1,6 @@
 import { and, asc, desc, eq, lt, sql } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
-import { automationRuns, automationVersions, automations } from '../db/schema.js';
+import { automationRuns, automationStatus, automationVersions, automations } from '../db/schema.js';
 import { automationDocumentSchema, type AutomationDocument } from './schema.js';
 
 /**
@@ -68,12 +68,28 @@ export interface AutomationRunStep {
   kind: string;
   summary: string;
   detail?: string;
+  /**
+   * Set on a step that is **something asked for that did not happen** — a
+   * device that did not answer or was offline, a relay the hub protected, a
+   * chain cut, the breaker. It is exactly what the rule's status counts as a
+   * problem, said per step.
+   *
+   * It exists because `kind` cannot say it. A `refused` step is also what the
+   * idempotence guard writes for "was already on", which is the house being
+   * as asked — and every shipped build draws a step by its `kind`, so that
+   * word's meaning has to stay where it is. Absent, never `false`.
+   */
+  problem?: true;
 }
 
 export interface AutomationRunRecord {
+  /** The row's own id, when the engine needs to find this trace again. */
+  id?: string;
   automationId: string;
   trigger: string;
   cause: string;
+  /** The cause in the hub's exact terms — see the column. */
+  causeDetail?: string;
   outcome: 'ran' | 'skipped' | 'refused' | 'failed' | 'interrupted';
   durationMs: number;
   steps: AutomationRunStep[];
@@ -273,9 +289,11 @@ export class AutomationStore {
   async recordRun(run: AutomationRunRecord): Promise<void> {
     try {
       await this.db.insert(automationRuns).values({
+        ...(run.id !== undefined ? { id: run.id } : {}),
         automationId: run.automationId,
         trigger: run.trigger,
         cause: run.cause.slice(0, 400),
+        ...(run.causeDetail !== undefined ? { causeDetail: run.causeDetail.slice(0, 400) } : {}),
         outcome: run.outcome,
         durationMs: run.durationMs,
         steps: run.steps.slice(0, MAX_RUN_STEPS),
@@ -283,6 +301,76 @@ export class AutomationStore {
       await this.pruneRuns(run.automationId);
     } catch {
       // See above.
+    }
+  }
+
+  /**
+   * Put one step of a stored trace right: the step that said a command went
+   * out, once the radio has said it never landed.
+   *
+   * Found by when it was written and what it said, and replaced where it
+   * stands, so the trace reads in the order things happened; a step that can
+   * no longer be found is added at the end rather than lost. Never throws,
+   * for `recordRun`'s reason, and a trace already pruned is simply gone.
+   */
+  async correctRunStep(
+    runId: string,
+    was: { at: string; summary: string },
+    now: AutomationRunStep,
+  ): Promise<void> {
+    try {
+      const [row] = await this.db
+        .select({ steps: automationRuns.steps })
+        .from(automationRuns)
+        .where(eq(automationRuns.id, runId))
+        .limit(1);
+      if (!row) return;
+      const steps = Array.isArray(row.steps) ? ([...row.steps] as AutomationRunStep[]) : [];
+      const index = steps.findIndex((step) => step.at === was.at && step.summary === was.summary);
+      if (index >= 0) steps[index] = now;
+      else if (steps.length < MAX_RUN_STEPS) steps.push(now);
+      await this.db.update(automationRuns).set({ steps }).where(eq(automationRuns.id, runId));
+    } catch {
+      // See above.
+    }
+  }
+
+  /**
+   * What the engine remembered about each rule before it last stopped —
+   * opaque here, because the shape is the engine's (`status.ts`) and a row an
+   * older or newer build wrote has to be read by whoever knows what to make
+   * of it. Never throws: a hub that cannot read this starts with every rule
+   * saying it has not run yet, which is true of this boot.
+   */
+  async loadStatus(): Promise<Map<string, unknown>> {
+    try {
+      const rows = await this.db.select().from(automationStatus);
+      return new Map(rows.map((row) => [row.automationId, row.data]));
+    } catch {
+      return new Map();
+    }
+  }
+
+  /**
+   * Write down what the engine remembers, for the rules it says have moved.
+   *
+   * Called on a timer, never per firing — see the table. A rule deleted in the
+   * meantime is a foreign key refusing its row, which is the right outcome and
+   * must not take the other rows with it, so each is written on its own.
+   */
+  async saveStatus(entries: ReadonlyMap<string, unknown>): Promise<void> {
+    for (const [automationId, data] of entries) {
+      try {
+        await this.db
+          .insert(automationStatus)
+          .values({ automationId, data, updatedAt: new Date() })
+          .onConflictDoUpdate({
+            target: automationStatus.automationId,
+            set: { data, updatedAt: new Date() },
+          });
+      } catch {
+        // See above.
+      }
     }
   }
 

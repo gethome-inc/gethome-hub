@@ -1,6 +1,18 @@
 import { randomUUID } from 'node:crypto';
 import type { EndpointState, HubCommand } from '../schema/index.js';
-import type { AutomationRunEvent, HubEventBus } from '../core/bus.js';
+import type { AutomationRunEvent, CommandFailure, HubEventBus } from '../core/bus.js';
+import { formatDuration } from './phrasing.js';
+import {
+  narrateCommand,
+  narrateEventCause,
+  narrateFailure,
+  narrateRefusal,
+  narrateSentWhileOffline,
+  narrateStateCause,
+  type NarratedDevice,
+} from './narrate.js';
+import { AutomationStatusBook, type AutomationStatus, type NotedRun } from './status.js';
+import { isToggle } from './schema.js';
 import type { ActivityService } from '../core/activity.js';
 import type { Logger } from '../logging.js';
 import {
@@ -14,6 +26,8 @@ import {
   dayOfWeekIn,
   evaluateConditions,
   evaluateEdge,
+  MIN_PLAUSIBLE_CLOCK,
+  nextScheduleAt,
   readPath,
   timeOfDayIn,
   type ConditionContext,
@@ -59,20 +73,30 @@ import {
  *  so a `schedule` cannot be stepped over, and cheap enough to `unref`. */
 const TICK_MS = 20_000;
 
-/**
- * Before this, the clock is not to be trusted.
- *
- * A Raspberry Pi has no real-time clock: it boots at whatever the last shutdown
- * wrote, or at the epoch, and NTP corrects it seconds to minutes later. A
- * scheduler that ran during that window would fire every rule whose time
- * happened to match a fictional clock. Nothing is skipped by waiting — the
- * tick fires on the minute it *is* in, so the moment the clock is right the
- * right minute comes round.
- */
-const MIN_PLAUSIBLE_CLOCK = Date.UTC(2025, 0, 1);
-
 /** Queued runs held for one rule in `queued` mode, before new ones are dropped. */
 const MAX_QUEUED = 5;
+
+/**
+ * How often what the engine remembers about each rule is written down.
+ * `STATE_FLUSH_MS`'s argument: a motion rule fires all day, and a count that
+ * is a minute behind after a power cut costs nobody anything.
+ */
+const STATUS_FLUSH_MS = 60_000;
+
+/**
+ * The most often one rule's status is announced. A rule can fire every few
+ * seconds; an app drawing "ran a moment ago" needs the first of those at once
+ * and the rest as one catch-up, not a frame each.
+ */
+const STATUS_NOTIFY_MS = 10_000;
+
+/**
+ * How long after a command went out a radio's word that it never landed is
+ * still about that command. Zigbee2MQTT gives a write about ten seconds
+ * before it reports the device unreachable; a minute covers a busy network
+ * without pinning yesterday's failure on this morning's run.
+ */
+const LATE_FAILURE_MS = 60_000;
 
 /** The registry, as much of it as this module needs. Structural on purpose:
  *  the engine is testable against a fake, and `DeviceRegistry` stays unaware. */
@@ -109,6 +133,8 @@ export interface AutomationEngineOptions {
   timezone: () => string;
   now?: () => number;
   guardLimits?: Partial<GuardLimits>;
+  /** `STATUS_NOTIFY_MS`, for a test that cannot wait ten seconds. */
+  statusNotifyMs?: number;
 }
 
 interface RunHandle {
@@ -139,6 +165,63 @@ interface FireOptions {
   manual?: boolean;
   useOffActions?: boolean;
   by?: AutomationPresser;
+  /** The cause in the hub's exact terms — `narrate.ts`. */
+  causeDetail?: string;
+  /**
+   * The whole sentence the activity log gets for a manual run: "Anna pressed
+   * Leaving". The run's own `cause` answers a different question — what set
+   * this rule off, read under the rule's name — and is "Pressed by Anna".
+   */
+  sentence?: string;
+}
+
+/**
+ * One run, for as long as something may still have to be said about it.
+ *
+ * **A command that reached the protocol is not a command that reached the
+ * device.** `registry.execute` resolves when the radio has *taken* a write —
+ * for Zigbee, when the broker has — and the word that it never landed comes
+ * seconds later, as a `commandFailed`, often after the run has ended and been
+ * written down as fine. This is what that word is matched back to: the trace
+ * while the run is still going (corrected in place), and once it is written,
+ * how it was counted and the write a correction has to land behind.
+ */
+interface RunLedger {
+  automationId: string;
+  runId: string;
+  /** The trace while the run is going; gone once it has been handed over. */
+  steps?: AutomationRunStep[] | undefined;
+  /** A failure that arrived while the run was going, for its own report. */
+  lateProblem?: string;
+  /** How the run was written down, once it was. */
+  reported?: NotedRun;
+  /** The trace being written, so a correction is not lost to the race. */
+  recorded?: Promise<void>;
+}
+
+/** The last command a rule sent one device, until its fate is known or stale. */
+interface SentCommand {
+  ledger: RunLedger;
+  command: HubCommand;
+  /** The step that says it went out — the one a failure replaces. */
+  step: AutomationRunStep;
+  at: number;
+}
+
+/** How one firing ended, as `report` is told it. */
+interface RunReport {
+  /** The run's ledger, when it got as far as its actions. */
+  ledger?: RunLedger;
+  steps?: AutomationRunStep[];
+  commands?: number;
+  refused?: number;
+  /** The first refusal in the hub's own terms — the live frame's `detail`. */
+  detail?: string | undefined;
+  /** Why it was skipped, or the first thing that went wrong, as a sentence. */
+  reason?: string | undefined;
+  /** Whether anything asked for did not happen. */
+  problem?: boolean;
+  startedAt?: number;
 }
 
 export class AutomationEngine {
@@ -161,6 +244,14 @@ export class AutomationEngine {
   /** Runs nobody is awaiting — see `detach`. */
   private readonly detached = new Set<Promise<void>>();
 
+  /** Per device: the last command a rule sent it — see `RunLedger`. */
+  private readonly sentCommands = new Map<string, SentCommand>();
+  /** Whether each rule is working — `status.ts`. */
+  private readonly book: AutomationStatusBook;
+  private lastStatusFlush = 0;
+  /** Per rule: when its status was last announced, and a catch-up if one is owed. */
+  private readonly announced = new Map<string, { at: number; timer?: ReturnType<typeof setTimeout> }>();
+
   private timer: ReturnType<typeof setInterval> | null = null;
   private started = false;
   private warnedAboutClock = false;
@@ -168,19 +259,23 @@ export class AutomationEngine {
   constructor(private readonly options: AutomationEngineOptions) {
     this.now = options.now ?? (() => Date.now());
     this.guards = new AutomationGuards(this.now, options.guardLimits ?? {});
+    this.book = new AutomationStatusBook(this.now, options.timezone);
   }
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   async start(): Promise<void> {
+    this.book.restore(await this.options.store.loadStatus());
     await this.reload();
     this.options.events.on('stateChanged', this.onStateChanged);
     this.options.events.on('deviceUpserted', this.onHomeMoved);
     this.options.events.on('deviceRemoved', this.onDeviceRemoved);
     this.options.events.on('structureChanged', this.onHomeMoved);
+    this.options.events.on('commandFailed', this.onCommandFailed);
 
     this.timer = setInterval(() => {
       void this.tick();
+      if (Date.now() - this.lastStatusFlush >= STATUS_FLUSH_MS) void this.flushStatus();
     }, TICK_MS);
     // Never the reason a quiet hub stays awake — the same `unref` the
     // registry's flush timer and the history service's both carry.
@@ -205,16 +300,22 @@ export class AutomationEngine {
     }
     for (const hold of this.holds.values()) clearTimeout(hold);
     this.holds.clear();
+    for (const entry of this.announced.values()) clearTimeout(entry.timer);
+    this.announced.clear();
     this.options.events.off('stateChanged', this.onStateChanged);
     this.options.events.off('deviceUpserted', this.onHomeMoved);
     this.options.events.off('deviceRemoved', this.onDeviceRemoved);
     this.options.events.off('structureChanged', this.onHomeMoved);
+    this.options.events.off('commandFailed', this.onCommandFailed);
+    this.sentCommands.clear();
     // Anything mid-`wait` is abandoned rather than resumed. Its trace already
     // says `interrupted`, which is the honest word for it.
     for (const handle of this.running.values()) handle.cancelled = true;
     await Promise.allSettled([...this.running.values()].map((handle) => handle.promise));
     this.running.clear();
     await this.settled();
+    // After the runs have drained, so the last of them is in what is written.
+    await this.flushStatus();
   }
 
   /** Re-read everything from the store. Called after any write. */
@@ -226,7 +327,98 @@ export class AutomationEngine {
     this.records = records;
     this.unreadable = unreadable;
     this.structure = structure;
+    this.book.keepOnly(new Set([...records, ...unreadable].map((entry) => entry.id)));
     this.rebuildWatchers();
+  }
+
+  // ── Whether a rule is working ──────────────────────────────────────────────
+
+  /**
+   * What an app is told about one rule beside the rule itself: when it last
+   * ran and how that went, today's count, the last problem, and — worked out
+   * here rather than remembered — when a rule on a clock fires next.
+   */
+  statusOf(id: string): AutomationStatus {
+    const record = this.get(id);
+    const { activeSince, lastPressed, ...remembered } = this.book.read(id);
+    const status: AutomationStatus = { ...remembered };
+    if (!record) return status;
+
+    // Only what the rule's shape can have. A rule that used to be a mode and
+    // was edited into one that watches has no "since" to show.
+    const manual = record.document.triggers.some((trigger) => trigger.kind === 'manual');
+    if (manual && lastPressed !== undefined) status.lastPressed = lastPressed;
+    if (isToggle(record.document) && record.active && activeSince !== undefined) {
+      status.activeSince = activeSince;
+    }
+
+    if (record.enabled) {
+      const next = this.nextRunAt(record);
+      if (next !== null) status.nextRunAt = new Date(next).toISOString();
+    }
+    return status;
+  }
+
+  /**
+   * When a rule on a clock fires next, or null when that cannot be said: no
+   * clock in it, a clock that is not set yet, a timezone `Intl` cannot use, or
+   * an `interval` that has not been armed by its first tick.
+   */
+  private nextRunAt(record: AutomationRecord): number | null {
+    const now = this.now();
+    if (now < MIN_PLAUSIBLE_CLOCK) return null;
+    const schedules: Extract<AutomationTrigger, { kind: 'schedule' }>[] = [];
+    let next: number | null = null;
+    for (const [index, trigger] of record.document.triggers.entries()) {
+      if (trigger.kind === 'schedule') schedules.push(trigger);
+      if (trigger.kind === 'interval') {
+        const last = this.lastFired.get(`${record.id}:${index}`);
+        if (last === undefined) continue;
+        const due = Math.max(last + trigger.everyMs, now);
+        if (next === null || due < next) next = due;
+      }
+    }
+    const scheduled = nextScheduleAt(schedules, this.options.timezone(), now);
+    if (scheduled !== null && (next === null || scheduled < next)) next = scheduled;
+    return next;
+  }
+
+  /**
+   * Write down what has moved. Public for `HistoryService.flush()`'s reason —
+   * a test cannot wait a minute — and called by `stop()`.
+   */
+  async flushStatus(): Promise<void> {
+    this.lastStatusFlush = Date.now();
+    const moved = this.book.takeDirty();
+    if (moved.size > 0) await this.options.store.saveStatus(moved);
+  }
+
+  /**
+   * Tell whoever is listening that a rule's status moved — at once the first
+   * time, and then no more than once per `STATUS_NOTIFY_MS` however often the
+   * rule fires. The catch-up is read when it is sent, so it carries the rule
+   * as it then is rather than as it was when the timer was set.
+   */
+  private announceStatus(id: string): void {
+    const every = this.options.statusNotifyMs ?? STATUS_NOTIFY_MS;
+    const emit = (): void => {
+      if (!this.get(id)) return;
+      this.options.events.emit('automationStatus', { automationId: id, status: this.statusOf(id) });
+    };
+    const entry = this.announced.get(id);
+    const now = Date.now();
+    if (!entry || now - entry.at >= every) {
+      clearTimeout(entry?.timer);
+      this.announced.set(id, { at: now });
+      emit();
+      return;
+    }
+    if (entry.timer !== undefined) return;
+    entry.timer = setTimeout(() => {
+      this.announced.set(id, { at: Date.now() });
+      emit();
+    }, every - (now - entry.at));
+    entry.timer.unref?.();
   }
 
   list(): readonly AutomationRecord[] {
@@ -272,13 +464,73 @@ export class AutomationEngine {
     });
   };
 
+  /**
+   * A radio saying a write never landed. If the last thing sent to that
+   * device was a rule's, the rule's trace and its status are put right.
+   *
+   * **The step is corrected where it stands**, not followed by a second one:
+   * "Hall lamp turned on" and then "Hall lamp didn’t answer" is a trace that
+   * contradicts itself, and the first of those was never true. A run still
+   * going is corrected in memory and counts the problem when it reports; one
+   * already written is corrected in its row, behind the write that made it.
+   *
+   * Attributed by device and by time only, which is as much as the failure
+   * carries. A command somebody sent the same device by hand inside the
+   * minute would be read as the rule's — and either way the device is not
+   * answering, which is what the rule's page needs to say.
+   */
+  private readonly onCommandFailed = (failure: CommandFailure): void => {
+    const sent = this.sentCommands.get(failure.deviceId);
+    if (sent === undefined) return;
+    this.sentCommands.delete(failure.deviceId);
+    if (this.now() - sent.at > LATE_FAILURE_MS) return;
+
+    const said = narrateFailure(this.narrated(failure.deviceId), sent.command, failure.detail, failure.kind);
+    const was = { at: sent.step.at, summary: sent.step.summary };
+    const corrected: AutomationRunStep = {
+      at: was.at,
+      kind: 'refused',
+      summary: said.text,
+      detail: said.detail,
+      problem: true,
+    };
+    const { ledger } = sent;
+
+    if (ledger.steps !== undefined) {
+      Object.assign(sent.step, corrected);
+      ledger.lateProblem ??= said.text;
+      return;
+    }
+    if (ledger.reported === undefined) return;
+    this.book.lateProblem(ledger.automationId, ledger.reported, said.text);
+    this.announceStatus(ledger.automationId);
+    void (ledger.recorded ?? Promise.resolve()).then(() =>
+      this.options.store.correctRunStep(ledger.runId, was, corrected),
+    );
+  };
+
   private readonly onDeviceRemoved = (deviceId: string): void => {
     this.guards.forgetDevice(deviceId);
+    this.sentCommands.delete(deviceId);
     for (const key of [...this.edges.keys()]) {
-      if (key.endsWith(`:${deviceId}`)) this.edges.delete(key);
+      if (key.endsWith(`:${deviceId}`)) this.forgetEdge(key);
     }
     this.onHomeMoved();
   };
+
+  /**
+   * Forget one trigger's answer, and any `for` it was waiting out. The hold
+   * would find no answer and fire nothing — but until it ran out it would go
+   * on telling the hub's automatic updates that a rule is mid-way.
+   */
+  private forgetEdge(key: string): void {
+    this.edges.delete(key);
+    const hold = this.holds.get(key);
+    if (hold !== undefined) {
+      clearTimeout(hold);
+      this.holds.delete(key);
+    }
+  }
 
   private evaluateDevice(deviceId: string, endpointId: number, state: EndpointState): void {
     const home = this.homeView();
@@ -325,9 +577,7 @@ export class AutomationEngine {
 
     if (!outcome.fires) return;
 
-    const cause =
-      `${record.name}: ${this.deviceName(deviceId)} ${trigger.path} ` +
-      `${trigger.op} ${String(trigger.value ?? '')}`;
+    const cause = narrateStateCause(trigger, this.narrated(deviceId), value);
     const origin = this.guards.causeOf(deviceId, endpointId);
     const depth = origin ? origin.depth + 1 : 0;
 
@@ -337,14 +587,14 @@ export class AutomationEngine {
         // Still true? The latch is the answer — it is only released when the
         // test stops holding, and releasing it is what cancelled this timer.
         if (this.edges.get(key)?.latched !== true) return;
-        void this.fire(record, 'deviceState', `${cause} (held for ${trigger.for! / 1000}s)`, depth);
+        void this.fire(record, 'deviceState', cause.text, depth, { causeDetail: cause.detail });
       }, trigger.for);
       hold.unref?.();
       this.holds.set(key, hold);
       return;
     }
 
-    void this.fire(record, 'deviceState', cause, depth);
+    void this.fire(record, 'deviceState', cause.text, depth, { causeDetail: cause.detail });
   }
 
   private evaluateEventTrigger(
@@ -367,14 +617,11 @@ export class AutomationEngine {
     if (trigger.gesture !== undefined && state.event?.gesture !== trigger.gesture) return;
     if (trigger.action !== undefined && state.event?.action !== trigger.action) return;
 
-    const pressed = [state.event?.button, state.event?.gesture].filter(Boolean).join(' ');
+    const cause = narrateEventCause(this.narrated(deviceId), state.event ?? {});
     const origin = this.guards.causeOf(deviceId, endpointId);
-    void this.fire(
-      record,
-      'deviceEvent',
-      `${this.deviceName(deviceId)}: ${pressed || state.event?.action || 'button'}`,
-      origin ? origin.depth + 1 : 0,
-    );
+    void this.fire(record, 'deviceEvent', cause.text, origin ? origin.depth + 1 : 0, {
+      causeDetail: cause.detail,
+    });
   }
 
   // ── The clock ──────────────────────────────────────────────────────────────
@@ -427,7 +674,11 @@ export class AutomationEngine {
           // worth of silence after a fire is what makes it once.
           if (last !== undefined && now - last < 60_000) continue;
           this.lastFired.set(key, now);
-          void this.fire(record, 'schedule', `it is ${time}`, 0);
+          // The time itself is the whole cause: under a rule's name, "19:30"
+          // is what a person would say set it off.
+          void this.fire(record, 'schedule', time, 0, {
+            causeDetail: `schedule at ${trigger.at}${trigger.days ? ` on days ${trigger.days.join(',')}` : ''}`,
+          });
           continue;
         }
 
@@ -441,10 +692,70 @@ export class AutomationEngine {
           }
           if (now - last < trigger.everyMs) continue;
           this.lastFired.set(key, now);
-          void this.fire(record, 'interval', `every ${Math.round(trigger.everyMs / 1000)}s`, 0);
+          void this.fire(record, 'interval', `Every ${formatDuration(trigger.everyMs)}`, 0, {
+            causeDetail: `interval every ${Math.round(trigger.everyMs / 1000)}s`,
+          });
         }
       }
     }
+  }
+
+  // ── What an update has to stay out of the way of ───────────────────────────
+
+  /**
+   * Whether any rule is in the middle of something a restart would lose: a
+   * run — most likely sitting in a `wait` — or a `for` still waiting out its
+   * time. Asked by the hub's automatic updates, which would otherwise end a run
+   * half done, or drop "the hall has been empty for twenty minutes" ten
+   * minutes in: after a restart that trigger adopts the hall as it finds it
+   * and says nothing, so the light it was going to switch off stays on all
+   * night.
+   */
+  hasRunInFlight(): boolean {
+    return this.running.size > 0 || this.holds.size > 0;
+  }
+
+  /**
+   * Whether an enabled rule's `schedule` falls in the next `horizonMs`.
+   *
+   * Asked minute by minute with the helpers `tick` itself uses, so "will this
+   * fire" and "did this fire" cannot disagree — across midnight, a list of
+   * days or a change of summer time. Twenty minutes is twenty formatter calls,
+   * asked a few times a night. A timezone `Intl` cannot use holds every
+   * schedule (see `tick`), so nothing is due in one.
+   */
+  scheduledWithin(now: number, horizonMs: number): boolean {
+    const schedules = this.enabledSchedules();
+    if (schedules.length === 0) return false;
+    const timezone = this.options.timezone();
+    try {
+      for (let at = now; at < now + horizonMs; at += 60_000) {
+        const time = timeOfDayIn(timezone, at);
+        const day = dayOfWeekIn(timezone, at);
+        if (schedules.some((trigger) => trigger.at === time && (trigger.days?.includes(day) ?? true))) {
+          return true;
+        }
+      }
+    } catch {
+      return false;
+    }
+    return false;
+  }
+
+  /** The home-local hours enabled rules are set to fire in, one entry per trigger. */
+  scheduledHours(): number[] {
+    return this.enabledSchedules().map((trigger) => Number(trigger.at.slice(0, 2)));
+  }
+
+  private enabledSchedules(): Extract<AutomationTrigger, { kind: 'schedule' }>[] {
+    const found: Extract<AutomationTrigger, { kind: 'schedule' }>[] = [];
+    for (const record of this.records) {
+      if (!record.enabled) continue;
+      for (const trigger of record.document.triggers) {
+        if (trigger.kind === 'schedule') found.push(trigger);
+      }
+    }
+    return found;
   }
 
   // ── Running ────────────────────────────────────────────────────────────────
@@ -465,7 +776,13 @@ export class AutomationEngine {
     // the hub ten seconds. Awaiting the run reported a failure on every
     // press that actually did something slow, over a house doing precisely
     // what it was asked. `settled()` is how a test waits for the rest.
-    this.detach(this.fire(record, 'manual', `${by.name} pressed ${record.name}`, 0, { manual: true, by }));
+    this.detach(
+      this.fire(record, 'manual', `Pressed by ${by.name}`, 0, {
+        manual: true,
+        by,
+        sentence: `${by.name} pressed ${record.name}`,
+      }),
+    );
     return true;
   }
 
@@ -480,6 +797,7 @@ export class AutomationEngine {
     const record = this.get(id);
     if (!record) return false;
     await this.options.store.setActive(id, active);
+    this.book.setActive(id, active);
     await this.reload();
     const updated = this.get(id);
     if (!updated) return false;
@@ -494,9 +812,14 @@ export class AutomationEngine {
       this.fire(
         updated,
         'manual',
-        `${by.name} switched ${record.name} ${active ? 'on' : 'off'}`,
+        `Switched ${active ? 'on' : 'off'} by ${by.name}`,
         0,
-        { manual: true, useOffActions: !active, by },
+        {
+          manual: true,
+          useOffActions: !active,
+          by,
+          sentence: `${by.name} switched ${record.name} ${active ? 'on' : 'off'}`,
+        },
       ),
     );
     return true;
@@ -539,7 +862,10 @@ export class AutomationEngine {
 
     if (existing) {
       if (mode === 'single') {
-        this.report(record, trigger, cause, 'skipped', [], 0, 0, 'a run was already going');
+        this.report(record, trigger, cause, 'skipped', options, {
+          detail: 'a run was already going',
+          reason: 'It was already running, so this one was skipped.',
+        });
         return;
       }
       if (mode === 'restart') {
@@ -547,7 +873,10 @@ export class AutomationEngine {
       }
       if (mode === 'queued') {
         if (existing.queued >= MAX_QUEUED) {
-          this.report(record, trigger, cause, 'skipped', [], 0, 0, `${MAX_QUEUED} runs already queued`);
+          this.report(record, trigger, cause, 'skipped', options, {
+            detail: `${MAX_QUEUED} runs already queued`,
+            reason: 'Too many runs were already waiting their turn, so this one was skipped.',
+          });
           return;
         }
         existing.queued += 1;
@@ -582,7 +911,10 @@ export class AutomationEngine {
     if (declared !== undefined && options.manual !== true) {
       const refusal = this.guards.declaredRefusal(record.id, declared);
       if (refusal !== null) {
-        this.report(record, trigger, cause, 'skipped', [], 0, 0, refusal);
+        this.report(record, trigger, cause, 'skipped', options, {
+          detail: refusal,
+          reason: `Skipped — ${refusal}.`,
+        });
         return;
       }
     }
@@ -596,7 +928,10 @@ export class AutomationEngine {
     const runaway = this.guards.noteRun(record.id);
     if (runaway.runaway) {
       await this.disableRunaway(record, runaway.detail);
-      this.report(record, trigger, cause, 'refused', [], 0, 0, runaway.detail);
+      this.report(record, trigger, cause, 'refused', options, {
+        detail: runaway.detail,
+        reason: `The hub switched this rule off — ${runaway.detail}.`,
+      });
       return;
     }
 
@@ -621,15 +956,24 @@ export class AutomationEngine {
     const startedAt = this.now();
     const runId = randomUUID();
     const steps: AutomationRunStep[] = [];
-    const note = (kind: string, summary: string, detail?: string): void => {
-      if (steps.length >= MAX_RUN_STEPS) return;
-      steps.push({
+    const note = (
+      kind: string,
+      summary: string,
+      detail?: string,
+      problem = false,
+    ): AutomationRunStep | undefined => {
+      if (steps.length >= MAX_RUN_STEPS) return undefined;
+      const step: AutomationRunStep = {
         at: new Date(this.now()).toISOString(),
         kind,
         summary,
         ...(detail !== undefined ? { detail } : {}),
-      });
+        ...(problem ? { problem: true as const } : {}),
+      };
+      steps.push(step);
+      return step;
     };
+    const ledger: RunLedger = { automationId: record.id, runId, steps };
 
     const home = this.homeView();
     const context: ConditionContext = {
@@ -649,8 +993,12 @@ export class AutomationEngine {
      * wants out of it.
      */
     if (!options.useOffActions && !evaluateConditions(record.document.conditions, context)) {
-      note('condition', 'A condition did not hold, so nothing ran.');
-      this.report(record, trigger, cause, 'skipped', steps, 0, 0, 'a condition did not hold');
+      note('condition', 'A condition didn’t hold, so nothing ran.');
+      this.report(record, trigger, cause, 'skipped', options, {
+        steps,
+        detail: 'a condition did not hold',
+        reason: 'A condition didn’t hold, so nothing ran.',
+      });
       return;
     }
 
@@ -661,6 +1009,8 @@ export class AutomationEngine {
     let sent = 0;
     let refused = 0;
     let firstRefusal: string | undefined;
+    let problems = 0;
+    let firstProblem: string | undefined;
     let outcome: 'ran' | 'failed' | 'interrupted' = 'ran';
 
     for (const action of actions) {
@@ -670,18 +1020,31 @@ export class AutomationEngine {
         break;
       }
       try {
-        const result = await this.runAction(action, { record, runId, depth, home, note, handle });
+        const result = await this.runAction(action, { record, runId, depth, home, note, handle, ledger });
         sent += result.sent;
         refused += result.refused;
         if (firstRefusal === undefined && result.refusal !== undefined) firstRefusal = result.refusal;
+        problems += result.problems ?? 0;
+        firstProblem ??= result.problem;
       } catch (error) {
         outcome = 'failed';
-        note('note', 'An action failed.', (error as Error).message);
+        firstProblem ??= 'A step failed, so the rest did not run.';
+        note('note', 'A step failed, so the rest did not run.', (error as Error).message, true);
         break;
       }
     }
 
-    this.report(record, trigger, cause, outcome, steps, sent, refused, firstRefusal, startedAt);
+    this.report(record, trigger, cause, outcome, options, {
+      steps,
+      commands: sent,
+      refused,
+      detail: firstRefusal,
+      // A radio may already have said one of this run's commands never landed.
+      reason: firstProblem ?? ledger.lateProblem,
+      problem: problems > 0 || ledger.lateProblem !== undefined,
+      startedAt,
+      ledger,
+    });
 
     /**
      * Only a *manual* run writes to the activity log.
@@ -697,7 +1060,7 @@ export class AutomationEngine {
       const by = options.by;
       const row = {
         kind: 'automation.ran',
-        message: cause,
+        message: options.sentence ?? cause,
         data: { ...by?.data, automationId: record.id, automationName: record.name, commands: sent },
       };
       await this.options.activity
@@ -718,11 +1081,26 @@ export class AutomationEngine {
       runId: string;
       depth: number;
       home: AutomationHomeView;
-      note: (kind: string, summary: string, detail?: string) => void;
+      note: (
+        kind: string,
+        summary: string,
+        detail?: string,
+        problem?: boolean,
+      ) => AutomationRunStep | undefined;
       handle: RunHandle;
+      ledger: RunLedger;
     },
-  ): Promise<{ sent: number; refused: number; refusal?: string }> {
-    const { record, runId, depth, home, note, handle } = context;
+  ): Promise<{
+    sent: number;
+    refused: number;
+    refusal?: string;
+    /** Commands that were asked for and did not happen — a device already
+     *  the way the rule wanted it is not one of them. */
+    problems?: number;
+    /** The first of those, as the trace says it. */
+    problem?: string;
+  }> {
+    const { record, runId, depth, home, note, handle, ledger } = context;
 
     switch (action.kind) {
       case 'deviceCommand': {
@@ -743,6 +1121,8 @@ export class AutomationEngine {
         let sent = 0;
         let refused = 0;
         let refusal: string | undefined;
+        let problems = 0;
+        let problem: string | undefined;
 
         for (const entry of resolved) {
           if (handle.cancelled) break;
@@ -757,7 +1137,17 @@ export class AutomationEngine {
           if (verdict) {
             refused += 1;
             refusal ??= verdict.detail;
-            note('refused', `${entry.deviceName}: ${command.type} not sent`, verdict.detail);
+            const said = narrateRefusal(this.narrated(entry.deviceId), command, verdict);
+            // Already the way the rule wanted it is the house being as asked,
+            // not something that failed to happen.
+            const wrong = verdict.kind !== 'unchanged';
+            if (wrong) {
+              problems += 1;
+              problem ??= said.text;
+            }
+            // `kind` stays `refused` either way — every shipped build draws by
+            // it — and `problem` is what tells the two apart.
+            note('refused', said.text, said.detail, wrong);
             continue;
           }
           /**
@@ -776,18 +1166,50 @@ export class AutomationEngine {
           try {
             await this.options.registry.execute(entry.deviceId, entry.endpointId, command);
             sent += 1;
-            note('command', `${entry.deviceName}: ${command.type}`);
+            /**
+             * **Taken by the radio, which is not the same as done.** A device
+             * the hub could not reach when this went out is said to have been
+             * offline rather than to have "turned on", and counts as a
+             * problem: it is the answer to "why didn't the light come on".
+             * For the rest the step says what was asked, and is put right if
+             * the radio reports within the minute that it never landed
+             * (`onCommandFailed`).
+             */
+            const device = this.narrated(entry.deviceId);
+            const offline = device.online === false;
+            const said = offline ? narrateSentWhileOffline(device, command) : narrateCommand(device, command);
+            if (offline) {
+              problems += 1;
+              problem ??= said.text;
+            }
+            const step = note('command', said.text, said.detail, offline);
+            if (step !== undefined) {
+              this.sentCommands.set(entry.deviceId, { ledger, command, step, at: this.now() });
+            }
           } catch (error) {
             refused += 1;
             refusal ??= (error as Error).message;
-            note('refused', `${entry.deviceName}: ${command.type} failed`, (error as Error).message);
+            const said = narrateFailure(
+              this.narrated(entry.deviceId),
+              command,
+              (error as Error).message,
+            );
+            problems += 1;
+            problem ??= said.text;
+            note('refused', said.text, said.detail, true);
           }
         }
-        return { sent, refused, ...(refusal !== undefined ? { refusal } : {}) };
+        return {
+          sent,
+          refused,
+          problems,
+          ...(refusal !== undefined ? { refusal } : {}),
+          ...(problem !== undefined ? { problem } : {}),
+        };
       }
 
       case 'wait': {
-        note('wait', `Waited ${Math.round(action.ms / 1000)}s.`);
+        note('wait', `Waited ${formatDuration(action.ms)}.`);
         await new Promise<void>((resolve) => {
           const timer = setTimeout(resolve, action.ms);
           timer.unref?.();
@@ -805,6 +1227,7 @@ export class AutomationEngine {
 
       case 'setAutomationActive': {
         await this.options.store.setActive(action.automationId, action.active);
+        this.book.setActive(action.automationId, action.active);
         await this.reload();
         this.options.events.emit('automationChanged', action.automationId);
         note('note', `${this.nameOf(action.automationId)} is now ${action.active ? 'on' : 'off'}.`);
@@ -823,11 +1246,20 @@ export class AutomationEngine {
          * only visible at run time, and this is where the chain is counted.
          */
         if (depth + 1 > this.guards.limitsInUse().maxCausationDepth) {
-          note('refused', `Did not run ${other.name} — too deep a chain of automations.`);
-          return { sent: 0, refused: 1, refusal: 'too deep a chain of automations' };
+          const said = `“${other.name}” was not run — rules were setting each other off.`;
+          note('refused', said, 'too deep a chain of automations', true);
+          return {
+            sent: 0,
+            refused: 1,
+            refusal: 'too deep a chain of automations',
+            problems: 1,
+            problem: said,
+          };
         }
         note('note', `Ran ${other.name}.`);
-        await this.fire(other, 'action', `${record.name} ran it`, depth + 1);
+        await this.fire(other, 'action', `Run by “${record.name}”`, depth + 1, {
+          causeDetail: `runAutomation from ${record.id}`,
+        });
         return { sent: 0, refused: 0 };
       }
 
@@ -871,32 +1303,63 @@ export class AutomationEngine {
     trigger: string,
     cause: string,
     outcome: AutomationRunEvent['outcome'],
-    steps: AutomationRunStep[],
-    commands: number,
-    refused: number,
-    detail?: string,
-    startedAt?: number,
+    fired: FireOptions,
+    run: RunReport = {},
   ): void {
+    const steps = run.steps ?? [];
+    // A firing that was declined before it began has no steps of its own, and
+    // a stored trace with none says nothing about why. One line does.
+    if (steps.length === 0 && run.reason !== undefined) {
+      steps.push({
+        at: new Date(this.now()).toISOString(),
+        kind: outcome === 'refused' ? 'refused' : 'note',
+        summary: run.reason,
+        ...(run.detail !== undefined ? { detail: run.detail } : {}),
+        // The breaker switching the rule off is a problem; a skip is not.
+        ...(outcome === 'refused' ? { problem: true as const } : {}),
+      });
+    }
     const event: AutomationRunEvent = {
       automationId: record.id,
       name: record.name,
       at: new Date(this.now()).toISOString(),
       trigger,
       cause,
+      ...(fired.causeDetail !== undefined ? { causeDetail: fired.causeDetail } : {}),
       outcome,
-      commands,
-      refused,
-      ...(detail !== undefined ? { detail } : {}),
+      commands: run.commands ?? 0,
+      refused: run.refused ?? 0,
+      problems: steps.filter((step) => step.problem === true).length,
+      ...(run.detail !== undefined ? { detail: run.detail } : {}),
     };
     this.options.events.emit('automationRun', event);
-    void this.options.store.recordRun({
+
+    const noted = this.book.note(record.id, {
+      outcome,
+      cause,
+      reason: run.reason,
+      problem: run.problem,
+      ...(fired.manual === true && fired.by !== undefined ? { pressedBy: fired.by.name } : {}),
+    });
+    this.announceStatus(record.id);
+
+    const recorded = this.options.store.recordRun({
+      ...(run.ledger !== undefined ? { id: run.ledger.runId } : {}),
       automationId: record.id,
       trigger,
       cause,
+      ...(fired.causeDetail !== undefined ? { causeDetail: fired.causeDetail } : {}),
       outcome,
-      durationMs: startedAt !== undefined ? this.now() - startedAt : 0,
+      durationMs: run.startedAt !== undefined ? this.now() - run.startedAt : 0,
       steps,
     });
+    // From here a late failure is a correction to a written trace and a
+    // counted run, no longer to this array.
+    if (run.ledger !== undefined) {
+      run.ledger.steps = undefined;
+      run.ledger.reported = noted;
+      run.ledger.recorded = recorded;
+    }
   }
 
   // ── Reading the home ───────────────────────────────────────────────────────
@@ -954,7 +1417,7 @@ export class AutomationEngine {
     // Forget what belongs to a rule or a device that has gone, or the map
     // grows by one entry per rule the home has ever had.
     for (const key of [...this.edges.keys()]) {
-      if (!live.has(key)) this.edges.delete(key);
+      if (!live.has(key)) this.forgetEdge(key);
     }
     this.watched = watched;
   }
@@ -992,8 +1455,12 @@ export class AutomationEngine {
       ?.endpoints.find((endpoint) => endpoint.endpointId === endpointId)?.state;
   }
 
-  private deviceName(deviceId: string): string {
-    return this.options.registry.listDevices().find((device) => device.id === deviceId)?.name ?? deviceId;
+  /** A device as a trace names it: what the home calls it, and where it is. */
+  private narrated(deviceId: string): NarratedDevice {
+    const device = this.options.registry.listDevices().find((entry) => entry.id === deviceId);
+    if (!device) return { name: 'A device that is no longer here' };
+    const room = this.structure.rooms.find((entry) => entry.id === device.roomId)?.name;
+    return { name: device.name, online: device.online, ...(room !== undefined ? { room } : {}) };
   }
 
   private nameOf(automationId: string): string {

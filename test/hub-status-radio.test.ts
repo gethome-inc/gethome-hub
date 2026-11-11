@@ -119,6 +119,20 @@ describe('the Wi-Fi the hub can hand an accessory', () => {
     expect(readWifiCredentials(file)).toEqual({ ssid: 'Flat 3', passphrase: 'hunter2hunter2' });
   });
 
+  it('undoes the quoting the dispatcher writes around an apostrophe', () => {
+    // A single-quoted shell string carries one as `'\''`: close the quote, an
+    // escaped apostrophe, open it again.
+    const file = path.join(dir, 'wifi.env');
+    writeFileSync(file, "WIFI_SSID='Dave'\\''s Wi-Fi'\nWIFI_PSK=''\\''quoted'\\'''\n");
+    expect(readWifiCredentials(file)).toEqual({ ssid: "Dave's Wi-Fi", passphrase: "'quoted'" });
+  });
+
+  it('still reads a value in double quotes, as somebody might write by hand', () => {
+    const file = path.join(dir, 'wifi.env');
+    writeFileSync(file, 'WIFI_SSID="Flat 3"\nWIFI_PSK="hunter2hunter2"\n');
+    expect(readWifiCredentials(file)).toEqual({ ssid: 'Flat 3', passphrase: 'hunter2hunter2' });
+  });
+
   it('is nothing for an open network', () => {
     // An open network has no password to hand over, and an accessory given an
     // empty PSK for a network it cannot join is worse than being told the hub

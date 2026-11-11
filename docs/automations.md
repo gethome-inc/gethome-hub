@@ -200,6 +200,38 @@ never reported always sends: silence is not evidence.
   database afterwards — the `HUB_NAME` split. An unusable zone is refused at
   the route rather than taking every schedule down on every tick.
 
+### What a restart costs a rule, and why the hub's own updates ask first
+
+A restart — an update, a radio switched, the power — costs a rule exactly
+what is in memory at that moment, and nothing that is written down:
+
+- **A run mid-way** loses the rest of itself, most often a `wait`, which is why a
+  `wait` is capped at fifteen minutes.
+- **A `for` still waiting out its time** is lost too. After the restart the
+  trigger adopts the reading as it finds it and says nothing — that is what keeps
+  a reboot from firing every rule in the house — so "the hall has been empty for
+  twenty minutes", ten minutes in, never fires, and the light it was going to
+  switch off stays on until somebody walks past again.
+- **An `interval`** arms again from the moment the hub is back, so its next beat
+  comes one whole period after the restart rather than on its old rhythm.
+- **A `schedule`** whose minute passed while the hub was down does not fire late.
+
+So a hub that [updates itself](api.md#automatic-updates) asks the engine before
+it goes. It waits while any run is mid-way or any `for` is waiting out its time
+(`rule_running`), and while an enabled `schedule` falls in the next twenty
+minutes (`rule_due`) — worked out minute by minute with the helpers the tick
+itself uses, so "will this fire" cannot disagree with "did this fire", across
+midnight and a list of days alike. The two hours it updates in are also chosen
+away from the hours scheduled rules fire in, and it starts looking only once the
+rules have loaded, since before then the engine answers that nothing is
+scheduled and nothing is running.
+
+An `interval` is deliberately not asked about: one that runs every ten minutes
+would hold the hub off for ever, and a restart only moves its rhythm. Nor does a
+rule the clock started count as somebody being about — it counts towards which
+hours are busy, while a rule a *device* set off, which sent a command, keeps the
+hub waiting for half an hour like a person would.
+
 ---
 
 ## What is written down
@@ -228,6 +260,80 @@ written again without the id, and the sentence still says who it was.
 A trace records the commands a guard **refused** as well as the ones it sent:
 "nothing happened" and "the hub declined to switch that relay for the fortieth
 time this hour" look identical from outside.
+
+### A trace is written in the home's words
+
+Both apps print a run's `cause` and each step's `summary` exactly as they
+arrive, so those two strings are made to be read (`narrate.ts`): "Motion in the
+Living Room", "19:30", "Pressed by George"; "Motion LED turned on", "Bedroom
+blind closed to 40%", "Hall lamp didn’t answer — it was offline". Three rules.
+**The home's names, never the schema's** — a device is what the home calls it
+and a room's reading is the room's ("Temperature in the Bedroom went above
+25 °C"), because nobody in the house has ever said a capability path. **The
+exact terms are kept beside the sentence** — `causeDetail` on the run, `detail`
+on a step — since they are what somebody debugging a rule is looking for.
+**Past tense**: the storyboard's "goes above" is a rule waiting, a trace's "went
+above" is the moment it stopped. A `cause` is read under the rule's own name and
+does not repeat it; the one manual-run row in the activity log is read without
+it, and keeps its whole sentence ("Anna pressed Leaving").
+
+**And a step says only what is known.** `registry.execute` resolves when a
+radio has *taken* a write — for Zigbee, when the broker has — which is not the
+device having done it. So a command to a device that was offline at that moment
+reads "Hall lamp was offline when this was sent" and counts as a problem (it is
+still sent: the resolver deliberately does not filter on reachability). And
+when a `commandFailed` arrives for a device within a minute of a rule's command
+to it (`LATE_FAILURE_MS`), the engine puts the run right: the step that said
+"turned on" is **replaced where it stands** with "didn’t answer" — in memory
+while the run is still going, in its stored row afterwards — and the rule's
+status counts the run as one with a problem, once. Replaced rather than
+followed, because "turned on" then "didn’t answer" is a trace contradicting
+itself over a line that was never true. The failure carries a device and
+nothing else, so it is matched by device and time; a command somebody sent the
+same device by hand inside that minute would be read as the rule's, and either
+way the device is not answering, which is what the rule's page has to say.
+
+**Which steps were a problem is said on the step.** `kind: "refused"` is what
+the idempotence guard writes for "was already on" as well as what a lamp that
+did not answer gets, inside a run whose outcome is `ran` either way — and every
+shipped build draws a step by its `kind`, so neither word can be given a new
+meaning. `problem: true` on a step is the additive answer: it marks exactly the
+steps the rule's status counts (a device that did not answer or was offline, a
+relay the hub protected, a chain cut, the breaker), and the `automationRun`
+frame, which has no steps, carries their count as `problems`. One definition in
+three places — the step, the frame, `status.today.problems` — and
+`test/automations-engine.test.ts` holds them together.
+
+A reading that is a *state* rather than an amount — an alarm, a lock, air
+quality — is a number on the wire and is tested with a threshold, so the cause
+is made from what the device read when the rule fired, not from the threshold:
+"Smoke in the Hall", "Front door was unlocked". A numbered mode is said only to
+have changed.
+
+A firing declined before it began used to leave a trace with no steps and so
+nothing to say why. It now carries one line — "A condition didn’t hold, so
+nothing ran."
+
+### Whether a rule is working
+
+`automation_runs` cannot say how a rule's day has gone: twenty traces is a
+minute of a rule that fires every few seconds. So the engine keeps a small
+status per rule (`status.ts`) — the last run and how it ended, today's runs,
+problems and skips in the home's own day, the last problem and the last skip as
+sentences, when a button was pressed, since when a mode has been on — and works
+out when a rule on a clock fires next. It rides on every rule the API sends;
+[the API reference](api.md#whether-a-rule-is-working) has the fields.
+
+| | Bound | Why |
+|---|---|---|
+| `automation_status` | one row per rule | written about once a minute and when the hub stops, **never per firing** — `STATE_FLUSH_MS`'s rule, for a motion rule that fires all day |
+| `automationStatus` frames | one per rule per ten seconds | the first at once, then one catch-up — a status is glanced at, a trace is watched |
+
+A run, a skip and a problem are kept apart because they answer three questions:
+a skip is a rule declining before it acts, which for "only at night" is most
+firings and is the rule working; a problem is a run in which something asked
+for did not happen. The idempotence guard declining a command — the lamp was
+already on — is neither.
 
 ---
 
@@ -457,6 +563,15 @@ says one thing: *this rule is not one room's*.
 
 ---
 
+### The devices a rule uses
+
+The same walk as a list (`automationDevices`): every rule on the wire carries
+`devices: {reads, controls}` — the ids it watches (triggers and conditions) and
+the ids it sends commands to (actions and a mode's off-branch), resolved against
+the home as it is right now. It is what lets a device's page name the rules that
+use it without an app decoding a document, and it moves the way `roomId` does:
+with the home, not only with the rule.
+
 ## Writing one in conversation
 
 `src/ai/automation-*.ts`. The agent is **authoring only**: the runtime above
@@ -593,11 +708,15 @@ falls through to prose rather than being dropped. `text` is always the sentence;
 
 | `role` | `text` | `data` |
 |---|---|---|
-| `user` | what was typed | — |
+| `user` | what was typed — or, for a photo sent with no words, the hub's caption (`Photo`, `2 photos`), so an app that predates photos draws something true | only when the message asked for something besides its words: `{model?, effort?, attachments?: [{type: "image", mediaType, ref?, width?, height?, bytes}], wordless?}`, the keys the request named — never a photo's bytes. `wordless: true` says `text` is the caption |
 | `agent` | what the model said | — |
 | `question` | the question | `{options: [{id, label, hint?}], allowFreeText}` |
 | `preview` | the rule's **summary**, from `describeAutomation` | `{automationId, name, shape, enabled, edited}` |
-| `note` | something the hub is saying on its own behalf — a provider that failed, a rule that could not be saved | — |
+| `note` | something the hub is saying on its own behalf — a provider that failed, a rule that could not be saved, a round somebody stopped, a limit the conversation reached | `{stopped: true}` on the note a stopped round ends on (see *Stopping a round* below); otherwise nothing |
+
+Whatever its role — never the person's own — **the first row a round writes**
+also carries `data.steps` and `data.tookMs` (see *What a person sees while it works*
+below): they follow the row's position in the round, not its kind.
 
 **One conversation, any number of rules — and one reply can carry more than one
 card.** Two things had to change for that. The loop kept a *single*
@@ -630,8 +749,9 @@ reply can change one rule and add another.
 **And the sentence covers the lot**: the prompt asks for one line above the
 cards rather than a paragraph per card.
 
-The number of rules one response may deliver is bounded
-(`AUTOMATION_MAX_RULES_PER_TURN`, four). Two is the case this exists for and
+The number of rules one reply may deliver is bounded
+(`AUTOMATION_MAX_RULES_PER_TURN`, four, counting any held back for the line
+above them — see below). Two is the case this exists for and
 four is a large ask answered in one go; past that it is a model that has
 misread the room, and the cost lands in somebody's home as a page of rules
 nobody asked for. The ones already accepted are saved and shown, and the rest
@@ -674,6 +794,33 @@ line — reported as its own step, because it is a round the person is watching.
 with whatever it did say, since spending a third round on a sentence it will not
 write is worse than handing over without one.
 
+**And however that round ends, the rule is handed over.** Its results have
+already told the model "Accepted", so a turn that ended without it left a
+conversation whose own history said a rule existed that had never been saved —
+and somebody who never saw its card. The line and more tool calls were the only
+endings that delivered it; every other way out of the round now does too:
+
+- **the cost limit**, checked before that round as before every other, so
+  nothing is spent past it. The card arrives without a line and the limit is a
+  `note` under it ("Start a new one to carry on"), because every later message
+  in the conversation meets the same check;
+- **a refusal**, with whatever the round kept — on Claude nothing, since a
+  declined reply is discarded whole — and not as a refusal: its sentence, the
+  other model its note offers and the message let go from the model's memory
+  are all for a request that was declined, and here only the line about it was;
+- **running out of rounds**: a rule accepted on the last round goes over at
+  once, since there is no round left to ask in, and nothing says the agent ran
+  out of steps without finishing, which it did not;
+- **another submission**, with words or without: both rules, in the order they
+  came, as one reply — and the held ones count against the four a reply may
+  carry;
+- **a question**, refused inside the turn as a question beside a submission
+  always was, with the rule going over with what was said;
+- **a failure talking to the model**: the rule goes over without its line.
+
+A person's stop keeps the same promise: a rule accepted before the stop goes
+after one held for its line, never in place of it.
+
 Two fields on `preview` are there because leaving them out was wrong in a way
 only a real app finds. **`name`**, because `text` is the summary rather than a
 title, and a client without it would have to look the id up in a list it may not
@@ -714,9 +861,11 @@ with no rows at all, never having existed or past the fortnight.
 transcript kept for a fortnight that nothing can find again is a transcript
 thrown away: closing the page lost the conversation as surely as never having
 stored it, because the only way back was a session id nobody writes down. The
-list carries the first thing the *person* said as its title, and `live` beside
-it — readable and continuable are two different states, and an app has to say
-which one it is offering rather than discovering it on the next message.
+list carries a title — the name the hub gives a conversation from what the
+*person* said first, and that first message itself until the name lands
+([`assistant.md`](assistant.md#a-conversations-name)) — and `live` beside it:
+readable and continuable are two different states, and an app has to say which
+one it is offering rather than discovering it on the next message.
 
 **One question is outstanding at a time, and every other call in its response
 is still closed.** `ask_user` hands control back mid-response, and the API's
@@ -751,7 +900,7 @@ dropped.
 — `{usd, provider, modelId, model}` — and three rules hold it up.
 
 *It is absent rather than zero when the hub cannot say.* The ledger keeps the
-last sixty runs of every kind while a transcript lives a fortnight, so a home
+last 250 runs of every kind while a transcript lives a fortnight, so a home
 that has recognised a few devices since can open a perfectly readable
 conversation whose spend row has been pruned. `$0.00` about a chat that plainly
 cost something is a claim; nothing at all is the truth — the rule
@@ -831,6 +980,25 @@ what tells an app the stored transcript is ready to re-read *and* what takes its
 round that failed left three animated dots running for ever over a note
 explaining the failure that nothing had gone back for.
 
+### Stopping a round
+
+`POST /automations/chat/:id/stop` stops the round a conversation is running,
+part-way — acknowledged at once like every other chat route, `{stopped}`, with
+the round winding down on the socket (`docs/api.md` has the wire, and
+`docs/assistant.md` the mechanism both agents share). What matters for this
+agent is the rules. **A rule the model was told is saved is saved**: the
+submission's result already said "Accepted", and a history that says so about a
+rule that does not exist is a conversation that lies to itself from then on —
+so a stop that lands after a submission, including during the extra round that
+asks the model for its sentence, still hands the rule back, and the runtime
+saves it and writes its card. Submissions after the stop in the same response
+are answered *Not done* rather than evaluated. Then a note with
+`data.stopped: true` — `Stopped. What was already done stays done.` when a rule
+was saved, `Stopped.` otherwise — and the words that reached the page before the
+stop are the line above the card, or the answer where there is no card. When the
+assistant handed this conversation over, stopping the *assistant* does not stop
+it: this is where its own stop is.
+
 ### What a person sees while it works
 
 A round is tens of seconds of the model reading the home and deciding before a
@@ -847,10 +1015,23 @@ word of the reply exists, so the socket carries **four phases**, not one:
 only once something had *happened*, and the first thing that happens in a round
 is none of it — no tool called, no word written — so the whole of the longest
 wait was three animated dots. Two things fill it now: a step goes up **before**
-the request ("Reading your home", and "Working it out" on later rounds), and the
-reasoning is streamed as it arrives. That second one exists only because the
+the request — "Thinking", `kind: 'thinking'`, on every round of both agents
+(`ROUND_STEP`) — and the reasoning is streamed as it arrives, which is what then
+hangs under that step as its `detail`. That second one exists only because the
 loop asks for `display: 'summarized'`; with this model's default the thinking
 blocks stream empty and there is nothing to show.
+
+**The word is the one that is true whatever was asked.** It was "Reading your
+home" on the first round and "Working it out" after, which described a request
+for a rule and nothing else — asked how something works, or sent a photo, the
+round still opened on a line saying it had read the house. What happens in that
+silence is the model thinking, so that is what it says. It follows that a
+`thinking` step with no `detail` says only that the model was asked, which is
+true of every round: it is the wait, not part of the account of what was done.
+The one round that opens on something else is the write-up a silent submission
+is sent back for: it says "Writing it up for you" (also `thinking`) and not
+"Thinking" after it, which would only write over the line that says what the
+wait is for.
 
 **`kind` is what an app draws a mark from** — `reading` · `checking` · `writing`
 · `asking` · `thinking` — and it is about the *shape of the act* rather than the
@@ -877,8 +1058,11 @@ and it does not hold for the *fact* that there were a dozen — a rule arrives o
 of a handful of tool calls, and discarding all of them leaves the one page whose
 job is explaining a house to somebody who does not write software with nothing
 but the conclusion. So the round's steps are written into the **first row that
-round records** (`data.steps`, `[{text, kind, detail?}]`), whichever kind of row
-it is, and an app draws them folded above the answer.
+round records** (`data.steps`, `[{text, kind, detail?, done?}]`), whichever kind
+of row it is, and an app draws them folded above the answer. `done: true` marks
+a step whose change to the home took — a device worked, a scene pressed, a job
+handed over — and is what a model asked a failed round again is told stays done
+(`docs/api.md`); a step that only read, or tried and was refused, has none.
 
 Five rules hold that to the size of a transcript row.
 
@@ -909,6 +1093,33 @@ it was.
 from the frames and the stored one from these, so one shape rather than two that
 would drift; `kind` stays open there too.
 
+**And the same row says how long the round took** — `data.tookMs`, the whole
+milliseconds from the round beginning to that row being written. Same position
+rule, same reason: one account of one round, on the first thing it wrote.
+Additive, so an app that has never heard of it draws the row exactly as before.
+
+**And how much of that was work rather than writing** — `data.workedMs`, from
+the round beginning to the first word of the reply that ended it, which is what
+"worked for 9s" means on a conversation read back. `tookMs` runs on to the row,
+so it also counts the reply arriving word by word: seconds somebody spent
+reading the answer rather than waiting for one. Three rules. **The reply is what
+comes after the last thing the round did** — a sentence a round writes and then
+goes off to call something with is narration (`said`, below), so every step and
+every interim sentence sets the clock back, and only the words after the last of
+them stop it. **A hand-over does not**: it is reported once the words it is
+about have already streamed. **And the first `delta` frame's `at` is the very
+instant it counts to** — one clock reading for the record and the frame — **and
+that frame carries the number itself** (`workedMs`), because the frames alone
+cannot say it: the round's clock starts when its turn begins and its first
+frame goes out only once the agent is ready to ask the model, which on a
+conversation's first message, on a small board, is seconds later. A client
+timing the wait between frames counted short, and changed its mind when the row
+landed.
+Absent on a round that ended without words of its own (a question, a card, a
+note alone — the note a failure, a refusal, the cost limit or the rounds
+running out writes included, whatever had streamed before the round broke off,
+since a reply that never finished did not end it), and additive like `tookMs`.
+
 ### What a round said before it went off to work
 
 **A model narrates as it works, and the narration was being thrown away.** It
@@ -938,7 +1149,7 @@ from either pump — it is the same fact in both, and the loop is the one place
 that already has `said` and `calls` in hand.
 
 **On Opus 5.5 and Sonnet 5.5 most of it arrives as reasoning instead, and that
-is fine.** From Opus 5.5 (as on Fable 5.1) the short notes a model writes
+is fine.** From Opus 5.5 (as on Fable 5.1 and 5.2) the short notes a model writes
 between tool calls come back as *progress-update* `thinking` blocks rather than
 `text` — at most one before each call; Sonnet 5.5 does the same with any note
 longer than a sentence or two, and leaves a shorter remark as `text`. The
@@ -997,6 +1208,12 @@ counts only while its vendor has a usable key, and otherwise falls to the one
 that has — so a home whose one key is OpenAI's runs on OpenAI, and switching the
 *mapping* provider changes nothing about whether rules can be written, in
 either direction.
+
+**And it thinks at its own word** (`ai.automations.effort`, `low`/`medium`/
+`high`, set on the AI page beside its model and `medium` until somebody picks
+another) — on every round nobody chose an effort for, which includes every job
+the assistant hands it: nobody is in that conversation to pick one. A message
+typed to it directly may still name its own for that round.
 
 **Either vendor runs it, and nothing after that line asks again.** Both loops
 have existed since the assistant got its `ChatTransport`, but a second check

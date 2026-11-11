@@ -19,6 +19,18 @@ path through your router. Your devices, your rooms, your rules, your history and
 your members live in one SQLite file on the hub's own card, and the apps reach
 it over your own Wi-Fi.
 
+Beside that file, as files of their own: the portraits and room pictures the
+home has had drawn, and — **only where somebody switched it on** — photos. A
+home may keep the photos its rooms and portraits were drawn from (off until a
+member with `hub.ai` turns it on), and each person may keep the photos they add
+to a chat (off until *they* turn it on, and readable by nobody else). A kept
+photo lives as long as what it was kept for — a room photo as long as a drawing
+made from it, a portrait photo as long as its portrait, a chat photo the 14
+days its conversation is kept — and is kept only while the hub has more than
+2 GB of space free. Like everything else on the card, the files are not
+encrypted: anyone holding the card can read them
+([`api.md`](api.md#photos-the-hub-keeps)).
+
 ## What leaves the hub
 
 The only connections the hub itself ever makes outward are:
@@ -27,9 +39,40 @@ The only connections the hub itself ever makes outward are:
   only for the AI feature you use. What each feature sends, and to whom, is in
   the [privacy policy](https://gethome.me/privacy#ai); the engineering side is
   in [`ai-adaptation.md`](ai-adaptation.md), [`assistant.md`](assistant.md) and
-  [`portraits.md`](portraits.md). With no key, nothing goes to any AI provider
-  and devices still appear, flagged *needs review*.
-- **To GitHub**, when it checks whether a newer build exists.
+  [`portraits.md`](portraits.md). Photos of a room somebody has drawn go to
+  OpenAI and are kept on the hub only where the home switched that on; the
+  picture is, and is shown to OpenAI to read its devices off — to Anthropic only when OpenAI cannot read it and the home holds
+  an Anthropic key ([`api.md`](api.md#room-pictures)). A photo
+  somebody attaches to a chat message goes to the provider of the model that
+  chat runs on, for that one round, and **never again**: the transcript records
+  only what the photo was — its type, its size in bytes and pixels, and the
+  app's own short name for its local copy (`ref`) — never the image itself, and
+  the hub rebuilds the conversation once the round is over so not even its
+  memory keeps the picture. Where the sender chose to keep their chat photos,
+  the hub keeps a copy as a file for the conversation's 14 days — to show them
+  on that person's other devices, and to nobody else — which no provider is
+  ever sent
+  ([`api.md`](api.md#what-a-chat-message-can-carry-model-effort-attachments)).
+  A conversation moves to the other provider only when somebody moves it — by
+  choosing that provider's model for it, or by asking a failed answer again on
+  the model its note offers ([`api.md`](api.md#asking-a-failed-round-again-post-chatidretry))
+  — and then that provider is sent a written record of the conversation so
+  far, as it is for any change of model. A request one Claude model declines
+  may be answered by another Claude model inside the same request: still
+  Anthropic, on the same key. To name a conversation for the list, the first
+  thing said in it — and, where that was only a greeting, the next one or two —
+  also goes to the cheapest model of the same provider, with nothing else from
+  the home; only if that provider cannot name it does it go to the other one,
+  and only where the home holds a key for that one
+  ([`assistant.md`](assistant.md#a-conversations-name)). The name is kept with
+  the transcript and goes when it does.
+  With no key, nothing goes to any AI provider and devices still appear,
+  flagged *needs review*.
+- **To GitHub**, when it checks whether a newer build exists: when an app asks,
+  and — only where somebody has switched on automatic updates — once a night, at
+  the hour the hub has chosen to update in (asked again that night only if
+  GitHub did not answer, or the build it is waiting for comes of age before the
+  hour is over). What is sent is the request itself; nothing about your home.
 - **To two documentation sites** — `zigbee2mqtt.io` and
   `raw.githubusercontent.com` — while the mapping agent is working out what a
   Zigbee device is, and only on a hub set up for OpenAI: on Anthropic the

@@ -21,7 +21,8 @@ export interface Profile {
 
 /**
  * A NetworkManager that keeps its profiles in a tab-separated file and answers
- * the handful of questions the script asks, the way nmcli answers them. Every
+ * the handful of questions the script asks, the way nmcli answers them — down
+ * to escaping a name read with `-g` unless the question says `-e no`. Every
  * call is recorded one argument per line, so a test can see exactly what a
  * network name reached nmcli as.
  */
@@ -51,6 +52,13 @@ case "$*" in
     for want in "$@"; do :; done
     while IFS="$tab" read -r uuid type active name ssid; do
       [ "$uuid" = "$want" ] && printf '%s\\n' "$ssid"
+    done < "$state" ;;
+  "-g 802-11-wireless.ssid connection show uuid "*)
+    # Without -e no, terse output escapes \\ and : inside a value.
+    for want in "$@"; do :; done
+    escape='s/[\\\\:]/\\\\&/g'
+    while IFS="$tab" read -r uuid type active name ssid; do
+      [ "$uuid" = "$want" ] && printf '%s\\n' "$ssid" | sed "$escape"
     done < "$state" ;;
   "-t -f DEVICE,TYPE device")
     [ "$FAKE_NO_WIFI_DEVICE" = 1 ] || printf 'wlan0:wifi\\n'

@@ -370,7 +370,8 @@ rather than inferred from the boards:
   | hub `MemoryHigh` | 200M | **400M** |
   | hub `--max-old-space-size` | 160 | **320** |
   | Z2M `MemoryHigh` / `MemoryMax` | 170M / 230M | **320M / 400M** |
-  | hub V8 flags | `--optimize-for-size --max-semi-space-size=1` | `--optimize-for-size` |
+  | hub V8 flags | `--optimize-for-size --max-semi-space-size=1 --expose-gc` | `--optimize-for-size` |
+  | hub glibc | `MALLOC_MMAP_THRESHOLD_=131072 MALLOC_ARENA_MAX=2` | defaults |
 
   **Reasoned from the same arithmetic, not measured.** A full home is ~70 (OS)
   + ~180 (hub with Matter) + ~150 (Zigbee2MQTT), so the 1 GB ceilings sit at
@@ -706,6 +707,29 @@ Three deliberate silences, each of which would otherwise be a false alarm:
   boot, so the first sample after the settle window is a baseline.
 - **A kernel that cannot answer abstains.** Every field is optional; a board
   with the memory controller off, or a developer's Mac, trips nothing.
+
+**A room drawing reads exactly like trouble, so it is made to give its memory
+back.** One drawing moves ~40 MB through the hub — the photos, three answers of
+base64, the picture read twice — almost all of it in objects only a full garbage
+collection frees, and a hub that is otherwise idle can go minutes without one;
+what V8 does free, glibc then mostly keeps. On 2026-10-23 a Zero 2 W running
+both radios drew one room and was held at its `MemoryHigh` for four minutes
+after the night had landed, and the watch stood Matter down — correctly, and it
+was left as it is. Instead a 512 MB board's hub runs with `--expose-gc`, which
+`src/room-pictures/store.ts` uses to collect once the day has been answered and
+again once the night lands (a pause of 0.3–0.5 s each on that board), and with
+glibc told to hand freed memory back (`MALLOC_MMAP_THRESHOLD_=131072`,
+`MALLOC_ARENA_MAX=2`). Replayed on the same board against a fake provider —
+`scripts/replay-room-picture.mjs`, which spends nothing — one drawing's peak
+fell from +40 MB to +26 MB, and three minutes after the night it held ~44 MB of
+anonymous memory instead of ~64. Most of what is left is paid once: a second
+drawing added 8.9 MB on top of the first before, and nothing after.
+
+**And the watch counts the whole board.** `MemAvailable` falls for anything
+running on it, so measuring a hub *on* the hub is enough to trip it: running
+that replay for three-quarters of an hour beside a hub with both radios up
+stood Matter down on 2026-10-26. Check which radios are live before loading a
+hub that is somebody's home.
 
 When it fires, the hub writes `auto` to `<data>/radio-mode` and the path unit
 applies it exactly as if somebody had pressed it in the app — `auto` rather

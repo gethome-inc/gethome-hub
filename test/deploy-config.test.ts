@@ -148,6 +148,50 @@ describe('deploy/install.sh', () => {
   });
 
   /**
+   * **A hub's broker has to start where AppArmor confines mosquitto.**
+   *
+   * AppArmor's own profile for `/usr/sbin/mosquitto`, which Ubuntu 26.04's
+   * `apparmor` package ships as `/etc/apparmor.d/mosquitto`, lets the broker
+   * read its configuration only under `/etc/mosquitto`: a file directly in it,
+   * or anything in `conf.d/`, `certs/` or `ca_certificates/`. On a machine
+   * that loads the profile, a password file or an ACL anywhere else is a broker
+   * that will not start — port 1883 closed, Zigbee and every MQTT device gone,
+   * on a hub that installed perfectly. Running a broker cannot catch that here,
+   * because CI unloads the profile so that `deploy-mqtt-acl.test.ts` can start
+   * one from a temporary directory, so the paths are read off the installer.
+   */
+  it('keeps every file the broker reads where AppArmor lets mosquitto read it', () => {
+    const variables = new Map(
+      [...installer.matchAll(/^(MQTT_\w+_FILE)="([^"$]+)"$/gm)].map(([, name, value]) => [name!, value!]),
+    );
+    const resolve = (raw: string): string =>
+      raw.replace(/^"|"$/g, '').replace(/\$\{?(\w+)\}?/g, (whole, name: string) => variables.get(name) ?? whole);
+
+    // What the installer writes for the broker, and what the broker is told to open.
+    const written = [...installer.matchAll(/tee\s+(\S+)\s+>\/dev\/null\s+<<'?MOSQ\w*'?$/gm)].map(([, target]) =>
+      resolve(target!),
+    );
+    const directives = /^\s*(password_file|acl_file|psk_file|include_dir|cafile|capath|certfile|keyfile|crlfile)\s+(\S+)/gm;
+    const opened = ['MOSQ', 'MOSQ_OPEN'].flatMap((delimiter) =>
+      [...heredoc(delimiter).matchAll(directives)].map(([, directive, file]) => ({
+        directive: directive!,
+        file: resolve(file!),
+      })),
+    );
+    // Found at all, or this would pass on an installer it can no longer read.
+    expect(written.length, 'no broker file written from a <<MOSQ… heredoc').toBeGreaterThanOrEqual(3);
+    expect(opened.map((entry) => entry.directive)).toEqual(expect.arrayContaining(['password_file', 'acl_file']));
+
+    const readable = (file: string): boolean =>
+      /^\/etc\/mosquitto\/[^/]+$/.test(file) || /^\/etc\/mosquitto\/(conf\.d|certs|ca_certificates)(\/|$)/.test(file);
+    for (const file of [...written, ...opened.map((entry) => entry.file)]) {
+      expect(readable(file), `mosquitto confined by AppArmor cannot read ${file}: keep it under /etc/mosquitto`).toBe(
+        true,
+      );
+    }
+  });
+
+  /**
    * **Never lock the hub out of its own broker.**
    *
    * Turning authentication on is three files that all have to land: the
@@ -469,6 +513,35 @@ describe('deploy/install.sh', () => {
     // board, and the 1 GB tier has never been measured.
     expect(smallTier).toContain('RADIO_BUDGET=one');
     expect(roomy, 'the budget is decided once, above the split').not.toContain('RADIO_BUDGET=');
+  });
+
+  /**
+   * A room drawing moves ~40 MB through the hub in objects only a full
+   * collection frees, and a 512 MB board's hub runs ~15 MB under its
+   * `MemoryHigh` — on 2026-10-23 one drawing held it at the limit long enough
+   * for the pressure watch to stand Matter down. Two things give it back, and
+   * both are this tier's alone: `--expose-gc`, which `src/room-pictures/store.ts`
+   * needs before it can collect, and glibc tuned to return what is freed.
+   */
+  it('lets a 512 MB hub hand a drawing’s memory back', () => {
+    const smallTier = installer.slice(
+      installer.indexOf('if [[ "$RAM_MB" -gt 0 && "$RAM_MB" -le 1024 ]]'),
+      installer.indexOf('# ── System packages'),
+    );
+    const splitAt = smallTier.indexOf('if [[ "$RAM_MB" -le "$TIGHT_BOARD_MAX_MB" ]]');
+    const tight = smallTier.slice(splitAt, smallTier.indexOf('  else', splitAt));
+    const roomy = smallTier.slice(smallTier.indexOf('  else', splitAt));
+
+    // Assignments, never prose: the comments beside them name both.
+    expect(tight.match(/HUB_V8_FLAGS="([^"]*)"/)?.[1]).toContain('--expose-gc');
+    expect(tight).toMatch(/^\s*HUB_MALLOC_ENV="Environment=MALLOC_MMAP_THRESHOLD_=131072 MALLOC_ARENA_MAX=2"$/m);
+    expect(roomy.match(/HUB_V8_FLAGS="([^"]*)"/)?.[1]).not.toContain('--expose-gc');
+    expect(roomy).not.toMatch(/^\s*HUB_MALLOC_ENV=/m);
+    // Empty everywhere else, and in the unit on its own line, where an empty
+    // value is an empty line rather than a broken directive.
+    expect(installer).toMatch(/^HUB_MALLOC_ENV=""$/m);
+    expect(unitBody('gethome-hubd.service')).toMatch(/^\$\{HUB_MALLOC_ENV\}$/m);
+    expect(unitBody('gethome-zigbee2mqtt.service')).not.toContain('MALLOC');
   });
 
   /**

@@ -1,0 +1,749 @@
+import { randomBytes } from 'node:crypto';
+import { existsSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { HubEventBus } from '../src/core/bus.js';
+import { SettingsService } from '../src/core/settings.js';
+import {
+  DAY_SETTINGS,
+  drawRoomPicture,
+  NIGHT_SETTINGS,
+  pictureCostUsd,
+  RoomPictureDrawError,
+  ROOM_PICTURE_MODEL,
+} from '../src/room-pictures/draw.js';
+import { LocateError, locateDevices, normaliseAnswer } from '../src/room-pictures/locate.js';
+import { dayPrompt, describeKind, locatePrompt, NIGHT_PROMPT } from '../src/room-pictures/prompts.js';
+import { homeLocator, PictureBusyError, RoomPictureService, type Locator } from '../src/room-pictures/store.js';
+import { AGENT_MODELS, estimateCostUsd, LOCATOR_MODELS, PROVIDER_MODELS } from '../src/ai/models.js';
+import { openTestDb, resetDb } from './helpers/db.js';
+
+/**
+ * Room pictures, minus the network: the image model and the reader are stubs,
+ * and what is pinned is the hub's own behaviour around them — what it sends,
+ * what it keeps, when it answers, and what survives a half that fails.
+ */
+
+const usage = { inputTextTokens: 275, inputImageTokens: 4480, outputTokens: 1372 };
+const png = (marker: number) => Buffer.alloc(4096, marker);
+const devices = [
+  { id: 'tv', name: 'Light TV', kind: 'outlet' },
+  { id: 'sensor', name: 'Climate sensor', kind: 'sensor' },
+];
+const locator: Locator = async () => [{ provider: 'openai', modelId: 'gpt-6.1-terra', apiKey: 'sk-reader' }];
+
+type Fn = ReturnType<typeof vi.fn>;
+
+function service(options: { draw?: Fn; locate?: Fn; collect?: Fn; limits?: object } = {}) {
+  const dir = mkdtempSync(path.join(tmpdir(), 'gethome-room-pictures-'));
+  const events = new HubEventBus();
+  const heard: string[] = [];
+  events.on('roomPicturesChanged', (roomId) => heard.push(roomId));
+  const draw = options.draw ?? vi.fn(async () => ({ png: png(1), usage }));
+  const locate =
+    options.locate ??
+    vi.fn(async () => ({
+      located: [
+        { deviceId: 'tv', x: 0.1, y: 0.3, seen: true },
+        { deviceId: 'sensor', x: 0.5, y: 0.4, seen: false },
+      ],
+      usage: { input_tokens: 2000, output_tokens: 500 },
+    }));
+  const collect = options.collect ?? vi.fn();
+  const pictures = new RoomPictureService(
+    dir,
+    events,
+    undefined,
+    undefined,
+    options.limits ?? {},
+    draw as never,
+    locate as never,
+    collect as never,
+  );
+  return { dir, heard, draw, locate, collect, pictures };
+}
+
+const input = {
+  roomId: 'room-living',
+  roomName: 'Living Room',
+  orientation: 'portrait' as const,
+  photos: [
+    { bytes: png(3), contentType: 'image/jpeg' },
+    { bytes: png(4), contentType: 'image/jpeg' },
+  ],
+  devices,
+  apiKey: 'sk-test',
+  locator,
+  member: { id: 'member-1', name: 'Georgy' },
+};
+
+describe('RoomPictureService', () => {
+  it('answers with the day picture and the devices read off it, then draws the night', async () => {
+    const { pictures, draw, locate, heard } = service();
+    const record = await pictures.draw(input);
+
+    // The day: the photos and nothing else, on a transparent ground — no
+    // device named and no portrait, so none is drawn the photos don't show.
+    const day = (draw.mock.calls[0] as unknown[])[0] as Record<string, unknown>;
+    expect((day['images'] as unknown[]).length).toBe(2);
+    expect(day['background']).toBe('transparent');
+    expect(day['size']).toBe('1024x1536');
+    expect(String(day['prompt'])).toContain('“Living Room”');
+    expect(String(day['prompt'])).not.toContain('Light TV');
+    expect(String(day['prompt'])).toContain('Draw only what the photos show.');
+    // The day at the rung above `high`; `complexity` is 2.6's, never sent.
+    expect(day['quality']).toBe('xhigh');
+    expect(day['complexity']).toBeUndefined();
+
+    // The devices were read off the day picture, and the answer came before the night.
+    expect(locate).toHaveBeenCalledTimes(1);
+    expect(record.markers).toEqual([
+      { deviceId: 'tv', x: 0.1, y: 0.3, source: 'seen' },
+      { deviceId: 'sensor', x: 0.5, y: 0.4, source: 'guessed' },
+    ]);
+    expect(record).toMatchObject({ roomId: 'room-living', hasNight: false, photoCount: 2, width: 1024, height: 1536 });
+    expect(pictures.isDrawing).toBe(true);
+
+    await pictures.settled();
+    const night = (draw.mock.calls[1] as unknown[])[0] as Record<string, unknown>;
+    expect(night['background']).toBe('opaque');
+    // The night is an edit that changes only the light, at `high`.
+    expect(night['quality']).toBe('high');
+    expect(night['complexity']).toBeUndefined();
+    expect(pictures.get(record.id)?.hasNight).toBe(true);
+    expect(await pictures.bytes(record.id, 'night')).not.toBeNull();
+    expect(pictures.isDrawing).toBe(false);
+    expect(heard).toEqual(['room-living', 'room-living']);
+  });
+
+  it('keeps the day when the night fails', async () => {
+    const draw = vi
+      .fn()
+      .mockResolvedValueOnce({ png: png(1), usage })
+      .mockRejectedValueOnce(new RoomPictureDrawError('busy', 'overloaded'));
+    const { pictures } = service({ draw });
+    const record = await pictures.draw(input);
+    await pictures.settled();
+    expect(pictures.get(record.id)?.hasNight).toBe(false);
+    expect(await pictures.bytes(record.id, 'night')).toBeNull();
+    expect(await pictures.bytes(record.id, 'day')).not.toBeNull();
+  });
+
+  it('keeps nothing when the day fails, and is free again', async () => {
+    const draw = vi.fn().mockRejectedValue(new RoomPictureDrawError('no', 'auth_failed'));
+    const { pictures } = service({ draw });
+    await expect(pictures.draw(input)).rejects.toMatchObject({ kind: 'auth_failed' });
+    expect(pictures.list()).toEqual([]);
+    expect(pictures.isDrawing).toBe(false);
+  });
+
+  // On a 512 MB board a drawing's garbage held the hub at its memory limit
+  // long enough for the pressure watch to stand Matter down (store.ts). What
+  // is pinned is *when*: once the day has been answered and before the night
+  // is asked for, and once the drawing is over, however it ended.
+  it('gives its memory back once the day is answered and once it is over', async () => {
+    const steps: string[] = [];
+    const draw = vi.fn(async (edit: { background: string }) => {
+      steps.push(edit.background === 'transparent' ? 'day' : 'night');
+      return { png: png(1), usage };
+    });
+    const { pictures } = service({ draw, collect: vi.fn(() => steps.push('collect')) });
+    await pictures.draw(input);
+    steps.push('answered');
+    await pictures.settled();
+    expect(steps).toEqual(['day', 'answered', 'collect', 'night', 'collect']);
+
+    const failed = service({ draw: vi.fn().mockRejectedValue(new RoomPictureDrawError('no', 'auth_failed')) });
+    await expect(failed.pictures.draw(input)).rejects.toBeInstanceOf(RoomPictureDrawError);
+    expect(failed.collect).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a drawing whose devices could not be read, with no markers', async () => {
+    const locate = vi.fn().mockRejectedValue(new LocateError('nope', 'refused'));
+    const { pictures } = service({ locate });
+    const record = await pictures.draw(input);
+    expect(record.markers).toEqual([]);
+    await pictures.settled();
+  });
+
+  it('reads nothing when the home has no key to read with', async () => {
+    const { pictures, locate } = service();
+    const record = await pictures.draw({ ...input, locator: async () => [] });
+    expect(locate).not.toHaveBeenCalled();
+    expect(record.markers).toEqual([]);
+    await pictures.settled();
+  });
+
+  it('asks the next reader when one cannot read the picture, and keeps the first answer', async () => {
+    const locate = vi
+      .fn()
+      .mockRejectedValueOnce(new LocateError('This home’s OpenAI account is out of credit.', 'billing'))
+      .mockResolvedValueOnce({
+        located: [{ deviceId: 'tv', x: 0.2, y: 0.6, seen: true }],
+        usage: { input_tokens: 2000, output_tokens: 500 },
+      });
+    const { pictures } = service({ locate });
+    const readers: Locator = async () => [
+      { provider: 'openai', modelId: 'gpt-6.1-terra', apiKey: 'sk-openai' },
+      { provider: 'anthropic', modelId: 'claude-sonnet-5-5', apiKey: 'sk-ant' },
+    ];
+    const record = await pictures.draw({ ...input, locator: readers });
+
+    const asked = locate.mock.calls.map((call) => (call as [{ provider: string; modelId: string; apiKey: string }])[0]);
+    expect(asked.map(({ provider, modelId, apiKey }) => ({ provider, modelId, apiKey }))).toEqual([
+      { provider: 'openai', modelId: 'gpt-6.1-terra', apiKey: 'sk-openai' },
+      { provider: 'anthropic', modelId: 'claude-sonnet-5-5', apiKey: 'sk-ant' },
+    ]);
+    expect(record.markers).toEqual([{ deviceId: 'tv', x: 0.2, y: 0.6, source: 'seen' }]);
+    await pictures.settled();
+  });
+
+  it('asks nobody after the first answer, and keeps the drawing when every reader fails', async () => {
+    const readers: Locator = async () => [
+      { provider: 'openai', modelId: 'gpt-6.1-terra', apiKey: 'sk-openai' },
+      { provider: 'anthropic', modelId: 'claude-sonnet-5-5', apiKey: 'sk-ant' },
+    ];
+    const answered = service();
+    await answered.pictures.draw({ ...input, locator: readers });
+    expect(answered.locate).toHaveBeenCalledTimes(1);
+    await answered.pictures.settled();
+
+    const locate = vi.fn().mockRejectedValue(new LocateError('nope', 'refused'));
+    const failing = service({ locate });
+    const record = await failing.pictures.draw({ ...input, locator: readers });
+    expect(locate).toHaveBeenCalledTimes(2);
+    expect(record.markers).toEqual([]);
+    await failing.pictures.settled();
+  });
+
+  it('refuses a second drawing until the first one’s night has landed', async () => {
+    const pending: ((value: { png: Buffer; usage: typeof usage }) => void)[] = [];
+    const draw = vi.fn(() => new Promise<{ png: Buffer; usage: typeof usage }>((resolve) => pending.push(resolve)));
+    const { pictures } = service({ draw });
+    const first = pictures.draw(input);
+    await expect(pictures.draw(input)).rejects.toBeInstanceOf(PictureBusyError);
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    pending[0]!({ png: png(1), usage });
+    await first;
+    // Answered, but the night is still being drawn: still busy.
+    await expect(pictures.draw(input)).rejects.toBeInstanceOf(PictureBusyError);
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    pending[1]!({ png: png(2), usage });
+    await pictures.settled();
+    expect(pictures.isDrawing).toBe(false);
+  });
+
+  // What an app whose request died with its connection reads to know whether
+  // to keep waiting (`GET /room-pictures`'s `drawing`). The answer it waits for
+  // is the picture in the list, so what is pinned is the overlap: the picture
+  // is listed before the room stops being drawn, never after.
+  it('says which room it is drawing from the ask until the night has landed, and none once it is over', async () => {
+    const pending: ((value: { png: Buffer; usage: typeof usage }) => void)[] = [];
+    const draw = vi.fn(() => new Promise<{ png: Buffer; usage: typeof usage }>((resolve) => pending.push(resolve)));
+    const { pictures } = service({ draw });
+    expect(pictures.drawingNow()).toEqual([]);
+
+    const first = pictures.draw(input);
+    expect(pictures.drawingNow()).toEqual([{ roomId: 'room-living' }]);
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    pending[0]!({ png: png(1), usage });
+    const record = await first;
+    // Answered, with its night still being drawn: listed, and still drawing.
+    expect(pictures.list().map((listed) => listed.id)).toContain(record.id);
+    expect(pictures.drawingNow()).toEqual([{ roomId: 'room-living' }]);
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    pending[1]!({ png: png(2), usage });
+    await pictures.settled();
+    expect(pictures.drawingNow()).toEqual([]);
+
+    // A day that fails is over at once, with nothing listed for it.
+    const failing = service({ draw: vi.fn().mockRejectedValue(new RoomPictureDrawError('no', 'billing')) });
+    await expect(failing.pictures.draw({ ...input, roomId: 'room-bed' })).rejects.toBeInstanceOf(RoomPictureDrawError);
+    expect(failing.pictures.drawingNow()).toEqual([]);
+    expect(failing.pictures.list()).toEqual([]);
+  });
+
+  it('never reads over a marker a person placed', async () => {
+    const { pictures, locate } = service();
+    const record = await pictures.draw(input);
+    await pictures.settled();
+    pictures.setMarkers(record.id, [{ deviceId: 'tv', x: 0.7, y: 0.7, source: 'placed' }]);
+    const again = await pictures.relocate(record.id, devices, locator);
+    expect(again?.markers.find((marker) => marker.deviceId === 'tv')).toEqual({
+      deviceId: 'tv',
+      x: 0.7,
+      y: 0.7,
+      source: 'placed',
+    });
+    // Only the device nobody placed was asked about the second time.
+    const asked = ((locate.mock.calls[1] as unknown[])[0] as { devices: { id: string }[] }).devices.map((d) => d.id);
+    expect(asked).toEqual(['sensor']);
+  });
+
+  it('shows the newest drawing, lets an older one be chosen, and hands the choice on when it goes', async () => {
+    const { pictures } = service();
+    const first = await pictures.draw(input);
+    await pictures.settled();
+    const second = await pictures.draw(input);
+    await pictures.settled();
+    expect(pictures.get(second.id)?.selected).toBe(true);
+    expect(pictures.get(first.id)?.selected).toBe(false);
+
+    expect(pictures.select(first.id)?.selected).toBe(true);
+    expect(pictures.get(second.id)?.selected).toBe(false);
+    expect(pictures.select('missing')).toBeNull();
+
+    await pictures.remove(first.id);
+    expect(pictures.get(second.id)?.selected).toBe(true);
+  });
+
+  it('never lets the budget take the picture a room shows', async () => {
+    const { pictures } = service({ limits: { budgetBytes: 1 } });
+    const bedroom = await pictures.draw({ ...input, roomId: 'room-bed' });
+    await pictures.settled();
+    await pictures.draw(input);
+    await pictures.settled();
+    const newest = await pictures.draw(input);
+    await pictures.settled();
+    // Over budget, everything goes but the newest drawing and what each room
+    // shows — and the bedroom's picture is older than both of the living room's.
+    expect(pictures.list().map((record) => record.id).sort()).toEqual([bedroom.id, newest.id].sort());
+    expect(pictures.get(bedroom.id)?.selected).toBe(true);
+  });
+
+  it('keeps a few per room, forgets a deleted room, and reads back after a restart', async () => {
+    const { pictures, dir, draw, locate } = service({ limits: { maxPerRoom: 2 } });
+    const one = await pictures.draw(input);
+    await pictures.settled();
+    await pictures.draw(input);
+    await pictures.settled();
+    await pictures.draw(input);
+    await pictures.settled();
+    expect(pictures.list()).toHaveLength(2);
+    expect(existsSync(path.join(dir, 'room-pictures', `${one.id}-day.png`))).toBe(false);
+    const reopened = new RoomPictureService(dir, undefined, undefined, undefined, {}, draw as never, locate as never);
+    expect(reopened.list()).toHaveLength(2);
+    await reopened.forgetRoom('room-living');
+    expect(reopened.list()).toEqual([]);
+  });
+});
+
+describe('reading the devices off a picture', () => {
+  it('keeps devices asked about, once each, inside the picture', () => {
+    const answer = normaliseAnswer(
+      {
+        devices: [
+          { id: 'tv', x: 1.4, y: -0.2, seen: true },
+          { id: 'tv', x: 0.5, y: 0.5, seen: true },
+          { id: 'stranger', x: 0.5, y: 0.5, seen: true },
+          { id: 'sensor', x: 0.3, y: 0.4 },
+        ],
+      },
+      devices,
+    );
+    expect(answer).toEqual([
+      { deviceId: 'tv', x: 0.98, y: 0.02, seen: true },
+      { deviceId: 'sensor', x: 0.3, y: 0.4, seen: false },
+    ]);
+  });
+
+  it('asks OpenAI with the picture and a strict schema', async () => {
+    const calls: RequestInit[] = [];
+    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      calls.push(init ?? {});
+      return new Response(
+        JSON.stringify({
+          output: [{ type: 'message', content: [{ type: 'output_text', text: '{"devices":[{"id":"tv","x":0.2,"y":0.3,"seen":true}]}' }] }],
+          usage: { input_tokens: 2100, output_tokens: 400 },
+        }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+    const result = await locateDevices({ provider: 'openai', modelId: 'gpt-6.1-sol', apiKey: 'k', picture: png(1), devices, fetchImpl });
+    expect(result.located).toEqual([{ deviceId: 'tv', x: 0.2, y: 0.3, seen: true }]);
+    const sent = JSON.parse(await (calls[0]!.body as Blob).text());
+    expect(sent.text.format.strict).toBe(true);
+    expect(sent.input[0].content[1].text).toContain('tv: “Light TV”');
+  });
+
+  // The body is a Blob with the base64 spliced in, in pieces, so the picture
+  // is never one string on the heap (`withPicture`). What has to hold is that
+  // the pieces join into exactly the base64 of the picture — for a picture of
+  // several pieces whose length is not a multiple of three.
+  it.each(['openai', 'anthropic'] as const)('sends the whole picture to %s, exactly', async (provider) => {
+    const picture = randomBytes(3 * 48 * 1024 + 1001);
+    let sent: Record<string, unknown> = {};
+    let contentType: string | null = null;
+    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      sent = JSON.parse(await (init!.body as Blob).text());
+      contentType = new Headers(init!.headers).get('content-type');
+      // Anthropic's half is read by its SDK, so its answer is the API's own
+      // shape and content type.
+      return new Response(
+        JSON.stringify(
+          provider === 'openai'
+            ? { output: [{ type: 'message', content: [{ type: 'output_text', text: '{"devices":[]}' }] }] }
+            : {
+                type: 'message',
+                role: 'assistant',
+                model: 'm',
+                content: [{ type: 'tool_use', id: 'toolu_1', name: 'submit_points', input: { devices: [] } }],
+                stop_reason: 'tool_use',
+                usage: { input_tokens: 1, output_tokens: 1 },
+              },
+        ),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as unknown as typeof fetch;
+    await locateDevices({ provider, modelId: 'm', apiKey: 'k', picture, devices, fetchImpl });
+    expect(contentType).toBe('application/json');
+    const content = (provider === 'openai' ? (sent['input'] as { content: unknown[] }[]) : (sent['messages'] as { content: unknown[] }[]))[0]!
+      .content[0] as { image_url?: string; source?: { data: string } };
+    const base64 = provider === 'openai' ? content.image_url!.replace('data:image/png;base64,', '') : content.source!.data;
+    expect(base64).toBe(picture.toString('base64'));
+    expect(JSON.stringify(sent)).not.toContain('picture-');
+  });
+
+  it('says why the provider refused', async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response(JSON.stringify({ error: { message: 'invalid x-api-key' } }), { status: 401 }),
+    ) as unknown as typeof fetch;
+    await expect(
+      locateDevices({ provider: 'anthropic', modelId: 'claude-opus-5-5', apiKey: 'bad', picture: png(1), devices, fetchImpl }),
+    ).rejects.toMatchObject({ kind: 'auth_failed', message: 'invalid x-api-key' });
+  });
+
+  /**
+   * Anthropic's half goes through the SDK, so the stub answers the way the API
+   * does — JSON with its content type — and what is pinned is the request the
+   * SDK was handed and what it does with a busy API. The body is the same Blob
+   * the OpenAI half sends, so it is read as one.
+   */
+  const anthropicReply = (body: Record<string, unknown>, status = 200, headers: Record<string, string> = {}) =>
+    new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
+  const pointsMessage = (stopReason = 'tool_use') => ({
+    id: 'msg_1',
+    type: 'message',
+    role: 'assistant',
+    model: 'claude-opus-5-5',
+    content: [
+      { type: 'tool_use', id: 'toolu_1', name: 'submit_points', input: { devices: [{ id: 'tv', x: 0.2, y: 0.3, seen: true }] } },
+    ],
+    stop_reason: stopReason,
+    stop_details: null,
+    usage: { input_tokens: 1800, output_tokens: 300 },
+  });
+
+  it('asks Anthropic with the picture, thinking at medium and no forced tool', async () => {
+    const calls: RequestInit[] = [];
+    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      calls.push(init ?? {});
+      return anthropicReply(pointsMessage());
+    }) as unknown as typeof fetch;
+    const result = await locateDevices({
+      provider: 'anthropic',
+      modelId: 'claude-opus-5-5',
+      apiKey: 'sk-ant',
+      picture: png(1),
+      devices,
+      fetchImpl,
+    });
+    expect(result.located).toEqual([{ deviceId: 'tv', x: 0.2, y: 0.3, seen: true }]);
+    expect(result.usage).toMatchObject({ input_tokens: 1800, output_tokens: 300 });
+    const sent = JSON.parse(await (calls[0]!.body as Blob).text());
+    expect(sent.thinking).toEqual({ type: 'adaptive' });
+    expect(sent.output_config).toEqual({ effort: 'medium' });
+    // A forced tool is a 400 on the models this runs on.
+    expect(sent.tool_choice).toBeUndefined();
+    expect(sent.messages[0].content[0]).toMatchObject({ type: 'image', source: { media_type: 'image/png' } });
+  });
+
+  it('tries again when Anthropic is busy, rather than leaving the room unplaced', async () => {
+    let attempts = 0;
+    const fetchImpl = vi.fn(async () => {
+      attempts += 1;
+      return attempts === 1
+        ? anthropicReply({ type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } }, 529, {
+            'retry-after-ms': '1',
+          })
+        : anthropicReply(pointsMessage());
+    }) as unknown as typeof fetch;
+    const result = await locateDevices({
+      provider: 'anthropic',
+      modelId: 'claude-opus-5-5',
+      apiKey: 'sk-ant',
+      picture: png(1),
+      devices,
+      fetchImpl,
+    });
+    expect(attempts).toBe(2);
+    expect(result.located).toHaveLength(1);
+  });
+
+  /**
+   * A room with a camera, a lock and an alarm panel in it can read as security
+   * work, so a reading the model declines is asked again of another Claude in
+   * the same request — and the answer read is the answering model's call,
+   * priced per attempt.
+   */
+  it('asks another Claude when the reading is declined, and reads its answer', async () => {
+    const calls: { url: string; init: RequestInit }[] = [];
+    const iteration = (type: string, model: string, input: number, output: number) => ({
+      type,
+      model,
+      input_tokens: input,
+      output_tokens: output,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+      cache_creation: null,
+    });
+    const fetchImpl = vi.fn(async (url: unknown, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return anthropicReply({
+        ...pointsMessage(),
+        model: 'claude-opus-4-8',
+        content: [
+          {
+            type: 'fallback',
+            from: { model: 'claude-opus-5-5' },
+            to: { model: 'claude-opus-4-8' },
+            trigger: { type: 'refusal', category: 'cyber' },
+          },
+          { type: 'tool_use', id: 'toolu_2', name: 'submit_points', input: { devices: [{ id: 'tv', x: 0.6, y: 0.4, seen: true }] } },
+        ],
+        usage: {
+          input_tokens: 1900,
+          output_tokens: 320,
+          iterations: [
+            iteration('message', 'claude-opus-5-5', 1800, 0),
+            iteration('fallback_message', 'claude-opus-4-8', 1900, 320),
+          ],
+        },
+      });
+    }) as unknown as typeof fetch;
+    const result = await locateDevices({
+      provider: 'anthropic',
+      modelId: 'claude-opus-5-5',
+      apiKey: 'sk-ant',
+      picture: png(1),
+      devices,
+      fetchImpl,
+    });
+    expect(result.located).toEqual([{ deviceId: 'tv', x: 0.6, y: 0.4, seen: true }]);
+    expect(result.costUsd).toBeCloseTo(
+      estimateCostUsd('claude-opus-5-5', { input_tokens: 1800, output_tokens: 0 }) +
+        estimateCostUsd('claude-opus-4-8', { input_tokens: 1900, output_tokens: 320 }),
+      12,
+    );
+    const sent = JSON.parse(await (calls[0]!.init.body as Blob).text());
+    expect(sent.fallbacks).toBe('default');
+    expect(new Headers(calls[0]!.init.headers).get('anthropic-beta')).toBe('server-side-fallback-2026-07-01');
+  });
+
+  it('reads no answer out of a refusal or a reply cut off part way through', async () => {
+    for (const [stopReason, kind] of [
+      ['refusal', 'refused'],
+      ['max_tokens', 'unreadable'],
+    ] as const) {
+      const fetchImpl = vi.fn(async () => anthropicReply(pointsMessage(stopReason))) as unknown as typeof fetch;
+      await expect(
+        locateDevices({ provider: 'anthropic', modelId: 'claude-opus-5-5', apiKey: 'sk-ant', picture: png(1), devices, fetchImpl }),
+      ).rejects.toBeInstanceOf(LocateError);
+      await expect(
+        locateDevices({ provider: 'anthropic', modelId: 'claude-opus-5-5', apiKey: 'sk-ant', picture: png(1), devices, fetchImpl }),
+      ).rejects.toMatchObject({ kind });
+    }
+  });
+});
+
+const handle = await openTestDb();
+
+/**
+ * Who reads, and on which model: each vendor's middle rung, OpenAI's first —
+ * it drew the picture — and Anthropic's after, whatever recognition runs on.
+ */
+describe('the reader', () => {
+  it('is each vendor’s middle rung: still offered, sees a picture, and costs less than anything recognition offers', () => {
+    const price = (model: string) => estimateCostUsd(model, { input_tokens: 1_000_000, output_tokens: 1_000_000 });
+    for (const provider of ['anthropic', 'openai'] as const) {
+      const reader = LOCATOR_MODELS[provider];
+      // Offered to the agents means current: a retired model leaves that list,
+      // and this fails until the constant names its successor.
+      const offered = AGENT_MODELS[provider].choices.find((choice) => choice.id === reader);
+      expect(offered?.images).toBe(true);
+      for (const choice of PROVIDER_MODELS[provider].choices) {
+        expect(price(reader)).toBeLessThan(price(choice.id));
+      }
+    }
+  });
+
+  describe.skipIf(!handle)('on the home’s own settings', () => {
+    const db = handle?.db!;
+    let settings: SettingsService;
+
+    beforeEach(async () => {
+      await resetDb(db);
+      settings = new SettingsService(db, Buffer.alloc(32).toString('base64'));
+    });
+
+    afterAll(async () => {
+      await handle?.close();
+    });
+
+    it('asks OpenAI first and Anthropic second, whatever recognition runs on', async () => {
+      await settings.setAiKey('anthropic', 'sk-ant-api-key-0000');
+      await settings.setAiModel('claude-fable-5-2', 'anthropic');
+      expect(await homeLocator(settings)()).toEqual([
+        { provider: 'anthropic', modelId: 'claude-sonnet-5-5', apiKey: 'sk-ant-api-key-0000' },
+      ]);
+
+      // Recognition still runs on Anthropic; the picture goes to OpenAI first,
+      // which drew it.
+      await settings.setAiKey('openai', 'sk-openai-key-0000');
+      expect((await settings.getAiSettings()).provider).toBe('anthropic');
+      const both = [
+        { provider: 'openai', modelId: 'gpt-6.1-terra', apiKey: 'sk-openai-key-0000' },
+        { provider: 'anthropic', modelId: 'claude-sonnet-5-5', apiKey: 'sk-ant-api-key-0000' },
+      ];
+      expect(await homeLocator(settings)()).toEqual(both);
+
+      await settings.setMappingProvider('openai');
+      await settings.setAiModel('gpt-6-astra', 'openai');
+      expect(await homeLocator(settings)()).toEqual(both);
+    });
+
+    it('never asks Anthropic on a Claude subscription token, and nobody with no key', async () => {
+      expect(await homeLocator(settings)()).toEqual([]);
+
+      await settings.setAiKey('anthropic', 'legacy-subscription-token');
+      await settings.set('ai_auth_type', 'oauth_token');
+      expect((await settings.getAiSettings()).legacySubscriptionToken).toBe(true);
+      expect(await homeLocator(settings)()).toEqual([]);
+
+      await settings.setAiKey('openai', 'sk-openai-key-0000');
+      expect(await homeLocator(settings)()).toEqual([
+        { provider: 'openai', modelId: 'gpt-6.1-terra', apiKey: 'sk-openai-key-0000' },
+      ]);
+    });
+  });
+});
+
+describe('drawing', () => {
+  it('sends every photo as it is, in order', async () => {
+    const photos = [randomBytes(70_001), randomBytes(1_234)];
+    let form: FormData | undefined;
+    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      form = init!.body as FormData;
+      return new Response(JSON.stringify({ data: [{ b64_json: png(7).toString('base64') }] }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const drawing = await drawRoomPicture({
+      ...DAY_SETTINGS,
+      apiKey: 'k',
+      prompt: 'p',
+      images: [
+        { bytes: photos[0]!, contentType: 'image/jpeg' },
+        { bytes: photos[1]!, contentType: 'image/png' },
+      ],
+      size: '1024x1536',
+      background: 'transparent',
+      fetchImpl,
+    });
+    expect(drawing.png.equals(png(7))).toBe(true);
+    const sent = form!.getAll('image[]') as File[];
+    expect(sent.map((file) => [file.name, file.type])).toEqual([
+      ['image0.jpg', 'image/jpeg'],
+      ['image1.png', 'image/png'],
+    ]);
+    for (const [index, file] of sent.entries()) expect(Buffer.from(await file.arrayBuffer()).equals(photos[index]!)).toBe(true);
+  });
+
+  /**
+   * A room takes the quality half of the 2.5 pair — the model that drew the
+   * owner's flat as itself, where 2.6 split it into two boxes — on a PNG: the
+   * day at `xhigh`, the night at `high`, and no `complexity`, which 2.5 does
+   * not have. See `draw.ts`.
+   */
+  it('draws on GPT Image 2.5 Sunburst on a PNG, the day at xhigh and the night at high', async () => {
+    const forms: FormData[] = [];
+    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      forms.push(init!.body as FormData);
+      return new Response(JSON.stringify({ data: [{ b64_json: png(7).toString('base64') }] }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const common = {
+      apiKey: 'k',
+      prompt: 'p',
+      images: [{ bytes: randomBytes(1_234), contentType: 'image/jpeg' }],
+      size: '1536x1024' as const,
+      fetchImpl,
+    };
+    await drawRoomPicture({ ...common, ...DAY_SETTINGS, background: 'transparent' });
+    await drawRoomPicture({ ...common, ...NIGHT_SETTINGS, background: 'opaque' });
+    const [day, night] = forms as [FormData, FormData];
+    expect(ROOM_PICTURE_MODEL).toBe('gpt-image-2.5-sunburst');
+    expect(day.get('model')).toBe(ROOM_PICTURE_MODEL);
+    expect(day.get('output_format')).toBe('png');
+    expect(day.get('size')).toBe('1536x1024');
+    expect(day.get('background')).toBe('transparent');
+    expect(day.get('quality')).toBe('xhigh');
+    expect(night.get('background')).toBe('opaque');
+    expect(night.get('quality')).toBe('high');
+    // 2.6's field, which 2.5 does not take.
+    expect(day.has('complexity')).toBe(false);
+    expect(night.has('complexity')).toBe(false);
+  });
+});
+
+describe('the words', () => {
+  it('draws from the photos alone, and reads the devices by name and kind', () => {
+    const prompt = dayPrompt('Bedroom', 3, 'portrait');
+    expect(prompt).toContain('first 3 images are phone photos');
+    expect(prompt).toContain('no devices, sensors, gadgets');
+    expect(locatePrompt(devices)).toContain('- tv: “Light TV” (a smart plug — look for what it powers)');
+    expect(describeKind('kettle-of-the-future')).toBe('a smart device');
+  });
+
+  /**
+   * The words that drew the owner's flat best, on 2026-10-23, pinned to the
+   * character (`prompts.ts`): two rewrites did worse, and a rewrite that reads
+   * better is not evidence. Change this only with a drawing of a real room
+   * beside the old one.
+   */
+  it('asks for the room in the first drawings’ own words', () => {
+    expect(dayPrompt('Living Room', 5, 'portrait')).toBe(
+      'The first 5 images are phone photos of “Living Room”, a room of a real home, taken from different corners.\n' +
+        'Ignore any white guide lines, buttons and other on-screen overlays in the photos.\n' +
+        '\n' +
+        'Draw this room as the room render of a premium smart-home app: an isometric cutaway of the whole room, seen ' +
+        'from above at about 35 degrees from one corner, the two walls nearest the viewer removed so the room can be ' +
+        'seen into like a dollhouse, the two far walls standing full height. A 3D artist’s model of this very room: ' +
+        'its real shape and proportions, every piece of furniture where the photos show it, in the room’s real ' +
+        'colours, materials and textures — the floor, the wall paint, the furniture, the fabrics, the appliances, ' +
+        'the curtains — so the person who lives here recognises their own room at a glance. Tidy away clutter, bags ' +
+        'and mess, and ignore the photos’ dim lighting and colour casts.\n' +
+        '\n' +
+        'Draw only what the photos show. Add nothing that is not in them — no devices, sensors, gadgets, lamps or ' +
+        'other objects the room does not have.\n' +
+        '\n' +
+        'Soft, diffuse daylight from the windows, gentle ambient occlusion, soft contact shadows, matte materials ' +
+        'with a subtle sheen, crisp clean geometry, walls cut as thick clean sections with a slightly darker top ' +
+        'edge, a thin floor slab under the room. Calm, tidy and quietly luxurious, highly detailed. The room fills ' +
+        'most of the tall image, standing on its own on a transparent background — no floor, backdrop or shadow ' +
+        'beyond the room itself.\n' +
+        '\n' +
+        'No text, no labels, no people, no watermark.',
+    );
+    expect(dayPrompt('Office', 1, 'landscape')).toContain('The first image is a phone photo of “Office”');
+    expect(dayPrompt('Office', 1, 'landscape')).toContain('The room fills most of the wide image');
+  });
+
+  it('lets the night change only the light', () => {
+    expect(NIGHT_PROMPT).toContain('Redraw the very same render at night.');
+    expect(NIGHT_PROMPT).toContain('Only the light changes.');
+  });
+
+  it('prices what the provider reported, and nothing it did not', () => {
+    expect(pictureCostUsd([undefined])).toBeUndefined();
+    expect(pictureCostUsd([usage])).toBeCloseTo(0.0779, 3);
+  });
+});

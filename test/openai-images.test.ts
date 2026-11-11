@@ -17,7 +17,7 @@ describe('OpenAI portrait generation', () => {
     vi.unstubAllGlobals();
   });
 
-  it('uses GPT Image 2.5 Flare with a transparent PNG background for a generated portrait', async () => {
+  it('uses GPT Image 2.6 Flare with a transparent PNG background for a generated portrait', async () => {
     await expect(drawPortrait({ apiKey: 'sk-proj-test', prompt: 'A smart wall plug.' })).resolves.toEqual({
       png: Buffer.from('portrait'),
     });
@@ -34,10 +34,10 @@ describe('OpenAI portrait generation', () => {
       output_format: 'png',
       quality: 'high',
     });
-    expect(PORTRAIT_MODEL).toBe('gpt-image-2.5-flare');
+    expect(PORTRAIT_MODEL).toBe('gpt-image-2.6-flare');
   });
 
-  it('uses the GPT Image 2.5 Flare edits endpoint when a photo is supplied', async () => {
+  it('uses the GPT Image 2.6 Flare edits endpoint when a photo is supplied', async () => {
     await drawPortrait({
       apiKey: 'sk-proj-test',
       prompt: 'Restyle this device.',
@@ -53,6 +53,9 @@ describe('OpenAI portrait generation', () => {
     // Transparency is only honoured on an alpha-capable format, and the store
     // writes these bytes to a `.png` the route serves as `image/png`.
     expect(form.get('output_format')).toBe('png');
+    // 2.6's `complexity` is left to the model's default, `high`, on this path
+    // too — the reason is beside `QUALITY` in `openai-images.ts`.
+    expect(form.has('complexity')).toBe(false);
     expect(form.get('image')).toBeInstanceOf(Blob);
     // And no `content-type` of our own on the multipart path: setting one
     // would omit the boundary `fetch` generates, and the upload would fail.
@@ -61,7 +64,7 @@ describe('OpenAI portrait generation', () => {
 
   /**
    * What a drawing cost is read off the provider's own answer rather than
-   * estimated from the size and quality we asked for — 2.5 bills per token, so
+   * estimated from the size and quality we asked for — 2.6 bills per token, so
    * the response is the only thing that actually knows.
    */
   it('reads the token usage back off the response and prices it', async () => {
