@@ -127,11 +127,38 @@ describe.skipIf(!handle)('which model a run is given', () => {
   });
 
   it('leaves the more thorough of Anthropic’s two alone as well', async () => {
-    await settings.setAiSettings({ model: 'claude-fable-5-1', apiKey: 'sk-ant-api-key-0000' });
+    await settings.setAiSettings({ model: 'claude-fable-5-2', apiKey: 'sk-ant-api-key-0000' });
     const mapper = new AiDeviceMapper(db, settings, log);
     await mapper.requestMapping(lamp, mapExposes(lamp), { force: true });
 
-    expect(new Set(modelsGiven(createMappingAgent))).toEqual(new Set(['claude-fable-5-1']));
+    expect(new Set(modelsGiven(createMappingAgent))).toEqual(new Set(['claude-fable-5-2']));
+  });
+
+  /**
+   * A home that chose Fable 5.1 chose the top rung, and keeps it: every
+   * surface runs Fable 5.2, never the default a rung below, while each column
+   * still says what somebody wrote in it — so the build before this one, which
+   * has never heard of Fable 5.2, reads them exactly as it always did.
+   */
+  it('moves a home on Fable 5.1 to Fable 5.2, and leaves the columns alone', async () => {
+    await settings.setAiSettings({ model: 'claude-fable-5-1', apiKey: 'sk-ant-api-key-0000' });
+    await settings.setAssistantModel('claude-fable-5-1');
+    await settings.setAutomationsModel('claude-fable-5-1');
+    const mapper = new AiDeviceMapper(db, settings, log);
+    await mapper.requestMapping(lamp, mapExposes(lamp), { force: true });
+
+    expect(new Set(modelsGiven(createMappingAgent))).toEqual(new Set(['claude-fable-5-2']));
+    const ai = await settings.getAiSettings();
+    expect(effectiveModel('anthropic', ai.anthropic.model)).toBe('claude-fable-5-2');
+    expect(ai.assistant).toMatchObject({ provider: 'anthropic', model: 'claude-fable-5-2' });
+    expect(ai.automations).toMatchObject({ provider: 'anthropic', model: 'claude-fable-5-2' });
+
+    const stored = new Map(
+      (await db.select().from(settingsTable)).map((row) => [row.key, row.value] as const),
+    );
+    expect(stored.get('ai_model')).toBe('claude-fable-5-1');
+    expect(stored.get('ai_assistant_model')).toBe('claude-fable-5-1');
+    expect(stored.get('ai_automations_model')).toBe('claude-fable-5-1');
   });
 
   it('leaves the more thorough of OpenAI’s two alone as well', async () => {
@@ -275,6 +302,7 @@ describe('the model table', () => {
   /** Every model a hub in the field may have stored, from every build so far. */
   const everShipped = {
     anthropic: [
+      'claude-fable-5-2',
       'claude-fable-5-1',
       'claude-haiku-5-5',
       'claude-opus-5-5',
@@ -365,7 +393,7 @@ describe('the agents’ tiers, read across the vendors', () => {
 
   it('answers each of today’s models with the other vendor’s on its tier, both ways round', () => {
     const pairs = [
-      ['claude-fable-5-1', 'gpt-6-astra'],
+      ['claude-fable-5-2', 'gpt-6-astra'],
       ['claude-opus-5-5', 'gpt-6.1-sol'],
       ['claude-sonnet-5-5', 'gpt-6.1-terra'],
       ['claude-haiku-5-5', 'gpt-6-luna'],
