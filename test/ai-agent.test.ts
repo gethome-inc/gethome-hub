@@ -6,6 +6,7 @@ import { mapExposes } from '../src/adapters/zigbee/exposes-mapper.js';
 import { classifyAgentFailure, classifyApiError, errorCodeIn, parseResetHint } from '../src/ai/errors.js';
 import { buildMappingUserPrompt, zigbee2mqttDevicePage } from '../src/ai/prompts.js';
 import {
+  AGENT_MODELS,
   DEFAULT_MODEL,
   PROVIDER_MODELS,
   budgetScale,
@@ -266,14 +267,24 @@ describe('supported models', () => {
   });
 
   /**
-   * Fable 5.1 is offered on Anthropic where GPT-6 Astra is on OpenAI: above the
-   * default, at the same $10/$50. Its sibling Mythos 5.1 shares its weights and
-   * is only for organisations Anthropic has verified, so a home's key would be
-   * refused — it is never offered. Nor is Fable 5, which this hub never ran.
+   * Fable 5.2 is offered on Anthropic where GPT-6 Astra is on OpenAI: above the
+   * default, at $8/$40 against Astra's $10/$50. Fable 5.1 before it is still
+   * known — a home may have stored it, and runs recorded on it are priced and
+   * named from its row — and never offered. Their siblings Mythos 5.1 and 5.2
+   * share their weights and are only for organisations Anthropic has verified,
+   * so a home's key would be refused — neither is known. Nor is Fable 5, which
+   * this hub never ran.
    */
-  it('offers Fable 5.1, and no other Fable or any Mythos', () => {
+  it('offers Fable 5.2, knows Fable 5.1, and no other Fable or any Mythos', () => {
     const every = [...supportedModelIds('anthropic'), ...supportedModelIds('openai')];
-    expect(every.filter((id) => id.includes('fable') || id.includes('mythos'))).toEqual(['claude-fable-5-1']);
+    expect(every.filter((id) => id.includes('fable') || id.includes('mythos'))).toEqual([
+      'claude-fable-5-2',
+      'claude-fable-5-1',
+    ]);
+    const offered = [...PROVIDER_MODELS.anthropic.choices, ...AGENT_MODELS.anthropic.choices].map(
+      (choice) => choice.id,
+    );
+    expect(offered.filter((id) => id.includes('fable'))).toEqual(['claude-fable-5-2', 'claude-fable-5-2']);
   });
 
   /**
@@ -313,7 +324,7 @@ describe('supported models', () => {
    */
   it('pins Opus 5.5, Astra and Sol by their explicit ids', () => {
     expect(PROVIDER_MODELS.anthropic.choices.map((choice) => choice.id)).toEqual([
-      'claude-fable-5-1',
+      'claude-fable-5-2',
       'claude-opus-5-5',
     ]);
     expect(PROVIDER_MODELS.openai.choices.map((choice) => choice.id)).toEqual(['gpt-6-astra', 'gpt-6.1-sol']);
@@ -328,6 +339,8 @@ describe('supported models', () => {
     expect(isSupportedModel('gpt-5.6-terra', 'openai')).toBe(true);
     expect(isSupportedModel('gpt-6-sol', 'openai')).toBe(true);
     expect(PROVIDER_MODELS.openai.choices.some((choice) => choice.id === 'gpt-6-sol')).toBe(false);
+    expect(isSupportedModel('claude-fable-5-1', 'anthropic')).toBe(true);
+    expect(PROVIDER_MODELS.anthropic.choices.some((choice) => choice.id === 'claude-fable-5-1')).toBe(false);
 
     // Accepted, priced, and never offered.
     expect(isSupportedModel('gpt-5.6', 'openai')).toBe(true);
@@ -378,7 +391,9 @@ describe('supported models', () => {
     // A model still on the list is still honoured, and so is silence.
     expect(effectiveModel('anthropic', 'claude-opus-5-5')).toBe('claude-opus-5-5');
     expect(effectiveModel('openai', 'gpt-6-astra')).toBe('gpt-6-astra');
-    expect(effectiveModel('anthropic', 'claude-fable-5-1')).toBe('claude-fable-5-1');
+    expect(effectiveModel('anthropic', 'claude-fable-5-2')).toBe('claude-fable-5-2');
+    // Fable 5.1 keeps its rung: it walks to Fable 5.2, never down to Opus.
+    expect(effectiveModel('anthropic', 'claude-fable-5-1')).toBe('claude-fable-5-2');
     expect(effectiveModel('anthropic', null)).toBe('claude-opus-5-5');
     expect(effectiveModel('anthropic', undefined)).toBe('claude-opus-5-5');
     // Nothing a stranger could put in the column becomes a model either — and
@@ -416,10 +431,13 @@ describe('supported models', () => {
     expect(
       estimateCostUsd('claude-sonnet-5-5', { input_tokens: 1_000_000, output_tokens: 1_000_000 }),
     ).toBeCloseTo(12, 5);
-    // Fable 5.1 is GPT-6 Astra's $10/$50.
+    // Fable 5.1 is GPT-6 Astra's $10/$50, and Fable 5.2 a fifth less, $8/$40.
     expect(
       estimateCostUsd('claude-fable-5-1', { input_tokens: 1_000_000, output_tokens: 1_000_000 }),
     ).toBeCloseTo(60, 5);
+    expect(
+      estimateCostUsd('claude-fable-5-2', { input_tokens: 1_000_000, output_tokens: 1_000_000 }),
+    ).toBeCloseTo(48, 5);
     // GPT-6 and Haiku 5.5 bill a long prompt at dearer rates, so their list
     // prices are checked on a prompt short of either line (`longPrompt`).
     const short = { input_tokens: 100_000, output_tokens: 100_000 };
@@ -494,6 +512,9 @@ describe('supported models', () => {
     // Fable 5.1 reads at a fortieth of $10, a quarter of what Opus 5 charged.
     expect(estimateCostUsd('claude-fable-5-1', { cache_read_input_tokens: 1_000_000 })).toBeCloseTo(0.25, 5);
     expect(estimateCostUsd('claude-fable-5-1', { cache_creation_input_tokens: 1_000_000 })).toBeCloseTo(12.5, 5);
+    // Fable 5.2 keeps the fortieth, of $8: $0.20 a read, $10 a write.
+    expect(estimateCostUsd('claude-fable-5-2', { cache_read_input_tokens: 1_000_000 })).toBeCloseTo(0.2, 5);
+    expect(estimateCostUsd('claude-fable-5-2', { cache_creation_input_tokens: 1_000_000 })).toBeCloseTo(10, 5);
   });
 
   /**
@@ -505,6 +526,8 @@ describe('supported models', () => {
   it('stretches the spend caps for a model priced above the one they were set against', () => {
     expect(budgetScale('gpt-6-astra')).toBeCloseTo(2, 5);
     expect(budgetScale('claude-fable-5-1')).toBeCloseTo(2, 5);
+    // $8/$40 against $5/$25: both rates 1.6 times the reference.
+    expect(budgetScale('claude-fable-5-2')).toBeCloseTo(1.6, 5);
     expect(budgetScale('claude-haiku-5-5')).toBe(1);
     expect(budgetScale('claude-opus-5')).toBe(1);
     expect(budgetScale('claude-opus-5-5')).toBe(1);

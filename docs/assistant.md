@@ -11,7 +11,7 @@ answers questions about the home and about the app, works devices and presses
 scenes, says what it can and cannot do — and hands the jobs that belong to
 another agent over to it.
 
-It runs on **either vendor**, on a model the home chooses: **Fable 5.1**, **Opus
+It runs on **either vendor**, on a model the home chooses: **Fable 5.2**, **Opus
 5.5**, **Sonnet 5.5** or **Haiku 5.5** on Anthropic, **GPT-6 Astra**, **GPT-6.1
 Sol**, **GPT-6.1 Terra** or **GPT-6 Luna** on OpenAI — the same four rungs on
 both. That list is its own rather than the mapper's, and the difference is the
@@ -26,9 +26,9 @@ GPT-5.6 Sol → GPT-6 Sol → GPT-6.1 Sol, GPT-5.6 Terra → GPT-6.1 Terra, each
 its own tier — on the vendor it chose, resolved whenever the settings are read
 and never written back (`src/ai/models.ts` says why that is the rollback-safe
 half). **Its $0.50 cap is in the model's own dollars**: it was sized against
-Opus 5, so `budgetScale` stretches it for GPT-6 Astra and Fable 5.1, at twice
-that price, and a conversation on the most capable model is not cut off at half
-the rounds.
+Opus 5, so `budgetScale` stretches it for GPT-6 Astra, at twice that price, and
+Fable 5.2, at 1.6 times, and a conversation on the most capable model is not cut
+off part way through the rounds.
 
 **It was Anthropic-only, and not as a policy.** `chat/agent-loop.ts` typed every
 signature against `Anthropic.*` and both agents imported the SDK at the top of
@@ -243,8 +243,10 @@ never its bytes. **And the provider history lets it go**: once a round that
 carried a photo is over, the session is *rebased* — spend banked, a fresh
 conversation on the same model, primed with the record of everything said —
 before the next queued turn begins. The history cannot be edited instead,
-because Fable 5.1 binds each thinking block to everything ahead of it and a
-conversation may only be appended to; a photo left in it would sit in memory
+because Fable 5.2 (as Fable 5.1, Opus 5.5 and Sonnet 5.5 before it) binds each
+thinking block to everything ahead of it — on every key, where the earlier models
+checked only keys opened from 31 August 2026 — and a conversation may only be
+appended to; a photo left in it would sit in memory
 for the session's two hours on a board with thirty megabytes to spare, and be
 re-sent and paid for every round after. **It happens whether or not the
 conversation is still in memory** — one closed or evicted mid-round still has

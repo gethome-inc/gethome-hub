@@ -1228,7 +1228,7 @@ describe.skipIf(!handle)('hub API', () => {
       'gpt-6-luna',
     ]);
     expect(assistant.choices.anthropic?.map((model) => model.id)).toEqual([
-      'claude-fable-5-1',
+      'claude-fable-5-2',
       'claude-opus-5-5',
       'claude-sonnet-5-5',
       'claude-haiku-5-5',
@@ -1494,7 +1494,7 @@ describe.skipIf(!handle)('hub API', () => {
     // taken and succeeded, so listing it as something recognition "runs on"
     // would send somebody to a model that never runs.
     const detail = (put.json() as { detail: string }).detail;
-    expect(detail).toContain('device recognition runs on: claude-fable-5-1, claude-opus-5-5');
+    expect(detail).toContain('device recognition runs on: claude-fable-5-2, claude-opus-5-5');
     expect(detail).not.toMatch(/claude-opus-5(?!-5)|claude-opus-4|claude-sonnet/);
   });
 

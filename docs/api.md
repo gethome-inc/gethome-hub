@@ -2375,7 +2375,7 @@ what can be done about it:
   note. Absent on a note written before the field was.
 - **`switchTo`** is the **other vendor's** agent model **on the tier the
   failed one was on** — the most capable, the recommended, the quicker one at
-  half its price, the quickest: GPT-6 Astra and Fable 5.1, GPT-6.1 Sol and
+  half its price, the quickest: GPT-6 Astra and Fable 5.2, GPT-6.1 Sol and
   Opus 5.5, GPT-6.1 Terra and Sonnet 5.5, GPT-6 Luna and Haiku 5.5, each
   offered for the other — so a chat put on the cheaper model is not answered
   again at four times its price. Where the other vendor offers two models on
@@ -2464,9 +2464,9 @@ the second provider reads exactly what it read before — plus a per-provider ha
 
   "providers": {
     "anthropic": { "hasKey": true, "model": "claude-opus-5-5",
-                   "models": [ { "id": "claude-fable-5-1", "label": "Fable 5.1", … },
+                   "models": [ { "id": "claude-fable-5-2", "label": "Fable 5.2", … },
                                { "id": "claude-opus-5-5", "label": "Opus 5.5",
-                                 "note": "Thorough, at two fifths of Fable’s price.",
+                                 "note": "Thorough, at half Fable’s price.",
                                  "recommended": true } ] },
     "openai":    { "hasKey": true, "model": "gpt-6.1-sol",
                    "models": [ { "id": "gpt-6-astra", "label": "GPT-6 Astra", … },
@@ -2474,13 +2474,13 @@ the second provider reads exactly what it read before — plus a per-provider ha
   },
   "mapping":   { "provider": "anthropic", "choosable": true, "enabled": true },
   "assistant": { "model": "claude-opus-5-5", "provider": "anthropic", "choosable": true,
-                 "models": [ { "id": "claude-fable-5-1", "label": "Fable 5.1", … },
+                 "models": [ { "id": "claude-fable-5-2", "label": "Fable 5.2", … },
                              { "id": "claude-opus-5-5", "label": "Opus 5.5",
                                "note": "Best when it has to work things out, …", "recommended": true },
                              { "id": "claude-sonnet-5-5", "label": "Sonnet 5.5",
                                "note": "Quicker, and half the price of Opus 5.5." },
                              { "id": "claude-haiku-5-5", "label": "Haiku 5.5", … } ],
-                 "choices": { "anthropic": [ { "id": "claude-fable-5-1", … },
+                 "choices": { "anthropic": [ { "id": "claude-fable-5-2", … },
                                              { "id": "claude-opus-5-5", … },
                                              { "id": "claude-sonnet-5-5", … },
                                              { "id": "claude-haiku-5-5", … } ],
@@ -2534,7 +2534,7 @@ descriptors the hub had to reject and one that named `custom` as an outlet's
 primary capability — a paid run whose result was a tile with no control on it,
 cached against the device *model* for ever. That argument is about *cheaper*
 models, so OpenAI offers GPT-6 Astra above GPT-6.1 Sol (the default) and
-Anthropic offers Fable 5.1 above Opus 5.5 (the default). Writing it is
+Anthropic offers Fable 5.2 above Opus 5.5 (the default). Writing it is
 `anthropicModel` / `openaiModel`, with `mappingProvider` beside it when the
 vendor changes too — one `PATCH` carries both, and the hub writes the models
 before the vendor so neither half is refused for the other. Send the vendor only
@@ -2543,7 +2543,8 @@ adding a second key later no longer moves recognition to the default vendor.
 
 **`model` is what will run, not what is stored — and a retired model is
 succeeded.** Every model the hub has known carries the model that replaced it
-(Opus 5 → Opus 5.5; Sonnet 5 → Sonnet 5.5; GPT-5.6 Sol and the `gpt-5.6` alias
+(Opus 5 → Opus 5.5; Sonnet 5 → Sonnet 5.5; Fable 5.1 → Fable 5.2; GPT-5.6 Sol
+and the `gpt-5.6` alias
 → GPT-6 Sol → GPT-6.1 Sol; GPT-5.6 Terra → GPT-6.1 Terra — a tier keeps its
 tier), and a stored choice counts only while it is still offered: otherwise the
 hub runs the first model along that chain which is, and only where there is none

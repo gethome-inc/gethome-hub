@@ -2636,9 +2636,10 @@ export abstract class ChatRuntime<Turn extends { kind: string }> {
    * Let a photo go, once the round it was sent for is over.
    *
    * **The provider history is the one place a photo outlives its round**, and
-   * it is the one place this hub cannot edit: Fable 5.1 binds each thinking
-   * block to everything ahead of it, so a conversation may only ever be
-   * appended to — cutting an image block out of the middle of one is a
+   * it is the one place this hub cannot edit: Fable 5.2 binds each thinking
+   * block to everything ahead of it — on every key, where Fable 5.1, Opus 5.5
+   * and Sonnet 5.5 check only keys opened from 31 August 2026 — so a
+   * conversation may only ever be appended to — cutting an image block out of the middle of one is a
    * conversation the API refuses. Left there, every photo somebody sent would
    * sit in memory for the session's two-hour life and be re-sent, and paid
    * for, on every round after it, on a board with thirty megabytes to spare.

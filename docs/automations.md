@@ -1149,7 +1149,7 @@ from either pump — it is the same fact in both, and the loop is the one place
 that already has `said` and `calls` in hand.
 
 **On Opus 5.5 and Sonnet 5.5 most of it arrives as reasoning instead, and that
-is fine.** From Opus 5.5 (as on Fable 5.1) the short notes a model writes
+is fine.** From Opus 5.5 (as on Fable 5.1 and 5.2) the short notes a model writes
 between tool calls come back as *progress-update* `thinking` blocks rather than
 `text` — at most one before each call; Sonnet 5.5 does the same with any note
 longer than a sentence or two, and leaves a shorter remark as `text`. The

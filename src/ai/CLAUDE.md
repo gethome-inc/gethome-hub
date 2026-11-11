@@ -64,7 +64,7 @@ domains — update them in the same change.
   unit of it the home ever meets until somebody remaps; a few cents on a job
   that runs a handful of times in a hub's life does not buy that risk. That is
   an argument about *cheaper* models, so OpenAI offers GPT-6 Astra above
-  GPT-6.1 Sol and Anthropic offers Fable 5.1 above Opus 5.5 — and the test pins
+  GPT-6.1 Sol and Anthropic offers Fable 5.2 above Opus 5.5 — and the test pins
   the invariant, not a count. The half that is easy to miss is
   **`effectiveModel`: a stored model counts only while it is still offered**,
   or retiring one leaves the homes that had chosen it as the only homes still
@@ -109,8 +109,8 @@ domains — update them in the same change.
   `AGENT_MAX_BUDGET_USD` per recognition run, `ASSISTANT_MAX_BUDGET_USD` and
   `AUTOMATION_MAX_BUDGET_USD` per conversation — was sized against Opus 5's
   $5/$25, and `budgetScale(modelId)` stretches it for a model priced above that
-  (GPT-6 Astra and Fable 5.1, ×2). Without it the most thorough model a home
-  could pick would be the one stopped at half the work; a cheaper model keeps
+  (GPT-6 Astra ×2, Fable 5.2 ×1.6). Without it the most thorough model a home
+  could pick would be the one stopped part way through the work; a cheaper model keeps
   the same ceiling, never a tighter one. A new cap goes through it too.
   **And what is measured against them is priced a request at a time**: every
   `RunUsage` adds up `estimateCostUsd` per round rather than pricing its token
@@ -802,7 +802,7 @@ domains — update them in the same change.
   paragraph and a release of both apps. `permission` is checked when the tool
   runs, so a member whose role cannot hand a job over gets a sentence the model
   reads out rather than a capability silently absent.
-  **The agents' model list is its own** (`AGENT_MODELS` — Fable 5.1, Opus 5.5,
+  **The agents' model list is its own** (`AGENT_MODELS` — Fable 5.2, Opus 5.5,
   Sonnet 5.5 and Haiku 5.5 on Anthropic, GPT-6 Astra, GPT-6.1 Sol, GPT-6.1
   Terra and GPT-6 Luna on OpenAI: the same four rungs on both), and the
   mapper's list stays strong-only: a descriptor is
@@ -1153,9 +1153,10 @@ domains — update them in the same change.
   subsystem writes a request body anywhere else —
   `ai_runs` holds no text and chats record no `ai_run_exchanges`, and a suite
   searches all three tables for the base64. **The provider history is the one
-  place a photo outlives its round, and it cannot be edited**: Fable 5.1 binds
-  each thinking block to everything ahead of it, so cutting an image block out
-  of the middle is a conversation the API refuses. So once a round that
+  place a photo outlives its round, and it cannot be edited**: Fable 5.2 binds
+  each thinking block to everything ahead of it — on every key, where Fable 5.1,
+  Opus 5.5 and Sonnet 5.5 check only keys opened from 31 August 2026 — so
+  cutting an image block out of the middle is a conversation the API refuses. So once a round that
   carried a photo ends — success or failure, in the chain, before the next
   queued turn — `rebase` banks the spend, opens a fresh conversation on the
   same model and primes it with the record of every settled row. **Whether or

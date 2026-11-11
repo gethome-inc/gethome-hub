@@ -593,7 +593,7 @@ describe('the reader', () => {
 
     it('asks OpenAI first and Anthropic second, whatever recognition runs on', async () => {
       await settings.setAiKey('anthropic', 'sk-ant-api-key-0000');
-      await settings.setAiModel('claude-fable-5-1', 'anthropic');
+      await settings.setAiModel('claude-fable-5-2', 'anthropic');
       expect(await homeLocator(settings)()).toEqual([
         { provider: 'anthropic', modelId: 'claude-sonnet-5-5', apiKey: 'sk-ant-api-key-0000' },
       ]);

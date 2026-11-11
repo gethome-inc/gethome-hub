@@ -757,9 +757,10 @@ describe('the words on a failure', () => {
     expect(switchOffer('anthropic', 'claude-sonnet-5-5', usable)).toMatchObject({ model: 'gpt-6.1-terra' });
     expect(switchOffer('openai', 'gpt-6-luna', usable)).toMatchObject({ model: 'claude-haiku-5-5' });
     expect(switchOffer('anthropic', 'claude-haiku-5-5', usable)).toMatchObject({ model: 'gpt-6-luna' });
-    expect(switchOffer('openai', 'gpt-6-astra', usable)).toMatchObject({ model: 'claude-fable-5-1' });
-    expect(switchOffer('anthropic', 'claude-fable-5-1', usable)).toMatchObject({ model: 'gpt-6-astra' });
+    expect(switchOffer('openai', 'gpt-6-astra', usable)).toMatchObject({ model: 'claude-fable-5-2' });
+    expect(switchOffer('anthropic', 'claude-fable-5-2', usable)).toMatchObject({ model: 'gpt-6-astra' });
     // A retired model is read as the one that replaced it, which keeps its tier.
+    expect(switchOffer('anthropic', 'claude-fable-5-1', usable)).toMatchObject({ model: 'gpt-6-astra' });
     expect(switchOffer('openai', 'gpt-5.6-terra', usable)).toMatchObject({ model: 'claude-sonnet-5-5' });
     expect(switchOffer('anthropic', 'claude-sonnet-4-6', usable)).toMatchObject({ model: 'gpt-6.1-terra' });
     // One this build never knew has no tier: the other vendor's default.
