@@ -67,7 +67,8 @@ Six rules.
   the four IR-learning ones, which a person does at the blaster — and parses
   **every JSON example** with the schema that will read it: discovery
   documents, endpoints, state reports and commands — and what a program says
-  about itself, which the hub has to keep whole. Agents copy an example
+  about itself and what a camera announces, each of which the hub has to keep
+  whole, and the id a camera proves itself with. Agents copy an example
   before they read the paragraph around it, so an example the hub would refuse
   is the most expensive kind of wrong.
 - **The docs stay canonical and the skills follow them.** `docs/api.md`,

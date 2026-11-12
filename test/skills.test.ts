@@ -29,6 +29,7 @@ import {
 } from '../src/schema/index.js';
 import { commandTopic, parseTopic } from '../src/adapters/mqtt/convention.js';
 import { readProgram } from '../src/adapters/mqtt/program.js';
+import { readCameraAnnouncement } from '../src/cameras/policy.js';
 import {
   bootedHome,
   loadedAccess,
@@ -408,6 +409,26 @@ describe('the skills, against the schema', () => {
             if (!isDeepStrictEqual(readProgram(JSON.stringify(example)), example)) {
               refused.push(`${where}: program ${JSON.stringify(example)} — the hub would not keep it as written`);
             }
+          } else if ('streams' in example) {
+            // A camera's announcement is read leniently as well, a stream at
+            // a time, so an example has to come through whole: every stream
+            // kept as written, at an address the hub is willing to fetch.
+            counted.camera = (counted.camera ?? 0) + 1;
+            const read = readCameraAnnouncement(example);
+            if (read.dropped.length > 0 || !isDeepStrictEqual(read.streams, example.streams)) {
+              refused.push(
+                `${where}: camera announcement ${JSON.stringify(example)} — the hub would not serve it as written (${read.dropped.join('; ')})`,
+              );
+            }
+          } else if (isDeepStrictEqual(Object.keys(example), ['id'])) {
+            // What a camera answers `GET /gethome/id` with. The hub compares
+            // it with the device's id, so an example is one: an id a device
+            // may have, or the placeholder for it.
+            counted.proof = (counted.proof ?? 0) + 1;
+            const id = (example as { id?: unknown }).id;
+            if (typeof id !== 'string' || !(id === '<deviceId>' || /^[A-Za-z0-9_-]{1,64}$/.test(id))) {
+              refused.push(`${where}: camera proof ${JSON.stringify(example)} — not an id a device can have`);
+            }
           } else check('state report', statePatchSchema, example, where);
         }
       }
@@ -420,6 +441,8 @@ describe('the skills, against the schema', () => {
     expect(counted.endpoint).toBeGreaterThanOrEqual(6);
     expect(counted['state report']).toBeGreaterThan(10);
     expect(counted.program).toBeGreaterThanOrEqual(2);
+    expect(counted.camera).toBeGreaterThanOrEqual(2);
+    expect(counted.proof).toBeGreaterThanOrEqual(2);
   });
 });
 

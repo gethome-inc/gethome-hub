@@ -39,7 +39,7 @@ endpoint `1`.
 | `gethome/device/<deviceId>/state/<endpointId>` | device | recommended | state patch for that endpoint |
 | `gethome/device/<deviceId>/set` | hub | no | command for endpoint 1 |
 | `gethome/device/<deviceId>/set/<endpointId>` | hub | no | command for that endpoint |
-| `gethome/device/<deviceId>/camera` | device | **yes** | the streams a camera serves on the LAN (endpoint 1) — see the hub's `docs/mqtt-integrations.md`, *Cameras* |
+| `gethome/device/<deviceId>/camera` | device | **yes** | the streams a camera serves on the home's network (endpoint 1), or empty to withdraw them — [cameras.md](cameras.md) |
 | `gethome/device/<deviceId>/camera/<endpointId>` | device | **yes** | the same, for that endpoint |
 | `gethome/device/<deviceId>/program` | device | **yes** | a JSON object saying the device is a program rather than a board, and optionally on which computer: `{"host":"nuc.local"}`; empty to withdraw |
 
@@ -253,6 +253,7 @@ gethome/discovery/<deviceId>/config        ""   retained   the hub deletes the d
 gethome/device/<deviceId>/state            ""   retained   clears the broker's copy
 gethome/device/<deviceId>/availability     ""   retained   clears the broker's copy
 gethome/device/<deviceId>/program          ""   retained   the same, if it said it is a program
+gethome/device/<deviceId>/camera           ""   retained   the same, if it announced a camera
 ```
 
 (With `mosquitto_pub`, an empty retained message is `-r -n`.)

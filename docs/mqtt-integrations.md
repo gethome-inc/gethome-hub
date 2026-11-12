@@ -260,7 +260,13 @@ payload to withdraw it.
   ignored, not refused, so a newer device still works with an older hub.
 - **`url`** must be plain `http://` to the camera's **private IPv4 address** —
   not a name, not `https`, no user name or password in it. Anything else is
-  dropped.
+  dropped. One of the hub's own addresses is refused when the picture is asked
+  for, so a camera is not served from the hub's own machine.
+- **An announcement is read stream by stream**: at most 8 an endpoint, each
+  with an `id` of its own (1–32 characters of `[A-Za-z0-9_-]`), a `url` of at
+  most 512 characters and, optionally, a `label` (at most 60) and a `width`
+  and `height` (whole numbers, 1–10000). One the hub will not serve is dropped
+  by itself, with a line in the hub's log, and the others stand.
 - **Prove it is you**: the hub fetches nothing until
   `GET http://<camera>/gethome/id` (asked on the stream's own port, then on
   port 80) answers `{"id":"<deviceId>"}` with this device's id.
