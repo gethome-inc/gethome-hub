@@ -230,3 +230,9 @@ starts it now and at every boot.
   several devices has only one last will, and a crash leaves the others
   reading online. When the bridge loses the hardware behind a device but stays
   connected, publish that device's availability `offline` itself.
+- **A bridge is a program, and can say so.** For each device it presents, in
+  `on_connect` beside the heartbeat (with `import socket`):
+  `client.publish(f"{BASE}/program", json.dumps({"host": socket.gethostname()}), qos=1, retain=True)`.
+  The hub then tells the apps that the device is a program and which computer
+  it runs on. The relay above leaves it out: there the Raspberry Pi and its
+  pins are the device.

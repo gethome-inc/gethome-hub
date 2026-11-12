@@ -202,6 +202,34 @@ gethome/device/greenhouse/set  ←  {"type":"toggle"}
 
 Both are spelled out in [references/capabilities.md](references/capabilities.md).
 
+## When the device is a program
+
+A bridge, a script or a service that is the device — code running on a
+computer, rather than firmware on a board — can say so, and the hub tells the
+gethome apps that it is a program and which computer it runs on. Publish a
+JSON object, **retained**, on every connection, beside the heartbeat:
+
+```text
+gethome/device/<deviceId>/program  →  {"host":"nuc.local"}
+```
+
+- `host` is the **name of the computer** the program runs on, for people to
+  read — its hostname is the usual answer. At most 120 characters; a longer
+  one is cut. It is optional: an object with no keys says "a program" and
+  names no computer.
+- **Never an address for the hub to connect to, and never a secret**: the hub
+  connects to nothing named here, and everything signed in with the `gethome`
+  account can read the topic.
+- Send only `host`. The hub passes over keys it does not know, so anything
+  else is dropped rather than shown.
+- An **empty retained payload** takes it back, and the device is hardware
+  again. A payload that is not a JSON object, or a `host` that is not a
+  string, is ignored with a line in the hub's log; the device stays as it was.
+- **Firmware on a board never publishes it.** A hub from before this ignores
+  the topic, and the device works there like any other — which is why it is a
+  topic of its own: the same fact as a key in the discovery document would be
+  refused whole.
+
 ## Removing a device
 
 Publish an **empty retained payload** to its config topic (and to its state

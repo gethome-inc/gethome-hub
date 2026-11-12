@@ -6,6 +6,7 @@ import type {
   AdapterBus,
   AdapterDeviceDescriptor,
   AdapterId,
+  DeviceProgram,
   DeviceRecognition,
   ProtocolAdapter,
 } from '../adapters/adapter.js';
@@ -52,6 +53,15 @@ export interface RegistryDevice {
    * fact the device already keeps.
    */
   wifiNetwork: string | null;
+  /**
+   * What the device said about being a program — a script, a bridge or a
+   * service on a computer — and null for one that hasn't said so: hardware,
+   * anything on Zigbee or Matter, and a program not yet announced since the
+   * hub started. **Held in memory only**, like `wifiNetwork` and for its
+   * reason: the MQTT adapter learns it again from the device's retained topic
+   * at every start.
+   */
+  program: DeviceProgram | null;
   endpoints: RegistryEndpoint[];
 }
 
@@ -247,6 +257,7 @@ export class DeviceRegistry implements AdapterBus {
         offlineExpectedByName: row.offlineExpectedByName,
         // Until its adapter announces it again, a moment from now.
         wifiNetwork: null,
+        program: null,
         endpoints: (byDevice.get(row.id) ?? []).map((endpoint) => ({
           endpointId: endpoint.endpointId,
           deviceKind: endpoint.deviceKind as DeviceKind,
@@ -958,6 +969,7 @@ export class DeviceRegistry implements AdapterBus {
       offlineExpectedBy: null,
       offlineExpectedByName: null,
       wifiNetwork: descriptor.wifiNetwork ?? null,
+      program: descriptor.program ?? null,
       endpoints: [],
     };
     for (const endpoint of descriptor.endpoints) {
@@ -1003,6 +1015,7 @@ export class DeviceRegistry implements AdapterBus {
     device.needsReview = descriptor.needsReview ?? false;
     device.recognition = descriptor.recognition ?? null;
     device.wifiNetwork = descriptor.wifiNetwork ?? null;
+    device.program = descriptor.program ?? null;
     await this.db
       .update(devices)
       .set({

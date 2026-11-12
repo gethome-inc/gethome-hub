@@ -100,6 +100,15 @@ export function deviceWire(
     ...(elsewhere !== undefined
       ? { offlineElsewhere: view.namesNetworks === true ? { network: elsewhere.network } : {} }
       : {}),
+    // **Presence is the answer** again: only a device that said it is a
+    // program — on its own MQTT topic, `adapters/mqtt/program.ts` — carries
+    // the key, so the wire of every other device is what it was. `host` is
+    // the computer it named, left out when it named none, which makes `{}` a
+    // whole answer. Built key by key rather than passed through, so the
+    // object grows here on purpose and never by accident.
+    ...(device.program !== null
+      ? { program: { ...(device.program.host !== undefined ? { host: device.program.host } : {}) } }
+      : {}),
     // **Presence is the capability once more**: only a device with panels
     // carries the key, so the wire of every other device is byte-for-byte what
     // it was, and an app from before panels never meets it at all. Each

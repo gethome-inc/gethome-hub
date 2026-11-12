@@ -36,6 +36,11 @@ mirrors the Matter data model. The hub's `docs/device-schema.md` is canonical.
 - `offlineExpected` (present only when somebody said a device being offline is
   fine) and `offlineElsewhere` (it is on a Wi-Fi network the hub has left) mean
   an offline device is **not** a fault. Don't alarm about either.
+- `program` is present only on a device that said it is a program — a script,
+  a bridge or a service running on a computer, rather than a board. It may
+  carry `host`, the name of that computer, for people to read and never an
+  address to connect to. Every other device has no such key, and the object
+  may gain others: read past what you don't know.
 - `favorite` is the key's member's own pin, not the home's.
 - Absent sub-objects in `state` mean that capability has not reported yet —
   not zero. `sensors` is always present, possibly empty.

@@ -1,6 +1,7 @@
 import { mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { pino } from 'pino';
 import type { FastifyInstance, HTTPMethods } from 'fastify';
@@ -27,6 +28,7 @@ import {
   statePatchSchema,
 } from '../src/schema/index.js';
 import { commandTopic, parseTopic } from '../src/adapters/mqtt/convention.js';
+import { readProgram } from '../src/adapters/mqtt/program.js';
 import {
   bootedHome,
   loadedAccess,
@@ -396,7 +398,17 @@ describe('the skills, against the schema', () => {
             if (!isCommandType(example.type)) check('command', commandSchema, example, where);
           } else if ('endpoints' in example) check('discovery document', mqttDiscoverySchema, example, where);
           else if ('endpointId' in example) check('endpoint', endpointDescriptorSchema, example, where);
-          else check('state report', statePatchSchema, example, where);
+          else if ('host' in example) {
+            // What a program says about itself has a reader rather than a
+            // schema, and the reader is lenient — so an example is held to
+            // more than being accepted: the hub has to keep all of it. One
+            // showing a key the hub passes over would teach an agent to send
+            // something that goes nowhere.
+            counted.program = (counted.program ?? 0) + 1;
+            if (!isDeepStrictEqual(readProgram(JSON.stringify(example)), example)) {
+              refused.push(`${where}: program ${JSON.stringify(example)} — the hub would not keep it as written`);
+            }
+          } else check('state report', statePatchSchema, example, where);
         }
       }
     }
@@ -407,6 +419,7 @@ describe('the skills, against the schema', () => {
     expect(counted['discovery document']).toBeGreaterThanOrEqual(4);
     expect(counted.endpoint).toBeGreaterThanOrEqual(6);
     expect(counted['state report']).toBeGreaterThan(10);
+    expect(counted.program).toBeGreaterThanOrEqual(2);
   });
 });
 

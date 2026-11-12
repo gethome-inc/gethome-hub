@@ -406,6 +406,16 @@ there, because those reach the routes as well. `docs/api.md` and
   And **the network's name is `hub.wifi`'s**: `deviceWire` renders `{}` without
   it (per reader, on the route and the socket), the `activity.read`
   narrowing shape. `docs/api.md` is canonical.
+- **A device may be a program, and the registry only carries the fact.** An
+  MQTT device says so on its own retained topic
+  (`adapters/mqtt/program.ts`), the adapter announces it on the descriptor as
+  `program`, and `deviceWire` renders it with presence as the answer: absent
+  for every device that isn't one. **Memory only, like `wifiNetwork`, and for
+  its reason**: the broker hands the retained message back at every start, so
+  a column would be a second copy of something the device keeps. Every
+  announcement replaces it, so a descriptor without one clears it, and only
+  the MQTT adapter ever sends one. `docs/mqtt-integrations.md` and
+  `docs/api.md` are canonical.
 - **`<data>/pairing-code` is a contract, and it now *survives* restarts.** It
   used to be re-minted on every boot, and that was the bug: any code that had
   been read — `install.sh`'s `@@PAIRING@@` marker, or a value Studio fetched a

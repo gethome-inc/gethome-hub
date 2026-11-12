@@ -68,18 +68,20 @@ internet: don't forward 1883 through your router.
 | `gethome/device/<deviceId>/set` | hub → device | canonical **command** for endpoint 1 |
 | `gethome/device/<deviceId>/set/<endpointId>` | hub → device | per-endpoint command |
 | `gethome/device/<deviceId>/camera[/<endpointId>]` | device → hub, **retained** | the streams a camera serves ([Cameras](#cameras)) |
+| `gethome/device/<deviceId>/program` | device → hub, **retained** | a JSON object saying the device is a program, and on which computer (`{"host":"nuc.local"}`) — optional ([A device that is a program](#a-device-that-is-a-program)) |
 
 Publish an **empty retained payload** to the config topic to remove the
 device.
 
 **The hub does the same when somebody deletes the device in an app**: it clears
-the retained config (and any heartbeat and camera topics), so the device
-doesn't come back on the hub's next boot. A device that subscribes to its own config topic hears that
-as a live empty message — its cue to stop announcing itself until it is set up
-again, rather than putting itself straight back. Its own retained config
-arriving on that subscription is not a deletion. (A device that is switched off
-at that moment misses it, and comes back when it is switched on: an empty
-retained message leaves nothing behind for it to hear later.)
+the retained config (and any heartbeat, camera and program topics), so the
+device doesn't come back on the hub's next boot. A device that subscribes to
+its own config topic hears that as a live empty message — its cue to stop
+announcing itself until it is set up again, rather than putting itself straight
+back. Its own retained config arriving on that subscription is not a deletion.
+(A device that is switched off at that moment misses it, and comes back when it
+is switched on: an empty retained message leaves nothing behind for it to hear
+later.)
 
 ### A project's own topics (`gethome/project/<key>/…`)
 
@@ -270,6 +272,49 @@ The apps never see the address: the endpoint's state carries the streams' ids,
 kinds and sizes, and a phone fetches them from the hub
 (`GET /api/v1/cameras/…`, [api.md](api.md)), which needs the `camera.view`
 permission. Nothing is recorded.
+
+## A device that is a program
+
+Not every device is a board. A script that publishes a reading it worked out,
+a bridge that presents other hardware, a service running on a computer in the
+house: each can be a device on this convention, and to the hub it is one like
+any other. A program that wants to be shown for what it is says so, retained,
+on its program topic:
+
+```
+gethome/device/tide-table/program  →  {"host":"nuc.local"}
+```
+
+Publish it on every connection, with the rest. It may go out before or after
+the discovery document: the hub keeps one that arrives first.
+
+- **`host`** is the name of the computer the program runs on, **for people to
+  read** — 1–120 characters once the spaces around it are trimmed, and a longer
+  one is cut to 120. It is never an address the hub connects to, and never the
+  place for a secret. It is optional: `{}` says "a program", on a computer it
+  didn't name, and so does a `host` that is empty.
+- **Keys the hub doesn't know are ignored**, never an error, so a program that
+  says more than this hub reads still works with it.
+- **An empty retained payload withdraws it**, and the device is hardware again.
+- A payload that isn't a JSON object, or a `host` that isn't a string, is
+  ignored with a line in the hub's log. It never rejects or removes the device.
+
+The hub hands it to the apps with the device — `program` on the device's wire
+([api.md](api.md#device-wire-shape-get-devices-item)) — which is what lets an
+app say that this one is a program, and where it runs, rather than drawing it
+as a board. Nothing else about the device changes: its state, its commands,
+its availability and its heartbeat are any device's. The hub keeps it in
+memory only and learns it again from the retained message after a restart.
+
+A board says nothing here, and nothing changes for it. A hub from before this
+doesn't subscribe to the topic and shows the device as it shows any other —
+which is why this is a topic of its own rather than a key in the discovery
+document, where a hub that had never heard of the key would refuse the whole
+device.
+
+This is for a program that **is** a device. One that only **uses** the home —
+reads it, switches what is already there — is not a device at all, and wants
+an API key instead ([MQTT or the API?](#connecting)).
 
 ## Rules & tips
 

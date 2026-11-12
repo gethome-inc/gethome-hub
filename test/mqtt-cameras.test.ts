@@ -130,7 +130,7 @@ describe('MQTT cameras', () => {
 });
 
 describe('MQTT forget', () => {
-  it('clears the retained config, heartbeat and camera topics, and its own echo is not a second removal', async () => {
+  it('clears the retained config, heartbeat, program and camera topics, and its own echo is not a second removal', async () => {
     const h = harness();
     h.message('gethome/discovery/porch-cam/config', discovery);
     h.message('gethome/device/porch-cam/camera', announcement);
@@ -139,6 +139,7 @@ describe('MQTT forget', () => {
     expect(h.published).toEqual([
       { topic: 'gethome/discovery/porch-cam/config', payload: '', options: { qos: 1, retain: true } },
       { topic: 'gethome/device/porch-cam/heartbeat', payload: '', options: { qos: 1, retain: true } },
+      { topic: 'gethome/device/porch-cam/program', payload: '', options: { qos: 1, retain: true } },
       { topic: 'gethome/device/porch-cam/camera', payload: '', options: { qos: 1, retain: true } },
     ]);
     // The broker hands our own empty config back on the subscription.
