@@ -254,7 +254,9 @@ export class AutomationChat extends ChatRuntime<AutomationTurn> {
       this.rememberSaved(session, replaces, document.name);
       return { id: replaces, document, edited: true };
     }
-    const record = await this.options.store.create(document, session.memberId, 'written in chat');
+    const record = await this.options.store.create(document, session.memberId, 'written in chat', {
+      kind: 'chat',
+    });
     await this.options.engine.reload();
     this.options.events.emit('automationChanged', record.id);
     // What the `ai_runs` row records as what the spend bought. The *first*

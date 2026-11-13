@@ -75,6 +75,7 @@ import { automationDocumentSchema } from '../automations/schema.js';
 import { sanityCheckAutomation } from '../automations/sanity.js';
 import { automationCatalog } from '../automations/catalog.js';
 import { AUTOMATION_TEMPLATES, findTemplate } from '../automations/templates.js';
+import { describeOrigin, originThroughKey } from '../automations/origin.js';
 import { automationOutline } from '../automations/outline.js';
 import { automationShape, describeAutomation } from '../automations/summarize.js';
 import { automationDevices, automationRoom } from '../automations/scope.js';
@@ -989,8 +990,11 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // yet — where there is nothing to look for a field on. `problems` says a
     // run's trace marks the steps that were a problem (`problem` on a step,
     // `problems` on the `automationRun` frame) — which is the only way to tell
-    // an unmarked step that was fine from one this hub never marks.
-    automations: { status: true, devices: true, problems: true },
+    // an unmarked step that was fine from one this hub never marks. `origin`
+    // says every rule carries who added it and how (`origin`, which is `null`
+    // where the hub has nothing to say) — so an app can tell a rule with no
+    // origin from a hub that never sends one.
+    automations: { status: true, devices: true, problems: true, origin: true },
     // Additive, and presence is the capability: a hub carrying this block has
     // `GET/POST/DELETE /settings/wifi…`, so an app may offer to add the Wi-Fi
     // network a hub is about to be carried to. `available: false` says this
@@ -4552,6 +4556,50 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
   // ── Automations ──────────────────────────────────────────────────────────
 
   /**
+   * The names an answer about rules needs: who is in the home, and what each
+   * API key that added a rule is called now.
+   *
+   * Read once per answer rather than per rule, and read live rather than kept
+   * on the engine's records — a member who renames themselves is the same
+   * person on every rule they added, and a second copy of their name held in
+   * the engine would be the one that went stale. The keys are read only when
+   * some rule was added through one, which in most homes is never.
+   */
+  type AutomationNames = { members: Map<string, string>; apiKeys: Map<string, string> };
+  const automationNames = async (
+    records: ReadonlyArray<ReturnType<AutomationEngine['list']>[number]>,
+  ): Promise<AutomationNames> => {
+    const members = new Map(
+      (await deps.db.query.members.findMany()).map((row) => [row.id, row.name]),
+    );
+    const throughKey = records.some((record) => record.origin?.apiKeyId !== undefined);
+    const keys = throughKey ? await apiKeys.list() : [];
+    return { members, apiKeys: new Map(keys.map((key) => [key.id, key.name])) };
+  };
+
+  /** A rule's origin, with every name in it as it stands today. */
+  const automationOrigin = (
+    record: ReturnType<AutomationEngine['list']>[number],
+    names: AutomationNames,
+  ) => {
+    const memberName =
+      record.createdBy !== null ? names.members.get(record.createdBy) : undefined;
+    const keyId = record.origin?.apiKeyId;
+    const keyName = keyId !== undefined ? names.apiKeys.get(keyId) : undefined;
+    const templateKey = record.origin?.template;
+    const templateTitle = templateKey !== undefined ? findTemplate(templateKey)?.title : undefined;
+    return describeOrigin({
+      stored: record.origin,
+      member:
+        record.createdBy !== null && memberName !== undefined
+          ? { id: record.createdBy, name: memberName }
+          : null,
+      ...(keyName !== undefined ? { apiKeyName: keyName } : {}),
+      ...(templateTitle !== undefined ? { templateTitle } : {}),
+    });
+  };
+
+  /**
    * A rule as the apps read it.
    *
    * `summary` is the contract and the document is the convenience — the
@@ -4562,6 +4610,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    */
   const automationWire = (
     record: ReturnType<AutomationEngine['list']>[number],
+    names: AutomationNames,
     /**
      * The home to read the rule against, so a route drawing a list builds it
      * once rather than once per rule. `homeView()` walks every device and every
@@ -4627,6 +4676,18 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
      * "this hub does not say" rather than "this rule has never run".
      */
     status: deps.automations.statusOf(record.id),
+    /**
+     * Who added the rule and how it reached the hub (`describeOrigin`):
+     * `sentence` is the whole answer in words, and the fields beside it are
+     * the ones an activity row uses for the same things.
+     *
+     * `null` when there is nothing to say — a rule from before the hub kept
+     * this, whose author has since left the home — and absent altogether on
+     * a hub older than the field, which `GET /hub`'s `automations.origin`
+     * tells apart. The member and the key are named as they are *now*, and a
+     * key that is gone by the name it had.
+     */
+    origin: automationOrigin(record, names),
     document: record.document,
     createdAt: record.createdAt.toISOString(),
     updatedAt: record.updatedAt.toISOString(),
@@ -4642,8 +4703,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
    */
   app.get('/api/v1/automations', authed, async () => {
     const home = deps.automations.homeView();
+    const records = deps.automations.list();
+    const names = await automationNames(records);
     return {
-      automations: deps.automations.list().map((record) => automationWire(record, home)),
+      automations: records.map((record) => automationWire(record, names, home)),
       unreadable: deps.automations.unreadableRules(),
     };
   });
@@ -4670,7 +4733,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
     const record = deps.automations.get(id);
     if (!record) return reply.code(404).send({ error: 'not_found' });
-    return automationWire(record);
+    return automationWire(record, await automationNames([record]));
   });
 
   /**
@@ -4789,7 +4852,13 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (report.problems.length > 0) {
       return reply.code(422).send({ error: 'invalid_automation', ...report });
     }
-    const record = await deps.automationStore.create(parsed.data, request.member!.id);
+    // A document, and the key that sent it when one did — which is all the
+    // hub can see. Which app was holding a member's own sign-in is not
+    // something a request says, so nothing here guesses it.
+    const record = await deps.automationStore.create(parsed.data, request.member!.id, 'created', {
+      kind: 'document',
+      ...originThroughKey(request.apiKey),
+    });
     await deps.automations.reload();
     deps.events.emit('automationChanged', record.id);
     const who = actor(request);
@@ -4800,9 +4869,10 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       data: { automationId: record.id, automationName: record.name, ...who.data },
     });
     const saved = deps.automations.get(record.id);
-    return reply
-      .code(201)
-      .send({ ...(saved ? automationWire(saved) : {}), warnings: report.warnings });
+    return reply.code(201).send({
+      ...(saved ? automationWire(saved, await automationNames([saved])) : {}),
+      warnings: report.warnings,
+    });
   });
 
   /**
@@ -4902,7 +4972,7 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
       });
     }
     const saved = deps.automations.get(id);
-    return { ...(saved ? automationWire(saved) : {}), warnings };
+    return { ...(saved ? automationWire(saved, await automationNames([saved])) : {}), warnings };
   });
 
   app.delete('/api/v1/automations/:id', needs('automation.manage'), async (request, reply) => {
@@ -4947,7 +5017,9 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     await deps.automations.reload();
     deps.events.emit('automationChanged', id);
     const saved = deps.automations.get(id);
-    return saved ? automationWire(saved) : reply.code(404).send({ error: 'not_found' });
+    return saved
+      ? automationWire(saved, await automationNames([saved]))
+      : reply.code(404).send({ error: 'not_found' });
   });
 
   /**
@@ -4981,7 +5053,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
         warnings.push(...report.problems);
         continue;
       }
-      const record = await deps.automationStore.create(document, request.member!.id, `from ${key}`);
+      const record = await deps.automationStore.create(
+        document,
+        request.member!.id,
+        `from ${key}`,
+        { kind: 'template', template: key, ...originThroughKey(request.apiKey) },
+      );
       created.push(record.id);
     }
     await deps.automations.reload();
@@ -4996,11 +5073,12 @@ export async function buildServer(deps: ApiDeps): Promise<FastifyInstance> {
     // Read after the reload above, and once for the whole answer rather than
     // per rule — a template can install several.
     const home = deps.automations.homeView();
+    const installed = created
+      .map((id) => deps.automations.get(id))
+      .filter((record) => record !== undefined);
+    const names = await automationNames(installed);
     return reply.code(201).send({
-      automations: created
-        .map((id) => deps.automations.get(id))
-        .filter((record) => record !== undefined)
-        .map((record) => automationWire(record, home)),
+      automations: installed.map((record) => automationWire(record, names, home)),
       warnings,
     });
   });

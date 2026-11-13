@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { eq } from 'drizzle-orm';
 import { pino } from 'pino';
 import type { FastifyInstance } from 'fastify';
 import { buildServer } from '../src/api/server.js';
@@ -719,5 +720,279 @@ describe('the devices a rule uses, and whether it is working', () => {
     });
 
     await app.inject({ method: 'DELETE', url: `/api/v1/automations/${id}`, headers: auth(token) });
+  });
+});
+
+/**
+ * Who added a rule, and how it reached the hub.
+ *
+ * The hub stores the member and the route; this is what it says about them on
+ * the wire, through every way a rule can be made over HTTP. A rule written in
+ * a chat is the fourth, and `test/automation-agent.test.ts` holds that one,
+ * where a conversation can be made to submit.
+ */
+describe('where a rule came from', () => {
+  type Origin = {
+    sentence: string;
+    kind?: string;
+    memberId?: string;
+    memberName?: string;
+    via?: string;
+    apiKeyId?: string;
+    apiKeyName?: string;
+    template?: string;
+    templateTitle?: string;
+  };
+
+  const originOf = async (id: string): Promise<Origin | null | undefined> =>
+    (
+      (
+        await app.inject({ method: 'GET', url: `/api/v1/automations/${id}`, headers: auth(token) })
+      ).json() as { origin?: Origin | null }
+    ).origin;
+
+  const remove = (id: string) =>
+    app.inject({ method: 'DELETE', url: `/api/v1/automations/${id}`, headers: auth(token) });
+
+  /** Somebody invited into the home as a plain member; their token and id. */
+  const join = async (name: string): Promise<{ token: string; id: string }> => {
+    const invite = await app.inject({
+      method: 'POST',
+      url: '/api/v1/invites',
+      headers: auth(token),
+      payload: {},
+    });
+    expect(invite.statusCode, invite.body).toBe(201);
+    const joined = await app.inject({
+      method: 'POST',
+      url: '/api/v1/pair',
+      payload: { code: (invite.json() as { code: string }).code, memberName: name },
+    });
+    const body = joined.json() as { token: string; member: { id: string } };
+    return { token: body.token, id: body.member.id };
+  };
+
+  it('says the hub keeps it, for a home with no rule to look at', async () => {
+    const hub = await app.inject({ method: 'GET', url: '/api/v1/hub' });
+    expect(hub.json()).toMatchObject({ automations: { origin: true } });
+  });
+
+  it('names the member behind a document sent with their own sign-in, and guesses nothing more', async () => {
+    const created = await create(button);
+    const body = created.json() as { id: string; origin: Origin };
+    expect(body.origin).toMatchObject({
+      sentence: 'Added by Georgy',
+      kind: 'document',
+      memberName: 'Georgy',
+    });
+    expect(body.origin.memberId).toEqual(expect.any(String));
+    // A sign-in says who, never which app was holding it.
+    expect(body.origin.via).toBeUndefined();
+    expect(body.origin.apiKeyName).toBeUndefined();
+
+    // The list says the same thing the single read does.
+    const list = await app.inject({ method: 'GET', url: '/api/v1/automations', headers: auth(token) });
+    const listed = (list.json() as { automations: { id: string; origin: Origin }[] }).automations.find(
+      (entry) => entry.id === body.id,
+    );
+    expect(listed?.origin).toEqual(body.origin);
+    await remove(body.id);
+  });
+
+  it('is a fact about the day it was added, so an edit does not move it', async () => {
+    const { id } = (await create(button)).json() as { id: string };
+    const before = await originOf(id);
+
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/automations/${id}`,
+      headers: auth(token),
+      payload: { document: { ...button, description: 'Edited since' }, name: 'Out', enabled: true },
+    });
+    expect(await originOf(id)).toEqual(before);
+    await remove(id);
+  });
+
+  it('follows a member who renames themselves', async () => {
+    const { id } = (await create(button)).json() as { id: string };
+    const rename = (name: string) =>
+      app.inject({
+        method: 'PATCH',
+        url: '/api/v1/members/me',
+        headers: auth(token),
+        payload: { name },
+      });
+
+    await rename('George');
+    expect(await originOf(id)).toMatchObject({ sentence: 'Added by George', memberName: 'George' });
+    // Back again: the rest of this file reads sentences with the old name in.
+    await rename('Georgy');
+    expect(await originOf(id)).toMatchObject({ sentence: 'Added by Georgy' });
+    await remove(id);
+  });
+
+  it('names the template a rule was installed from', async () => {
+    const installed = await app.inject({
+      method: 'POST',
+      url: '/api/v1/automations/templates/away',
+      headers: auth(token),
+      payload: {},
+    });
+    const [rule] = (installed.json() as { automations: { id: string; origin: Origin }[] }).automations;
+    expect(rule?.origin).toMatchObject({
+      sentence: 'Added by Georgy from the “I’m leaving” template',
+      kind: 'template',
+      template: 'away',
+      templateTitle: 'I’m leaving',
+      memberName: 'Georgy',
+    });
+    await remove(rule!.id);
+  });
+
+  it('names the API key that sent one, as the activity log would', async () => {
+    const minted = await app.inject({
+      method: 'POST',
+      url: '/api/v1/api-keys',
+      headers: auth(token),
+      payload: { name: 'Node-RED', control: true, permissions: ['automation.manage'] },
+    });
+    expect(minted.statusCode, minted.body).toBe(201);
+    const { key, secret } = minted.json() as { key: { id: string }; secret: string };
+
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/v1/automations',
+      headers: auth(secret),
+      payload: { ...button, name: 'From a script' },
+    });
+    expect(created.statusCode, created.body).toBe(201);
+    const { id } = created.json() as { id: string };
+    expect(await originOf(id)).toEqual({
+      sentence: 'Added by Georgy’s “Node-RED”',
+      kind: 'document',
+      memberId: expect.any(String),
+      memberName: 'Georgy',
+      via: 'api',
+      apiKeyId: key.id,
+      apiKeyName: 'Node-RED',
+    });
+
+    // A key can install a template too, which is why the key rides beside
+    // `kind` rather than being one.
+    const installed = await app.inject({
+      method: 'POST',
+      url: '/api/v1/automations/templates/night',
+      headers: auth(secret),
+      payload: {},
+    });
+    expect(installed.statusCode, installed.body).toBe(201);
+    const [night] = (installed.json() as { automations: { id: string; origin: Origin }[] }).automations;
+    expect(night?.origin).toMatchObject({
+      sentence: 'Added by Georgy’s “Node-RED” from the “Night” template',
+      kind: 'template',
+      via: 'api',
+      apiKeyId: key.id,
+    });
+
+    // The key is named as it is called now…
+    const renamed = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/api-keys/${key.id}`,
+      headers: auth(token),
+      payload: { name: 'Flows' },
+    });
+    expect(renamed.statusCode, renamed.body).toBe(200);
+    expect(await originOf(id)).toMatchObject({
+      sentence: 'Added by Georgy’s “Flows”',
+      apiKeyName: 'Flows',
+    });
+
+    // …and once it is gone, by the name it had when it added the rule — the
+    // rule is still running, and "which script made this" still has an answer.
+    const revoked = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/api-keys/${key.id}`,
+      headers: auth(token),
+    });
+    expect(revoked.statusCode).toBeLessThan(300);
+    expect(await originOf(id)).toMatchObject({
+      sentence: 'Added by Georgy’s “Node-RED”',
+      via: 'api',
+      apiKeyId: key.id,
+      apiKeyName: 'Node-RED',
+    });
+
+    await remove(id);
+    await remove(night!.id);
+  });
+
+  it('keeps how a rule arrived after the member who added it has left, and no name', async () => {
+    const anna = await join('Anna');
+    const document = await app.inject({
+      method: 'POST',
+      url: '/api/v1/automations',
+      headers: auth(anna.token),
+      payload: { ...button, name: 'Anna’s button' },
+    });
+    expect(document.statusCode, document.body).toBe(201);
+    const documentId = (document.json() as { id: string }).id;
+    const template = await app.inject({
+      method: 'POST',
+      url: '/api/v1/automations/templates/away',
+      headers: auth(anna.token),
+      payload: {},
+    });
+    const templateId = (template.json() as { automations: { id: string }[] }).automations[0]!.id;
+    expect(await originOf(documentId)).toMatchObject({ sentence: 'Added by Anna', memberId: anna.id });
+
+    const gone = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/members/${anna.id}`,
+      headers: auth(token),
+    });
+    expect(gone.statusCode).toBeLessThan(300);
+
+    // The rule outlives the person, and so does the route it came by. Their
+    // name does not: nothing here kept a copy of it.
+    const fromTemplate = await originOf(templateId);
+    expect(fromTemplate).toEqual({
+      sentence: 'Added from the “I’m leaving” template',
+      kind: 'template',
+      template: 'away',
+      templateTitle: 'I’m leaving',
+    });
+    // A plain document from somebody who is gone leaves nothing to say, and
+    // nothing is what is said — `null`, present, so an app can tell it from a
+    // hub that never sends the field.
+    expect(await originOf(documentId)).toBeNull();
+
+    await remove(documentId);
+    await remove(templateId);
+  });
+
+  it('says nothing about a rule from before it was kept, beyond who added it', async () => {
+    const { id } = (await create(button)).json() as { id: string };
+    // What every rule saved by an earlier build holds in this column.
+    await handle!.db.update(automationsTable).set({ origin: null }).where(eq(automationsTable.id, id));
+    await engine.reload();
+
+    const origin = await originOf(id);
+    expect(origin).toMatchObject({ sentence: 'Added by Georgy', memberName: 'Georgy' });
+    expect(origin?.kind).toBeUndefined();
+    await remove(id);
+  });
+
+  it('reads a column it cannot make sense of as not knowing, and still lists the rule', async () => {
+    const { id } = (await create(button)).json() as { id: string };
+    await handle!.db
+      .update(automationsTable)
+      .set({ origin: { via: 'somewhere', kind: 7 } })
+      .where(eq(automationsTable.id, id));
+    await engine.reload();
+
+    const list = await app.inject({ method: 'GET', url: '/api/v1/automations', headers: auth(token) });
+    expect(list.statusCode).toBe(200);
+    expect(await originOf(id)).toMatchObject({ sentence: 'Added by Georgy' });
+    await remove(id);
   });
 });

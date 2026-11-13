@@ -2,6 +2,7 @@ import { and, asc, desc, eq, lt, sql } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import { automationRuns, automationStatus, automationVersions, automations } from '../db/schema.js';
 import { automationDocumentSchema, type AutomationDocument } from './schema.js';
+import { readStoredOrigin, type NewOrigin, type StoredOrigin } from './origin.js';
 
 /**
  * Where automations live, and the bounds that keep them from becoming the SD
@@ -41,6 +42,8 @@ export interface AutomationRecord {
   disabledReason: string | null;
   document: AutomationDocument;
   createdBy: string | null;
+  /** How it reached the hub — null on a rule from before that was kept. */
+  origin: StoredOrigin | null;
   sortOrder: number;
   createdAt: Date;
   updatedAt: Date;
@@ -133,6 +136,7 @@ export class AutomationStore {
         disabledReason: row.disabledReason,
         document: parsed.data,
         createdBy: row.createdBy,
+        origin: readStoredOrigin(row.origin),
         sortOrder: row.sortOrder,
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
@@ -141,10 +145,21 @@ export class AutomationStore {
     return { records, unreadable };
   }
 
+  /**
+   * `origin` is how the rule reached the hub, and this is the only place it
+   * is ever written: `update`, `setLook` and a revert leave it alone, because
+   * a rule edited in a chat is still the rule a template installed.
+   *
+   * It says the same thing `note` says and both are kept on purpose. The note
+   * goes on a *version*, where it reads beside the notes of the edits that
+   * followed, and ten versions are kept; the origin goes on the rule, where it
+   * is still there after the eleventh edit.
+   */
   async create(
     document: AutomationDocument,
     memberId: string | null,
     note = 'created',
+    origin: NewOrigin | null = null,
   ): Promise<AutomationRecord> {
     const [row] = await this.db
       .insert(automations)
@@ -152,6 +167,7 @@ export class AutomationStore {
         name: document.name,
         document,
         createdBy: memberId,
+        origin,
         /**
          * **Created switched off.** A rule the agent has just written is the
          * one moment somebody can still look at what is about to start
@@ -463,6 +479,7 @@ export class AutomationStore {
       disabledReason: row.disabledReason,
       document,
       createdBy: row.createdBy,
+      origin: readStoredOrigin(row.origin),
       sortOrder: row.sortOrder,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,

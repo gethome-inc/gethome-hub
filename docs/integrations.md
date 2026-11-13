@@ -187,6 +187,12 @@ phone had done it at sunset. That is also how to find a script that is
 misbehaving — and the reason to give each integration a key of its own and a
 name that says what it is.
 
+A rule a key adds says so for as long as the rule exists, not only while the
+feed remembers: every rule carries
+[`origin`](api.md#where-a-rule-came-from), and one a key saved reads *Added by
+Anna’s “Porch light script”* to everybody in the home — by the key's name as it
+is now, and by the name it had once the key is revoked.
+
 ## MQTT or the API?
 
 | | MQTT convention | API key |
