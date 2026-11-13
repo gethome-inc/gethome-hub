@@ -121,18 +121,19 @@ async function startCamera(id: string) {
 function watchStream(
   url: string,
   token: string,
-): Promise<{ status: number; body: unknown; request: http.ClientRequest }> {
+): Promise<{ status: number; body: unknown; request: http.ClientRequest; ended: Promise<void> }> {
   return new Promise((resolve, reject) => {
     const request = http.get(url, { headers: { authorization: `Bearer ${token}` } }, (response) => {
       const status = response.statusCode ?? 0;
+      const ended = new Promise<void>((done) => response.once('close', () => done()));
       if (status === 200) {
         response.resume();
-        resolve({ status, body: null, request });
+        resolve({ status, body: null, request, ended });
         return;
       }
       let body = '';
       response.on('data', (chunk: Buffer) => (body += chunk.toString()));
-      response.on('end', () => resolve({ status, body: JSON.parse(body) as unknown, request }));
+      response.on('end', () => resolve({ status, body: JSON.parse(body) as unknown, request, ended }));
     });
     request.on('error', reject);
   });
@@ -1066,6 +1067,62 @@ describe.skipIf(!handle)('API keys', () => {
         await camera.close();
         // Anna's keys are counted against a limit later tests reach.
         await app.inject({ method: 'DELETE', url: `/api/v1/api-keys/${key.id}`, headers: auth(memberToken) });
+      }
+    });
+
+    /**
+     * A live stream authorizes once, when it opens, so the hub has to end it
+     * when the access behind it ends: at once for a revoked key, on the next
+     * frame for a key narrowed away from `camera.view`. Two keys, two
+     * streams, and each one's stream ends when its key does.
+     */
+    it('ends a key’s live stream when the key is revoked or loses camera.view', async () => {
+      const camera = await startCamera('porch-cam');
+      const open: http.ClientRequest[] = [];
+      const revoked = await mint(memberToken, { name: 'Revoked watcher', permissions: ['camera.view'] });
+      const narrowed = await mint(memberToken, { name: 'Narrowed watcher', permissions: ['camera.view'] });
+      try {
+        for (const stream of ['front', 'side']) {
+          adapter.cameras.set(`porch-cam/1/${stream}`, { kind: 'mjpeg', url: `${camera.url}/stream` });
+        }
+        adapter.bus!.deviceUpserted({
+          adapter: 'mqtt',
+          externalId: 'porch-cam',
+          suggestedName: 'Porch camera',
+          endpoints: [{ endpointId: 1, deviceKind: 'camera', capabilities: ['onOff', 'camera'], primary: 'onOff' }],
+        });
+        await registry.flush();
+        const cameraId = registry.listDevices().find((device) => device.name === 'Porch camera')!.id;
+        const live = (stream: string) =>
+          `http://127.0.0.1:${String(port)}/api/v1/cameras/${cameraId}/1/${stream}/mjpeg`;
+
+        const front = await watchStream(live('front'), revoked.secret);
+        open.push(front.request);
+        expect(front.status).toBe(200);
+        const side = await watchStream(live('side'), narrowed.secret);
+        open.push(side.request);
+        expect(side.status).toBe(200);
+
+        const gone = await app.inject({
+          method: 'DELETE',
+          url: `/api/v1/api-keys/${revoked.key.id}`,
+          headers: auth(memberToken),
+        });
+        expect(gone.statusCode).toBe(204);
+        await front.ended;
+
+        const changed = await app.inject({
+          method: 'PATCH',
+          url: `/api/v1/api-keys/${narrowed.key.id}`,
+          headers: auth(memberToken),
+          payload: { permissions: [] },
+        });
+        expect(changed.statusCode).toBe(200);
+        await side.ended;
+      } finally {
+        for (const request of open) request.destroy();
+        await camera.close();
+        await app.inject({ method: 'DELETE', url: `/api/v1/api-keys/${narrowed.key.id}`, headers: auth(memberToken) });
       }
     });
 

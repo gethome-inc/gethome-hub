@@ -66,6 +66,14 @@ the fetch in *What leaves the hub*. Update them in the same change.
   the fix is the same. Stills are not counted — each is a fresh request, paced
   by the key's rate limit — and a person is held only to `maxUpstreams`, as
   before, though that is now asked after attestation too.
+- **A live stream ends when the access behind it does.** It authorizes once,
+  when it opens, so `server.ts` files each viewer in `cameraViewers` — a
+  `MemberSessions` of its own, apart from the sockets' so neither spends the
+  other's per-key limit — which is how revoking a key or removing a member
+  hangs it up at once; and `watch()` takes an `allowed` check that `Upstream`
+  asks before every frame, as the event socket asks a key before every frame,
+  for a key that expires, is paused or loses `camera.view`, or a role that
+  loses it. A viewer refused there is hung up, and nobody else is.
 - **`describe()` is read by `GET /hub`**, which is the installer's health check
   and must never throw — keep it a constant. `maxStreamsPerKey` is the per-key
   limit above, and a hub without it lets no key watch a camera at all.

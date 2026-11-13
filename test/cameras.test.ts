@@ -220,6 +220,51 @@ describe('camera proxy', () => {
     }
   });
 
+  /**
+   * Access is asked before every frame, so a viewer whose access ends stops
+   * on the next one and nobody else does — and the hang-up `watch` hands back
+   * ends a viewer at once, which is how a revocation reaches it.
+   */
+  it('hangs up a viewer whose access ends, and only that one', async () => {
+    const target = { key: 'd/1/live', externalId: 'porch-cam', url: `${camera.url}/stream` };
+    let watching = true;
+    const hangUps: Array<() => void> = [];
+    let asked = 0;
+    const server = http.createServer((request, response) => {
+      const allowed = asked++ === 0 ? () => watching : undefined;
+      void proxy
+        .watch(target, response, (listener) => request.on('close', listener), undefined, allowed)
+        .then((hangUp) => hangUps.push(hangUp));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const url = `http://127.0.0.1:${String((server.address() as AddressInfo).port)}/`;
+    try {
+      const first = await frames(url, 1);
+      const ended = new Promise<void>((resolve) => first.request.once('close', () => resolve()));
+      const second = await frames(url, 1);
+      watching = false;
+      await ended;
+      expect(proxy.streaming).toBe(1);
+      // The other viewer is still being sent frames.
+      const more = await frames(url, 2);
+      expect(more.frames).toHaveLength(2);
+      more.request.destroy();
+      second.request.destroy();
+      await until(() => proxy.streaming === 0);
+
+      const third = await frames(url, 1);
+      const closed = new Promise<void>((resolve) => third.request.once('close', () => resolve()));
+      hangUps.at(-1)!();
+      await closed;
+      await until(() => proxy.streaming === 0);
+    } finally {
+      await new Promise<void>((resolve) => {
+        server.closeAllConnections();
+        server.close(() => resolve());
+      });
+    }
+  });
+
   it('is busy past the number of cameras it relays at once', async () => {
     const other = await startCamera();
     const first = await startViewerServer(proxy, { key: 'a/1/live', externalId: 'porch-cam', url: `${camera.url}/stream` });

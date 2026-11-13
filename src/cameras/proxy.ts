@@ -147,13 +147,21 @@ export class CameraProxy {
    *
    * `opener` is the API key asking, when it is one. Joining a stream that is
    * already open is never refused; opening one is held to `refuseOpening`.
+   *
+   * `allowed` is asked before every frame this viewer is sent, and a viewer
+   * it says no to is hung up instead — the way the event socket asks a key
+   * again before every frame, so a key that expires or is narrowed, or a role
+   * that loses `camera.view`, stops the picture on the next frame rather than
+   * whenever the app happens to go away. The returned function hangs this
+   * viewer up at once, for a revocation that has to be immediate.
    */
   async watch(
     target: CameraTarget,
     viewer: http.ServerResponse,
     onClose: (listener: () => void) => void,
     opener?: CameraOpener,
-  ): Promise<void> {
+    allowed?: () => boolean,
+  ): Promise<() => void> {
     let upstream = this.upstreams.get(target.key);
     if (!upstream) {
       this.refuseOpening(opener);
@@ -190,8 +198,9 @@ export class CameraProxy {
       connection: 'close',
     });
     const attached = upstream;
-    attached.add(viewer);
+    attached.add(viewer, allowed);
     onClose(() => attached.remove(viewer));
+    return () => attached.hangUp(viewer);
   }
 
   /** Stops every stream — the hub is shutting down. */
@@ -386,7 +395,8 @@ function readBody(response: http.IncomingMessage, maxBytes: number, timeoutMs: n
 
 /** One camera's live stream, and everybody watching it. */
 class Upstream {
-  private readonly viewers = new Set<http.ServerResponse>();
+  /** Everybody watching, each with what is asked before it is sent a frame. */
+  private readonly viewers = new Map<http.ServerResponse, (() => boolean) | undefined>();
   private response: http.IncomingMessage | null = null;
   private idleTimer: NodeJS.Timeout | null = null;
   private closed = false;
@@ -427,13 +437,19 @@ class Upstream {
     this.touch();
   }
 
-  add(viewer: http.ServerResponse): void {
-    this.viewers.add(viewer);
+  add(viewer: http.ServerResponse, allowed?: () => boolean): void {
+    this.viewers.set(viewer, allowed);
   }
 
   remove(viewer: http.ServerResponse): void {
-    this.viewers.delete(viewer);
+    if (!this.viewers.delete(viewer)) return;
     if (this.viewers.size === 0) this.close();
+  }
+
+  /** Ends one viewer's response and lets it go; the rest carry on. */
+  hangUp(viewer: http.ServerResponse): void {
+    viewer.end();
+    this.remove(viewer);
   }
 
   close(): void {
@@ -441,7 +457,7 @@ class Upstream {
     this.closed = true;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.response?.destroy();
-    for (const viewer of this.viewers) viewer.end();
+    for (const viewer of this.viewers.keys()) viewer.end();
     this.viewers.clear();
     this.onClosed();
   }
@@ -454,13 +470,20 @@ class Upstream {
 
   private broadcast(frame: Buffer): void {
     const head = Buffer.from(`--${BOUNDARY}\r\nContent-Type: image/jpeg\r\nContent-Length: ${String(frame.length)}\r\n\r\n`, 'latin1');
-    for (const viewer of this.viewers) {
+    const refused: http.ServerResponse[] = [];
+    for (const [viewer, allowed] of this.viewers) {
+      if (allowed && !allowed()) {
+        refused.push(viewer);
+        continue;
+      }
       // Behind by more than a frame or two: this one skips, nobody waits.
       if (viewer.writableLength > VIEWER_BACKLOG_BYTES) continue;
       viewer.write(head);
       viewer.write(frame);
       viewer.write('\r\n');
     }
+    // Hung up after the loop, since the last one leaving closes the upstream.
+    for (const viewer of refused) this.hangUp(viewer);
   }
 }
 

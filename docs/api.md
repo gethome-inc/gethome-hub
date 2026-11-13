@@ -2965,6 +2965,12 @@ app fetches through the hub, by the names the state gives it:
 
 Both need `camera.view`, for a member or for an [API key](#api-keys) given it.
 A stream that isn't announced, or is the other kind, is `404 camera_not_found`.
+**A live stream ends when the access behind it does**, since it is authorized
+once, when it opens: revoking its key or removing its member hangs it up at
+once, and a key that expires, is paused or loses `camera.view` — or a role that
+loses it — is sent no further frame and hung up instead. The app sees the
+response end, and asking again is answered the way any request with that
+credential is.
 
 **What the hub will fetch is narrow on purpose.** The address came from a
 device, every board in the house shares one broker account, and the hub is the
