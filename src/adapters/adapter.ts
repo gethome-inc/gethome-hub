@@ -25,6 +25,16 @@ export interface DeviceRecognition {
   exposesHash?: string;
 }
 
+/**
+ * What a device that is a program said about itself: a script, a bridge or a
+ * service running on a computer, rather than a board. An empty object is a
+ * whole answer — a program, on a computer it didn't name. It will grow.
+ */
+export interface DeviceProgram {
+  /** The computer it runs on, by name, for people to read — never an address the hub connects to. */
+  host?: string;
+}
+
 /** What an adapter announces when it discovers (or re-reads) a device. */
 export interface AdapterDeviceDescriptor {
   adapter: AdapterId;
@@ -51,6 +61,14 @@ export interface AdapterDeviceDescriptor {
    * device is offline because they are apart (`core/device-network.ts`).
    */
   wifiNetwork?: string;
+  /**
+   * Set when the device said it is a program, and absent for every device
+   * that didn't — hardware, and anything on Zigbee or Matter. Like
+   * `wifiNetwork`, each announcement says it afresh: leaving it out of the
+   * next one is how it is taken back. Only the MQTT adapter learns it, from
+   * the device's own topic (`adapters/mqtt/program.ts`).
+   */
+  program?: DeviceProgram;
 }
 
 /**

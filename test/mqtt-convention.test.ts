@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { cameraTopic, commandTopic, configTopic, heartbeatTopic, parseTopic, subscriptionPatterns } from '../src/adapters/mqtt/convention.js';
+import {
+  cameraTopic,
+  commandTopic,
+  configTopic,
+  heartbeatTopic,
+  parseTopic,
+  programTopic,
+  subscriptionPatterns,
+} from '../src/adapters/mqtt/convention.js';
 import { mqttDiscoverySchema, statePatchSchema } from '../src/schema/index.js';
 import { cameraUrlProblem, isPrivateIPv4, readCameraAnnouncement } from '../src/cameras/policy.js';
 
@@ -53,6 +61,14 @@ describe('MQTT convention topics', () => {
     expect(parseTopic('gethome/device/pool-pump/heartbeat/2')).toBeNull();
     expect(heartbeatTopic('pool-pump')).toBe('gethome/device/pool-pump/heartbeat');
     expect(subscriptionPatterns()).toContain('gethome/device/+/heartbeat');
+  });
+
+  it('reads a program topic, which is the device’s and never an endpoint’s, and listens for it', () => {
+    expect(parseTopic('gethome/device/tide-table/program')).toEqual({ kind: 'program', deviceId: 'tide-table' });
+    expect(parseTopic('gethome/device/tide-table/program/2')).toBeNull();
+    expect(parseTopic('gethome/device/has space/program')).toBeNull();
+    expect(programTopic('tide-table')).toBe('gethome/device/tide-table/program');
+    expect(subscriptionPatterns()).toContain('gethome/device/+/program');
   });
 });
 

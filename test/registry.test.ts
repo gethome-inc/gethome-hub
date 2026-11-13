@@ -239,6 +239,53 @@ describe.skipIf(!handle)('DeviceRegistry', () => {
     expect(registry.getDevice(deviceId)!.name).toBe('Reading light');
   });
 
+  /**
+   * A device that said it is a program. The registry only carries the fact:
+   * the MQTT adapter learns it from the device's own retained topic and says
+   * it afresh in every announcement, so there is no column for it — the
+   * `wifiNetwork` shape — and a restart knows nothing until the adapter has
+   * heard the broker again.
+   */
+  it('carries what a program said in memory only, and each announcement says it afresh', async () => {
+    adapter.bus!.deviceUpserted(lampDescriptor);
+    await registry.flush();
+    const deviceId = registry.listDevices()[0]!.id;
+    // Null for a device that never said so, which is nearly every device.
+    expect(registry.getDevice(deviceId)!.program).toBeNull();
+
+    const upserts = vi.fn();
+    events.on('deviceUpserted', upserts);
+    adapter.bus!.deviceUpserted({ ...lampDescriptor, program: { host: 'nuc.local' } });
+    await registry.flush();
+    expect(registry.getDevice(deviceId)!.program).toEqual({ host: 'nuc.local' });
+    // The same device, told to every socket as an ordinary upsert.
+    expect(registry.listDevices()).toHaveLength(1);
+    expect(upserts).toHaveBeenCalledWith(deviceId);
+
+    // Read back off the disk, it is hardware until its adapter says otherwise.
+    const reloaded = new DeviceRegistry(db, new HubEventBus(), new ActivityService(db, events), log);
+    const again = new FakeAdapter();
+    reloaded.registerAdapter(again);
+    await reloaded.start();
+    expect(reloaded.getDevice(deviceId)!.program).toBeNull();
+    again.bus!.deviceUpserted({ ...lampDescriptor, program: {} });
+    await reloaded.flush();
+    expect(reloaded.getDevice(deviceId)!.program).toEqual({});
+
+    // And an announcement that leaves it out takes it back.
+    upserts.mockClear();
+    adapter.bus!.deviceUpserted(lampDescriptor);
+    await registry.flush();
+    expect(registry.getDevice(deviceId)!.program).toBeNull();
+    expect(upserts).toHaveBeenCalledWith(deviceId);
+  });
+
+  it('meets a device as a program when its first announcement says so', async () => {
+    adapter.bus!.deviceUpserted({ ...lampDescriptor, program: { host: 'attic-pi' } });
+    await registry.flush();
+    expect(registry.listDevices()[0]!.program).toEqual({ host: 'attic-pi' });
+  });
+
   it('reconciles endpoint capabilities on re-announcement (AI remap path)', async () => {
     adapter.bus!.deviceUpserted({ ...lampDescriptor, needsReview: true });
     await registry.flush();

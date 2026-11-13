@@ -1252,12 +1252,12 @@ it starts. Per radio:
 - **Matter** takes the node off the hub's fabric, telling the accessory first
   when it can be reached, so it forgets the hub too and can be paired again
   straight away; one that cannot be reached is removed from the hub regardless.
-- **MQTT** clears the device's retained discovery document and camera topics, so
-  a board that is switched on hears that it was removed and stays out. A board
-  that is **switched off** misses it, and an empty retained message leaves
-  nothing to hear later, so it comes back as a new device when it is switched on
-  again — the device SDK's documented limit, which per-device broker accounts
-  are what fix.
+- **MQTT** clears the device's retained discovery document and its heartbeat,
+  camera and program topics, so a board that is switched on hears that it was
+  removed and stays out. A board that is **switched off** misses it, and an
+  empty retained message leaves nothing to hear later, so it comes back as a
+  new device when it is switched on again — the device SDK's documented limit,
+  which per-device broker accounts are what fix.
 
 A device removed and then paired again is a new device, with a new id, whichever
 radio it is on.
@@ -1831,6 +1831,28 @@ panel of a kind it doesn't draw off the page — never failing the device, or th
 list, over it. `sha256` covers everything the panel is made of and changes when
 any of it does, which makes it the key an app caches a panel under. `id` is
 unique among the device's panels of every kind.
+
+`program` is present only on a device that said it is a **program** — a
+script, a bridge or a service running on a computer, rather than a board — on
+its own MQTT topic
+([mqtt-integrations.md](mqtt-integrations.md#a-device-that-is-a-program)):
+
+```json
+"program": { "host": "nuc.local" }
+```
+
+`host` is the name of the computer it runs on, as the program gave it: at most
+120 characters, for people to read, and never an address to connect to. It is
+left out when the program named none, so `"program": {}` is a whole answer.
+**Presence is the answer**, as for `offlineExpected`: every other device's
+wire is byte-for-byte what it was, a Zigbee or Matter device never carries the
+key, and an app from before it reads past it and draws the device as it draws
+any other. The object may gain keys, so read past the ones you don't know.
+Nothing is stored: the hub learns it again from the broker's retained message
+after a restart, so for a moment after one a program reads as an ordinary
+device. Every change — the hub learning it, a program saying so for the first
+time, naming another computer, or taking it back — arrives as an ordinary
+`deviceUpserted` frame.
 
 An endpoint with the `camera` capability carries `state.camera.streams` — ids,
 kinds and sizes, never an address. See [Cameras](#cameras).
