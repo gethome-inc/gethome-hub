@@ -784,6 +784,22 @@ export const automations = sqliteTable(
      * running it.
      */
     createdBy: text('created_by').references(() => members.id, { onDelete: 'set null' }),
+    /**
+     * How the rule reached the hub, written once when it is created and never
+     * again — `StoredOrigin` as JSON (`src/automations/origin.ts`): in a chat,
+     * from a template or as a document, and the API key when one sent it.
+     *
+     * Beside `created_by` rather than in it, because they go stale in opposite
+     * ways: the member is a live reference that follows a rename and empties
+     * when they leave, while *how* is a fact about one moment that nothing
+     * afterwards changes. It was recoverable only from the first version's
+     * note, which is the first thing ten versions evict.
+     *
+     * Null on a rule saved before the hub kept it, apart from what migration
+     * `0022` could still read out of those notes — so null means "this hub
+     * does not know", never "nothing in particular".
+     */
+    origin: text('origin', { mode: 'json' }),
     sortOrder: integer('sort_order').notNull().default(0),
     createdAt: createdAt(),
     updatedAt: createdAt('updated_at'),
