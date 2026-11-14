@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync, existsSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pino } from 'pino';
@@ -18,6 +18,7 @@ import { members, mqttDeviceAccounts } from '../src/db/schema.js';
 import { openTestDb, resetDb } from './helpers/db.js';
 import {
   accountsResult,
+  brokerAccount,
   brokerMachine,
   passwdUsers,
   runAccountsScript,
@@ -501,12 +502,44 @@ describe('deploy/mqtt-accounts.sh, given a list it should not trust', () => {
   it('writes files the broker can read and nobody else can', () => {
     writeList([`account=desk-light-x7k2q9 9f3a11c2 ${hash}`]);
     runAccountsScript(m);
-    // 0640 — and, run as root, handed to the broker's group, which a suite
-    // running as root on a machine with mosquitto installed checks for real in
-    // `test/deploy-mqtt-acl.test.ts` by having the broker read them.
+    // The broker account's own — its user, its primary group, 0600 — because
+    // mosquitto checks both against the account it reads them as and warns,
+    // at every reload, about any other. What the broker then says about them
+    // is `test/deploy-mqtt-acl.test.ts`, which has one read them.
+    const account = brokerAccount();
     for (const file of [m.passwd, m.acl]) {
-      expect(statSync(file).mode & 0o777).toBe(0o640);
+      const stat = statSync(file);
+      expect(stat.mode & 0o777, file).toBe(0o600);
+      expect(stat.uid, file).toBe(account.uid);
+      expect(stat.gid, file).toBe(account.gid);
     }
+  });
+
+  it('replaces what an older build left rather than keeping its owner and mode', () => {
+    // An older build wrote `root:mosquitto` 0640, and a file edited in place
+    // keeps whatever it had. Each rewrite is a new file renamed over the old,
+    // so nothing of the old one's survives — shown here with a mode the broker
+    // would warn about, which is what the suite can set without root.
+    for (const file of [m.passwd, m.acl]) chmodSync(file, 0o644);
+    writeList([`account=desk-light-x7k2q9 9f3a11c2 ${hash}`]);
+    runAccountsScript(m);
+    expect(accountsResult(m)).toMatchObject({ state: 'applied' });
+    for (const file of [m.passwd, m.acl]) {
+      expect(statSync(file).mode & 0o777, file).toBe(0o600);
+      expect(statSync(file).uid, file).toBe(brokerAccount().uid);
+    }
+  });
+
+  it('writes nothing for a broker account this machine does not have', () => {
+    // On a hub that is `mosquitto`, and the installer checked it is there. A
+    // name that is not an account cannot be handed a file, and a file the
+    // broker cannot be handed is one it may not be able to read — so the
+    // files are left exactly as they were and the run says so.
+    const before = [readFileSync(m.passwd, 'utf8'), readFileSync(m.acl, 'utf8')];
+    writeList([`account=desk-light-x7k2q9 9f3a11c2 ${hash}`]);
+    runAccountsScript(m, [], { GETHOME_MQTT_USER: 'no-such-broker-account-x9' });
+    expect([readFileSync(m.passwd, 'utf8'), readFileSync(m.acl, 'utf8')]).toEqual(before);
+    expect(accountsResult(m)).toMatchObject({ state: 'failed', error: 'write' });
   });
 
   it('writes its answer as the hub’s account, never through a name the hub planted', () => {

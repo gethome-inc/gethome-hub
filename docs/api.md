@@ -803,8 +803,9 @@ still writes all of `gethome/`. The way to close that is to give every device
 its own account and then rotate the shared one (`gethome-hubctl mqtt --rotate`),
 which no longer strands a device that holds an account of its own.
 
-**How it reaches the broker.** The password file and the ACL are root's, and
-the hub's account cannot touch either. So the hub writes its whole list of
+**How it reaches the broker.** The password file and the ACL belong to the
+broker's own account and only root writes them, and the hub's account cannot
+touch either. So the hub writes its whole list of
 accounts — a name, a project key and a hash each, never a password — into
 `<data>/mqtt-accounts/`, `gethome-mqtt-accounts.path` notices, and
 `deploy/mqtt-accounts.sh` rebuilds the two files and has mosquitto read them
