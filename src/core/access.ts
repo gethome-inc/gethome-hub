@@ -75,8 +75,8 @@ export const PERMISSIONS: readonly PermissionDescriptor[] = [
     group: 'Devices',
     title: 'Remove devices',
     summary:
-      'Take a device out of the home and unpair it, or take away the MQTT account a board ' +
-      'holds. Nothing in the apps undoes this.',
+      'Take a device out of the home and unpair it, take away the MQTT account a board ' +
+      'holds, or set up again a board somebody else set up. Nothing in the apps undoes this.',
   },
   {
     key: 'camera.view',

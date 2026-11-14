@@ -1,7 +1,7 @@
 import { pbkdf2Sync, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { asc, count, eq } from 'drizzle-orm';
+import { and, asc, count, eq, isNull, ne, or } from 'drizzle-orm';
 import type { HubEventBus } from './bus.js';
 import type { Db } from '../db/client.js';
 import { mqttDeviceAccounts } from '../db/schema.js';
@@ -155,6 +155,17 @@ export type MintMqttAccountOutcome =
        */
       reason: 'unavailable' | 'reserved' | 'limit' | 'failed';
       detail?: string;
+    }
+  | {
+      ok: false;
+      /**
+       * Somebody else's, and the caller may not take it over (`mayTakeOver`).
+       * `device` — the device holds an account another member gave it, or is
+       * in the home already. `project` — accounts another member made carry
+       * this project key. Nothing was written.
+       */
+      reason: 'held';
+      held: 'device' | 'project';
     };
 
 /**
@@ -353,11 +364,27 @@ export class MqttDeviceAccounts {
    * broker's side says no** — an account the broker never learnt of is a
    * password that can never sign in, and leaving the row would have the next
    * list read claim a device holds one.
+   *
+   * **Replacing is yours to do for your own device, and somebody else's only
+   * with `mayTakeOver`** (the route's `device.remove`). A new password cuts
+   * off whatever held the old one, and the account reaches the device's
+   * topics: whoever holds it reports the device's state, reads its commands
+   * and can withdraw its discovery document, which takes it out of the home.
+   * So an id another member gave an account, one with no account but already
+   * in the home (`inHome`, which only the caller can know), and a project key
+   * on accounts another member made all ask for the same permission removing
+   * the device would. A row whose member has left is nobody's own any more.
+   * Both checks run inside the queue and the transaction, so two people
+   * asking at once cannot each find the id free.
    */
   async mint(input: {
     deviceId: string;
     projectKey?: string | undefined;
     member: { id: string; name: string };
+    /** The caller may take a device or a project over from somebody else. Absent is no. */
+    mayTakeOver?: boolean;
+    /** A device on the MQTT convention is in the home under this id now. */
+    inHome?: boolean;
   }): Promise<MintMqttAccountOutcome> {
     if (!MQTT_ACCOUNT_ID.test(input.deviceId)) throw new Error('not a device id');
     if (input.projectKey !== undefined && !MQTT_PROJECT_KEY.test(input.projectKey)) {
@@ -379,15 +406,34 @@ export class MqttDeviceAccounts {
       // The count and the write are one synchronous transaction, with no
       // `await` between them — the `ApiKeyService.create` rule, so requests
       // sent together cannot each find room for one more.
+      const mayTakeOver = input.mayTakeOver === true;
       const written = this.db.transaction((tx) => {
         const previous = tx
           .select()
           .from(mqttDeviceAccounts)
           .where(eq(mqttDeviceAccounts.deviceId, input.deviceId))
           .get();
+        if (!mayTakeOver) {
+          const othersDevice =
+            previous !== undefined ? previous.memberId !== input.member.id : input.inHome === true;
+          if (othersDevice) return { refused: 'device' } as const;
+          if (input.projectKey !== undefined) {
+            const others = tx
+              .select({ n: count() })
+              .from(mqttDeviceAccounts)
+              .where(
+                and(
+                  eq(mqttDeviceAccounts.projectKey, input.projectKey),
+                  or(isNull(mqttDeviceAccounts.memberId), ne(mqttDeviceAccounts.memberId, input.member.id)),
+                ),
+              )
+              .get();
+            if ((others?.n ?? 0) > 0) return { refused: 'project' } as const;
+          }
+        }
         if (previous === undefined) {
           const held = tx.select({ n: count() }).from(mqttDeviceAccounts).get();
-          if ((held?.n ?? 0) >= MAX_MQTT_DEVICE_ACCOUNTS) return undefined;
+          if ((held?.n ?? 0) >= MAX_MQTT_DEVICE_ACCOUNTS) return { refused: 'limit' } as const;
         }
         const row = tx
           .insert(mqttDeviceAccounts)
@@ -397,7 +443,10 @@ export class MqttDeviceAccounts {
           .get();
         return { row, previous };
       });
-      if (written === undefined) return { ok: false, reason: 'limit' } as const;
+      if ('refused' in written) {
+        if (written.refused === 'limit') return { ok: false, reason: 'limit' } as const;
+        return { ok: false, reason: 'held', held: written.refused } as const;
+      }
 
       // A list that could not even be written is the same outcome as one the
       // root script refused: the broker never learnt of the account.

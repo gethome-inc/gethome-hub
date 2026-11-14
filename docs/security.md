@@ -173,7 +173,9 @@ serving it, not a security boundary.
   over once and keeps only the broker's hash of it. Deleting the device ends
   the account and the broker hangs up on the board, so a deleted board stays
   deleted even if it was switched off at the time. Who gave which device an
-  account is in the activity log. One limit to be exact about: this confines
+  account is in the activity log, and a device or project somebody else set
+  up is not anybody's for the asking: taking it over needs a role that may
+  remove devices, which a plain Member's does not. One limit to be exact about: this confines
   the device that holds such an account, and does not stop somebody holding
   the shared `gethome` password from writing to that device's topics —
   [`api.md`](api.md#a-broker-account-for-each-device-mqttdevice-accounts).

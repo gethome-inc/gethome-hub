@@ -75,6 +75,19 @@ device to the hub and to the apps; nothing you publish says which it is. The
 shared account goes on working, with its password unchanged, for everything
 that already has it.
 
+**A device somebody else set up is theirs to set up again.** Asking for an
+account for a device another member gave one, for a device already in the
+home, or with a project key another member's accounts carry needs a role that
+may remove devices: a new password takes the device off the broker until it
+is handed over, and an account under its id speaks for it.
+
+**Don't add your own users to the broker's password file.** The hub rebuilds
+that file whenever a device's account is made or taken away — as the broker's
+own two accounts plus one line per device — and the installer writes it afresh
+on every update, so a user added there by hand disappears at the next board
+somebody sets up. Something that needs its own account is a device, and gets
+one the way a device does.
+
 > **MQTT or the API?** This convention is for a thing that **is** a device — a
 > board with a relay on it, a sensor, a bridge that presents other hardware as
 > devices. Software that **uses** the home — a dashboard, a script that switches
